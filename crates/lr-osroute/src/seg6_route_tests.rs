@@ -298,8 +298,19 @@ fn seg6local_rejects_missing_required_parameters() {
 fn seg6local_rejects_kernel_unimplemented_behaviors() {
     // Flavor variants (End.PSP etc.) have no seg6_action_table
     // descriptor — encoding them would be a guaranteed EINVAL.
+    // End.BM (IANA 15) maps to kernel action 11, but the kernel's
+    // `seg6_action_table` has NO entry at action 11 (the kernel
+    // implements End.B6/End.B6.Encaps/End.BPF/End.DT4/End.DT6/End.DT46
+    // but NOT End.BM) — encoding it would be a guaranteed EINVAL.
+    // End.DX2V (IANA 22) is similarly absent from the kernel table.
     let sid = Sid::from_str("fcbb:bb00::1").unwrap();
-    for behavior in [Behavior::EndPsp, Behavior::EndDT46, Behavior::EndBM] {
+    for behavior in [
+        Behavior::EndPsp,
+        Behavior::EndBM,
+        Behavior::EndDX2V,
+        Behavior::EndDT2U,
+        Behavior::EndDT2M,
+    ] {
         let route = Seg6LocalRoute::new(sid, behavior);
         let err = test_netlink()
             .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)

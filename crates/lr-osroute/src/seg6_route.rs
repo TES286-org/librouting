@@ -124,11 +124,21 @@ const SEG6_IPTUN_MODE_ENCAP: u32 = 1;
 // seg6_local action param types (uapi/linux/seg6_local.h — the enum
 // order is UNSPEC, ACTION, SRH, TABLE, NH4, NH6, IIF, OIF, BPF,
 // VRFTABLE, COUNTERS, FLAVORS).
+const SEG6_LOCAL_SRH: u16 = 2;
 const SEG6_LOCAL_TABLE: u16 = 3;
 const SEG6_LOCAL_NH4: u16 = 4;
 const SEG6_LOCAL_NH6: u16 = 5;
 const SEG6_LOCAL_IIF: u16 = 6;
 const SEG6_LOCAL_OIF: u16 = 7;
+/// `SEG6_LOCAL_VRFTABLE` — uapi value 9. End.DT4, End.DT46 and the
+/// VRF-mode End.DT6 path use this in place of `SEG6_LOCAL_TABLE`
+/// when the lookup table is bound to a VRF device (Linux
+/// `CONFIG_NET_L3_MASTER_DEV`). The kernel's `seg6_action_table`
+/// (net/ipv6/seg6_local.c) REQUIRES it for End.DT4 (action 8) and
+/// End.DT46 (action 16); the legacy End.DT6 path on a non-L3-master
+/// kernel still uses `SEG6_LOCAL_TABLE`, while an L3-master kernel
+/// accepts either.
+const SEG6_LOCAL_VRFTABLE: u16 = 9;
 
 /// The kernel's `SEG6_LOCAL_ACTION_*` code for a behavior, plus the
 /// parameter attributes the kernel's `seg6_action_table`
@@ -155,6 +165,11 @@ struct KernelAction {
 }
 
 /// The `SEG6_LOCAL_*` parameter attributes a route may carry.
+///
+/// Mirrors the kernel's `seg6_local_lwt` field set
+/// (net/ipv6/seg6_local.c): each boolean here corresponds to a
+/// `SEG6_LOCAL_*` netlink attribute the kernel's
+/// `seg6_action_table[].attrs` / `.optattrs` bitmaps name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ParamSet {
     nh4: bool,
@@ -162,6 +177,17 @@ struct ParamSet {
     iif: bool,
     oif: bool,
     table: bool,
+    /// `SEG6_LOCAL_SRH` (uapi 2) — the SRv6 Routing Header an
+    /// `End.B6.Insert` / `End.B6.Encaps` route pushes onto the
+    /// packet. Required by both behaviors (kernel action codes 9 and
+    /// 10).
+    srh: bool,
+    /// `SEG6_LOCAL_VRFTABLE` (uapi 9) — the VRF device's routing
+    /// table id an `End.DT4` / `End.DT46` (and the L3-master-dev form
+    /// of `End.DT6`) route forwards the decapsulated packet into.
+    /// Required by End.DT4 (kernel action 8) and End.DT46 (kernel
+    /// action 16).
+    vrf_table: bool,
 }
 
 impl ParamSet {
@@ -171,6 +197,8 @@ impl ParamSet {
         iif: false,
         oif: false,
         table: false,
+        srh: false,
+        vrf_table: false,
     };
     const NH4: Self = Self {
         nh4: true,
@@ -188,6 +216,14 @@ impl ParamSet {
         table: true,
         ..Self::NONE
     };
+    const SRH: Self = Self {
+        srh: true,
+        ..Self::NONE
+    };
+    const VRFTABLE: Self = Self {
+        vrf_table: true,
+        ..Self::NONE
+    };
     /// Union of two sets (builder-friendly).
     const fn union(self, other: Self) -> Self {
         Self {
@@ -196,6 +232,8 @@ impl ParamSet {
             iif: self.iif || other.iif,
             oif: self.oif || other.oif,
             table: self.table || other.table,
+            srh: self.srh || other.srh,
+            vrf_table: self.vrf_table || other.vrf_table,
         }
     }
 }
@@ -211,13 +249,21 @@ impl ParamSet {
 /// - End.DX4: requires NH4.
 /// - End.DT6: TABLE tolerated (required on pre-6.x kernels that
 ///   lacked the L3-master-dev form, so emitters should always set it).
-/// - End.B6.Insert / End.B6.Encaps: require SRH — not representable
-///   through `Seg6LocalRoute` (no SRH parameter exists), so they are
-///   rejected here rather than mis-encoded.
-/// - Everything else (flavor combinations, .Red variants, the L2
-///   table family, kernel-only actions like End.S): the kernel either
-///   has no descriptor or a parameter this API does not model —
-///   rejected with a descriptive error instead of a wire-level EINVAL.
+/// - End.DT4: requires VRFTABLE (`CONFIG_NET_L3_MASTER_DEV` only —
+///   a non-L3-master kernel has no descriptor and the install fails
+///   with EINVAL).
+/// - End.DT46: requires VRFTABLE (same `CONFIG_NET_L3_MASTER_DEV`
+///   dependency as End.DT4).
+/// - End.B6.Insert: requires SRH (the SRv6 Routing Header pushed
+///   onto the packet at the binding-SID endpoint).
+/// - End.B6.Encaps: requires SRH (the SRv6 Routing Header carried
+///   inside the outer IPv6 header the endpoint adds).
+/// - End.BM, End.DX2V, End.DT2U, End.DT2M, the PSP/USP/USD flavor
+///   combinations and the `.Red` variants: the kernel either has no
+///   descriptor or a parameter this API does not model (the FLAVORS
+///   attribute carries the PSP/USP/USD bits at runtime instead of a
+///   distinct action code) — rejected with a descriptive error
+///   instead of a wire-level EINVAL.
 fn kernel_action_for(behavior: Behavior) -> Result<KernelAction, Seg6RouteError> {
     let action = match behavior {
         Behavior::End => KernelAction {
@@ -255,11 +301,56 @@ fn kernel_action_for(behavior: Behavior) -> Result<KernelAction, Seg6RouteError>
             requires: ParamSet::NONE,
             tolerates: ParamSet::TABLE,
         },
+        // End.DT4 (RFC 8986 §4.8): decap an inner IPv4 packet and
+        // look it up in a VRF-bound table. The kernel's
+        // `seg6_action_table` descriptor requires `SEG6_LOCAL_VRFTABLE`
+        // (uapi 9) — `SEG6_LOCAL_TABLE` (uapi 3) is NOT accepted and
+        // `parse_nla_action` answers EINVAL. The descriptor only
+        // exists when the kernel was built with
+        // `CONFIG_NET_L3_MASTER_DEV` (the `input_action_end_dt4`
+        // function is `#ifdef`'d on it); on a kernel without that
+        // config the install still fails with EINVAL — but the error
+        // is then the kernel's, not ours.
+        Behavior::EndDT4 => KernelAction {
+            code: 8, // SEG6_LOCAL_ACTION_END_DT4
+            requires: ParamSet::VRFTABLE,
+            tolerates: ParamSet::NONE,
+        },
+        // End.B6.Insert (RFC 8986 §4.14): the endpoint inserts the
+        // specified SRH into the packet immediately after the IPv6
+        // header. The kernel's `seg6_action_table` descriptor requires
+        // `SEG6_LOCAL_SRH` (uapi 2) — the SRH bytes the endpoint
+        // pushes.
+        Behavior::EndB6Insert => KernelAction {
+            code: 9, // SEG6_LOCAL_ACTION_END_B6
+            requires: ParamSet::SRH,
+            tolerates: ParamSet::NONE,
+        },
+        // End.B6.Encaps (RFC 8986 §4.14): the endpoint wraps the
+        // packet in an outer IPv6 header carrying the specified SRH.
+        // Same SRH parameter contract as End.B6.Insert; the kernel
+        // additionally reserves headroom for the outer IPv6 header
+        // (descriptor's `.static_headroom = sizeof(struct ipv6hdr)`)
+        // but that is not a netlink-parameter concern.
+        Behavior::EndB6Encaps => KernelAction {
+            code: 10, // SEG6_LOCAL_ACTION_END_B6_ENCAP
+            requires: ParamSet::SRH,
+            tolerates: ParamSet::NONE,
+        },
+        // End.DT46 (RFC 8986 §4.9): decap an inner IPv4 or IPv6
+        // packet and look it up in a VRF-bound table. Same
+        // `SEG6_LOCAL_VRFTABLE` parameter contract as End.DT4; same
+        // `CONFIG_NET_L3_MASTER_DEV` dependency.
+        Behavior::EndDT46 => KernelAction {
+            code: 16, // SEG6_LOCAL_ACTION_END_DT46
+            requires: ParamSet::VRFTABLE,
+            tolerates: ParamSet::NONE,
+        },
         other => {
             return Err(Seg6RouteError::UnsupportedAction(format!(
                 "the Linux kernel's seg6local table has no parameter contract for {other} \
-                 (IANA value {}); only End, End.X, End.T, End.DX2, End.DX6, End.DX4 and \
-                 End.DT6 install via netlink",
+                 (IANA value {}); only End, End.X, End.T, End.DX2, End.DX6, End.DX4, End.DT6, \
+                 End.DT4, End.B6.Insert, End.B6.Encaps and End.DT46 install via netlink",
                 other.wire_value()
             )));
         }
@@ -475,8 +566,33 @@ pub struct Seg6LocalRoute {
     /// Optional output interface index (the `End.DX2` parameter; an
     /// optional `End.X` steering parameter).
     pub oif: Option<u32>,
-    /// Optional table ID (the `End.T` / `End.DT6` parameter).
+    /// Optional table ID — the `SEG6_LOCAL_TABLE` parameter used by
+    /// `End.T` and the legacy `End.DT6` path. NOT accepted by
+    /// `End.DT4` / `End.DT46` (their descriptors require
+    /// [`Seg6LocalRoute::vrf_table`] instead —
+    /// `parse_nla_action` answers `EINVAL` for a stray `table` on
+    /// those behaviors).
     pub table: Option<u32>,
+    /// Optional VRF table ID — the `SEG6_LOCAL_VRFTABLE` parameter
+    /// used by `End.DT4`, `End.DT46` and the L3-master-dev form of
+    /// `End.DT6`. The argument is a routing-table id bound to a VRF
+    /// device (Linux `CONFIG_NET_L3_MASTER_DEV`); the kernel
+    /// additionally requires the VRF's strict-mode sysctl
+    /// (`net.vrf.strict_mode=1`) for the install to succeed — see
+    /// iproute2's `ip-route.8.in` `End.DT4 vrftable TABLEID`
+    /// description. Mutually exclusive with [`Seg6LocalRoute::table`]
+    /// in practice: every kernel action descriptor accepts at most
+    /// one of the two, and an `End.T` route setting `vrf_table` (or
+    /// an `End.DT4` route setting `table`) is rejected by the
+    /// encoder with a descriptive error before the wire.
+    pub vrf_table: Option<u32>,
+    /// Optional SRv6 Routing Header — the `SEG6_LOCAL_SRH`
+    /// parameter required by `End.B6.Insert` (RFC 8986 §4.14) and
+    /// `End.B6.Encaps` (RFC 8986 §4.14). The SRH is the same wire
+    /// form a `seg6` encap route pushes (RFC 8754 §2); the
+    /// endpoint inserts (End.B6.Insert) or wraps (End.B6.Encaps) it
+    /// onto the packet at the binding-SID endpoint.
+    pub srh: Option<Srh>,
 }
 
 impl Seg6LocalRoute {
@@ -498,6 +614,8 @@ impl Seg6LocalRoute {
             iif: None,
             oif: None,
             table: None,
+            vrf_table: None,
+            srh: None,
         }
     }
 
@@ -546,6 +664,32 @@ impl Seg6LocalRoute {
     #[must_use]
     pub fn with_table(mut self, table: u32) -> Self {
         self.table = Some(table);
+        self
+    }
+
+    /// Set the VRF table ID — the `SEG6_LOCAL_VRFTABLE` parameter
+    /// (uapi 9) used by `End.DT4`, `End.DT46` and the L3-master-dev
+    /// form of `End.DT6`. The argument is a routing-table id bound to
+    /// a VRF device; the kernel additionally requires
+    /// `net.vrf.strict_mode=1` for the install to succeed. Mutually
+    /// exclusive with [`Seg6LocalRoute::with_table`] in practice —
+    /// every kernel action descriptor accepts at most one of the
+    /// two, and the encoder's parameter contract check rejects a
+    /// route that sets both. Builder-style.
+    #[must_use]
+    pub fn with_vrf_table(mut self, vrf_table: u32) -> Self {
+        self.vrf_table = Some(vrf_table);
+        self
+    }
+
+    /// Set the SRv6 Routing Header — the `SEG6_LOCAL_SRH` parameter
+    /// (uapi 2) required by `End.B6.Insert` (RFC 8986 §4.14) and
+    /// `End.B6.Encaps` (RFC 8986 §4.14). The SRH is the same wire
+    /// form a `seg6` encap route pushes (RFC 8754 §2); the endpoint
+    /// inserts or wraps it at the binding-SID endpoint. Builder-style.
+    #[must_use]
+    pub fn with_srh(mut self, srh: Srh) -> Self {
+        self.srh = Some(srh);
         self
     }
 }
@@ -915,11 +1059,13 @@ impl Seg6Netlink {
     ///   RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_SEG6_LOCAL (7)
     ///   RTA_ENCAP = nested {
     ///     SEG6_LOCAL_ACTION (type 1) = <u32 action code>   (4-byte payload, KERNEL numbering)
-    ///     SEG6_LOCAL_NH4   (type 4) = <IPv4 next-hop>      (4-byte payload, optional)
-    ///     SEG6_LOCAL_NH6   (type 5) = <IPv6 next-hop>      (16-byte payload, optional)
-    ///     SEG6_LOCAL_IIF   (type 6) = <input ifindex>      (4-byte payload, optional)
-    ///     SEG6_LOCAL_OIF   (type 7) = <output ifindex>    (4-byte payload, optional)
-    ///     SEG6_LOCAL_TABLE (type 3) = <routing table id>  (4-byte payload, optional)
+    ///     SEG6_LOCAL_SRH    (type 2) = <SRH bytes>        (variable, RFC 8754 §2 wire form)
+    ///     SEG6_LOCAL_TABLE  (type 3) = <routing table id>  (4-byte payload, optional)
+    ///     SEG6_LOCAL_NH4    (type 4) = <IPv4 next-hop>      (4-byte payload, optional)
+    ///     SEG6_LOCAL_NH6    (type 5) = <IPv6 next-hop>      (16-byte payload, optional)
+    ///     SEG6_LOCAL_IIF    (type 6) = <input ifindex>      (4-byte payload, optional)
+    ///     SEG6_LOCAL_OIF    (type 7) = <output ifindex>    (4-byte payload, optional)
+    ///     SEG6_LOCAL_VRFTABLE (type 9) = <VRF table id>     (4-byte payload, optional)
     ///   }
     /// ```
     ///
@@ -954,6 +1100,8 @@ impl Seg6Netlink {
             iif: route.iif.is_some(),
             oif: route.oif.is_some(),
             table: route.table.is_some(),
+            srh: route.srh.is_some(),
+            vrf_table: route.vrf_table.is_some(),
         };
         let allowed = action.requires.union(action.tolerates);
         let required = action.requires;
@@ -963,6 +1111,13 @@ impl Seg6Netlink {
             (present.iif, allowed.iif, required.iif, "iif"),
             (present.oif, allowed.oif, required.oif, "oif"),
             (present.table, allowed.table, required.table, "table"),
+            (present.srh, allowed.srh, required.srh, "srh"),
+            (
+                present.vrf_table,
+                allowed.vrf_table,
+                required.vrf_table,
+                "vrf_table",
+            ),
         ] {
             if set && !allowed_here {
                 return Err(Seg6RouteError::UnsupportedAction(format!(
@@ -1013,6 +1168,24 @@ impl Seg6Netlink {
                 SEG6_LOCAL_TABLE,
                 &table.to_ne_bytes(),
             ));
+        }
+        if let Some(vrf_table) = route.vrf_table {
+            encap.extend(Self::build_rta_attribute(
+                SEG6_LOCAL_VRFTABLE,
+                &vrf_table.to_ne_bytes(),
+            ));
+        }
+        if let Some(srh) = &route.srh {
+            // The SEG6_LOCAL_SRH payload is the SRH bytes (RFC 8754
+            // §2 wire form) — the same `encode_vec()` output a `seg6`
+            // encap route's `SEG6_IPTUNNEL_SRH` attribute carries
+            // (minus the 4-byte mode prefix the encap form prepends).
+            // The kernel's `parse_nla_srh` (net/ipv6/seg6_local.c)
+            // validates the bytes against RFC 8754 §2 and rejects
+            // malformed SRHs with EINVAL, so a `Srh::encode_vec()`
+            // failure surfaces here as `BadSrh` before the wire.
+            let srh_bytes = srh.encode_vec()?;
+            encap.extend(Self::build_rta_attribute(SEG6_LOCAL_SRH, &srh_bytes));
         }
         while encap.len() % 4 != 0 {
             encap.push(0);
