@@ -151,6 +151,103 @@ fn ospf_area_lsa_sharing_and_abr_summary() {
 }
 
 #[test]
+fn ospf_summary_lsa_id_collision_remap_e2e() {
+    // RFC 2328 Appendix E: when an ABR summarizes two prefixes whose
+    // network addresses coincide but the masks differ (e.g. 10.0.0.0/8
+    // and 10.0.0.0/16, both originating from area 1), the less-specific
+    // one keeps the network address as its Link State ID and the
+    // more-specific one is remapped to its broadcast address (host bits
+    // all 1). Without the remap, the second LSA would silently overwrite
+    // the first under the same `(ls_type, ls_id, advertising_router)`
+    // LSDB key (RFC 2328 §12.1.6) — only one of the two routes would
+    // survive in the area's Loc-RIB.
+    let (mut r, backbone, area1) = abr_with_two_areas();
+
+    // R2 carries two stub networks: 10.0.0.0/8 (mask 0xff000000) and
+    // 10.0.0.0/16 (mask 0xffff0000). Both share the network address
+    // 10.0.0.0 — the collision the Appendix E algorithm targets.
+    let area1_with_overlap = vec![
+        router_lsa(ROOT, vec![(0x0202_0202, 0, P2P, 5)]),
+        router_lsa(
+            0x0202_0202,
+            vec![
+                (ROOT, 0, P2P, 5),
+                (0x0a00_0000, 0xff00_0000, STUB, 10), // 10.0.0.0/8
+                (0x0a00_0000, 0xffff_0000, STUB, 20), // 10.0.0.0/16
+            ],
+        ),
+    ];
+    r.feed_input(area1, &lsu(0x0202_0202, 1, area1_with_overlap))
+        .unwrap();
+
+    // Both intra-area routes land in the RIB.
+    let snap = r.rib_snapshot();
+    let r8 = snap
+        .iter()
+        .find(|rt| rt.key.prefix == Prefix::new_v4([10, 0, 0, 0], 8))
+        .expect("intra-area /8 installed");
+    assert_eq!(r8.preference.metric, 15); // 5 (to R2) + 10
+    let r16 = snap
+        .iter()
+        .find(|rt| rt.key.prefix == Prefix::new_v4([10, 0, 0, 0], 16))
+        .expect("intra-area /16 installed");
+    assert_eq!(r16.preference.metric, 25); // 5 (to R2) + 20
+
+    // The backbone session emits one LS-Update carrying BOTH summary-LSAs.
+    // Drain through a few cycles so any re-origination completes.
+    let mut all_lsas: Vec<Lsa> = Vec::new();
+    for _ in 0..3 {
+        for u in decode_lsus(&r.drain_output(backbone)) {
+            all_lsas.extend(u.lsas);
+        }
+    }
+    let summaries: Vec<&Lsa> = all_lsas
+        .iter()
+        .filter(|l| l.header.ls_type == LsaTypeV2::SummaryIpLsa as u16)
+        .collect();
+    assert!(
+        summaries.len() >= 2,
+        "expected two summary-LSAs for the overlapping prefixes; got {}",
+        summaries.len()
+    );
+
+    // 10.0.0.0/8 keeps the network address (0x0a000000) as LS-ID; the
+    // body's mask is 0xff000000.
+    let lsa8 = summaries
+        .iter()
+        .find(|l| l.header.link_state_id == 0x0a00_0000)
+        .expect("summary for /8 must use the network address as LS-ID");
+    assert_eq!(lsa8.header.advertising_router, ROOT);
+    let body8 = decode_summary_lsa_body(&lsa8.body).unwrap();
+    assert_eq!(body8.network_mask, 0xff00_0000);
+    assert_eq!(body8.tos0_metric(), Some(15));
+    assert!(lsa8.checksum_ok());
+
+    // 10.0.0.0/16 is remapped to its broadcast address (0x0a00ffff =
+    // 10.0.255.255) per RFC 2328 Appendix E. The body's mask is
+    // 0xffff0000 — peers can disambiguate the two LSAs by mask even
+    // though one LS-ID happens to be the broadcast of the other's
+    // network.
+    let lsa16 = summaries
+        .iter()
+        .find(|l| l.header.link_state_id == 0x0a00_ffff)
+        .expect("summary for /16 must use the broadcast address as LS-ID");
+    assert_eq!(lsa16.header.advertising_router, ROOT);
+    let body16 = decode_summary_lsa_body(&lsa16.body).unwrap();
+    assert_eq!(body16.network_mask, 0xffff_0000);
+    assert_eq!(body16.tos0_metric(), Some(25));
+    assert!(lsa16.checksum_ok());
+
+    // Sanity: the two LS-IDs are distinct (otherwise the remap would
+    // have failed and one summary would have silently displaced the
+    // other under the same LSDB key).
+    assert_ne!(
+        lsa8.header.link_state_id, lsa16.header.link_state_id,
+        "the two summaries must carry distinct Link State IDs"
+    );
+}
+
+#[test]
 fn ospf_inter_area_route_from_remote_abr() {
     // Backbone-only router: border router 3.3.3.3 (metric 5 away)
     // summarizes 10.20.20.0/24 metric 7 → inter-area route at metric 12.
