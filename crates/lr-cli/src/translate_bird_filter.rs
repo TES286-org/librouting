@@ -158,31 +158,33 @@ pub(super) fn translate(src: &BirdFilterSource) -> (TranslatedFilters, Vec<RoaRo
                     full.push('\n');
                 }
                 full.push_str(&translated);
-                // Backstop: an emitted filter must compile in lr.
-                if let Err(e) = filter::compile(name, &full) {
-                    out.failed.push((
+                // Backstop: an emitted filter must compile in lr, and
+                // compile() does not check variable references — a leftover
+                // BIRD constant or attribute word would only fail at
+                // route-eval time. One `compile` call feeds both checks
+                // (the previous shape called `compile` twice and the
+                // implicit `else` arm was an `unreachable!` that would
+                // fire the moment `compile` ever became impure).
+                match filter::compile(name, &full) {
+                    Err(e) => out.failed.push((
                         name.clone(),
                         vec![format!(
                             "translated body does not compile in the lr filter DSL: {e}"
                         )],
-                    ));
-                } else if let Ok(parsed) = filter::compile(name, &full) {
-                    // Backstop 2: compile() does not check variable
-                    // references; a leftover BIRD constant or attribute
-                    // word would only fail at route-eval time. Walk the
-                    // AST and reject bodies referencing names nothing
-                    // introduced.
-                    let unknown = verify_vars(&parsed);
-                    if unknown.is_empty() {
-                        out.ok.push(FilterRow {
-                            name: name.clone(),
-                            body: full,
-                        });
-                    } else {
-                        out.failed.push((name.clone(), unknown));
+                    )),
+                    Ok(parsed) => {
+                        // Walk the AST and reject bodies referencing
+                        // names nothing introduced.
+                        let unknown = verify_vars(&parsed);
+                        if unknown.is_empty() {
+                            out.ok.push(FilterRow {
+                                name: name.clone(),
+                                body: full,
+                            });
+                        } else {
+                            out.failed.push((name.clone(), unknown));
+                        }
                     }
-                } else {
-                    unreachable!("compile succeeded above but failed here");
                 }
             }
             Err(notes) => out.failed.push((name.clone(), notes)),
