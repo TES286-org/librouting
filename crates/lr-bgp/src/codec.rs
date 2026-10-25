@@ -533,15 +533,18 @@ fn encode_update(
     for a in u.attributes.iter() {
         // The private LrMplsLabelStack / LrExchangePlaneRecords /
         // LrOspfMetric2 / LrOspfRouterId / LrBabelSeqno /
-        // LrBabelRouterId tags carry router-internal state inside
-        // the Loc-RIB only — they are never sent on the wire (the
-        // label stack lives in the NLRI; the exchange-plane wire
-        // form is the fresh type-251 attribute the egress path
-        // builds; the OSPF metric-2 / router-id carry OSPF ingress
-        // state from the LSDB that BGP never re-advertises; the
-        // Babel seqno / router-id carry Babel ingress state from
-        // the Babel route table that BGP never re-advertises). Skip
-        // all six during encode.
+        // LrBabelRouterId / LrIgpMetric / LrPeerSourceAddress tags
+        // carry router-internal state inside the Loc-RIB only — they
+        // are never sent on the wire (the label stack lives in the
+        // NLRI; the exchange-plane wire form is the fresh type-251
+        // attribute the egress path builds; the OSPF metric-2 /
+        // router-id carry OSPF ingress state from the LSDB that BGP
+        // never re-advertises; the Babel seqno / router-id carry
+        // Babel ingress state from the Babel route table that BGP
+        // never re-advertises; the IGP metric and peer source address
+        // are best-path decision inputs the embedder injected from
+        // its IGP RIB / transport layer that BGP itself never
+        // re-advertises). Skip all eight during encode.
         if matches!(
             a.attr_type,
             crate::path::AttrType::LrMplsLabelStack
@@ -550,6 +553,8 @@ fn encode_update(
                 | crate::path::AttrType::LrOspfRouterId
                 | crate::path::AttrType::LrBabelSeqno
                 | crate::path::AttrType::LrBabelRouterId
+                | crate::path::AttrType::LrIgpMetric
+                | crate::path::AttrType::LrPeerSourceAddress
         ) {
             continue;
         }

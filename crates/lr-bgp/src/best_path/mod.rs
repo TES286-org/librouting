@@ -61,6 +61,31 @@ pub struct BestPathConfig {
     /// selection, and the operator is expected to implement RFC 8326
     /// §4.1 as an explicit inbound policy instead).
     pub graceful_shutdown_least_preferred: bool,
+    /// RFC 4271 §9.1.2.2 step (g): the path with the lowest IGP metric
+    /// to the NEXT_HOP wins. The metric is read from the route's
+    /// private [`crate::path::AttrType::LrIgpMetric`] tag (the embedder
+    /// injects it at route learn time from its IGP RIB — the daemon's
+    /// `lr-osroute` FIB lookup, or an out-of-band OSPF/Babel route
+    /// table walk). Absent tag is treated as `u32::MAX` (worst), so a
+    /// route with no IGP metric never beats a route with a real metric.
+    /// Default true — the RFC mandates the step; operators can disable
+    /// it for test scenarios without an IGP (e.g. an FFI-driven
+    /// two-router test that does not run OSPF/Babel and so cannot
+    /// supply the metric).
+    pub compare_igp_metric: bool,
+    /// RFC 4271 §9.1.2.2 step (h): prefer the path whose NEXT_HOP
+    /// equals the peer's source address — a route whose NEXT_HOP is
+    /// the peer's own transport source is the route the peer
+    /// originated (IGP cost zero by construction), winning over a
+    /// route the peer re-advertises (NEXT_HOP points elsewhere). The
+    /// peer source is read from the route's private
+    /// [`crate::path::AttrType::LrPeerSourceAddress`] tag (the daemon
+    /// injects it at route learn time from the session's transport
+    /// address; FFI sessions without a configured peer address leave
+    /// it absent). Default true — the RFC mandates the step;
+    /// operators can disable it for test scenarios where the peer
+    /// transport address is not known.
+    pub prefer_next_hop_self: bool,
 }
 
 impl Default for BestPathConfig {
@@ -74,6 +99,8 @@ impl Default for BestPathConfig {
             multipath: 1,
             multipath_relax: false,
             graceful_shutdown_least_preferred: true,
+            compare_igp_metric: true,
+            prefer_next_hop_self: true,
         }
     }
 }
@@ -226,6 +253,35 @@ impl BestPath {
             }
         }
 
+        // RFC 4271 §9.1.2.2 step (g) — IGP metric to NEXT_HOP. Same
+        // shape as `compare`'s step 7; see that step for the rationale.
+        if cfg.compare_igp_metric {
+            let igp_a = attrs_a.igp_metric().unwrap_or(u32::MAX);
+            let igp_b = attrs_b.igp_metric().unwrap_or(u32::MAX);
+            let cmp = igp_a.cmp(&igp_b);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
+
+        // RFC 4271 §9.1.2.2 step (h) — NEXT_HOP equals peer's source.
+        // Same shape as `compare`'s step 8.
+        if cfg.prefer_next_hop_self {
+            let nh_a_matches = a
+                .next_hop
+                .is_some_and(|nh| attrs_a.peer_source_address() == Some(nh));
+            let nh_b_matches = b
+                .next_hop
+                .is_some_and(|nh| attrs_b.peer_source_address() == Some(nh));
+            if nh_a_matches != nh_b_matches {
+                return if nh_a_matches {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
+        }
+
         if cfg.deterministic_router_id {
             let rid_a = Self::originator_id(&attrs_a);
             let rid_b = Self::originator_id(&attrs_b);
@@ -363,9 +419,44 @@ impl BestPath {
             }
         }
 
-        // 7. Lowest IGP metric to NEXT_HOP — embedder injects via custom tag.
+        // 7. Lowest IGP metric to NEXT_HOP (RFC 4271 §9.1.2.2 step (g)).
+        //    The metric is the embedder's IGP RIB distance to the
+        //    route's NEXT_HOP, stored under the private `LrIgpMetric`
+        //    tag. An absent tag is treated as `u32::MAX` (worst) so a
+        //    route with no IGP metric never beats a route with a real
+        //    metric — when both are absent they tie through to step 8.
+        if cfg.compare_igp_metric {
+            let igp_a = attrs_a.igp_metric().unwrap_or(u32::MAX);
+            let igp_b = attrs_b.igp_metric().unwrap_or(u32::MAX);
+            let cmp = igp_a.cmp(&igp_b);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
 
-        // 8. Prefer paths where NEXT_HOP equals the peer's source address.
+        // 8. Prefer paths where NEXT_HOP equals the peer's source
+        //    address (RFC 4271 §9.1.2.2 step (h)). The peer's transport
+        //    source is stored under the private `LrPeerSourceAddress`
+        //    tag — a route whose `next_hop` matches its peer's source
+        //    is the route the peer originated (IGP cost zero by
+        //    construction), winning over a route the peer re-advertises
+        //    (NEXT_HOP points elsewhere). The asymmetry (`true > false`
+        //    for "matched wins") makes the matched path `Ordering::Less`.
+        if cfg.prefer_next_hop_self {
+            let nh_a_matches = a
+                .next_hop
+                .is_some_and(|nh| attrs_a.peer_source_address() == Some(nh));
+            let nh_b_matches = b
+                .next_hop
+                .is_some_and(|nh| attrs_b.peer_source_address() == Some(nh));
+            if nh_a_matches != nh_b_matches {
+                return if nh_a_matches {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
+        }
 
         // 9. Oldest route wins — disabled when deterministic_router_id is on
         //    (RFC 5004 deterministic comparison replaces it).
@@ -714,6 +805,294 @@ mod tests {
         let routes = [a, b];
         let mp = BestPath::multipath(&routes, &cfg).unwrap();
         assert_eq!(mp.len(), 1, "the GS-tagged path must stay out of the set");
+        assert_eq!(mp[0].origin.peer, 1);
+    }
+
+    // ===========================================================================
+    // Step 7 — Lowest IGP metric to NEXT_HOP (RFC 4271 §9.1.2.2 step (g))
+    // ===========================================================================
+
+    /// Helper: build a route carrying the same AS_PATH but a different
+    /// private `LrIgpMetric` tag. The metric is encoded as a 4-byte
+    /// big-endian u32 (matching `PathAttributes::set_igp_metric`'s wire
+    /// shape — the test goes through the same `Attributes` insert so
+    /// `PathAttributes::igp_metric()` decodes it back symmetrically).
+    fn route_with_igp_metric(as_path: Vec<u8>, metric: Option<u32>, peer: u64) -> Route {
+        let mut attrs = Attributes::new();
+        attrs.insert(Attribute {
+            tag: lr_core::attr::AttrTag(2),
+            flags: 0,
+            value: as_path,
+        });
+        if let Some(m) = metric {
+            attrs.insert(Attribute {
+                tag: lr_core::attr::AttrTag(AttrType::LrIgpMetric.to_u8()),
+                flags: 0,
+                value: m.to_be_bytes().to_vec(),
+            });
+        }
+        Route {
+            key: RouteKey::new(Prefix::new_v4([10, 0, 0, 0], 8), NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: None,
+            attributes: attrs,
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    /// RFC 4271 §9.1.2.2 step (g): a path whose IGP metric to NEXT_HOP
+    /// is lower wins over one whose metric is higher. Both routes carry
+    /// the same AS_PATH so the upstream steps (LOCAL_PREF / AS_PATH
+    /// length / ORIGIN / MED / eBGP-over-iBGP) all tie; step 7 is the
+    /// deciding factor.
+    #[test]
+    fn lower_igp_metric_wins() {
+        let near = route_with_igp_metric(vec![2, 1, 0, 0, 100], Some(50), 1);
+        let far = route_with_igp_metric(vec![2, 1, 0, 0, 100], Some(500), 2);
+        let cfg = BestPathConfig::default();
+        let routes = [near, far];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "lower IGP metric to NEXT_HOP wins at step 7"
+        );
+    }
+
+    /// An absent `LrIgpMetric` tag is treated as `u32::MAX` (worst), so
+    /// a route with no metric loses to one with a real metric; both
+    /// absent ties through to step 8.
+    #[test]
+    fn absent_igp_metric_is_treated_as_worst() {
+        let with_metric = route_with_igp_metric(vec![2, 1, 0, 0, 100], Some(99), 1);
+        let no_metric = route_with_igp_metric(vec![2, 1, 0, 0, 100], None, 2);
+        let cfg = BestPathConfig::default();
+        let routes = [with_metric, no_metric];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "an absent IGP metric (u32::MAX) loses to any real metric"
+        );
+    }
+
+    /// Disabling `compare_igp_metric` skips the step entirely — both
+    /// routes tie at step 7 and fall through to step 8 and beyond; the
+    /// tiebreaker (router-id / peer-id) picks the lower peer-id (peer 1).
+    /// This mirrors FRR's `bgp bestpath as-path ignore-igp-metric` knob
+    /// (there is no RFC for the skip — the RFC mandates the step, the
+    /// skip is a test-scenario opt-out).
+    #[test]
+    fn compare_igp_metric_can_be_disabled() {
+        let near = route_with_igp_metric(vec![2, 1, 0, 0, 100], Some(50), 2);
+        let far = route_with_igp_metric(vec![2, 1, 0, 0, 100], Some(500), 1);
+        let cfg = BestPathConfig {
+            compare_igp_metric: false,
+            ..Default::default()
+        };
+        let routes = [near, far];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "step 7 skipped — lower peer-id wins via step 12's tiebreaker"
+        );
+    }
+
+    // ===========================================================================
+    // Step 8 — Prefer paths whose NEXT_HOP equals the peer's source address
+    // (RFC 4271 §9.1.2.2 step (h))
+    // ===========================================================================
+
+    /// Helper: build a route with the same AS_PATH but a different
+    /// private `LrPeerSourceAddress` tag and `next_hop`. The peer source
+    /// is encoded as a 4-byte (IPv4) or 16-byte (IPv6) raw `IpAddr` —
+    /// matching `PathAttributes::set_peer_source_address`'s wire shape.
+    fn route_with_peer_source(
+        as_path: Vec<u8>,
+        next_hop: Option<lr_core::addr::IpAddr>,
+        peer_source: Option<lr_core::addr::IpAddr>,
+        peer: u64,
+    ) -> Route {
+        let mut attrs = Attributes::new();
+        attrs.insert(Attribute {
+            tag: lr_core::attr::AttrTag(2),
+            flags: 0,
+            value: as_path,
+        });
+        if let Some(src) = peer_source {
+            let value: Vec<u8> = match src {
+                lr_core::addr::IpAddr::V4(b) => b.to_vec(),
+                lr_core::addr::IpAddr::V6(b) => b.to_vec(),
+            };
+            attrs.insert(Attribute {
+                tag: lr_core::attr::AttrTag(AttrType::LrPeerSourceAddress.to_u8()),
+                flags: 0,
+                value,
+            });
+        }
+        Route {
+            key: RouteKey::new(Prefix::new_v4([10, 0, 0, 0], 8), NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop,
+            attributes: attrs,
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    /// RFC 4271 §9.1.2.2 step (h): a path whose NEXT_HOP equals its
+    /// peer's source address wins over one whose NEXT_HOP points
+    /// elsewhere — the matched path is the route the peer originated
+    /// (IGP cost zero by construction); the unmatched path is one the
+    /// peer re-advertises.
+    #[test]
+    fn next_hop_equal_to_peer_source_wins() {
+        // Peer 1's transport source is 192.0.2.1; the route's NEXT_HOP
+        // matches it — peer 1 originated the route.
+        let originated = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            1,
+        );
+        // Peer 2's transport source is 192.0.2.2; the route's NEXT_HOP
+        // is 192.0.2.254 — peer 2 re-advertises a route whose NEXT_HOP
+        // points at a different router.
+        let re_advertised = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 254])),
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 2])),
+            2,
+        );
+        let cfg = BestPathConfig::default();
+        let routes = [originated, re_advertised];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "a route whose NEXT_HOP equals its peer's source address wins at step 8"
+        );
+    }
+
+    /// Step 8 also fires for IPv6 next-hops: a route whose NEXT_HOP is
+    /// the IPv6 peer source wins over one whose NEXT_HOP differs.
+    #[test]
+    fn next_hop_equal_to_peer_source_wins_ipv6() {
+        let v6_originated = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ])),
+            Some(lr_core::addr::IpAddr::V6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ])),
+            1,
+        );
+        let v6_re_advertised = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfe,
+            ])),
+            Some(lr_core::addr::IpAddr::V6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+            ])),
+            2,
+        );
+        let cfg = BestPathConfig::default();
+        let routes = [v6_originated, v6_re_advertised];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "IPv6 NEXT_HOP matching the IPv6 peer source wins at step 8"
+        );
+    }
+
+    /// An absent `LrPeerSourceAddress` tag makes the match check
+    /// false for both routes — neither matches, so step 8 ties
+    /// through to the remaining tiebreakers. The lower peer-id (peer
+    /// 1) wins via step 12's last-resort tiebreaker.
+    #[test]
+    fn absent_peer_source_skips_step_8() {
+        let a = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            None,
+            2,
+        );
+        let b = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            None,
+            1,
+        );
+        let cfg = BestPathConfig::default();
+        let routes = [a, b];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "absent peer source on both routes — step 8 ties; lower peer-id wins"
+        );
+    }
+
+    /// Disabling `prefer_next_hop_self` skips step 8 entirely — both
+    /// routes tie at step 8 and fall through to step 9+, where the
+    /// lower peer-id wins (peer 1).
+    #[test]
+    fn prefer_next_hop_self_can_be_disabled() {
+        let matched = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            2,
+        );
+        let unmatched = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 254])),
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 2])),
+            1,
+        );
+        let cfg = BestPathConfig {
+            prefer_next_hop_self: false,
+            ..Default::default()
+        };
+        let routes = [matched, unmatched];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "step 8 disabled — lower peer-id wins via step 12's tiebreaker"
+        );
+    }
+
+    /// Step 8 in the multipath comparator: a path whose NEXT_HOP does
+    /// not match its peer source cannot join an equal-cost set with one
+    /// that does. The matched path wins outright at step 8, so the
+    /// unmatched one stays out of the multipath group.
+    #[test]
+    fn next_hop_self_excludes_unmatched_from_multipath() {
+        let matched = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            1,
+        );
+        let unmatched = route_with_peer_source(
+            vec![2, 1, 0, 0, 100],
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 254])),
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 2])),
+            2,
+        );
+        let cfg = BestPathConfig {
+            multipath: 8,
+            multipath_relax: true,
+            ..Default::default()
+        };
+        let routes = [matched, unmatched];
+        let mp = BestPath::multipath(&routes, &cfg).unwrap();
+        assert_eq!(mp.len(), 1, "the unmatched path stays out of the set");
         assert_eq!(mp[0].origin.peer, 1);
     }
 }

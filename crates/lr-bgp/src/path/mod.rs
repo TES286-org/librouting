@@ -34,6 +34,7 @@ pub use well_known::{
     OriginKind, OriginatorId, PmsiTunnel,
 };
 
+use lr_core::addr::IpAddr;
 use lr_core::attr::{AttrTag, Attribute, Attributes};
 use lr_core::nlri::NlriFamily;
 
@@ -253,6 +254,68 @@ pub enum AttrType {
     /// 249/250/252/253/254/255 — code point 251 is the W6.3
     /// exchange-plane wire attribute, not a private `AttrType`
     /// variant).
+    /// librouting-private IGP metric to NEXT_HOP (RFC 4271 §9.1.2.2
+    /// step (g): "the internal distance to the NEXT_HOP") injected by
+    /// the embedder at route learn time. The comparator reads it via
+    /// [`PathAttributes::igp_metric`] for step 7 of the decision
+    /// process — lower metric wins; an absent tag is treated as
+    /// [`u32::MAX`] (worst) so a route with no IGP metric never beats
+    /// one with a real metric. *Never* transmitted on the wire: it
+    /// carries router-internal IGP state that BGP itself never
+    /// re-advertises (the IGP RIB is the source), and the codec
+    /// strips it at encode so peers never see it. Attached to BGP
+    /// routes whose embedder has access to an IGP RIB; absent when no
+    /// IGP metric is available (the comparator then falls back to
+    /// the remaining tiebreakers).
+    ///
+    /// 246 is an internal-only code point: it never appears on the
+    /// wire (the codec strips it at encode) and it deliberately
+    /// avoids the 244-254 unassigned range that the W6.3
+    /// exchange-plane prototype rides on for its wire attribute
+    /// (type 251).
+    ///
+    /// Value layout: a single 4-byte big-endian u32 holding the IGP
+    /// metric (the kernel/IGP RIB distance to the route's
+    /// NEXT_HOP). Distances up to 2^32-1 fit; larger values are
+    /// truncated and the comparator clamps to `u32::MAX`.
+    LrIgpMetric = 246,
+    /// librouting-private peer transport source address (RFC 4271
+    /// §9.1.2.2 step (h): "prefer the route learned from the BGP
+    /// speaker with the lowest IP address as the BGP NEXT_HOP of
+    /// the route"; FRR/BIRD restate it as "prefer paths whose
+    /// NEXT_HOP equals the peer's source address" — a route whose
+    /// NEXT_HOP is the peer's own transport source is the route
+    /// the peer originated, not one it re-advertises, so the IGP
+    /// cost-to-NEXT_HOP is zero by construction). The comparator
+    /// reads it via [`PathAttributes::peer_source_address`] for
+    /// step 8 — a route whose `next_hop` matches its
+    /// `peer_source_address` wins over one whose does not.
+    /// *Never* transmitted on the wire: the peer's transport
+    /// address is router-internal session state (the embedder's
+    /// transport layer is the source), and the codec strips it at
+    /// encode so peers never see it. Attached to every BGP route
+    /// the embedder learns from a peer whose transport address is
+    /// known; absent when the embedder does not know the peer's
+    /// transport address (e.g. FFI sessions without a configured
+    /// peer address).
+    ///
+    /// 245 is an internal-only code point: it never appears on the
+    /// wire (the codec strips it at encode) and it deliberately
+    /// avoids the 244-254 unassigned range that the W6.3
+    /// exchange-plane prototype rides on for its wire attribute
+    /// (type 251).
+    ///
+    /// Value layout: 4 bytes for an IPv4 address or 16 bytes for an
+    /// IPv6 address, big-endian (the raw `IpAddr` octets — no
+    /// discriminator byte; the address family is implied by the
+    /// length).
+    LrPeerSourceAddress = 245,
+    /// Unknown attribute code. The explicit discriminant keeps the
+    /// data-carrying variant out of the unit-like variants' implicit
+    /// numbering (the eight private tags above sit at
+    /// 245/246/249/250/252/253/254/255 — code point 251 is the W6.3
+    /// exchange-plane wire attribute, not a private `AttrType`
+    /// variant).
     Other(u8) = 0,
 }
 
@@ -286,6 +349,8 @@ impl AttrType {
             252 => Self::LrOspfRouterId,
             250 => Self::LrBabelRouterId,
             249 => Self::LrBabelSeqno,
+            246 => Self::LrIgpMetric,
+            245 => Self::LrPeerSourceAddress,
             255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
@@ -320,6 +385,8 @@ impl AttrType {
             Self::LrOspfRouterId => 252,
             Self::LrBabelRouterId => 250,
             Self::LrBabelSeqno => 249,
+            Self::LrIgpMetric => 246,
+            Self::LrPeerSourceAddress => 245,
             Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
         }
@@ -867,6 +934,116 @@ impl PathAttributes {
     /// `defined(babel_router_id)` does.
     pub fn has_babel_router_id(&self) -> bool {
         self.get(AttrType::LrBabelRouterId).is_some()
+    }
+
+    /// Attach the IGP metric to NEXT_HOP (RFC 4271 §9.1.2.2 step (g))
+    /// to this attribute set under the private [`AttrType::LrIgpMetric`]
+    /// tag. The tag is never transmitted on the wire; it carries the
+    /// IGP distance the embedder computed against its IGP RIB through
+    /// the Loc-RIB so [`crate::best_path::BestPath::compare`] can read
+    /// it for step 7 of the decision process — lower metric wins;
+    /// an absent tag is treated as `u32::MAX` (worst). The daemon
+    /// sets this when it has access to the IGP RIB (OSPF / Babel
+    /// route to the route's `next_hop`); embedders without an IGP
+    /// RIB leave it absent and the comparator falls back to the
+    /// remaining tiebreakers.
+    ///
+    /// `metric` is masked to `u32::MAX` (no overflow — the comparator
+    /// compares `u32` directly, and OSPF metrics fit in 24 bits while
+    /// Babel metrics fit in 16 bits so the masked region is unused).
+    pub fn set_igp_metric(&mut self, metric: u32) {
+        let value = metric.to_be_bytes();
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrIgpMetric,
+            value.to_vec(),
+        ));
+    }
+
+    /// Read back the IGP metric to NEXT_HOP previously attached with
+    /// [`Self::set_igp_metric`]. Returns `None` when the route carries
+    /// no IGP metric — i.e. the embedder has no IGP RIB (or has not
+    /// wired the per-route injection yet), so the comparator falls
+    /// back to the remaining tiebreakers. A malformed value (not
+    /// exactly 4 bytes) returns `None` — the codec rejects
+    /// partial-width stores at decode.
+    pub fn igp_metric(&self) -> Option<u32> {
+        let a = self.get(AttrType::LrIgpMetric)?;
+        if a.value.len() != 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([
+            a.value[0], a.value[1], a.value[2], a.value[3],
+        ]))
+    }
+
+    /// True when an `LrIgpMetric` attribute is physically present on
+    /// the route. Use this to distinguish "no metric" from "present
+    /// but malformed" — [`Self::igp_metric`] returns `None` for both.
+    pub fn has_igp_metric(&self) -> bool {
+        self.get(AttrType::LrIgpMetric).is_some()
+    }
+
+    /// Attach the peer's transport source address (RFC 4271 §9.1.2.2
+    /// step (h)) to this attribute set under the private
+    /// [`AttrType::LrPeerSourceAddress`] tag. The tag is never
+    /// transmitted on the wire; it carries the IP address the peer's
+    /// transport-level connection originates from, which is the
+    /// address the BGP NEXT_HOP gets compared against at step 8 — a
+    /// route whose NEXT_HOP is the peer's own transport source is the
+    /// route the peer originated (IGP cost zero by construction),
+    /// winning over a route the peer re-advertises (the NEXT_HOP
+    /// points elsewhere).
+    ///
+    /// The daemon sets this on every BGP route learned from a peer
+    /// whose transport source is known (inbound peer matched against
+    /// the configured `address`; outbound peer is the configured
+    /// `address`); embedders using the FFI or the programmatic API
+    /// without a known peer source leave it absent.
+    ///
+    /// Value layout: 4 bytes for an IPv4 address, 16 bytes for an
+    /// IPv6 address (the raw `IpAddr` octets — no discriminator byte;
+    /// the address family is implied by the length).
+    pub fn set_peer_source_address(&mut self, addr: IpAddr) {
+        let value: Vec<u8> = match addr {
+            IpAddr::V4(b) => b.to_vec(),
+            IpAddr::V6(b) => b.to_vec(),
+        };
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrPeerSourceAddress,
+            value,
+        ));
+    }
+
+    /// Read back the peer's transport source address previously
+    /// attached with [`Self::set_peer_source_address`]. Returns `None`
+    /// when the route carries no peer source attribute (FFI sessions
+    /// or redistributed BGP routes whose transport origin is not
+    /// known). A malformed value (not 4 or 16 bytes) returns `None`.
+    pub fn peer_source_address(&self) -> Option<IpAddr> {
+        let a = self.get(AttrType::LrPeerSourceAddress)?;
+        match a.value.len() {
+            4 => {
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&a.value);
+                Some(IpAddr::V4(b))
+            }
+            16 => {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(&a.value);
+                Some(IpAddr::V6(b))
+            }
+            _ => None,
+        }
+    }
+
+    /// True when an `LrPeerSourceAddress` attribute is physically
+    /// present on the route. Use this to distinguish "no peer source"
+    /// from "present but malformed" — [`Self::peer_source_address`]
+    /// returns `None` for both.
+    pub fn has_peer_source_address(&self) -> bool {
+        self.get(AttrType::LrPeerSourceAddress).is_some()
     }
 
     /// Decode MP_REACH_NLRI with RFC 7911 Add-Path awareness: `add_path`
