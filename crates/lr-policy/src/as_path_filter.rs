@@ -161,11 +161,20 @@ impl AsPathFilterBank {
         false
     }
 
-    /// Stub (no `bgp` feature): permissive, matching historical
-    /// behaviour.
+    /// Stub (no `bgp` feature): **fail-closed** — a configured
+    /// AS-path filter cannot be evaluated when the crate is built
+    /// without the typed BGP path-attribute decoder, so the safe
+    /// default is to deny the route. The previous shape of this
+    /// stub returned `true` (permit-all), which silently admitted
+    /// every route past a configured-but-unparseable filter — an
+    /// unsafe default for a security-sensitive control plane.
+    ///
+    /// Embedders that build `lr-policy` without `bgp` and want
+    /// prefix-only filtering should use [`PrefixList`](crate::PrefixList)
+    /// and not configure an [`AsPathFilter`] at all.
     #[cfg(not(feature = "bgp"))]
     pub fn evaluate(&self, _id: u32, _route: &Route) -> bool {
-        true
+        false
     }
 }
 
@@ -188,7 +197,7 @@ pub fn parse_as_path_2(b: &[u8]) -> Vec<Asn> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bgp"))]
 mod tests {
     use super::*;
 
@@ -271,5 +280,76 @@ mod tests {
         assert!(!bank.evaluate(1, &route), "no match -> implicit deny");
         assert!(!bank.evaluate(7, &route), "unknown id -> deny");
         let _ = bgp::as_sequence(&route);
+    }
+}
+
+// ============================================================
+// no-bgp fail-closed coverage
+// ============================================================
+//
+// `lr-policy`'s default build turns `bgp` on; the stub path covered
+// here is only compiled when an embedder explicitly opts out. The
+// crate's `--no-default-features --features std` build is currently
+// blocked upstream of this module — `filter/eval.rs`'s default method
+// bodies reference `crate::bgp::*` unconditionally — so a future
+// follow-up that lands the no-bgp build will see these tests pin the
+// fail-closed verdict (and a regression that re-introduces the
+// permissive permit-all stub flagged in defects.txt will fail here).
+#[cfg(not(feature = "bgp"))]
+#[cfg(test)]
+mod no_bgp_tests {
+    use super::*;
+    use lr_core::addr::Prefix;
+    use lr_core::nlri::NlriFamily;
+    use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
+
+    fn any_route() -> Route {
+        Route {
+            key: RouteKey::new(
+                Prefix::new_v4([203, 0, 113, 0], 24),
+                NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 100),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn configured_filter_denies_when_bgp_decoder_absent() {
+        // A non-empty AS-path filter configured to *permit* a route
+        // whose AS_PATH ends in 65002. Without the `bgp` feature the
+        // crate cannot decode the route's AS_PATH, so the safe default
+        // is to deny the route — fail-closed.
+        let mut bank = AsPathFilterBank::new();
+        bank.add(vec![AsPathFilter {
+            pattern: "_65002$".into(),
+            permit: true,
+        }]);
+        assert!(
+            !bank.evaluate(0, &any_route()),
+            "no-bgp stub must deny (fail-closed), not silently admit"
+        );
+    }
+
+    #[test]
+    fn unknown_id_denies_when_bgp_decoder_absent() {
+        // The bank's unknown-id branch already denies (independent of
+        // the bgp feature); the known-id branch now agrees after the
+        // stub's fail-closed fix, so the two paths converge on deny.
+        let bank = AsPathFilterBank::new();
+        assert!(
+            !bank.evaluate(0, &any_route()),
+            "no-bgp stub: known list id must deny (fail-closed)"
+        );
+        assert!(
+            !bank.evaluate(99, &any_route()),
+            "no-bgp stub: unknown list id still denies"
+        );
     }
 }

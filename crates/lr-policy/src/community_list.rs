@@ -7,8 +7,13 @@
 //! deny (`false`) — the safe default for operator-written lists.
 //!
 //! Requires the `bgp` feature (default) for typed attribute decoding;
-//! without it lists evaluate to the permissive stub for embedders
-//! that only use prefix-based policy.
+//! without it [`CommunityList::evaluate`] fails **closed** (returns
+//! `false`): a configured community list cannot be evaluated when the
+//! crate is built without the typed BGP path-attribute decoder, and
+//! the safe default for a security-sensitive filter is to deny the
+//! route rather than silently admit it. Embedders that want
+//! prefix-only policy should use [`PrefixList`](crate::PrefixList)
+//! and not configure a `CommunityList`.
 
 use lr_core::rib::Route;
 
@@ -50,11 +55,20 @@ impl CommunityList {
         false // implicit deny
     }
 
-    /// Stub (no `bgp` feature): permissive, matching historical
-    /// behaviour for prefix-only deployments.
+    /// Stub (no `bgp` feature): **fail-closed** — a configured
+    /// community list cannot be evaluated when the crate is built
+    /// without the typed BGP path-attribute decoder, so the safe
+    /// default is to deny the route. The previous shape of this
+    /// stub returned `true` (permit-all), which silently admitted
+    /// every route past a configured-but-unparseable filter — an
+    /// unsafe default for a security-sensitive control plane.
+    ///
+    /// Embedders that build `lr-policy` without `bgp` and want
+    /// prefix-only filtering should use [`PrefixList`] and not
+    /// configure a [`CommunityList`] at all.
     #[cfg(not(feature = "bgp"))]
     pub fn evaluate(&self, _route: &Route) -> bool {
-        true
+        false
     }
 }
 
@@ -84,7 +98,7 @@ impl CommunityListBank {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bgp"))]
 mod tests {
     use super::*;
     use crate::bgp;
@@ -166,5 +180,96 @@ mod tests {
         assert!(bank.evaluate(0, &route));
         assert!(!bank.evaluate(9, &route), "unknown list id denies");
         let _ = bgp::communities(&route);
+    }
+}
+
+// ============================================================
+// no-bgp fail-closed coverage
+// ============================================================
+//
+// `lr-policy`'s default build turns `bgp` on; the stub path covered
+// here is only compiled when an embedder explicitly opts out. The
+// crate's `--no-default-features --features std` build is currently
+// blocked upstream of this module — `filter/eval.rs`'s default method
+// bodies reference `crate::bgp::*` unconditionally — so a future
+// follow-up that lands the no-bgp build will see these tests pin the
+// fail-closed verdict (and a regression that re-introduces the
+// permissive permit-all stub flagged in defects.txt will fail here).
+#[cfg(not(feature = "bgp"))]
+#[cfg(test)]
+mod no_bgp_tests {
+    use super::*;
+    use lr_core::addr::Prefix;
+    use lr_core::nlri::NlriFamily;
+    use lr_core::rib::{Protocol, Route, RouteKey, RouteOrigin};
+
+    fn any_route() -> Route {
+        Route {
+            key: RouteKey::new(
+                Prefix::new_v4([203, 0, 113, 0], 24),
+                NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn configured_list_denies_when_bgp_decoder_absent() {
+        // A non-empty community list configured to *permit* a route
+        // carrying community (64512, 100). Without the `bgp` feature
+        // the crate cannot decode the route's communities, so the
+        // safe default is to deny the route — fail-closed.
+        let mut list = CommunityList::new();
+        list.push(CommunityListEntry {
+            communities: vec![0u32],
+            permit: true,
+        });
+        assert!(
+            !list.evaluate(&any_route()),
+            "no-bgp stub must deny (fail-closed), not silently admit"
+        );
+    }
+
+    #[test]
+    fn empty_list_denies_when_bgp_decoder_absent() {
+        // Even an empty community list (which the bgp-enabled path
+        // also evaluates as implicit-deny) stays deny under the no-bgp
+        // stub — the two paths agree on the deny verdict for an empty
+        // list, so a no-bgp build does not introduce a discrepancy.
+        let list = CommunityList::new();
+        assert!(
+            !list.evaluate(&any_route()),
+            "no-bgp stub on an empty list must deny (matching the bgp path's implicit deny)"
+        );
+    }
+
+    #[test]
+    fn bank_known_id_denies_when_bgp_decoder_absent() {
+        // The bank delegates to the inner list's `evaluate`, which
+        // fails closed. The unknown-id branch already denies in the
+        // bank (independent of the bgp feature), so the known-id and
+        // unknown-id branches now agree: both deny.
+        let mut bank = CommunityListBank::new();
+        let mut list = CommunityList::new();
+        list.push(CommunityListEntry {
+            communities: vec![0u32],
+            permit: true,
+        });
+        bank.add(list);
+        assert!(
+            !bank.evaluate(0, &any_route()),
+            "no-bgp stub: known list id must deny (fail-closed)"
+        );
+        assert!(
+            !bank.evaluate(99, &any_route()),
+            "no-bgp stub: unknown list id still denies"
+        );
     }
 }

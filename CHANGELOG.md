@@ -361,6 +361,38 @@ could not (the `LrOspfMetric2` tag has no C ABI setter).
   case has no automatic resolution and the operator must summarize
   at a single length.
 
+### Fixed
+
+**`lr-policy` community-list and AS-path filter `evaluate` stubs now
+fail-closed when the `bgp` feature is off** (`policy`, issue #92). The
+`#[cfg(not(feature = "bgp"))]` stubs in
+`crates/lr-policy/src/community_list.rs` and
+`crates/lr-policy/src/as_path_filter.rs` previously returned `true`
+(permit-all) on every call — a permissive stub that silently admitted
+every route past a configured-but-unparseable filter. Without the
+typed BGP path-attribute decoder the crate cannot actually evaluate
+the configured list, so the safe default for a security-sensitive
+control plane is to deny the route (`false`), matching what the
+`DenyAllResolver` already does on the FFI side and what
+`CommunityListBank::evaluate` already does for unknown list ids. The
+previous shape was flagged in `defects.txt` as a FAKE-IMPL with an
+unsafe default; this release flips the default. Embedders that build
+`lr-policy` without `bgp` for prefix-only deployments should use
+`PrefixList` and not configure a `CommunityList` / `AsPathFilter` at
+all — the stub now denies instead of silently admitting. New
+`#[cfg(not(feature = "bgp"))] #[cfg(test)] mod no_bgp_tests` modules
+in both files pin the deny behaviour; the existing `#[cfg(test)] mod
+tests` modules are gated `#[cfg(all(test, feature = "bgp"))]` to keep
+the two test surfaces disjoint. The default build (with `bgp` on)
+is unchanged. The `--no-default-features --features std` build of
+`lr-policy` is currently blocked upstream of these stubs — the
+`FilterContext` trait's default method bodies in
+`crates/lr-policy/src/filter/eval.rs` reference `crate::bgp::*`
+unconditionally — so the new no-bgp tests stay dormant until that
+upstream follow-up lands; they will then exercise the fail-closed
+verdict and catch any regression that re-introduces the permissive
+permit-all stub.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
