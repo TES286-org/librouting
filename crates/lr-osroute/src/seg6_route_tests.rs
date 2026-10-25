@@ -323,6 +323,235 @@ fn seg6local_rejects_kernel_unimplemented_behaviors() {
 }
 
 #[test]
+fn seg6local_end_dt4_encodes_vrftable_parameter() {
+    // End.DT4 (IANA 19) maps to kernel action 8 and requires the
+    // SEG6_LOCAL_VRFTABLE parameter (uapi 9). The kernel's
+    // `seg6_action_table` entry for End.DT4 — added in commit
+    // 664d6f86868b ("seg6: add support for the SRv6 End.DT4
+    // behavior") — sets `.attrs = SEG6_F_ATTR(SEG6_LOCAL_VRFTABLE)`,
+    // so emitting SEG6_LOCAL_TABLE (uapi 3) instead would be a
+    // guaranteed EINVAL on a real kernel.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndDT4).with_vrf_table(100);
+    let req = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap();
+    let encap = find_attr(&req, RTA_ENCAP).unwrap();
+    assert_eq!(SEG6_LOCAL_VRFTABLE, 9, "uapi enum order: VRFTABLE is 9");
+    let vrf_attr = find_encap_attr(encap, SEG6_LOCAL_VRFTABLE).unwrap();
+    assert_eq!(vrf_attr.len(), 4, "SEG6_LOCAL_VRFTABLE is a u32");
+    assert_eq!(u32::from_ne_bytes(vrf_attr.try_into().unwrap()), 100);
+    // End.DT4: IANA 19 → SEG6_LOCAL_ACTION_END_DT4 (8).
+    let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+    assert_eq!(u32::from_ne_bytes(action_attr.try_into().unwrap()), 8);
+    // SEG6_LOCAL_TABLE (type 3) MUST be absent — the End.DT4
+    // descriptor rejects a stray `table` parameter with EINVAL.
+    assert!(
+        find_encap_attr(encap, SEG6_LOCAL_TABLE).is_none(),
+        "End.DT4 must not carry SEG6_LOCAL_TABLE"
+    );
+}
+
+#[test]
+fn seg6local_end_dt4_requires_vrftable_parameter() {
+    // The End.DT4 descriptor requires VRFTABLE — an End.DT4 route
+    // without it would install nothing and EINVAL at the kernel
+    // instead.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndDT4);
+    let err = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap_err();
+    match err {
+        Seg6RouteError::UnsupportedAction(s) => {
+            assert!(
+                s.contains("vrf_table"),
+                "error names the missing parameter: {s}"
+            );
+        }
+        other => panic!("expected UnsupportedAction, got {:?}", other),
+    }
+}
+
+#[test]
+fn seg6local_end_dt4_rejects_stray_table_parameter() {
+    // End.DT4 routes the inner IPv4 packet via a VRF table, NOT a
+    // plain routing-table id. The kernel's `seg6_action_table`
+    // descriptor for action 8 does not list SEG6_LOCAL_TABLE in
+    // either `.attrs` or `.optattrs`, so a route that sets `table`
+    // instead of `vrf_table` would be a guaranteed EINVAL on a
+    // real kernel.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndDT4).with_table(100);
+    let err = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap_err();
+    match err {
+        Seg6RouteError::UnsupportedAction(s) => {
+            assert!(s.contains("table"), "error names the stray parameter: {s}");
+        }
+        other => panic!("expected UnsupportedAction, got {:?}", other),
+    }
+}
+
+#[test]
+fn seg6local_end_dt46_encodes_vrftable_parameter() {
+    // End.DT46 (IANA 20) maps to kernel action 16 and requires the
+    // SEG6_LOCAL_VRFTABLE parameter (uapi 9), same parameter
+    // contract as End.DT4.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndDT46).with_vrf_table(200);
+    let req = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap();
+    let encap = find_attr(&req, RTA_ENCAP).unwrap();
+    let vrf_attr = find_encap_attr(encap, SEG6_LOCAL_VRFTABLE).unwrap();
+    assert_eq!(vrf_attr.len(), 4, "SEG6_LOCAL_VRFTABLE is a u32");
+    assert_eq!(u32::from_ne_bytes(vrf_attr.try_into().unwrap()), 200);
+    // End.DT46: IANA 20 → SEG6_LOCAL_ACTION_END_DT46 (16).
+    let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+    assert_eq!(u32::from_ne_bytes(action_attr.try_into().unwrap()), 16);
+    // SEG6_LOCAL_TABLE (type 3) MUST be absent.
+    assert!(
+        find_encap_attr(encap, SEG6_LOCAL_TABLE).is_none(),
+        "End.DT46 must not carry SEG6_LOCAL_TABLE"
+    );
+}
+
+#[test]
+fn seg6local_end_dt46_requires_vrftable_parameter() {
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndDT46);
+    let err = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap_err();
+    match err {
+        Seg6RouteError::UnsupportedAction(s) => {
+            assert!(
+                s.contains("vrf_table"),
+                "error names the missing parameter: {s}"
+            );
+        }
+        other => panic!("expected UnsupportedAction, got {:?}", other),
+    }
+}
+
+#[test]
+fn seg6local_end_b6_insert_encodes_srh_parameter() {
+    // End.B6.Insert (IANA 13) maps to kernel action 9 and requires
+    // the SEG6_LOCAL_SRH parameter (uapi 2) — the SRv6 Routing
+    // Header the endpoint inserts into the packet. The kernel's
+    // `seg6_action_table` entry for action 9 sets
+    // `.attrs = SEG6_F_ATTR(SEG6_LOCAL_SRH)`.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let seg1 = Sid::from_str("fcbb:bb01::1").unwrap();
+    let seg2 = Sid::from_str("fcbb:bb02::1").unwrap();
+    let srh = Srh::new(vec![seg1, seg2]).unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndB6Insert).with_srh(srh.clone());
+    let req = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap();
+    let encap = find_attr(&req, RTA_ENCAP).unwrap();
+    assert_eq!(SEG6_LOCAL_SRH, 2, "uapi enum order: SRH is 2");
+    let srh_attr = find_encap_attr(encap, SEG6_LOCAL_SRH).unwrap();
+    // The SEG6_LOCAL_SRH payload is the bare SRH bytes (RFC 8754 §2
+    // wire form) — no mode prefix, no IPv6 outer header, just the
+    // SRH itself. The `seg6` encap form prepends a 4-byte mode
+    // u32; this attribute does not.
+    let expected_srh = srh.encode_vec().unwrap();
+    assert_eq!(
+        srh_attr,
+        &expected_srh[..],
+        "SEG6_LOCAL_SRH payload must be the bare SRH wire bytes"
+    );
+    // End.B6.Insert: IANA 13 → SEG6_LOCAL_ACTION_END_B6 (9).
+    let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+    assert_eq!(u32::from_ne_bytes(action_attr.try_into().unwrap()), 9);
+}
+
+#[test]
+fn seg6local_end_b6_insert_requires_srh_parameter() {
+    // The End.B6.Insert descriptor requires SRH — an End.B6.Insert
+    // route without it would install nothing and EINVAL at the
+    // kernel instead.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndB6Insert);
+    let err = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap_err();
+    match err {
+        Seg6RouteError::UnsupportedAction(s) => {
+            assert!(s.contains("srh"), "error names the missing parameter: {s}");
+        }
+        other => panic!("expected UnsupportedAction, got {:?}", other),
+    }
+}
+
+#[test]
+fn seg6local_end_b6_encaps_encodes_srh_parameter() {
+    // End.B6.Encaps (IANA 14) maps to kernel action 10 and requires
+    // the SEG6_LOCAL_SRH parameter (uapi 2) — the SRv6 Routing
+    // Header the endpoint wraps the packet with. Same parameter
+    // contract as End.B6.Insert; the kernel additionally reserves
+    // headroom for the outer IPv6 header on this action, but that
+    // is not a netlink-parameter concern.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let seg1 = Sid::from_str("fcbb:bb01::2").unwrap();
+    let srh = Srh::new(vec![seg1]).unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndB6Encaps).with_srh(srh.clone());
+    let req = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap();
+    let encap = find_attr(&req, RTA_ENCAP).unwrap();
+    let srh_attr = find_encap_attr(encap, SEG6_LOCAL_SRH).unwrap();
+    let expected_srh = srh.encode_vec().unwrap();
+    assert_eq!(
+        srh_attr,
+        &expected_srh[..],
+        "SEG6_LOCAL_SRH payload must be the bare SRH wire bytes"
+    );
+    // End.B6.Encaps: IANA 14 → SEG6_LOCAL_ACTION_END_B6_ENCAP (10).
+    let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+    assert_eq!(u32::from_ne_bytes(action_attr.try_into().unwrap()), 10);
+}
+
+#[test]
+fn seg6local_end_b6_encaps_requires_srh_parameter() {
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndB6Encaps);
+    let err = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap_err();
+    match err {
+        Seg6RouteError::UnsupportedAction(s) => {
+            assert!(s.contains("srh"), "error names the missing parameter: {s}");
+        }
+        other => panic!("expected UnsupportedAction, got {:?}", other),
+    }
+}
+
+#[test]
+fn seg6local_end_b6_insert_rejects_stray_table_parameter() {
+    // End.B6.Insert's descriptor accepts ONLY the SRH parameter — a
+    // route that also sets `table` would EINVAL on the kernel.
+    let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+    let seg1 = Sid::from_str("fcbb:bb01::1").unwrap();
+    let srh = Srh::new(vec![seg1]).unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndB6Insert)
+        .with_srh(srh)
+        .with_table(50);
+    let err = test_netlink()
+        .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap_err();
+    match err {
+        Seg6RouteError::UnsupportedAction(s) => {
+            assert!(s.contains("table"), "error names the stray parameter: {s}");
+        }
+        other => panic!("expected UnsupportedAction, got {:?}", other),
+    }
+}
+
+#[test]
 fn seg6local_route_attaches_nh4_for_end_dx4() {
     let sid = Sid::from_str("fcbb:bb00::1").unwrap();
     let nh4 = [192, 0, 2, 1];

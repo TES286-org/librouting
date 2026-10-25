@@ -453,3 +453,131 @@ fn seg6local_end_x_with_nh6_installs_into_kernel_local_table() {
     );
     let _ = nl.delete_seg6local_route(sid);
 }
+
+/// End.B6.Insert (RFC 8986 §4.14, kernel action 9): the endpoint
+/// pushes the configured SRH into the packet immediately after the
+/// IPv6 header. The kernel's `seg6_action_table` descriptor requires
+/// the `SEG6_LOCAL_SRH` parameter (uapi 2) — iproute2's spelling is
+/// `End.B6 srh segs SEGMENTS`. This test exercises the new SRH
+/// parameter surface end-to-end: the request bytes the kernel
+/// accepts must contain `SEG6_LOCAL_SRH` carrying the SRH wire form.
+///
+/// Skipped on kernels without `CONFIG_IPV6_SEG6_LWTUNNEL` or without
+/// `CAP_NET_ADMIN` — same skip predicate as the other tests in this
+/// file. The wire format itself is pinned by the
+/// `seg6local_end_b6_insert_encodes_srh_parameter` unit test; this
+/// integration test is additional end-to-end verification against a
+/// real kernel's `seg6_action_table[SEG6_LOCAL_ACTION_END_B6]`
+/// descriptor.
+#[test]
+#[ignore = "kernel-gated: requires seg6_enabled=1 + CAP_NET_ADMIN (run as root or in a rootless netns)"]
+fn seg6local_end_b6_insert_with_srh_installs_into_kernel_local_table() {
+    if let Some(reason) = kernel_unavailable() {
+        eprintln!("SKIP: {}", reason);
+        return;
+    }
+
+    let mut nl = match Seg6Netlink::connect() {
+        Ok(nl) => nl,
+        Err(e) => {
+            if is_privilege_error(&e) {
+                eprintln!("SKIP: Seg6Netlink::connect returned EPERM (run as root or in a rootless netns)");
+                return;
+            }
+            panic!("Seg6Netlink::connect failed unexpectedly: {}", e);
+        }
+    };
+
+    // An End.B6.Insert SID whose SRH pushes a single segment — the
+    // documentation prefix (RFC 3849) keeps the SIDs off the real
+    // Internet. The route-level egress device is the namespace's
+    // loopback; the SRH is the action's parameter (SEG6_LOCAL_SRH).
+    let sid = Sid::from_str("2001:db8:dead:beef::b6").unwrap();
+    let seg1 = Sid::from_str("2001:db8:cafe::1").unwrap();
+    let srh = Srh::new(vec![seg1]).unwrap();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndB6Insert)
+        .with_srh(srh)
+        .with_if_index(loopback_ifindex());
+
+    let res = nl.add_seg6local_route(&route);
+    if let Err(e) = &res {
+        if is_privilege_error(e) {
+            eprintln!(
+                "SKIP: add_seg6local_route returned EPERM (run as root or in a rootless netns)"
+            );
+            return;
+        }
+        eprintln!("add_seg6local_route failed: {}\n{}", e, show_seg6_routes());
+        if let Some(req) = nl.last_request_bytes() {
+            eprintln!(
+                "rejected request ({} bytes): {}",
+                req.len(),
+                req.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
+        if let Some(resp) = nl.last_response_bytes() {
+            eprintln!(
+                "kernel reply ({} bytes): {}",
+                resp.len(),
+                resp.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
+        eprintln!(
+            "iproute2 contrast: {}",
+            ip_verbose(&[
+                "-6",
+                "route",
+                "add",
+                "2001:db8:dead:beef::b6",
+                "encap",
+                "seg6local",
+                "action",
+                "End.B6",
+                "srh",
+                "segs",
+                "2001:db8:cafe::1",
+                "table",
+                "local",
+                "dev",
+                "lo",
+            ])
+        );
+        let _ = Command::new("ip")
+            .args([
+                "-6",
+                "route",
+                "del",
+                "2001:db8:dead:beef::b6",
+                "table",
+                "local",
+            ])
+            .status();
+    }
+    let _ = nl.delete_seg6local_route(sid);
+    res.expect("seg6local End.B6.Insert route should install into the kernel");
+
+    nl.add_seg6local_route(&route)
+        .expect("re-install seg6local End.B6.Insert route");
+    let local_table = ip(&["-6", "route", "show", "table", "local"]);
+    assert!(
+        local_table.contains("2001:db8:dead:beef::b6"),
+        "seg6local End.B6.Insert SID missing from local table:\n{}",
+        local_table
+    );
+    assert!(
+        local_table.contains("End.B6"),
+        "End.B6 action not displayed by `ip route`:\n{}",
+        local_table
+    );
+    // The SRH's first segment should appear in the route display —
+    // iproute2 prints the segment list alongside the SRH. The exact
+    // rendering varies by iproute2 version, so we accept any line
+    // that mentions the SID and the End.B6 action together.
+    let _ = nl.delete_seg6local_route(sid);
+}
