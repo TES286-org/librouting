@@ -567,8 +567,43 @@ pub(crate) fn v3_lsa(
 /// `prev_seq` carries the current instance's sequence for
 /// re-origination; the returned LSA is finalized. `None` = sequence
 /// space exhausted (§12.1.2).
+///
+/// For routers with enough adjacencies that the resulting LSA would
+/// exceed the IPv6 MTU, originate additional fragments via
+/// [`originate_v3_router_lsa_fragment`] with monotonically increasing
+/// `ls_id` values (1, 2, …). RFC 5340 §4.4.2 lets a router originate
+/// multiple Router-LSAs per area, disambiguated by the Link State ID;
+/// the receiver merges them into one virtual vertex (see
+/// `V3Topology::from_lsdb`).
 pub fn originate_v3_router_lsa(
     router_id: u32,
+    bits: u8,
+    options: u32,
+    links: &[V3RouterLink],
+    prev_seq: Option<u32>,
+) -> Option<Lsa> {
+    originate_v3_router_lsa_fragment(router_id, 0, bits, options, links, prev_seq)
+}
+
+/// Originate one fragment of the router's own Router-LSA for an area
+/// (RFC 5340 §4.4.2 / §4.4.3.2).
+///
+/// `ls_id` is the fragment number (0 for the first fragment, 1 for the
+/// second, …). A router with fewer than approximately 30 interfaces
+/// originates a single fragment with `ls_id = 0` via
+/// [`originate_v3_router_lsa`]; routers with more adjacencies split the
+/// link list across multiple fragments so each fits inside the IPv6 MTU
+/// (RFC 5340 §A.4.3 — no Router-LSA may exceed the area's MTU; IPv6
+/// forbids fragmentation on the wire, §A.1). The `bits` and `options`
+/// fields MUST be identical across all fragments the router originates
+/// for the same area (RFC 5340 §4.4.2 — a receiver merges the fragments
+/// into one virtual vertex, taking the first fragment's bits/options).
+/// `prev_seq` carries the current instance's sequence for
+/// re-origination; the returned LSA is finalized. `None` = sequence
+/// space exhausted (§12.1.2).
+pub fn originate_v3_router_lsa_fragment(
+    router_id: u32,
+    ls_id: u32,
     bits: u8,
     options: u32,
     links: &[V3RouterLink],
@@ -582,7 +617,7 @@ pub fn originate_v3_router_lsa(
         links: links.to_vec(),
     }
     .encode(&mut body);
-    Some(v3_lsa(LS_TYPE_ROUTER, 0, router_id, seq, body))
+    Some(v3_lsa(LS_TYPE_ROUTER, ls_id, router_id, seq, body))
 }
 
 /// Originate a Network-LSA for a transit segment where this router is

@@ -20,11 +20,12 @@ pub use grace::{
 pub mod v3;
 pub use v3::{
     originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
-    originate_v3_router_lsa, V3IntraAreaPrefixBody, V3LinkLsaBody, V3NetworkLsaBody, V3Prefix,
-    V3RouterLink, V3RouterLsaBody, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL,
-    LS_TYPE_AS_EXTERNAL, LS_TYPE_INTER_PREFIX, LS_TYPE_INTER_ROUTER, LS_TYPE_INTRA_PREFIX,
-    LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER, PREFIX_OPT_LA, PREFIX_OPT_MC, PREFIX_OPT_NU,
-    PREFIX_OPT_P, ROUTER_BIT_B, ROUTER_BIT_E, ROUTER_BIT_V6,
+    originate_v3_router_lsa, originate_v3_router_lsa_fragment, V3IntraAreaPrefixBody,
+    V3LinkLsaBody, V3NetworkLsaBody, V3Prefix, V3RouterLink, V3RouterLsaBody,
+    LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL, LS_TYPE_AS_EXTERNAL,
+    LS_TYPE_INTER_PREFIX, LS_TYPE_INTER_ROUTER, LS_TYPE_INTRA_PREFIX, LS_TYPE_LINK,
+    LS_TYPE_NETWORK, LS_TYPE_ROUTER, PREFIX_OPT_LA, PREFIX_OPT_MC, PREFIX_OPT_NU, PREFIX_OPT_P,
+    ROUTER_BIT_B, ROUTER_BIT_E, ROUTER_BIT_V6,
 };
 
 /// Segment Routing extensions (RFC 8665): the RFC 7684 Extended Prefix
@@ -73,14 +74,15 @@ pub use e_v3::{
     is_e_lsa_type, originate_v3_e_as_external_lsa, originate_v3_e_inter_area_prefix_lsa,
     originate_v3_e_inter_area_router_lsa, originate_v3_e_intra_area_prefix_lsa,
     originate_v3_e_link_lsa, originate_v3_e_network_lsa, originate_v3_e_router_lsa,
-    EAsExternalLsaBody, EExternalPrefixTlv, EInterAreaPrefixLsaBody, EInterAreaRouterLsaBody,
-    EInterAreaRouterTlv, EIntraAreaPrefixLsaBody, ELinkLsaBody, ENetworkLsaBody, EPrefixTlv,
-    ERouterLinkTlv, ERouterLsaBody, RawTlv, EXT_PREFIX_BIT_E, EXT_PREFIX_METRIC_MASK,
-    LS_TYPE_E_AS_EXTERNAL, LS_TYPE_E_INTER_PREFIX, LS_TYPE_E_INTER_ROUTER, LS_TYPE_E_INTRA_PREFIX,
-    LS_TYPE_E_LINK, LS_TYPE_E_NETWORK, LS_TYPE_E_ROUTER, LS_TYPE_E_TYPE_7, SUBTLV_IPV4_FWD_ADDR,
-    SUBTLV_IPV6_FWD_ADDR, SUBTLV_ROUTE_TAG, TLV_ATTACHED_ROUTERS, TLV_EXTERNAL_PREFIX,
-    TLV_INTER_AREA_PREFIX, TLV_INTER_AREA_ROUTER, TLV_INTRA_AREA_PREFIX, TLV_IPV4_LINK_LOCAL,
-    TLV_IPV6_LINK_LOCAL, TLV_ROUTER_LINK,
+    originate_v3_e_router_lsa_fragment, EAsExternalLsaBody, EExternalPrefixTlv,
+    EInterAreaPrefixLsaBody, EInterAreaRouterLsaBody, EInterAreaRouterTlv, EIntraAreaPrefixLsaBody,
+    ELinkLsaBody, ENetworkLsaBody, EPrefixTlv, ERouterLinkTlv, ERouterLsaBody, RawTlv,
+    EXT_PREFIX_BIT_E, EXT_PREFIX_METRIC_MASK, LS_TYPE_E_AS_EXTERNAL, LS_TYPE_E_INTER_PREFIX,
+    LS_TYPE_E_INTER_ROUTER, LS_TYPE_E_INTRA_PREFIX, LS_TYPE_E_LINK, LS_TYPE_E_NETWORK,
+    LS_TYPE_E_ROUTER, LS_TYPE_E_TYPE_7, SUBTLV_IPV4_FWD_ADDR, SUBTLV_IPV6_FWD_ADDR,
+    SUBTLV_ROUTE_TAG, TLV_ATTACHED_ROUTERS, TLV_EXTERNAL_PREFIX, TLV_INTER_AREA_PREFIX,
+    TLV_INTER_AREA_ROUTER, TLV_INTRA_AREA_PREFIX, TLV_IPV4_LINK_LOCAL, TLV_IPV6_LINK_LOCAL,
+    TLV_ROUTER_LINK,
 };
 
 /// RFC 2328 §14: LSAs aged to MaxAge are flushed from the database.

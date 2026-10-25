@@ -761,8 +761,38 @@ impl EIntraAreaPrefixLsaBody {
 /// [`crate::lsa::v3::originate_v3_router_lsa`]; the Link State ID is 0
 /// and `links` carry the Router-Link TLVs (sub-TLV region included, so
 /// SRv6 End.X SIDs ride along). `None` = sequence space exhausted.
+///
+/// For routers that need to fragment their E-Router-LSA across multiple
+/// instances, see [`originate_v3_e_router_lsa_fragment`] (RFC 5340
+/// §4.4.2 / RFC 8362 §4.1 — the same Link State ID fragmentation rule
+/// legacy Router-LSAs use).
 pub fn originate_v3_e_router_lsa(
     router_id: u32,
+    bits: u8,
+    options: u32,
+    links: Vec<ERouterLinkTlv>,
+    prev_seq: Option<u32>,
+) -> Option<Lsa> {
+    originate_v3_e_router_lsa_fragment(router_id, 0, bits, options, links, prev_seq)
+}
+
+/// Originate one fragment of the router's own E-Router-LSA for an area
+/// (RFC 5340 §4.4.2 carried over by RFC 8362 §4.1 — Extended LSAs
+/// follow the same Link State ID fragmentation rule legacy LSAs use).
+///
+/// `ls_id` is the fragment number (0 for the first fragment, 1 for the
+/// second, …). A router with fewer than approximately 30 interfaces
+/// originates a single fragment with `ls_id = 0` via
+/// [`originate_v3_e_router_lsa`]; routers with more adjacencies split
+/// the Router-Link TLV list across multiple fragments so each fits
+/// inside the IPv6 MTU. The `bits` and `options` fields MUST be
+/// identical across all fragments the router originates for the same
+/// area (RFC 5340 §4.4.2 — a receiver merges the fragments into one
+/// virtual vertex, taking the first fragment's bits/options). `None` =
+/// sequence space exhausted.
+pub fn originate_v3_e_router_lsa_fragment(
+    router_id: u32,
+    ls_id: u32,
     bits: u8,
     options: u32,
     links: Vec<ERouterLinkTlv>,
@@ -776,7 +806,7 @@ pub fn originate_v3_e_router_lsa(
         links,
     }
     .encode(&mut body);
-    Some(v3_lsa(LS_TYPE_E_ROUTER, 0, router_id, seq, body))
+    Some(v3_lsa(LS_TYPE_E_ROUTER, ls_id, router_id, seq, body))
 }
 
 /// Originate an E-Network-LSA for a transit segment where this router
