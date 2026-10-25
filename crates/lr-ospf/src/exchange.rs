@@ -134,6 +134,13 @@ pub struct DbExchange {
     version: OspfVersion,
     /// The Options word DD packets advertise (v2: E|O; v3: V6|R|E).
     options: u32,
+    /// Per-neighbor retransmit interval (RFC 2328 Appendix B
+    /// `RxmtInterval`; BIRD `rxmtint` / FRR `retransmit-interval`).
+    /// Defaults to [`RXMT_INTERVAL_MS`] (5 s, matching BIRD/FRR).
+    /// The poll loop uses this field rather than the constant so a
+    /// daemon that exposes a per-interface `rxmt_interval` knob can
+    /// drive the wait without touching the codec.
+    rxmt_interval_ms: u64,
 }
 
 impl DbExchange {
@@ -179,7 +186,25 @@ impl DbExchange {
             } else {
                 0x02 | u32::from(crate::lsa::grace::OPTIONS_O_BIT)
             },
+            rxmt_interval_ms: RXMT_INTERVAL_MS,
         }
+    }
+
+    /// Override the per-neighbor retransmit interval (RFC 2328 Appendix
+    /// B `RxmtInterval`). The default is [`RXMT_INTERVAL_MS`] (5 s);
+    /// a daemon that exposes a per-interface `rxmt_interval` knob
+    /// (BIRD `rxmtint`, FRR `retransmit-interval`) should call this
+    /// after construction so the poll loop's wait uses the operator
+    /// value. Values of 0 are clamped to 1 ms so the poll loop never
+    /// busy-spins on a 0 ms `saturating_sub` floor.
+    pub fn with_rxmt_interval(mut self, ms: u64) -> Self {
+        self.rxmt_interval_ms = ms.max(1);
+        self
+    }
+
+    /// Current retransmit interval in milliseconds.
+    pub fn rxmt_interval_ms(&self) -> u64 {
+        self.rxmt_interval_ms
     }
 
     /// Current phase.
@@ -437,10 +462,13 @@ impl DbExchange {
 
     /// Periodic retransmission (RxmtInterval): the master repeats its
     /// pending DBD, both sides repeat a pending LS-Request until the
-    /// answer arrives.
+    /// answer arrives. The wait uses [`self.rxmt_interval_ms`] so a
+    /// per-neighbor override (BIRD `rxmtint` / FRR
+    /// `retransmit-interval`) takes effect without touching the
+    /// codec; the default is [`RXMT_INTERVAL_MS`] (5 s).
     pub fn poll(&mut self, now_ms: u64) -> Vec<OspfPacket> {
         let mut out = Vec::new();
-        if now_ms.saturating_sub(self.last_dd_sent_ms) >= RXMT_INTERVAL_MS {
+        if now_ms.saturating_sub(self.last_dd_sent_ms) >= self.rxmt_interval_ms {
             if let Some((flags, seq, headers)) = &self.last_dd {
                 // Master DBDs repeat until the slave echoes the
                 // sequence; slave DBDs repeat on duplicate master
@@ -468,7 +496,7 @@ impl DbExchange {
         }
         if self.phase == Phase::Loading
             && !self.lsr_queue.is_empty()
-            && now_ms.saturating_sub(self.last_lsr_sent_ms) >= RXMT_INTERVAL_MS
+            && now_ms.saturating_sub(self.last_lsr_sent_ms) >= self.rxmt_interval_ms
         {
             let body = self
                 .last_lsr

@@ -365,6 +365,54 @@ fn poll_retransmits_pending_master_db_desc() {
 }
 
 #[test]
+fn with_rxmt_interval_overrides_poll_wait() {
+    // RFC 2328 Appendix B `RxmtInterval` is per-neighbor: BIRD exposes
+    // it as `rxmtint`, FRR as `retransmit-interval`. The constant
+    // `RXMT_INTERVAL_MS` (5 s) is the BIRD/FRR default; a daemon that
+    // surfaces a per-interface knob must be able to drive the wait
+    // below the default without touching the codec.
+    let our_lsdb = lsdb_with(THEM, &[]);
+    let their_lsdb = lsdb_with(US, &[]);
+    let mut us = DbExchange::with_version(THEM, AREA, MTU, OspfVersion::V2).with_rxmt_interval(500);
+    let mut us_nbr = neighbor(THEM);
+    let mut them = exchange(US, &their_lsdb);
+    let mut them_nbr = neighbor(US);
+
+    assert_eq!(us.rxmt_interval_ms(), 500);
+
+    let us_init = us.initial_db_desc(7, NOW);
+    let step = them.on_db_desc(
+        body_db_desc(&us_init),
+        THEM,
+        &their_lsdb,
+        &mut them_nbr,
+        NOW,
+    );
+    let answer = body_db_desc(&step.outbound[0]);
+    let step = us.on_db_desc(answer, US, &our_lsdb, &mut us_nbr, NOW);
+    let master_dd = body_db_desc(&step.outbound[0]);
+
+    // Below the 500 ms override: nothing.
+    assert!(us.poll(NOW + 499).is_empty());
+    // At 500 ms + 1: the master repeats its pending DBD. (With the
+    // default 5 s `RXMT_INTERVAL_MS` this `NOW + 501` would be far
+    // below the wait and the poll would return nothing — pinning the
+    // override is what makes the test meaningful.)
+    let retrans = us.poll(NOW + 501);
+    assert_eq!(retrans.len(), 1);
+    assert_eq!(body_db_desc(&retrans[0]), master_dd);
+}
+
+#[test]
+fn with_rxmt_interval_clamps_zero_to_one_ms() {
+    // A 0 ms override would otherwise let `saturating_sub(last, now)`
+    // be 0 every tick, busy-spinning the poll loop on every pump.
+    // The builder clamps to 1 ms so the wait is at least one tick.
+    let ex = DbExchange::with_version(US, AREA, MTU, OspfVersion::V2).with_rxmt_interval(0);
+    assert_eq!(ex.rxmt_interval_ms(), 1);
+}
+
+#[test]
 fn poll_retransmits_initial_db_desc_in_exstart() {
     // The broadcast-segment deadlock (interop `ospf_broadcast.sh`
     // hangs): the master's initial DBD is lost — or dropped by a peer
