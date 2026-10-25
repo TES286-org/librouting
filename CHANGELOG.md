@@ -393,6 +393,50 @@ upstream follow-up lands; they will then exercise the fail-closed
 verdict and catch any regression that re-introduces the permissive
 permit-all stub.
 
+**`lr-ospf` SPF walk now merges fragmented Router-LSAs per RFC 5340
+§4.4.2** (`ospf`, issue #92). The OSPFv3 LSDB pre-scan in
+`V3Topology::from_lsdb` previously kept only the first Router-LSA
+instance per advertising router (legacy `0x2001` and Extended
+`0xA021` paths both used a `BTreeSet::insert` sentinel / `.or_insert`
+shape that silently dropped every fragment after the first). RFC 5340
+§4.4.2 lets a router originate multiple Router-LSAs per area,
+disambiguated by the Link State ID (the fragment number 0, 1, 2, …),
+and a conformant receiver MUST merge all fragments into one virtual
+vertex: the bits/options come from the lowest-LS-ID fragment, and the
+links lists concatenate. Without the merge, a router with more than
+approximately 30 interfaces — the threshold at which the link list
+no longer fits inside the IPv6 MTU and the LSA has to be split —
+silently lost every adjacency described by fragment 1 and beyond,
+and the SPF tree lost every reachable destination beyond the first
+fragment's links. The fix lifts both the legacy and the
+Extended-LSA reception paths: `V3RouterLsaBody::links` is extended
+across fragments via `.entry().and_modify(|merged|
+merged.links.extend(body.links.clone())).or_insert(body)`, and the
+E-Router-LSA pre-pass appends subsequent fragments' decoded
+Router-Link TLVs to the merged body. Two new public self-origination
+helpers mirror the new surface for emitters: `originate_v3_router_lsa_fragment`
+(in `crates/lr-ospf/src/lsa/v3.rs`) and
+`originate_v3_e_router_lsa_fragment` (in `crates/lr-ospf/src/lsa/e_v3.rs`)
+take an explicit `ls_id` so a router that needs to split its
+Router-LSA can originate fragments 0, 1, … as the spec requires; the
+existing `originate_v3_router_lsa` and `originate_v3_e_router_lsa`
+delegate to them with `ls_id = 0` (no behaviour change for callers
+that originate a single fragment). Four regression tests in
+`crates/lr-ospf/src/spf_v3_tests.rs` pin the merge:
+`v3_fragmented_router_lsa_merges_links_across_fragments` (r2 splits
+its link list across two fragments so r3 is reachable only through
+the merge),
+`v3_fragmented_router_lsa_first_fragment_seen_supplies_bits_and_options`
+(a single fragment with a non-zero Link State ID still produces a
+valid vertex),
+`v3_fragmented_router_lsa_merge_is_lsdb_order_stable` (the
+bits/options come from the lowest-LS-ID fragment regardless of
+install order — the LSDB's `BTreeMap` iteration is ascending by
+`LsaKey`), and `v3_extended_fragmented_e_router_lsa_merges_links_across_fragments`
+(the Extended-LSA reception path merges E-Router-LSA fragments too).
+No public Rust API surface move beyond the two additive origination
+helpers; no C ABI change (`include/lr_ffi.h` byte-identical).
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
