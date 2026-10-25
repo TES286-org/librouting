@@ -389,3 +389,105 @@ fn summary_ls_infinity_and_garbage_ignored() {
     db.install(bad, 0);
     assert!(summary_routes(&db, &spf).is_empty());
 }
+
+// Regression for the TOS-metric-skip bug in `decode_router_links`
+// (defects.txt spf.rs L501-L503). Before the fix, the parser advanced
+// `i += 12` per link unconditionally, ignoring the `# TOS` byte; a
+// router-LSA whose link declared `# TOS > 0` would have its trailing
+// TOS-specific metric entries misread as the next link's (Link ID,
+// Link Data, Type, # TOS) header, silently corrupting the rest of
+// the list. RFC 2328 §A.4.2 sizes each additional TOS entry at 4
+// octets: `TOS:1 | 0:1 | TOS metric:2`.
+//
+// Pushes one router-LSA link entry to `body` — the 12-byte base
+// (link_id, link_data, type, #tos, tos0_metric) followed by `tos_metrics`
+// additional 4-octet TOS-specific metric entries.
+fn push_router_link(
+    body: &mut Vec<u8>,
+    link_id: u32,
+    link_data: u32,
+    link_type: u8,
+    tos0_metric: u16,
+    tos_metrics: &[(u8, u16)],
+) {
+    body.extend_from_slice(&link_id.to_be_bytes());
+    body.extend_from_slice(&link_data.to_be_bytes());
+    body.push(link_type);
+    body.push(tos_metrics.len() as u8);
+    body.extend_from_slice(&tos0_metric.to_be_bytes());
+    for (tos, metric) in tos_metrics {
+        body.push(*tos);
+        body.push(0); // reserved
+        body.extend_from_slice(&metric.to_be_bytes());
+    }
+}
+
+#[test]
+fn decode_router_links_skips_tos_metric_entries() {
+    // Two links. The first carries 2 TOS-specific metric entries
+    // (8 extra octets); the second is a vanilla stub link. Before the
+    // fix the parser would step 12 octets after link 1 and treat the
+    // first TOS entry's bytes as link 2's (Link ID, Link Data) —
+    // making `links.len()` collapse to 1 with bogus fields, and
+    // usually emitting a fake second link out of trailing bytes.
+    let mut body = Vec::new();
+    body.extend_from_slice(&0u16.to_be_bytes()); // flags
+    body.extend_from_slice(&2u16.to_be_bytes()); // # links = 2
+    push_router_link(
+        &mut body,
+        0x0a000001,
+        0xff000000,
+        RouterLinkType::StubNetwork as u8,
+        10,
+        &[(0x04, 20), (0x08, 30)],
+    );
+    push_router_link(
+        &mut body,
+        0x0a000002,
+        0xff000000,
+        RouterLinkType::StubNetwork as u8,
+        5,
+        &[],
+    );
+    let links = decode_router_links(&body);
+    assert_eq!(links.len(), 2, "both links survive the TOS-skip");
+    assert_eq!(links[0].link_id, 0x0a000001);
+    assert_eq!(links[0].tos, 2, "# TOS byte preserved on the first link");
+    assert_eq!(links[0].metric, 10, "TOS 0 metric preserved");
+    assert_eq!(
+        links[1].link_id, 0x0a000002,
+        "second link's header is read past the first link's TOS entries"
+    );
+    assert_eq!(links[1].tos, 0);
+    assert_eq!(links[1].metric, 5);
+}
+
+#[test]
+fn decode_router_links_stops_on_truncated_tos_section() {
+    // Advertises `# TOS = 3` (12 octets of TOS entries) but only
+    // supplies 4 octets of them — the parser must not overrun the
+    // buffer trying to honour the link count, and the truncated
+    // link is the last one emitted.
+    let mut body = Vec::new();
+    body.extend_from_slice(&0u16.to_be_bytes()); // flags
+    body.extend_from_slice(&1u16.to_be_bytes()); // # links = 1
+    push_router_link(
+        &mut body,
+        0x0a000003,
+        0xff000000,
+        RouterLinkType::StubNetwork as u8,
+        10,
+        // Only one TOS entry appended, but `# TOS` says 3 (set inside
+        // `push_router_link` from `tos_metrics.len()` = 1).
+        &[(0x04, 20)],
+    );
+    // Manually patch the # TOS byte to claim 3 (without growing the
+    // trailing TOS bytes) — emulates a malformed LSA from the wire.
+    body[4 + 4 + 4 + 1] = 3; // header(4) + link_id(4) + link_data(4) + type(1)
+    let links = decode_router_links(&body);
+    assert_eq!(links.len(), 1, "truncated link is still emitted");
+    assert_eq!(links[0].tos, 3, "# TOS byte preserved");
+    assert_eq!(links[0].metric, 10);
+    // No second link, even though `# links` says 1 — the truncation
+    // breaks the advertised count and the loop bails out cleanly.
+}

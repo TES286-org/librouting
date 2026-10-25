@@ -478,7 +478,8 @@ pub fn decode_router_links(body: &[u8]) -> Vec<RouterLink> {
         return out;
     }
     // Skip 2-byte flags + 2-byte # of links (v2).
-    // Body layout: flags:2, #links:2, then 12-byte links.
+    // Body layout: flags:2, #links:2, then per-link entries whose
+    // size depends on the # TOS byte (RFC 2328 §A.4.2).
     let n = u16::from_be_bytes([body[2], body[3]]) as usize;
     let mut i = 4;
     for _ in 0..n {
@@ -488,18 +489,37 @@ pub fn decode_router_links(body: &[u8]) -> Vec<RouterLink> {
         let link_id = u32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
         let link_data = u32::from_be_bytes([body[i + 4], body[i + 5], body[i + 6], body[i + 7]]);
         let link_type = body[i + 8];
-        let tos = body[i + 9];
+        // RFC 2328 §A.4.2: byte 9 is "# TOS" — the count of *additional*
+        // TOS-specific metric entries that follow the 12-byte base
+        // entry (the base metric itself is the "TOS 0 metric" and is
+        // not counted). Each additional entry is 4 octets:
+        // `TOS:1 | 0:1 | TOS metric:2` (RFC 2328 §A.4.2).
+        let num_tos = body[i + 9];
         let metric = u16::from_be_bytes([body[i + 10], body[i + 11]]);
         out.push(RouterLink {
             link_id,
             link_data,
             link_type,
-            tos,
+            tos: num_tos,
             metric,
         });
+        // Advance past the 12-byte base entry plus `num_tos * 4` octets
+        // of TOS-specific metric entries. Without the second term the
+        // parser would step into the TOS entries and misread them as the
+        // next link's (Link ID, Link Data, Type, # TOS) header — the
+        // first malformed link would silently corrupt the rest of the
+        // list. Stop early on a truncated TOS section so a malformed
+        // (or short) body does not overrun the buffer.
         i += 12;
-        // Skip any TOS entries (12 bytes per TOS).
-        // (Simplified — assumes no TOS.)
+        let tos_bytes = (num_tos as usize)
+            .saturating_mul(4)
+            .min(body.len().saturating_sub(i));
+        i += tos_bytes;
+        if tos_bytes < (num_tos as usize) * 4 {
+            // The body was truncated inside the TOS section; the
+            // advertised link count cannot be honoured.
+            break;
+        }
     }
     out
 }
@@ -526,6 +546,18 @@ fn decode_network_attached_routers(body: &[u8]) -> Vec<u32> {
 /// Encode a router-LSA body (RFC 2328 §A.4.2): 2-byte link flags, 2-byte
 /// link count, then one 12-byte block per link. Used by tests and by
 /// embedders originating router-LSAs.
+///
+/// **Asymmetry with [`decode_router_links`]:** the encoder writes only
+/// the 12-byte base entry per link. RFC 2328 §A.4.2 permits each link
+/// to carry `# TOS` *additional* 4-octet TOS-specific metric entries
+/// after the base; the decoder honours and skips them, but this
+/// encoder does not emit them. Callers passing `RouterLink { tos: N, .. }`
+/// with `N > 0` would write a `# TOS = N` byte that promises `N * 4`
+/// follow-on octets that the encoder never writes — i.e. malformed
+/// wire. TOS-based routing is deprecated in practice (BIRD and FRR
+/// both originate router-LSAs with `# TOS = 0`), so the encoder
+/// intentionally does not grow a TOS-metric surface here; callers that
+/// need to originate TOS metrics must assemble the bytes themselves.
 pub fn encode_router_lsa_body(flags: u16, links: Vec<RouterLink>) -> Vec<u8> {
     let mut v = Vec::with_capacity(4 + 12 * links.len());
     v.extend_from_slice(&flags.to_be_bytes());

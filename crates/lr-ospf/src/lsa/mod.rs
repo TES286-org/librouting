@@ -593,11 +593,30 @@ impl RouterLinkType {
 }
 
 /// One router-LSA link description (RFC 2328 §A.4.2): 12 bytes.
+///
+/// The base entry is `Link ID(4) | Link Data(4) | Type(1) | # TOS(1) |
+/// TOS 0 metric(2)`. The `tos` field below stores the **# TOS** byte
+/// — the count of *additional* TOS-specific metric entries that follow
+/// the 12-byte base on the wire (each one is 4 octets: `TOS:1 | 0:1 |
+/// TOS metric:2`, per RFC 2328 §A.4.2). The base metric (always
+/// present) is the "TOS 0 metric" and is *not* included in the count.
+///
+/// The decoder honours `tos > 0` (it skips the trailing TOS entries);
+/// the encoder [`crate::spf::encode_router_lsa_body`] does not — it
+/// emits the 12-byte base only. Callers that construct a `RouterLink`
+/// for encoding must keep `tos == 0`; the field is exposed verbatim so
+/// the decoder can round-trip a # TOS-bearing LSA back into the
+/// struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterLink {
     pub link_id: u32,
     pub link_data: u32,
     pub link_type: u8,
+    /// Wire byte 9 of the link entry — the count of TOS-specific
+    /// metric entries that follow the 12-byte base. Despite the
+    /// field name, this is a *count*, not a TOS value (RFC 2328
+    /// §A.4.2 "the number of different TOS metrics given for this
+    /// link, not counting the required link metric").
     pub tos: u8,
     pub metric: u16,
 }
