@@ -2046,6 +2046,17 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
             );
         }
     }
+    // RFC 4271 §9.1.2.2 step (h): the peer's transport source address
+    // feeds the best-path comparator's step 8 (prefer paths whose
+    // NEXT_HOP equals the peer source). `expected_peer_ip` already
+    // resolves the configured `address`, else the host part of the
+    // configured `remote` — both are the address the peer's BGP
+    // transport originates from. The router instance stamps the value
+    // on every route the session learns under the private
+    // `LrPeerSourceAddress` attribute tag at InstallRoute time.
+    if let Some(peer_ip) = expected_peer_ip(p) {
+        sc = sc.with_peer_address(peer_ip);
+    }
     sc
 }
 

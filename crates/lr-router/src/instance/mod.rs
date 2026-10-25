@@ -331,6 +331,16 @@ enum SessionState {
         /// the FSM, so the router can update them at the dispatch
         /// sites that already detect transitions and errors.
         stats: SessionStats,
+        /// RFC 4271 §9.1.2.2 step (h): the peer's transport source
+        /// address. The router instance attaches this to every BGP
+        /// route learned from the session under the private
+        /// `LrPeerSourceAddress` attribute tag at InstallRoute time;
+        /// the best-path comparator's step 8 then compares the route's
+        /// `next_hop` to the peer source. `None` when the embedder
+        /// has not configured a peer transport address — the
+        /// comparator's step 8 ties through to the remaining
+        /// tiebreakers in that case.
+        peer_address: Option<lr_core::addr::IpAddr>,
     },
     Ospf {
         runtime: OspfRuntime,
@@ -3024,7 +3034,29 @@ impl DefaultRouter {
                 BgpAction::CancelTimer(id) => {
                     self.timers.cancel(encode_timer(session, id));
                 }
-                BgpAction::InstallRoute(r) => self.import_route(r),
+                BgpAction::InstallRoute(mut r) => {
+                    // RFC 4271 §9.1.2.2 step (h): stamp the route with
+                    // the session's peer transport source address under
+                    // the private `LrPeerSourceAddress` attribute tag.
+                    // The best-path comparator's step 8 then compares
+                    // the route's `next_hop` to the peer source — a
+                    // route whose NEXT_HOP matches its peer source is
+                    // the route the peer originated (IGP cost zero by
+                    // construction), winning over one the peer
+                    // re-advertises. Skipped when the session has no
+                    // configured peer address (the comparator's step 8
+                    // then ties through to the remaining tiebreakers).
+                    if let Some(SessionState::Bgp {
+                        peer_address: Some(addr),
+                        ..
+                    }) = self.sessions.get(&r.origin.peer)
+                    {
+                        let mut attrs: lr_bgp::path::PathAttributes = r.attributes.clone().into();
+                        attrs.set_peer_source_address(*addr);
+                        r.attributes = attrs.into();
+                    }
+                    self.import_route(r);
+                }
                 BgpAction::WithdrawRoute { key, path_id } => {
                     // Withdrawals carry the origin implicitly: the session
                     // that reports them is the origin.
@@ -3792,6 +3824,7 @@ impl RouterInstance for DefaultRouter {
                         established: false,
                         was_established: false,
                         stats: SessionStats::default(),
+                        peer_address: cfg.peer_address,
                     },
                 );
                 self.mrai.insert(

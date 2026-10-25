@@ -271,6 +271,23 @@ pub struct SessionConfig {
     /// setting `enabled = true` activates the per-speaker reflection
     /// posture used together with [`Self::route_reflector_client`].
     pub route_reflector: lr_bgp::role::RouteReflectorConfig,
+    /// The configured peer transport source IP address (RFC 4271
+    /// §9.1.2.2 step (h): "prefer the route learned from the BGP
+    /// speaker with the lowest IP address as the BGP NEXT_HOP of
+    /// the route"). The router instance attaches this address to
+    /// every BGP route learned from the session under the private
+    /// [`lr_bgp::path::AttrType::LrPeerSourceAddress`] tag at
+    /// InstallRoute time; the best-path comparator's step 8 then
+    /// compares the route's `next_hop` to the peer source — a
+    /// route whose NEXT_HOP matches its peer source is the route
+    /// the peer originated, winning over one the peer re-advertises.
+    ///
+    /// `None` (the default) when the embedder has not configured a
+    /// peer transport address — FFI sessions, test scaffolds, or
+    /// redistributed BGP routes whose transport origin is not
+    /// known. The comparator's step 8 ties through to the remaining
+    /// tiebreakers in that case.
+    pub peer_address: Option<lr_core::addr::IpAddr>,
 }
 
 impl SessionConfig {
@@ -322,6 +339,7 @@ impl SessionConfig {
             locally_initiated: false,
             route_reflector_client: false,
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
+            peer_address: None,
         }
     }
 
@@ -397,6 +415,19 @@ impl SessionConfig {
     /// Set the local interface address (next-hop-self / protocol identity).
     pub fn with_local_address(mut self, addr: lr_core::addr::IpAddr) -> Self {
         self.local_address = Some(addr);
+        self
+    }
+
+    /// Set the peer's transport source address (RFC 4271 §9.1.2.2 step
+    /// (h)): the router instance attaches this address to every BGP
+    /// route learned from the session under the private
+    /// `LrPeerSourceAddress` attribute tag; the best-path comparator's
+    /// step 8 then compares the route's `next_hop` to the peer source
+    /// — a route whose NEXT_HOP matches its peer source is the route
+    /// the peer originated (IGP cost zero by construction), winning
+    /// over one the peer re-advertises.
+    pub fn with_peer_address(mut self, addr: lr_core::addr::IpAddr) -> Self {
+        self.peer_address = Some(addr);
         self
     }
 
@@ -542,6 +573,7 @@ impl SessionConfig {
             locally_initiated: false,
             route_reflector_client: false,
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
+            peer_address: None,
         }
     }
 
@@ -595,6 +627,7 @@ impl SessionConfig {
             locally_initiated: false,
             route_reflector_client: false,
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
+            peer_address: None,
         }
     }
 }

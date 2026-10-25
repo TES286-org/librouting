@@ -461,3 +461,129 @@ fn hold_timer_expiry_resets_session() {
     });
     assert!(went_idle, "session must transition to Idle");
 }
+
+// ===========================================================================
+// RFC 4271 §9.1.2.2 step (h) — best-path step 8 daemon wiring
+// ===========================================================================
+
+/// `SessionConfig::with_peer_address` propagates the peer transport
+/// source to `SessionState::Bgp`; the router instance stamps the
+/// address onto every route learned from the session under the private
+/// `LrPeerSourceAddress` attribute tag at `BgpAction::InstallRoute`
+/// time. The best-path comparator's step 8 then compares the route's
+/// `next_hop` to the peer source — a route whose NEXT_HOP matches its
+/// peer source is the route the peer originated (IGP cost zero by
+/// construction).
+///
+/// This test wires an eBGP pair with `with_peer_address` populated on
+/// both sides; B learns a route from A whose NEXT_HOP is A's transport
+/// address (192.0.2.1, the next-hop-self value A stamps on eBGP
+/// egress). B's snapshot route then carries the `LrPeerSourceAddress`
+/// attribute matching its `next_hop`, so `attrs.peer_source_address()`
+/// returns the same address.
+#[test]
+fn learned_route_carries_peer_source_address_matching_next_hop() {
+    let mut a = DefaultRouter::new();
+    let mut b = DefaultRouter::new();
+    let ha = a
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_local_address(IpAddr::V4([192, 0, 2, 1]))
+                .with_peer_address(IpAddr::V4([192, 0, 2, 1])),
+        )
+        .unwrap();
+    let hb = b
+        .add_session(
+            SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                .with_local_address(IpAddr::V4([192, 0, 2, 2]))
+                .with_peer_address(IpAddr::V4([192, 0, 2, 1])),
+        )
+        .unwrap();
+    a.start_session(ha).unwrap();
+    b.start_session(hb).unwrap();
+    pump(&mut a, ha, &mut b, hb);
+    let _ = a.poll_events();
+    let _ = b.poll_events();
+
+    // A originates a route with NEXT_HOP = 192.0.2.1 — its own
+    // transport source — so the route is "originated by A". A's
+    // egress rewrites the next-hop to its local_address per
+    // next-hop-self, so B sees NEXT_HOP = 192.0.2.1.
+    a.originate(
+        Prefix::new_v4([203, 0, 113, 0], 24),
+        Some(IpAddr::V4([192, 0, 2, 1])),
+    );
+    pump(&mut a, ha, &mut b, hb);
+
+    let snapshot = b.rib_snapshot();
+    assert_eq!(snapshot.len(), 1, "B must have the route");
+    let r = snapshot[0];
+    assert_eq!(
+        r.next_hop,
+        Some(IpAddr::V4([192, 0, 2, 1])),
+        "next-hop-self rewrite lands the peer's transport source as NEXT_HOP"
+    );
+    let attrs: lr_bgp::path::PathAttributes = r.attributes.clone().into();
+    assert_eq!(
+        attrs.peer_source_address(),
+        Some(IpAddr::V4([192, 0, 2, 1])),
+        "router stamps the session's peer_address under LrPeerSourceAddress"
+    );
+    assert!(
+        attrs.has_peer_source_address(),
+        "LrPeerSourceAddress tag is physically present"
+    );
+    // Step 8 fires for the matched path: the comparator's step 8 sees
+    // `next_hop == peer_source_address` — the route's matched-flag is
+    // true, so it wins over a hypothetical unmatched competitor. The
+    // test pins that the daemon's wiring stamps the attribute; the
+    // comparator-level behavior is pinned separately in
+    // `crates/lr-bgp/src/best_path/mod.rs` tests.
+}
+
+/// Without `with_peer_address`, the router instance does not stamp the
+/// `LrPeerSourceAddress` tag — the comparator's step 8 then ties
+/// through to the remaining tiebreakers (no route has a match). This
+/// pins the wire shape: the tag is opt-in via `SessionConfig`.
+#[test]
+fn learned_route_without_peer_address_carries_no_tag() {
+    let mut a = DefaultRouter::new();
+    let mut b = DefaultRouter::new();
+    let ha = a
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_local_address(IpAddr::V4([192, 0, 2, 1])),
+        )
+        .unwrap();
+    let hb = b
+        .add_session(
+            SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                .with_local_address(IpAddr::V4([192, 0, 2, 2])),
+        )
+        .unwrap();
+    a.start_session(ha).unwrap();
+    b.start_session(hb).unwrap();
+    pump(&mut a, ha, &mut b, hb);
+    let _ = a.poll_events();
+    let _ = b.poll_events();
+
+    a.originate(
+        Prefix::new_v4([203, 0, 113, 0], 24),
+        Some(IpAddr::V4([192, 0, 2, 1])),
+    );
+    pump(&mut a, ha, &mut b, hb);
+
+    let snapshot = b.rib_snapshot();
+    assert_eq!(snapshot.len(), 1);
+    let r = snapshot[0];
+    let attrs: lr_bgp::path::PathAttributes = r.attributes.clone().into();
+    assert_eq!(
+        attrs.peer_source_address(),
+        None,
+        "no with_peer_address call → no LrPeerSourceAddress tag"
+    );
+    assert!(
+        !attrs.has_peer_source_address(),
+        "the tag is not physically present"
+    );
+}

@@ -185,6 +185,13 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
                 // part of the defects.txt follow-up for the RR API.
                 route_reflector_client: false,
                 route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
+                // RFC 4271 §9.1.2.2 step (h): the FFI surface does not
+                // (yet) accept a peer transport source address; the
+                // comparator's step 8 ties through to the remaining
+                // tiebreakers when this is `None`. Embedders using the
+                // programmatic API call `SessionConfig::with_peer_address`
+                // before `add_session` instead.
+                peer_address: None,
             };
             match router.add_session(cfg) {
                 Ok(h) => {
