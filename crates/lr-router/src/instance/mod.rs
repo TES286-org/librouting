@@ -4874,18 +4874,29 @@ impl DefaultRouter {
                         attributes: attrs.into(),
                         age_ms: self.now_ms,
                         path_id: 0,
-                        tag: None,
+                        // The pipe's tag is applied to the route's tag
+                        // slot — zero collapses to `None` so the
+                        // absence-of-tag and tag-zero cases stay
+                        // distinct, matching how the OSPF type-5 / v3
+                        // type-7 paths feed `pipe.tag` into the LSA's
+                        // `external_route_tag` field (RFC 2328 §A.4.5).
+                        tag: (pipe.tag != 0).then_some(pipe.tag),
                     };
                     let key = route.key.clone();
                     // No-op when the copy is unchanged (age aside). This
                     // also terminates the apply_selection →
                     // redistribute_route cycle when the copy itself is
-                    // the Loc-RIB best and re-matches its own pipe.
+                    // the Loc-RIB best and re-matches its own pipe. The
+                    // `tag` field is part of the comparison so a pipe
+                    // whose `tag` was edited (or whose tag-zero ↔
+                    // tag-non-zero boundary was crossed) re-installs the
+                    // redistributed copy with the new tag.
                     let unchanged = self.redistributed_bgp.get(&key).is_some_and(|existing| {
                         existing.origin == bgp_route.origin
                             && existing.preference == bgp_route.preference
                             && existing.attributes == bgp_route.attributes
                             && existing.next_hop == bgp_route.next_hop
+                            && existing.tag == bgp_route.tag
                     });
                     if unchanged {
                         continue;

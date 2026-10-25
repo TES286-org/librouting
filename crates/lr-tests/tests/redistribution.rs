@@ -376,3 +376,94 @@ fn redistribution_ipv6() {
     });
     assert!(redistributed, "IPv6 redistribute must fire");
 }
+
+// ===========================================================================
+// Tag propagation: pipe.tag → redistributed route's tag slot
+// ===========================================================================
+
+/// A BGP → BGP pipe with `with_tag(N)` propagates N to the redistributed
+/// BGP route's `tag` slot. The route struct carries the tag verbatim —
+/// a BGP `bgp.tag` filter-DSL accessor does not yet exist, so the value
+/// is only observable via the route struct today (embedders reading the
+/// Loc-RIB programmatically). Mirrors how the OSPF paths feed `pipe.tag`
+/// into the type-5 / type-7 LSA's `external_route_tag` field.
+#[test]
+fn bgp_to_bgp_redistribution_applies_nonzero_tag() {
+    let mut a = DefaultRouter::new();
+    let mut b = DefaultRouter::new();
+    let ha = a
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), V4_A)
+                .with_local_address(IpAddr::V4([192, 0, 2, 1])),
+        )
+        .unwrap();
+    let hb = b
+        .add_session(
+            SessionConfig::bgp(Asn(64513), Asn(64512), V4_B)
+                .with_local_address(IpAddr::V4([192, 0, 2, 2])),
+        )
+        .unwrap();
+    a.start_session(ha).unwrap();
+    b.start_session(hb).unwrap();
+    pump(&mut a, ha, &mut b, hb);
+
+    a.add_redistribution_pipe(
+        RedistributionPipe::new(Protocol::Bgp, Protocol::Bgp).with_tag(0xdead_beef),
+    );
+
+    b.originate(
+        Prefix::new_v4([203, 0, 113, 0], 24),
+        Some(IpAddr::V4([192, 0, 2, 2])),
+    );
+    pump(&mut a, ha, &mut b, hb);
+
+    let snap = a.rib_snapshot();
+    assert_eq!(snap.len(), 1, "A must have the redistributed route");
+    assert_eq!(
+        snap[0].tag,
+        Some(0xdead_beef),
+        "pipe.tag must propagate to the redistributed BGP route's tag slot",
+    );
+}
+
+/// `pipe.tag == 0` collapses to `None` on the redistributed BGP route.
+/// This keeps the absence-of-tag and tag-zero cases distinct — an OSPF
+/// route with no `route_tag` reads as `defined(ospf.tag) == false`, the
+/// same shape the BGP side adopts here.
+#[test]
+fn bgp_to_bgp_redistribution_zero_tag_collapses_to_none() {
+    let mut a = DefaultRouter::new();
+    let mut b = DefaultRouter::new();
+    let ha = a
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), V4_A)
+                .with_local_address(IpAddr::V4([192, 0, 2, 1])),
+        )
+        .unwrap();
+    let hb = b
+        .add_session(
+            SessionConfig::bgp(Asn(64513), Asn(64512), V4_B)
+                .with_local_address(IpAddr::V4([192, 0, 2, 2])),
+        )
+        .unwrap();
+    a.start_session(ha).unwrap();
+    b.start_session(hb).unwrap();
+    pump(&mut a, ha, &mut b, hb);
+
+    // Default-constructed pipe carries `tag = 0` — the same shape
+    // `with_tag(0)` would produce.
+    a.add_redistribution_pipe(RedistributionPipe::new(Protocol::Bgp, Protocol::Bgp));
+
+    b.originate(
+        Prefix::new_v4([203, 0, 113, 0], 24),
+        Some(IpAddr::V4([192, 0, 2, 2])),
+    );
+    pump(&mut a, ha, &mut b, hb);
+
+    let snap = a.rib_snapshot();
+    assert_eq!(snap.len(), 1);
+    assert_eq!(
+        snap[0].tag, None,
+        "pipe.tag == 0 must collapse to None on the redistributed route",
+    );
+}

@@ -82,7 +82,16 @@ pub struct RedistributionPipe {
     /// Metric transformation.
     pub metric: MetricPolicy,
     /// Optional protocol tag (BGP community, OSPF route tag, etc.).
-    /// Currently informational; the embedder can read it from the pipe.
+    ///
+    /// Applied to the redistributed route's `tag` slot on every target
+    /// protocol: BGP re-originated routes carry `Some(pipe.tag)` (zero
+    /// collapses to `None` so the absence-of-tag and tag-zero cases stay
+    /// distinct), and OSPF type-5 / type-7 externals copy `pipe.tag`
+    /// straight into the LSA's 32-bit `external_route_tag` field (RFC
+    /// 2328 §A.4.5 / RFC 3101 §2.4). The policy DSL's `ospf.tag` accessor
+    /// surfaces the OSPF value; BGP routes do not yet have a `bgp.tag`
+    /// accessor, but the field is still on the route so embedders can
+    /// read it programmatically.
     pub tag: u32,
     /// Optional prefix-list filter — only routes matching the list are
     /// redistributed. `None` = accept all. The actual filtering is done
