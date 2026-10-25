@@ -55,10 +55,7 @@ use lr_bgp::best_path::{BestPath, BestPathConfig};
 use lr_bgp::error::{BgpCeaseSubcode, BgpErrorCode};
 use lr_bgp::path::{AttrType, Community, PathAttrFlags, PathAttribute, PathAttributes};
 use lr_bgp::{BgpAction, BgpEvent, BgpPeer, BgpState, PeerConfig as BgpPeerConfig};
-use lr_ospf::abr::{
-    flush_summary_lsa, originate_summary_lsa, originate_v3_inter_area_prefix_lsa,
-    SummaryDestination,
-};
+use lr_ospf::abr::{flush_summary_lsa, originate_v3_inter_area_prefix_lsa, SummaryDestination};
 use lr_ospf::external::{
     external_routes, flush_external_lsa, originate_external_lsa, originate_summary_asbr_lsa,
     ExternalDestination, ExternalMetricType,

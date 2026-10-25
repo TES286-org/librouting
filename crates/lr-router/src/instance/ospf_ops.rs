@@ -743,15 +743,31 @@ impl DefaultRouter {
 
             let mut to_originate: Vec<Lsa> = Vec::new();
             let mut used_lsids: BTreeSet<u32> = BTreeSet::new();
-            for (prefix, metric) in &sources {
-                let dest = SummaryDestination::new(*prefix, *metric as u32);
-                let mask = prefix_len_to_mask(prefix.prefix_len);
-                let network = match prefix.addr {
-                    lr_core::addr::IpAddr::V4(o) => u32::from_be_bytes(o) & mask,
-                    lr_core::addr::IpAddr::V6(_) => continue,
+            // RFC 2328 Appendix E: assign unique Link State IDs to the
+            // batch so two destinations sharing the same network address
+            // but different prefix lengths (e.g. 10.0.0.0/8 and
+            // 10.0.0.0/16) do not collapse onto the same `(ls_type,
+            // ls_id, advertising_router)` LSDB key. Less-specific keeps
+            // the network address; more-specific is remapped to its
+            // broadcast address. `assign_summary_lsa_ids` sorts the
+            // destinations ascending by prefix length so the order is
+            // correct regardless of the iteration order `sources`
+            // happens to hand us.
+            let destinations: Vec<SummaryDestination> = sources
+                .iter()
+                .map(|(prefix, metric)| SummaryDestination::new(*prefix, *metric as u32))
+                .collect();
+            let assigned = lr_ospf::abr::assign_summary_lsa_ids(&destinations, &existing);
+            for (dest, ls_id) in assigned {
+                let Some(ls_id) = ls_id else {
+                    // Unsolvable LS-ID collision (RFC 2328 Appendix E):
+                    // both the network and broadcast addresses are
+                    // taken. Skip origination; the prior LSA stays.
+                    continue;
                 };
-                used_lsids.insert(network);
-                let prev = existing.get(&network);
+                let mask = prefix_len_to_mask(dest.prefix.prefix_len);
+                used_lsids.insert(ls_id);
+                let prev = existing.get(&ls_id);
                 let unchanged = prev.is_some_and(|lsa| {
                     lr_ospf::lsa::decode_summary_lsa_body(&lsa.body).is_some_and(|body| {
                         body.network_mask == mask && body.tos0_metric() == Some(dest.metric)
@@ -761,7 +777,9 @@ impl DefaultRouter {
                     continue;
                 }
                 let prev_seq = prev.map(|lsa| lsa.header.ls_sequence_number);
-                if let Some(lsa) = originate_summary_lsa(router_id, &dest, prev_seq) {
+                if let Some(lsa) =
+                    lr_ospf::abr::originate_summary_lsa_with_id(router_id, ls_id, &dest, prev_seq)
+                {
                     to_originate.push(lsa);
                 }
             }

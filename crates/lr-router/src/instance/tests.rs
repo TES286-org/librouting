@@ -3,6 +3,7 @@ use crate::redistribution::RedistributionPipe;
 use lr_core::addr::Asn;
 use lr_core::addr::RouterId;
 use lr_core::fsm::TimerSpec;
+use lr_ospf::abr::originate_summary_lsa;
 use lr_ospf::packet::{LsUpdateBody, OspfBody};
 
 /// Test helper: encode one LS-Update carrying `lsas` as if received
