@@ -342,6 +342,25 @@ exposes the existing `lr_route_set_tag` setter, so the binding
 can exercise the present path that the metric2 binding test
 could not (the `LrOspfMetric2` tag has no C ABI setter).
 
+- OSPFv2 ABR summary-LSA origination now applies RFC 2328 Appendix E
+  when two prefixes whose network addresses coincide but the masks
+  differ (e.g. `10.0.0.0/8` and `10.0.0.0/16`) are summarized into
+  the same area. The less-specific LSA keeps the network address as
+  its Link State ID; the more-specific one is remapped to its
+  broadcast address (host bits all 1) so the two no longer collide on
+  the `(ls_type, ls_id, advertising_router)` LSDB key (RFC 2328
+  §12.1.6) — previously the second LSA silently overwrote the first
+  and only one of the two routes survived in the area's Loc-RIB.
+  `lr_ospf::abr` exposes `summary_lsa_id_for` (single-prefix form)
+  and `assign_summary_lsa_ids` (batch form that sorts ascending by
+  prefix length so the less-specific prefix wins the network address)
+  alongside the existing `originate_summary_lsa`; the daemon's ABR
+  driver now routes through `originate_summary_lsa_with_id`. The
+  remap returns `None` when both the network and broadcast addresses
+  are taken by *different* LSAs — RFC 2328 Appendix E notes this
+  case has no automatic resolution and the operator must summarize
+  at a single length.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
