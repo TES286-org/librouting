@@ -361,6 +361,41 @@ could not (the `LrOspfMetric2` tag has no C ABI setter).
   case has no automatic resolution and the operator must summarize
   at a single length.
 
+- `lr-osroute::seg6_route` now installs four SRv6 seg6local behaviors
+  the Linux kernel's `seg6_action_table` (net/ipv6/seg6_local.c)
+  implements but the encoder previously rejected with
+  `UnsupportedAction`: `End.DT4` (IANA 19, kernel action 8),
+  `End.DT46` (IANA 20, kernel action 16), `End.B6.Insert` (IANA 13,
+  kernel action 9) and `End.B6.Encaps` (IANA 14, kernel action 10).
+  End.DT4 and End.DT46 are the IPv4-L3VPN and dual-stack L3VPN
+  decap behaviors (RFC 8986 §4.8 / §4.9); both require the
+  `SEG6_LOCAL_VRFTABLE` parameter (uapi 9), a routing-table id
+  bound to a VRF device (Linux `CONFIG_NET_L3_MASTER_DEV`).
+  End.B6.Insert and End.B6.Encaps are the binding-SID SRH
+  insert / encap behaviors (RFC 8986 §4.14); both require the
+  `SEG6_LOCAL_SRH` parameter (uapi 2), the SRv6 Routing Header
+  the endpoint pushes onto the packet (RFC 8754 §2 wire form).
+  `Seg6LocalRoute` gains two additive fields (`vrf_table:
+  Option<u32>` and `srh: Option<Srh>`) and two additive builders
+  (`with_vrf_table(table)` and `with_srh(srh)`); the existing
+  `with_table` builder stays for `End.T` / legacy `End.DT6`. The
+  kernel's parameter contract is enforced BEFORE encoding:
+  `End.DT4` / `End.DT46` reject a stray `table` parameter (the
+  kernel's `parse_nla_action` answers EINVAL for a `SEG6_LOCAL_TABLE`
+  attribute the descriptor does not list); `End.B6.Insert` /
+  `End.B6.Encaps` reject every parameter except `srh`. The C ABI is
+  unchanged (`include/lr_ffi.h` byte-identical — `Seg6LocalRoute` is
+  not in the C ABI; the FFI surface only exposes the SRH codec). 10
+  new unit tests pin the wire shape, the action-code translation
+  (End.DT4 → 8, End.DT46 → 16, End.B6.Insert → 9, End.B6.Encaps →
+  10), the required-parameter rejection paths and the stray-parameter
+  rejection paths; one new kernel-gated end-to-end test in
+  `tests/srv6_kernel.rs` exercises `End.B6.Insert` against a real
+  kernel's `seg6_action_table[SEG6_LOCAL_ACTION_END_B6]` descriptor.
+  End.BM (IANA 15), End.DX2V (22), End.DT2U (23), End.DT2M (24) and
+  the PSP/USP/USD flavor combinations remain rejected — the kernel
+  has no `seg6_action_table` descriptor for them.
+
 ### Fixed
 
 **`lr-policy` community-list and AS-path filter `evaluate` stubs now
