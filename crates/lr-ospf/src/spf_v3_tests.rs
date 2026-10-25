@@ -1,8 +1,8 @@
 use super::*;
 use crate::lsa::v3::{
     originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
-    originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LS_TYPE_ROUTER,
-    ROUTER_BIT_V6,
+    originate_v3_router_lsa, originate_v3_router_lsa_fragment, LINK_TYPE_POINTTOPOINT,
+    LINK_TYPE_TRANSIT, LS_TYPE_ROUTER, ROUTER_BIT_V6,
 };
 
 /// Two routers on a p2p link (interface ids 5 and 3), each with one
@@ -1165,4 +1165,344 @@ fn summary_routes_v3_e_inter_area_prefix() {
     // Legacy mode ignores the 0xA023.
     let spf_legacy = run_spf_v3(&db, r1);
     assert!(summary_routes_v3(&db, &spf_legacy).is_empty());
+}
+
+/// RFC 5340 §4.4.2: a router may originate multiple Router-LSAs per
+/// area, disambiguated by the Link State ID (the fragment number 0, 1,
+/// 2, …). A receiver MUST merge all fragments of the same advertising
+/// router into one virtual vertex — only the first fragment supplies
+/// the bits/options; every subsequent fragment's link list is appended
+/// to the merged vertex.
+///
+/// This test injects two Router-LSA fragments from r2: fragment 0
+/// carries the back-link to r1, fragment 1 carries the forward link to
+/// r3. Before the fix, only fragment 0 was visible to the SPF walk and
+/// r3 was unreachable through r2 — the adjacency silently dropped, the
+/// SPF tree lost everything beyond fragment 0.
+#[test]
+fn v3_fragmented_router_lsa_merges_links_across_fragments() {
+    let mut db = Lsdb::new();
+    let (r1, r2, r3) = (0x0a00_0001, 0x0a00_0002, 0x0a00_0003);
+    let link = |metric: u16, ifid: u32, nifid: u32, nrid: u32| crate::lsa::v3::V3RouterLink {
+        link_type: LINK_TYPE_POINTTOPOINT,
+        metric,
+        interface_id: ifid,
+        neighbor_interface_id: nifid,
+        neighbor_router_id: nrid,
+    };
+    // r1: single fragment with the link to r2.
+    db.install(
+        originate_v3_router_lsa(r1, ROUTER_BIT_V6, 0x13, &[link(10, 5, 3, r2)], None).unwrap(),
+        0,
+    );
+    // r2: fragment 0 — back-link to r1.
+    db.install(
+        originate_v3_router_lsa_fragment(r2, 0, ROUTER_BIT_V6, 0x13, &[link(10, 3, 5, r1)], None)
+            .unwrap(),
+        0,
+    );
+    // r2: fragment 1 — forward link to r3.
+    db.install(
+        originate_v3_router_lsa_fragment(r2, 1, ROUTER_BIT_V6, 0x13, &[link(10, 6, 7, r3)], None)
+            .unwrap(),
+        0,
+    );
+    // r3: single fragment with the back-link to r2.
+    db.install(
+        originate_v3_router_lsa(r3, ROUTER_BIT_V6, 0x13, &[link(10, 7, 6, r2)], None).unwrap(),
+        0,
+    );
+    // Link-LSAs for every interface.
+    db.install(
+        originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r2, 6, 1, 0x13, fe80(22), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r3, 7, 1, 0x13, fe80(3), vec![], None).unwrap(),
+        0,
+    );
+    // r3's own /64.
+    let p3 = net64(3);
+    db.install(
+        originate_v3_intra_area_prefix_lsa(r3, 1, LS_TYPE_ROUTER, 0, r3, vec![p3.clone()], None)
+            .unwrap(),
+        0,
+    );
+
+    let spf = run_spf_v3(&db, r1);
+    let v3v = V3VertexId::Router(r3);
+    // r3 is reachable at 10 (r1→r2) + 10 (r2→r3) = 20 — only because
+    // r2's two fragments were merged. Without the fix, the SPF walk
+    // never sees r2's link to r3 and the assertion fails.
+    assert_eq!(
+        spf.vertices.get(&v3v),
+        Some(&20),
+        "r3 reachable through r2's fragment 1"
+    );
+    let nh = spf
+        .next_hops
+        .get(&v3v)
+        .expect("inherited next hop survives the merge");
+    assert_eq!(
+        nh.link_local,
+        IpAddr::V6(fe80(2)),
+        "via r2's first interface"
+    );
+    let route = spf
+        .routes
+        .iter()
+        .find(|r| r.prefix == route_of(&p3))
+        .expect("r3's prefix becomes a route");
+    assert_eq!(route.metric, 20);
+    assert_eq!(route.next_hop, Some(IpAddr::V6(fe80(2))));
+}
+
+/// Fragment-1-only routers (a router whose fragment 0 was lost or never
+/// originated) still appear in the SPF tree: the first fragment the
+/// receiver sees supplies the bits/options, and the merged vertex has
+/// the links that fragment carried. This pins the §4.4.2 "first
+/// fragment seen" rule (vs. "first fragment by Link State ID" — which
+/// would be a stronger invariant the spec does not require).
+#[test]
+fn v3_fragmented_router_lsa_first_fragment_seen_supplies_bits_and_options() {
+    let mut db = Lsdb::new();
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let link = |metric: u16, ifid: u32, nifid: u32, nrid: u32| crate::lsa::v3::V3RouterLink {
+        link_type: LINK_TYPE_POINTTOPOINT,
+        metric,
+        interface_id: ifid,
+        neighbor_interface_id: nifid,
+        neighbor_router_id: nrid,
+    };
+    db.install(
+        originate_v3_router_lsa(r1, ROUTER_BIT_V6, 0x13, &[link(10, 5, 3, r2)], None).unwrap(),
+        0,
+    );
+    // r2's only fragment carries Link State ID 5 (a non-zero fragment
+    // number is unusual but legal per §4.4.2 — the receiver must merge
+    // any fragment the router originates into the virtual vertex).
+    db.install(
+        originate_v3_router_lsa_fragment(r2, 5, ROUTER_BIT_V6, 0x13, &[link(10, 3, 5, r1)], None)
+            .unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+        0,
+    );
+
+    let spf = run_spf_v3(&db, r1);
+    let v3v = V3VertexId::Router(r2);
+    assert_eq!(spf.vertices.get(&v3v), Some(&10));
+    // §4.4.2 mandates the bits/options be identical across fragments
+    // the router originates; the receiver takes the value from the
+    // first fragment seen (here, fragment 5 — the only one).
+    assert_eq!(
+        spf.router_options.get(&r2).copied(),
+        Some(0x13),
+        "options come from the first fragment seen",
+    );
+    let nh = spf.next_hops.get(&v3v).expect("next hop resolved");
+    assert_eq!(nh.link_local, IpAddr::V6(fe80(2)));
+}
+
+/// A router that originates fragments out of order (fragment 1 first,
+/// fragment 0 second) — the LSDB iteration order is ascending by
+/// `LsaKey`, so the canonical walk still visits fragment 0 first. This
+/// test pins the merge is order-stable: the bits/options come from
+/// fragment 0 regardless of when `install` was called.
+#[test]
+fn v3_fragmented_router_lsa_merge_is_lsdb_order_stable() {
+    let mut db = Lsdb::new();
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let link = |metric: u16, ifid: u32, nifid: u32, nrid: u32| crate::lsa::v3::V3RouterLink {
+        link_type: LINK_TYPE_POINTTOPOINT,
+        metric,
+        interface_id: ifid,
+        neighbor_interface_id: nifid,
+        neighbor_router_id: nrid,
+    };
+    db.install(
+        originate_v3_router_lsa(r1, ROUTER_BIT_V6, 0x13, &[link(10, 5, 3, r2)], None).unwrap(),
+        0,
+    );
+    // Install fragment 1 BEFORE fragment 0 — Lsdb::iter visits by
+    // ascending key, so the merge still starts from fragment 0.
+    db.install(
+        originate_v3_router_lsa_fragment(
+            r2,
+            1,
+            ROUTER_BIT_V6,
+            0x11, // intentionally different — fragment 1 should not win
+            &[link(15, 6, 7, 0x0a00_0003)],
+            None,
+        )
+        .unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_router_lsa_fragment(r2, 0, ROUTER_BIT_V6, 0x13, &[link(10, 3, 5, r1)], None)
+            .unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+        0,
+    );
+
+    let spf = run_spf_v3(&db, r1);
+    // §4.4.2: bits/options come from the lowest-LS-ID fragment, not the
+    // first-installed one. Without the LSDB-order stability, fragment 1
+    // (installed first) would have leaked its 0x11 options into the
+    // merged vertex.
+    assert_eq!(
+        spf.router_options.get(&r2).copied(),
+        Some(0x13),
+        "options come from the lowest-LS-ID fragment",
+    );
+    // r2 is reachable (the back-link in fragment 0).
+    let v3v = V3VertexId::Router(r2);
+    assert_eq!(spf.vertices.get(&v3v), Some(&10));
+    let nh = spf.next_hops.get(&v3v).expect("next hop resolved");
+    assert_eq!(nh.link_local, IpAddr::V6(fe80(2)));
+}
+
+/// RFC 8362 §4.1 (Extended-LSA mode): E-Router-LSAs inherit the same
+/// fragmentation rule legacy Router-LSAs use (RFC 5340 §4.4.2). The
+/// receiver merges all E-Router-LSA fragments of the same advertising
+/// router into one virtual vertex; the first fragment supplies the
+/// bits/options, subsequent fragments append their Router-Link TLVs to
+/// the merged body. Before the fix, only fragment 0 was visible to the
+/// SPF walk — the E-Router-LSA pre-pass used a `BTreeSet::insert`
+/// sentinel that silently dropped every fragment after the first.
+#[test]
+fn v3_extended_fragmented_e_router_lsa_merges_links_across_fragments() {
+    let mut db = Lsdb::new();
+    let (r1, r2, r3) = (0x0a00_0001, 0x0a00_0002, 0x0a00_0003);
+    // r1: single E-Router-LSA fragment with the link to r2.
+    db.install(
+        crate::lsa::originate_v3_e_router_lsa(
+            r1,
+            ROUTER_BIT_V6,
+            0x13,
+            vec![e_link(10, 5, 3, r2)],
+            None,
+        )
+        .unwrap(),
+        0,
+    );
+    // r2: E-Router-LSA fragment 0 — back-link to r1.
+    db.install(
+        crate::lsa::originate_v3_e_router_lsa_fragment(
+            r2,
+            0,
+            ROUTER_BIT_V6,
+            0x13,
+            vec![e_link(10, 3, 5, r1)],
+            None,
+        )
+        .unwrap(),
+        0,
+    );
+    // r2: E-Router-LSA fragment 1 — forward link to r3.
+    db.install(
+        crate::lsa::originate_v3_e_router_lsa_fragment(
+            r2,
+            1,
+            ROUTER_BIT_V6,
+            0x13,
+            vec![e_link(10, 6, 7, r3)],
+            None,
+        )
+        .unwrap(),
+        0,
+    );
+    // r3: single E-Router-LSA fragment with the back-link to r2.
+    db.install(
+        crate::lsa::originate_v3_e_router_lsa(
+            r3,
+            ROUTER_BIT_V6,
+            0x13,
+            vec![e_link(10, 7, 6, r2)],
+            None,
+        )
+        .unwrap(),
+        0,
+    );
+    // E-Link-LSAs for every interface.
+    db.install(
+        crate::lsa::originate_v3_e_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        crate::lsa::originate_v3_e_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        crate::lsa::originate_v3_e_link_lsa(r2, 6, 1, 0x13, fe80(22), vec![], None).unwrap(),
+        0,
+    );
+    db.install(
+        crate::lsa::originate_v3_e_link_lsa(r3, 7, 1, 0x13, fe80(3), vec![], None).unwrap(),
+        0,
+    );
+    // r3's own /64 via E-Intra-Area-Prefix-LSA referencing the E-Router-LSA.
+    let p3 = net64(3);
+    db.install(
+        crate::lsa::originate_v3_e_intra_area_prefix_lsa(
+            r3,
+            1,
+            crate::lsa::LS_TYPE_E_ROUTER,
+            0,
+            r3,
+            vec![e_prefix_tlv(&p3)],
+            None,
+        )
+        .unwrap(),
+        0,
+    );
+
+    let spf = run_spf_v3_extended(&db, r1);
+    let v3v = V3VertexId::Router(r3);
+    // r3 is reachable at 10 (r1→r2) + 10 (r2→r3) = 20 — only because
+    // r2's two E-Router-LSA fragments were merged. Without the fix, the
+    // E-Router-LSA pre-pass silently dropped fragment 1 and r3 was
+    // unreachable through r2.
+    assert_eq!(
+        spf.vertices.get(&v3v),
+        Some(&20),
+        "r3 reachable through r2's E-Router-LSA fragment 1",
+    );
+    let nh = spf
+        .next_hops
+        .get(&v3v)
+        .expect("inherited next hop survives the merge");
+    assert_eq!(
+        nh.link_local,
+        IpAddr::V6(fe80(2)),
+        "via r2's first interface"
+    );
+    let route = spf
+        .routes
+        .iter()
+        .find(|r| r.prefix == route_of(&p3))
+        .expect("r3's prefix becomes a route");
+    assert_eq!(route.metric, 20);
+    assert_eq!(route.next_hop, Some(IpAddr::V6(fe80(2))));
 }
