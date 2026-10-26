@@ -35,15 +35,17 @@ use std::collections::BTreeMap;
 
 use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::external::{
-    fa_prefix, longest_covering, ExternalDestination, ExternalMetricType, ExternalRoute,
-    LS_INFINITY,
+    fa_prefix, fa_prefix_v6, longest_covering, ExternalDestination, ExternalMetricType,
+    ExternalRoute, ExternalRouteV3, LS_INFINITY,
 };
+use crate::lsa::v3::{V3AsExternalBody, V3Prefix};
 use crate::lsa::{
     decode_as_external_body, encode_as_external_body, prefix_len_to_mask, router_lsa_flags,
-    AsExternalEntry, Lsa, LsaHeader, LsaTypeV2,
+    AsExternalEntry, EAsExternalLsaBody, Lsa, LsaHeader, LsaTypeV2, LS_TYPE_E_TYPE_7, LS_TYPE_NSSA,
+    PREFIX_OPT_NU, PREFIX_OPT_P,
 };
 use crate::lsdb::Lsdb;
-use crate::spf::{SpfResult, VertexId};
+use crate::spf::{SpfResult, SpfResultV3, V3VertexId, VertexId};
 use lr_core::addr::{IpAddr, Prefix};
 
 /// The N/P-bit (RFC 3101 Appendix A): options bit 3 (`0x08`). It is the
@@ -323,6 +325,255 @@ pub fn is_elected_translator(lsdb: &Lsdb, router_id: u32) -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// OSPFv3 NSSA route calculation (RFC 5340 §4.4.3.6 / RFC 3101 §2.5)
+// ---------------------------------------------------------------------------
+//
+// The v3 NSSA-LSA (0x2007) shares its body shape with the v3
+// AS-External-LSA (0x4005) — [`V3AsExternalBody`] decodes both — so the
+// v3 type-7 calculation mirrors [`crate::external::external_routes_v3`]
+// with two protocol-mandated deviations from the type-5 path:
+//
+//   1. **The forwarding address must be covered by an intra-area path of
+//      the NSSA itself** (RFC 3101 §2.5 step (3)). The type-5 v3
+//      calculation admits summary routes (0x2003 / 0xA023) into its
+//      covering table; the type-7 path does not — type-7 LSAs never
+//      propagate beyond the area, so a type-3 summary reaching the NSSA
+//      from outside would not stay within scope. We restrict the
+//      covering table to `spf_result.routes` (the §4.8.1 intra-area
+//      routes).
+//
+//   2. **The ASBR must be reachable within the NSSA** — there is no
+//      "inter-area-router-LSA leg" fallback for type-7 routes. In v2 the
+//      equivalent rule falls out of the area being a stub: type-4
+//      summary-ASBR-LSAs do not flood into NSSAs. In v3 the same applies:
+//      0x2004 / 0xA024 inter-area-router-LSAs do not flood into NSSAs,
+//      so the `asbr_legs` table the v3 type-5 path builds is empty here.
+//      We therefore consult only `spf_result.vertices` (the §4.8.1 SPF
+//      tree) for ASBR reachability, mirroring the v2 path's
+//      `spf_result.vertices.get(&VertexId::Router(...))` lookup.
+//
+// The default-route install rules from §2.5 step (3) [NSSA] also apply
+// in the v3 form: a border router skips type-7 defaults whose P-bit is
+// clear and skips all type-7 defaults when summary import is suppressed.
+// The v3 P-bit lives in the prefix-options byte (the
+// [`PREFIX_OPT_P`] bit), since v3 LSA headers carry no options byte
+// (RFC 5340 §A.4.2) — the prefix's P-bit is the IANA-registered
+// "Propagate" bit (RFC 5340 §A.4.1.1) and carries the §2.4 semantics
+// "this prefix should be propagated across area boundaries".
+
+/// Whether a v3 NSSA-LSA's prefix carries the propagate (P) bit set in
+/// the prefix-options byte (RFC 5340 §A.4.1.1 + RFC 3101 §2.4). The v3
+/// LSA header carries no options byte (RFC 5340 §A.4.2), so the
+/// propagate marker travels in the prefix-options field — the same bit
+/// the §4.8.x intra-area route computation checks for inter-area
+/// propagation.
+fn v3_p_bit_set(prefix: &V3Prefix) -> bool {
+    prefix.options & PREFIX_OPT_P != 0
+}
+
+/// The v3 form of the [`nssa_routes`] selection: type-7 candidates from
+/// 0x2007 NSSA-LSAs (RFC 5340 §4.4.3.6) for one NSSA. Returns
+/// [`ExternalRouteV3`] entries (the body shape is identical to the
+/// type-5 form, so the v3 external route type carries every field a
+/// type-7 needs). The two protocol deviations above — intra-area-only
+/// FA cover and intra-area-only ASBR reachability — are baked in; the
+/// default-route install rules from §2.5 step (3) [NSSA] honour
+/// [`NssaCalcOpts`].
+pub fn nssa_routes_v3(
+    lsdb: &Lsdb,
+    spf_result: &SpfResultV3,
+    opts: NssaCalcOpts,
+) -> Vec<ExternalRouteV3> {
+    nssa_routes_v3_mode(lsdb, spf_result, opts, false)
+}
+
+/// The Extended-LSA mode of [`nssa_routes_v3`] (RFC 8362 §4.6):
+/// E-Type-7-LSAs (0xA027) contribute external prefixes alongside the
+/// legacy 0x2007s. The body decoding uses [`EAsExternalLsaBody`]
+/// (the same Extended-Prefix TLV shape the E-AS-External path uses),
+/// and the selection rules mirror [`nssa_routes_v3`].
+pub fn nssa_routes_v3_extended(
+    lsdb: &Lsdb,
+    spf_result: &SpfResultV3,
+    opts: NssaCalcOpts,
+) -> Vec<ExternalRouteV3> {
+    nssa_routes_v3_mode(lsdb, spf_result, opts, true)
+}
+
+fn nssa_routes_v3_mode(
+    lsdb: &Lsdb,
+    spf_result: &SpfResultV3,
+    opts: NssaCalcOpts,
+    extended: bool,
+) -> Vec<ExternalRouteV3> {
+    // Fast path: areas without any type-7 LSAs skip the covering-table
+    // construction entirely.
+    let has_nssa = lsdb.iter().any(|(key, _)| {
+        key.ls_type == LS_TYPE_NSSA || (extended && key.ls_type == LS_TYPE_E_TYPE_7)
+    });
+    if !has_nssa {
+        return Vec::new();
+    }
+
+    // §2.5 step (3): a type-7's forwarding address must be covered by
+    // an *intra-area* path of the NSSA. Unlike the type-5 v3 path,
+    // summary routes (0x2003 / 0xA023) are NOT admitted here — type-7
+    // LSAs do not leave the NSSA, so a summary's reachability crosses
+    // the area boundary the type-7 was confined to.
+    let covering: Vec<(Prefix, u64)> = spf_result
+        .routes
+        .iter()
+        .map(|r| (r.prefix, r.metric))
+        .collect();
+
+    let mut best: BTreeMap<Prefix, ExternalRouteV3> = BTreeMap::new();
+    for (key, entry) in lsdb.iter() {
+        let e_t7 = key.ls_type == LS_TYPE_E_TYPE_7;
+        if key.ls_type != LS_TYPE_NSSA && !(extended && e_t7) {
+            continue;
+        }
+        // Both LSA forms decode into the same shape — the body is
+        // byte-identical to the v3 AS-External-LSA body (RFC 5340
+        // §A.4.7 / RFC 8362 §3.6), so the projection mirrors the
+        // type-5 v3 path.
+        let body = if e_t7 {
+            match EAsExternalLsaBody::decode(&entry.lsa.body) {
+                Some(b) => V3NssaBody {
+                    metric: b.0.metric,
+                    e_bit: b.0.e_bit,
+                    prefix: b.0.prefix.clone(),
+                    forwarding_addr: b.0.ipv6_fwd_addr,
+                    route_tag: b.0.route_tag,
+                },
+                None => continue,
+            }
+        } else {
+            match V3AsExternalBody::decode(&entry.lsa.body) {
+                Some(b) => V3NssaBody {
+                    metric: b.metric,
+                    e_bit: b.e_bit,
+                    prefix: b.prefix.clone(),
+                    forwarding_addr: b.forwarding_addr,
+                    route_tag: b.route_tag,
+                },
+                None => continue,
+            }
+        };
+        if body.metric >= LS_INFINITY {
+            continue; // §16.4 (1) via §2.5 step (1)
+        }
+        // §4.8.5: NU-marked prefixes are skipped (FRR `ospf6_asbr_lsa_add`
+        // parity). The P-bit lives in the same prefix-options byte, so
+        // we keep reading it before the NU check returns.
+        if body.prefix.options & PREFIX_OPT_NU != 0 {
+            continue;
+        }
+        let metric_type = ExternalMetricType::from_e_bit(body.e_bit);
+        let external_metric = u64::from(body.metric);
+        let is_default = body.prefix.prefix_len == 0;
+        if is_default
+            && opts.border_router
+            && (opts.summaries_suppressed || !v3_p_bit_set(&body.prefix))
+        {
+            // §2.5 step (3) [NSSA]: border routers only install type-7
+            // defaults whose P-bit (the prefix-options Propagate bit)
+            // is set, and none at all when summary import is suppressed
+            // (their own type-3 default wins then).
+            continue;
+        }
+
+        // Internal leg (§2.5 step (3)).
+        let (internal_cost, border_router, asbr) = if let Some(fa) = body.forwarding_addr {
+            // Unspecified and link-local forwarding addresses are
+            // illegal (RFC 5340 §A.4.7) — treat them as no usable
+            // forwarding address rather than a crash/loop source.
+            let unusable = fa == [0u8; 16] || (fa[0] == 0xfe && (fa[1] & 0xc0) == 0x80);
+            if unusable {
+                continue;
+            }
+            // The FA MUST be covered by an intra-area route of the
+            // NSSA itself — summary routes do not qualify.
+            let Some((_, cost)) = longest_covering(&covering, fa_prefix_v6(fa)) else {
+                continue; // forwarding address not intra-area reachable in the NSSA
+            };
+            (cost, None, key.advertising_router)
+        } else {
+            // Zero FA: the ASBR itself is the internal leg — and the
+            // ASBR must be reachable *within* the NSSA. Type-4
+            // inter-area-router-LSAs do not flood into NSSAs, so there
+            // is no inter-area fallback (the v3 type-5 path's
+            // `asbr_legs` table stays empty here).
+            match spf_result
+                .vertices
+                .get(&V3VertexId::Router(key.advertising_router))
+            {
+                Some(&dist) => (dist, None, key.advertising_router),
+                None => continue, // ASBR unreachable through the NSSA
+            }
+        };
+
+        let metric = match metric_type {
+            ExternalMetricType::Type1 => internal_cost + external_metric,
+            ExternalMetricType::Type2 => external_metric,
+        };
+        let prefix = Prefix::new_v6(body.prefix.addr, body.prefix.prefix_len);
+        // The next hop is the ASBR's link-local address from the SPF
+        // tree (zero-FA case) or the global forwarding address itself
+        // (the FA is a global IPv6 address and needs no interface
+        // disambiguation). For the zero-FA case we mirror the v3
+        // type-5 path: the ASBR's link-local next hop from the SPF
+        // result.
+        let next_hop = spf_result
+            .next_hops
+            .get(&V3VertexId::Router(asbr))
+            .map(|nh| nh.link_local)
+            .or_else(|| body.forwarding_addr.map(IpAddr::V6));
+        let candidate = ExternalRouteV3 {
+            prefix,
+            metric,
+            metric_type,
+            internal_cost,
+            asbr,
+            border_router,
+            forwarding_addr: body.forwarding_addr.map(IpAddr::V6),
+            next_hop,
+            // RFC 3101 §2.3 / RFC 8362 §3.6 External-Prefix sub-TLV 3
+            // — the type-7 LSA's external route tag. `None` when the
+            // LSA carries no tag (the v3 T bit is clear, or the
+            // Extended-LSA External-Prefix TLV carries no Route Tag
+            // sub-TLV); `Some(t)` when it does. The OSPF route
+            // computation surfaces it through `Route::tag` so the
+            // policy DSL's `ospf.tag` accessor reads it, mirroring the
+            // type-5 v3 path.
+            route_tag: body.route_tag,
+        };
+        let replace = match best.get(&prefix) {
+            None => true,
+            Some(prev) => candidate.beats(prev),
+        };
+        if replace {
+            best.insert(prefix, candidate);
+        }
+    }
+    best.into_values().collect()
+}
+
+/// The calculation-relevant projection of one v3 NSSA-LSA body — the
+/// legacy 0x2007 form (RFC 5340 §A.4.7) and the E-Type-7 form
+/// (RFC 8362 §3.6 External-Prefix TLV) decode into this common shape.
+struct V3NssaBody {
+    metric: u32,
+    e_bit: bool,
+    prefix: V3Prefix,
+    forwarding_addr: Option<[u8; 16]>,
+    route_tag: Option<u32>,
+}
+
 #[cfg(test)]
 #[path = "nssa_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "nssa_v3_tests.rs"]
+mod v3_tests;
