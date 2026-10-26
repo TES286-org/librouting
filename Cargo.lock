@@ -611,6 +611,7 @@ dependencies = [
  "lr-bmp",
  "lr-core",
  "lr-damping",
+ "lr-ldp",
  "lr-mpls",
  "lr-mrt",
  "lr-ospf",

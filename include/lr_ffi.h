@@ -239,6 +239,34 @@
 
 #define LR_SESSION_KIND_BABEL 4
 
+#define LR_LDP_VERSION LDP_VERSION
+
+#define LR_LDP_PORT LDP_PORT
+
+#define LR_LDP_MSG_NOTIFICATION 1
+
+#define LR_LDP_MSG_HELLO 256
+
+#define LR_LDP_MSG_INITIALIZATION 512
+
+#define LR_LDP_MSG_KEEPALIVE 513
+
+#define LR_LDP_MSG_CAPABILITY 514
+
+#define LR_LDP_MSG_ADDRESS 768
+
+#define LR_LDP_MSG_ADDRESS_WITHDRAW 769
+
+#define LR_LDP_MSG_LABEL_MAPPING 1024
+
+#define LR_LDP_MSG_LABEL_REQUEST 1025
+
+#define LR_LDP_MSG_LABEL_WITHDRAW 1026
+
+#define LR_LDP_MSG_LABEL_RELEASE 1027
+
+#define LR_LDP_MSG_LABEL_ABORT 1028
+
 #define LR_MRT_RECORD_PEER_INDEX_TABLE 1
 
 #define LR_MRT_RECORD_RIB 2
@@ -786,6 +814,24 @@ typedef struct lr_ospf_grace_event_t {
    */
   uint8_t purged;
 } lr_ospf_grace_event_t;
+
+/**
+ * Repr-C LdpId. Mirrors `lr_ldp::pdu::LdpId` (4-byte LSR ID + 2-byte
+ * label space).
+ */
+typedef struct lr_ldp_id_t {
+  uint8_t lsr_id[4];
+  uint16_t label_space;
+} lr_ldp_id_t;
+
+/**
+ * Opaque `LdpPdu` handle.
+ */
+typedef struct OpaqueLdpPdu {
+  uint8_t _private[0];
+} OpaqueLdpPdu;
+
+typedef struct OpaqueLdpPdu *lr_ldp_pdu_t;
 
 /**
  * Opaque `Label` handle. C side never touches internals.
@@ -2128,6 +2174,109 @@ uint64_t lr_router_bgp_session_identity_hash(lr_router_t r);
 intptr_t lr_router_drain_ospf_grace_events(lr_router_t r,
                                            struct lr_ospf_grace_event_t *out,
                                            uintptr_t cap);
+
+/**
+ * Construct an LdpId from 4 LSR-ID bytes + a label-space id.
+ *
+ * # Safety
+ * `lsr_id` must point to 4 readable bytes.
+ */
+struct lr_ldp_id_t lr_ldp_id_new(const uint8_t *lsr_id, uint16_t label_space);
+
+/**
+ * Write the LdpId's 6 wire bytes (LSR ID + label space, big-endian)
+ * into `out`. Returns 0 on success.
+ *
+ * # Safety
+ * `out` must point to 6 writable bytes.
+ */
+int32_t lr_ldp_id_to_bytes(struct lr_ldp_id_t id, uint8_t *out);
+
+/**
+ * Parse an LdpId from 6 wire bytes.
+ *
+ * # Safety
+ * `bytes` must point to 6 readable bytes.
+ */
+struct lr_ldp_id_t lr_ldp_id_from_bytes(const uint8_t *bytes);
+
+/**
+ * Encode an LDP Hello PDU (RFC 5036 §3.5.2) — the most common LDP
+ * message used by both link and targeted discovery. The PDU carries
+ * one `HelloMsg` with the supplied parameters. The encoded bytes
+ * are written to `*out`.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_ldp_encode_hello_pdu(struct lr_ldp_id_t sender,
+                                uint32_t message_id,
+                                uint16_t hold_time,
+                                uint8_t target,
+                                struct lr_bytes_t *out);
+
+/**
+ * Decode one LDP PDU from `data`. On success, writes a freshly-
+ * allocated `lr_ldp_pdu_t` to `*out`. Returns 0 on success, negative
+ * on error.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_ldp_pdu_t`.
+ */
+int32_t lr_ldp_decode(const uint8_t *data, uintptr_t len, lr_ldp_pdu_t *out);
+
+/**
+ * Read the PDU's sender LdpId.
+ *
+ * # Safety
+ * `pdu` must be a valid handle.
+ */
+struct lr_ldp_id_t lr_ldp_pdu_sender(lr_ldp_pdu_t pdu);
+
+/**
+ * Read the PDU's version field (always 1 per RFC 5036).
+ *
+ * # Safety
+ * `pdu` must be a valid handle.
+ */
+uint16_t lr_ldp_pdu_version(lr_ldp_pdu_t pdu);
+
+/**
+ * Read the number of messages carried by the PDU.
+ *
+ * # Safety
+ * `pdu` must be a valid handle.
+ */
+uintptr_t lr_ldp_pdu_message_count(lr_ldp_pdu_t pdu);
+
+/**
+ * Read the message-type code of message `index` (one of the
+ * `LR_LDP_MSG_*` constants). Returns 0 on a NULL handle or an
+ * out-of-range index.
+ *
+ * # Safety
+ * `pdu` must be a valid handle.
+ */
+uint16_t lr_ldp_pdu_message_type_at(lr_ldp_pdu_t pdu, uintptr_t index);
+
+/**
+ * Read the message-id of message `index`. Returns 0 on a NULL handle
+ * or an out-of-range index.
+ *
+ * # Safety
+ * `pdu` must be a valid handle.
+ */
+uint32_t lr_ldp_pdu_message_id_at(lr_ldp_pdu_t pdu, uintptr_t index);
+
+/**
+ * Drop a boxed `LdpPdu`. Safe to call with NULL.
+ *
+ * # Safety
+ * `pdu` must have been produced by [`lr_ldp_decode`] and must not be
+ * used after this call.
+ */
+void lr_ldp_pdu_free(lr_ldp_pdu_t pdu);
 
 /**
  * Construct a `Label` with default TC=0 and TTL=64 (RFC 3032 §2.1).
