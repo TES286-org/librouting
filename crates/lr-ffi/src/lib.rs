@@ -45,6 +45,7 @@ pub mod ospf;
 pub mod ospf_lsdb;
 pub mod policy;
 pub mod policy_objects;
+pub mod policy_safety;
 pub mod rib;
 pub mod roa_store;
 pub mod router;

@@ -1300,6 +1300,12 @@ typedef struct lr_community_entry_t {
   uint8_t permit;
 } lr_community_entry_t;
 
+typedef struct OpaqueSafetyNet {
+  uint8_t _private[0];
+} OpaqueSafetyNet;
+
+typedef struct OpaqueSafetyNet *lr_safety_net_t;
+
 typedef struct OpaqueLocRib {
   uint8_t _private[0];
 } OpaqueLocRib;
@@ -4187,6 +4193,83 @@ int32_t lr_resolver_add_community_list(lr_resolver_t resolver,
                                        const char *name,
                                        const struct lr_community_entry_t *entries,
                                        uintptr_t count);
+
+/**
+ * Construct a `SafetyNet` for the given local AS (RFC 4271 §9.1.4
+ * safety checks). The local AS is used for AS-path loop detection.
+ *
+ * Returns NULL on a panic.
+ */
+lr_safety_net_t lr_safety_net_new(uint32_t local_as);
+
+/**
+ * Set the local source address (for martian / source-alias checks).
+ * Returns a NEW handle (the input handle is consumed and freed).
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle. `addr_v4` is the 4-byte IPv4
+ * address (NULL when IPv6); `addr_v6` is the 16-byte IPv6 address
+ * (NULL when IPv4).
+ */
+lr_safety_net_t lr_safety_net_with_local_addr(lr_safety_net_t r,
+                                              const uint8_t *addr_v4,
+                                              const uint8_t *addr_v6);
+
+/**
+ * Check one route against the safety net. `is_ebgp` selects the
+ * eBGP-specific checks (RFC 4271 §9.1.2 — the AS_PATH must not
+ * contain the local AS, the NEXT_HOP must not be the local address,
+ * etc.).
+ *
+ * Returns 0 when the route passes, 1 when a violation was detected
+ * (the violation is recorded in the last-error string), negative on
+ * error.
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle. `route` must be a valid
+ * route handle.
+ */
+int32_t lr_safety_net_check(lr_safety_net_t r, lr_route_t route, uint8_t is_ebgp);
+
+/**
+ * Drop a boxed SafetyNet. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_safety_net_new` and not already
+ * freed.
+ */
+void lr_safety_net_free(lr_safety_net_t r);
+
+/**
+ * Bind a route-map to a session's import path. Returns 0 on
+ * success, `LR_ERR_NULL` on a NULL resolver, `LR_ERR_OTHER` (-6)
+ * when the named route-map does not exist.
+ *
+ * # Safety
+ * `r` must be a valid resolver handle. `map_name` must be a
+ * NUL-terminated C string (NULL is treated as "no map").
+ */
+int32_t lr_policy_set_bind_import(lr_resolver_t r, uint64_t session, const char *map_name);
+
+/**
+ * Bind a route-map to a session's export path. Same contract as
+ * [`lr_policy_set_bind_import`].
+ *
+ * # Safety
+ * See [`lr_policy_set_bind_import`].
+ */
+int32_t lr_policy_set_bind_export(lr_resolver_t r, uint64_t session, const char *map_name);
+
+/**
+ * Validate the PolicySet's bindings — returns 0 when the set is
+ * internally consistent, 1 when a binding references a route-map
+ * that does not exist (the offending session + reason are recorded
+ * in the last-error string), negative on error.
+ *
+ * # Safety
+ * `r` must be a valid resolver handle.
+ */
+int32_t lr_policy_set_validate(lr_resolver_t r);
 
 /**
  * Construct an empty Loc-RIB (RFC 4271 §9).
