@@ -38,6 +38,11 @@ pub mod neighbor;
 pub mod nssa;
 pub mod origination;
 pub mod packet;
+/// Per-neighbor LSA retransmission list (RFC 2328 §13.5 / §13.6 / §13.7).
+/// The flood path adds LSAs to the receiving neighbor's list; the
+/// LS-Acknowledgment handler drains them; the poll loop retransmits
+/// any that have waited `RxmtInterval` without an ack.
+pub mod retransmit;
 pub mod spf;
 /// Per-node Segment Routing database (RFC 8665 reception): the SRGBs
 /// and Prefix-SID mappings projected from the area LSDB, plus the
