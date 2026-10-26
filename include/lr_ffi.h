@@ -165,6 +165,18 @@
  */
 #define LR_BFD_DIAG_MISCONN_DEFECT 9
 
+#define LR_BGP_STATE_IDLE 1
+
+#define LR_BGP_STATE_CONNECT 2
+
+#define LR_BGP_STATE_ACTIVE 3
+
+#define LR_BGP_STATE_OPEN_SENT 4
+
+#define LR_BGP_STATE_OPEN_CONFIRM 5
+
+#define LR_BGP_STATE_ESTABLISHED 6
+
 #define LR_BMP_VERSION VERSION
 
 
@@ -510,6 +522,12 @@ typedef struct OpaqueBfdPacket {
 } OpaqueBfdPacket;
 
 typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
+
+typedef struct OpaqueBgpPeer {
+  uint8_t _private[0];
+} OpaqueBgpPeer;
+
+typedef struct OpaqueBgpPeer *lr_bgp_peer_t;
 
 /**
  * Opaque `BmpMessage` handle.
@@ -1665,6 +1683,179 @@ int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uin
  * and must not be used after this call.
  */
 void lr_bfd_packet_free(lr_bfd_packet_t packet);
+
+/**
+ * Construct a `BgpPeer` from the BGP-4 mandatory parameters (RFC
+ * 4271 §4.2, §8). Returns NULL on a panic.
+ *
+ * `local_bgp_id` is the 32-bit BGP identifier (network byte order
+ * is irrelevant — the value is stored as a `u32` and the codec
+ * writes it big-endian on the wire).
+ *
+ * `hold_time` is the seconds the peer proposes for the hold timer;
+ * 0 means "use the negotiated default (90 s)".
+ * `keepalive` is the seconds the peer proposes for the keepalive
+ * timer; 0 means "use hold_time / 3".
+ * `asn4` selects RFC 6793 four-octet-AS support.
+ */
+lr_bgp_peer_t lr_bgp_peer_new(uint32_t local_as,
+                              uint32_t peer_as,
+                              uint32_t local_bgp_id,
+                              uint16_t hold_time,
+                              uint16_t keepalive,
+                              uint8_t asn4);
+
+/**
+ * Drop a boxed BgpPeer. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_bgp_peer_new` and not already freed.
+ */
+void lr_bgp_peer_free(lr_bgp_peer_t r);
+
+/**
+ * Read the current FSM state. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+int32_t lr_bgp_peer_state(lr_bgp_peer_t r);
+
+/**
+ * 1 when the peer is in Established state, 0 otherwise. Returns 0 on
+ * a NULL handle.
+ *
+ * # Safety
+ * See [`lr_bgp_peer_state`].
+ */
+uint8_t lr_bgp_peer_is_established(lr_bgp_peer_t r);
+
+/**
+ * Read the peer's BGP identifier (post-OPEN). Returns 1 when the
+ * peer has advertised a BGP id; 0 when no OPEN has been received
+ * yet (in which case `*out` is left unchanged).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `out` must point to writable
+ * `uint32_t`.
+ */
+int32_t lr_bgp_peer_peer_bgp_id(lr_bgp_peer_t r, uint32_t *out);
+
+/**
+ * Read the peer's AS (post-OPEN). Returns 1 when the peer has
+ * advertised an AS; 0 when no OPEN has been received yet.
+ *
+ * # Safety
+ * See [`lr_bgp_peer_peer_bgp_id`].
+ */
+int32_t lr_bgp_peer_peer_as(lr_bgp_peer_t r, uint32_t *out);
+
+/**
+ * Read the negotiated hold time (seconds). Returns 0 on a NULL
+ * handle or when negotiation has not completed.
+ *
+ * # Safety
+ * See [`lr_bgp_peer_state`].
+ */
+uint16_t lr_bgp_peer_negotiated_hold_time(lr_bgp_peer_t r);
+
+/**
+ * Feed inbound wire bytes into the peer's stream-decoder. The
+ * resulting outbound bytes (OPEN / KEEPALIVE / UPDATE /
+ * NOTIFICATION responses) are appended to the peer's drain buffer
+ * — use [`lr_bgp_peer_drain_outgoing`] to read them.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle, -5
+ * (`LR_ERR_CODEC`) on a parse error (the last-error string is set).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `data` must point to `len`
+ * readable bytes.
+ */
+int32_t lr_bgp_peer_feed_bytes(lr_bgp_peer_t r, const uint8_t *data, uintptr_t len);
+
+/**
+ * Drain the peer's outbound byte buffer. Returns 0 on success and
+ * writes a freshly-allocated `lr_bytes_t` to `*out`. The caller
+ * frees it via `lr_bytes_free`.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `out` must point to writable
+ * memory.
+ */
+int32_t lr_bgp_peer_drain_outgoing(lr_bgp_peer_t r, struct lr_bytes_t *out);
+
+/**
+ * Drive the FSM with `ManualStart` (RFC 4271 §8.1.2).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+int32_t lr_bgp_peer_step_manual_start(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `ManualStop` (RFC 4271 §8.1.2).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_manual_stop(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `TransportOpen` (RFC 4271 §8.1.2).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_transport_open(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `TransportFatal` (RFC 4271 §8.1.2).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_transport_fatal(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `TransportClose` (RFC 4271 §8.1.2).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_transport_close(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `TimerConnectRetry` (RFC 4271 §8.1.3).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_timer_connect_retry(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `TimerHoldExpired` (RFC 4271 §8.1.3).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_timer_hold_expired(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `TimerKeepalive` (RFC 4271 §8.1.3).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_timer_keepalive(lr_bgp_peer_t r);
+
+/**
+ * Drive the FSM with `TimerIdleHold` (RFC 4271 §8.1.3).
+ *
+ * # Safety
+ * See [`lr_bgp_peer_step_manual_start`].
+ */
+int32_t lr_bgp_peer_step_timer_idle_hold(lr_bgp_peer_t r);
 
 /**
  * Decode one BMP message from `data`. On success, writes a freshly-
