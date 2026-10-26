@@ -1308,3 +1308,89 @@ fn accepts_confed_segments_from_confederation_peer() {
         "a confederation peer must install routes from a same-confederation AS_CONFED_* path"
     );
 }
+
+// ===== StateMachine trait adapter surfaces RouteRefresh / EndOfRib =====
+//
+// `BgpPeer::step()` (the inherent method) emits `BgpAction::RouteRefreshRequested`
+// and `BgpAction::EndOfRib`; the daemon consumes these directly. The
+// `StateMachine for BgpPeer` trait adapter flattens `BgpAction` into the
+// generic `lr_core::fsm::Action` enum so a trait-only embedder can drive the
+// FSM without depending on `lr-bgp`'s action vocabulary. Before the issue
+// #92 fix the adapter mapped both variants to `Action::None`, silently
+// dropping the signal — these tests pin the contract that the adapter now
+// surfaces them as `Action::EmitEvent(Event::RouteRefreshRequested { .. })`
+// and `Action::EmitEvent(Event::EndOfRib { .. })`.
+
+/// Helper: drive `peer` through the `StateMachine` trait and return the
+/// flattened `Vec<Action>` for the single `BgpEvent`. Mirrors how a
+/// trait-only embedder would call `peer.step(event)` — the inherent
+/// `BgpPeer::step` returns `Vec<BgpAction>`, the trait `step` returns
+/// `Vec<Action>`.
+fn trait_step(peer: &mut BgpPeer, ev: BgpEvent) -> Vec<Action> {
+    use lr_core::fsm::StateMachine;
+    StateMachine::step(peer, ev)
+}
+
+/// A negotiated ROUTE-REFRESH received by peer `a` surfaces through the
+/// `StateMachine` trait adapter as
+/// `Action::EmitEvent(Event::RouteRefreshRequested)`, not `Action::None`.
+/// The session id is `cfg.peer_id` of the receiving peer (here `0`
+/// because the test peer never overrides the default).
+#[test]
+fn trait_adapter_surfaces_route_refresh() {
+    use crate::message::route_refresh::RouteRefresh;
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    // The peer must have negotiated ROUTE-REFRESH for the FSM to surface
+    // the action; the default `PeerConfig::new` enables it.
+    assert!(a.route_refresh_negotiated());
+    let actions = trait_step(
+        &mut a,
+        BgpEvent::Message(BgpMessage::RouteRefresh(RouteRefresh::new(
+            NlriFamily::IPV4_UNICAST,
+        ))),
+    );
+    let found = actions.iter().any(|a| {
+        matches!(
+            a,
+            Action::EmitEvent(lr_core::event::Event::RouteRefreshRequested {
+                family: NlriFamily { afi: 1, safi: 1 },
+                session: 0,
+            })
+        )
+    });
+    assert!(
+        found,
+        "the trait adapter must surface RouteRefreshRequested as \
+         Action::EmitEvent(Event::RouteRefreshRequested); if this assertion \
+         fails, the adapter has regressed to mapping BgpAction::RouteRefreshRequested \
+         to Action::None"
+    );
+}
+
+/// The End-of-RIB marker received by a peer surfaces through the
+/// `StateMachine` trait adapter as `Action::EmitEvent(Event::EndOfRib)`,
+/// not `Action::None`. An empty UPDATE is the End-of-RIB marker for
+/// IPv4 unicast (RFC 4724 §4).
+#[test]
+fn trait_adapter_surfaces_end_of_rib() {
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    let actions = trait_step(&mut a, BgpEvent::Message(BgpMessage::Update(Update::new())));
+    let found = actions.iter().any(|a| {
+        matches!(
+            a,
+            Action::EmitEvent(lr_core::event::Event::EndOfRib {
+                family: NlriFamily { afi: 1, safi: 1 },
+                session: 0,
+            })
+        )
+    });
+    assert!(
+        found,
+        "the trait adapter must surface EndOfRib as \
+         Action::EmitEvent(Event::EndOfRib); if this assertion fails, \
+         the adapter has regressed to mapping BgpAction::EndOfRib \
+         to Action::None"
+    );
+}

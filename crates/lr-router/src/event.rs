@@ -115,6 +115,23 @@ impl From<Event> for RouterEvent {
             Event::Log(s) => Self::Log(s),
             Event::PrefixAdvertised(p) => Self::PrefixAdvertised(p),
             Event::PrefixRetracted(p) => Self::PrefixRetracted(p),
+            // The trait-only `StateMachine for BgpPeer` adapter surfaces
+            // these so a trait-only embedder can react to them. The daemon
+            // consumes `BgpAction::RouteRefreshRequested` / `BgpAction::EndOfRib`
+            // directly through `BgpPeer::step()` and never reaches this
+            // arm — surfacing as a `Log` line keeps the daemon's event
+            // stream readable while still leaving a trace for the
+            // trait-only path. Embedders that want structured access can
+            // match on the source `Event` directly (the trait adapter's
+            // output goes through `Action::EmitEvent`).
+            Event::RouteRefreshRequested { session, family } => Self::Log(format!(
+                "bgp: route-refresh requested by session {session} for afi={} safi={}",
+                family.afi, family.safi
+            )),
+            Event::EndOfRib { session, family } => Self::Log(format!(
+                "bgp: end-of-rib received from session {session} for afi={} safi={}",
+                family.afi, family.safi
+            )),
         }
     }
 }

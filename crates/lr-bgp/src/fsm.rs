@@ -1495,10 +1495,33 @@ impl StateMachine for BgpPeer {
                 BgpAction::Emit(ev) => Action::EmitEvent(ev),
                 BgpAction::InstallRoute(r) => Action::InstallRoute(r),
                 BgpAction::WithdrawRoute { key, path_id } => Action::WithdrawRoute { key, path_id },
-                // The generic core FSM has no route-refresh-specific action;
-                // router-aware embedders consume it through `BgpAction`.
-                BgpAction::RouteRefreshRequested(_) => Action::None,
-                BgpAction::EndOfRib(_) => Action::None,
+                // RFC 2918 §2 ROUTE-REFRESH: the daemon consumes this
+                // through `BgpAction` directly (router-aware path) and
+                // re-announces the requested family to the peer; a
+                // trait-only embedder that drives `BgpPeer` through the
+                // `StateMachine` trait previously saw `Action::None`
+                // and silently lost the request. Surface it as a
+                // structured `Event::RouteRefreshRequested` so the
+                // trait-only embedder can react (log it, fan out to a
+                // controller, etc.). The session id is `cfg.peer_id`,
+                // matching what `BgpPeer::step()` populates for
+                // `Event::PeerStateChange`.
+                BgpAction::RouteRefreshRequested(family) => {
+                    Action::EmitEvent(lr_core::event::Event::RouteRefreshRequested {
+                        session: self.cfg.peer_id,
+                        family,
+                    })
+                }
+                // RFC 4724 §4 End-of-RIB: same shape — the daemon
+                // consumes `BgpAction::EndOfRib` directly to advance
+                // retention tracking; a trait-only embedder previously
+                // saw `Action::None`. Surface it as a structured
+                // `Event::EndOfRib` so the trait-only embedder can
+                // react.
+                BgpAction::EndOfRib(family) => Action::EmitEvent(lr_core::event::Event::EndOfRib {
+                    session: self.cfg.peer_id,
+                    family,
+                }),
                 BgpAction::None => Action::None,
             })
             .collect()
