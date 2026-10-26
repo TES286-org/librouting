@@ -174,7 +174,20 @@ first:
 | Local routes | `lr_router_originate_v4`/`_v6`, `lr_router_originate_labeled_v4`/`_v6`, `lr_router_withdraw_v4`/`_v6`, `lr_router_install_static_v4`/`_v6` |
 | Policy objects | `lr_prefix_list_*`, `lr_route_map_*`, `lr_resolver_*`, `lr_filter_*` |
 | ROA | `lr_roa_store_*`, `lr_router_add_roa_entry`, `lr_router_set_roa_validate` |
+| Codec (round-trip) | `lr_bgp_decode`, `lr_bgp_encode_*`, `lr_ospf_decode_v2`, `lr_babel_decode` |
+| Codec (parsed-form BGP inspection) | `lr_bgp_decode_message`, `lr_bgp_message_free`, `lr_bgp_message_type`, `lr_bgp_message_open_*`, `lr_bgp_message_notification_*`, `lr_bgp_message_route_refresh_*`, `lr_bgp_message_update_*` |
 | Observability | `lr_router_rib_len`, `lr_router_rib_dump`, `lr_router_sessions_dump` |
+
+The codec round-trip surface (`lr_bgp_decode` etc.) returns the
+canonical re-encoded bytes — useful for differential checks. The
+parsed-form BGP inspection surface keeps the structured
+`BgpMessage` alive behind an opaque `lr_bgp_message_t` handle so
+an embedder can read the variant fields (OPEN's AS, NOTIFICATION's
+code, UPDATE's NLRI list, ROUTE-REFRESH's AFI/SAFI) without writing
+a BGP parser outside the library. Constants `LR_BGP_MSG_OPEN` /
+`_UPDATE` / `_NOTIFICATION` / `_KEEPALIVE` / `_ROUTE_REFRESH` and
+`LR_BGP_RR_SUBTYPE_NORMAL` / `_BORR` / `_EORR` are defined in
+`include/lr_ffi.h`.
 
 Every buffer the ABI hands you is owned: release it with
 `lr_bytes_free`. Every handle you create is yours: release it with the

@@ -139,7 +139,32 @@ complete ABI, and `r.get()` reaches all of it.
 | ROA | `make_roa_store`, `roa_store_replace_static`, `roa_store_apply_deltas`, `roa_store_validate` |
 | Policy objects | `make_route_v4`/`_v6`, `make_prefix_list`, `make_route_map`, `make_resolver`, `make_filter` and their setters/evaluators |
 | BGP encoders | `encode_keepalive`, `encode_open`, `encode_notification`, `encode_update_withdraw_v4`, `encode_update_announce_v4` |
+| BGP parsed-form inspection | `BgpMessage`, `decode_bgp_message`, `message_kind`, `open_version`/`_my_as`/`_hold_time`/`_bgp_id`/`_param_count`/`_param_at`, `notification_code`/`_subcode`/`_data`, `route_refresh_afi`/`_safi`/`_subtype`, `update_withdrawn_count`/`_nlri_count`/`_attr_count`/`_withdrawn_at`/`_nlri_at`/`_attr_at` |
 | Buffer helper | `to_vec` |
+
+The `BgpMessage` type is a `std::unique_ptr<OpaqueBgpMessage,
+BgpMessageDeleter>` — RAII release, exception-on-error accessors
+matching the rest of the wrapper. Decode wire bytes once via
+`decode_bgp_message(data, len)` or `decode_bgp_message(vec)`, then
+read the variant fields with the accessors above. The accessors
+throw `librouting::Error` on a null handle, a variant mismatch (e.g.
+calling `notification_code` on an OPEN), or an out-of-range index —
+the underlying last-error string is preserved in the exception
+message.
+
+```cpp
+auto wire = to_vec(encode_open(4'200'000'000, 180, {10, 0, 0, 1}, true));
+auto m = decode_bgp_message(wire);
+if (message_kind(m) == BgpMessageKind::Open) {
+    // open_my_as unwraps AS_TRANS (23456) → real 32-bit AS.
+    assert(open_my_as(m) == 4'200'000'000);
+    // The capabilities TLV carries the Four-Octet-AS capability
+    // (code 65, length 4).
+    assert(open_param_count(m) == 1);
+    auto p = open_param_at(m, 0);
+    assert(p.param_type == 2 && p.value[0] == 65);
+}
+```
 
 Functions the header exports that the wrapper does **not** cover include
 `lr_router_start_session`, `lr_router_rib_len`, `lr_router_rib_dump`,

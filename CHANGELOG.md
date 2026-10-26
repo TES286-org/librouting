@@ -94,6 +94,117 @@ recompiling.
 
 ### Added
 
+**Structured BGP message inspection surface** (`ffi`, issue #92). The
+C ABI gained a structured BGP-message inspection surface mirroring
+the `lr_bgp::BgpMessage` enum and its variants, so an embedder can
+decode a BGP message once and walk its variant fields field-by-field
+across the ABI — the same shape a Rust embedder gets from
+`match msg { ... }`. The pre-existing `lr_bgp_decode` round-trip path
+returned the canonical re-encoded bytes (useful for differential
+checks) but exposed none of the parsed structure, forcing C/Go/Python
+embedders who wanted to read a message's fields to write their own
+BGP parser outside the library — defeating the point of the FFI.
+
+The new surface adds an opaque handle `lr_bgp_message_t` (boxes a
+`BgpMessage`) plus a decode entry point and per-variant readers:
+
+- `lr_bgp_decode_message(data, len) -> lr_bgp_message_t` — decodes one
+  BGP message and returns an owned handle (NULL on failure; the
+  thread-local last-error string is set).
+- `lr_bgp_message_free(m)` — releases the handle. Safe on NULL.
+- `lr_bgp_message_type(m, *out) -> int32_t` — writes the message type
+  code (1..5, see `LR_BGP_MSG_OPEN` etc.) to `*out`.
+
+OPEN readers (RFC 4271 §4.2):
+
+- `lr_bgp_message_open_version` / `_my_as` / `_hold_time` /
+  `_bgp_id` — basic OPEN fields. `_my_as` unwraps AS_TRANS (23456)
+  when the RFC 6793 four-octet-AS capability is present, surfacing
+  the real 32-bit AS.
+- `lr_bgp_message_open_param_count` / `_param_at(idx, *out_type,
+  *out_value)` — walks the OPEN optional parameters (RFC 5492
+  capabilities). The param value is the raw capability payload —
+  a sequence of `(code:1, length:1, value:length)` triples an
+  embedder can crack open with `Capability::decode_set` on the Rust
+  side or by hand from C.
+
+NOTIFICATION readers (RFC 4271 §4.5):
+
+- `lr_bgp_message_notification_code` / `_subcode` / `_data(*out)` —
+  error code, subcode and the variable-length diagnostic data
+  payload (often empty for compact Cease/Administrative-Reset
+  NOTIFICATIONs BIRD/FRR emit).
+
+ROUTE-REFRESH readers (RFC 2918 + RFC 7313):
+
+- `lr_bgp_message_route_refresh_afi` / `_safi` / `_subtype` —
+  address-family, sub-address-family and the RFC 7313 subtype
+  (0 = Normal, 1 = BoRR, 2 = EoRR, 0xff = unknown — RFC 7313 §3.2
+  requires the message be silently ignored, so the decoder maps
+  unrecognized values here).
+
+UPDATE readers (RFC 4271 §4.3):
+
+- `lr_bgp_message_update_withdrawn_count` /
+  `_nlri_count` / `_attr_count` — section sizes.
+- `lr_bgp_message_update_withdrawn_at(idx, *out_prefix)` /
+  `_nlri_at(idx, *out_prefix)` — IPv4 withdrawn routes and NLRI
+  entries as `lr_prefix_t` (16-byte zero-padded `addr`,
+  `is_ipv6` discriminator, `prefix_len`). MP-BGP NLRI (RFC 4760)
+  carried inside the MpReach/MpUnreach path attributes is reachable
+  through the attribute reader at index 14/15 — typed readers for
+  those are a follow-up.
+- `lr_bgp_message_update_attr_at(idx, *out_type, *out_flags,
+  *out_value)` — path attribute at `idx`. The flags byte layout is
+  RFC 4271 §5.1 + RFC 9072 §2 (bit 7 optional, bit 6 transitive,
+  bit 5 partial, bit 4 extended-length).
+
+Reader contract: every reader returns `LR_ERR_NULL` (-1) on a null
+handle, `LR_ERR_INVALID_HANDLE` (-2) when the message is not the
+variant the reader expects (e.g. calling `lr_bgp_message_open_*` on
+a NOTIFICATION), and `LR_ERR_OTHER` (-6) on out-of-range indices.
+
+Constants added to `include/lr_ffi.h` (cbindgen-generated):
+`LR_BGP_MSG_OPEN`/`_UPDATE`/`_NOTIFICATION`/`_KEEPALIVE`/`_ROUTE_REFRESH`
+and `LR_BGP_RR_SUBTYPE_NORMAL`/`_BORR`/`_EORR`.
+
+Per-protocol-binding parity:
+- **C++** (`include/librouting.hpp`): new RAII type
+  `librouting::BgpMessage` (with custom deleter), `decode_bgp_message`,
+  `message_kind`, `open_*`, `notification_*`, `route_refresh_*`,
+  `update_*` accessors. Throws `librouting::Error` on FFI failures.
+- **Python** (`bindings/lr-python`): new `librouting.codec.BgpMessage`
+  class with `decode`, `close`, `kind`, `open_*`, `notification_*`,
+  `route_refresh_*`, `update_*` methods, plus the
+  `BGP_MSG_*`/`BGP_RR_SUBTYPE_*` constants exported from the
+  top-level package. `__del__`/`__enter__`/`__exit__` keep the
+  handle single-owner.
+- **Go** (`bindings/lr-go`): new `BgpMessage` type with
+  `DecodeBgpMessage`, `Close`, `Kind`, `Open*`, `Notification*`,
+  `RouteRefresh*`, `Update*` methods, plus the `BGPMsg*` /
+  `BGPRRSubtype*` constants. `runtime.SetFinalizer` frees the
+  handle when the wrapper leaves scope.
+
+Test coverage: 16 new Rust unit tests in
+`crates/lr-ffi/src/codec.rs` cover every variant (OPEN/UPDATE/
+NOTIFICATION/KEEPALIVE/ROUTE-REFRESH), the AS_TRANS unwrap path,
+the variant-mismatch error path, the null-handle / null-output
+rejection paths, the out-of-range index path, the panic barrier
+contract (decode-then-free in a loop), and the box/unbox lifecycle
+for a hand-built message. New tests in `tests/ffi/harness.c` and
+`tests/ffi/harness.cpp` exercise the same surface from C and C++.
+New Python tests in `bindings/lr-python/tests/test_librouting.py`
+and Go tests in `bindings/lr-go/librouting_test.go` cover the same
+shapes. Full workspace test suite, clippy, fmt and the docs linters
+are green.
+
+The new surface is the template for the OSPF (`lr_ospf_message_t`)
+and Babel (`lr_babel_message_t`) inspection surfaces — the OSPFv3
+NSSA route-computation work landed in this same issue (#92) is the
+kind of protocol feature whose structured form embedders will want
+to read across the ABI in the same shape, and the BGP surface here
+is the established pattern they will follow.
+
 **BGP PMSI Tunnel filter DSL surface** (`policy`, `cli`, ROADMAP
 "Per-protocol route attributes and an external conversion corpus").
 The filter DSL now exposes the RFC 6514 §5 PMSI Tunnel attribute —

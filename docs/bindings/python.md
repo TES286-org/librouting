@@ -156,7 +156,27 @@ after `cargo build --release -p lr-ffi`.
 | Policy objects | `Route`, `PrefixList`, `RouteMap`, `Resolver`, `Match`, `Set`, `AsPathFilter`, `CommunityEntry` |
 | Filter DSL | `compile_filter`, `CompiledFilter`, `FILTER_*` |
 | Codecs | `codec.encode_keepalive`, `encode_open`, `encode_notification`, `encode_update_withdraw_v4`, `encode_update_announce_v4`, `decode_bgp`, `decode_ospf_v2`, `decode_babel`, `encode_srv6_srh`, `decode_srv6_srh` |
+| Codecs (parsed-form BGP inspection) | `codec.BgpMessage`, `codec.BGP_MSG_*`, `codec.BGP_RR_SUBTYPE_*` |
 | Diagnostics | `rib_len`, `rib_dump`, `sessions_dump`, `mpls_platform_labels` |
+
+The `codec.BgpMessage` class wraps the opaque `lr_bgp_message_t`
+handle. Decode wire bytes once via `BgpMessage.decode(data)`, then
+read the variant fields with the `kind` / `open_*` /
+`notification_*` / `route_refresh_*` / `update_*` accessors. The
+handle is single-owner; `__del__`, `__enter__` / `__exit__` and an
+explicit `close()` all free it. Use it as a context manager:
+
+```python
+import librouting
+
+wire = librouting.encode_open(4_200_000_000, 180, "10.0.0.1", as4=True)
+with librouting.BgpMessage.decode(wire) as m:
+    assert m.kind() == librouting.BGP_MSG_OPEN
+    assert m.open_my_as() == 4_200_000_000  # unwraps AS_TRANS
+    assert m.open_param_count() == 1
+    ptype, pvalue = m.open_param_at(0)
+    # pvalue[0] == 65 → RFC 6793 Four-Octet-AS capability code.
+```
 
 `add_bgp_session` takes the full graceful-restart knob set:
 `hold_time`, `keepalive`, `asn4`, `graceful_restart`, `gr_restart_time`

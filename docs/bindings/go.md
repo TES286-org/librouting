@@ -178,4 +178,20 @@ The exported surface mirrors the C ABI group by group.
 | Damping | `SetDamping`, `DampingConfig`, `(*Damping).Decay` |
 | Policy objects | `NewRouteV4`/`V6`, `NewPrefixList`, `NewRouteMap`, `NewResolver`, `Compile` |
 | Codecs | `EncodeKeepalive`, `EncodeOpen`, `EncodeNotification`, `EncodeUpdateWithdrawV4`, `EncodeUpdateAnnounceV4`, `DecodeBGP`, `EncodeSRv6SRH`, `DecodeSRv6SRH` |
+| Codecs (parsed-form BGP inspection) | `BgpMessage`, `DecodeBgpMessage`, `(*BgpMessage).Close`, `Kind`, `Open*`, `Notification*`, `RouteRefresh*`, `Update*`, `BGPMsg*`, `BGPRRSubtype*` |
 | Diagnostics | `LastError`, `ABIVersion`, `MplsPlatformLabels`, `RibLen`, `RibDump`, `SessionsDump` |
+
+The `BgpMessage` type wraps the opaque `lr_bgp_message_t` handle.
+Decode wire bytes once via `DecodeBgpMessage(data)`, then read the
+variant fields with the `Kind` / `Open*` / `Notification*` /
+`RouteRefresh*` / `Update*` accessors. `runtime.SetFinalizer` frees
+the handle when the wrapper leaves scope; an explicit `Close` is
+also available for deterministic teardown.
+
+```go
+wire, _ := librouting.EncodeOpen(4_200_000_000, 180, [4]byte{10, 0, 0, 1}, true)
+m, _ := librouting.DecodeBgpMessage(wire)
+defer m.Close()
+kind, _ := m.Kind() // == librouting.BGPMsgOpen
+asn, _ := m.OpenMyAs() // == 4_200_000_000 (unwraps AS_TRANS)
+```
