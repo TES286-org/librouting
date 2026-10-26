@@ -23,9 +23,11 @@
 #![allow(clippy::drop_non_drop)]
 
 pub mod babel;
+pub mod best_path;
 pub mod bfd;
 pub mod bmp;
 pub mod bytes;
+pub mod capabilities;
 pub mod codec;
 pub mod core;
 pub mod error;

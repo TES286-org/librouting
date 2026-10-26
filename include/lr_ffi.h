@@ -193,6 +193,24 @@
 
 #define LR_BMP_PEER_FLAG_A 32
 
+#define LR_BGP_CAP_MULTIPROTOCOL_EXTENSIONS 1
+
+#define LR_BGP_CAP_ROUTE_REFRESH 2
+
+#define LR_BGP_CAP_EXTENDED_NEXT_HOP 5
+
+#define LR_BGP_CAP_EXTENDED_MESSAGE 6
+
+#define LR_BGP_CAP_GRACEFUL_RESTART 64
+
+#define LR_BGP_CAP_FOUR_OCTET_AS 65
+
+#define LR_BGP_CAP_ADD_PATH 69
+
+#define LR_BGP_CAP_ENHANCED_ROUTE_REFRESH 70
+
+#define LR_BGP_CAP_LONG_LIVED_GRACEFUL_RESTART 71
+
 /**
  * BGP message type codes (RFC 4271 §4.1 + RFC 2918). Mirrors
  * [`lr_bgp::BgpMessageType`] but exposed as plain `u8` constants so C
@@ -458,6 +476,33 @@ typedef struct lr_bytes_t {
 } lr_bytes_t;
 
 /**
+ * Repr-C `BestPathConfig`. Mirrors `lr_bgp::best_path::BestPathConfig`.
+ */
+typedef struct lr_best_path_config_t {
+  uint8_t always_compare_med;
+  uint8_t missing_med_as_infinity;
+  uint8_t deterministic_router_id;
+  uint8_t prefer_externals;
+  uint8_t count_confed_in_path_len;
+  uint32_t multipath;
+  uint8_t multipath_relax;
+  uint8_t graceful_shutdown_least_preferred;
+  uint8_t compare_igp_metric;
+  uint8_t prefer_next_hop_self;
+} lr_best_path_config_t;
+
+/**
+ * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
+ * and route-map evaluation run against the same data model the
+ * library uses internally.
+ */
+typedef struct OpaqueRoute {
+  uint8_t _private[0];
+} OpaqueRoute;
+
+typedef struct OpaqueRoute *lr_route_t;
+
+/**
  * Opaque `BfdPacket` handle.
  */
 typedef struct OpaqueBfdPacket {
@@ -503,6 +548,15 @@ typedef struct lr_bmp_tlv_t {
   const uint8_t *value;
   uintptr_t value_len;
 } lr_bmp_tlv_t;
+
+/**
+ * Opaque `Capability` handle.
+ */
+typedef struct OpaqueBgpCapability {
+  uint8_t _private[0];
+} OpaqueBgpCapability;
+
+typedef struct OpaqueBgpCapability *lr_bgp_capability_t;
 
 /**
  * Repr-C IpAddr. Carries a `is_ipv6` flag plus 16 bytes (IPv4 occupies
@@ -623,17 +677,6 @@ typedef struct OpaqueFilter {
 } OpaqueFilter;
 
 typedef struct OpaqueFilter *lr_filter_t;
-
-/**
- * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
- * and route-map evaluation run against the same data model the
- * library uses internally.
- */
-typedef struct OpaqueRoute {
-  uint8_t _private[0];
-} OpaqueRoute;
-
-typedef struct OpaqueRoute *lr_route_t;
 
 /**
  * One RFC 4360 extended community, embedder-side.
@@ -1274,6 +1317,45 @@ uintptr_t lr_babel_frame_tlv_value_at(lr_babel_frame_t frame,
 void lr_babel_frame_free(lr_babel_frame_t frame);
 
 /**
+ * Construct a `BestPathConfig` with the RFC 4271 §9.1.2.2 defaults.
+ */
+struct lr_best_path_config_t lr_best_path_config_default(void);
+
+/**
+ * Construct a `BestPathConfig` with the explicit values the caller
+ * supplies. The `*_u8` fields are interpreted as booleans (0 = false,
+ * non-zero = true).
+ */
+struct lr_best_path_config_t lr_best_path_config_new(uint8_t always_compare_med,
+                                                     uint8_t missing_med_as_infinity,
+                                                     uint8_t deterministic_router_id,
+                                                     uint8_t prefer_externals,
+                                                     uint8_t count_confed_in_path_len,
+                                                     uint32_t multipath,
+                                                     uint8_t multipath_relax,
+                                                     uint8_t graceful_shutdown_least_preferred,
+                                                     uint8_t compare_igp_metric,
+                                                     uint8_t prefer_next_hop_self);
+
+/**
+ * Run the BGP best-path comparison between two route handles and
+ * return the comparison result. The two routes are passed as opaque
+ * `lr_route_t` handles (the same type the policy module uses).
+ *
+ * Returns:
+ * - `-1` when `a` is preferred.
+ * - `0` when the two routes tie (the caller should fall through to
+ *   the next tiebreaker).
+ * - `1` when `b` is preferred.
+ * - `LR_ERR_NULL` (-1) when either handle is NULL.
+ *
+ * # Safety
+ * Both handles must be valid (produced by `lr_route_new_v4` /
+ * `lr_route_new_v6` or another `lr_route_*` constructor).
+ */
+int32_t lr_best_path_compare(lr_route_t a, lr_route_t b, struct lr_best_path_config_t cfg);
+
+/**
  * Decode one BFD Control packet from `data`. On success, writes a
  * freshly-allocated `lr_bfd_packet_t` to `*out`. Returns 0 on success,
  * negative on error.
@@ -1640,6 +1722,63 @@ uintptr_t lr_bytes_len(const struct lr_bytes_t *b);
  * Pointer to the data of an `lr_bytes_t`. NULL if `b` is NULL.
  */
 const uint8_t *lr_bytes_ptr(const struct lr_bytes_t *b);
+
+/**
+ * Convert a BGP capability wire value to its `LR_BGP_CAP_*` constant.
+ * Unknown values are passed through as-is (matching `CapabilityCode::Other(u8)`).
+ */
+uint8_t lr_bgp_cap_code_from_wire(uint8_t wire);
+
+/**
+ * Construct a Four-Octet AS capability (RFC 6793 §4) carrying the
+ * given ASN. Returns an opaque `lr_bgp_capability_t` handle.
+ */
+lr_bgp_capability_t lr_bgp_cap_four_octet_as(uint32_t asn);
+
+/**
+ * Read the capability's wire code (one of the `LR_BGP_CAP_*`
+ * constants, or a pass-through value for unknown capabilities).
+ *
+ * # Safety
+ * `cap` must be a valid handle.
+ */
+uint8_t lr_bgp_cap_code(lr_bgp_capability_t cap);
+
+/**
+ * Read the length of the capability's value bytes.
+ *
+ * # Safety
+ * `cap` must be a valid handle.
+ */
+uintptr_t lr_bgp_cap_value_len(lr_bgp_capability_t cap);
+
+/**
+ * Copy the capability's value bytes into the caller-supplied buffer.
+ * Returns the number of bytes copied.
+ *
+ * # Safety
+ * `cap` must be a valid handle. `out` must point to at least `cap_size`
+ * writable bytes.
+ */
+uintptr_t lr_bgp_cap_value(lr_bgp_capability_t cap, uint8_t *out, uintptr_t cap_size);
+
+/**
+ * For a Four-Octet-AS capability, return the 4-byte ASN value. Returns
+ * 0 on a NULL handle or when the capability is not a Four-Octet-AS.
+ *
+ * # Safety
+ * `cap` must be a valid handle.
+ */
+uint32_t lr_bgp_cap_as_four_octet(lr_bgp_capability_t cap);
+
+/**
+ * Drop a boxed `Capability`. Safe to call with NULL.
+ *
+ * # Safety
+ * `cap` must have been produced by a `lr_bgp_cap_*` constructor and
+ * must not be used after this call.
+ */
+void lr_bgp_cap_free(lr_bgp_capability_t cap);
 
 /**
  * Decode one BGP message from `data`. Returns 0 on success (and writes a

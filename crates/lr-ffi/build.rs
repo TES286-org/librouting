@@ -112,4 +112,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ldp.rs");
     println!("cargo:rerun-if-changed=src/ospf.rs");
     println!("cargo:rerun-if-changed=src/babel.rs");
+    println!("cargo:rerun-if-changed=src/best_path.rs");
+    println!("cargo:rerun-if-changed=src/capabilities.rs");
 }
