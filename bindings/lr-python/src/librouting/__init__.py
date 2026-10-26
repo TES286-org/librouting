@@ -28,6 +28,24 @@ from .codec import (
     encode_update_withdraw_v4,
 )
 from .mpls import Label, LabelSpec, LabelStack
+from .bfd import (
+    BfdPacket,
+    decode_bfd_packet,
+    STATE_ADMIN_DOWN,
+    STATE_DOWN,
+    STATE_INIT,
+    STATE_UP,
+    DIAG_NONE,
+    DIAG_CTRL_EXPIRED,
+    DIAG_ECHO_FAILED,
+    DIAG_NEIGHBOR_SIGNALLED,
+    DIAG_FWD_RESET,
+    DIAG_PATH_DOWN,
+    DIAG_CONCAT_PATH_DOWN,
+    DIAG_ADMIN_DOWN,
+    DIAG_REV_PATH_DOWN,
+    DIAG_MISCONN_DEFECT,
+)
 from .policy import (
     EVAL_DENY,
     EVAL_FALLTHROUGH,
@@ -156,6 +174,23 @@ __all__ = [
     "Label",
     "LabelSpec",
     "LabelStack",
+    # BFD Control packet wire codec (RFC 5880 §4.1).
+    "BfdPacket",
+    "decode_bfd_packet",
+    "STATE_ADMIN_DOWN",
+    "STATE_DOWN",
+    "STATE_INIT",
+    "STATE_UP",
+    "DIAG_NONE",
+    "DIAG_CTRL_EXPIRED",
+    "DIAG_ECHO_FAILED",
+    "DIAG_NEIGHBOR_SIGNALLED",
+    "DIAG_FWD_RESET",
+    "DIAG_PATH_DOWN",
+    "DIAG_CONCAT_PATH_DOWN",
+    "DIAG_ADMIN_DOWN",
+    "DIAG_REV_PATH_DOWN",
+    "DIAG_MISCONN_DEFECT",
 ]
 
 # The single source of truth for the package version: pyproject.toml reads

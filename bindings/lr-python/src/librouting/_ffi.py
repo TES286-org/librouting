@@ -565,6 +565,51 @@ int32_t lr_mpls_label_stack_push(lr_mpls_label_stack_t stack, lr_mpls_label_t la
 int32_t lr_mpls_label_stack_push_bottom(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
 int32_t lr_mpls_label_stack_pop(lr_mpls_label_stack_t stack);
 void lr_mpls_label_stack_free(lr_mpls_label_stack_t stack);
+
+/* BFD Control packet wire codec (RFC 5880 §4.1). */
+typedef struct OpaqueBfdPacket OpaqueBfdPacket;
+typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
+
+#define LR_BFD_STATE_ADMIN_DOWN 0
+#define LR_BFD_STATE_DOWN 1
+#define LR_BFD_STATE_INIT 2
+#define LR_BFD_STATE_UP 3
+#define LR_BFD_DIAG_NONE 0
+#define LR_BFD_DIAG_CTRL_EXPIRED 1
+#define LR_BFD_DIAG_ECHO_FAILED 2
+#define LR_BFD_DIAG_NEIGHBOR_SIGNALLED 3
+#define LR_BFD_DIAG_FWD_RESET 4
+#define LR_BFD_DIAG_PATH_DOWN 5
+#define LR_BFD_DIAG_CONCAT_PATH_DOWN 6
+#define LR_BFD_DIAG_ADMIN_DOWN 7
+#define LR_BFD_DIAG_REV_PATH_DOWN 8
+#define LR_BFD_DIAG_MISCONN_DEFECT 9
+
+int32_t lr_bfd_decode(const uint8_t *data, uintptr_t len, lr_bfd_packet_t *out);
+int32_t lr_bfd_encode(lr_bfd_packet_t packet, lr_bytes_t *out);
+lr_bfd_packet_t lr_bfd_packet_new(void);
+lr_bfd_packet_t lr_bfd_packet_heartbeat(uint32_t my_disc, uint32_t your_disc);
+uint8_t lr_bfd_packet_version(lr_bfd_packet_t packet);
+uint8_t lr_bfd_packet_diag(lr_bfd_packet_t packet);
+uint8_t lr_bfd_packet_state(lr_bfd_packet_t packet);
+uint8_t lr_bfd_packet_flags(lr_bfd_packet_t packet);
+uint8_t lr_bfd_packet_detect_mult(lr_bfd_packet_t packet);
+uint32_t lr_bfd_packet_my_discriminator(lr_bfd_packet_t packet);
+uint32_t lr_bfd_packet_your_discriminator(lr_bfd_packet_t packet);
+uint32_t lr_bfd_packet_desired_min_tx_interval(lr_bfd_packet_t packet);
+uint32_t lr_bfd_packet_required_min_rx_interval(lr_bfd_packet_t packet);
+uint32_t lr_bfd_packet_required_min_echo_interval(lr_bfd_packet_t packet);
+uint8_t lr_bfd_packet_length(lr_bfd_packet_t packet);
+int32_t lr_bfd_packet_set_diag(lr_bfd_packet_t packet, uint8_t diag);
+int32_t lr_bfd_packet_set_state(lr_bfd_packet_t packet, uint8_t state);
+int32_t lr_bfd_packet_set_flags(lr_bfd_packet_t packet, uint8_t flags);
+int32_t lr_bfd_packet_set_detect_mult(lr_bfd_packet_t packet, uint8_t detect_mult);
+int32_t lr_bfd_packet_set_my_discriminator(lr_bfd_packet_t packet, uint32_t disc);
+int32_t lr_bfd_packet_set_your_discriminator(lr_bfd_packet_t packet, uint32_t disc);
+int32_t lr_bfd_packet_set_desired_min_tx_interval(lr_bfd_packet_t packet, uint32_t interval);
+int32_t lr_bfd_packet_set_required_min_rx_interval(lr_bfd_packet_t packet, uint32_t interval);
+int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uint32_t interval);
+void lr_bfd_packet_free(lr_bfd_packet_t packet);
 """
 
 
