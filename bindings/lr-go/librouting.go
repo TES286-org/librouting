@@ -967,6 +967,412 @@ func EncodeUpdateAnnounceV4(prefixes []PrefixSpec, nextHop [4]byte, asPath []uin
 	return copyBytes(&b), nil
 }
 
+// ===== BGP message inspection (parsed-form readers) =====
+//
+// `DecodeBgp` (above) returns the canonical re-encoded bytes — useful
+// for differential checks but not for reading a message's fields. The
+// `BgpMessage` type below wraps the opaque `lr_bgp_message_t` handle
+// and exposes the variant fields, mirroring `lr_bgp::BgpMessage`:
+// OPEN/UPDATE/NOTIFICATION/KEEPALIVE/ROUTE-REFRESH.
+
+// BGP message type codes (RFC 4271 §4.1 + RFC 2918).
+const (
+	BGPMsgOpen         = 1
+	BGPMsgUpdate       = 2
+	BGPMsgNotification = 3
+	BGPMsgKeepalive    = 4
+	BGPMsgRouteRefresh = 5
+)
+
+// Route-Refresh subtype (RFC 7313 §3.2).
+const (
+	BGPRRSubtypeNormal = 0
+	BGPRRSubtypeBoRR   = 1
+	BGPRRSubtypeEoRR   = 2
+)
+
+// BgpMessage is an owned BGP-message handle (a boxed
+// `lr_bgp::BgpMessage`). Decode wire bytes once via DecodeBgpMessage,
+// then read the variant fields with the Open* / Notification* /
+// RouteRefresh* / Update* accessors. The handle is freed automatically
+// by the runtime finalizer (or by an explicit Close).
+type BgpMessage struct {
+	handle C.lr_bgp_message_t
+}
+
+// DecodeBgpMessage decodes one BGP message and returns an owned handle
+// to the parsed form. Unlike DecodeBgp (which round-trips the parsed
+// message through `encode_vec` and hands back canonical bytes), this
+// keeps the structured `BgpMessage` alive so its variant fields can be
+// read by the matching accessors.
+func DecodeBgpMessage(data []byte) (*BgpMessage, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("DecodeBgpMessage: empty data")
+	}
+	h := C.lr_bgp_decode_message((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
+	if h == nil {
+		return nil, fmt.Errorf("lr_bgp_decode_message: %s", LastError())
+	}
+	m := &BgpMessage{handle: h}
+	// runtime.SetFinalizer frees the handle when the wrapper leaves
+	// scope — same shape as the Bytes / Router helpers above.
+	runtime.SetFinalizer(m, (*BgpMessage).Close)
+	return m, nil
+}
+
+// Close releases the underlying handle. Safe to call more than once.
+func (m *BgpMessage) Close() {
+	if m.handle != nil {
+		C.lr_bgp_message_free(m.handle)
+		m.handle = nil
+	}
+	runtime.SetFinalizer(m, nil)
+}
+
+func (m *BgpMessage) require() (C.lr_bgp_message_t, error) {
+	if m == nil || m.handle == nil {
+		return nil, fmt.Errorf("BgpMessage: handle already closed")
+	}
+	return m.handle, nil
+}
+
+// Kind returns the BGP message type code (1..5, see BGPMsg*).
+func (m *BgpMessage) Kind() (uint8, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint8_t
+	rc := C.lr_bgp_message_type(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_type: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint8(out), nil
+}
+
+// ---- OPEN readers (RFC 4271 §4.2) ----
+
+// OpenVersion returns the OPEN version (always 4 on a well-formed message).
+func (m *BgpMessage) OpenVersion() (uint8, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint8_t
+	rc := C.lr_bgp_message_open_version(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_open_version: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint8(out), nil
+}
+
+// OpenMyAs returns the sender AS. When the OPEN carries the RFC 6793
+// four-octet-AS capability, the real 32-bit AS is unwrapped from the
+// capability; otherwise the 16-bit `my_as` field is returned.
+func (m *BgpMessage) OpenMyAs() (uint32, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint32_t
+	rc := C.lr_bgp_message_open_my_as(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_open_my_as: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint32(out), nil
+}
+
+// OpenHoldTime returns the OPEN hold time in seconds.
+func (m *BgpMessage) OpenHoldTime() (uint16, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint16_t
+	rc := C.lr_bgp_message_open_hold_time(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_open_hold_time: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint16(out), nil
+}
+
+// OpenBgpID returns the 4-byte BGP identifier (network order).
+func (m *BgpMessage) OpenBgpID() ([4]byte, error) {
+	h, err := m.require()
+	if err != nil {
+		return [4]byte{}, err
+	}
+	var out [4]C.uint8_t
+	rc := C.lr_bgp_message_open_bgp_id(h, &out[0])
+	if rc != 0 {
+		return [4]byte{}, fmt.Errorf("lr_bgp_message_open_bgp_id: %s (rc=%d)", LastError(), int(rc))
+	}
+	return [4]byte{byte(out[0]), byte(out[1]), byte(out[2]), byte(out[3])}, nil
+}
+
+// OpenParamCount returns the number of OPEN optional parameters
+// (RFC 5492 capabilities).
+func (m *BgpMessage) OpenParamCount() (int, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	return int(C.lr_bgp_message_open_param_count(h)), nil
+}
+
+// OpenParam is one OPEN optional parameter: the type byte plus the raw
+// capability payload (RFC 5492 §3 — a sequence of
+// `(code:1, length:1, value:length)` triples).
+type OpenParam struct {
+	ParamType uint8
+	Value     []byte
+}
+
+// OpenParamAt returns the optional parameter at idx.
+func (m *BgpMessage) OpenParamAt(idx int) (OpenParam, error) {
+	h, err := m.require()
+	if err != nil {
+		return OpenParam{}, err
+	}
+	var ptype C.uint8_t
+	var pval C.struct_lr_bytes_t
+	rc := C.lr_bgp_message_open_param_at(h, C.size_t(idx), &ptype, &pval)
+	if rc != 0 {
+		return OpenParam{}, fmt.Errorf("lr_bgp_message_open_param_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&pval)
+	return OpenParam{ParamType: uint8(ptype), Value: copyBytes(&pval)}, nil
+}
+
+// OpenParams walks every optional parameter.
+func (m *BgpMessage) OpenParams() ([]OpenParam, error) {
+	n, err := m.OpenParamCount()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OpenParam, 0, n)
+	for i := 0; i < n; i++ {
+		p, err := m.OpenParamAt(i)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// ---- NOTIFICATION readers (RFC 4271 §4.5) ----
+
+// NotificationCode returns the NOTIFICATION error code.
+func (m *BgpMessage) NotificationCode() (uint8, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint8_t
+	rc := C.lr_bgp_message_notification_code(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_notification_code: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint8(out), nil
+}
+
+// NotificationSubcode returns the NOTIFICATION error subcode.
+func (m *BgpMessage) NotificationSubcode() (uint8, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint8_t
+	rc := C.lr_bgp_message_notification_subcode(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_notification_subcode: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint8(out), nil
+}
+
+// NotificationData returns the NOTIFICATION diagnostic payload
+// (often empty).
+func (m *BgpMessage) NotificationData() ([]byte, error) {
+	h, err := m.require()
+	if err != nil {
+		return nil, err
+	}
+	var out C.struct_lr_bytes_t
+	rc := C.lr_bgp_message_notification_data(h, &out)
+	if rc != 0 {
+		return nil, fmt.Errorf("lr_bgp_message_notification_data: %s (rc=%d)", LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&out)
+	return copyBytes(&out), nil
+}
+
+// ---- ROUTE-REFRESH readers (RFC 2918 + RFC 7313) ----
+
+// RouteRefreshAfi returns the ROUTE-REFRESH address-family identifier.
+func (m *BgpMessage) RouteRefreshAfi() (uint16, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint16_t
+	rc := C.lr_bgp_message_route_refresh_afi(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_route_refresh_afi: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint16(out), nil
+}
+
+// RouteRefreshSafi returns the ROUTE-REFRESH sub-address-family identifier.
+func (m *BgpMessage) RouteRefreshSafi() (uint8, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint8_t
+	rc := C.lr_bgp_message_route_refresh_safi(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_route_refresh_safi: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint8(out), nil
+}
+
+// RouteRefreshSubtype returns the RFC 7313 subtype (0 = Normal,
+// 1 = BoRR, 2 = EoRR, 0xff = unknown).
+func (m *BgpMessage) RouteRefreshSubtype() (uint8, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	var out C.uint8_t
+	rc := C.lr_bgp_message_route_refresh_subtype(h, &out)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_bgp_message_route_refresh_subtype: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint8(out), nil
+}
+
+// ---- UPDATE readers (RFC 4271 §4.3) ----
+
+// UpdateWithdrawnCount returns the number of withdrawn routes.
+func (m *BgpMessage) UpdateWithdrawnCount() (int, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	return int(C.lr_bgp_message_update_withdrawn_count(h)), nil
+}
+
+// UpdateNlriCount returns the number of NLRI entries (IPv4 unicast
+// legacy NLRI only; MP-BGP NLRI lives inside MpReach/MpUnreach).
+func (m *BgpMessage) UpdateNlriCount() (int, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	return int(C.lr_bgp_message_update_nlri_count(h)), nil
+}
+
+// UpdateAttrCount returns the number of path attributes.
+func (m *BgpMessage) UpdateAttrCount() (int, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	return int(C.lr_bgp_message_update_attr_count(h)), nil
+}
+
+// UpdateWithdrawnAt returns the withdrawn route at idx as a PrefixSpec.
+func (m *BgpMessage) UpdateWithdrawnAt(idx int) (PrefixSpec, error) {
+	h, err := m.require()
+	if err != nil {
+		return PrefixSpec{}, err
+	}
+	var p C.struct_lr_prefix_t
+	rc := C.lr_bgp_message_update_withdrawn_at(h, C.size_t(idx), &p)
+	if rc != 0 {
+		return PrefixSpec{}, fmt.Errorf("lr_bgp_message_update_withdrawn_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+	}
+	return prefixFromC(p), nil
+}
+
+// UpdateNlriAt returns the NLRI entry at idx as a PrefixSpec.
+func (m *BgpMessage) UpdateNlriAt(idx int) (PrefixSpec, error) {
+	h, err := m.require()
+	if err != nil {
+		return PrefixSpec{}, err
+	}
+	var p C.struct_lr_prefix_t
+	rc := C.lr_bgp_message_update_nlri_at(h, C.size_t(idx), &p)
+	if rc != 0 {
+		return PrefixSpec{}, fmt.Errorf("lr_bgp_message_update_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+	}
+	return prefixFromC(p), nil
+}
+
+// PathAttr is one path attribute: type code, flags byte and raw value bytes.
+type PathAttr struct {
+	AttrType uint8
+	Flags    uint8
+	Value    []byte
+}
+
+// UpdateAttrAt returns the path attribute at idx.
+func (m *BgpMessage) UpdateAttrAt(idx int) (PathAttr, error) {
+	h, err := m.require()
+	if err != nil {
+		return PathAttr{}, err
+	}
+	var atype, aflags C.uint8_t
+	var aval C.struct_lr_bytes_t
+	rc := C.lr_bgp_message_update_attr_at(h, C.size_t(idx), &atype, &aflags, &aval)
+	if rc != 0 {
+		return PathAttr{}, fmt.Errorf("lr_bgp_message_update_attr_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&aval)
+	return PathAttr{
+		AttrType: uint8(atype),
+		Flags:    uint8(aflags),
+		Value:    copyBytes(&aval),
+	}, nil
+}
+
+// UpdateAttrs walks every path attribute.
+func (m *BgpMessage) UpdateAttrs() ([]PathAttr, error) {
+	n, err := m.UpdateAttrCount()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PathAttr, 0, n)
+	for i := 0; i < n; i++ {
+		a, err := m.UpdateAttrAt(i)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// prefixFromC projects a `C.struct_lr_prefix_t` into the Go-side
+// `PrefixSpec`. IPv4 carries the address in the first 4 bytes of `addr`
+// (the remaining 12 are zero); IPv6 uses all 16 bytes.
+func prefixFromC(p C.struct_lr_prefix_t) PrefixSpec {
+	spec := PrefixSpec{PrefixLen: uint8(p.prefix_len)}
+	if p.is_ipv6 != 0 {
+		spec.Addr = make([]byte, 16)
+		for i := 0; i < 16; i++ {
+			spec.Addr[i] = byte(p.addr[i])
+		}
+	} else {
+		spec.Addr = make([]byte, 4)
+		for i := 0; i < 4; i++ {
+			spec.Addr[i] = byte(p.addr[i])
+		}
+	}
+	return spec
+}
+
 // cPrefixArray is a scratch []C.lr_prefix_t kept alive until the FFI
 // call returns.
 type cPrefixArray []C.lr_prefix_t

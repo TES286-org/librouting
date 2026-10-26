@@ -1793,3 +1793,300 @@ func TestFilterDSLBabelRouterId(t *testing.T) {
 			verdict, err, FilterAccept)
 	}
 }
+
+func TestBgpMessageDecodeOpenRoundTrip(t *testing.T) {
+	// OPEN with 4-byte AS: BgpMessage.OpenMyAs unwraps AS_TRANS (23456)
+	// and surfaces the real 32-bit AS from the RFC 6793 capability.
+	wire, err := EncodeOpen(4_200_000_000, 180, [4]byte{10, 0, 0, 1}, true)
+	if err != nil {
+		t.Fatalf("EncodeOpen: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+
+	if k, _ := m.Kind(); k != BGPMsgOpen {
+		t.Fatalf("Kind: got %d, want %d (OPEN)", k, BGPMsgOpen)
+	}
+	if v, _ := m.OpenVersion(); v != 4 {
+		t.Fatalf("OpenVersion: got %d, want 4", v)
+	}
+	if asn, _ := m.OpenMyAs(); asn != 4_200_000_000 {
+		t.Fatalf("OpenMyAs: got %d, want 4_200_000_000 (unwrapped AS_TRANS)", asn)
+	}
+	if h, _ := m.OpenHoldTime(); h != 180 {
+		t.Fatalf("OpenHoldTime: got %d, want 180", h)
+	}
+	id, _ := m.OpenBgpID()
+	if id != [4]byte{10, 0, 0, 1} {
+		t.Fatalf("OpenBgpID: got %v, want [10 0 0 1]", id)
+	}
+
+	// Exactly one optional parameter: the capabilities TLV carrying
+	// the Four-Octet-AS capability (code 65, length 4).
+	n, _ := m.OpenParamCount()
+	if n != 1 {
+		t.Fatalf("OpenParamCount: got %d, want 1", n)
+	}
+	p, err := m.OpenParamAt(0)
+	if err != nil {
+		t.Fatalf("OpenParamAt(0): %v", err)
+	}
+	if p.ParamType != 2 {
+		t.Fatalf("ParamType: got %d, want 2 (capabilities, RFC 5492)", p.ParamType)
+	}
+	if len(p.Value) < 6 {
+		t.Fatalf("Value: too short (%d bytes), want >= 6", len(p.Value))
+	}
+	if p.Value[0] != 65 {
+		t.Fatalf("Value[0]: got %d, want 65 (Four-Octet-AS capability)", p.Value[0])
+	}
+	if p.Value[1] != 4 {
+		t.Fatalf("Value[1]: got %d, want 4 (capability length)", p.Value[1])
+	}
+	capAs := uint32(p.Value[2])<<24 | uint32(p.Value[3])<<16 | uint32(p.Value[4])<<8 | uint32(p.Value[5])
+	if capAs != 4_200_000_000 {
+		t.Fatalf("Value[2:6]: got %d, want 4_200_000_000", capAs)
+	}
+
+	// Out-of-range returns an error (LR_ERR_OTHER).
+	if _, err := m.OpenParamAt(99); err == nil {
+		t.Fatalf("OpenParamAt(99): expected error, got nil")
+	}
+
+	// Variant-mismatch reader returns an error (LR_ERR_INVALID_HANDLE).
+	if _, err := m.NotificationCode(); err == nil {
+		t.Fatalf("NotificationCode on OPEN: expected error, got nil")
+	}
+}
+
+func TestBgpMessageDecodeOpen16bitNoCapability(t *testing.T) {
+	// OPEN with 16-bit AS and no Four-Octet-AS capability: OpenMyAs
+	// returns the raw 16-bit field (no AS_TRANS unwrap).
+	wire, err := EncodeOpen(64512, 90, [4]byte{10, 0, 0, 1}, false)
+	if err != nil {
+		t.Fatalf("EncodeOpen: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+	if asn, _ := m.OpenMyAs(); asn != 64512 {
+		t.Fatalf("OpenMyAs: got %d, want 64512 (no capability, raw 16-bit field)", asn)
+	}
+	if n, _ := m.OpenParamCount(); n != 0 {
+		t.Fatalf("OpenParamCount: got %d, want 0", n)
+	}
+}
+
+func TestBgpMessageDecodeNotificationRoundTrip(t *testing.T) {
+	wire, err := EncodeNotification(1, 2, []byte{0xde, 0xad, 0xbe, 0xef})
+	if err != nil {
+		t.Fatalf("EncodeNotification: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+	if k, _ := m.Kind(); k != BGPMsgNotification {
+		t.Fatalf("Kind: got %d, want %d (NOTIFICATION)", k, BGPMsgNotification)
+	}
+	if c, _ := m.NotificationCode(); c != 1 {
+		t.Fatalf("NotificationCode: got %d, want 1 (Header)", c)
+	}
+	if s, _ := m.NotificationSubcode(); s != 2 {
+		t.Fatalf("NotificationSubcode: got %d, want 2 (Conn-Not-Sync)", s)
+	}
+	d, _ := m.NotificationData()
+	if !bytesEqual(d, []byte{0xde, 0xad, 0xbe, 0xef}) {
+		t.Fatalf("NotificationData: got %v, want [de ad be ef]", d)
+	}
+}
+
+func TestBgpMessageDecodeNotificationCompact(t *testing.T) {
+	wire, err := EncodeNotification(6, 4, nil)
+	if err != nil {
+		t.Fatalf("EncodeNotification: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+	if k, _ := m.Kind(); k != BGPMsgNotification {
+		t.Fatalf("Kind: got %d, want %d (NOTIFICATION)", k, BGPMsgNotification)
+	}
+	d, _ := m.NotificationData()
+	if len(d) != 0 {
+		t.Fatalf("NotificationData: got %d bytes, want 0", len(d))
+	}
+}
+
+func TestBgpMessageDecodeUpdateWithdrawOnly(t *testing.T) {
+	wire, err := EncodeUpdateWithdrawV4([]PrefixSpec{
+		{Addr: []byte{203, 0, 113, 0}, PrefixLen: 24},
+		{Addr: []byte{198, 51, 100, 0}, PrefixLen: 25},
+	})
+	if err != nil {
+		t.Fatalf("EncodeUpdateWithdrawV4: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+	if k, _ := m.Kind(); k != BGPMsgUpdate {
+		t.Fatalf("Kind: got %d, want %d (UPDATE)", k, BGPMsgUpdate)
+	}
+	if n, _ := m.UpdateWithdrawnCount(); n != 2 {
+		t.Fatalf("UpdateWithdrawnCount: got %d, want 2", n)
+	}
+	if n, _ := m.UpdateNlriCount(); n != 0 {
+		t.Fatalf("UpdateNlriCount: got %d, want 0", n)
+	}
+	if n, _ := m.UpdateAttrCount(); n != 0 {
+		t.Fatalf("UpdateAttrCount: got %d, want 0", n)
+	}
+	p0, _ := m.UpdateWithdrawnAt(0)
+	if !bytesEqual(p0.Addr, []byte{203, 0, 113, 0}) || p0.PrefixLen != 24 {
+		t.Fatalf("UpdateWithdrawnAt(0): got %+v, want 203.0.113.0/24", p0)
+	}
+	p1, _ := m.UpdateWithdrawnAt(1)
+	if !bytesEqual(p1.Addr, []byte{198, 51, 100, 0}) || p1.PrefixLen != 25 {
+		t.Fatalf("UpdateWithdrawnAt(1): got %+v, want 198.51.100.0/25", p1)
+	}
+	if _, err := m.UpdateWithdrawnAt(99); err == nil {
+		t.Fatalf("UpdateWithdrawnAt(99): expected error, got nil")
+	}
+}
+
+func TestBgpMessageDecodeUpdateAnnounce(t *testing.T) {
+	wire, err := EncodeUpdateAnnounceV4(
+		[]PrefixSpec{{Addr: []byte{203, 0, 113, 0}, PrefixLen: 24}},
+		[4]byte{192, 0, 2, 1},
+		[]uint32{64512, 64513, 64514},
+		0, false,
+	)
+	if err != nil {
+		t.Fatalf("EncodeUpdateAnnounceV4: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+	if k, _ := m.Kind(); k != BGPMsgUpdate {
+		t.Fatalf("Kind: got %d, want %d (UPDATE)", k, BGPMsgUpdate)
+	}
+	if n, _ := m.UpdateNlriCount(); n != 1 {
+		t.Fatalf("UpdateNlriCount: got %d, want 1", n)
+	}
+	p, _ := m.UpdateNlriAt(0)
+	if !bytesEqual(p.Addr, []byte{203, 0, 113, 0}) || p.PrefixLen != 24 {
+		t.Fatalf("UpdateNlriAt(0): got %+v, want 203.0.113.0/24", p)
+	}
+	attrs, _ := m.UpdateAttrs()
+	if len(attrs) < 3 {
+		t.Fatalf("UpdateAttrs: got %d, want >= 3", len(attrs))
+	}
+	byType := map[uint8]PathAttr{}
+	for _, a := range attrs {
+		byType[a.AttrType] = a
+	}
+	if _, ok := byType[1]; !ok {
+		t.Fatalf("UpdateAttrs: missing ORIGIN (type 1)")
+	}
+	if _, ok := byType[3]; !ok {
+		t.Fatalf("UpdateAttrs: missing NEXT_HOP (type 3)")
+	}
+	if !bytesEqual(byType[1].Value, []byte{0}) {
+		t.Fatalf("ORIGIN value: got %v, want [0] (IGP)", byType[1].Value)
+	}
+	if !bytesEqual(byType[3].Value, []byte{192, 0, 2, 1}) {
+		t.Fatalf("NEXT_HOP value: got %v, want [192 0 2 1]", byType[3].Value)
+	}
+}
+
+func TestBgpMessageDecodeKeepalive(t *testing.T) {
+	wire, err := EncodeKeepalive()
+	if err != nil {
+		t.Fatalf("EncodeKeepalive: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+	if k, _ := m.Kind(); k != BGPMsgKeepalive {
+		t.Fatalf("Kind: got %d, want %d (KEEPALIVE)", k, BGPMsgKeepalive)
+	}
+}
+
+func TestBgpMessageDecodeRejectsTruncated(t *testing.T) {
+	if _, err := DecodeBgpMessage([]byte{0xff, 0xff, 0xff, 0xff}); err == nil {
+		t.Fatalf("DecodeBgpMessage: expected error on truncated input, got nil")
+	}
+}
+
+func TestBgpMessageCloseIsIdempotent(t *testing.T) {
+	wire, err := EncodeKeepalive()
+	if err != nil {
+		t.Fatalf("EncodeKeepalive: %v", err)
+	}
+	m, err := DecodeBgpMessage(wire)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	m.Close()
+	m.Close() // second close is a no-op
+	if _, err := m.Kind(); err == nil {
+		t.Fatalf("Kind after Close: expected error, got nil")
+	}
+}
+
+func TestBgpMessageWalkAllVariantsViaKind(t *testing.T) {
+	cases := []struct {
+		wire []byte
+		want uint8
+	}{
+		{mustEncodeOpen(t, 64512, 90, [4]byte{10, 0, 0, 1}, false), BGPMsgOpen},
+		{mustEncode(t, EncodeKeepalive), BGPMsgKeepalive},
+		{mustEncode(t, func() ([]byte, error) { return EncodeNotification(6, 4, nil) }), BGPMsgNotification},
+		{mustEncode(t, func() ([]byte, error) {
+			return EncodeUpdateWithdrawV4([]PrefixSpec{{Addr: []byte{203, 0, 113, 0}, PrefixLen: 24}})
+		}), BGPMsgUpdate},
+	}
+	for _, c := range cases {
+		m, err := DecodeBgpMessage(c.wire)
+		if err != nil {
+			t.Fatalf("DecodeBgpMessage: %v", err)
+		}
+		k, _ := m.Kind()
+		if k != c.want {
+			t.Fatalf("Kind: got %d, want %d", k, c.want)
+		}
+		m.Close()
+	}
+}
+
+func mustEncode(t *testing.T, f func() ([]byte, error)) []byte {
+	t.Helper()
+	b, err := f()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	return b
+}
+
+func mustEncodeOpen(t *testing.T, myAs uint32, holdTime uint16, bgpId [4]byte, as4 bool) []byte {
+	t.Helper()
+	b, err := EncodeOpen(myAs, holdTime, bgpId, as4)
+	if err != nil {
+		t.Fatalf("EncodeOpen: %v", err)
+	}
+	return b
+}
