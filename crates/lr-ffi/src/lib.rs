@@ -39,6 +39,7 @@ pub mod ldp;
 pub mod mpls;
 pub mod mrt;
 pub mod ospf;
+pub mod ospf_lsdb;
 pub mod policy;
 pub mod policy_objects;
 pub mod rib;

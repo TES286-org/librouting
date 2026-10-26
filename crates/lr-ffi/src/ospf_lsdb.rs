@@ -1,0 +1,678 @@
+//! OSPF LSDB + LSA FFI (RFC 2328 §12, RFC 5340 §A.4).
+//!
+//! Mirrors the public Rust API of `lr_ospf::lsdb::{Lsdb, LsaEntry,
+//! InstallOutcome}` and `lr_ospf::lsa::{Lsa, LsaHeader, LsaKey}` so
+//! an embedder can build, populate and inspect a link-state database
+//! without going through the daemon's `DefaultRouter`. The lsdb
+//! crate was previously invisible across the C ABI — embedders that
+//! wanted to bring their own OSPF plumbing had to re-implement the
+//! LSDB in C.
+//!
+//! # Naming note
+//!
+//! `inspection.rs` already exposes `lr_ospf_lsa_t` as a struct
+//! projection (header fields + body bytes) for the
+//! `lr_router_ospf_area_lsa` reader. This module uses the distinct
+//! `lr_ospf_lsdb_*` and `lr_ospf_lsa_box_*` / `lr_ospf_lsa_hdr_*`
+//! prefixes so the two surfaces do not collide — the C-side LSA
+//! projection in this module is `lr_ospf_lsa_hdr_t`, the opaque
+//! boxed-LSA handle is `lr_ospf_lsa_box_t`, and the opaque
+//! boxed-LSA-header handle is `lr_ospf_lsa_hdr_box_t`.
+
+#![allow(unused_unsafe)]
+
+use lr_ospf::lsa::{Lsa, LsaHeader, LsaKey};
+use lr_ospf::lsdb::{InstallOutcome, Lsdb};
+
+use crate::error::{LrError, LR_ERR_PANIC};
+use crate::guarded;
+use crate::handle::lr_bytes_t;
+
+const LR_ERR_NULL: i32 = LrError::Null as i32;
+#[allow(dead_code)]
+const LR_ERR_OTHER: i32 = LrError::Other as i32;
+
+// ---- Opaque handle types ----
+
+#[repr(C)]
+pub struct OpaqueOspfLsdb {
+    _private: [u8; 0],
+}
+pub type lr_ospf_lsdb_t = *mut OpaqueOspfLsdb;
+
+#[repr(C)]
+pub struct OpaqueOspfLsaBox {
+    _private: [u8; 0],
+}
+/// Opaque boxed-LSA handle. The C-side LSA *projection* is
+/// `lr_ospf_lsa_hdr_t` (a struct the caller can read fields from);
+/// this is the boxed owned-LSA handle the embedder passes back to
+/// `lr_ospf_lsa_*` functions.
+pub type lr_ospf_lsa_box_t = *mut OpaqueOspfLsaBox;
+
+#[repr(C)]
+pub struct OpaqueOspfLsaHdrBox {
+    _private: [u8; 0],
+}
+/// Opaque boxed-LSA-header handle (for the
+/// `lr_ospf_lsa_header_new` / `_free` constructor / destructor pair).
+pub type lr_ospf_lsa_hdr_box_t = *mut OpaqueOspfLsaHdrBox;
+
+// ---- LSA header C-side projection ----
+
+/// Fixed-layout projection of one LSA header (RFC 2328 §A.4.1).
+/// Mirrors the header fields of `lr_ospf::lsa::LsaHeader` without
+/// the body bytes (use `lr_ospf_lsa_body` to read the body).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_ospf_lsa_hdr_t {
+    /// Age in seconds (top 2 bits are DoNotAge per RFC 4136).
+    pub ls_age: u16,
+    /// OSPFv2 options byte. OSPFv3 keeps this 0.
+    pub options: u8,
+    /// LSA type: OSPFv2 8-bit type (1..=11) or OSPFv3 16-bit type.
+    pub ls_type: u16,
+    /// Link State ID (RFC 2328 §A.4.1).
+    pub link_state_id: u32,
+    /// Advertising router (RFC 2328 §A.4.1).
+    pub advertising_router: u32,
+    /// LSA sequence number (RFC 2328 §A.4.1 — uses 0x80000001 floor).
+    pub ls_sequence_number: u32,
+    /// Fletcher-16 checksum over the LSA body (RFC 2328 §A.4.1).
+    pub ls_checksum: u16,
+    /// Total LSA length, header included, in bytes.
+    pub length: u16,
+}
+
+impl From<&LsaHeader> for lr_ospf_lsa_hdr_t {
+    fn from(h: &LsaHeader) -> Self {
+        Self {
+            ls_age: h.ls_age,
+            options: h.options,
+            ls_type: h.ls_type,
+            link_state_id: h.link_state_id,
+            advertising_router: h.advertising_router,
+            ls_sequence_number: h.ls_sequence_number,
+            ls_checksum: h.ls_checksum,
+            length: h.length,
+        }
+    }
+}
+
+// ---- Lsdb box / unbox helpers ----
+
+fn box_lsdb(d: Lsdb) -> lr_ospf_lsdb_t {
+    Box::into_raw(Box::new(d)) as lr_ospf_lsdb_t
+}
+unsafe fn borrow_lsdb(r: lr_ospf_lsdb_t) -> Option<&'static Lsdb> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const Lsdb) })
+}
+unsafe fn borrow_lsdb_mut(r: lr_ospf_lsdb_t) -> Option<&'static mut Lsdb> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut Lsdb) })
+}
+unsafe fn unbox_lsdb(r: lr_ospf_lsdb_t) -> Option<Box<Lsdb>> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(r as *mut Lsdb) })
+}
+
+// ---- LSA box / unbox helpers ----
+
+fn box_lsa(l: Lsa) -> lr_ospf_lsa_box_t {
+    Box::into_raw(Box::new(l)) as lr_ospf_lsa_box_t
+}
+unsafe fn borrow_lsa(r: lr_ospf_lsa_box_t) -> Option<&'static Lsa> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const Lsa) })
+}
+unsafe fn unbox_lsa(r: lr_ospf_lsa_box_t) -> Option<Box<Lsa>> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(r as *mut Lsa) })
+}
+
+fn box_lsa_header(h: LsaHeader) -> lr_ospf_lsa_hdr_box_t {
+    Box::into_raw(Box::new(h)) as lr_ospf_lsa_hdr_box_t
+}
+unsafe fn unbox_lsa_header(r: lr_ospf_lsa_hdr_box_t) -> Option<Box<LsaHeader>> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(r as *mut LsaHeader) })
+}
+
+/// Translate an `InstallOutcome` to a C-side return code.
+fn install_outcome_rc(o: InstallOutcome) -> i32 {
+    match o {
+        InstallOutcome::New => 1,
+        InstallOutcome::Replaced => 2,
+        InstallOutcome::Ignored => 0,
+        InstallOutcome::Purged => 3,
+    }
+}
+
+// ---- Lsdb surface ----
+
+/// Construct an empty LSDB (RFC 2328 §12).
+#[no_mangle]
+pub extern "C" fn lr_ospf_lsdb_new() -> lr_ospf_lsdb_t {
+    guarded(|| box_lsdb(Lsdb::new()), std::ptr::null_mut())
+}
+
+/// Drop a boxed LSDB. Safe to call with NULL.
+///
+/// # Safety
+/// `r` must have been produced by `lr_ospf_lsdb_new` and not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_free(r: lr_ospf_lsdb_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_lsdb(r));
+        },
+        (),
+    )
+}
+
+/// Install one LSA into the LSDB (RFC 2328 §13). The `lsa` handle is
+/// *consumed* — the caller must not use it after this call.
+///
+/// Returns:
+/// - 0 = NoChange (byte-identical reinstall, no generation bump).
+/// - 1 = NewEntry (a new LSA was added).
+/// - 2 = Refreshed (an existing LSA was replaced with newer content).
+/// - 3 = Duplicate (an older-instance duplicate was dropped).
+/// - Negative on error.
+///
+/// # Safety
+/// `r` must be a valid LSDB handle. `lsa` must be a valid LSA handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_install(
+    r: lr_ospf_lsdb_t,
+    lsa: lr_ospf_lsa_box_t,
+    now_ms: u64,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(lsdb) = borrow_lsdb_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(l) = unbox_lsa(lsa) else {
+                return LR_ERR_NULL;
+            };
+            let outcome = lsdb.install(*l, now_ms);
+            install_outcome_rc(outcome)
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Remove one LSA by (ls_type, link_state_id, advertising_router).
+/// Returns 1 when an LSA was removed, 0 when the key was absent.
+///
+/// # Safety
+/// `r` must be a valid LSDB handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_remove(
+    r: lr_ospf_lsdb_t,
+    ls_type: u16,
+    link_state_id: u32,
+    advertising_router: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(lsdb) = borrow_lsdb_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let key = LsaKey {
+                ls_type,
+                link_state_id,
+                advertising_router,
+            };
+            if lsdb.remove(&key).is_some() {
+                1
+            } else {
+                0
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read one LSA by key. Returns 0 on success and writes a NEW
+/// `lr_ospf_lsa_box_t` handle (a *copy* the caller frees via
+/// `lr_ospf_lsa_free`) to `*out`. Returns 0 with `*out = NULL` when
+/// the key is absent.
+///
+/// # Safety
+/// `r` must be a valid LSDB handle. `out` must point to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_get(
+    r: lr_ospf_lsdb_t,
+    ls_type: u16,
+    link_state_id: u32,
+    advertising_router: u32,
+    out: *mut lr_ospf_lsa_box_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(lsdb) = borrow_lsdb(r) else {
+                return LR_ERR_NULL;
+            };
+            let key = LsaKey {
+                ls_type,
+                link_state_id,
+                advertising_router,
+            };
+            match lsdb.get(&key) {
+                None => {
+                    unsafe { *out = std::ptr::null_mut() }
+                    0
+                }
+                Some(entry) => {
+                    unsafe { *out = box_lsa(entry.lsa.clone()) }
+                    0
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of LSAs in the LSDB. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid LSDB handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_len(r: lr_ospf_lsdb_t) -> usize {
+    guarded(
+        || unsafe { borrow_lsdb(r).map(|d| d.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// True when the LSDB holds no LSAs. Returns 1 on a NULL handle.
+///
+/// # Safety
+/// See [`lr_ospf_lsdb_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_is_empty(r: lr_ospf_lsdb_t) -> u8 {
+    guarded(
+        || unsafe { borrow_lsdb(r).map(|d| d.is_empty() as u8).unwrap_or(1) },
+        1,
+    )
+}
+
+/// Read every LSA header as a flat array (RFC 2328 §A.4.1). On success
+/// writes a freshly-allocated `lr_ospf_lsa_hdr_t*` to `*out` and the
+/// count to `*out_count`. The caller owns the array and must free it
+/// via `lr_ospf_lsa_hdr_array_free`.
+///
+/// # Safety
+/// `r` must be a valid LSDB handle. `out` and `out_count` must point
+/// to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_headers(
+    r: lr_ospf_lsdb_t,
+    out: *mut *mut lr_ospf_lsa_hdr_t,
+    out_count: *mut usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() || out_count.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(lsdb) = borrow_lsdb(r) else {
+                return LR_ERR_NULL;
+            };
+            let headers: Vec<lr_ospf_lsa_hdr_t> =
+                lsdb.headers().iter().map(lr_ospf_lsa_hdr_t::from).collect();
+            let count = headers.len();
+            let mut boxed = headers.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+            unsafe {
+                *out = ptr;
+                *out_count = count;
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Free an LSA header array returned by `lr_ospf_lsdb_headers`. Safe
+/// to call with NULL.
+///
+/// # Safety
+/// `ptr` must have been produced by `lr_ospf_lsdb_headers` and `count`
+/// must be the value written to `*out_count` by that call.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_hdr_array_free(ptr: *mut lr_ospf_lsa_hdr_t, count: usize) {
+    guarded(
+        || unsafe {
+            if ptr.is_null() || count == 0 {
+                return;
+            }
+            let slice = unsafe { std::slice::from_raw_parts_mut(ptr, count) };
+            let _ = unsafe { Box::from_raw(slice as *mut [lr_ospf_lsa_hdr_t]) };
+        },
+        (),
+    )
+}
+
+// ---- LSA surface ----
+
+/// Construct an LSA from a header handle + body bytes. The header
+/// handle is *consumed*. Returns NULL on a NULL header.
+///
+/// # Safety
+/// `header` must be a valid LSA header handle. `body` must point to
+/// `body_len` readable bytes (NULL only when `body_len == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_new(
+    header: lr_ospf_lsa_hdr_box_t,
+    body: *const u8,
+    body_len: usize,
+) -> lr_ospf_lsa_box_t {
+    guarded(
+        || unsafe {
+            let Some(h) = unbox_lsa_header(header) else {
+                return std::ptr::null_mut();
+            };
+            let body_vec = if body.is_null() || body_len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(body, body_len) }.to_vec()
+            };
+            box_lsa(Lsa {
+                header: *h,
+                body: body_vec,
+            })
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Read the header fields of an LSA into `*out`. Returns 0 on success.
+///
+/// # Safety
+/// `lsa` must be a valid LSA handle. `out` must point to writable
+/// memory of size `lr_ospf_lsa_hdr_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_header_get(
+    lsa: lr_ospf_lsa_box_t,
+    out: *mut lr_ospf_lsa_hdr_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(l) = borrow_lsa(lsa) else {
+                return LR_ERR_NULL;
+            };
+            unsafe { *out = lr_ospf_lsa_hdr_t::from(&l.header) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read the body bytes of an LSA. Returns 0 on success and writes a
+/// freshly-allocated `lr_bytes_t` to `*out` (the caller frees via
+/// `lr_bytes_free`).
+///
+/// # Safety
+/// `lsa` must be a valid LSA handle. `out` must point to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_body(lsa: lr_ospf_lsa_box_t, out: *mut lr_bytes_t) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(l) = borrow_lsa(lsa) else {
+                return LR_ERR_NULL;
+            };
+            unsafe { *out = lr_bytes_t::from_vec(l.body.clone()) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Encode the LSA as the 20-byte header + body (RFC 2328 §A.4 wire
+/// form). Returns 0 on success and writes a freshly-allocated
+/// `lr_bytes_t` to `*out`.
+///
+/// # Safety
+/// `lsa` must be a valid LSA handle. `out` must point to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_to_wire(lsa: lr_ospf_lsa_box_t, out: *mut lr_bytes_t) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(l) = borrow_lsa(lsa) else {
+                return LR_ERR_NULL;
+            };
+            unsafe { *out = lr_bytes_t::from_vec(l.to_wire()) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Drop a boxed LSA. Safe to call with NULL.
+///
+/// # Safety
+/// `lsa` must have been produced by `lr_ospf_lsa_new` /
+/// `lr_ospf_lsdb_get` and not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_free(lsa: lr_ospf_lsa_box_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_lsa(lsa));
+        },
+        (),
+    )
+}
+
+// ---- LSA header surface ----
+
+/// Construct an LSA header from the 8 fields (RFC 2328 §A.4.1).
+#[no_mangle]
+pub extern "C" fn lr_ospf_lsa_header_new(
+    ls_age: u16,
+    options: u8,
+    ls_type: u16,
+    link_state_id: u32,
+    advertising_router: u32,
+    ls_sequence_number: u32,
+    ls_checksum: u16,
+    length: u16,
+) -> lr_ospf_lsa_hdr_box_t {
+    guarded(
+        || {
+            box_lsa_header(LsaHeader {
+                ls_age,
+                options,
+                ls_type,
+                link_state_id,
+                advertising_router,
+                ls_sequence_number,
+                ls_checksum,
+                length,
+            })
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Drop a boxed LSA header. Safe to call with NULL.
+///
+/// # Safety
+/// `h` must have been produced by `lr_ospf_lsa_header_new` and not
+/// already freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_header_free(h: lr_ospf_lsa_hdr_box_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_lsa_header(h));
+        },
+        (),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_lsa(seq: u32) -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                ls_age: 1,
+                options: 0,
+                ls_type: 1,
+                link_state_id: 0x01020304,
+                advertising_router: 0x01020304,
+                ls_sequence_number: seq,
+                ls_checksum: 0xabcd,
+                length: 20,
+            },
+            body: vec![0xde, 0xad, 0xbe, 0xef],
+        }
+    }
+
+    fn box_lsa_for_test(l: Lsa) -> lr_ospf_lsa_box_t {
+        box_lsa(l)
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_install_and_get() {
+        let lsdb = lr_ospf_lsdb_new();
+        assert!(!lsdb.is_null());
+        assert_eq!(unsafe { lr_ospf_lsdb_is_empty(lsdb) }, 1);
+
+        let lsa = box_lsa_for_test(sample_lsa(0x80000001));
+        let rc = unsafe { lr_ospf_lsdb_install(lsdb, lsa, 0) };
+        assert_eq!(rc, 1, "first install is New");
+        assert_eq!(unsafe { lr_ospf_lsdb_len(lsdb) }, 1);
+        assert_eq!(unsafe { lr_ospf_lsdb_is_empty(lsdb) }, 0);
+
+        // Get it back.
+        let mut out: lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let rc = unsafe { lr_ospf_lsdb_get(lsdb, 1, 0x01020304, 0x01020304, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert!(!out.is_null());
+
+        // Read the header back.
+        let mut hdr = lr_ospf_lsa_hdr_t::default();
+        let rc = unsafe { lr_ospf_lsa_header_get(out, &raw mut hdr) };
+        assert_eq!(rc, 0);
+        assert_eq!(hdr.ls_type, 1);
+        assert_eq!(hdr.link_state_id, 0x01020304);
+        assert_eq!(hdr.ls_sequence_number, 0x80000001);
+
+        // Read the body back.
+        let mut body = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let rc = unsafe { lr_ospf_lsa_body(out, &raw mut body) };
+        assert_eq!(rc, 0);
+        assert_eq!(body.len, 4);
+        unsafe { crate::bytes::lr_bytes_free(&raw mut body) };
+
+        unsafe { lr_ospf_lsa_free(out) };
+
+        // Reinstall the same LSA (same sequence) — should be Ignored.
+        let lsa2 = box_lsa_for_test(sample_lsa(0x80000001));
+        let rc = unsafe { lr_ospf_lsdb_install(lsdb, lsa2, 0) };
+        assert_eq!(rc, 0, "duplicate-instance reinstall is Ignored");
+
+        // Install a newer instance — should be Replaced.
+        let lsa3 = box_lsa_for_test(sample_lsa(0x80000002));
+        let rc = unsafe { lr_ospf_lsdb_install(lsdb, lsa3, 0) };
+        assert_eq!(rc, 2, "newer instance is Replaced");
+
+        // Remove.
+        let rc = unsafe { lr_ospf_lsdb_remove(lsdb, 1, 0x01020304, 0x01020304) };
+        assert_eq!(rc, 1);
+        assert_eq!(unsafe { lr_ospf_lsdb_is_empty(lsdb) }, 1);
+
+        unsafe { lr_ospf_lsdb_free(lsdb) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_headers_array() {
+        let lsdb = lr_ospf_lsdb_new();
+        let lsa1 = box_lsa_for_test(sample_lsa(0x80000001));
+        let _ = unsafe { lr_ospf_lsdb_install(lsdb, lsa1, 0) };
+        let lsa2 = box_lsa_for_test(Lsa {
+            header: LsaHeader {
+                ls_type: 1,
+                link_state_id: 0x05060708,
+                advertising_router: 0x01020304,
+                ls_sequence_number: 0x80000001,
+                ..sample_lsa(0).header
+            },
+            body: vec![],
+        });
+        let _ = unsafe { lr_ospf_lsdb_install(lsdb, lsa2, 0) };
+
+        let mut ptr: *mut lr_ospf_lsa_hdr_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe { lr_ospf_lsdb_headers(lsdb, &raw mut ptr, &raw mut count) };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 2);
+
+        unsafe { lr_ospf_lsa_hdr_array_free(ptr, count) };
+        unsafe { lr_ospf_lsdb_free(lsdb) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsa_new_and_to_wire() {
+        let hdr = lr_ospf_lsa_header_new(1, 0, 1, 0x01020304, 0x01020304, 0x80000001, 0xabcd, 24);
+        let body = [0xde, 0xad, 0xbe, 0xef];
+        let lsa = unsafe { lr_ospf_lsa_new(hdr, body.as_ptr(), body.len()) };
+        assert!(!lsa.is_null());
+
+        let mut wire = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let rc = unsafe { lr_ospf_lsa_to_wire(lsa, &raw mut wire) };
+        assert_eq!(rc, 0);
+        // 20-byte header + 4-byte body = 24 bytes.
+        assert_eq!(wire.len, 24);
+        unsafe { crate::bytes::lr_bytes_free(&raw mut wire) };
+
+        unsafe { lr_ospf_lsa_free(lsa) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_handles_null_safely() {
+        assert_eq!(unsafe { lr_ospf_lsdb_len(std::ptr::null_mut()) }, 0);
+        assert_eq!(unsafe { lr_ospf_lsdb_is_empty(std::ptr::null_mut()) }, 1);
+        unsafe { lr_ospf_lsdb_free(std::ptr::null_mut()) };
+        unsafe { lr_ospf_lsa_free(std::ptr::null_mut()) };
+        unsafe { lr_ospf_lsa_header_free(std::ptr::null_mut()) };
+    }
+}

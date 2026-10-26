@@ -1056,6 +1056,74 @@ typedef struct OpaqueOspfPacket {
 
 typedef struct OpaqueOspfPacket *lr_ospf_packet_t;
 
+typedef struct OpaqueOspfLsdb {
+  uint8_t _private[0];
+} OpaqueOspfLsdb;
+
+typedef struct OpaqueOspfLsdb *lr_ospf_lsdb_t;
+
+typedef struct OpaqueOspfLsaBox {
+  uint8_t _private[0];
+} OpaqueOspfLsaBox;
+
+/**
+ * Opaque boxed-LSA handle. The C-side LSA *projection* is
+ * `lr_ospf_lsa_hdr_t` (a struct the caller can read fields from);
+ * this is the boxed owned-LSA handle the embedder passes back to
+ * `lr_ospf_lsa_*` functions.
+ */
+typedef struct OpaqueOspfLsaBox *lr_ospf_lsa_box_t;
+
+/**
+ * Fixed-layout projection of one LSA header (RFC 2328 §A.4.1).
+ * Mirrors the header fields of `lr_ospf::lsa::LsaHeader` without
+ * the body bytes (use `lr_ospf_lsa_body` to read the body).
+ */
+typedef struct lr_ospf_lsa_hdr_t {
+  /**
+   * Age in seconds (top 2 bits are DoNotAge per RFC 4136).
+   */
+  uint16_t ls_age;
+  /**
+   * OSPFv2 options byte. OSPFv3 keeps this 0.
+   */
+  uint8_t options;
+  /**
+   * LSA type: OSPFv2 8-bit type (1..=11) or OSPFv3 16-bit type.
+   */
+  uint16_t ls_type;
+  /**
+   * Link State ID (RFC 2328 §A.4.1).
+   */
+  uint32_t link_state_id;
+  /**
+   * Advertising router (RFC 2328 §A.4.1).
+   */
+  uint32_t advertising_router;
+  /**
+   * LSA sequence number (RFC 2328 §A.4.1 — uses 0x80000001 floor).
+   */
+  uint32_t ls_sequence_number;
+  /**
+   * Fletcher-16 checksum over the LSA body (RFC 2328 §A.4.1).
+   */
+  uint16_t ls_checksum;
+  /**
+   * Total LSA length, header included, in bytes.
+   */
+  uint16_t length;
+} lr_ospf_lsa_hdr_t;
+
+typedef struct OpaqueOspfLsaHdrBox {
+  uint8_t _private[0];
+} OpaqueOspfLsaHdrBox;
+
+/**
+ * Opaque boxed-LSA-header handle (for the
+ * `lr_ospf_lsa_header_new` / `_free` constructor / destructor pair).
+ */
+typedef struct OpaqueOspfLsaHdrBox *lr_ospf_lsa_hdr_box_t;
+
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
@@ -3101,6 +3169,173 @@ uint8_t lr_ospf_packet_body_kind(lr_ospf_packet_t packet);
  * and must not be used after this call.
  */
 void lr_ospf_packet_free(lr_ospf_packet_t packet);
+
+/**
+ * Construct an empty LSDB (RFC 2328 §12).
+ */
+lr_ospf_lsdb_t lr_ospf_lsdb_new(void);
+
+/**
+ * Drop a boxed LSDB. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_ospf_lsdb_new` and not already freed.
+ */
+void lr_ospf_lsdb_free(lr_ospf_lsdb_t r);
+
+/**
+ * Install one LSA into the LSDB (RFC 2328 §13). The `lsa` handle is
+ * *consumed* — the caller must not use it after this call.
+ *
+ * Returns:
+ * - 0 = NoChange (byte-identical reinstall, no generation bump).
+ * - 1 = NewEntry (a new LSA was added).
+ * - 2 = Refreshed (an existing LSA was replaced with newer content).
+ * - 3 = Duplicate (an older-instance duplicate was dropped).
+ * - Negative on error.
+ *
+ * # Safety
+ * `r` must be a valid LSDB handle. `lsa` must be a valid LSA handle.
+ */
+int32_t lr_ospf_lsdb_install(lr_ospf_lsdb_t r, lr_ospf_lsa_box_t lsa, uint64_t now_ms);
+
+/**
+ * Remove one LSA by (ls_type, link_state_id, advertising_router).
+ * Returns 1 when an LSA was removed, 0 when the key was absent.
+ *
+ * # Safety
+ * `r` must be a valid LSDB handle.
+ */
+int32_t lr_ospf_lsdb_remove(lr_ospf_lsdb_t r,
+                            uint16_t ls_type,
+                            uint32_t link_state_id,
+                            uint32_t advertising_router);
+
+/**
+ * Read one LSA by key. Returns 0 on success and writes a NEW
+ * `lr_ospf_lsa_box_t` handle (a *copy* the caller frees via
+ * `lr_ospf_lsa_free`) to `*out`. Returns 0 with `*out = NULL` when
+ * the key is absent.
+ *
+ * # Safety
+ * `r` must be a valid LSDB handle. `out` must point to writable memory.
+ */
+int32_t lr_ospf_lsdb_get(lr_ospf_lsdb_t r,
+                         uint16_t ls_type,
+                         uint32_t link_state_id,
+                         uint32_t advertising_router,
+                         lr_ospf_lsa_box_t *out);
+
+/**
+ * Number of LSAs in the LSDB. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid LSDB handle.
+ */
+uintptr_t lr_ospf_lsdb_len(lr_ospf_lsdb_t r);
+
+/**
+ * True when the LSDB holds no LSAs. Returns 1 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_ospf_lsdb_len`].
+ */
+uint8_t lr_ospf_lsdb_is_empty(lr_ospf_lsdb_t r);
+
+/**
+ * Read every LSA header as a flat array (RFC 2328 §A.4.1). On success
+ * writes a freshly-allocated `lr_ospf_lsa_hdr_t*` to `*out` and the
+ * count to `*out_count`. The caller owns the array and must free it
+ * via `lr_ospf_lsa_hdr_array_free`.
+ *
+ * # Safety
+ * `r` must be a valid LSDB handle. `out` and `out_count` must point
+ * to writable memory.
+ */
+int32_t lr_ospf_lsdb_headers(lr_ospf_lsdb_t r,
+                             struct lr_ospf_lsa_hdr_t **out,
+                             uintptr_t *out_count);
+
+/**
+ * Free an LSA header array returned by `lr_ospf_lsdb_headers`. Safe
+ * to call with NULL.
+ *
+ * # Safety
+ * `ptr` must have been produced by `lr_ospf_lsdb_headers` and `count`
+ * must be the value written to `*out_count` by that call.
+ */
+void lr_ospf_lsa_hdr_array_free(struct lr_ospf_lsa_hdr_t *ptr, uintptr_t count);
+
+/**
+ * Construct an LSA from a header handle + body bytes. The header
+ * handle is *consumed*. Returns NULL on a NULL header.
+ *
+ * # Safety
+ * `header` must be a valid LSA header handle. `body` must point to
+ * `body_len` readable bytes (NULL only when `body_len == 0`).
+ */
+lr_ospf_lsa_box_t lr_ospf_lsa_new(lr_ospf_lsa_hdr_box_t header,
+                                  const uint8_t *body,
+                                  uintptr_t body_len);
+
+/**
+ * Read the header fields of an LSA into `*out`. Returns 0 on success.
+ *
+ * # Safety
+ * `lsa` must be a valid LSA handle. `out` must point to writable
+ * memory of size `lr_ospf_lsa_hdr_t`.
+ */
+int32_t lr_ospf_lsa_header_get(lr_ospf_lsa_box_t lsa, struct lr_ospf_lsa_hdr_t *out);
+
+/**
+ * Read the body bytes of an LSA. Returns 0 on success and writes a
+ * freshly-allocated `lr_bytes_t` to `*out` (the caller frees via
+ * `lr_bytes_free`).
+ *
+ * # Safety
+ * `lsa` must be a valid LSA handle. `out` must point to writable memory.
+ */
+int32_t lr_ospf_lsa_body(lr_ospf_lsa_box_t lsa, struct lr_bytes_t *out);
+
+/**
+ * Encode the LSA as the 20-byte header + body (RFC 2328 §A.4 wire
+ * form). Returns 0 on success and writes a freshly-allocated
+ * `lr_bytes_t` to `*out`.
+ *
+ * # Safety
+ * `lsa` must be a valid LSA handle. `out` must point to writable memory.
+ */
+int32_t lr_ospf_lsa_to_wire(lr_ospf_lsa_box_t lsa, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed LSA. Safe to call with NULL.
+ *
+ * # Safety
+ * `lsa` must have been produced by `lr_ospf_lsa_new` /
+ * `lr_ospf_lsdb_get` and not already freed.
+ */
+void lr_ospf_lsa_free(lr_ospf_lsa_box_t lsa);
+
+/**
+ * Construct an LSA header from the 8 fields (RFC 2328 §A.4.1).
+ */
+lr_ospf_lsa_hdr_box_t lr_ospf_lsa_header_new(uint16_t ls_age,
+                                             uint8_t options,
+                                             uint16_t ls_type,
+                                             uint32_t link_state_id,
+                                             uint32_t advertising_router,
+                                             uint32_t ls_sequence_number,
+                                             uint16_t ls_checksum,
+                                             uint16_t length);
+
+/**
+ * Drop a boxed LSA header. Safe to call with NULL.
+ *
+ * # Safety
+ * `h` must have been produced by `lr_ospf_lsa_header_new` and not
+ * already freed.
+ */
+void lr_ospf_lsa_header_free(lr_ospf_lsa_hdr_box_t h);
 
 /**
  * Install one redistribution pipe on the router.
