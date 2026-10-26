@@ -487,6 +487,80 @@ int main() {
         // RAII cleanup runs when the store leaves scope.
     }
 
+    // ---- BGP message inspection (parsed-form readers): decode an
+    // OPEN and read the variant fields; decode a NOTIFICATION and
+    // read code/subcode/data; decode an UPDATE and walk NLRI. ----
+    {
+        // Encode then decode a 4-byte-AS OPEN — the FFI reader must
+        // surface the real 32-bit AS (RFC 6793 §7 unwraps AS_TRANS).
+        auto bytes = to_vec(encode_open(4'200'000'000, 180, {10, 0, 0, 1}, true));
+        auto m = decode_bgp_message(bytes);
+        check(message_kind(m) == BgpMessageKind::Open, "OPEN message kind");
+        check(open_version(m) == 4, "OPEN version 4");
+        check(open_my_as(m) == 4'200'000'000, "OPEN my_as unwraps AS_TRANS → 4-byte AS");
+        check(open_hold_time(m) == 180, "OPEN hold time");
+        auto id = open_bgp_id(m);
+        check(id == std::array<std::uint8_t, 4>{10, 0, 0, 1}, "OPEN bgp_id");
+
+        // Exactly one optional parameter: the capabilities TLV
+        // holding the Four-Octet-AS capability (code 65, len 4).
+        check(open_param_count(m) == 1, "OPEN has one optional parameter");
+        auto p = open_param_at(m, 0);
+        check(p.param_type == 2, "OPEN param type 2 (capabilities, RFC 5492)");
+        check(p.value.size() >= 6, "OPEN capabilities payload has at least 6 bytes");
+        check(p.value[0] == 65, "OPEN capability code 65 (Four-Octet-AS)");
+        check(p.value[1] == 4, "OPEN capability length 4");
+        std::uint32_t as_in_cap = (static_cast<std::uint32_t>(p.value[2]) << 24) |
+                                  (static_cast<std::uint32_t>(p.value[3]) << 16) |
+                                  (static_cast<std::uint32_t>(p.value[4]) << 8) |
+                                  static_cast<std::uint32_t>(p.value[5]);
+        check(as_in_cap == 4'200'000'000, "OPEN capability carries the real 4-byte AS");
+
+        // Out-of-range param access throws.
+        bool threw_oob = false;
+        try { open_param_at(m, 99); } catch (const Error&) { threw_oob = true; }
+        check(threw_oob, "OPEN out-of-range param throws");
+
+        // Variant-mismatch reader throws (NOTIFICATION reader on an OPEN).
+        bool threw_mismatch = false;
+        try { notification_code(m); } catch (const Error&) { threw_mismatch = true; }
+        check(threw_mismatch, "NOTIFICATION reader on OPEN throws");
+
+        // NOTIFICATION with diagnostic data.
+        auto notif = encode_notification(1, 2, {0xde, 0xad, 0xbe, 0xef});
+        auto nm = decode_bgp_message(to_vec(notif));
+        check(message_kind(nm) == BgpMessageKind::Notification, "NOTIFICATION message kind");
+        check(notification_code(nm) == 1, "NOTIFICATION code 1 (Header)");
+        check(notification_subcode(nm) == 2, "NOTIFICATION subcode 2 (Conn-Not-Sync)");
+        auto nd = notification_data(nm);
+        check(nd == std::vector<std::uint8_t>{0xde, 0xad, 0xbe, 0xef},
+              "NOTIFICATION diagnostic data round-trips");
+
+        // Withdraw-only UPDATE: two prefixes, zero attributes.
+        std::vector<lr_prefix_t> prefixes = {
+            make_prefix({203, 0, 113, 0}, 24),
+            make_prefix({198, 51, 100, 0}, 25),
+        };
+        auto upd = encode_update_withdraw_v4(prefixes);
+        auto um = decode_bgp_message(to_vec(upd));
+        check(message_kind(um) == BgpMessageKind::Update, "UPDATE message kind");
+        check(update_withdrawn_count(um) == 2, "UPDATE has 2 withdrawn routes");
+        check(update_nlri_count(um) == 0, "UPDATE withdraw-only has no NLRI");
+        check(update_attr_count(um) == 0, "UPDATE withdraw-only has 0 attributes");
+        auto w0 = update_withdrawn_at(um, 0);
+        check(std::memcmp(w0.addr, prefixes[0].addr, 4) == 0 && w0.prefix_len == 24,
+              "UPDATE withdrawn[0] = 203.0.113.0/24");
+        auto w1 = update_withdrawn_at(um, 1);
+        check(std::memcmp(w1.addr, prefixes[1].addr, 4) == 0 && w1.prefix_len == 25,
+              "UPDATE withdrawn[1] = 198.51.100.0/25");
+
+        // KEEPALIVE — variant tag only, no fields to read.
+        auto km = decode_bgp_message(to_vec(encode_keepalive()));
+        check(message_kind(km) == BgpMessageKind::Keepalive, "KEEPALIVE message kind");
+
+        // RAII cleanup runs when each BgpMessage leaves scope.
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

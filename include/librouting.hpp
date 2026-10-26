@@ -752,6 +752,202 @@ inline std::vector<std::uint8_t> to_vec(const Bytes& b) {
     return std::vector<std::uint8_t>(ptr, ptr + len);
 }
 
+// ===== BGP message inspection (parsed-form readers) =====
+//
+// `lr_bgp_decode` returns the canonical re-encoded bytes — useful for
+// differential checks but not for reading a message's fields. The
+// handles + readers below mirror the `BgpMessage` enum so an embedder
+// can decode a message once and walk its variant fields in C++.
+
+struct BgpMessageDeleter {
+    void operator()(lr_bgp_message_t m) const noexcept {
+        if (m) lr_bgp_message_free(m);
+    }
+};
+/// An owned BGP-message handle. Decoded from wire bytes via
+/// `decode_bgp_message`; release is automatic via the deleter.
+using BgpMessage = std::unique_ptr<OpaqueBgpMessage, BgpMessageDeleter>;
+
+/// Decode one BGP message and return an owned handle to the parsed
+/// form. Throws `Error` on a decode failure (the underlying last-error
+/// string is preserved in the exception message).
+inline BgpMessage decode_bgp_message(const std::uint8_t* data, std::size_t len) {
+    auto m = lr_bgp_decode_message(data, len);
+    if (!m) {
+        const char* err = lr_last_error();
+        throw Error("lr_bgp_decode_message failed: " + std::string(err ? err : "unknown"));
+    }
+    return BgpMessage(m);
+}
+inline BgpMessage decode_bgp_message(const std::vector<std::uint8_t>& bytes) {
+    return decode_bgp_message(bytes.data(), bytes.size());
+}
+
+/// Variant tag (mirrors `LR_BGP_MSG_*`).
+enum class BgpMessageKind : std::uint8_t {
+    Open = LR_BGP_MSG_OPEN,
+    Update = LR_BGP_MSG_UPDATE,
+    Notification = LR_BGP_MSG_NOTIFICATION,
+    Keepalive = LR_BGP_MSG_KEEPALIVE,
+    RouteRefresh = LR_BGP_MSG_ROUTE_REFRESH,
+};
+
+inline BgpMessageKind message_kind(const BgpMessage& m) {
+    std::uint8_t k = 0;
+    check_rc(lr_bgp_message_type(m.get(), &k), "lr_bgp_message_type");
+    return static_cast<BgpMessageKind>(k);
+}
+
+/// OPEN reader: version (always 4 on a well-formed message).
+inline std::uint8_t open_version(const BgpMessage& m) {
+    std::uint8_t v = 0;
+    check_rc(lr_bgp_message_open_version(m.get(), &v), "lr_bgp_message_open_version");
+    return v;
+}
+
+/// OPEN reader: sender AS. Unwraps AS_TRANS (23456) when the RFC 6793
+/// four-octet-AS capability is present, returning the real 32-bit AS.
+inline std::uint32_t open_my_as(const BgpMessage& m) {
+    std::uint32_t v = 0;
+    check_rc(lr_bgp_message_open_my_as(m.get(), &v), "lr_bgp_message_open_my_as");
+    return v;
+}
+
+/// OPEN reader: hold time in seconds.
+inline std::uint16_t open_hold_time(const BgpMessage& m) {
+    std::uint16_t v = 0;
+    check_rc(lr_bgp_message_open_hold_time(m.get(), &v), "lr_bgp_message_open_hold_time");
+    return v;
+}
+
+/// OPEN reader: 4-byte BGP identifier (network order).
+inline std::array<std::uint8_t, 4> open_bgp_id(const BgpMessage& m) {
+    std::array<std::uint8_t, 4> id{};
+    check_rc(lr_bgp_message_open_bgp_id(m.get(), id.data()), "lr_bgp_message_open_bgp_id");
+    return id;
+}
+
+/// OPEN reader: number of optional parameters (RFC 5492 capabilities).
+inline std::size_t open_param_count(const BgpMessage& m) {
+    return lr_bgp_message_open_param_count(m.get());
+}
+
+/// One OPEN optional parameter: type byte + raw capability payload
+/// (RFC 5492 §3 — `(code:1, length:1, value:length)` triples).
+struct OpenParam {
+    std::uint8_t param_type;
+    std::vector<std::uint8_t> value;
+};
+
+inline OpenParam open_param_at(const BgpMessage& m, std::size_t idx) {
+    OpenParam out;
+    auto b = std::make_unique<lr_bytes_t>();
+    check_rc(lr_bgp_message_open_param_at(m.get(), idx, &out.param_type, b.get()),
+             "lr_bgp_message_open_param_at");
+    out.value = to_vec(Bytes(b.release()));
+    return out;
+}
+
+/// NOTIFICATION reader: error code (RFC 4271 §4.5).
+inline std::uint8_t notification_code(const BgpMessage& m) {
+    std::uint8_t v = 0;
+    check_rc(lr_bgp_message_notification_code(m.get(), &v),
+             "lr_bgp_message_notification_code");
+    return v;
+}
+
+/// NOTIFICATION reader: error subcode.
+inline std::uint8_t notification_subcode(const BgpMessage& m) {
+    std::uint8_t v = 0;
+    check_rc(lr_bgp_message_notification_subcode(m.get(), &v),
+             "lr_bgp_message_notification_subcode");
+    return v;
+}
+
+/// NOTIFICATION reader: variable-length diagnostic data (often empty).
+inline std::vector<std::uint8_t> notification_data(const BgpMessage& m) {
+    auto b = std::make_unique<lr_bytes_t>();
+    check_rc(lr_bgp_message_notification_data(m.get(), b.get()),
+             "lr_bgp_message_notification_data");
+    return to_vec(Bytes(b.release()));
+}
+
+/// ROUTE-REFRESH reader: AFI (RFC 4271 address-family identifier).
+inline std::uint16_t route_refresh_afi(const BgpMessage& m) {
+    std::uint16_t v = 0;
+    check_rc(lr_bgp_message_route_refresh_afi(m.get(), &v),
+             "lr_bgp_message_route_refresh_afi");
+    return v;
+}
+
+/// ROUTE-REFRESH reader: SAFI (sub-address-family identifier).
+inline std::uint8_t route_refresh_safi(const BgpMessage& m) {
+    std::uint8_t v = 0;
+    check_rc(lr_bgp_message_route_refresh_safi(m.get(), &v),
+             "lr_bgp_message_route_refresh_safi");
+    return v;
+}
+
+/// ROUTE-REFRESH reader: RFC 7313 subtype (0 = Normal, 1 = BoRR,
+/// 2 = EoRR, 0xff = unknown — RFC 7313 §3.2 requires the message be
+/// silently ignored, so the decoder maps unrecognized values here).
+inline std::uint8_t route_refresh_subtype(const BgpMessage& m) {
+    std::uint8_t v = 0;
+    check_rc(lr_bgp_message_route_refresh_subtype(m.get(), &v),
+             "lr_bgp_message_route_refresh_subtype");
+    return v;
+}
+
+/// UPDATE reader: number of withdrawn routes.
+inline std::size_t update_withdrawn_count(const BgpMessage& m) {
+    return lr_bgp_message_update_withdrawn_count(m.get());
+}
+
+/// UPDATE reader: number of NLRI entries (IPv4 unicast legacy NLRI only;
+/// MP-BGP NLRI lives inside the MpReach/MpUnreach path attributes).
+inline std::size_t update_nlri_count(const BgpMessage& m) {
+    return lr_bgp_message_update_nlri_count(m.get());
+}
+
+/// UPDATE reader: number of path attributes.
+inline std::size_t update_attr_count(const BgpMessage& m) {
+    return lr_bgp_message_update_attr_count(m.get());
+}
+
+/// One path attribute: type code, flags byte and raw value bytes.
+struct PathAttr {
+    std::uint8_t attr_type;
+    std::uint8_t flags;
+    std::vector<std::uint8_t> value;
+};
+
+inline PathAttr update_attr_at(const BgpMessage& m, std::size_t idx) {
+    PathAttr out;
+    auto b = std::make_unique<lr_bytes_t>();
+    check_rc(lr_bgp_message_update_attr_at(m.get(), idx, &out.attr_type, &out.flags, b.get()),
+             "lr_bgp_message_update_attr_at");
+    out.value = to_vec(Bytes(b.release()));
+    return out;
+}
+
+/// Read the withdrawn route at `idx` as a `lr_prefix_t`. Throws on
+/// out-of-range or variant mismatch (the C ABI returns distinct error
+/// codes that surface through `check_rc`'s last-error string).
+inline lr_prefix_t update_withdrawn_at(const BgpMessage& m, std::size_t idx) {
+    lr_prefix_t p{};
+    check_rc(lr_bgp_message_update_withdrawn_at(m.get(), idx, &p),
+             "lr_bgp_message_update_withdrawn_at");
+    return p;
+}
+
+/// Read the NLRI entry at `idx` as a `lr_prefix_t`.
+inline lr_prefix_t update_nlri_at(const BgpMessage& m, std::size_t idx) {
+    lr_prefix_t p{};
+    check_rc(lr_bgp_message_update_nlri_at(m.get(), idx, &p),
+             "lr_bgp_message_update_nlri_at");
+    return p;
+}
+
 // ===== D5.3 — policy objects: route handle, prefix-list, route-map,
 // resolver =====
 
