@@ -337,6 +337,56 @@ impl DefaultRouter {
                         router_id: Some(r.asbr),
                     });
                 }
+                // RFC 5340 §4.4.3.6 + RFC 3101 §2.5: type-7 externals
+                // from 0x2007 NSSA-LSAs (or 0xA027 E-Type-7-LSAs under
+                // Extended-LSA mode). The v3 NSSA selection rules
+                // mirror the v2 NSSA path: the FA must be covered by
+                // an intra-area path of the NSSA itself (no summary
+                // cover) and the ASBR must be reachable within the
+                // NSSA (no inter-area-router leg). `NssaCalcOpts`
+                // carries the border-router / summary-suppression
+                // flags so the §2.5 step (3) [NSSA] default-route
+                // install rules apply on the v3 side too. The entry
+                // fills only prefixes the type-5 / internal /
+                // inter-area paths did not — §11 path preference.
+                if area.kind.is_nssa() {
+                    let opts = NssaCalcOpts {
+                        border_router: self.ospf_is_abr_for(Protocol::Ospfv3),
+                        summaries_suppressed: area.kind.no_summary(),
+                    };
+                    for r in if self.ospf_v3_extended_lsas {
+                        lr_ospf::nssa::nssa_routes_v3_extended(&area.lsdb, &spf3, opts)
+                    } else {
+                        lr_ospf::nssa::nssa_routes_v3(&area.lsdb, &spf3, opts)
+                    } {
+                        table.entry(r.prefix).or_insert_with(|| OspfTableEntry {
+                            metric: r.metric,
+                            kind: OspfKind::External {
+                                metric_type: r.metric_type,
+                                asbr: r.asbr,
+                                forwarding_addr: r.forwarding_addr,
+                                internal_cost: r.internal_cost,
+                            },
+                            label: None,
+                            label_nh: None,
+                            next_hop: r.next_hop,
+                            // RFC 3101 §2.3 / RFC 8362 §3.6 — the
+                            // v3 type-7 route tag travels in the same
+                            // T bit / External-Prefix sub-TLV 3 the
+                            // type-5 path uses; the OSPF route
+                            // computation surfaces it the same way.
+                            route_tag: r.route_tag,
+                            // The NSSA-LSA's advertising router IS
+                            // the ASBR (the same value as the
+                            // `asbr` field above). The OSPF route
+                            // computation surfaces it through the
+                            // private `LrOspfRouterId` path attribute
+                            // so the policy DSL's `ospf.router_id`
+                            // accessor can read it.
+                            router_id: Some(r.asbr),
+                        });
+                    }
+                }
                 for (prefix, entry) in table {
                     let better = match global.get(&prefix) {
                         None => true,
