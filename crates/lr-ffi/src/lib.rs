@@ -41,6 +41,7 @@ pub mod mrt;
 pub mod ospf;
 pub mod policy;
 pub mod policy_objects;
+pub mod rib;
 pub mod roa_store;
 pub mod router;
 pub mod sessions;

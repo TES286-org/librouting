@@ -1,0 +1,1228 @@
+//! Loc-RIB + Adj-RIB-In/Out + cross-protocol mux FFI (RFC 4271 §9).
+//!
+//! Mirrors the public Rust API of `lr_rib::{LocRib, AdjRibIn, AdjRibOut,
+//! RibMux, RouteSelector, RibDiff}` so an embedder can build, populate
+//! and inspect a Loc-RIB (and the Adj-RIBs around it) without going
+//! through the daemon's `DefaultRouter`. This is the foundation for
+//! embedders that want to bring their own protocol plumbing (e.g. a
+//! custom BGP daemon that wires `BgpPeer` to its own Adj-RIB-In and a
+//! `LocRib` for selection).
+//!
+//! # Surface
+//!
+//! - `lr_loc_rib_new` / `lr_loc_rib_free` — Loc-RIB lifecycle.
+//! - `lr_loc_rib_install` — install one path (RFC 7911 path-id aware).
+//! - `lr_loc_rib_uninstall` — withdraw a key.
+//! - `lr_loc_rib_len` / `lr_loc_rib_is_empty` / `lr_loc_rib_paths_len`
+//!   / `lr_loc_rib_generation` — readers.
+//! - `lr_loc_rib_best_present` / `lr_loc_rib_best` — best-path reader
+//!   (returns 1/0 for presence; the route handle is a *copy* the
+//!   caller frees via `lr_route_free`).
+//!
+//! - `lr_adj_rib_in_new` / `lr_adj_rib_in_free` — Adj-RIB-In lifecycle.
+//! - `lr_adj_rib_in_feed` — install one pre-policy route.
+//! - `lr_adj_rib_in_withdraw` — withdraw by origin + key + path-id.
+//! - `lr_adj_rib_in_len` / `lr_adj_rib_in_is_empty`.
+//!
+//! - `lr_adj_rib_out_new` / `lr_adj_rib_out_free` — Adj-RIB-Out lifecycle.
+//! - `lr_adj_rib_out_advertise` — advertise a route to a destination.
+//! - `lr_adj_rib_out_suppress` — withdraw a route from a destination.
+//! - `lr_adj_rib_out_len` / `lr_adj_rib_out_is_empty`.
+//!
+//! - `lr_rib_mux_new` / `lr_rib_mux_free` — cross-protocol mux lifecycle.
+//! - `lr_rib_mux_install` / `lr_rib_mux_uninstall` / `lr_rib_mux_get` /
+//!   `lr_rib_mux_len` / `lr_rib_mux_is_empty`.
+//!
+//! - `lr_route_selector_select` / `lr_route_selector_select_bgp` —
+//!   apply the BIRD/FRR best-path selector to a flat array of route
+//!   handles; returns the index of the winner, or -1 if no route.
+//!
+//! Every entry point runs inside the crate's `catch_unwind` barrier
+//! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
+//! thread-local last-error string.
+
+#![allow(unused_unsafe)]
+
+use lr_core::addr::Prefix;
+use lr_core::nlri::NlriFamily;
+use lr_core::rib::{Route, RouteKey, RouteOrigin};
+use lr_rib::{AdjRibIn, AdjRibOut, LocRib, RibMux, RouteSelector};
+
+use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
+use crate::guarded;
+use crate::handle::lr_route_t;
+use crate::policy::lr_prefix_t;
+
+const LR_ERR_NULL: i32 = LrError::Null as i32;
+#[allow(dead_code)]
+const LR_ERR_INVALID_HANDLE: i32 = LrError::InvalidHandle as i32;
+const LR_ERR_OTHER: i32 = LrError::Other as i32;
+
+// ---- Opaque handle types ----
+
+#[repr(C)]
+pub struct OpaqueLocRib {
+    _private: [u8; 0],
+}
+pub type lr_loc_rib_t = *mut OpaqueLocRib;
+
+#[repr(C)]
+pub struct OpaqueAdjRibIn {
+    _private: [u8; 0],
+}
+pub type lr_adj_rib_in_t = *mut OpaqueAdjRibIn;
+
+#[repr(C)]
+pub struct OpaqueAdjRibOut {
+    _private: [u8; 0],
+}
+pub type lr_adj_rib_out_t = *mut OpaqueAdjRibOut;
+
+#[repr(C)]
+pub struct OpaqueRibMux {
+    _private: [u8; 0],
+}
+pub type lr_rib_mux_t = *mut OpaqueRibMux;
+
+// ---- Box / unbox helpers ----
+
+fn box_loc_rib(r: LocRib) -> lr_loc_rib_t {
+    Box::into_raw(Box::new(r)) as lr_loc_rib_t
+}
+unsafe fn unbox_loc_rib(r: lr_loc_rib_t) -> Option<Box<LocRib>> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(r as *mut LocRib) })
+}
+unsafe fn borrow_loc_rib(r: lr_loc_rib_t) -> Option<&'static LocRib> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const LocRib) })
+}
+unsafe fn borrow_loc_rib_mut(r: lr_loc_rib_t) -> Option<&'static mut LocRib> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut LocRib) })
+}
+
+fn box_adj_rib_in(r: AdjRibIn) -> lr_adj_rib_in_t {
+    Box::into_raw(Box::new(r)) as lr_adj_rib_in_t
+}
+unsafe fn borrow_adj_rib_in_mut(r: lr_adj_rib_in_t) -> Option<&'static mut AdjRibIn> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut AdjRibIn) })
+}
+unsafe fn borrow_adj_rib_in(r: lr_adj_rib_in_t) -> Option<&'static AdjRibIn> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const AdjRibIn) })
+}
+unsafe fn unbox_adj_rib_in(r: lr_adj_rib_in_t) -> Option<Box<AdjRibIn>> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(r as *mut AdjRibIn) })
+}
+
+fn box_adj_rib_out(r: AdjRibOut) -> lr_adj_rib_out_t {
+    Box::into_raw(Box::new(r)) as lr_adj_rib_out_t
+}
+unsafe fn borrow_adj_rib_out_mut(r: lr_adj_rib_out_t) -> Option<&'static mut AdjRibOut> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut AdjRibOut) })
+}
+unsafe fn borrow_adj_rib_out(r: lr_adj_rib_out_t) -> Option<&'static AdjRibOut> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const AdjRibOut) })
+}
+unsafe fn unbox_adj_rib_out(r: lr_adj_rib_out_t) -> Option<Box<AdjRibOut>> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(r as *mut AdjRibOut) })
+}
+
+fn box_rib_mux(r: RibMux) -> lr_rib_mux_t {
+    Box::into_raw(Box::new(r)) as lr_rib_mux_t
+}
+unsafe fn borrow_rib_mux_mut(r: lr_rib_mux_t) -> Option<&'static mut RibMux> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut RibMux) })
+}
+unsafe fn borrow_rib_mux(r: lr_rib_mux_t) -> Option<&'static RibMux> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const RibMux) })
+}
+unsafe fn unbox_rib_mux(r: lr_rib_mux_t) -> Option<Box<RibMux>> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(r as *mut RibMux) })
+}
+
+// ---- RouteKey + RouteOrigin helpers (mirror lr_prefix_t) ----
+
+/// Build a `RouteKey` from a C-side `lr_prefix_t` plus protocol id.
+/// `source` may be NULL when the route has no source prefix.
+fn route_key_from_c(
+    prefix: &lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: Option<&lr_prefix_t>,
+) -> Option<RouteKey> {
+    let p = prefix_to_rust(prefix)?;
+    let family = NlriFamily { afi, safi };
+    match source {
+        None => Some(RouteKey::new(p, family)),
+        Some(s) => {
+            let src = prefix_to_rust(s)?;
+            Some(RouteKey::with_source(p, family, src))
+        }
+    }
+}
+
+fn prefix_to_rust(p: &lr_prefix_t) -> Option<Prefix> {
+    if p.is_ipv6 == 0 {
+        if p.prefix_len > 32 {
+            return None;
+        }
+        Some(Prefix::new_v4(
+            [p.addr[0], p.addr[1], p.addr[2], p.addr[3]],
+            p.prefix_len,
+        ))
+    } else {
+        if p.prefix_len > 128 {
+            return None;
+        }
+        Some(Prefix::new_v6(p.addr, p.prefix_len))
+    }
+}
+
+/// Take ownership of a `lr_route_t` (the route is *moved* into the
+/// Loc-RIB / Adj-RIB). Returns `None` on a NULL handle.
+unsafe fn take_route(r: lr_route_t) -> Option<Route> {
+    if r.is_null() {
+        return None;
+    }
+    let boxed: Box<Route> = unsafe { Box::from_raw(r as *mut Route) };
+    Some(*boxed)
+}
+
+/// Clone a `lr_route_t` so the caller keeps ownership. The returned
+/// handle is owned by the caller and must be freed via `lr_route_free`.
+fn clone_route_handle(r: &Route) -> lr_route_t {
+    Box::into_raw(Box::new(r.clone())) as lr_route_t
+}
+
+// ---- Loc-RIB surface ----
+
+/// Construct an empty Loc-RIB (RFC 4271 §9).
+#[no_mangle]
+pub extern "C" fn lr_loc_rib_new() -> lr_loc_rib_t {
+    guarded(|| box_loc_rib(LocRib::new()), std::ptr::null_mut())
+}
+
+/// Drop a boxed Loc-RIB. Safe to call with NULL.
+///
+/// # Safety
+/// `r` must have been produced by `lr_loc_rib_new` and not already
+/// freed. Double-free is undefined behaviour.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_free(r: lr_loc_rib_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_loc_rib(r));
+        },
+        (),
+    )
+}
+
+/// Install one path into the Loc-RIB (RFC 4271 §9.1, RFC 7911
+/// path-id aware). The `route` handle is *consumed* — the caller
+/// must not use it after this call.
+///
+/// Returns 1 when the install actually changed the Loc-RIB (a new
+/// path was added or an existing one replaced with non-identical
+/// content); 0 for a byte-identical no-op (no generation bump).
+/// Negative on error.
+///
+/// # Safety
+/// `r` must be a valid Loc-RIB handle. `route` must be a valid route
+/// handle produced by `lr_route_new_v4` / `lr_route_new_v6`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_install(r: lr_loc_rib_t, route: lr_route_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(route) = take_route(route) else {
+                return LR_ERR_NULL;
+            };
+            if rib.install(route) {
+                1
+            } else {
+                0
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Uninstall a key (RFC 4271 §9.1 withdraw). Returns 1 when a route
+/// was withdrawn, 0 when the key was not present.
+///
+/// # Safety
+/// `r` must be a valid Loc-RIB handle. `prefix` must be a readable
+/// `lr_prefix_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_uninstall(
+    r: lr_loc_rib_t,
+    prefix: *const lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: *const lr_prefix_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let prefix_c = unsafe { &*prefix };
+            let source_c = if source.is_null() {
+                None
+            } else {
+                Some(unsafe { &*source })
+            };
+            let Some(key) = route_key_from_c(prefix_c, afi, safi, source_c) else {
+                set_last_error("invalid prefix in lr_loc_rib_uninstall".into());
+                return LR_ERR_OTHER;
+            };
+            if rib.uninstall(&key).is_some() {
+                1
+            } else {
+                0
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of keys (prefixes) in the Loc-RIB. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid Loc-RIB handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_len(r: lr_loc_rib_t) -> usize {
+    guarded(
+        || unsafe { borrow_loc_rib(r).map(|rib| rib.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// True when the Loc-RIB holds no keys. Returns 1 (true) on a NULL
+/// handle (the safe default for "no routes to advertise").
+///
+/// # Safety
+/// See [`lr_loc_rib_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_is_empty(r: lr_loc_rib_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_loc_rib(r)
+                .map(|rib| rib.is_empty() as u8)
+                .unwrap_or(1)
+        },
+        1,
+    )
+}
+
+/// Total number of stored paths (>= `len()` under RFC 7911 Add-Path).
+/// Returns 0 on a NULL handle.
+///
+/// # Safety
+/// See [`lr_loc_rib_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_paths_len(r: lr_loc_rib_t) -> usize {
+    guarded(
+        || unsafe { borrow_loc_rib(r).map(|rib| rib.paths_len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Monotonic generation counter — callers can ask "what changed since
+/// generation X?". Returns 0 on a NULL handle.
+///
+/// # Safety
+/// See [`lr_loc_rib_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_generation(r: lr_loc_rib_t) -> u64 {
+    guarded(
+        || unsafe { borrow_loc_rib(r).map(|rib| rib.generation()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// True when a route is present for the given key. Returns 0 on a NULL
+/// handle or when the key is absent.
+///
+/// # Safety
+/// `r` must be a valid Loc-RIB handle. `prefix` must be a readable
+/// `lr_prefix_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_best_present(
+    r: lr_loc_rib_t,
+    prefix: *const lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: *const lr_prefix_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib(r) else {
+                return 0;
+            };
+            if prefix.is_null() {
+                return 0;
+            }
+            let prefix_c = unsafe { &*prefix };
+            let source_c = if source.is_null() {
+                None
+            } else {
+                Some(unsafe { &*source })
+            };
+            let Some(key) = route_key_from_c(prefix_c, afi, safi, source_c) else {
+                return 0;
+            };
+            if rib.best(&key).is_some() {
+                1
+            } else {
+                0
+            }
+        },
+        0,
+    )
+}
+
+/// Read the best path for a key. Returns 0 on success and writes a
+/// NEW `lr_route_t` handle (a *copy* of the Loc-RIB's internal route)
+/// to `*out`. The caller owns the copy and must free it via
+/// `lr_route_free`. Returns `LR_ERR_NULL` on a NULL Loc-RIB, 0 with
+/// `*out = NULL` when the key is absent.
+///
+/// # Safety
+/// `r` must be a valid Loc-RIB handle. `prefix` and `out` must point
+/// to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_best(
+    r: lr_loc_rib_t,
+    prefix: *const lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: *const lr_prefix_t,
+    out: *mut lr_route_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(rib) = borrow_loc_rib(r) else {
+                return LR_ERR_NULL;
+            };
+            if prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let prefix_c = unsafe { &*prefix };
+            let source_c = if source.is_null() {
+                None
+            } else {
+                Some(unsafe { &*source })
+            };
+            let Some(key) = route_key_from_c(prefix_c, afi, safi, source_c) else {
+                set_last_error("invalid prefix in lr_loc_rib_best".into());
+                return LR_ERR_OTHER;
+            };
+            match rib.best(&key) {
+                None => {
+                    unsafe { *out = std::ptr::null_mut() }
+                    0
+                }
+                Some(route) => {
+                    unsafe { *out = clone_route_handle(route) }
+                    0
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// ---- Adj-RIB-In surface ----
+
+/// Construct an empty Adj-RIB-In (RFC 4271 §9).
+#[no_mangle]
+pub extern "C" fn lr_adj_rib_in_new() -> lr_adj_rib_in_t {
+    guarded(|| box_adj_rib_in(AdjRibIn::new()), std::ptr::null_mut())
+}
+
+/// Drop a boxed Adj-RIB-In. Safe to call with NULL.
+///
+/// # Safety
+/// `r` must have been produced by `lr_adj_rib_in_new` and not already
+/// freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_in_free(r: lr_adj_rib_in_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_adj_rib_in(r));
+        },
+        (),
+    )
+}
+
+/// Install one pre-policy route from `origin`. The `route` handle is
+/// *consumed* — the caller must not use it after this call.
+///
+/// `origin_peer` is the peer's session handle (the `RouteOrigin::peer`
+/// field); `origin_proto` is the `RouteOrigin::proto` field (one of
+/// the `LR_PROTO_*` constants).
+///
+/// # Safety
+/// `r` must be a valid Adj-RIB-In handle. `route` must be a valid route
+/// handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_in_feed(
+    r: lr_adj_rib_in_t,
+    origin_peer: u64,
+    origin_proto: i32,
+    route: lr_route_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_adj_rib_in_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(route) = take_route(route) else {
+                return LR_ERR_NULL;
+            };
+            // Map the C-side proto id to the Rust Protocol enum by
+            // reusing LrProtocol::from_i32 from policy.rs. Treat
+            // unknown ids as Protocol::Other(0).
+            let proto_u32 = match crate::policy::LrProtocol::from_i32(origin_proto) {
+                Some(p) => p.to_proto_u32(),
+                None => 0,
+            };
+            let origin = RouteOrigin {
+                peer: origin_peer,
+                proto: proto_u32,
+            };
+            rib.feed_pre_policy(origin, route);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Withdraw one (origin, key, path-id) tuple. Returns 1 when a route
+/// was withdrawn, 0 when no matching entry existed.
+///
+/// # Safety
+/// `r` must be a valid Adj-RIB-In handle. `prefix` must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_in_withdraw(
+    r: lr_adj_rib_in_t,
+    origin_peer: u64,
+    origin_proto: i32,
+    prefix: *const lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: *const lr_prefix_t,
+    path_id: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_adj_rib_in_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let prefix_c = unsafe { &*prefix };
+            let source_c = if source.is_null() {
+                None
+            } else {
+                Some(unsafe { &*source })
+            };
+            let Some(key) = route_key_from_c(prefix_c, afi, safi, source_c) else {
+                set_last_error("invalid prefix in lr_adj_rib_in_withdraw".into());
+                return LR_ERR_OTHER;
+            };
+            let proto_u32 = match crate::policy::LrProtocol::from_i32(origin_proto) {
+                Some(p) => p.to_proto_u32(),
+                None => 0,
+            };
+            let origin = RouteOrigin {
+                peer: origin_peer,
+                proto: proto_u32,
+            };
+            if rib.withdraw(origin, &key, path_id).is_some() {
+                1
+            } else {
+                0
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Total number of stored routes. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid Adj-RIB-In handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_in_len(r: lr_adj_rib_in_t) -> usize {
+    guarded(
+        || unsafe { borrow_adj_rib_in(r).map(|rib| rib.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// True when the Adj-RIB-In holds no routes. Returns 1 on a NULL handle.
+///
+/// # Safety
+/// See [`lr_adj_rib_in_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_in_is_empty(r: lr_adj_rib_in_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_adj_rib_in(r)
+                .map(|rib| rib.is_empty() as u8)
+                .unwrap_or(1)
+        },
+        1,
+    )
+}
+
+// ---- Adj-RIB-Out surface ----
+
+/// Construct an empty Adj-RIB-Out (RFC 4271 §9).
+#[no_mangle]
+pub extern "C" fn lr_adj_rib_out_new() -> lr_adj_rib_out_t {
+    guarded(|| box_adj_rib_out(AdjRibOut::new()), std::ptr::null_mut())
+}
+
+/// Drop a boxed Adj-RIB-Out. Safe to call with NULL.
+///
+/// # Safety
+/// `r` must have been produced by `lr_adj_rib_out_new` and not already
+/// freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_free(r: lr_adj_rib_out_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_adj_rib_out(r));
+        },
+        (),
+    )
+}
+
+/// Advertise one route to a destination. The `route` handle is *not*
+/// consumed (the Adj-RIB-Out stores a clone). `tx_path_id` is the
+/// RFC 7911 path identifier sent on the wire.
+///
+/// # Safety
+/// `r` must be a valid Adj-RIB-Out handle. `route` must be a valid
+/// route handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_advertise(
+    r: lr_adj_rib_out_t,
+    dest_peer: u64,
+    dest_proto: i32,
+    route: lr_route_t,
+    tx_path_id: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_adj_rib_out_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if route.is_null() {
+                return LR_ERR_NULL;
+            }
+            let route_ref: &Route = unsafe { &*(route as *const Route) };
+            let proto_u32 = match crate::policy::LrProtocol::from_i32(dest_proto) {
+                Some(p) => p.to_proto_u32(),
+                None => 0,
+            };
+            let dest = RouteOrigin {
+                peer: dest_peer,
+                proto: proto_u32,
+            };
+            rib.advertise(dest, route_ref, tx_path_id);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Suppress (withdraw) one (dest, key, path-id) tuple. Returns 1 when
+/// a route was suppressed, 0 when no matching entry existed.
+///
+/// # Safety
+/// `r` must be a valid Adj-RIB-Out handle. `prefix` must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_suppress(
+    r: lr_adj_rib_out_t,
+    dest_peer: u64,
+    dest_proto: i32,
+    prefix: *const lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: *const lr_prefix_t,
+    tx_path_id: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_adj_rib_out_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let prefix_c = unsafe { &*prefix };
+            let source_c = if source.is_null() {
+                None
+            } else {
+                Some(unsafe { &*source })
+            };
+            let Some(key) = route_key_from_c(prefix_c, afi, safi, source_c) else {
+                set_last_error("invalid prefix in lr_adj_rib_out_suppress".into());
+                return LR_ERR_OTHER;
+            };
+            let proto_u32 = match crate::policy::LrProtocol::from_i32(dest_proto) {
+                Some(p) => p.to_proto_u32(),
+                None => 0,
+            };
+            let dest = RouteOrigin {
+                peer: dest_peer,
+                proto: proto_u32,
+            };
+            rib.suppress(dest, &key, tx_path_id);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Total number of stored routes. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid Adj-RIB-Out handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_len(r: lr_adj_rib_out_t) -> usize {
+    guarded(
+        || unsafe { borrow_adj_rib_out(r).map(|rib| rib.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// True when the Adj-RIB-Out holds no routes. Returns 1 on a NULL handle.
+///
+/// # Safety
+/// See [`lr_adj_rib_out_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_is_empty(r: lr_adj_rib_out_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_adj_rib_out(r)
+                .map(|rib| rib.is_empty() as u8)
+                .unwrap_or(1)
+        },
+        1,
+    )
+}
+
+// ---- RibMux surface (cross-protocol merge by admin distance) ----
+
+/// Construct an empty RibMux — cross-protocol mux (RFC 4271 §9 + the
+/// admin-distance model the daemon uses to merge BGP / OSPF / Babel
+/// routes into one FIB).
+#[no_mangle]
+pub extern "C" fn lr_rib_mux_new() -> lr_rib_mux_t {
+    guarded(|| box_rib_mux(RibMux::new()), std::ptr::null_mut())
+}
+
+/// Drop a boxed RibMux. Safe to call with NULL.
+///
+/// # Safety
+/// `r` must have been produced by `lr_rib_mux_new` and not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_rib_mux_free(r: lr_rib_mux_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_rib_mux(r));
+        },
+        (),
+    )
+}
+
+/// Install one route into the mux. The `route` handle is *consumed*.
+///
+/// # Safety
+/// `r` must be a valid RibMux handle. `route` must be a valid route handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_rib_mux_install(r: lr_rib_mux_t, route: lr_route_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(mux) = borrow_rib_mux_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(route) = take_route(route) else {
+                return LR_ERR_NULL;
+            };
+            mux.install(route);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Uninstall a key. Returns 1 when a route was withdrawn, 0 when the
+/// key was not present.
+///
+/// # Safety
+/// `r` must be a valid RibMux handle. `prefix` must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn lr_rib_mux_uninstall(
+    r: lr_rib_mux_t,
+    prefix: *const lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: *const lr_prefix_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(mux) = borrow_rib_mux_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let prefix_c = unsafe { &*prefix };
+            let source_c = if source.is_null() {
+                None
+            } else {
+                Some(unsafe { &*source })
+            };
+            let Some(key) = route_key_from_c(prefix_c, afi, safi, source_c) else {
+                set_last_error("invalid prefix in lr_rib_mux_uninstall".into());
+                return LR_ERR_OTHER;
+            };
+            if mux.uninstall(&key).is_some() {
+                1
+            } else {
+                0
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read the merged route for a key. Returns 0 on success and writes a
+/// NEW `lr_route_t` handle (a *copy*) to `*out`. `LR_ERR_NULL` on a
+/// NULL mux; 0 with `*out = NULL` when the key is absent.
+///
+/// # Safety
+/// `r` must be a valid RibMux handle. `prefix` and `out` must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn lr_rib_mux_get(
+    r: lr_rib_mux_t,
+    prefix: *const lr_prefix_t,
+    afi: u16,
+    safi: u8,
+    source: *const lr_prefix_t,
+    out: *mut lr_route_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(mux) = borrow_rib_mux(r) else {
+                return LR_ERR_NULL;
+            };
+            if prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let prefix_c = unsafe { &*prefix };
+            let source_c = if source.is_null() {
+                None
+            } else {
+                Some(unsafe { &*source })
+            };
+            let Some(key) = route_key_from_c(prefix_c, afi, safi, source_c) else {
+                set_last_error("invalid prefix in lr_rib_mux_get".into());
+                return LR_ERR_OTHER;
+            };
+            match mux.get(&key) {
+                None => {
+                    unsafe { *out = std::ptr::null_mut() }
+                    0
+                }
+                Some(route) => {
+                    unsafe { *out = clone_route_handle(route) }
+                    0
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of merged routes. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid RibMux handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_rib_mux_len(r: lr_rib_mux_t) -> usize {
+    guarded(
+        || unsafe { borrow_rib_mux(r).map(|mux| mux.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// True when the mux holds no routes. Returns 1 on a NULL handle.
+///
+/// # Safety
+/// See [`lr_rib_mux_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_rib_mux_is_empty(r: lr_rib_mux_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_rib_mux(r)
+                .map(|mux| mux.is_empty() as u8)
+                .unwrap_or(1)
+        },
+        1,
+    )
+}
+
+// ---- RouteSelector ----
+
+/// Apply the BIRD/FRR best-path selector to a flat array of route
+/// handles. Returns the index of the winning route (>= 0), or -1 when
+/// `count == 0` or every handle is NULL. The handles are *not*
+/// consumed — the caller keeps ownership.
+///
+/// # Safety
+/// `routes` must point to `count` readable `lr_route_t` values.
+#[no_mangle]
+pub unsafe extern "C" fn lr_route_selector_select(routes: *const lr_route_t, count: usize) -> i64 {
+    guarded(
+        || unsafe {
+            if routes.is_null() || count == 0 {
+                return -1;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(routes, count) };
+            // Build a Vec<Route> by cloning the routes the handles
+            // point at. RouteSelector::select takes &[Route], not
+            // &[&Route] — cloning is the simplest correct shape.
+            let mut cloned: Vec<Route> = Vec::with_capacity(count);
+            let mut index_map: Vec<usize> = Vec::with_capacity(count);
+            for (i, &h) in slice.iter().enumerate() {
+                if h.is_null() {
+                    continue;
+                }
+                let r: &Route = unsafe { &*(h as *const Route) };
+                cloned.push(r.clone());
+                index_map.push(i);
+            }
+            if cloned.is_empty() {
+                return -1;
+            }
+            let Some(winner) = RouteSelector::select(&cloned) else {
+                return -1;
+            };
+            // Find which original index the winner came from. Compare by
+            // pointer-equivalent identity: the winner is a reference into
+            // `cloned`, so find the index in `cloned` and map back.
+            let winner_ptr = winner as *const Route;
+            for (rank, r) in cloned.iter().enumerate() {
+                if std::ptr::eq(r as *const Route, winner_ptr) {
+                    return index_map[rank] as i64;
+                }
+            }
+            -1
+        },
+        -1,
+    )
+}
+
+/// Apply the BGP-specific best-path selector (RFC 4271 §9.1). Same
+/// contract as [`lr_route_selector_select`].
+///
+/// # Safety
+/// See [`lr_route_selector_select`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_route_selector_select_bgp(
+    routes: *const lr_route_t,
+    count: usize,
+) -> i64 {
+    guarded(
+        || unsafe {
+            if routes.is_null() || count == 0 {
+                return -1;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(routes, count) };
+            let mut cloned: Vec<Route> = Vec::with_capacity(count);
+            let mut index_map: Vec<usize> = Vec::with_capacity(count);
+            for (i, &h) in slice.iter().enumerate() {
+                if h.is_null() {
+                    continue;
+                }
+                let r: &Route = unsafe { &*(h as *const Route) };
+                cloned.push(r.clone());
+                index_map.push(i);
+            }
+            if cloned.is_empty() {
+                return -1;
+            }
+            let Some(winner) = RouteSelector::select_bgp(&cloned) else {
+                return -1;
+            };
+            let winner_ptr = winner as *const Route;
+            for (rank, r) in cloned.iter().enumerate() {
+                if std::ptr::eq(r as *const Route, winner_ptr) {
+                    return index_map[rank] as i64;
+                }
+            }
+            -1
+        },
+        -1,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lr_core::rib::Protocol;
+
+    /// Build a Route for tests — minimal v4 with the given prefix,
+    /// local-pref, and AS path.
+    fn build_route(prefix: [u8; 4], plen: u8, local_pref: u32) -> lr_route_t {
+        let route = Route {
+            key: RouteKey::new(Prefix::new_v4(prefix, plen), NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin {
+                peer: 1,
+                proto: crate::policy::LrProtocol::Bgp.to_proto_u32(),
+            },
+            protocol: Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(100, 0),
+            next_hop: Some(lr_core::addr::IpAddr::V4([10, 0, 0, 1])),
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        let mut route = route;
+        // Use the public path-attribute API to set LOCAL_PREF.
+        route.attributes.insert(lr_core::attr::Attribute {
+            tag: lr_core::attr::AttrTag::raw(lr_bgp::path::AttrType::LocalPref.to_u8()),
+            flags: 0x40,
+            value: local_pref.to_be_bytes().to_vec(),
+        });
+        Box::into_raw(Box::new(route)) as lr_route_t
+    }
+
+    /// Build a Route with a specific metric in `preference.metric`
+    /// (the field RouteSelector::compare actually looks at — unlike
+    /// `local_pref`, which is a BGP attribute the generic selector
+    /// does not consult).
+    fn build_route_with_metric(prefix: [u8; 4], plen: u8, metric: u32) -> lr_route_t {
+        let route = Route {
+            key: RouteKey::new(Prefix::new_v4(prefix, plen), NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin {
+                peer: 1,
+                proto: crate::policy::LrProtocol::Bgp.to_proto_u32(),
+            },
+            protocol: Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(100, metric),
+            next_hop: Some(lr_core::addr::IpAddr::V4([10, 0, 0, 1])),
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        Box::into_raw(Box::new(route)) as lr_route_t
+    }
+
+    fn v4_prefix(addr: [u8; 4], plen: u8) -> lr_prefix_t {
+        let mut p = lr_prefix_t {
+            addr: [0; 16],
+            is_ipv6: 0,
+            prefix_len: plen,
+        };
+        p.addr[..4].copy_from_slice(&addr);
+        p
+    }
+
+    #[test]
+    fn ffi_loc_rib_install_and_best() {
+        let rib = lr_loc_rib_new();
+        assert!(!rib.is_null());
+
+        let r = build_route([10, 0, 0, 0], 24, 100);
+        let rc = unsafe { lr_loc_rib_install(rib, r) };
+        assert_eq!(rc, 1, "first install changes the Loc-RIB");
+
+        // Re-install identical route — no change.
+        let r2 = build_route([10, 0, 0, 0], 24, 100);
+        let rc = unsafe { lr_loc_rib_install(rib, r2) };
+        assert_eq!(rc, 0, "byte-identical reinstall is a no-op");
+
+        assert_eq!(unsafe { lr_loc_rib_len(rib) }, 1);
+        assert_eq!(unsafe { lr_loc_rib_is_empty(rib) }, 0);
+        assert_eq!(unsafe { lr_loc_rib_paths_len(rib) }, 1);
+        assert!(unsafe { lr_loc_rib_generation(rib) } >= 1);
+
+        let p = v4_prefix([10, 0, 0, 0], 24);
+        assert_eq!(
+            unsafe { lr_loc_rib_best_present(rib, &p, 1, 1, std::ptr::null()) },
+            1
+        );
+
+        let mut out: lr_route_t = std::ptr::null_mut();
+        let rc = unsafe { lr_loc_rib_best(rib, &p, 1, 1, std::ptr::null(), &raw mut out) };
+        assert_eq!(rc, 0);
+        assert!(!out.is_null());
+        unsafe { crate::policy_objects::lr_route_free(out) };
+
+        // Uninstall.
+        let rc = unsafe { lr_loc_rib_uninstall(rib, &p, 1, 1, std::ptr::null()) };
+        assert_eq!(rc, 1);
+        assert_eq!(unsafe { lr_loc_rib_is_empty(rib) }, 1);
+
+        unsafe { lr_loc_rib_free(rib) };
+    }
+
+    #[test]
+    fn ffi_loc_rib_handles_null_safely() {
+        assert_eq!(unsafe { lr_loc_rib_len(std::ptr::null_mut()) }, 0);
+        assert_eq!(unsafe { lr_loc_rib_is_empty(std::ptr::null_mut()) }, 1);
+        unsafe { lr_loc_rib_free(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn ffi_adj_rib_in_feed_and_len() {
+        let rib = lr_adj_rib_in_new();
+        assert!(!rib.is_null());
+        assert_eq!(unsafe { lr_adj_rib_in_is_empty(rib) }, 1);
+
+        let r = build_route([10, 0, 0, 0], 24, 100);
+        let rc = unsafe {
+            lr_adj_rib_in_feed(rib, 1, 0 /* LR_PROTO_BGP */, r)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { lr_adj_rib_in_len(rib) }, 1);
+        assert_eq!(unsafe { lr_adj_rib_in_is_empty(rib) }, 0);
+
+        let p = v4_prefix([10, 0, 0, 0], 24);
+        let rc = unsafe { lr_adj_rib_in_withdraw(rib, 1, 0, &p, 1, 1, std::ptr::null(), 0) };
+        assert_eq!(rc, 1);
+        assert_eq!(unsafe { lr_adj_rib_in_len(rib) }, 0);
+
+        unsafe { lr_adj_rib_in_free(rib) };
+    }
+
+    #[test]
+    fn ffi_adj_rib_out_advertise_and_len() {
+        let rib = lr_adj_rib_out_new();
+        assert!(!rib.is_null());
+        assert_eq!(unsafe { lr_adj_rib_out_is_empty(rib) }, 1);
+
+        let r = build_route([10, 0, 0, 0], 24, 100);
+        let rc = unsafe { lr_adj_rib_out_advertise(rib, 1, 0, r, 0) };
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { lr_adj_rib_out_len(rib) }, 1);
+        assert_eq!(unsafe { lr_adj_rib_out_is_empty(rib) }, 0);
+
+        // The route handle is NOT consumed — free it.
+        unsafe { crate::policy_objects::lr_route_free(r) };
+
+        let p = v4_prefix([10, 0, 0, 0], 24);
+        let rc = unsafe { lr_adj_rib_out_suppress(rib, 1, 0, &p, 1, 1, std::ptr::null(), 0) };
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { lr_adj_rib_out_len(rib) }, 0);
+
+        unsafe { lr_adj_rib_out_free(rib) };
+    }
+
+    #[test]
+    fn ffi_rib_mux_install_and_get() {
+        let mux = lr_rib_mux_new();
+        assert!(!mux.is_null());
+
+        let r = build_route([10, 0, 0, 0], 24, 100);
+        let rc = unsafe { lr_rib_mux_install(mux, r) };
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { lr_rib_mux_len(mux) }, 1);
+        assert_eq!(unsafe { lr_rib_mux_is_empty(mux) }, 0);
+
+        let p = v4_prefix([10, 0, 0, 0], 24);
+        let mut out: lr_route_t = std::ptr::null_mut();
+        let rc = unsafe { lr_rib_mux_get(mux, &p, 1, 1, std::ptr::null(), &raw mut out) };
+        assert_eq!(rc, 0);
+        assert!(!out.is_null());
+        unsafe { crate::policy_objects::lr_route_free(out) };
+
+        let rc = unsafe { lr_rib_mux_uninstall(mux, &p, 1, 1, std::ptr::null()) };
+        assert_eq!(rc, 1);
+        assert_eq!(unsafe { lr_rib_mux_is_empty(mux) }, 1);
+
+        unsafe { lr_rib_mux_free(mux) };
+    }
+
+    #[test]
+    fn ffi_route_selector_select_picks_lower_metric() {
+        // Two routes for the same prefix; the one with metric=10 must
+        // beat the one with metric=100 (RouteSelector::compare orders
+        // by admin_distance, then metric, then age).
+        let r1 = build_route_with_metric([10, 0, 0, 0], 24, 100);
+        let r2 = build_route_with_metric([10, 0, 0, 0], 24, 10);
+        let routes = [r1, r2];
+        let winner = unsafe { lr_route_selector_select(routes.as_ptr(), routes.len()) };
+        assert_eq!(winner, 1, "the lower-metric route wins");
+
+        let winner_bgp = unsafe { lr_route_selector_select_bgp(routes.as_ptr(), routes.len()) };
+        assert_eq!(winner_bgp, 1, "BGP selector agrees");
+
+        // Cleanup: both handles are still owned by the test.
+        for r in routes {
+            unsafe { crate::policy_objects::lr_route_free(r) };
+        }
+    }
+
+    #[test]
+    fn ffi_route_selector_select_returns_minus_one_on_empty() {
+        let winner = unsafe { lr_route_selector_select(std::ptr::null(), 0) };
+        assert_eq!(winner, -1);
+    }
+}

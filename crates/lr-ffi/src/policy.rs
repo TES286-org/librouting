@@ -58,7 +58,7 @@ impl LrProtocol {
         }
     }
 
-    fn to_protocol(self) -> Protocol {
+    pub(crate) fn to_protocol(self) -> Protocol {
         match self {
             Self::Bgp => Protocol::Bgp,
             Self::Ospf => Protocol::Ospfv2,
@@ -67,6 +67,13 @@ impl LrProtocol {
             Self::Static => Protocol::Static,
             Self::Connected => Protocol::Connected,
         }
+    }
+
+    /// Map a `LrProtocol` to the `RouteOrigin::proto` `u32` value the
+    /// daemon uses (the same numeric id the C ABI's `LR_PROTO_*`
+    /// constants advertise — `0` for BGP, `1` for OSPFv2, etc.).
+    pub(crate) fn to_proto_u32(self) -> u32 {
+        self as i32 as u32
     }
 }
 

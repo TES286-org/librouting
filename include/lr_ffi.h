@@ -1186,6 +1186,30 @@ typedef struct lr_community_entry_t {
   uint8_t permit;
 } lr_community_entry_t;
 
+typedef struct OpaqueLocRib {
+  uint8_t _private[0];
+} OpaqueLocRib;
+
+typedef struct OpaqueLocRib *lr_loc_rib_t;
+
+typedef struct OpaqueAdjRibIn {
+  uint8_t _private[0];
+} OpaqueAdjRibIn;
+
+typedef struct OpaqueAdjRibIn *lr_adj_rib_in_t;
+
+typedef struct OpaqueAdjRibOut {
+  uint8_t _private[0];
+} OpaqueAdjRibOut;
+
+typedef struct OpaqueAdjRibOut *lr_adj_rib_out_t;
+
+typedef struct OpaqueRibMux {
+  uint8_t _private[0];
+} OpaqueRibMux;
+
+typedef struct OpaqueRibMux *lr_rib_mux_t;
+
 /**
  * Opaque ROA store handle. C side never touches internals.
  */
@@ -3543,6 +3567,328 @@ int32_t lr_resolver_add_community_list(lr_resolver_t resolver,
                                        const char *name,
                                        const struct lr_community_entry_t *entries,
                                        uintptr_t count);
+
+/**
+ * Construct an empty Loc-RIB (RFC 4271 §9).
+ */
+lr_loc_rib_t lr_loc_rib_new(void);
+
+/**
+ * Drop a boxed Loc-RIB. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_loc_rib_new` and not already
+ * freed. Double-free is undefined behaviour.
+ */
+void lr_loc_rib_free(lr_loc_rib_t r);
+
+/**
+ * Install one path into the Loc-RIB (RFC 4271 §9.1, RFC 7911
+ * path-id aware). The `route` handle is *consumed* — the caller
+ * must not use it after this call.
+ *
+ * Returns 1 when the install actually changed the Loc-RIB (a new
+ * path was added or an existing one replaced with non-identical
+ * content); 0 for a byte-identical no-op (no generation bump).
+ * Negative on error.
+ *
+ * # Safety
+ * `r` must be a valid Loc-RIB handle. `route` must be a valid route
+ * handle produced by `lr_route_new_v4` / `lr_route_new_v6`.
+ */
+int32_t lr_loc_rib_install(lr_loc_rib_t r, lr_route_t route);
+
+/**
+ * Uninstall a key (RFC 4271 §9.1 withdraw). Returns 1 when a route
+ * was withdrawn, 0 when the key was not present.
+ *
+ * # Safety
+ * `r` must be a valid Loc-RIB handle. `prefix` must be a readable
+ * `lr_prefix_t`.
+ */
+int32_t lr_loc_rib_uninstall(lr_loc_rib_t r,
+                             const struct lr_prefix_t *prefix,
+                             uint16_t afi,
+                             uint8_t safi,
+                             const struct lr_prefix_t *source);
+
+/**
+ * Number of keys (prefixes) in the Loc-RIB. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid Loc-RIB handle.
+ */
+uintptr_t lr_loc_rib_len(lr_loc_rib_t r);
+
+/**
+ * True when the Loc-RIB holds no keys. Returns 1 (true) on a NULL
+ * handle (the safe default for "no routes to advertise").
+ *
+ * # Safety
+ * See [`lr_loc_rib_len`].
+ */
+uint8_t lr_loc_rib_is_empty(lr_loc_rib_t r);
+
+/**
+ * Total number of stored paths (>= `len()` under RFC 7911 Add-Path).
+ * Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_loc_rib_len`].
+ */
+uintptr_t lr_loc_rib_paths_len(lr_loc_rib_t r);
+
+/**
+ * Monotonic generation counter — callers can ask "what changed since
+ * generation X?". Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_loc_rib_len`].
+ */
+uint64_t lr_loc_rib_generation(lr_loc_rib_t r);
+
+/**
+ * True when a route is present for the given key. Returns 0 on a NULL
+ * handle or when the key is absent.
+ *
+ * # Safety
+ * `r` must be a valid Loc-RIB handle. `prefix` must be a readable
+ * `lr_prefix_t`.
+ */
+uint8_t lr_loc_rib_best_present(lr_loc_rib_t r,
+                                const struct lr_prefix_t *prefix,
+                                uint16_t afi,
+                                uint8_t safi,
+                                const struct lr_prefix_t *source);
+
+/**
+ * Read the best path for a key. Returns 0 on success and writes a
+ * NEW `lr_route_t` handle (a *copy* of the Loc-RIB's internal route)
+ * to `*out`. The caller owns the copy and must free it via
+ * `lr_route_free`. Returns `LR_ERR_NULL` on a NULL Loc-RIB, 0 with
+ * `*out = NULL` when the key is absent.
+ *
+ * # Safety
+ * `r` must be a valid Loc-RIB handle. `prefix` and `out` must point
+ * to writable memory.
+ */
+int32_t lr_loc_rib_best(lr_loc_rib_t r,
+                        const struct lr_prefix_t *prefix,
+                        uint16_t afi,
+                        uint8_t safi,
+                        const struct lr_prefix_t *source,
+                        lr_route_t *out);
+
+/**
+ * Construct an empty Adj-RIB-In (RFC 4271 §9).
+ */
+lr_adj_rib_in_t lr_adj_rib_in_new(void);
+
+/**
+ * Drop a boxed Adj-RIB-In. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_adj_rib_in_new` and not already
+ * freed.
+ */
+void lr_adj_rib_in_free(lr_adj_rib_in_t r);
+
+/**
+ * Install one pre-policy route from `origin`. The `route` handle is
+ * *consumed* — the caller must not use it after this call.
+ *
+ * `origin_peer` is the peer's session handle (the `RouteOrigin::peer`
+ * field); `origin_proto` is the `RouteOrigin::proto` field (one of
+ * the `LR_PROTO_*` constants).
+ *
+ * # Safety
+ * `r` must be a valid Adj-RIB-In handle. `route` must be a valid route
+ * handle.
+ */
+int32_t lr_adj_rib_in_feed(lr_adj_rib_in_t r,
+                           uint64_t origin_peer,
+                           int32_t origin_proto,
+                           lr_route_t route);
+
+/**
+ * Withdraw one (origin, key, path-id) tuple. Returns 1 when a route
+ * was withdrawn, 0 when no matching entry existed.
+ *
+ * # Safety
+ * `r` must be a valid Adj-RIB-In handle. `prefix` must be readable.
+ */
+int32_t lr_adj_rib_in_withdraw(lr_adj_rib_in_t r,
+                               uint64_t origin_peer,
+                               int32_t origin_proto,
+                               const struct lr_prefix_t *prefix,
+                               uint16_t afi,
+                               uint8_t safi,
+                               const struct lr_prefix_t *source,
+                               uint32_t path_id);
+
+/**
+ * Total number of stored routes. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid Adj-RIB-In handle.
+ */
+uintptr_t lr_adj_rib_in_len(lr_adj_rib_in_t r);
+
+/**
+ * True when the Adj-RIB-In holds no routes. Returns 1 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_adj_rib_in_len`].
+ */
+uint8_t lr_adj_rib_in_is_empty(lr_adj_rib_in_t r);
+
+/**
+ * Construct an empty Adj-RIB-Out (RFC 4271 §9).
+ */
+lr_adj_rib_out_t lr_adj_rib_out_new(void);
+
+/**
+ * Drop a boxed Adj-RIB-Out. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_adj_rib_out_new` and not already
+ * freed.
+ */
+void lr_adj_rib_out_free(lr_adj_rib_out_t r);
+
+/**
+ * Advertise one route to a destination. The `route` handle is *not*
+ * consumed (the Adj-RIB-Out stores a clone). `tx_path_id` is the
+ * RFC 7911 path identifier sent on the wire.
+ *
+ * # Safety
+ * `r` must be a valid Adj-RIB-Out handle. `route` must be a valid
+ * route handle.
+ */
+int32_t lr_adj_rib_out_advertise(lr_adj_rib_out_t r,
+                                 uint64_t dest_peer,
+                                 int32_t dest_proto,
+                                 lr_route_t route,
+                                 uint32_t tx_path_id);
+
+/**
+ * Suppress (withdraw) one (dest, key, path-id) tuple. Returns 1 when
+ * a route was suppressed, 0 when no matching entry existed.
+ *
+ * # Safety
+ * `r` must be a valid Adj-RIB-Out handle. `prefix` must be readable.
+ */
+int32_t lr_adj_rib_out_suppress(lr_adj_rib_out_t r,
+                                uint64_t dest_peer,
+                                int32_t dest_proto,
+                                const struct lr_prefix_t *prefix,
+                                uint16_t afi,
+                                uint8_t safi,
+                                const struct lr_prefix_t *source,
+                                uint32_t tx_path_id);
+
+/**
+ * Total number of stored routes. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid Adj-RIB-Out handle.
+ */
+uintptr_t lr_adj_rib_out_len(lr_adj_rib_out_t r);
+
+/**
+ * True when the Adj-RIB-Out holds no routes. Returns 1 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_adj_rib_out_len`].
+ */
+uint8_t lr_adj_rib_out_is_empty(lr_adj_rib_out_t r);
+
+/**
+ * Construct an empty RibMux — cross-protocol mux (RFC 4271 §9 + the
+ * admin-distance model the daemon uses to merge BGP / OSPF / Babel
+ * routes into one FIB).
+ */
+lr_rib_mux_t lr_rib_mux_new(void);
+
+/**
+ * Drop a boxed RibMux. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_rib_mux_new` and not already freed.
+ */
+void lr_rib_mux_free(lr_rib_mux_t r);
+
+/**
+ * Install one route into the mux. The `route` handle is *consumed*.
+ *
+ * # Safety
+ * `r` must be a valid RibMux handle. `route` must be a valid route handle.
+ */
+int32_t lr_rib_mux_install(lr_rib_mux_t r, lr_route_t route);
+
+/**
+ * Uninstall a key. Returns 1 when a route was withdrawn, 0 when the
+ * key was not present.
+ *
+ * # Safety
+ * `r` must be a valid RibMux handle. `prefix` must be readable.
+ */
+int32_t lr_rib_mux_uninstall(lr_rib_mux_t r,
+                             const struct lr_prefix_t *prefix,
+                             uint16_t afi,
+                             uint8_t safi,
+                             const struct lr_prefix_t *source);
+
+/**
+ * Read the merged route for a key. Returns 0 on success and writes a
+ * NEW `lr_route_t` handle (a *copy*) to `*out`. `LR_ERR_NULL` on a
+ * NULL mux; 0 with `*out = NULL` when the key is absent.
+ *
+ * # Safety
+ * `r` must be a valid RibMux handle. `prefix` and `out` must be readable.
+ */
+int32_t lr_rib_mux_get(lr_rib_mux_t r,
+                       const struct lr_prefix_t *prefix,
+                       uint16_t afi,
+                       uint8_t safi,
+                       const struct lr_prefix_t *source,
+                       lr_route_t *out);
+
+/**
+ * Number of merged routes. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid RibMux handle.
+ */
+uintptr_t lr_rib_mux_len(lr_rib_mux_t r);
+
+/**
+ * True when the mux holds no routes. Returns 1 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_rib_mux_len`].
+ */
+uint8_t lr_rib_mux_is_empty(lr_rib_mux_t r);
+
+/**
+ * Apply the BIRD/FRR best-path selector to a flat array of route
+ * handles. Returns the index of the winning route (>= 0), or -1 when
+ * `count == 0` or every handle is NULL. The handles are *not*
+ * consumed — the caller keeps ownership.
+ *
+ * # Safety
+ * `routes` must point to `count` readable `lr_route_t` values.
+ */
+int64_t lr_route_selector_select(const lr_route_t *routes, uintptr_t count);
+
+/**
+ * Apply the BGP-specific best-path selector (RFC 4271 §9.1). Same
+ * contract as [`lr_route_selector_select`].
+ *
+ * # Safety
+ * See [`lr_route_selector_select`].
+ */
+int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
 
 /**
  * Create an empty ROA store. NULL on panic (last-error set).
