@@ -894,6 +894,65 @@ int main(void) {
         lr_route_free(rt);
     }
 
+    /* ===== Structured inspection surface (issue #92) ===== */
+    {
+        lr_router_t r2 = lr_router_new();
+        check(r2 != NULL, "router_new for inspection");
+
+        /* Fresh router: zero sessions, zero areas. */
+        check(lr_router_session_count(r2) == 0,
+              "session_count: 0 on fresh router");
+        check(lr_router_ospf_area_count(r2) == 0,
+              "ospf_area_count: 0 on fresh router");
+
+        /* Add one BGP session and verify the summary surface. */
+        uint64_t h = 0;
+        int rc = lr_router_add_bgp_session(r2, 64512, 64513, 0x0a000001u,
+                                            90, 0, 1, &h);
+        check(rc == 0 && h != 0, "add_bgp_session for inspection");
+        check(lr_router_session_count(r2) == 1,
+              "session_count: 1 after BGP session");
+        lr_session_summary_t s;
+        check(lr_router_session_summary_at(r2, 0, &s) == 0,
+              "session_summary_at(0): success");
+        check(s.handle == h, "session_summary_at: handle matches");
+        check(s.kind == LR_SESSION_KIND_BGP, "session_summary_at: kind is BGP");
+        check(s.local_as == 64512, "session_summary_at: local_as");
+        check(s.peer_as == 64513, "session_summary_at: peer_as");
+        check(strcmp((const char *)s.kind_text, "bgp") == 0,
+              "session_summary_at: kind_text is 'bgp'");
+
+        /* Out-of-range index returns LR_ERR_OTHER (-6). */
+        lr_session_summary_t s2;
+        check(lr_router_session_summary_at(r2, 99, &s2) == -6,
+              "session_summary_at(99): out-of-range returns -6");
+
+        /* OSPF area IDs: fresh router has zero; unknown area returns
+         * LR_ERR_OTHER (-6). */
+        check(lr_router_ospf_area_count(r2) == 0,
+              "ospf_area_count: still 0 after BGP session");
+        uint64_t tv = 0;
+        check(lr_router_ospf_area_topology_version(r2, 99, &tv) == -6,
+              "ospf_area_topology_version(99): unknown returns -6");
+
+        /* OSPF LSA: unknown area/LSA returns -6. */
+        lr_ospf_lsa_t lsa;
+        check(lr_router_ospf_area_lsa(r2, 0, 1, 1, 1, &lsa) == -6,
+              "ospf_area_lsa: unknown returns -6");
+
+        /* bgp_session_identity_hash returns a u64 (always succeeds). */
+        uint64_t hash = lr_router_bgp_session_identity_hash(r2);
+        check(hash <= 0xFFFFFFFFFFFFFFFFULL,
+              "bgp_session_identity_hash: fits in u64");
+
+        /* drain_ospf_grace_events returns 0 events on a fresh router. */
+        lr_ospf_grace_event_t ev;
+        intptr_t n = lr_router_drain_ospf_grace_events(r2, &ev, 1);
+        check(n == 0, "drain_ospf_grace_events: 0 events on fresh router");
+
+        lr_router_destroy(r2);
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

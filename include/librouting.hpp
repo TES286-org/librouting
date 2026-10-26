@@ -669,6 +669,263 @@ inline std::vector<Event> poll_events(Router& r, std::size_t capacity = 32) {
     return out;
 }
 
+// ===== Structured inspection surface (issue #92) =====
+//
+// Mirrors the Rust pub API of DefaultRouter::session_summaries /
+// ospf_area_ids / ospf_area_topology_version / ospf_area_lsa /
+// bgp_session_identity_hash / drain_ospf_grace_events so the
+// embedder no longer has to parse the text-form
+// `sessions_dump` / `rib_dump` JSON.
+
+/// Session protocol kind (mirrors LR_SESSION_KIND_*).
+enum class SessionKind : std::int32_t {
+    Bgp   = 1,
+    Ospf  = 2,
+    Ospf3 = 3,
+    Babel = 4,
+};
+
+/// Lower-case ASCII name for the kind — same form as Rust's
+/// `SessionSummary::kind`.
+inline const char* session_kind_name(SessionKind k) {
+    switch (k) {
+        case SessionKind::Bgp:   return "bgp";
+        case SessionKind::Ospf:  return "ospf";
+        case SessionKind::Ospf3: return "ospf3";
+        case SessionKind::Babel: return "babel";
+    }
+    return "unknown";
+}
+
+/// One session's operational summary (mirrors lr_router::SessionSummary).
+struct SessionSummary {
+    std::uint64_t handle = 0;
+    SessionKind kind = SessionKind::Bgp;
+    std::string kind_text;
+    std::uint32_t local_as = 0;
+    std::uint32_t peer_as = 0;
+    std::string state;
+    bool established = false;
+    bool peer_bgp_id_present = false;
+    std::uint32_t peer_bgp_id = 0;
+    std::uint16_t negotiated_hold_time = 0;
+    std::uint64_t adj_rib_in_len = 0;
+    std::uint64_t updates_received = 0;
+    std::uint64_t updates_sent = 0;
+};
+
+/// Decode a fixed-size NUL-terminated uint8 array as a std::string.
+/// The C struct field is `uint8_t arr[N]`; the caller passes the
+/// array decayed to a pointer plus its declared size.
+inline std::string decode_c_text(const std::uint8_t* p, std::size_t cap) {
+    std::size_t n = 0;
+    while (n < cap && p[n] != 0) ++n;
+    return std::string(reinterpret_cast<const char*>(p), n);
+}
+
+/// Number of sessions currently registered on the router. Mirrors
+/// `DefaultRouter::session_summaries().len()`.
+inline std::size_t session_count(Router& r) {
+    return lr_router_session_count(r.get());
+}
+
+/// Read one session summary by index. Mirrors
+/// `DefaultRouter::session_summaries()[index]`. Throws `Error` when
+/// the index is out of range.
+inline SessionSummary session_summary_at(Router& r, std::size_t index) {
+    lr_session_summary_t raw{};
+    int rc = lr_router_session_summary_at(r.get(), index, &raw);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_session_summary_at failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    SessionSummary s;
+    s.handle = raw.handle;
+    s.kind = static_cast<SessionKind>(raw.kind);
+    s.kind_text = decode_c_text(raw.kind_text, sizeof(raw.kind_text));
+    s.local_as = raw.local_as;
+    s.peer_as = raw.peer_as;
+    s.state = decode_c_text(raw.state_text, sizeof(raw.state_text));
+    s.established = raw.established != 0;
+    s.peer_bgp_id_present = raw.peer_bgp_id_present != 0;
+    s.peer_bgp_id = raw.peer_bgp_id;
+    s.negotiated_hold_time = raw.negotiated_hold_time;
+    s.adj_rib_in_len = raw.adj_rib_in_len;
+    s.updates_received = raw.updates_received;
+    s.updates_sent = raw.updates_sent;
+    return s;
+}
+
+/// Snapshot of every session's operational summary. Convenience
+/// wrapper around `session_count` + `session_summary_at`.
+inline std::vector<SessionSummary> session_summaries(Router& r) {
+    std::size_t n = session_count(r);
+    std::vector<SessionSummary> out;
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.push_back(session_summary_at(r, i));
+    }
+    return out;
+}
+
+/// Number of OSPF areas the router currently holds. Mirrors
+/// `DefaultRouter::ospf_area_ids().len()`.
+inline std::size_t ospf_area_count(Router& r) {
+    return lr_router_ospf_area_count(r.get());
+}
+
+/// Read one OSPF area ID by index. Mirrors
+/// `DefaultRouter::ospf_area_ids()[index]`. The order is ascending
+/// (BTreeMap iteration).
+inline std::uint32_t ospf_area_id_at(Router& r, std::size_t index) {
+    std::uint32_t id = 0;
+    int rc = lr_router_ospf_area_id_at(r.get(), index, &id);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_area_id_at failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return id;
+}
+
+/// Snapshot of every OSPF area ID. Convenience wrapper around
+/// `ospf_area_count` + `ospf_area_id_at`.
+inline std::vector<std::uint32_t> ospf_area_ids(Router& r) {
+    std::size_t n = ospf_area_count(r);
+    std::vector<std::uint32_t> out;
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.push_back(ospf_area_id_at(r, i));
+    }
+    return out;
+}
+
+/// OSPF area topology version — a monotonic counter bumped on every
+/// *content* change of a topology LSA (types 1-5, 7). Mirrors
+/// `DefaultRouter::ospf_area_topology_version`. Throws `Error` when
+/// the area is unknown.
+inline std::uint64_t ospf_area_topology_version(Router& r, std::uint32_t area_id) {
+    std::uint64_t v = 0;
+    int rc = lr_router_ospf_area_topology_version(r.get(), area_id, &v);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_area_topology_version failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return v;
+}
+
+/// One OSPF LSA projection — fixed-layout header plus the body bytes
+/// owned by the caller (RAII through `Bytes`).
+struct OspfLsa {
+    std::uint16_t ls_age = 0;
+    std::uint8_t options = 0;
+    std::uint16_t ls_type = 0;
+    std::uint32_t link_state_id = 0;
+    std::uint32_t advertising_router = 0;
+    std::uint32_t ls_sequence_number = 0;
+    std::uint16_t ls_checksum = 0;
+    std::uint16_t length = 0;
+    std::vector<std::uint8_t> body;
+};
+
+/// Read one LSA out of an area's LSDB by its exact key
+/// (ls_type, link_state_id, advertising_router). Mirrors
+/// `DefaultRouter::ospf_area_lsa`. Throws `Error` when the area or
+/// LSA is unknown.
+inline OspfLsa ospf_area_lsa(Router& r,
+                             std::uint32_t area_id,
+                             std::uint16_t ls_type,
+                             std::uint32_t link_state_id,
+                             std::uint32_t advertising_router) {
+    lr_ospf_lsa_t raw{};
+    int rc = lr_router_ospf_area_lsa(r.get(), area_id, ls_type,
+                                     link_state_id, advertising_router, &raw);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_area_lsa failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    OspfLsa out;
+    out.ls_age = raw.ls_age;
+    out.options = raw.options;
+    out.ls_type = raw.ls_type;
+    out.link_state_id = raw.link_state_id;
+    out.advertising_router = raw.advertising_router;
+    out.ls_sequence_number = raw.ls_sequence_number;
+    out.ls_checksum = raw.ls_checksum;
+    out.length = raw.length;
+    if (raw.body.len > 0 && raw.body.ptr != nullptr) {
+        out.body.assign(raw.body.ptr, raw.body.ptr + raw.body.len);
+    }
+    lr_bytes_free(&raw.body);
+    return out;
+}
+
+/// Stable, content-derived hash that changes when the set of BGP
+/// sessions changes structurally (session added/removed, peer
+/// address changed, ASN4 mode flipped). Mirrors
+/// `DefaultRouter::bgp_session_identity_hash`.
+inline std::uint64_t bgp_session_identity_hash(Router& r) {
+    return lr_router_bgp_session_identity_hash(r.get());
+}
+
+/// One OSPF Graceful-Restart event (RFC 3623 §3 / RFC 5187 §2).
+/// Mirrors lr_router::OspfGraceEvent.
+struct OspfGraceEvent {
+    std::uint32_t area = 0;
+    std::uint32_t advertising_router = 0;
+    std::uint32_t grace_period_secs = 0;
+    std::uint8_t reason = 0;
+    std::optional<std::array<std::uint8_t, 4>> interface_addr_v4;
+    std::optional<std::array<std::uint8_t, 16>> interface_addr_v6;
+    std::uint16_t ls_age_secs = 0;
+    bool purged = false;
+};
+
+/// Drain pending OSPF Graceful-Restart events (RFC 3623 §3 / RFC
+/// 5187 §2). Mirrors `DefaultRouter::drain_ospf_grace_events`.
+/// Events past `capacity` stay queued for the next call.
+inline std::vector<OspfGraceEvent> drain_ospf_grace_events(Router& r,
+                                                            std::size_t capacity = 32) {
+    if (capacity == 0) {
+        throw Error("drain_ospf_grace_events: capacity must be positive");
+    }
+    std::vector<lr_ospf_grace_event_t> raw(capacity);
+    std::intptr_t n = lr_router_drain_ospf_grace_events(
+        r.get(), raw.data(), static_cast<std::uintptr_t>(capacity));
+    if (n < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_drain_ospf_grace_events failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    std::vector<OspfGraceEvent> out;
+    out.reserve(static_cast<std::size_t>(n));
+    for (std::intptr_t i = 0; i < n; ++i) {
+        const auto& e = raw[static_cast<std::size_t>(i)];
+        OspfGraceEvent ev;
+        ev.area = e.area;
+        ev.advertising_router = e.advertising_router;
+        ev.grace_period_secs = e.grace_period_secs;
+        ev.reason = e.reason;
+        if (e.interface_addr_v4_present) {
+            std::array<std::uint8_t, 4> a{};
+            std::copy(e.interface_addr_v4, e.interface_addr_v4 + 4, a.begin());
+            ev.interface_addr_v4 = a;
+        }
+        if (e.interface_addr_v6_present) {
+            std::array<std::uint8_t, 16> a{};
+            std::copy(e.interface_addr_v6, e.interface_addr_v6 + 16, a.begin());
+            ev.interface_addr_v6 = a;
+        }
+        ev.ls_age_secs = e.ls_age_secs;
+        ev.purged = e.purged != 0;
+        out.push_back(std::move(ev));
+    }
+    return out;
+}
+
 // ===== D5.4 — BGP message encoders =====
 
 /// Encode a KEEPALIVE message (RFC 4271 §4.4).

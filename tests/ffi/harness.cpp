@@ -561,6 +561,66 @@ int main() {
         // RAII cleanup runs when each BgpMessage leaves scope.
     }
 
+    // ===== Structured inspection surface (issue #92) =====
+    {
+        auto r = make_router();
+
+        // Fresh router: zero sessions, zero areas.
+        check(session_count(r) == 0, "session_count: 0 on fresh router");
+        check(session_summaries(r).empty(), "session_summaries: empty on fresh router");
+        check(ospf_area_count(r) == 0, "ospf_area_count: 0 on fresh router");
+        check(ospf_area_ids(r).empty(), "ospf_area_ids: empty on fresh router");
+
+        // Adding one BGP session surfaces one summary.
+        std::uint64_t h = add_bgp_session(r, 64512, 64513, 0x0a000001u);
+        auto summaries = session_summaries(r);
+        check(summaries.size() == 1, "session_summaries: 1 after BGP session");
+        if (!summaries.empty()) {
+            const auto& s = summaries[0];
+            check(s.handle == h, "session_summaries: handle matches add_bgp_session return");
+            check(s.kind == SessionKind::Bgp, "session_summaries: kind is Bgp");
+            check(s.kind_text == "bgp", "session_summaries: kind_text is 'bgp'");
+            check(s.local_as == 64512, "session_summaries: local_as");
+            check(s.peer_as == 64513, "session_summaries: peer_as");
+        }
+
+        // Out-of-range index throws.
+        bool threw = false;
+        try {
+            (void)session_summary_at(r, 99);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "session_summary_at: out-of-range throws Error");
+
+        // bgp_session_identity_hash returns a u64 (no exceptions).
+        std::uint64_t hash = bgp_session_identity_hash(r);
+        check(hash <= 0xFFFFFFFFFFFFFFFFULL, "bgp_session_identity_hash: fits in u64");
+
+        // OSPF area IDs: fresh router has zero; unknown area raises.
+        check(ospf_area_ids(r).empty(), "ospf_area_ids: still empty after BGP session");
+        threw = false;
+        try {
+            (void)ospf_area_topology_version(r, 99);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "ospf_area_topology_version: unknown area throws Error");
+
+        threw = false;
+        try {
+            (void)ospf_area_lsa(r, 0, 1, 1, 1);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "ospf_area_lsa: unknown LSA throws Error");
+
+        // drain_ospf_grace_events returns an empty vector on a fresh
+        // router — no events pending.
+        auto gr_events = drain_ospf_grace_events(r);
+        check(gr_events.empty(), "drain_ospf_grace_events: empty on fresh router");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");
