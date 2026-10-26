@@ -592,6 +592,46 @@ typedef struct lr_ospf_grace_event_t {
 } lr_ospf_grace_event_t;
 
 /**
+ * Opaque `Label` handle. C side never touches internals.
+ */
+typedef struct OpaqueMplsLabel {
+  uint8_t _private[0];
+} OpaqueMplsLabel;
+
+typedef struct OpaqueMplsLabel *lr_mpls_label_t;
+
+/**
+ * Opaque `LabelStack` handle. C side never touches internals.
+ */
+typedef struct OpaqueMplsLabelStack {
+  uint8_t _private[0];
+} OpaqueMplsLabelStack;
+
+typedef struct OpaqueMplsLabelStack *lr_mpls_label_stack_t;
+
+/**
+ * One fully-specified label `(value, tc, ttl)`. Used by
+ * [`lr_mpls_label_stack_from_labels`] to build a stack from a flat
+ * array of label specs without round-tripping through individual
+ * `lr_mpls_label_t` handles.
+ */
+typedef struct lr_mpls_label_spec_t {
+  /**
+   * 20-bit label value. Values 0–15 are reserved (RFC 3032 §2.1).
+   */
+  uint32_t value;
+  /**
+   * 3-bit Traffic Class (RFC 5462, formerly EXP). High bits are
+   * masked on encode.
+   */
+  uint8_t tc;
+  /**
+   * 8-bit Time-to-Live.
+   */
+  uint8_t ttl;
+} lr_mpls_label_spec_t;
+
+/**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
  */
@@ -1334,6 +1374,254 @@ uint64_t lr_router_bgp_session_identity_hash(lr_router_t r);
 intptr_t lr_router_drain_ospf_grace_events(lr_router_t r,
                                            struct lr_ospf_grace_event_t *out,
                                            uintptr_t cap);
+
+/**
+ * Construct a `Label` with default TC=0 and TTL=64 (RFC 3032 §2.1).
+ * Infallible — the value is masked to 20 bits on encode. Returns
+ * `NULL` only on a panic.
+ *
+ * `value > Label::MAX_VALUE` is allowed here (matches the Rust
+ * `Label::new` semantics); use [`lr_mpls_label_new_checked`] to
+ * validate the 20-bit range.
+ */
+lr_mpls_label_t lr_mpls_label_new(uint32_t value);
+
+/**
+ * Checked constructor — returns `NULL` and sets the last-error string
+ * when `value` exceeds the 20-bit label range (RFC 3032 §2.1). On
+ * success the boxed `Label` carries `tc=0, ttl=64`.
+ */
+lr_mpls_label_t lr_mpls_label_new_checked(uint32_t value);
+
+/**
+ * Set the Traffic Class (3 bits, RFC 5462). The lower 3 bits of `tc`
+ * are taken; the rest are masked. Returns a NEW handle (the input
+ * handle is consumed and freed); returns `NULL` if `label` is NULL.
+ *
+ * The builder-style `with_tc` returns a NEW `Label` in Rust; the FFI
+ * surface mirrors that by transferring ownership: the input handle is
+ * invalid after the call. Use the returned handle for subsequent
+ * reads.
+ *
+ * # Safety
+ * `label` must have been produced by [`lr_mpls_label_new`] (or one of
+ * the other `lr_mpls_label_*` constructors) and must not be used
+ * after this call.
+ */
+lr_mpls_label_t lr_mpls_label_with_tc(lr_mpls_label_t label, uint8_t tc);
+
+/**
+ * Set the TTL. Returns a NEW handle; the input is consumed.
+ *
+ * # Safety
+ * See [`lr_mpls_label_with_tc`].
+ */
+lr_mpls_label_t lr_mpls_label_with_ttl(lr_mpls_label_t label, uint8_t ttl);
+
+/**
+ * Read the 20-bit label value. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `label` must have been produced by a `lr_mpls_label_*` constructor
+ * and not freed.
+ */
+uint32_t lr_mpls_label_value(lr_mpls_label_t label);
+
+/**
+ * Read the 3-bit Traffic Class. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_mpls_label_value`].
+ */
+uint8_t lr_mpls_label_tc(lr_mpls_label_t label);
+
+/**
+ * Read the 8-bit TTL. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_mpls_label_value`].
+ */
+uint8_t lr_mpls_label_ttl(lr_mpls_label_t label);
+
+/**
+ * True when the label value is in the reserved range 0–15 (RFC 3032
+ * §2.1). Returns 0 (false) on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_mpls_label_value`].
+ */
+uint8_t lr_mpls_label_is_reserved(lr_mpls_label_t label);
+
+/**
+ * Encode as a single 3-octet NLRI entry (RFC 8277 §2.2/§2.3:
+ * `Label(20) | Rsrv(3) | S(1)`, no TTL and no TC field). `bottom`
+ * sets the S bit. Writes 3 bytes to `*out`. Returns 0 on success,
+ * negative on error.
+ *
+ * # Safety
+ * `label` must be a valid handle. `out` must point to writable memory
+ * of at least 3 bytes.
+ */
+int32_t lr_mpls_label_encode_3octet(lr_mpls_label_t label, uint8_t bottom, uint8_t *out);
+
+/**
+ * Encode as a single 4-octet wire entry (RFC 3032 §2.1: label + TC
+ * + S + TTL). `bottom` sets the S bit. Writes 4 bytes to `*out`.
+ *
+ * # Safety
+ * See [`lr_mpls_label_encode_3octet`]; `out` needs at least 4 bytes.
+ */
+int32_t lr_mpls_label_encode_4octet(lr_mpls_label_t label, uint8_t bottom, uint8_t *out);
+
+/**
+ * Drop a boxed `Label`. Safe to call with NULL.
+ *
+ * # Safety
+ * `label` must have been produced by a `lr_mpls_label_*` constructor
+ * and must not be used after this call. Double-free is undefined
+ * behaviour.
+ */
+void lr_mpls_label_free(lr_mpls_label_t label);
+
+/**
+ * Construct an empty `LabelStack` (RFC 3032 §2.1). Useful as a
+ * builder starting point; not a valid wire value (an MPLS frame
+ * must carry at least one label).
+ */
+lr_mpls_label_stack_t lr_mpls_label_stack_new(void);
+
+/**
+ * Build a stack from a flat array of label values (TC=0, TTL=64).
+ * Returns `NULL` on a null pointer or panic.
+ *
+ * # Safety
+ * `values` must point to `count` readable `uint32_t` values.
+ */
+lr_mpls_label_stack_t lr_mpls_label_stack_from_values(const uint32_t *values, uintptr_t count);
+
+/**
+ * Build a stack from a flat array of fully-specified labels
+ * (`value`, `tc`, `ttl` triples). Returns `NULL` on a null pointer
+ * or panic.
+ *
+ * # Safety
+ * `labels` must point to `count` readable `lr_mpls_label_spec_t`.
+ */
+lr_mpls_label_stack_t lr_mpls_label_stack_from_labels(const struct lr_mpls_label_spec_t *labels,
+                                                      uintptr_t count);
+
+/**
+ * Decode the 4-octet-per-entry wire form (RFC 3032 §2.1). On
+ * success writes a freshly-allocated `lr_mpls_label_stack_t` to
+ * `*out`. Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_mpls_label_stack_t`.
+ */
+int32_t lr_mpls_label_stack_decode_4octet(const uint8_t *data,
+                                          uintptr_t len,
+                                          lr_mpls_label_stack_t *out);
+
+/**
+ * Decode the 3-octet-per-entry NLRI form (RFC 8277 §2.2/§2.3).
+ *
+ * # Safety
+ * See [`lr_mpls_label_stack_decode_4octet`].
+ */
+int32_t lr_mpls_label_stack_decode_3octet(const uint8_t *data,
+                                          uintptr_t len,
+                                          lr_mpls_label_stack_t *out);
+
+/**
+ * Encode the stack as the 4-octet-per-entry wire form (RFC 3032
+ * §2.1). The S bit is set on the last entry.
+ *
+ * # Safety
+ * `stack` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_mpls_label_stack_encode_4octet(lr_mpls_label_stack_t stack, struct lr_bytes_t *out);
+
+/**
+ * Encode the stack as the 3-octet-per-entry NLRI form (RFC 8277
+ * §2.2/§2.3).
+ *
+ * # Safety
+ * See [`lr_mpls_label_stack_encode_4octet`].
+ */
+int32_t lr_mpls_label_stack_encode_3octet(lr_mpls_label_stack_t stack, struct lr_bytes_t *out);
+
+/**
+ * Number of labels in the stack. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `stack` must be a valid handle.
+ */
+uintptr_t lr_mpls_label_stack_len(lr_mpls_label_stack_t stack);
+
+/**
+ * True when the stack holds no labels. Returns 1 (true) on a NULL
+ * handle (the safe default for "no labels to encode").
+ *
+ * # Safety
+ * See [`lr_mpls_label_stack_len`].
+ */
+uint8_t lr_mpls_label_stack_is_empty(lr_mpls_label_stack_t stack);
+
+/**
+ * Read one label by index. Returns 0 on success and writes a copy
+ * of the label's `(value, tc, ttl)` to `*out_value`, `*out_tc`,
+ * `*out_ttl`. Returns `LR_ERR_NULL` (-1) on a NULL stack,
+ * `LR_ERR_INVALID_HANDLE` (-2) when the index is out of range.
+ *
+ * # Safety
+ * `stack` must be a valid handle. The three out-pointers must point
+ * to writable `uint32_t` / `uint8_t` / `uint8_t`.
+ */
+int32_t lr_mpls_label_stack_at(lr_mpls_label_stack_t stack,
+                               uintptr_t index,
+                               uint32_t *out_value,
+                               uint8_t *out_tc,
+                               uint8_t *out_ttl);
+
+/**
+ * Push a label onto the top of the stack (the label examined first
+ * when a labelled packet arrives). Consumes the `label` handle.
+ *
+ * # Safety
+ * `stack` must be a valid handle. `label` must be a valid handle and
+ * is invalid after this call.
+ */
+int32_t lr_mpls_label_stack_push(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
+
+/**
+ * Push a label onto the bottom of the stack (last to be examined).
+ * Consumes the `label` handle.
+ *
+ * # Safety
+ * See [`lr_mpls_label_stack_push`].
+ */
+int32_t lr_mpls_label_stack_push_bottom(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
+
+/**
+ * Pop the top label. Returns 1 when a label was popped (the popped
+ * label is dropped), 0 when the stack was already empty. Returns
+ * `LR_ERR_NULL` (-1) on a NULL stack handle.
+ *
+ * # Safety
+ * `stack` must be a valid handle.
+ */
+int32_t lr_mpls_label_stack_pop(lr_mpls_label_stack_t stack);
+
+/**
+ * Drop a boxed `LabelStack`. Safe to call with NULL.
+ *
+ * # Safety
+ * `stack` must have been produced by a `lr_mpls_label_stack_*`
+ * constructor and must not be used after this call.
+ */
+void lr_mpls_label_stack_free(lr_mpls_label_stack_t stack);
 
 /**
  * Install one redistribution pipe on the router.

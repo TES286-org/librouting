@@ -29,6 +29,7 @@ pub mod events;
 pub mod filters;
 pub mod handle;
 pub mod inspection;
+pub mod mpls;
 pub mod policy;
 pub mod policy_objects;
 pub mod roa_store;
