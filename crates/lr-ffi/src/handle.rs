@@ -199,3 +199,50 @@ pub struct OpaqueFilter {
 }
 
 pub type lr_filter_t = *mut OpaqueFilter;
+
+// ---- Parsed-message handles (BGP/OSPF/Babel) ----
+//
+// The codec round-trip surface (`lr_bgp_decode` etc.) returns the
+// canonical re-encoded bytes — useful for fuzzing/differential checks
+// but useless for embedders that need to inspect a parsed message's
+// fields. The handles below box a parsed `BgpMessage` (and eventually
+// `OspfPacket` / `BabelFrame`) so the matching `lr_*_message_*`
+// readers can project the structured form across the C ABI.
+
+/// Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
+#[repr(C)]
+pub struct OpaqueBgpMessage {
+    _private: [u8; 0],
+}
+
+pub type lr_bgp_message_t = *mut OpaqueBgpMessage;
+
+/// Construct an opaque BGP-message handle from a parsed `BgpMessage`.
+pub fn box_bgp_message(m: lr_bgp::BgpMessage) -> lr_bgp_message_t {
+    Box::into_raw(Box::new(m)) as lr_bgp_message_t
+}
+
+/// Reclaim a BGP-message handle back into its boxed `BgpMessage`.
+///
+/// # Safety
+/// `m` must have been produced by [`box_bgp_message`] and must not be
+/// destroyed while another thread is inside a call on the same handle.
+pub unsafe fn unbox_bgp_message(m: lr_bgp_message_t) -> Option<Box<lr_bgp::BgpMessage>> {
+    if m.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(m as *mut lr_bgp::BgpMessage) })
+}
+
+/// Borrow a BGP-message handle as `&BgpMessage` for read-only access.
+/// Returns `None` on a null handle (the caller surfaces `LR_ERR_NULL`).
+///
+/// # Safety
+/// `m` must have been produced by [`box_bgp_message`] and must not be
+/// destroyed while the returned reference is live.
+pub unsafe fn borrow_bgp_message(m: lr_bgp_message_t) -> Option<&'static lr_bgp::BgpMessage> {
+    if m.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(m as *const lr_bgp::BgpMessage) })
+}

@@ -24,10 +24,17 @@ use lr_babel::BabelCodec as BabelC;
 use lr_bgp::{BgpCodec as BgpC, BgpMessage};
 use lr_ospf::OspfCodec as OspfC;
 
-use crate::error::{set_last_error, LR_ERR_PANIC};
+use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
 use crate::handle::lr_bytes_t;
 use crate::policy::lr_prefix_t;
+
+/// `LR_ERR_NULL` (-1) — null pointer or null handle.
+const LR_ERR_NULL: i32 = LrError::Null as i32;
+/// `LR_ERR_INVALID_HANDLE` (-2) — wrong message variant for this reader.
+const LR_ERR_INVALID_HANDLE: i32 = LrError::InvalidHandle as i32;
+/// `LR_ERR_OTHER` (-6) — index out of range or other documented failure.
+const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
 /// Decode one BGP message from `data`. Returns 0 on success (and writes a
 /// `lr_bytes_t` containing the message type byte at offset 0 + body to
@@ -139,7 +146,7 @@ pub unsafe extern "C" fn lr_bgp_encode_open(
             }
             let mut id = [0u8; 4];
             unsafe { id.copy_from_slice(std::slice::from_raw_parts(bgp_id, 4)) };
-            let mut open = lr_bgp::message::open::Open::new(
+            let mut open = lr_bgp::message::Open::new(
                 lr_core::addr::Asn(my_as),
                 hold_time,
                 lr_core::addr::RouterId::from_v4(id),
@@ -149,8 +156,8 @@ pub unsafe extern "C" fn lr_bgp_encode_open(
                 // real AS; the 16-bit field reads AS_TRANS when needed.
                 let mut value = vec![65u8, 4];
                 value.extend_from_slice(&my_as.to_be_bytes());
-                open.params.push(lr_bgp::message::open::OpenParam {
-                    param_type: lr_bgp::message::open::OpenParam::PARAM_TYPE_CAPABILITY,
+                open.params.push(lr_bgp::message::OpenParam {
+                    param_type: lr_bgp::message::OpenParam::PARAM_TYPE_CAPABILITY,
                     value,
                 });
             }
@@ -467,6 +474,752 @@ pub extern "C" fn lr_babel_decode(data: *const u8, len: usize, out: *mut lr_byte
         },
         LR_ERR_PANIC,
     )
+}
+
+// ============================================================================
+// Structured BGP message inspection
+// ----------------------------------------------------------------------------
+// The `lr_bgp_decode` round-trip surface above is useful for differential
+// checks but useless for an embedder that needs to read the parsed fields:
+// the C side cannot crack open a Rust enum, so OPEN's AS, NOTIFICATION's
+// code/subcode, ROUTE-REFRESH's AFI/SAFI, UPDATE's NLRI list, etc. were all
+// invisible across the ABI. The handles + readers below mirror the
+// `BgpMessage` enum and its variants so an embedder can decode a message
+// once and walk its structured form field-by-field — the same shape a Rust
+// embedder gets from `match msg { ... }`.
+//
+// The design follows the existing handle convention (see `handle.rs`):
+// `lr_bgp_decode_message` returns a heap-allocated `lr_bgp_message_t` owned
+// by the caller; every reader takes a non-null handle and returns the
+// documented error code on mismatch (`LR_ERR_INVALID_HANDLE` when the
+// message is not the variant the reader expects, `LR_ERR_NULL` on a null
+// handle). The handle is freed with `lr_bgp_message_free`.
+//
+// Future OSPF/Babel message inspection surfaces (`lr_ospf_message_t`,
+// `lr_babel_message_t`) will follow the same pattern.
+// ============================================================================
+
+/// BGP message type codes (RFC 4271 §4.1 + RFC 2918). Mirrors
+/// [`lr_bgp::BgpMessageType`] but exposed as plain `u8` constants so C
+/// consumers can `switch` on the value returned by
+/// [`lr_bgp_message_type`] without depending on a generated enum.
+pub const LR_BGP_MSG_OPEN: u8 = 1;
+pub const LR_BGP_MSG_UPDATE: u8 = 2;
+pub const LR_BGP_MSG_NOTIFICATION: u8 = 3;
+pub const LR_BGP_MSG_KEEPALIVE: u8 = 4;
+pub const LR_BGP_MSG_ROUTE_REFRESH: u8 = 5;
+
+/// Route-Refresh subtype (RFC 7313 §3.2). The third body octet of a
+/// ROUTE-REFRESH message; ROUTE-REFRESH readers surface this via
+/// [`lr_bgp_message_route_refresh_subtype`].
+pub const LR_BGP_RR_SUBTYPE_NORMAL: u8 = 0;
+pub const LR_BGP_RR_SUBTYPE_BORR: u8 = 1;
+pub const LR_BGP_RR_SUBTYPE_EORR: u8 = 2;
+
+/// Decode one BGP message and return an opaque handle to the parsed
+/// form. The caller owns the handle and must release it with
+/// [`lr_bgp_message_free`]. Returns NULL on failure (the thread-local
+/// last-error string is set).
+///
+/// Unlike [`lr_bgp_decode`] (which round-trips the parsed message
+/// through `encode_vec` and hands back canonical bytes), this entry
+/// point keeps the structured `BgpMessage` alive so its variant fields
+/// can be read by the matching `lr_bgp_message_*` readers.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes.
+#[no_mangle]
+pub extern "C" fn lr_bgp_decode_message(
+    data: *const u8,
+    len: usize,
+) -> crate::handle::lr_bgp_message_t {
+    guarded(
+        || {
+            if data.is_null() {
+                set_last_error("null data pointer".into());
+                return std::ptr::null_mut();
+            }
+            let slice = unsafe { std::slice::from_raw_parts(data, len) };
+            let mut codec = BgpC::new();
+            match codec.decode_slice(slice) {
+                Ok(Some(m)) => crate::handle::box_bgp_message(m),
+                Ok(None) => {
+                    set_last_error("truncated".into());
+                    std::ptr::null_mut()
+                }
+                Err(e) => {
+                    set_last_error(format!("{e:?}"));
+                    std::ptr::null_mut()
+                }
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Free a BGP-message handle produced by [`lr_bgp_decode_message`]. Safe
+/// to call with NULL.
+///
+/// # Safety
+/// `m` must have been produced by [`lr_bgp_decode_message`] and must not
+/// be destroyed while another thread is inside a call on the same handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_free(m: crate::handle::lr_bgp_message_t) {
+    guarded(
+        || {
+            let _ = unsafe { crate::handle::unbox_bgp_message(m) };
+        },
+        (),
+    )
+}
+
+/// Write the BGP message type code (1..5, see `LR_BGP_MSG_*`) to `out`.
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle.
+///
+/// # Safety
+/// `out` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_type(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let kind = match msg {
+                BgpMessage::Open(_) => LR_BGP_MSG_OPEN,
+                BgpMessage::Update(_) => LR_BGP_MSG_UPDATE,
+                BgpMessage::Notification(_) => LR_BGP_MSG_NOTIFICATION,
+                BgpMessage::Keepalive(_) => LR_BGP_MSG_KEEPALIVE,
+                BgpMessage::RouteRefresh(_) => LR_BGP_MSG_ROUTE_REFRESH,
+            };
+            unsafe { *out = kind };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// ---------- OPEN readers (RFC 4271 §4.2) ----------
+
+/// Write the OPEN version (always 4 on a well-formed message) to `out`.
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle, and
+/// `LR_ERR_INVALID_HANDLE` when the message is not an OPEN.
+///
+/// # Safety
+/// `out` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_open_version(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Open(o) = msg else {
+                set_last_error("message is not OPEN".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = o.version };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the sender AS to `out`. When the OPEN carries the RFC 6793
+/// four-octet-AS capability (param type 2, capability code 65), the
+/// real 32-bit AS is read from the capability; otherwise the 16-bit
+/// `my_as` field is returned. Returns 0 on success, `LR_ERR_NULL`
+/// on a null handle, `LR_ERR_INVALID_HANDLE` when not OPEN.
+///
+/// # Safety
+/// `out` must point to a writable `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_open_my_as(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u32,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Open(o) = msg else {
+                set_last_error("message is not OPEN".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            // RFC 6793 §7: when AS_TRANS (23456) is announced in the
+            // 16-bit field, the real 4-byte AS lives in the
+            // Four-Octet-AS capability (param type 2, cap code 65).
+            // `decode_set` parses the capability value as 4 BE bytes.
+            let mut asn = o.my_as.as_u32();
+            if o.uses_as_trans() {
+                for p in &o.params {
+                    if p.param_type != lr_bgp::message::OpenParam::PARAM_TYPE_CAPABILITY {
+                        continue;
+                    }
+                    for cap in lr_bgp::capabilities::Capability::decode_set(&p.value) {
+                        if let Some(real) = cap.as_four_octet() {
+                            asn = real;
+                        }
+                    }
+                }
+            }
+            unsafe { *out = asn };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the OPEN hold time (seconds) to `out`. Returns 0 on success,
+/// `LR_ERR_NULL` on a null handle, `LR_ERR_INVALID_HANDLE` when not OPEN.
+///
+/// # Safety
+/// `out` must point to a writable `uint16_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_open_hold_time(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u16,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Open(o) = msg else {
+                set_last_error("message is not OPEN".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = o.hold_time };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the OPEN BGP identifier (4 bytes, network order) to `out`.
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle or null `out`,
+/// `LR_ERR_INVALID_HANDLE` when not OPEN.
+///
+/// # Safety
+/// `out` must point to 4 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_open_bgp_id(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Open(o) = msg else {
+                set_last_error("message is not OPEN".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let id_bytes = o.bgp_id.as_u32().to_be_bytes();
+            unsafe {
+                std::ptr::copy_nonoverlapping(id_bytes.as_ptr(), out, 4);
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of optional parameters in the OPEN. Returns the count
+/// directly (0 on a null handle or non-OPEN message — the last-error
+/// string is set on the latter so the caller can distinguish).
+#[no_mangle]
+pub extern "C" fn lr_bgp_message_open_param_count(m: crate::handle::lr_bgp_message_t) -> usize {
+    guarded(
+        || {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Open(o) = msg else {
+                set_last_error("message is not OPEN".into());
+                return 0;
+            };
+            o.params.len()
+        },
+        0,
+    )
+}
+
+/// Write the optional parameter at `idx` to `out_type` and `out_value`.
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle or null outputs,
+/// `LR_ERR_INVALID_HANDLE` when the message is not OPEN, and
+/// `LR_ERR_OTHER` when `idx` is out of range.
+///
+/// `out_value` is a freshly allocated `lr_bytes_t` the caller must free
+/// with [`crate::bytes::lr_bytes_free`]. The param `value` is the raw
+/// capability payload (RFC 5492 §3): a sequence of `(code:1, length:1,
+/// value:length)` capability triples that an embedder can crack open
+/// with [`lr_bgp::Capability::decode_set`] on the Rust side or by hand
+/// from C — see `tests/ffi/harness.c` for the wire layout.
+///
+/// # Safety
+/// `out_type` must point to a writable `uint8_t`, `out_value` to a
+/// writable `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_open_param_at(
+    m: crate::handle::lr_bgp_message_t,
+    idx: usize,
+    out_type: *mut u8,
+    out_value: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || {
+            if out_type.is_null() || out_value.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Open(o) = msg else {
+                set_last_error("message is not OPEN".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(p) = o.params.get(idx) else {
+                set_last_error(format!(
+                    "param index {idx} out of range ({})",
+                    o.params.len()
+                ));
+                return LR_ERR_OTHER;
+            };
+            unsafe {
+                *out_type = p.param_type;
+                *out_value = lr_bytes_t::from_vec(p.value.clone());
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// ---------- NOTIFICATION readers (RFC 4271 §4.5) ----------
+
+/// Write the NOTIFICATION error code to `out`. Returns 0 on success,
+/// `LR_ERR_NULL` on a null handle or null `out`, `LR_ERR_INVALID_HANDLE`
+/// when the message is not a NOTIFICATION.
+///
+/// # Safety
+/// `out` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_notification_code(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Notification(n) = msg else {
+                set_last_error("message is not NOTIFICATION".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = n.error_code };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the NOTIFICATION error subcode to `out`. See
+/// [`lr_bgp_message_notification_code`].
+///
+/// # Safety
+/// `out` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_notification_subcode(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Notification(n) = msg else {
+                set_last_error("message is not NOTIFICATION".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = n.error_subcode };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the NOTIFICATION data payload (variable-length, often empty)
+/// to `out`. Returns 0 on success, `LR_ERR_NULL` on a null handle or
+/// null `out`, `LR_ERR_INVALID_HANDLE` when not a NOTIFICATION.
+///
+/// `out` is a freshly allocated `lr_bytes_t` the caller must free with
+/// [`crate::bytes::lr_bytes_free`]. The payload is empty for the
+/// compact NOTIFICATIONs BIRD/FRR emit on Cease/Administrative Reset,
+/// and carries diagnostic text (RFC 4271 §4.5) for Header/OPEN/UPDATE
+/// errors.
+///
+/// # Safety
+/// `out` must point to a writable `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_notification_data(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Notification(n) = msg else {
+                set_last_error("message is not NOTIFICATION".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = lr_bytes_t::from_vec(n.data.clone()) };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// ---------- ROUTE-REFRESH readers (RFC 2918 + RFC 7313) ----------
+
+/// Write the ROUTE-REFRESH AFI (RFC 4271 address-family identifier) to
+/// `out`. Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+/// `out`, `LR_ERR_INVALID_HANDLE` when the message is not a
+/// ROUTE-REFRESH.
+///
+/// # Safety
+/// `out` must point to a writable `uint16_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_route_refresh_afi(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u16,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::RouteRefresh(r) = msg else {
+                set_last_error("message is not ROUTE-REFRESH".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = r.family.afi };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the ROUTE-REFRESH SAFI (RFC 4271 sub-address-family
+/// identifier) to `out`. See [`lr_bgp_message_route_refresh_afi`].
+///
+/// # Safety
+/// `out` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_route_refresh_safi(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::RouteRefresh(r) = msg else {
+                set_last_error("message is not ROUTE-REFRESH".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = r.family.safi };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the ROUTE-REFRESH subtype (RFC 7313 §3.2) to `out`: 0 = Normal,
+/// 1 = BoRR, 2 = EoRR, 0xff = unknown (RFC 7313 §3.2 requires the
+/// message be silently ignored, so the decoder maps unrecognized values
+/// here). See [`LR_BGP_RR_SUBTYPE_*`] for the named constants.
+///
+/// # Safety
+/// `out` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_route_refresh_subtype(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::RouteRefresh(r) = msg else {
+                set_last_error("message is not ROUTE-REFRESH".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            unsafe { *out = r.subtype as u8 };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// ---------- UPDATE readers (RFC 4271 §4.3) ----------
+//
+// The UPDATE surface here covers the IPv4 withdrawn-routes + NLRI
+// sections and the path-attribute list. MP-BGP NLRI (RFC 4760) carried
+// inside MpReach/MpUnreach is reachable through the attribute reader at
+// index 14/15 — a follow-up slice will add typed readers for those.
+
+/// Number of withdrawn routes in the UPDATE. Returns the count
+/// directly (0 on a null handle or non-UPDATE message — the last-error
+/// string is set on the latter).
+#[no_mangle]
+pub extern "C" fn lr_bgp_message_update_withdrawn_count(
+    m: crate::handle::lr_bgp_message_t,
+) -> usize {
+    guarded(
+        || {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return 0;
+            };
+            u.withdrawn.len()
+        },
+        0,
+    )
+}
+
+/// Number of NLRI entries in the UPDATE (IPv4 unicast legacy NLRI only;
+/// MP-BGP NLRI lives inside the MpReach/MpUnreach path attributes). See
+/// [`lr_bgp_message_update_withdrawn_count`] for return semantics.
+#[no_mangle]
+pub extern "C" fn lr_bgp_message_update_nlri_count(m: crate::handle::lr_bgp_message_t) -> usize {
+    guarded(
+        || {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return 0;
+            };
+            u.nlri.len()
+        },
+        0,
+    )
+}
+
+/// Number of path attributes in the UPDATE. The attribute at index `i`
+/// is read with [`lr_bgp_message_update_attr_at`].
+#[no_mangle]
+pub extern "C" fn lr_bgp_message_update_attr_count(m: crate::handle::lr_bgp_message_t) -> usize {
+    guarded(
+        || {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return 0;
+            };
+            u.attributes.iter().count()
+        },
+        0,
+    )
+}
+
+/// Write the withdrawn route at `idx` to `out`. Returns 0 on success,
+/// `LR_ERR_NULL` on a null handle or null `out`, `LR_ERR_INVALID_HANDLE`
+/// when the message is not an UPDATE, and `LR_ERR_OTHER` when `idx` is
+/// out of range. The prefix's `addr` is zero-padded to 16 bytes (the
+/// first 4 carry the IPv4 octets); `is_ipv6` is 0; `prefix_len` carries
+/// the prefix length.
+///
+/// # Safety
+/// `out` must point to a writable `lr_prefix_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_withdrawn_at(
+    m: crate::handle::lr_bgp_message_t,
+    idx: usize,
+    out: *mut crate::policy::lr_prefix_t,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(nlri) = u.withdrawn.get(idx) else {
+                set_last_error(format!(
+                    "withdrawn index {idx} out of range ({})",
+                    u.withdrawn.len()
+                ));
+                return LR_ERR_OTHER;
+            };
+            unsafe { *out = prefix_to_lr_prefix(&nlri.prefix) };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the NLRI entry at `idx` to `out`. Same contract as
+/// [`lr_bgp_message_update_withdrawn_at`] but for the announce section.
+///
+/// # Safety
+/// `out` must point to a writable `lr_prefix_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_nlri_at(
+    m: crate::handle::lr_bgp_message_t,
+    idx: usize,
+    out: *mut crate::policy::lr_prefix_t,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(nlri) = u.nlri.get(idx) else {
+                set_last_error(format!("nlri index {idx} out of range ({})", u.nlri.len()));
+                return LR_ERR_OTHER;
+            };
+            unsafe { *out = prefix_to_lr_prefix(&nlri.prefix) };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the path attribute at `idx` to `out_type`, `out_flags` and
+/// `out_value`. Returns 0 on success, `LR_ERR_NULL` on a null handle or
+/// null outputs, `LR_ERR_INVALID_HANDLE` when not an UPDATE, and
+/// `LR_ERR_OTHER` when `idx` is out of range.
+///
+/// `out_value` is a freshly allocated `lr_bytes_t` the caller must free
+/// with [`crate::bytes::lr_bytes_free`]. The flags byte layout is
+/// RFC 4271 §5.1 + RFC 9072 §2: bit 7 optional, bit 6 transitive, bit 5
+/// partial, bit 4 extended-length.
+///
+/// # Safety
+/// `out_type` and `out_flags` must point to writable `uint8_t` values,
+/// `out_value` to a writable `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_attr_at(
+    m: crate::handle::lr_bgp_message_t,
+    idx: usize,
+    out_type: *mut u8,
+    out_flags: *mut u8,
+    out_value: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || {
+            if out_type.is_null() || out_flags.is_null() || out_value.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(attr) = u.attributes.iter().nth(idx) else {
+                set_last_error(format!("attr index {idx} out of range"));
+                return LR_ERR_OTHER;
+            };
+            unsafe {
+                *out_type = attr.attr_type.to_u8();
+                *out_flags = attr.flags.0;
+                *out_value = lr_bytes_t::from_vec(attr.value.clone());
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Project a `lr_core::addr::Prefix` into the C-ABI `lr_prefix_t` shape
+/// (16-byte zero-padded `addr`, `is_ipv6` discriminator, `prefix_len`).
+/// Used by the UPDATE readers above.
+fn prefix_to_lr_prefix(p: &lr_core::addr::Prefix) -> crate::policy::lr_prefix_t {
+    use lr_core::addr::IpAddr;
+    let mut out = crate::policy::lr_prefix_t {
+        addr: [0u8; 16],
+        is_ipv6: 0,
+        prefix_len: p.prefix_len,
+    };
+    match p.addr {
+        IpAddr::V4(b) => {
+            out.addr[..4].copy_from_slice(&b);
+        }
+        IpAddr::V6(b) => {
+            out.addr = b;
+            out.is_ipv6 = 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -980,5 +1733,647 @@ mod tests {
             rc == -3 || rc == -5,
             "truncated/malformed input returns -3/-5, got {rc}"
         );
+    }
+
+    // ---------- structured BGP message inspection ----------
+
+    use crate::handle::{box_bgp_message, lr_bgp_message_t};
+    use lr_bgp::message::{Keepalive, Open, OpenParam, RouteRefresh, RouteRefreshSubtype};
+
+    fn last_error() -> String {
+        use std::ffi::CStr;
+        unsafe {
+            CStr::from_ptr(crate::error::lr_last_error())
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+
+    /// Build a BGP-4 OPEN with the 4-byte AS capability so the AS_TRANS
+    /// unwrap path is exercised end-to-end through the FFI.
+    fn build_open_with_as4(asn: u32, hold: u16, id: [u8; 4]) -> Vec<u8> {
+        let mut out = new_out();
+        assert_eq!(
+            unsafe { lr_bgp_encode_open(asn, hold, id.as_ptr(), 1, &raw mut out) },
+            0,
+            "encode_open must succeed"
+        );
+        take(&out)
+    }
+
+    fn build_keepalive() -> Vec<u8> {
+        let mut out = new_out();
+        assert_eq!(lr_bgp_encode_keepalive(&raw mut out), 0);
+        take(&out)
+    }
+
+    fn build_notification(code: u8, subcode: u8, data: &[u8]) -> Vec<u8> {
+        let mut out = new_out();
+        assert_eq!(
+            unsafe {
+                lr_bgp_encode_notification(
+                    code,
+                    subcode,
+                    if data.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        data.as_ptr()
+                    },
+                    data.len(),
+                    &raw mut out,
+                )
+            },
+            0
+        );
+        take(&out)
+    }
+
+    fn build_update_withdraw(prefixes: &[([u8; 4], u8)]) -> Vec<u8> {
+        let mut out = new_out();
+        let arr: Vec<lr_prefix_t> = prefixes
+            .iter()
+            .map(|(addr, len)| lr_prefix_t {
+                addr: {
+                    let mut a = [0u8; 16];
+                    a[..4].copy_from_slice(addr);
+                    a
+                },
+                is_ipv6: 0,
+                prefix_len: *len,
+            })
+            .collect();
+        assert_eq!(
+            unsafe { lr_bgp_encode_update_withdraw_v4(arr.as_ptr(), arr.len(), &raw mut out,) },
+            0
+        );
+        take(&out)
+    }
+
+    fn build_update_announce(
+        prefixes: &[([u8; 4], u8)],
+        next_hop: [u8; 4],
+        as_path: &[u32],
+        origin: u8,
+    ) -> Vec<u8> {
+        let mut out = new_out();
+        let arr: Vec<lr_prefix_t> = prefixes
+            .iter()
+            .map(|(addr, len)| lr_prefix_t {
+                addr: {
+                    let mut a = [0u8; 16];
+                    a[..4].copy_from_slice(addr);
+                    a
+                },
+                is_ipv6: 0,
+                prefix_len: *len,
+            })
+            .collect();
+        assert_eq!(
+            unsafe {
+                lr_bgp_encode_update_announce_v4(
+                    arr.as_ptr(),
+                    arr.len(),
+                    next_hop.as_ptr(),
+                    as_path.as_ptr(),
+                    as_path.len(),
+                    origin,
+                    1,
+                    &raw mut out,
+                )
+            },
+            0
+        );
+        take(&out)
+    }
+
+    #[test]
+    fn decode_message_returns_null_on_null_data() {
+        let m = lr_bgp_decode_message(std::ptr::null(), 0);
+        assert!(m.is_null(), "null data must return NULL handle");
+        let err = last_error();
+        assert!(err.contains("null"), "expected null error, got: {err}");
+    }
+
+    #[test]
+    fn decode_message_returns_null_on_truncated() {
+        // 4 bytes cannot fit a 19-byte BGP header.
+        let bytes = [0xffu8; 4];
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(m.is_null(), "truncated input must return NULL");
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn message_type_round_trip() {
+        for (label, bytes, want) in [
+            (
+                1u8,
+                build_open_with_as4(64512, 90, [10, 0, 0, 1]),
+                LR_BGP_MSG_OPEN,
+            ),
+            (2, build_keepalive(), LR_BGP_MSG_KEEPALIVE),
+            (3, build_notification(6, 4, &[]), LR_BGP_MSG_NOTIFICATION),
+            (
+                4,
+                build_update_withdraw(&[([203, 0, 113, 0], 24)]),
+                LR_BGP_MSG_UPDATE,
+            ),
+        ] {
+            let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+            assert!(!m.is_null(), "case {label}: decode must succeed");
+            let mut kind = 0u8;
+            assert_eq!(
+                unsafe { lr_bgp_message_type(m, &raw mut kind) },
+                0,
+                "case {label}: type read must succeed"
+            );
+            assert_eq!(kind, want, "case {label}: type code mismatch");
+            unsafe { lr_bgp_message_free(m) };
+        }
+    }
+
+    #[test]
+    fn message_type_null_handle_returns_null_err() {
+        let mut kind = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_type(std::ptr::null_mut(), &raw mut kind) },
+            LR_ERR_NULL
+        );
+    }
+
+    #[test]
+    fn open_readers_round_trip_as4() {
+        // 4_200_000_000 cannot fit in 16 bits, so the OPEN must
+        // announce AS_TRANS (23456) on the wire and carry the real
+        // AS inside the RFC 6793 capability. The reader is
+        // expected to unwrap and surface the 32-bit value.
+        let bytes = build_open_with_as4(4_200_000_000, 180, [10, 0, 0, 1]);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        let mut version = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_open_version(m, &raw mut version) },
+            0
+        );
+        assert_eq!(version, 4, "BGP-4 only");
+
+        let mut asn = 0u32;
+        assert_eq!(unsafe { lr_bgp_message_open_my_as(m, &raw mut asn) }, 0);
+        assert_eq!(asn, 4_200_000_000, "must unwrap AS_TRANS → real AS");
+
+        let mut hold = 0u16;
+        assert_eq!(
+            unsafe { lr_bgp_message_open_hold_time(m, &raw mut hold) },
+            0
+        );
+        assert_eq!(hold, 180);
+
+        let mut id = [0u8; 4];
+        assert_eq!(unsafe { lr_bgp_message_open_bgp_id(m, id.as_mut_ptr()) }, 0);
+        assert_eq!(id, [10, 0, 0, 1]);
+
+        // The encoder appends exactly one optional parameter (the
+        // capabilities TLV) holding the 4-byte-AS capability.
+        let param_count = lr_bgp_message_open_param_count(m);
+        assert_eq!(param_count, 1, "exactly one capabilities param");
+        let mut ptype = 0u8;
+        let mut pvalue = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_open_param_at(m, 0, &raw mut ptype, &raw mut pvalue) },
+            0
+        );
+        assert_eq!(ptype, 2, "param type 2 = capabilities (RFC 5492)");
+        // The capabilities payload begins with (code=65, length=4, as_be).
+        let value_bytes = take(&pvalue);
+        drop_bytes(pvalue);
+        assert_eq!(value_bytes[0], 65, "capability code 65 = Four-Octet-AS");
+        assert_eq!(value_bytes[1], 4, "capability length 4");
+        assert_eq!(
+            &value_bytes[2..6],
+            &4_200_000_000u32.to_be_bytes(),
+            "real 4-byte AS in the capability value"
+        );
+
+        // Out-of-range index returns LR_ERR_OTHER. Use a fresh
+        // `lr_bytes_t` since `drop_bytes(pvalue)` already consumed it.
+        let mut ptype2 = 0u8;
+        let mut pvalue2 = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let rc = unsafe { lr_bgp_message_open_param_at(m, 1, &raw mut ptype2, &raw mut pvalue2) };
+        assert_eq!(rc, LR_ERR_OTHER);
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn open_readers_reject_wrong_variant() {
+        // A KEEPALIVE decoded through the OPEN readers must return
+        // LR_ERR_INVALID_HANDLE and set the last-error string.
+        let bytes = build_keepalive();
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        let mut version = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_open_version(m, &raw mut version) },
+            LR_ERR_INVALID_HANDLE
+        );
+        assert!(last_error().contains("not OPEN"), "{}", last_error());
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn open_readers_reject_null_handle_and_null_outputs() {
+        let mut v = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_open_version(std::ptr::null_mut(), &raw mut v) },
+            LR_ERR_NULL
+        );
+        // Build a real OPEN so we can verify null-output rejection too.
+        let bytes = build_open_with_as4(64512, 90, [10, 0, 0, 1]);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        assert_eq!(
+            unsafe { lr_bgp_message_open_version(m, std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_open_my_as(m, std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_open_hold_time(m, std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_open_bgp_id(m, std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_open_param_at(m, 0, std::ptr::null_mut(), std::ptr::null_mut())
+            },
+            LR_ERR_NULL
+        );
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn notification_readers_round_trip() {
+        // Cease / Administrative Reset, no data (the compact form BIRD/FRR emit).
+        let bytes = build_notification(6, 4, &[]);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        let mut code = 0u8;
+        let mut subcode = 0u8;
+        let mut data = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_notification_code(m, &raw mut code) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_notification_subcode(m, &raw mut subcode) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_notification_data(m, &raw mut data) },
+            0
+        );
+        assert_eq!(code, 6, "Cease");
+        assert_eq!(subcode, 4, "Administrative Reset");
+        assert_eq!(data.len, 0, "no diagnostic data");
+        drop_bytes(data);
+        unsafe { lr_bgp_message_free(m) };
+
+        // NOTIFICATION with diagnostic data (Header/Conn-Not-Sync).
+        let payload = [0xde, 0xad, 0xbe, 0xef];
+        let bytes = build_notification(1, 2, &payload);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        let mut data = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_notification_data(m, &raw mut data) },
+            0
+        );
+        assert_eq!(take(&data), payload);
+        drop_bytes(data);
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn notification_readers_reject_wrong_variant() {
+        let bytes = build_keepalive();
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        let mut code = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_notification_code(m, &raw mut code) },
+            LR_ERR_INVALID_HANDLE
+        );
+        assert!(last_error().contains("not NOTIFICATION"));
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn route_refresh_readers_round_trip() {
+        use lr_core::nlri::NlriFamily;
+        // Construct a ROUTE-REFRESH for IPv6 unicast (AFI=2, SAFI=1)
+        // with the BoRR subtype. Build the message via the Rust API
+        // and encode it through BgpCodec so the decoder sees real
+        // wire bytes.
+        let rr = RouteRefresh {
+            family: NlriFamily { afi: 2, safi: 1 },
+            subtype: RouteRefreshSubtype::BeginOfRib,
+        };
+        let codec = BgpC::new();
+        let bytes = codec.encode_vec(&BgpMessage::RouteRefresh(rr)).unwrap();
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        let mut subtype = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_route_refresh_afi(m, &raw mut afi) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_route_refresh_safi(m, &raw mut safi) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_route_refresh_subtype(m, &raw mut subtype) },
+            0
+        );
+        assert_eq!(afi, 2, "IPv6");
+        assert_eq!(safi, 1, "unicast");
+        assert_eq!(subtype, LR_BGP_RR_SUBTYPE_BORR, "BoRR");
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn route_refresh_readers_reject_wrong_variant() {
+        let bytes = build_keepalive();
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        let mut afi = 0u16;
+        assert_eq!(
+            unsafe { lr_bgp_message_route_refresh_afi(m, &raw mut afi) },
+            LR_ERR_INVALID_HANDLE
+        );
+        assert!(last_error().contains("not ROUTE-REFRESH"));
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn update_readers_round_trip_withdraw_only() {
+        // Withdraw-only UPDATE: two prefixes, no attributes, no NLRI.
+        let bytes = build_update_withdraw(&[([203, 0, 113, 0], 24), ([198, 51, 100, 0], 25)]);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(lr_bgp_message_update_withdrawn_count(m), 2);
+        assert_eq!(
+            lr_bgp_message_update_nlri_count(m),
+            0,
+            "no NLRI in withdraw-only"
+        );
+
+        let mut prefix = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 0,
+            prefix_len: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_update_withdrawn_at(m, 0, &raw mut prefix) },
+            0
+        );
+        assert_eq!(&prefix.addr[..4], &[203, 0, 113, 0]);
+        assert_eq!(prefix.prefix_len, 24);
+        assert_eq!(prefix.is_ipv6, 0);
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_withdrawn_at(m, 1, &raw mut prefix) },
+            0
+        );
+        assert_eq!(&prefix.addr[..4], &[198, 51, 100, 0]);
+        assert_eq!(prefix.prefix_len, 25);
+
+        // Out-of-range returns LR_ERR_OTHER.
+        assert_eq!(
+            unsafe { lr_bgp_message_update_withdrawn_at(m, 2, &raw mut prefix) },
+            LR_ERR_OTHER
+        );
+
+        // No NLRI to read; the nlri_at reader must also reject the
+        // out-of-range index.
+        assert_eq!(
+            unsafe { lr_bgp_message_update_nlri_at(m, 0, &raw mut prefix) },
+            LR_ERR_OTHER
+        );
+
+        // Path attributes: the encoder writes ORIGIN + AS_PATH +
+        // NEXT_HOP for an announce UPDATE; for a withdraw-only
+        // UPDATE there are zero attributes.
+        assert_eq!(lr_bgp_message_update_attr_count(m), 0);
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn update_readers_round_trip_announce() {
+        let bytes = build_update_announce(
+            &[([203, 0, 113, 0], 24)],
+            [192, 0, 2, 1],
+            &[64512, 64513, 64514],
+            0, // IGP
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(lr_bgp_message_update_nlri_count(m), 1);
+        assert_eq!(lr_bgp_message_update_withdrawn_count(m), 0);
+
+        let mut prefix = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 0,
+            prefix_len: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_update_nlri_at(m, 0, &raw mut prefix) },
+            0
+        );
+        assert_eq!(&prefix.addr[..4], &[203, 0, 113, 0]);
+        assert_eq!(prefix.prefix_len, 24);
+
+        // The encoder writes ORIGIN (1) + AS_PATH (2) + NEXT_HOP (3).
+        assert!(lr_bgp_message_update_attr_count(m) >= 3);
+        let mut found_origin = false;
+        let mut found_next_hop = false;
+        for i in 0..lr_bgp_message_update_attr_count(m) {
+            let mut atype = 0u8;
+            let mut aflags = 0u8;
+            let mut avalue = lr_bytes_t {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    lr_bgp_message_update_attr_at(
+                        m,
+                        i,
+                        &raw mut atype,
+                        &raw mut aflags,
+                        &raw mut avalue,
+                    )
+                },
+                0
+            );
+            if atype == 1 {
+                found_origin = true;
+                assert_eq!(avalue.len, 1, "ORIGIN value is 1 byte");
+                assert_eq!(take(&avalue)[0], 0, "ORIGIN=IGP");
+            }
+            if atype == 3 {
+                found_next_hop = true;
+                assert_eq!(avalue.len, 4, "NEXT_HOP value is 4 bytes");
+                assert_eq!(&take(&avalue)[..], &[192, 0, 2, 1]);
+            }
+            drop_bytes(avalue);
+        }
+        assert!(found_origin, "ORIGIN attribute present");
+        assert!(found_next_hop, "NEXT_HOP attribute present");
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn update_readers_reject_wrong_variant() {
+        let bytes = build_keepalive();
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        assert_eq!(lr_bgp_message_update_withdrawn_count(m), 0);
+        assert!(last_error().contains("not UPDATE"));
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn update_attr_at_rejects_null_outputs() {
+        let bytes = build_update_announce(&[([203, 0, 113, 0], 24)], [192, 0, 2, 1], &[64512], 0);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_attr_at(
+                    m,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            LR_ERR_NULL
+        );
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn free_handles_null_safely() {
+        // SAFE no-op on a NULL handle — no UB, no panic, no allocation.
+        unsafe { lr_bgp_message_free(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn decode_then_free_does_not_leak() {
+        // Sanity check the box/unbox lifecycle on a real message.
+        // Repeated decode + free in a loop should not OOM in practice
+        // (the test does not assert memory, only that the cycle
+        // completes without panicking or returning NULL).
+        let bytes = build_open_with_as4(64512, 90, [10, 0, 0, 1]);
+        for _ in 0..100 {
+            let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+            assert!(!m.is_null());
+            unsafe { lr_bgp_message_free(m) };
+        }
+    }
+
+    #[test]
+    fn open_my_as_unwraps_as_trans_for_2_byte_as_with_capability() {
+        // A 16-bit AS that ALSO carries the 4-byte-AS capability
+        // (e.g. an AS_TRANS upgrade probe from BIRD) must surface
+        // the capability's value, not the 16-bit field.
+        let open = Open::new(
+            lr_core::addr::Asn::new(23456),
+            90,
+            lr_core::addr::RouterId::from_u32(0x0a000001),
+        );
+        // Manually attach a Four-Octet-AS capability with AS 4_000_000.
+        let mut cap_bytes = vec![65u8, 4];
+        cap_bytes.extend_from_slice(&4_000_000u32.to_be_bytes());
+        let param = OpenParam {
+            param_type: OpenParam::PARAM_TYPE_CAPABILITY,
+            value: cap_bytes,
+        };
+        let mut open = open;
+        open.params.push(param);
+        let codec = BgpC::new();
+        let bytes = codec.encode_vec(&BgpMessage::Open(open)).unwrap();
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        let mut asn = 0u32;
+        assert_eq!(unsafe { lr_bgp_message_open_my_as(m, &raw mut asn) }, 0);
+        assert_eq!(
+            asn, 4_000_000,
+            "AS_TRANS must be unwrapped to the cap value"
+        );
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn open_my_as_returns_16bit_when_no_capability() {
+        // A plain 2-byte AS without the 4-byte-AS capability returns
+        // the raw 16-bit field value (no unwrap).
+        let mut out = new_out();
+        // as4=0 to suppress the capability; 64512 fits in 16 bits.
+        assert_eq!(
+            unsafe { lr_bgp_encode_open(64512, 90, [10, 0, 0, 1].as_ptr(), 0, &raw mut out) },
+            0
+        );
+        let bytes = take(&out);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        let mut asn = 0u32;
+        assert_eq!(unsafe { lr_bgp_message_open_my_as(m, &raw mut asn) }, 0);
+        assert_eq!(asn, 64512, "no capability → raw 16-bit field");
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    /// Box a hand-built message directly, exercising the box/unbox
+    /// path that does not go through `lr_bgp_decode_message`.
+    #[test]
+    fn box_bgp_message_then_borrow_round_trip() {
+        let msg = BgpMessage::Keepalive(Keepalive);
+        let m: lr_bgp_message_t = box_bgp_message(msg);
+        let mut kind = 0u8;
+        assert_eq!(unsafe { lr_bgp_message_type(m, &raw mut kind) }, 0);
+        assert_eq!(kind, LR_BGP_MSG_KEEPALIVE);
+        unsafe { lr_bgp_message_free(m) };
     }
 }

@@ -57,6 +57,33 @@
 #define LR_MAX_PREFIX_RESTART 2
 
 
+/**
+ * BGP message type codes (RFC 4271 §4.1 + RFC 2918). Mirrors
+ * [`lr_bgp::BgpMessageType`] but exposed as plain `u8` constants so C
+ * consumers can `switch` on the value returned by
+ * [`lr_bgp_message_type`] without depending on a generated enum.
+ */
+#define LR_BGP_MSG_OPEN 1
+
+#define LR_BGP_MSG_UPDATE 2
+
+#define LR_BGP_MSG_NOTIFICATION 3
+
+#define LR_BGP_MSG_KEEPALIVE 4
+
+#define LR_BGP_MSG_ROUTE_REFRESH 5
+
+/**
+ * Route-Refresh subtype (RFC 7313 §3.2). The third body octet of a
+ * ROUTE-REFRESH message; ROUTE-REFRESH readers surface this via
+ * [`lr_bgp_message_route_refresh_subtype`].
+ */
+#define LR_BGP_RR_SUBTYPE_NORMAL 0
+
+#define LR_BGP_RR_SUBTYPE_BORR 1
+
+#define LR_BGP_RR_SUBTYPE_EORR 2
+
 
 
 /**
@@ -194,6 +221,15 @@ typedef struct lr_prefix_t {
   uint8_t is_ipv6;
   uint8_t prefix_len;
 } lr_prefix_t;
+
+/**
+ * Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
+ */
+typedef struct OpaqueBgpMessage {
+  uint8_t _private[0];
+} OpaqueBgpMessage;
+
+typedef struct OpaqueBgpMessage *lr_bgp_message_t;
 
 /**
  * Opaque router handle. C side never touches internals.
@@ -666,6 +702,242 @@ int32_t lr_bgp_encode_update_announce_v4(const struct lr_prefix_t *prefixes,
 int32_t lr_ospf_decode_v2(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
 
 int32_t lr_babel_decode(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
+
+/**
+ * Decode one BGP message and return an opaque handle to the parsed
+ * form. The caller owns the handle and must release it with
+ * [`lr_bgp_message_free`]. Returns NULL on failure (the thread-local
+ * last-error string is set).
+ *
+ * Unlike [`lr_bgp_decode`] (which round-trips the parsed message
+ * through `encode_vec` and hands back canonical bytes), this entry
+ * point keeps the structured `BgpMessage` alive so its variant fields
+ * can be read by the matching `lr_bgp_message_*` readers.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes.
+ */
+lr_bgp_message_t lr_bgp_decode_message(const uint8_t *data, uintptr_t len);
+
+/**
+ * Free a BGP-message handle produced by [`lr_bgp_decode_message`]. Safe
+ * to call with NULL.
+ *
+ * # Safety
+ * `m` must have been produced by [`lr_bgp_decode_message`] and must not
+ * be destroyed while another thread is inside a call on the same handle.
+ */
+void lr_bgp_message_free(lr_bgp_message_t m);
+
+/**
+ * Write the BGP message type code (1..5, see `LR_BGP_MSG_*`) to `out`.
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle.
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_type(lr_bgp_message_t m, uint8_t *out);
+
+/**
+ * Write the OPEN version (always 4 on a well-formed message) to `out`.
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle, and
+ * `LR_ERR_INVALID_HANDLE` when the message is not an OPEN.
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_open_version(lr_bgp_message_t m, uint8_t *out);
+
+/**
+ * Write the sender AS to `out`. When the OPEN carries the RFC 6793
+ * four-octet-AS capability (param type 2, capability code 65), the
+ * real 32-bit AS is read from the capability; otherwise the 16-bit
+ * `my_as` field is returned. Returns 0 on success, `LR_ERR_NULL`
+ * on a null handle, `LR_ERR_INVALID_HANDLE` when not OPEN.
+ *
+ * # Safety
+ * `out` must point to a writable `uint32_t`.
+ */
+int32_t lr_bgp_message_open_my_as(lr_bgp_message_t m, uint32_t *out);
+
+/**
+ * Write the OPEN hold time (seconds) to `out`. Returns 0 on success,
+ * `LR_ERR_NULL` on a null handle, `LR_ERR_INVALID_HANDLE` when not OPEN.
+ *
+ * # Safety
+ * `out` must point to a writable `uint16_t`.
+ */
+int32_t lr_bgp_message_open_hold_time(lr_bgp_message_t m, uint16_t *out);
+
+/**
+ * Write the OPEN BGP identifier (4 bytes, network order) to `out`.
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle or null `out`,
+ * `LR_ERR_INVALID_HANDLE` when not OPEN.
+ *
+ * # Safety
+ * `out` must point to 4 writable bytes.
+ */
+int32_t lr_bgp_message_open_bgp_id(lr_bgp_message_t m, uint8_t *out);
+
+/**
+ * Number of optional parameters in the OPEN. Returns the count
+ * directly (0 on a null handle or non-OPEN message — the last-error
+ * string is set on the latter so the caller can distinguish).
+ */
+uintptr_t lr_bgp_message_open_param_count(lr_bgp_message_t m);
+
+/**
+ * Write the optional parameter at `idx` to `out_type` and `out_value`.
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle or null outputs,
+ * `LR_ERR_INVALID_HANDLE` when the message is not OPEN, and
+ * `LR_ERR_OTHER` when `idx` is out of range.
+ *
+ * `out_value` is a freshly allocated `lr_bytes_t` the caller must free
+ * with [`crate::bytes::lr_bytes_free`]. The param `value` is the raw
+ * capability payload (RFC 5492 §3): a sequence of `(code:1, length:1,
+ * value:length)` capability triples that an embedder can crack open
+ * with [`lr_bgp::Capability::decode_set`] on the Rust side or by hand
+ * from C — see `tests/ffi/harness.c` for the wire layout.
+ *
+ * # Safety
+ * `out_type` must point to a writable `uint8_t`, `out_value` to a
+ * writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_message_open_param_at(lr_bgp_message_t m,
+                                     uintptr_t idx,
+                                     uint8_t *out_type,
+                                     struct lr_bytes_t *out_value);
+
+/**
+ * Write the NOTIFICATION error code to `out`. Returns 0 on success,
+ * `LR_ERR_NULL` on a null handle or null `out`, `LR_ERR_INVALID_HANDLE`
+ * when the message is not a NOTIFICATION.
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_notification_code(lr_bgp_message_t m, uint8_t *out);
+
+/**
+ * Write the NOTIFICATION error subcode to `out`. See
+ * [`lr_bgp_message_notification_code`].
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_notification_subcode(lr_bgp_message_t m, uint8_t *out);
+
+/**
+ * Write the NOTIFICATION data payload (variable-length, often empty)
+ * to `out`. Returns 0 on success, `LR_ERR_NULL` on a null handle or
+ * null `out`, `LR_ERR_INVALID_HANDLE` when not a NOTIFICATION.
+ *
+ * `out` is a freshly allocated `lr_bytes_t` the caller must free with
+ * [`crate::bytes::lr_bytes_free`]. The payload is empty for the
+ * compact NOTIFICATIONs BIRD/FRR emit on Cease/Administrative Reset,
+ * and carries diagnostic text (RFC 4271 §4.5) for Header/OPEN/UPDATE
+ * errors.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_message_notification_data(lr_bgp_message_t m, struct lr_bytes_t *out);
+
+/**
+ * Write the ROUTE-REFRESH AFI (RFC 4271 address-family identifier) to
+ * `out`. Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+ * `out`, `LR_ERR_INVALID_HANDLE` when the message is not a
+ * ROUTE-REFRESH.
+ *
+ * # Safety
+ * `out` must point to a writable `uint16_t`.
+ */
+int32_t lr_bgp_message_route_refresh_afi(lr_bgp_message_t m, uint16_t *out);
+
+/**
+ * Write the ROUTE-REFRESH SAFI (RFC 4271 sub-address-family
+ * identifier) to `out`. See [`lr_bgp_message_route_refresh_afi`].
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_route_refresh_safi(lr_bgp_message_t m, uint8_t *out);
+
+/**
+ * Write the ROUTE-REFRESH subtype (RFC 7313 §3.2) to `out`: 0 = Normal,
+ * 1 = BoRR, 2 = EoRR, 0xff = unknown (RFC 7313 §3.2 requires the
+ * message be silently ignored, so the decoder maps unrecognized values
+ * here). See [`LR_BGP_RR_SUBTYPE_*`] for the named constants.
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_route_refresh_subtype(lr_bgp_message_t m, uint8_t *out);
+
+/**
+ * Number of withdrawn routes in the UPDATE. Returns the count
+ * directly (0 on a null handle or non-UPDATE message — the last-error
+ * string is set on the latter).
+ */
+uintptr_t lr_bgp_message_update_withdrawn_count(lr_bgp_message_t m);
+
+/**
+ * Number of NLRI entries in the UPDATE (IPv4 unicast legacy NLRI only;
+ * MP-BGP NLRI lives inside the MpReach/MpUnreach path attributes). See
+ * [`lr_bgp_message_update_withdrawn_count`] for return semantics.
+ */
+uintptr_t lr_bgp_message_update_nlri_count(lr_bgp_message_t m);
+
+/**
+ * Number of path attributes in the UPDATE. The attribute at index `i`
+ * is read with [`lr_bgp_message_update_attr_at`].
+ */
+uintptr_t lr_bgp_message_update_attr_count(lr_bgp_message_t m);
+
+/**
+ * Write the withdrawn route at `idx` to `out`. Returns 0 on success,
+ * `LR_ERR_NULL` on a null handle or null `out`, `LR_ERR_INVALID_HANDLE`
+ * when the message is not an UPDATE, and `LR_ERR_OTHER` when `idx` is
+ * out of range. The prefix's `addr` is zero-padded to 16 bytes (the
+ * first 4 carry the IPv4 octets); `is_ipv6` is 0; `prefix_len` carries
+ * the prefix length.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_prefix_t`.
+ */
+int32_t lr_bgp_message_update_withdrawn_at(lr_bgp_message_t m,
+                                           uintptr_t idx,
+                                           struct lr_prefix_t *out);
+
+/**
+ * Write the NLRI entry at `idx` to `out`. Same contract as
+ * [`lr_bgp_message_update_withdrawn_at`] but for the announce section.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_prefix_t`.
+ */
+int32_t lr_bgp_message_update_nlri_at(lr_bgp_message_t m, uintptr_t idx, struct lr_prefix_t *out);
+
+/**
+ * Write the path attribute at `idx` to `out_type`, `out_flags` and
+ * `out_value`. Returns 0 on success, `LR_ERR_NULL` on a null handle or
+ * null outputs, `LR_ERR_INVALID_HANDLE` when not an UPDATE, and
+ * `LR_ERR_OTHER` when `idx` is out of range.
+ *
+ * `out_value` is a freshly allocated `lr_bytes_t` the caller must free
+ * with [`crate::bytes::lr_bytes_free`]. The flags byte layout is
+ * RFC 4271 §5.1 + RFC 9072 §2: bit 7 optional, bit 6 transitive, bit 5
+ * partial, bit 4 extended-length.
+ *
+ * # Safety
+ * `out_type` and `out_flags` must point to writable `uint8_t` values,
+ * `out_value` to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_message_update_attr_at(lr_bgp_message_t m,
+                                      uintptr_t idx,
+                                      uint8_t *out_type,
+                                      uint8_t *out_flags,
+                                      struct lr_bytes_t *out_value);
 
 /**
  * Get the last error message. Returned string is NUL-terminated UTF-8.
