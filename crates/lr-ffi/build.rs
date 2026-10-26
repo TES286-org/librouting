@@ -103,4 +103,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/policy.rs");
     println!("cargo:rerun-if-changed=src/codec.rs");
     println!("cargo:rerun-if-changed=src/events.rs");
+    println!("cargo:rerun-if-changed=src/inspection.rs");
 }

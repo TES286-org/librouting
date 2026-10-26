@@ -104,6 +104,27 @@
 #define LR_FILTER_FALLTHROUGH 2
 
 /**
+ * Maximum text length for the `kind` and `state` strings in
+ * [`lr_session_summary_t`]. RFC 2328 / RFC 5340 / RFC 8966 never use
+ * names longer than "Established" (11 chars) / "Loading" (7 chars) —
+ * 32 is comfortably above any plausible state name. NUL-terminated.
+ */
+#define LR_SESSION_TEXT_MAX 32
+
+/**
+ * Protocol kind constants published as `LR_SESSION_KIND_*` defines in
+ * the header. The text form is also kept on the struct so embedders
+ * that prefer names get them without an extra lookup.
+ */
+#define LR_SESSION_KIND_BGP 1
+
+#define LR_SESSION_KIND_OSPF 2
+
+#define LR_SESSION_KIND_OSPF3 3
+
+#define LR_SESSION_KIND_BABEL 4
+
+/**
  * ORIGIN values (RFC 4271 §5.1.1).
  */
 #define LR_ORIGIN_IGP 0
@@ -405,6 +426,170 @@ typedef struct lr_filter_context_t {
                                   const struct lr_ext_comm_t *items,
                                   uintptr_t count);
 } lr_filter_context_t;
+
+/**
+ * One session summary, mirroring [`lr_router::SessionSummary`].
+ *
+ * `kind` is one of the `LR_SESSION_KIND_*` constants; `kind_text` is
+ * the lower-case ASCII name (`"bgp"`, `"ospf"`, `"ospf3"`, `"babel"`).
+ * `state_text` is the protocol-state name (`"Established"`, `"Full"`,
+ * `"Up"`, ...). `peer_bgp_id_present` is `1` when the BGP identifier
+ * field is meaningful (BGP only, post-OPEN).
+ */
+typedef struct lr_session_summary_t {
+  /**
+   * Opaque session handle (matches `lr_router_add_*_session` output).
+   */
+  uint64_t handle;
+  /**
+   * One of the `LR_SESSION_KIND_*` constants.
+   */
+  int32_t kind;
+  /**
+   * Lower-case ASCII kind name, NUL-terminated.
+   */
+  uint8_t kind_text[LR_SESSION_TEXT_MAX];
+  /**
+   * Configured local AS (BGP only; 0 for OSPF / Babel).
+   */
+  uint32_t local_as;
+  /**
+   * Configured peer AS (BGP only; 0 for OSPF / Babel).
+   */
+  uint32_t peer_as;
+  /**
+   * Protocol-state name, NUL-terminated (e.g. `"Established"`).
+   */
+  uint8_t state_text[LR_SESSION_TEXT_MAX];
+  /**
+   * 1 when the session is fully established, 0 otherwise.
+   */
+  uint8_t established;
+  /**
+   * 1 when `peer_bgp_id` carries a value, 0 otherwise.
+   */
+  uint8_t peer_bgp_id_present;
+  /**
+   * BGP identifier advertised by the peer (BGP only, post-OPEN).
+   */
+  uint32_t peer_bgp_id;
+  /**
+   * Hold time negotiated on the current connection (BGP only, secs).
+   */
+  uint16_t negotiated_hold_time;
+  /**
+   * Routes currently held in this session's Adj-RIB-In.
+   */
+  uint64_t adj_rib_in_len;
+  /**
+   * UPDATE messages received from the peer (BGP only; 0 otherwise).
+   */
+  uint64_t updates_received;
+  /**
+   * UPDATE messages sent to the peer (BGP only; 0 otherwise).
+   */
+  uint64_t updates_sent;
+} lr_session_summary_t;
+
+/**
+ * One OSPF LSA projection — fixed-layout header + owned body bytes.
+ *
+ * The header mirrors [`lr_ospf::lsa::LsaHeader`] exactly. The body
+ * is the LSA's payload bytes, owned by the caller through
+ * [`crate::handle::lr_bytes_t`] and freed with `lr_bytes_free`.
+ */
+typedef struct lr_ospf_lsa_t {
+  /**
+   * Age in seconds (top 2 bits are DoNotAge per RFC 4136).
+   */
+  uint16_t ls_age;
+  /**
+   * OSPFv2 options byte. OSPFv3 keeps this 0.
+   */
+  uint8_t options;
+  /**
+   * LSA type: OSPFv2 8-bit type (1..=11) or OSPFv3 16-bit type.
+   */
+  uint16_t ls_type;
+  /**
+   * Link State ID (RFC 2328 §A.4.1).
+   */
+  uint32_t link_state_id;
+  /**
+   * Advertising router (RFC 2328 §A.4.1).
+   */
+  uint32_t advertising_router;
+  /**
+   * LSA sequence number (RFC 2328 §A.4.1 — uses 0x80000001 floor).
+   */
+  uint32_t ls_sequence_number;
+  /**
+   * Fletcher-16 checksum over the LSA body (RFC 2328 §A.4.1).
+   */
+  uint16_t ls_checksum;
+  /**
+   * Total LSA length, header included, in bytes.
+   */
+  uint16_t length;
+  /**
+   * Owned body bytes — caller frees with `lr_bytes_free`.
+   */
+  struct lr_bytes_t body;
+} lr_ospf_lsa_t;
+
+/**
+ * One OSPF Graceful-Restart event (RFC 3623 §3 / RFC 5187 §2).
+ *
+ * Mirrors [`lr_router::OspfGraceEvent`] so the embedder's GR driver
+ * no longer has to wire through the daemon's event channel to learn
+ * that a peer entered helper mode or flushed its Grace-LSA.
+ */
+typedef struct lr_ospf_grace_event_t {
+  /**
+   * OSPF area ID the Grace-LSA arrived on.
+   */
+  uint32_t area;
+  /**
+   * Advertising Router of the Grace-LSA (the restarting router).
+   */
+  uint32_t advertising_router;
+  /**
+   * Requested grace period, seconds (Grace-LSA TLV 1).
+   */
+  uint32_t grace_period_secs;
+  /**
+   * Restart reason (TLV 2): 0 unknown, 1 software restart,
+   * 2 software reload/upgrade, 3 redundant switchover.
+   */
+  uint8_t reason;
+  /**
+   * 1 when `interface_addr_v4` carries a value, 0 otherwise.
+   */
+  uint8_t interface_addr_v4_present;
+  /**
+   * Restarting router's IPv4 interface address (TLV 3 4-octet form).
+   */
+  uint8_t interface_addr_v4[4];
+  /**
+   * 1 when `interface_addr_v6` carries a value, 0 otherwise.
+   */
+  uint8_t interface_addr_v6_present;
+  /**
+   * Restarting router's IPv6 interface address (TLV 3 16-octet form,
+   * RFC 5187 §2.2). Not required for v3 — neighbours are
+   * Router-ID identified.
+   */
+  uint8_t interface_addr_v6[16];
+  /**
+   * LS age of the received instance (grace already elapsed).
+   */
+  uint16_t ls_age_secs;
+  /**
+   * 1 when the instance carries MaxAge — restart ended, helpers exit
+   * (RFC 3623 §3.2 (1)).
+   */
+  uint8_t purged;
+} lr_ospf_grace_event_t;
 
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
@@ -1023,6 +1208,132 @@ int32_t lr_filter_evaluate(lr_filter_t filter,
                            const struct lr_filter_context_t *ctx,
                            int32_t *out_verdict,
                            struct lr_bytes_t *out_reason);
+
+/**
+ * Count of sessions currently registered on the router. Mirrors
+ * `DefaultRouter::session_summaries().len()`.
+ *
+ * Returns 0 on a NULL or poisoned router handle (the thread-local
+ * last-error string is set).
+ */
+uintptr_t lr_router_session_count(lr_router_t r);
+
+/**
+ * Read one session summary by index. Returns 0 on success,
+ * `LR_ERR_NULL` (-1) on a NULL `out`, `LR_ERR_INVALID_HANDLE` (-2)
+ * on a NULL or poisoned router, `LR_ERR_OTHER` (-6) when `index` is
+ * out of range (the sessions vector was snapshotted at a smaller
+ * size — call [`lr_router_session_count`] for the current bound).
+ *
+ * Mirrors `DefaultRouter::session_summaries()[index]`. The order is
+ * stable for the lifetime of one router instance (insertion order
+ * of the sessions, sorted by handle).
+ *
+ * # Safety
+ * `out` must point to a writable `lr_session_summary_t` slot.
+ */
+int32_t lr_router_session_summary_at(lr_router_t r,
+                                     uintptr_t index,
+                                     struct lr_session_summary_t *out);
+
+/**
+ * Count of OSPF areas the router currently holds. Mirrors
+ * `DefaultRouter::ospf_area_ids().len()`.
+ *
+ * Returns 0 on a NULL or poisoned router handle.
+ */
+uintptr_t lr_router_ospf_area_count(lr_router_t r);
+
+/**
+ * Read one OSPF area ID by index. Returns 0 on success,
+ * `LR_ERR_NULL` (-1) on a NULL `out`, `LR_ERR_INVALID_HANDLE` (-2)
+ * on a NULL or poisoned router, `LR_ERR_OTHER` (-6) when `index`
+ * is out of range.
+ *
+ * Mirrors `DefaultRouter::ospf_area_ids()[index]`. The order is
+ * ascending (BTreeMap iteration), matching the Rust API.
+ *
+ * # Safety
+ * `out` must point to a writable `u32` slot.
+ */
+int32_t lr_router_ospf_area_id_at(lr_router_t r, uintptr_t index, uint32_t *out);
+
+/**
+ * OSPF area topology version — a monotonic counter bumped on every
+ * *content* change of a topology LSA (types 1-5, 7). Returns 0 on
+ * success and writes the version to `*out`; returns `LR_ERR_NULL` (-1)
+ * on a NULL `out`, `LR_ERR_INVALID_HANDLE` (-2) on a NULL or
+ * poisoned router, `LR_ERR_OTHER` (-6) when the area is unknown
+ * (mirrors `Option<u64>::None`).
+ *
+ * Mirrors `DefaultRouter::ospf_area_topology_version`. The
+ * graceful-restart restarting-router poll loop calls this once per
+ * main-loop pass and exits helping when the counter moves (RFC 3623
+ * §3.2 (3)).
+ *
+ * # Safety
+ * `out` must point to a writable `u64` slot.
+ */
+int32_t lr_router_ospf_area_topology_version(lr_router_t r, uint32_t area_id, uint64_t *out);
+
+/**
+ * Read one LSA out of an area's LSDB by its exact key
+ * (`ls_type`, `link_state_id`, `advertising_router`). Returns 0 on
+ * success and writes the LSA into `*out` (the body bytes are
+ * caller-owned and must be freed with `lr_bytes_free`); returns
+ * `LR_ERR_NULL` (-1) on a NULL `out`, `LR_ERR_INVALID_HANDLE` (-2)
+ * on a NULL or poisoned router, `LR_ERR_OTHER` (-6) when the area
+ * or LSA is unknown.
+ *
+ * Mirrors `DefaultRouter::ospf_area_lsa`. The graceful-restart
+ * restarting router uses this to fetch its own pre-restart
+ * router-LSA — re-received from helping neighbours through database
+ * exchange (RFC 3623 §2.2 (1)) — and walk the adjacencies it used
+ * to carry.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_ospf_lsa_t` slot. After a
+ * successful call the embedder owns `out->body` and must free it
+ * with `lr_bytes_free` to avoid a memory leak.
+ */
+int32_t lr_router_ospf_area_lsa(lr_router_t r,
+                                uint32_t area_id,
+                                uint16_t ls_type,
+                                uint32_t link_state_id,
+                                uint32_t advertising_router,
+                                struct lr_ospf_lsa_t *out);
+
+/**
+ * Stable, content-derived hash that changes when the set of BGP
+ * sessions changes structurally (session added/removed, peer address
+ * changed, ASN4 mode flipped). Returns 0 for a router with no BGP
+ * sessions; returns `LR_ERR_INVALID_HANDLE` (-2) on a NULL or
+ * poisoned router.
+ *
+ * Mirrors `DefaultRouter::bgp_session_identity_hash`. The EPE ticker
+ * polls this and only re-projects the BGP-LS Link NLRI set when
+ * the hash moves.
+ */
+uint64_t lr_router_bgp_session_identity_hash(lr_router_t r);
+
+/**
+ * Drain pending OSPF Graceful-Restart events (RFC 3623 §3 / RFC
+ * 5187 §2). Returns the number of events written into `out` (up to
+ * `cap`; events past `cap` stay queued for the next call). Returns
+ * `LR_ERR_NULL` (-1) on a NULL `out` (when `cap > 0`),
+ * `LR_ERR_INVALID_HANDLE` (-2) on a NULL or poisoned router.
+ *
+ * Mirrors `DefaultRouter::drain_ospf_grace_events`. The embedder's
+ * helper-mode poll loop calls this once per main-loop pass.
+ *
+ * # Safety
+ * `out` must point to a writable array of `lr_ospf_grace_event_t`
+ * with room for at least `cap` entries. Passing `cap == 0` with
+ * `out == NULL` is allowed and is a no-op (returns 0).
+ */
+intptr_t lr_router_drain_ospf_grace_events(lr_router_t r,
+                                           struct lr_ospf_grace_event_t *out,
+                                           uintptr_t cap);
 
 /**
  * Install one redistribution pipe on the router.
