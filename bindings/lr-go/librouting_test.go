@@ -2090,3 +2090,145 @@ func mustEncodeOpen(t *testing.T, myAs uint32, holdTime uint16, bgpId [4]byte, a
 	}
 	return b
 }
+
+// ----------------------------------------------------------------------
+// Structured inspection surface (issue #92).
+// ----------------------------------------------------------------------
+
+func TestSessionCountZeroOnNewRouter(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	n, err := r.SessionCount()
+	if err != nil {
+		t.Fatalf("SessionCount: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("new router session count = %d, want 0", n)
+	}
+	summaries, err := r.SessionSummaries()
+	if err != nil {
+		t.Fatalf("SessionSummaries: %v", err)
+	}
+	if len(summaries) != 0 {
+		t.Fatalf("new router summaries len = %d, want 0", len(summaries))
+	}
+}
+
+func TestSessionSummaryAtOutOfRange(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	if _, err := r.SessionSummaryAt(0); err == nil {
+		t.Fatal("expected error on out-of-range index")
+	}
+}
+
+func TestSessionSummariesAfterBGPSession(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	h, err := r.AddBGPSession(64512, 64513, 0x0a000001, 90, 0, true)
+	if err != nil {
+		t.Fatalf("AddBGPSession: %v", err)
+	}
+	summaries, err := r.SessionSummaries()
+	if err != nil {
+		t.Fatalf("SessionSummaries: %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+	s := summaries[0]
+	if s.Handle != h {
+		t.Errorf("handle = %d, want %d", s.Handle, h)
+	}
+	if s.Kind != SessionKindBGP {
+		t.Errorf("kind = %v, want %v", s.Kind, SessionKindBGP)
+	}
+	if s.KindText != "bgp" {
+		t.Errorf("kind_text = %q, want %q", s.KindText, "bgp")
+	}
+	if s.LocalAS != 64512 {
+		t.Errorf("local_as = %d, want 64512", s.LocalAS)
+	}
+	if s.PeerAS != 64513 {
+		t.Errorf("peer_as = %d, want 64513", s.PeerAS)
+	}
+}
+
+func TestOspfAreaIDsAfterOspfSession(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	if _, err := r.AddOSPFSession(0x01020304, 0); err != nil {
+		t.Fatalf("AddOSPFSession: %v", err)
+	}
+	ids, err := r.OspfAreaIDs()
+	if err != nil {
+		t.Fatalf("OspfAreaIDs: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != 0 {
+		t.Fatalf("ospf area ids = %v, want [0]", ids)
+	}
+}
+
+func TestOspfAreaTopologyVersionUnknown(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	if _, err := r.OspfAreaTopologyVersion(99); err == nil {
+		t.Fatal("expected error on unknown area")
+	}
+}
+
+func TestOspfAreaLsaUnknown(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	if _, err := r.OspfAreaLsa(0, 1, 1, 1); err == nil {
+		t.Fatal("expected error on unknown LSA")
+	}
+}
+
+func TestBgpSessionIdentityHashIsUint64(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	h, err := r.BgpSessionIdentityHash()
+	if err != nil {
+		t.Fatalf("BgpSessionIdentityHash: %v", err)
+	}
+	if h > 0xFFFFFFFFFFFFFFFF {
+		t.Fatalf("hash = %#x, exceeds uint64", h)
+	}
+}
+
+func TestDrainOspfGraceEventsEmpty(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	
+	events, err := r.DrainOspfGraceEvents(32)
+	if err != nil {
+		t.Fatalf("DrainOspfGraceEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events len = %d, want 0", len(events))
+	}
+}

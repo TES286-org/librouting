@@ -799,6 +799,296 @@ func (r *Router) SessionsDump() (string, error) {
 	return string(copyBytes(&b)), nil
 }
 
+// ===== Structured inspection surface (issue #92) =====
+//
+// Mirrors the Rust pub API of DefaultRouter::session_summaries /
+// ospf_area_ids / ospf_area_topology_version / ospf_area_lsa /
+// bgp_session_identity_hash / drain_ospf_grace_events so the
+// embedder no longer has to parse SessionsDump / RibDump text output.
+
+// SessionKind is the protocol kind of a SessionSummary. Mirrors the
+// LR_SESSION_KIND_* constants.
+type SessionKind int32
+
+const (
+	SessionKindBGP   SessionKind = 1
+	SessionKindOSPF  SessionKind = 2
+	SessionKindOSPF3 SessionKind = 3
+	SessionKindBabel SessionKind = 4
+)
+
+// String returns the lower-case ASCII name of the kind ("bgp",
+// "ospf", "ospf3", "babel") — the same form as Rust's
+// SessionSummary::kind.
+func (k SessionKind) String() string {
+	switch k {
+	case SessionKindBGP:
+		return "bgp"
+	case SessionKindOSPF:
+		return "ospf"
+	case SessionKindOSPF3:
+		return "ospf3"
+	case SessionKindBabel:
+		return "babel"
+	default:
+		return "unknown"
+	}
+}
+
+// SessionSummary is one session's operational summary. Mirrors
+// lr_router::SessionSummary.
+type SessionSummary struct {
+	Handle             uint64
+	Kind               SessionKind
+	KindText           string
+	LocalAS            uint32
+	PeerAS             uint32
+	State              string
+	Established        bool
+	PeerBgpIDPresent   bool
+	PeerBgpID          uint32
+	NegotiatedHoldTime uint16
+	AdjRibInLen        uint64
+	UpdatesReceived    uint64
+	UpdatesSent        uint64
+}
+
+// OspfLsa is one OSPF LSA projection — fixed-layout header plus
+// the body bytes owned by Go (the caller does not need to free
+// them; they are copied out of the C buffer before it is freed).
+type OspfLsa struct {
+	LsAge             uint16
+	Options           uint8
+	LsType            uint16
+	LinkStateID       uint32
+	AdvertisingRouter uint32
+	LsSequenceNumber  uint32
+	LsChecksum        uint16
+	Length            uint16
+	Body              []byte
+}
+
+// OspfGraceEvent is one OSPF Graceful-Restart event (RFC 3623 §3 /
+// RFC 5187 §2). Mirrors lr_router::OspfGraceEvent.
+type OspfGraceEvent struct {
+	Area                 uint32
+	AdvertisingRouter    uint32
+	GracePeriodSecs      uint32
+	Reason               uint8
+	InterfaceAddrV4      [4]byte
+	InterfaceAddrV4Valid bool
+	InterfaceAddrV6      [16]byte
+	InterfaceAddrV6Valid bool
+	LsAgeSecs            uint16
+	Purged               bool
+}
+
+// SessionCount returns the number of sessions currently registered
+// on the router. Mirrors DefaultRouter::session_summaries().len().
+func (r *Router) SessionCount() (int, error) {
+	n := C.lr_router_session_count(r.ptr)
+	return int(n), nil
+}
+
+// SessionSummaryAt reads one session summary by index. Mirrors
+// DefaultRouter::session_summaries()[index]. The order is stable
+// (insertion order, sorted by handle).
+func (r *Router) SessionSummaryAt(index int) (SessionSummary, error) {
+	var c C.struct_lr_session_summary_t
+	rc := C.lr_router_session_summary_at(r.ptr, C.uintptr_t(index), &c)
+	if rc != 0 {
+		return SessionSummary{}, fmt.Errorf("lr_router_session_summary_at: %s (rc=%d)", LastError(), int(rc))
+	}
+	return decodeSessionSummary(&c), nil
+}
+
+// SessionSummaries returns every session's operational summary.
+// Convenience wrapper around SessionCount + SessionSummaryAt.
+func (r *Router) SessionSummaries() ([]SessionSummary, error) {
+	n, err := r.SessionCount()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SessionSummary, 0, n)
+	for i := 0; i < n; i++ {
+		s, err := r.SessionSummaryAt(i)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// OspfAreaCount returns the number of OSPF areas the router
+// currently holds. Mirrors DefaultRouter::ospf_area_ids().len().
+func (r *Router) OspfAreaCount() (int, error) {
+	n := C.lr_router_ospf_area_count(r.ptr)
+	return int(n), nil
+}
+
+// OspfAreaIDAt reads one OSPF area ID by index. Mirrors
+// DefaultRouter::ospf_area_ids()[index]. The order is ascending
+// (BTreeMap iteration).
+func (r *Router) OspfAreaIDAt(index int) (uint32, error) {
+	var id C.uint32_t
+	rc := C.lr_router_ospf_area_id_at(r.ptr, C.uintptr_t(index), &id)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_router_ospf_area_id_at: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint32(id), nil
+}
+
+// OspfAreaIDs returns every OSPF area ID the router currently
+// holds. Convenience wrapper around OspfAreaCount + OspfAreaIDAt.
+func (r *Router) OspfAreaIDs() ([]uint32, error) {
+	n, err := r.OspfAreaCount()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]uint32, 0, n)
+	for i := 0; i < n; i++ {
+		id, err := r.OspfAreaIDAt(i)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// OspfAreaTopologyVersion returns the OSPF area topology version —
+// a monotonic counter bumped on every *content* change of a
+// topology LSA (types 1-5, 7). Mirrors
+// DefaultRouter::ospf_area_topology_version. Returns an error when
+// the area is unknown.
+func (r *Router) OspfAreaTopologyVersion(areaID uint32) (uint64, error) {
+	var v C.uint64_t
+	rc := C.lr_router_ospf_area_topology_version(r.ptr, C.uint32_t(areaID), &v)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_router_ospf_area_topology_version: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint64(v), nil
+}
+
+// OspfAreaLsa reads one LSA out of an area's LSDB by its exact key
+// (ls_type, link_state_id, advertising_router). Mirrors
+// DefaultRouter::ospf_area_lsa. Returns an error when the area or
+// LSA is unknown.
+func (r *Router) OspfAreaLsa(areaID uint32, lsType uint16, linkStateID uint32, advertisingRouter uint32) (OspfLsa, error) {
+	var c C.struct_lr_ospf_lsa_t
+	rc := C.lr_router_ospf_area_lsa(r.ptr, C.uint32_t(areaID), C.uint16_t(lsType),
+		C.uint32_t(linkStateID), C.uint32_t(advertisingRouter), &c)
+	if rc != 0 {
+		return OspfLsa{}, fmt.Errorf("lr_router_ospf_area_lsa: %s (rc=%d)", LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&c.body)
+	return decodeOspfLsa(&c), nil
+}
+
+// BgpSessionIdentityHash returns a stable, content-derived hash that
+// changes when the set of BGP sessions changes structurally (session
+// added/removed, peer address changed, ASN4 mode flipped). Mirrors
+// DefaultRouter::bgp_session_identity_hash.
+func (r *Router) BgpSessionIdentityHash() (uint64, error) {
+	return uint64(C.lr_router_bgp_session_identity_hash(r.ptr)), nil
+}
+
+// DrainOspfGraceEvents drains pending OSPF Graceful-Restart events
+// (RFC 3623 §3 / RFC 5187 §2). Mirrors
+// DefaultRouter::drain_ospf_grace_events. Events past capacity stay
+// queued for the next call.
+func (r *Router) DrainOspfGraceEvents(capacity int) ([]OspfGraceEvent, error) {
+	if capacity <= 0 {
+		return nil, fmt.Errorf("DrainOspfGraceEvents: capacity must be positive")
+	}
+	cArr := (*C.struct_lr_ospf_grace_event_t)(C.malloc(C.sizeof_struct_lr_ospf_grace_event_t * C.size_t(capacity)))
+	if cArr == nil {
+		return nil, fmt.Errorf("DrainOspfGraceEvents: out of memory")
+	}
+	defer C.free(unsafe.Pointer(cArr))
+	n := C.lr_router_drain_ospf_grace_events(r.ptr, cArr, C.uintptr_t(capacity))
+	if n < 0 {
+		return nil, fmt.Errorf("lr_router_drain_ospf_grace_events: %s (rc=%d)", LastError(), int(n))
+	}
+	slice := (*[1 << 20]C.struct_lr_ospf_grace_event_t)(unsafe.Pointer(cArr))[:n:n]
+	out := make([]OspfGraceEvent, 0, n)
+	for _, e := range slice {
+		out = append(out, decodeOspfGraceEvent(&e))
+	}
+	return out, nil
+}
+
+// decodeSessionSummary translates one C struct into the Go form.
+// Returns a value, not a pointer — the caller already has its own
+// copy of the C struct on the stack.
+func decodeSessionSummary(c *C.struct_lr_session_summary_t) SessionSummary {
+	var s SessionSummary
+	s.Handle = uint64(c.handle)
+	s.Kind = SessionKind(int32(c.kind))
+	s.KindText = cUint8ArrayToString(c.kind_text[:])
+	s.LocalAS = uint32(c.local_as)
+	s.PeerAS = uint32(c.peer_as)
+	s.State = cUint8ArrayToString(c.state_text[:])
+	s.Established = c.established != 0
+	s.PeerBgpIDPresent = c.peer_bgp_id_present != 0
+	s.PeerBgpID = uint32(c.peer_bgp_id)
+	s.NegotiatedHoldTime = uint16(c.negotiated_hold_time)
+	s.AdjRibInLen = uint64(c.adj_rib_in_len)
+	s.UpdatesReceived = uint64(c.updates_received)
+	s.UpdatesSent = uint64(c.updates_sent)
+	return s
+}
+
+// decodeOspfLsa translates one C struct into the Go form, copying
+// the LSA body bytes out of the C-owned buffer.
+func decodeOspfLsa(c *C.struct_lr_ospf_lsa_t) OspfLsa {
+	var l OspfLsa
+	l.LsAge = uint16(c.ls_age)
+	l.Options = uint8(c.options)
+	l.LsType = uint16(c.ls_type)
+	l.LinkStateID = uint32(c.link_state_id)
+	l.AdvertisingRouter = uint32(c.advertising_router)
+	l.LsSequenceNumber = uint32(c.ls_sequence_number)
+	l.LsChecksum = uint16(c.ls_checksum)
+	l.Length = uint16(c.length)
+	l.Body = copyBytes(&c.body)
+	return l
+}
+
+// decodeOspfGraceEvent translates one C struct into the Go form.
+func decodeOspfGraceEvent(c *C.struct_lr_ospf_grace_event_t) OspfGraceEvent {
+	var e OspfGraceEvent
+	e.Area = uint32(c.area)
+	e.AdvertisingRouter = uint32(c.advertising_router)
+	e.GracePeriodSecs = uint32(c.grace_period_secs)
+	e.Reason = uint8(c.reason)
+	e.InterfaceAddrV4Valid = c.interface_addr_v4_present != 0
+	copy(e.InterfaceAddrV4[:], (*[4]byte)(unsafe.Pointer(&c.interface_addr_v4[0]))[:])
+	e.InterfaceAddrV6Valid = c.interface_addr_v6_present != 0
+	copy(e.InterfaceAddrV6[:], (*[16]byte)(unsafe.Pointer(&c.interface_addr_v6[0]))[:])
+	e.LsAgeSecs = uint16(c.ls_age_secs)
+	e.Purged = c.purged != 0
+	return e
+}
+
+// cUint8ArrayToString decodes a NUL-terminated fixed-size uint8
+// slice (the [LR_SESSION_TEXT_MAX] arrays on lr_session_summary_t)
+// as UTF-8. cgo exposes C-side `uint8_t arr[N]` fields as
+// `[N]C.uint8_t` and slice conversion on a `[N]C.uint8_t` value
+// yields `[]C.uint8_t`, which is iterated byte-by-byte here.
+func cUint8ArrayToString(buf []C.uint8_t) string {
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	out := make([]byte, end)
+	for i := 0; i < end; i++ {
+		out[i] = byte(buf[i])
+	}
+	return string(out)
+}
+
 // AddROAEntry adds one Route Origin Authorization entry to the
 // router's ROA table (RFC 6482 §3 / RFC 6811 §2). Pass exactly one
 // of `prefixV4` (4 bytes) or `prefixV6` (16 bytes); the other MUST
