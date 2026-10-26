@@ -1161,6 +1161,207 @@ int main(void) {
         check(bad_out == NULL, "decode sets *out to NULL on failure");
     }
 
+    /* ---- lr_loc_rib / lr_adj_rib / lr_rib_mux / lr_route_selector ---- */
+    {
+        lr_loc_rib_t rib = lr_loc_rib_new();
+        check(rib != NULL, "lr_loc_rib_new returns non-NULL");
+        check(lr_loc_rib_is_empty(rib) == 1, "fresh Loc-RIB is empty");
+        check(lr_loc_rib_len(rib) == 0, "fresh Loc-RIB len = 0");
+        lr_loc_rib_free(rib);
+        lr_loc_rib_free(NULL); /* safe on NULL */
+
+        lr_adj_rib_in_t in = lr_adj_rib_in_new();
+        check(in != NULL, "lr_adj_rib_in_new returns non-NULL");
+        check(lr_adj_rib_in_is_empty(in) == 1, "fresh Adj-RIB-In is empty");
+        lr_adj_rib_in_free(in);
+
+        lr_adj_rib_out_t out = lr_adj_rib_out_new();
+        check(out != NULL, "lr_adj_rib_out_new returns non-NULL");
+        check(lr_adj_rib_out_is_empty(out) == 1, "fresh Adj-RIB-Out is empty");
+        lr_adj_rib_out_free(out);
+
+        lr_rib_mux_t mux = lr_rib_mux_new();
+        check(mux != NULL, "lr_rib_mux_new returns non-NULL");
+        check(lr_rib_mux_is_empty(mux) == 1, "fresh RibMux is empty");
+        lr_rib_mux_free(mux);
+
+        /* RouteSelector on an empty array returns -1. */
+        check(lr_route_selector_select(NULL, 0) == -1,
+              "RouteSelector returns -1 on empty input");
+    }
+
+    /* ---- lr_ospf_lsdb + lr_ospf_lsa ---- */
+    {
+        lr_ospf_lsdb_t lsdb = lr_ospf_lsdb_new();
+        check(lsdb != NULL, "lr_ospf_lsdb_new returns non-NULL");
+        check(lr_ospf_lsdb_is_empty(lsdb) == 1, "fresh LSDB is empty");
+
+        /* Construct an LSA header + body. */
+        lr_ospf_lsa_hdr_box_t hdr = lr_ospf_lsa_header_new(
+            1, 0, 1, 0x01020304, 0x01020304, 0x80000001, 0xabcd, 24);
+        check(hdr != NULL, "lr_ospf_lsa_header_new returns non-NULL");
+
+        uint8_t body[] = {0xde, 0xad, 0xbe, 0xef};
+        lr_ospf_lsa_box_t lsa = lr_ospf_lsa_new(hdr, body, 4);
+        check(lsa != NULL, "lr_ospf_lsa_new returns non-NULL");
+
+        /* Install — should be New (returns 1). */
+        int rc = lr_ospf_lsdb_install(lsdb, lsa, 0);
+        check(rc == 1, "lr_ospf_lsdb_install returns 1 (New)");
+
+        check(lr_ospf_lsdb_len(lsdb) == 1, "LSDB has 1 LSA");
+        check(lr_ospf_lsdb_is_empty(lsdb) == 0, "LSDB not empty");
+
+        /* Get it back. */
+        lr_ospf_lsa_box_t got = NULL;
+        rc = lr_ospf_lsdb_get(lsdb, 1, 0x01020304, 0x01020304, &got);
+        check(rc == 0, "lr_ospf_lsdb_get returns 0");
+        check(got != NULL, "lr_ospf_lsdb_get sets *out");
+
+        /* Read the header back. */
+        lr_ospf_lsa_hdr_t got_hdr;
+        rc = lr_ospf_lsa_header_get(got, &got_hdr);
+        check(rc == 0, "lr_ospf_lsa_header_get returns 0");
+        check(got_hdr.ls_type == 1, "got ls_type = 1");
+        check(got_hdr.link_state_id == 0x01020304, "got link_state_id");
+
+        /* Read the body back. */
+        lr_bytes_t got_body = {NULL, 0, 0};
+        rc = lr_ospf_lsa_body(got, &got_body);
+        check(rc == 0, "lr_ospf_lsa_body returns 0");
+        check(got_body.len == 4, "got body len = 4");
+        lr_bytes_free(&got_body);
+
+        /* Encode as wire form. */
+        lr_bytes_t wire = {NULL, 0, 0};
+        rc = lr_ospf_lsa_to_wire(got, &wire);
+        check(rc == 0, "lr_ospf_lsa_to_wire returns 0");
+        check(wire.len == 24, "wire len = 20-byte header + 4-byte body");
+        lr_bytes_free(&wire);
+
+        lr_ospf_lsa_free(got);
+
+        /* Remove. */
+        rc = lr_ospf_lsdb_remove(lsdb, 1, 0x01020304, 0x01020304);
+        check(rc == 1, "lr_ospf_lsdb_remove returns 1");
+
+        /* NULL safety. */
+        check(lr_ospf_lsdb_len(NULL) == 0, "lsdb_len on NULL = 0");
+        lr_ospf_lsdb_free(NULL);
+        lr_ospf_lsa_free(NULL);
+        lr_ospf_lsa_header_free(NULL);
+
+        lr_ospf_lsdb_free(lsdb);
+    }
+
+    /* ---- lr_ospf_neighbor (FSM) ---- */
+    {
+        lr_ospf_neighbor_t n = lr_ospf_neighbor_new(0x01020304);
+        check(n != NULL, "lr_ospf_neighbor_new returns non-NULL");
+        check(lr_ospf_neighbor_state(n) == LR_OSPF_NEIGHBOR_STATE_DOWN,
+              "fresh neighbor is Down");
+
+        int st = lr_ospf_neighbor_step_hello_seen(n, 0, 0, 1);
+        check(st == LR_OSPF_NEIGHBOR_STATE_INIT,
+              "HelloSeen transitions Down → Init");
+
+        st = lr_ospf_neighbor_step_hello_seen(n, 0, 0, 1);
+        check(st == LR_OSPF_NEIGHBOR_STATE_TWO_WAY,
+              "second HelloSeen transitions Init → TwoWay");
+
+        st = lr_ospf_neighbor_step_adj_ok(n, 1);
+        check(st == LR_OSPF_NEIGHBOR_STATE_EX_START,
+              "AdjOk { proceed } transitions TwoWay → ExStart");
+
+        st = lr_ospf_neighbor_step_kill(n);
+        check(st == LR_OSPF_NEIGHBOR_STATE_DOWN,
+              "Kill transitions back to Down");
+
+        lr_ospf_neighbor_free(n);
+    }
+
+    /* ---- lr_bgp_peer (FSM) ---- */
+    {
+        lr_bgp_peer_t p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        check(p != NULL, "lr_bgp_peer_new returns non-NULL");
+        check(lr_bgp_peer_state(p) == LR_BGP_STATE_IDLE, "fresh peer is Idle");
+        check(lr_bgp_peer_is_established(p) == 0, "fresh peer not established");
+
+        /* ManualStart transitions Idle → Connect. */
+        int rc = lr_bgp_peer_step_manual_start(p);
+        check(rc == 0, "step_manual_start returns 0");
+        check(lr_bgp_peer_state(p) == LR_BGP_STATE_CONNECT,
+              "ManualStart transitions Idle → Connect");
+
+        /* No OPEN received yet — peer_bgp_id returns 0 (absent). */
+        uint32_t id = 0;
+        check(lr_bgp_peer_peer_bgp_id(p, &id) == 0, "no peer_bgp_id yet");
+
+        lr_bgp_peer_free(p);
+    }
+
+    /* ---- lr_babel_neighbor + lr_babel_route_table ---- */
+    {
+        uint8_t v4[4] = {10, 0, 0, 1};
+        lr_babel_neighbor_t n = lr_babel_neighbor_new(v4, NULL, 1000);
+        check(n != NULL, "lr_babel_neighbor_new (v4) returns non-NULL");
+
+        int rc = lr_babel_neighbor_hello(n, 1, 100, 1100);
+        check(rc == 0, "lr_babel_neighbor_hello returns 0");
+        rc = lr_babel_neighbor_ihu(n, 96, 100, 1100);
+        check(rc == 0, "lr_babel_neighbor_ihu returns 0");
+
+        check(lr_babel_neighbor_rtt_valid(n, 1200) == 0,
+              "rtt not valid (no timestamped Hello)");
+        check(lr_babel_neighbor_rtt_us(n, 1200) == 0,
+              "rtt_us = 0 when no valid sample");
+
+        lr_babel_neighbor_free(n);
+
+        lr_babel_route_table_t t = lr_babel_route_table_new();
+        check(t != NULL, "lr_babel_route_table_new returns non-NULL");
+        check(lr_babel_route_table_is_empty(t) == 1, "fresh route table is empty");
+        check(lr_babel_route_table_len(t) == 0, "fresh route table len = 0");
+        lr_babel_route_table_free(t);
+    }
+
+    /* ---- lr_ldp_session ---- */
+    {
+        lr_ldp_session_t s = lr_ldp_session_new(
+            0x0a000001, 0, 0x0a000002, 0, 0, 0);
+        check(s != NULL, "lr_ldp_session_new returns non-NULL");
+        check(lr_ldp_session_state(s) == LR_LDP_SESSION_STATE_NON_EXISTENT,
+              "fresh session is NonExistent");
+        check(lr_ldp_session_is_operational(s) == 0, "fresh session not operational");
+
+        int rc = lr_ldp_session_start(s, 0);
+        check(rc == 0, "lr_ldp_session_start returns 0");
+
+        int st = lr_ldp_session_state(s);
+        check(st == LR_LDP_SESSION_STATE_OPEN_SENT ||
+                  st == LR_LDP_SESSION_STATE_INITIALIZED,
+              "state after start is OpenSent or Initialized");
+
+        lr_ldp_session_free(s);
+    }
+
+    /* ---- lr_safety_net ---- */
+    {
+        lr_safety_net_t sn = lr_safety_net_new(64512);
+        check(sn != NULL, "lr_safety_net_new returns non-NULL");
+
+        /* A v4 local address. */
+        uint8_t v4[4] = {10, 0, 0, 1};
+        lr_safety_net_t sn2 = lr_safety_net_with_local_addr(sn, v4, NULL);
+        check(sn2 != NULL, "lr_safety_net_with_local_addr returns non-NULL");
+        lr_safety_net_free(sn2);
+        /* The original handle was consumed by with_local_addr — do not
+         * free it. */
+
+        /* NULL-handle check returns LR_ERR_NULL. */
+        check(lr_safety_net_check(NULL, NULL, 1) == -1, "check on NULL = -1");
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");
