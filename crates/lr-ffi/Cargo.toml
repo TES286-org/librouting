@@ -27,6 +27,9 @@ lr-core = { workspace = true }
 lr-bgp = { workspace = true }
 lr-ospf = { workspace = true }
 lr-babel = { workspace = true }
+lr-bfd = { workspace = true }
+lr-bmp = { workspace = true }
+lr-mrt = { workspace = true, features = ["bgp"] }
 lr-rib = { workspace = true }
 lr-policy = { workspace = true, features = ["damping"] }
 lr-damping = { workspace = true }

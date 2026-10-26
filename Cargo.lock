@@ -606,10 +606,13 @@ version = "1.8.0"
 dependencies = [
  "cbindgen",
  "lr-babel",
+ "lr-bfd",
  "lr-bgp",
+ "lr-bmp",
  "lr-core",
  "lr-damping",
  "lr-mpls",
+ "lr-mrt",
  "lr-ospf",
  "lr-policy",
  "lr-rib",
