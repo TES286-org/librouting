@@ -472,6 +472,56 @@ install order — the LSDB's `BTreeMap` iteration is ascending by
 No public Rust API surface move beyond the two additive origination
 helpers; no C ABI change (`include/lr_ffi.h` byte-identical).
 
+**`lr-ospf` now computes type-7 NSSA routes for OSPFv3 (RFC 5340
+§4.4.3.6 / RFC 3101 §2.5)** (`ospf`, issue #92). The v3 type-7 path
+was the asymmetric gap left by `external_routes_v3` (RFC 5340
+§4.8.5): the v3 AS-external-LSA route calculation landed without a
+type-7 mirror, so 0x2007 NSSA-LSAs (and their 0xA027 E-Type-7
+counterparts under Extended-LSA mode) never entered v3 SPF — an
+NSSA-area v3 deployment could originate type-7 LSAs but the
+calculation side installed nothing. The fix adds
+`lr_ospf::nssa::nssa_routes_v3` (legacy 0x2007 reception) and
+`lr_ospf::nssa::nssa_routes_v3_extended` (Extended-LSA 0xA027
+reception) — both mirror `external_routes_v3` with two protocol-
+mandated deviations from the type-5 path: the forwarding address
+must be covered by an *intra-area* path of the NSSA itself (RFC
+3101 §2.5 step (3) — summary routes do not qualify, since type-7
+LSAs never leave the NSSA), and the ASBR must be reachable within
+the NSSA (no `0x2004` / `0xA024` inter-area-router-LSA fallback —
+type-4 LSAs do not flood into NSSAs). The default-route install
+rules from §2.5 step (3) [NSSA] carry over: a border router skips
+type-7 defaults whose P-bit is clear, and skips all type-7 defaults
+when summary import is suppressed. The v3 P-bit lives in the
+prefix-options byte (`PREFIX_OPT_P`, RFC 5340 §A.4.1.1) rather than
+the LSA header (v3 LSA headers carry no options byte, RFC 5340
+§A.4.2); the prefix-options P-bit is the IANA-registered
+"Propagate" bit and carries §2.4's NSSA-translation semantics. The
+router pipeline (`lr_router::instance::ospf_ops::ospf_recompute`)
+honours the new path for `OspfAreaType::Nssa` v3 areas alongside
+the existing type-5 / inter-area / intra-area legs. One new public
+self-origination helper `originate_v3_nssa_lsa` (in
+`crates/lr-ospf/src/lsa/v3.rs`) emits a 0x2007 LSA from a
+`V3ExternalDestination` plus a `p_bit` flag, mirroring the v2
+`originate_nssa_lsa` for emitters and tests. Fifteen new unit tests
+in `crates/lr-ospf/src/nssa_v3_tests.rs` pin the selection rules:
+intra-area ASBR reachability, intra-area FA cover (and rejection of
+summary cover), link-local / unspecified FA rejection, no
+inter-area-router leg (with a sanity check that the type-5 path
+*does* honour the leg), LSInfinity / NU-bit filters, type-1 vs
+type-2 preference, route-tag propagation, default-route install
+rules for border routers (P-bit set / clear, summaries suppressed /
+imported), Extended-LSA (0xA027) reception in extended mode only,
+origination-helper `p_bit`-requires-FA invariant, type-5 LSA
+invisibility to the type-7 path, the fast-path skip for LSDBs
+without any type-7, the unreachable-ASBR drop, and the
+prefix-options-byte P-bit read. Public Rust API gains the new
+`originate_v3_nssa_lsa` function and the `LS_TYPE_NSSA` constant;
+no C ABI change (`include/lr_ffi.h` byte-identical). The v3
+type-7 → type-5 translation (RFC 3101 §3.2) remains a v2-only
+follow-up — the route computation is the substantive gap the defect
+flagged, and the translator election logic stays v2-scoped until a
+follow-up adds the v3 origination side of the translation.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
