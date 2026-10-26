@@ -58,6 +58,104 @@
 
 
 /**
+ * State: AdminDown (RFC 5880 §6.1).
+ */
+#define LR_BFD_STATE_ADMIN_DOWN 0
+
+/**
+ * State: Down.
+ */
+#define LR_BFD_STATE_DOWN 1
+
+/**
+ * State: Init.
+ */
+#define LR_BFD_STATE_INIT 2
+
+/**
+ * State: Up.
+ */
+#define LR_BFD_STATE_UP 3
+
+/**
+ * Diagnostic: No Diagnostic.
+ */
+#define LR_BFD_DIAG_NONE 0
+
+/**
+ * Diagnostic: Control Detection Time Expired.
+ */
+#define LR_BFD_DIAG_CTRL_EXPIRED 1
+
+/**
+ * Diagnostic: Echo Function Failed.
+ */
+#define LR_BFD_DIAG_ECHO_FAILED 2
+
+/**
+ * Diagnostic: Neighbor Signaled Session Down.
+ */
+#define LR_BFD_DIAG_NEIGHBOR_SIGNALLED 3
+
+/**
+ * Diagnostic: Forwarding Plane Reset.
+ */
+#define LR_BFD_DIAG_FWD_RESET 4
+
+/**
+ * Diagnostic: Path Down.
+ */
+#define LR_BFD_DIAG_PATH_DOWN 5
+
+/**
+ * Diagnostic: Concatenated Path Down.
+ */
+#define LR_BFD_DIAG_CONCAT_PATH_DOWN 6
+
+/**
+ * Diagnostic: Administratively Down.
+ */
+#define LR_BFD_DIAG_ADMIN_DOWN 7
+
+/**
+ * Diagnostic: Reverse Concatenated Path Down.
+ */
+#define LR_BFD_DIAG_REV_PATH_DOWN 8
+
+/**
+ * Diagnostic: Mis-Connectivity Defect.
+ */
+#define LR_BFD_DIAG_MISCONN_DEFECT 9
+
+#define LR_BMP_VERSION VERSION
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#define LR_BMP_PEER_FLAG_V 128
+
+#define LR_BMP_PEER_FLAG_L 64
+
+#define LR_BMP_PEER_FLAG_A 32
+
+/**
  * BGP message type codes (RFC 4271 §4.1 + RFC 2918). Mirrors
  * [`lr_bgp::BgpMessageType`] but exposed as plain `u8` constants so C
  * consumers can `switch` on the value returned by
@@ -123,6 +221,16 @@
 #define LR_SESSION_KIND_OSPF3 3
 
 #define LR_SESSION_KIND_BABEL 4
+
+#define LR_MRT_RECORD_PEER_INDEX_TABLE 1
+
+#define LR_MRT_RECORD_RIB 2
+
+#define LR_MRT_RECORD_BGP4MP_STATE_CHANGE 3
+
+#define LR_MRT_RECORD_BGP4MP_MESSAGE 4
+
+#define LR_MRT_RECORD_UNKNOWN 5
 
 /**
  * ORIGIN values (RFC 4271 §5.1.1).
@@ -223,6 +331,15 @@
 #define LR_OSPF_V3 3
 
 /**
+ * Opaque `BfdPacket` handle.
+ */
+typedef struct OpaqueBfdPacket {
+  uint8_t _private[0];
+} OpaqueBfdPacket;
+
+typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
+
+/**
  * Rust-allocated byte slice that the embedder owns and must free.
  */
 typedef struct lr_bytes_t {
@@ -230,6 +347,44 @@ typedef struct lr_bytes_t {
   uintptr_t len;
   uintptr_t cap;
 } lr_bytes_t;
+
+/**
+ * Opaque `BmpMessage` handle.
+ */
+typedef struct OpaqueBmpMessage {
+  uint8_t _private[0];
+} OpaqueBmpMessage;
+
+typedef struct OpaqueBmpMessage *lr_bmp_message_t;
+
+/**
+ * One BMP peer header (RFC 7854 §4.2). Mirrors `lr_bmp::PeerHeader`.
+ */
+typedef struct lr_bmp_peer_header_t {
+  uint8_t peer_type;
+  uint8_t peer_flags;
+  uint64_t peer_distinguisher;
+  /**
+   * Always 16 bytes; v4 occupies the last 4 (RFC 7854 §4.2).
+   */
+  uint8_t peer_address[16];
+  uint32_t peer_as;
+  uint32_t peer_bgp_id;
+  uint32_t timestamp_secs;
+  uint32_t timestamp_fraction;
+} lr_bmp_peer_header_t;
+
+/**
+ * One BMP TLV (RFC 7854 §4.7/§4.8) used by the Initiation and
+ * Termination constructors. The `value` pointer is borrowed for the
+ * duration of the constructor call only — the constructor copies the
+ * bytes into the message payload.
+ */
+typedef struct lr_bmp_tlv_t {
+  uint16_t tlv_type;
+  const uint8_t *value;
+  uintptr_t value_len;
+} lr_bmp_tlv_t;
 
 /**
  * One IPv4/IPv6 prefix (embedder-side). IPv4 addresses go in the
@@ -632,6 +787,52 @@ typedef struct lr_mpls_label_spec_t {
 } lr_mpls_label_spec_t;
 
 /**
+ * Opaque `MrtRecord` handle.
+ */
+typedef struct OpaqueMrtRecord {
+  uint8_t _private[0];
+} OpaqueMrtRecord;
+
+typedef struct OpaqueMrtRecord *lr_mrt_record_t;
+
+/**
+ * One peer of a Peer Index Table. Mirrors `lr_mrt::PeerEntry`. The
+ * `ip_addr` pointer must point to 4 bytes for IPv4, 16 bytes for IPv6.
+ */
+typedef struct lr_mrt_peer_entry_t {
+  uint32_t bgp_id;
+  /**
+   * 4 or 16 bytes, depending on `is_ipv6`.
+   */
+  const uint8_t *ip_addr;
+  uint8_t is_ipv6;
+  uint32_t asn;
+} lr_mrt_peer_entry_t;
+
+/**
+ * One RIB entry. Mirrors `lr_mrt::RibEntry`. The `attributes` pointer
+ * is borrowed for the duration of the encode call.
+ */
+typedef struct lr_mrt_rib_entry_t {
+  uint16_t peer_index;
+  uint32_t originated_time;
+  uint32_t path_id;
+  const uint8_t *attributes;
+  uintptr_t attr_len;
+} lr_mrt_rib_entry_t;
+
+/**
+ * Opaque `MrtRibDump` handle. Wraps a boxed `lr_mrt::MrtRibDump` so
+ * embedders can incrementally build a dump without re-encoding every
+ * record on every add.
+ */
+typedef struct OpaqueMrtRibDump {
+  uint8_t _private[0];
+} OpaqueMrtRibDump;
+
+typedef struct OpaqueMrtRibDump *lr_mrt_rib_dump_t;
+
+/**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
  */
@@ -815,6 +1016,373 @@ typedef struct lr_roa_delta_t {
    */
   struct lr_roa_entry_t entry;
 } lr_roa_delta_t;
+
+/**
+ * Opaque `Sid` handle.
+ */
+typedef struct OpaqueSrv6Sid {
+  uint8_t _private[0];
+} OpaqueSrv6Sid;
+
+typedef struct OpaqueSrv6Sid *lr_srv6_sid_t;
+
+/**
+ * Opaque `Locator` handle.
+ */
+typedef struct OpaqueSrv6Locator {
+  uint8_t _private[0];
+} OpaqueSrv6Locator;
+
+typedef struct OpaqueSrv6Locator *lr_srv6_locator_t;
+
+/**
+ * Decode one BFD Control packet from `data`. On success, writes a
+ * freshly-allocated `lr_bfd_packet_t` to `*out`. Returns 0 on success,
+ * negative on error.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_bfd_packet_t`.
+ */
+int32_t lr_bfd_decode(const uint8_t *data, uintptr_t len, lr_bfd_packet_t *out);
+
+/**
+ * Encode a `lr_bfd_packet_t` to its wire form. On success, writes a
+ * freshly-allocated `lr_bytes_t` to `*out`.
+ *
+ * # Safety
+ * `packet` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bfd_encode(lr_bfd_packet_t packet, struct lr_bytes_t *out);
+
+/**
+ * Construct an empty `BfdPacket` with sensible defaults (state=Down,
+ * diag=None, detect_mult=3, all intervals 1s). Returns NULL on panic.
+ */
+lr_bfd_packet_t lr_bfd_packet_new(void);
+
+/**
+ * Construct an "Up" heartbeat packet (state=Up, diag=None,
+ * detect_mult=3, intervals=1s, no auth). Convenience for the most
+ * common on-wire shape.
+ */
+lr_bfd_packet_t lr_bfd_packet_heartbeat(uint32_t my_disc, uint32_t your_disc);
+
+/**
+ * Read the BFD version field (RFC 5880 §4.1: always 1).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_bfd_packet_version(lr_bfd_packet_t packet);
+
+/**
+ * Read the diagnostic code (`LR_BFD_DIAG_*`).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_bfd_packet_diag(lr_bfd_packet_t packet);
+
+/**
+ * Read the state (`LR_BFD_STATE_*`).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_bfd_packet_state(lr_bfd_packet_t packet);
+
+/**
+ * Read the flags bitmask (M | D | A | C | F | P — see RFC 5880 §4.1).
+ * Bit layout: bit 0 = M (Multipoint), bit 1 = D (Demand), bit 2 = A
+ * (Auth), bit 3 = C (CPI), bit 4 = F (Final), bit 5 = P (Poll).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_bfd_packet_flags(lr_bfd_packet_t packet);
+
+/**
+ * Read the detect multiplier.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_bfd_packet_detect_mult(lr_bfd_packet_t packet);
+
+/**
+ * Read the My Discriminator field.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint32_t lr_bfd_packet_my_discriminator(lr_bfd_packet_t packet);
+
+/**
+ * Read the Your Discriminator field.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint32_t lr_bfd_packet_your_discriminator(lr_bfd_packet_t packet);
+
+/**
+ * Read the Desired Min TX Interval (microseconds).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint32_t lr_bfd_packet_desired_min_tx_interval(lr_bfd_packet_t packet);
+
+/**
+ * Read the Required Min RX Interval (microseconds).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint32_t lr_bfd_packet_required_min_rx_interval(lr_bfd_packet_t packet);
+
+/**
+ * Read the Required Min Echo Interval (microseconds).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint32_t lr_bfd_packet_required_min_echo_interval(lr_bfd_packet_t packet);
+
+/**
+ * Read the wire length (24 + auth section).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_bfd_packet_length(lr_bfd_packet_t packet);
+
+/**
+ * Set the diagnostic code (`LR_BFD_DIAG_*`).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_diag(lr_bfd_packet_t packet, uint8_t diag);
+
+/**
+ * Set the state (`LR_BFD_STATE_*`). Out-of-range values are clamped
+ * to AdminDown (0).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_state(lr_bfd_packet_t packet, uint8_t state);
+
+/**
+ * Set the flags bitmask (M | D | A | C | F | P). Reserved bits are
+ * masked off.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_flags(lr_bfd_packet_t packet, uint8_t flags);
+
+/**
+ * Set the detect multiplier.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_detect_mult(lr_bfd_packet_t packet, uint8_t detect_mult);
+
+/**
+ * Set the My Discriminator field.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_my_discriminator(lr_bfd_packet_t packet, uint32_t disc);
+
+/**
+ * Set the Your Discriminator field.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_your_discriminator(lr_bfd_packet_t packet, uint32_t disc);
+
+/**
+ * Set the Desired Min TX Interval (microseconds).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_desired_min_tx_interval(lr_bfd_packet_t packet, uint32_t interval);
+
+/**
+ * Set the Required Min RX Interval (microseconds).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_required_min_rx_interval(lr_bfd_packet_t packet, uint32_t interval);
+
+/**
+ * Set the Required Min Echo Interval (microseconds).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uint32_t interval);
+
+/**
+ * Drop a boxed `BfdPacket`. Safe to call with NULL.
+ *
+ * # Safety
+ * `packet` must have been produced by a `lr_bfd_packet_*` constructor
+ * and must not be used after this call.
+ */
+void lr_bfd_packet_free(lr_bfd_packet_t packet);
+
+/**
+ * Decode one BMP message from `data`. On success, writes a freshly-
+ * allocated `lr_bmp_message_t` to `*out`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_bmp_message_t`.
+ */
+int32_t lr_bmp_decode(const uint8_t *data, uintptr_t len, lr_bmp_message_t *out);
+
+/**
+ * Encode a `lr_bmp_message_t` to its wire form.
+ *
+ * # Safety
+ * `message` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bmp_encode(lr_bmp_message_t message, struct lr_bytes_t *out);
+
+/**
+ * Build a Route Monitoring message (type 0) wrapping a BGP UPDATE.
+ * `peer` MUST be non-NULL — Route Monitoring always carries a peer
+ * header (RFC 7854 §4.3).
+ *
+ * # Safety
+ * `peer` must point to a `lr_bmp_peer_header_t`. `bgp_update` must
+ * point to `bgp_len` readable bytes.
+ */
+lr_bmp_message_t lr_bmp_message_route_monitoring(const struct lr_bmp_peer_header_t *peer,
+                                                 const uint8_t *bgp_update,
+                                                 uintptr_t bgp_len);
+
+/**
+ * Build a Termination message (type 5). The `info` argument is a flat
+ * array of `lr_bmp_tlv_t` (type + value pointer); pass NULL for an
+ * empty TLV list.
+ *
+ * # Safety
+ * `info` must point to `count` readable `lr_bmp_tlv_t` entries; each
+ * `value` pointer inside must point to `value_len` readable bytes.
+ */
+lr_bmp_message_t lr_bmp_message_termination(const struct lr_bmp_tlv_t *info, uintptr_t count);
+
+/**
+ * Build an Initiation message (type 4). Same TLV shape as Termination.
+ *
+ * # Safety
+ * See [`lr_bmp_message_termination`].
+ */
+lr_bmp_message_t lr_bmp_message_initiation(const struct lr_bmp_tlv_t *info, uintptr_t count);
+
+/**
+ * Build a Peer Down message (type 2). `reason` is one of the
+ * `LR_BMP_PEER_DOWN_*` constants (1=LocalClose, 2=RemoteClose,
+ * 3=RemoteNotification, 4=DepletedResource, 5=AdminReset); values
+ * outside that range are clamped to LocalClose. `peer` MUST be
+ * non-NULL. `data` is the optional reason-specific payload (NULL when
+ * `data_len == 0`).
+ *
+ * # Safety
+ * `peer` must point to a `lr_bmp_peer_header_t`. `data` must point to
+ * `data_len` readable bytes.
+ */
+lr_bmp_message_t lr_bmp_message_peer_down(const struct lr_bmp_peer_header_t *peer,
+                                          uint8_t reason,
+                                          const uint8_t *data,
+                                          uintptr_t data_len);
+
+/**
+ * Build a Peer Up message (type 3). The four BGP message bodies are
+ * passed as flat byte slices; any may be NULL/0-length.
+ *
+ * # Safety
+ * `peer` MUST point to a `lr_bmp_peer_header_t`. Each `*_msg` pointer
+ * must point to its matching `*_len` readable bytes.
+ */
+lr_bmp_message_t lr_bmp_message_peer_up(const struct lr_bmp_peer_header_t *peer,
+                                        const uint8_t *local_addr,
+                                        uintptr_t local_addr_len,
+                                        uint16_t local_port,
+                                        uint16_t remote_port,
+                                        const uint8_t *sent_open,
+                                        uintptr_t sent_open_len,
+                                        const uint8_t *received_open,
+                                        uintptr_t received_open_len);
+
+/**
+ * Read the message type (`LR_BMP_MSG_*`).
+ *
+ * # Safety
+ * `message` must be a valid handle.
+ */
+uint8_t lr_bmp_message_type(lr_bmp_message_t message);
+
+/**
+ * 1 when the message carries a Peer Header, 0 otherwise (Initiation
+ * and Termination carry no peer header).
+ *
+ * # Safety
+ * `message` must be a valid handle.
+ */
+uint8_t lr_bmp_message_peer_present(lr_bmp_message_t message);
+
+/**
+ * Copy the Peer Header into `*out` when one is present. Returns 0 on
+ * success, `LR_ERR_NULL` on a NULL handle, `LR_ERR_INVALID_HANDLE`
+ * (-2) when the message has no peer header.
+ *
+ * # Safety
+ * `message` must be a valid handle. `out` must point to a writable
+ * `lr_bmp_peer_header_t`.
+ */
+int32_t lr_bmp_message_peer_header(lr_bmp_message_t message, struct lr_bmp_peer_header_t *out);
+
+/**
+ * Read the payload length (bytes). The payload bytes themselves are
+ * accessed via [`lr_bmp_message_payload`].
+ *
+ * # Safety
+ * `message` must be a valid handle.
+ */
+uintptr_t lr_bmp_message_payload_len(lr_bmp_message_t message);
+
+/**
+ * Copy the payload into a freshly-allocated `lr_bytes_t`. The caller
+ * owns the bytes and must free them with `lr_bytes_free`.
+ *
+ * # Safety
+ * `message` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bmp_message_payload(lr_bmp_message_t message, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `BmpMessage`. Safe to call with NULL.
+ *
+ * # Safety
+ * `message` must have been produced by a `lr_bmp_message_*`
+ * constructor and must not be used after this call.
+ */
+void lr_bmp_message_free(lr_bmp_message_t message);
 
 /**
  * Free an `lr_bytes_t` previously returned from any `lr_*` function. Safe to
@@ -1622,6 +2190,177 @@ int32_t lr_mpls_label_stack_pop(lr_mpls_label_stack_t stack);
  * constructor and must not be used after this call.
  */
 void lr_mpls_label_stack_free(lr_mpls_label_stack_t stack);
+
+/**
+ * Decode one MRT record from `data`. On success, writes a freshly-
+ * allocated `lr_mrt_record_t` to `*out`. The decoder is stateful
+ * (carryover survives across calls when bytes are partial); this FFI
+ * entry creates a fresh `MrtReader` per call, so partial records
+ * return `LR_ERR_OTHER` — embedders should feed one complete record
+ * at a time.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_mrt_record_t`.
+ */
+int32_t lr_mrt_decode(const uint8_t *data, uintptr_t len, lr_mrt_record_t *out);
+
+/**
+ * Encode a Peer Index Table record to wire bytes (RFC 6396 §4.3 +
+ * RFC 8050). The peer list is a flat array of `lr_mrt_peer_entry_t`
+ * passed through `peers` / `peer_count`.
+ *
+ * # Safety
+ * `view_name` must be a NUL-terminated C string (NULL = empty view).
+ * `peers` must point to `peer_count` readable `lr_mrt_peer_entry_t`.
+ */
+int32_t lr_mrt_encode_peer_index_table(uint32_t timestamp,
+                                       uint32_t collector_bgp_id,
+                                       const char *view_name,
+                                       const struct lr_mrt_peer_entry_t *peers,
+                                       uintptr_t peer_count,
+                                       struct lr_bytes_t *out);
+
+/**
+ * Encode a RIB table record (RFC 6396 §4.3 + RFC 8050 subtype 2).
+ * The entries are a flat array of `lr_mrt_rib_entry_t`.
+ *
+ * # Safety
+ * `entries` must point to `entry_count` readable `lr_mrt_rib_entry_t`.
+ */
+int32_t lr_mrt_encode_rib_table(uint32_t timestamp,
+                                uint32_t sequence,
+                                const uint8_t *prefix_addr,
+                                uint8_t prefix_len,
+                                uint8_t is_ipv6,
+                                uint8_t add_path,
+                                const struct lr_mrt_rib_entry_t *entries,
+                                uintptr_t entry_count,
+                                struct lr_bytes_t *out);
+
+/**
+ * Read the record type (`LR_MRT_RECORD_*`).
+ *
+ * # Safety
+ * `record` must be a valid handle.
+ */
+uint8_t lr_mrt_record_type(lr_mrt_record_t record);
+
+/**
+ * 1 when this record is a RIB record, 0 otherwise.
+ *
+ * # Safety
+ * `record` must be a valid handle.
+ */
+uint8_t lr_mrt_record_is_rib(lr_mrt_record_t record);
+
+/**
+ * For an Unknown record, write the `(msg_type, subtype)` pair to the
+ * given out-pointers. Returns 0 on success, `LR_ERR_INVALID_HANDLE`
+ * (-2) when the record is not the Unknown variant.
+ *
+ * # Safety
+ * `record` must be a valid handle. Both out-pointers must be writable
+ * `uint16_t*`.
+ */
+int32_t lr_mrt_record_unknown_subtype(lr_mrt_record_t record,
+                                      uint16_t *out_msg_type,
+                                      uint16_t *out_subtype);
+
+/**
+ * Drop a boxed `MrtRecord`. Safe to call with NULL.
+ *
+ * # Safety
+ * `record` must have been produced by a `lr_mrt_record_*` constructor
+ * and must not be used after this call.
+ */
+void lr_mrt_record_free(lr_mrt_record_t record);
+
+/**
+ * Construct an empty MrtRibDump. The collector's BGP ID is the
+ * BGP identifier of the BMP/MRT collector emitting the dump; the
+ * view name is the BIRD table name (may be empty).
+ */
+lr_mrt_rib_dump_t lr_mrt_rib_dump_new(uint32_t collector_bgp_id, const char *view_name);
+
+/**
+ * Add a peer to the dump. Returns the peer index assigned (0-based).
+ *
+ * # Safety
+ * `peer.ip_addr` must point to 4 or 16 bytes (per `is_ipv6`).
+ */
+uint16_t lr_mrt_rib_dump_add_peer(lr_mrt_rib_dump_t dump, struct lr_mrt_peer_entry_t peer);
+
+/**
+ * Add a RIB table record to the dump (RFC 6396 §4.3). The table is
+ * built from the raw parameters the same way
+ * [`lr_mrt_encode_rib_table`] builds the wire bytes — but here the
+ * table is appended to the dump's in-memory list, encoded only when
+ * [`lr_mrt_rib_dump_encode`] runs.
+ *
+ * # Safety
+ * `dump` must be a valid handle. `prefix_addr` must point to 4 or 16
+ * bytes per `is_ipv6`. `entries` must point to `entry_count`
+ * readable `lr_mrt_rib_entry_t`.
+ */
+int32_t lr_mrt_rib_dump_add_table(lr_mrt_rib_dump_t dump,
+                                  uint32_t sequence,
+                                  const uint8_t *prefix_addr,
+                                  uint8_t prefix_len,
+                                  uint8_t is_ipv6,
+                                  uint8_t add_path,
+                                  const struct lr_mrt_rib_entry_t *entries,
+                                  uintptr_t entry_count);
+
+/**
+ * Encode the entire dump as a sequence of MRT records, returning
+ * the concatenated wire bytes in `*out`.
+ *
+ * # Safety
+ * `dump` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_mrt_rib_dump_encode(lr_mrt_rib_dump_t dump, uint32_t timestamp, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `MrtRibDump`. Safe to call with NULL.
+ *
+ * # Safety
+ * `dump` must have been produced by [`lr_mrt_rib_dump_new`] and not
+ * used after this call.
+ */
+void lr_mrt_rib_dump_free(lr_mrt_rib_dump_t dump);
+
+/**
+ * Construct a `Bgp4MpMessage` record from raw bytes (subtype
+ * BGP4MP_MESSAGE_AS4). The result is ready for encode via the dump
+ * machinery or as a standalone record.
+ */
+lr_mrt_record_t lr_mrt_record_bgp4mp_message(uint32_t peer_as,
+                                             uint32_t local_as,
+                                             uint16_t ifindex,
+                                             uint16_t af,
+                                             const uint8_t *peer_addr,
+                                             uintptr_t peer_addr_len,
+                                             const uint8_t *local_addr,
+                                             uintptr_t local_addr_len,
+                                             const uint8_t *message,
+                                             uintptr_t message_len);
+
+/**
+ * Construct a `Bgp4MpStateChange` record (subtype
+ * BGP4MP_STATE_CHANGE_AS4). Returns an opaque handle.
+ */
+lr_mrt_record_t lr_mrt_record_bgp4mp_state_change(uint32_t peer_as,
+                                                  uint32_t local_as,
+                                                  uint16_t ifindex,
+                                                  uint16_t af,
+                                                  const uint8_t *peer_addr,
+                                                  uintptr_t peer_addr_len,
+                                                  const uint8_t *local_addr,
+                                                  uintptr_t local_addr_len,
+                                                  uint16_t old_state,
+                                                  uint16_t new_state);
 
 /**
  * Install one redistribution pipe on the router.
@@ -2811,5 +3550,162 @@ int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, struct lr_bytes_t
  * - `LR_ERR_CODEC` (-5): SRH decode error (set via `lr_last_error`).
  */
 int32_t lr_srv6_decode_srh(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
+
+/**
+ * Look up a `Behavior` by its 16-bit wire value (RFC 8986 §9.2,
+ * IANA registry). Returns 1 when the value maps to a known behavior,
+ * 0 when it is unassigned. The 16-bit wire value is written to
+ * `*out_value` and the behavior's mnemonic name (e.g. `"End"`,
+ * `"End.X with PSP"`) is written to `*out_name` as a NUL-terminated
+ * C string copied into the caller-supplied `name_cap`-byte buffer.
+ *
+ * # Safety
+ * `out_name` must point to at least `name_cap` writable bytes (NULL
+ * skips the name copy). `out_value` must be a writable `uint16_t*`
+ * (NULL skips the value copy).
+ */
+uint8_t lr_srv6_behavior_from_wire(uint16_t wire,
+                                   uint16_t *out_value,
+                                   char *out_name,
+                                   uintptr_t name_cap);
+
+/**
+ * Get the 16-bit wire value of a `Behavior`. The behavior is identified
+ * by its wire value `wire` — invalid values return 0.
+ */
+uint16_t lr_srv6_behavior_wire_value(uint16_t wire);
+
+/**
+ * True when `wire` is one of the PSP-flavored End.* behaviors (PSP =
+ * Penultimate Segment Pop, RFC 8986 §4.16). Returns 0 for unknown
+ * values.
+ */
+uint8_t lr_srv6_behavior_is_psp(uint16_t wire);
+
+/**
+ * True when `wire` is one of the USP-flavored End.* behaviors (USP =
+ * Ultimate Segment Pop, RFC 8986 §4.16).
+ */
+uint8_t lr_srv6_behavior_is_usp(uint16_t wire);
+
+/**
+ * True when `wire` is one of the USD-flavored End.* behaviors (USD =
+ * Ultimate Segment Decap, RFC 8986 §4.16).
+ */
+uint8_t lr_srv6_behavior_is_usd(uint16_t wire);
+
+/**
+ * True when `wire` is a decap behavior (End.D*, RFC 8986 §4.5-§4.13).
+ */
+uint8_t lr_srv6_behavior_is_decap(uint16_t wire);
+
+/**
+ * True when `wire` is a cross-connect behavior (End.X*, RFC 8986 §4.2).
+ */
+uint8_t lr_srv6_behavior_is_cross_connect(uint16_t wire);
+
+/**
+ * True when `wire` is a table-lookup behavior (End.DT*, RFC 8986
+ * §4.7-§4.9).
+ */
+uint8_t lr_srv6_behavior_is_table_lookup(uint16_t wire);
+
+/**
+ * Write the behavior's mnemonic name (e.g. `"End"`, `"End.DX6"`) into
+ * the caller-supplied buffer. Returns the number of bytes written
+ * (excluding the NUL terminator), or 0 if `wire` is unknown or
+ * `out_name` is NULL.
+ *
+ * # Safety
+ * `out_name` must point to at least `name_cap` writable bytes.
+ */
+uintptr_t lr_srv6_behavior_name(uint16_t wire, char *out_name, uintptr_t name_cap);
+
+/**
+ * Construct a `Sid` from 16 raw octets.
+ *
+ * # Safety
+ * `octets` must point to 16 readable bytes.
+ */
+struct OpaqueSrv6Sid *lr_srv6_sid_new(const uint8_t *octets);
+
+/**
+ * Write the SID's 16 octets to `out_octets`.
+ *
+ * # Safety
+ * `sid` must be a valid handle. `out_octets` must point to 16 writable
+ * bytes.
+ */
+int32_t lr_srv6_sid_octets(lr_srv6_sid_t sid, uint8_t *out_octets);
+
+/**
+ * 1 when `sid` is the unspecified SID (`::`), 0 otherwise.
+ *
+ * # Safety
+ * `sid` must be a valid handle.
+ */
+uint8_t lr_srv6_sid_is_unspecified(lr_srv6_sid_t sid);
+
+/**
+ * Drop a boxed `Sid`. Safe to call with NULL.
+ *
+ * # Safety
+ * `sid` must have been produced by [`lr_srv6_sid_new`] and must not
+ * be used after this call.
+ */
+void lr_srv6_sid_free(lr_srv6_sid_t sid);
+
+/**
+ * Construct a `Locator` from a 16-byte address and a block-bit width.
+ * Returns NULL when `block_bits > 128` or `addr` is NULL.
+ *
+ * # Safety
+ * `addr` must point to 16 readable bytes.
+ */
+lr_srv6_locator_t lr_srv6_locator_new(const uint8_t *addr, uint8_t block_bits);
+
+/**
+ * Drop a boxed `Locator`. Safe to call with NULL.
+ *
+ * # Safety
+ * `loc` must have been produced by [`lr_srv6_locator_new`] and must
+ * not be used after this call.
+ */
+void lr_srv6_locator_free(lr_srv6_locator_t loc);
+
+/**
+ * Write the locator's 16-byte address to `out_addr`.
+ *
+ * # Safety
+ * `loc` must be a valid handle. `out_addr` must point to 16 writable
+ * bytes.
+ */
+int32_t lr_srv6_locator_addr(lr_srv6_locator_t loc, uint8_t *out_addr);
+
+/**
+ * Read the locator's block-bit width.
+ *
+ * # Safety
+ * `loc` must be a valid handle.
+ */
+uint8_t lr_srv6_locator_block_bits(lr_srv6_locator_t loc);
+
+/**
+ * 1 when `sid` falls inside this locator, 0 otherwise. Returns 0 on a
+ * NULL handle.
+ *
+ * # Safety
+ * `loc` and `sid` must be valid handles.
+ */
+uint8_t lr_srv6_locator_contains_sid(lr_srv6_locator_t loc, lr_srv6_sid_t sid);
+
+/**
+ * Build a SID by combining this locator's prefix with a 16-byte tail.
+ * Returns NULL on a NULL locator or when the tail address is NULL.
+ *
+ * # Safety
+ * `loc` must be a valid handle. `tail` must point to 16 readable bytes.
+ */
+lr_srv6_sid_t lr_srv6_locator_sid_with_tail(lr_srv6_locator_t loc, const uint8_t *tail);
 
 #endif  /* LR_FFI_H */
