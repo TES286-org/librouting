@@ -1567,4 +1567,274 @@ inline FilterVerdict filter_evaluate(const Filter& f, Route& r,
     return static_cast<FilterVerdict>(verdict);
 }
 
+// ---------------------------------------------------------------------------
+// MPLS Label / LabelStack (RFC 3032 §2.1, RFC 8277 §2.2/§2.3)
+//
+// Mirrors the public Rust API of `lr_mpls::{Label, LabelStack}` and the
+// `lr_mpls_*` C ABI surface in `lr_ffi.h`. Each handle is RAII-owned
+// via `std::unique_ptr` with a deleter that calls the matching
+// `lr_mpls_*_free` function.
+// ---------------------------------------------------------------------------
+
+struct MplsLabelDeleter {
+    void operator()(lr_mpls_label_t l) const noexcept {
+        if (l) lr_mpls_label_free(l);
+    }
+};
+struct MplsLabelStackDeleter {
+    void operator()(lr_mpls_label_stack_t s) const noexcept {
+        if (s) lr_mpls_label_stack_free(s);
+    }
+};
+
+/// RAII handle to a single MPLS label value with TC + TTL fields.
+using MplsLabel = std::unique_ptr<OpaqueMplsLabel, MplsLabelDeleter>;
+/// RAII handle to an ordered MPLS label stack.
+using MplsLabelStack = std::unique_ptr<OpaqueMplsLabelStack, MplsLabelStackDeleter>;
+
+/// One fully-specified label `(value, tc, ttl)`. Used by
+/// `make_label_stack_from_labels` to build a stack from a flat vector of
+/// label specs without round-tripping through individual `MplsLabel`
+/// handles. Mirrors `lr_mpls_label_spec_t`.
+struct MplsLabelSpec {
+    std::uint32_t value;
+    std::uint8_t tc;
+    std::uint8_t ttl;
+};
+
+/// Construct a Label with default TC=0 and TTL=64 (RFC 3032 §2.1).
+/// Infallible — the value is masked to 20 bits on encode.
+inline MplsLabel make_label(std::uint32_t value) {
+    auto l = lr_mpls_label_new(value);
+    if (!l) throw Error("lr_mpls_label_new returned null");
+    return MplsLabel(l);
+}
+
+/// Checked constructor — throws `Error` when `value` exceeds the 20-bit
+/// label range (RFC 3032 §2.1).
+inline MplsLabel make_label_checked(std::uint32_t value) {
+    auto l = lr_mpls_label_new_checked(value);
+    if (!l) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_new_checked failed: " + std::string(err ? err : "unknown"));
+    }
+    return MplsLabel(l);
+}
+
+/// Read the 20-bit label value.
+inline std::uint32_t label_value(const MplsLabel& l) {
+    return lr_mpls_label_value(l.get());
+}
+/// Read the 3-bit Traffic Class.
+inline std::uint8_t label_tc(const MplsLabel& l) {
+    return lr_mpls_label_tc(l.get());
+}
+/// Read the 8-bit TTL.
+inline std::uint8_t label_ttl(const MplsLabel& l) {
+    return lr_mpls_label_ttl(l.get());
+}
+/// True when the label value is in the reserved range 0–15 (RFC 3032 §2.1).
+inline bool label_is_reserved(const MplsLabel& l) {
+    return lr_mpls_label_is_reserved(l.get()) != 0;
+}
+
+/// Set the Traffic Class (3 bits, RFC 5462). The lower 3 bits of `tc`
+/// are taken; the rest are masked. Returns a NEW handle (the input
+/// handle is consumed and freed).
+inline MplsLabel label_with_tc(MplsLabel& l, std::uint8_t tc) {
+    auto out = lr_mpls_label_with_tc(l.release(), tc);
+    if (!out) throw Error("lr_mpls_label_with_tc returned null");
+    return MplsLabel(out);
+}
+
+/// Set the TTL. Returns a NEW handle; the input is consumed.
+inline MplsLabel label_with_ttl(MplsLabel& l, std::uint8_t ttl) {
+    auto out = lr_mpls_label_with_ttl(l.release(), ttl);
+    if (!out) throw Error("lr_mpls_label_with_ttl returned null");
+    return MplsLabel(out);
+}
+
+/// Encode as a single 3-octet NLRI entry (RFC 8277 §2.2/§2.3:
+/// `Label(20) | Rsrv(3) | S(1)`, no TTL and no TC field). `bottom`
+/// sets the S bit. Returns 3 bytes.
+inline std::array<std::uint8_t, 3> label_encode_3octet(const MplsLabel& l, bool bottom) {
+    std::array<std::uint8_t, 3> out{};
+    std::int32_t rc = lr_mpls_label_encode_3octet(l.get(), bottom ? 1 : 0, out.data());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_encode_3octet failed: " + std::string(err ? err : "unknown"));
+    }
+    return out;
+}
+
+/// Encode as a single 4-octet wire entry (RFC 3032 §2.1: label + TC
+/// + S + TTL). `bottom` sets the S bit. Returns 4 bytes.
+inline std::array<std::uint8_t, 4> label_encode_4octet(const MplsLabel& l, bool bottom) {
+    std::array<std::uint8_t, 4> out{};
+    std::int32_t rc = lr_mpls_label_encode_4octet(l.get(), bottom ? 1 : 0, out.data());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_encode_4octet failed: " + std::string(err ? err : "unknown"));
+    }
+    return out;
+}
+
+/// Construct an empty LabelStack (RFC 3032 §2.1). Useful as a builder
+/// starting point; not a valid wire value (an MPLS frame must carry
+/// at least one label).
+inline MplsLabelStack make_label_stack() {
+    auto s = lr_mpls_label_stack_new();
+    if (!s) throw Error("lr_mpls_label_stack_new returned null");
+    return MplsLabelStack(s);
+}
+
+/// Build a stack from a vector of label values (TC=0, TTL=64).
+inline MplsLabelStack make_label_stack_from_values(const std::vector<std::uint32_t>& values) {
+    auto s = lr_mpls_label_stack_from_values(values.data(), values.size());
+    if (!s) throw Error("lr_mpls_label_stack_from_values returned null");
+    return MplsLabelStack(s);
+}
+
+/// Build a stack from a vector of fully-specified labels.
+inline MplsLabelStack make_label_stack_from_labels(const std::vector<MplsLabelSpec>& labels) {
+    // Translate the C++ struct to the C struct — same memory layout,
+    // but `std::vector<MplsLabelSpec>` is not directly usable as a
+    // `const lr_mpls_label_spec_t*` because the C struct may carry
+    // padding the C++ struct does not (or vice versa). Copy into a
+    // C-typed buffer to be safe across ABIs.
+    std::vector<lr_mpls_label_spec_t> c_specs;
+    c_specs.reserve(labels.size());
+    for (const auto& l : labels) {
+        c_specs.push_back(lr_mpls_label_spec_t{l.value, l.tc, l.ttl});
+    }
+    auto s = lr_mpls_label_stack_from_labels(c_specs.data(), c_specs.size());
+    if (!s) throw Error("lr_mpls_label_stack_from_labels returned null");
+    return MplsLabelStack(s);
+}
+
+/// Decode the 4-octet-per-entry wire form (RFC 3032 §2.1). The S bit
+/// must mark the bottom entry only.
+inline MplsLabelStack decode_label_stack_4octet(const std::uint8_t* data, std::size_t len) {
+    lr_mpls_label_stack_t s = nullptr;
+    std::int32_t rc = lr_mpls_label_stack_decode_4octet(data, len, &s);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_decode_4octet failed: " + std::string(err ? err : "unknown"));
+    }
+    if (!s) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_decode_4octet returned null: " + std::string(err ? err : "unknown"));
+    }
+    return MplsLabelStack(s);
+}
+inline MplsLabelStack decode_label_stack_4octet(const std::vector<std::uint8_t>& bytes) {
+    return decode_label_stack_4octet(bytes.data(), bytes.size());
+}
+
+/// Decode the 3-octet-per-entry NLRI form (RFC 8277 §2.2/§2.3). TTL
+/// is not carried in this form and defaults to 0.
+inline MplsLabelStack decode_label_stack_3octet(const std::uint8_t* data, std::size_t len) {
+    lr_mpls_label_stack_t s = nullptr;
+    std::int32_t rc = lr_mpls_label_stack_decode_3octet(data, len, &s);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_decode_3octet failed: " + std::string(err ? err : "unknown"));
+    }
+    if (!s) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_decode_3octet returned null: " + std::string(err ? err : "unknown"));
+    }
+    return MplsLabelStack(s);
+}
+inline MplsLabelStack decode_label_stack_3octet(const std::vector<std::uint8_t>& bytes) {
+    return decode_label_stack_3octet(bytes.data(), bytes.size());
+}
+
+/// Number of labels in the stack.
+inline std::size_t label_stack_len(const MplsLabelStack& s) {
+    return lr_mpls_label_stack_len(s.get());
+}
+/// True when the stack holds no labels.
+inline bool label_stack_is_empty(const MplsLabelStack& s) {
+    return lr_mpls_label_stack_is_empty(s.get()) != 0;
+}
+
+/// Read one label by index as a fully-specified `MplsLabelSpec`.
+/// Throws `Error` when the index is out of range.
+inline MplsLabelSpec label_stack_at(const MplsLabelStack& s, std::size_t index) {
+    std::uint32_t v = 0;
+    std::uint8_t tc = 0, ttl = 0;
+    std::int32_t rc = lr_mpls_label_stack_at(s.get(), index, &v, &tc, &ttl);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_at failed: " + std::string(err ? err : "unknown"));
+    }
+    return MplsLabelSpec{v, tc, ttl};
+}
+
+/// Return the full vector of label specs in stack order (top first).
+inline std::vector<MplsLabelSpec> label_stack_labels(const MplsLabelStack& s) {
+    std::vector<MplsLabelSpec> out;
+    out.reserve(label_stack_len(s));
+    for (std::size_t i = 0; i < out.capacity(); ++i) {
+        out.push_back(label_stack_at(s, i));
+    }
+    return out;
+}
+
+/// Push a label onto the top of the stack. The label handle is
+/// consumed and freed.
+inline void label_stack_push(MplsLabelStack& s, MplsLabel& label) {
+    std::int32_t rc = lr_mpls_label_stack_push(s.get(), label.release());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_push failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// Push a label onto the bottom of the stack. The label handle is
+/// consumed and freed.
+inline void label_stack_push_bottom(MplsLabelStack& s, MplsLabel& label) {
+    std::int32_t rc = lr_mpls_label_stack_push_bottom(s.get(), label.release());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_push_bottom failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// Pop the top label. Returns true when a label was popped, false
+/// when the stack was already empty.
+inline bool label_stack_pop(MplsLabelStack& s) {
+    std::int32_t rc = lr_mpls_label_stack_pop(s.get());
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_pop failed: " + std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Encode the stack as the 4-octet-per-entry wire form (RFC 3032 §2.1).
+/// The S bit is set on the last entry.
+inline Bytes label_stack_encode_4octet(const MplsLabelStack& s) {
+    auto out = std::make_unique<lr_bytes_t>();
+    std::int32_t rc = lr_mpls_label_stack_encode_4octet(s.get(), out.get());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_encode_4octet failed: " + std::string(err ? err : "unknown"));
+    }
+    return Bytes(out.release());
+}
+
+/// Encode the stack as the 3-octet-per-entry NLRI form (RFC 8277
+/// §2.2/§2.3).
+inline Bytes label_stack_encode_3octet(const MplsLabelStack& s) {
+    auto out = std::make_unique<lr_bytes_t>();
+    std::int32_t rc = lr_mpls_label_stack_encode_3octet(s.get(), out.get());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_mpls_label_stack_encode_3octet failed: " + std::string(err ? err : "unknown"));
+    }
+    return Bytes(out.release());
+}
+
 } // namespace librouting
