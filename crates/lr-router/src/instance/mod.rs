@@ -4418,6 +4418,30 @@ impl RouterInstance for DefaultRouter {
             }
         }
 
+        // OSPF LSA flood retransmissions (RFC 2328 §13.6): every
+        // RxmtInterval, re-flood any LSA still on this neighbor's
+        // Link State Retransmission List — the LS-Acknowledgment
+        // handler drains the list as acks arrive (§13.7); what's left
+        // here is the dropped-LS-Update (or dropped-LS-Ack) recovery
+        // path. The retransmit is unicast to the one neighbor that
+        // owes us an ack, never re-broadcast — matching BIRD's
+        // `ospf_ls_upd_queue_lsa` per-neighbor retransmission.
+        for state in self.sessions.values_mut() {
+            let SessionState::Ospf { runtime, conn, .. } = state else {
+                continue;
+            };
+            let rxmt_interval = runtime.exchange.rxmt_interval_ms();
+            let lsas = runtime.retransmit.poll(self.now_ms, rxmt_interval);
+            if lsas.is_empty() {
+                continue;
+            }
+            let packet = ospf_ls_update(runtime.protocol, runtime.router_id, runtime.area_id, lsas);
+            if let Ok(mut bytes) = runtime.codec.encode_vec(&packet) {
+                Self::finalize_ospf_v2_egress(runtime.protocol, &mut bytes);
+                conn.put_output(&bytes);
+            }
+        }
+
         // OSPF uses periodic self-LSA refresh (RFC 2328 §14.1) rather than
         // an individual timer per LSA. One poll-driven pass keeps the router
         // compact while preserving exact caller-controlled timestamps.

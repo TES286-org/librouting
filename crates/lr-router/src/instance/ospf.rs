@@ -15,8 +15,9 @@ use lr_ospf::lsa::{Lsa, LsaTypeV2};
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::neighbor::{NeighborEvent, NeighborState, OspfNeighbor};
 use lr_ospf::packet::{
-    LsUpdateBody, OspfBody, OspfHeader, OspfPacket, OspfPacketType, OspfVersion,
+    LsAckBody, LsUpdateBody, OspfBody, OspfHeader, OspfPacket, OspfPacketType, OspfVersion,
 };
+use lr_ospf::retransmit::LinkStateRetransmissionList;
 
 /// OSPF protocol runtime for one adjacency: neighbor FSM + per-session
 /// decode state.
@@ -30,9 +31,10 @@ use lr_ospf::packet::{
 /// Loading / Full), DBDs negotiate the master/slave role and seed the
 /// LS-Request queue (§10.6 + §10.7 via `DbExchange`), LS-Requests are
 /// satisfied from the area LSDB (§10.9), LS-Updates flow into the area
-/// LSDB through the exchange driver (§13), and LS-Acks are received
-/// fire-and-forget (§13.7). [`OspfRuntime::handle_packet`] is the
-/// dispatch point; the exchange state is owned by
+/// LSDB through the exchange driver (§13), and LS-Acks drain the
+/// per-neighbor Link State Retransmission List (§13.7 — see
+/// [`LinkStateRetransmissionList`]). [`OspfRuntime::handle_packet`] is
+/// the dispatch point; the exchange state is owned by
 /// [`lr_ospf::exchange::DbExchange`] so the codec can stream-decode the
 /// packet body without holding the LSDB lock.
 pub(super) struct OspfRuntime {
@@ -68,6 +70,14 @@ pub(super) struct OspfRuntime {
     pub(super) dr: u32,
     /// Elected Backup Designated Router (segment identity, as above).
     pub(super) bdr: u32,
+    /// Per-neighbor Link State Retransmission List (RFC 2328 §13.5).
+    /// Every LSA we flood to this neighbor is recorded here; the
+    /// LS-Acknowledgment handler drains it (§13.7); the poll loop
+    /// retransmits any entry that has waited `RxmtInterval` without
+    /// an ack (§13.6). Previously the flood path was fire-and-forget
+    /// — a single dropped LS-Update (or LS-Ack) left the two LSDBs
+    /// permanently out of sync.
+    pub(super) retransmit: LinkStateRetransmissionList,
 }
 
 /// One configured virtual link (RFC 2328 §15): a backbone adjacency
@@ -333,6 +343,37 @@ pub(super) fn ospf_ls_update(
     }
 }
 
+/// Build one LS-Acknowledgment packet for an area (RFC 2328 §A.3.6).
+/// Used by the runtime to encode direct acks the exchange driver
+/// generates (§13.7) and by tests to forge inbound acks from peers.
+#[cfg(test)]
+pub(super) fn ospf_ls_ack(
+    protocol: Protocol,
+    router_id: u32,
+    area_id: u32,
+    headers: Vec<lr_ospf::lsa::LsaHeader>,
+) -> OspfPacket {
+    OspfPacket {
+        header: OspfHeader {
+            version: if protocol == Protocol::Ospfv3 {
+                OspfVersion::V3 as u8
+            } else {
+                OspfVersion::V2 as u8
+            },
+            kind: OspfPacketType::LinkStateAck as u8,
+            length: 0,
+            router_id,
+            area_id,
+            checksum: 0,
+            au_type_or_instance: 0,
+            auth_data: 0,
+        },
+        body: OspfBody::LsAck(LsAckBody {
+            lsa_headers: headers,
+        }),
+    }
+}
+
 impl OspfTableEntry {
     pub(super) fn intra(metric: u64, next_hop: Option<IpAddr>) -> Self {
         Self {
@@ -560,6 +601,7 @@ impl OspfRuntime {
             neighbor_ip: neighbor_ip.unwrap_or(0),
             dr: 0,
             bdr: 0,
+            retransmit: LinkStateRetransmissionList::new(),
         }
     }
 
@@ -689,13 +731,44 @@ impl OspfRuntime {
                     .on_ls_update(&u.lsas, &mut self.neighbor)
                     .into()
             }
-            OspfBody::LsAck(_) => {
-                // Acknowledgements of our flooded LSAs (§13.7) — the
-                // flood path is fire-and-forget; nothing to track yet.
-                OspfStep::default()
-            }
+            OspfBody::LsAck(ack) => self.on_ls_ack(ack),
             _ => OspfStep::default(),
         }
+    }
+
+    /// Process one LS-Acknowledgment packet (RFC 2328 §13.7). For every
+    /// LSA header the neighbor acknowledged, the matching entry is
+    /// removed from this neighbor's [`LinkStateRetransmissionList`].
+    /// Returns an `OspfStep` whose `actions` may carry one
+    /// [`Action::EmitEvent`] log entry when the ack referenced LSAs we
+    /// never flooded (§13.7 step 5 — stray / duplicate acks are
+    /// accepted silently; the log line lets the operator correlate
+    /// the event with a possible session de-sync).
+    ///
+    /// The flood path is no longer fire-and-forget once this handler
+    /// runs: the retransmit list is what stops the poll loop from
+    /// re-flooding the same LSA every `RxmtInterval`. Without this
+    /// drain, every flooded LSA would retransmit forever.
+    fn on_ls_ack(&mut self, ack: &LsAckBody) -> OspfStep {
+        let removed = self.retransmit.apply_acks(&ack.lsa_headers);
+        let mut step = OspfStep::default();
+        if removed != ack.lsa_headers.len() {
+            // §13.7 step 5: a stray ack is harmless (the receiver is
+            // signaling "I have an instance newer than yours" or
+            // re-acking a duplicate), but it can also indicate a
+            // session de-sync. Surface as a Log action so the embedder
+            // can correlate it with a neighbor down event without a
+            // noisy dedicated channel.
+            step.actions.push(Action::EmitEvent(
+                lr_core::event::Event::Log(format!(
+                    "OSPF neighbor {} LS-Ack carried {} header(s), {} did not match any pending retransmit entry",
+                    self.router_id,
+                    ack.lsa_headers.len(),
+                    ack.lsa_headers.len() - removed,
+                )),
+            ));
+        }
+        step
     }
 }
 

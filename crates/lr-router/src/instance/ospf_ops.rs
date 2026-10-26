@@ -9,18 +9,35 @@ use super::*;
 
 impl DefaultRouter {
     /// Flood `lsas` to every OSPF session of `area` except `exclude`
-    /// (RFC 2328 §13.3, simplified: no ack/retransmission bookkeeping —
-    /// the poll-driven embedder handles transport reliability).
+    /// (RFC 2328 §13.3). Each LSA is also recorded on the receiving
+    /// neighbor's [`LinkStateRetransmissionList`] (§13.5) so the poll
+    /// loop can retransmit any that go un-acked past `RxmtInterval`
+    /// (§13.6), and so the LS-Acknowledgment handler can drain them
+    /// (§13.7). The list replaces the previous fire-and-forget flood
+    /// path, which silently lost LSAs on a single dropped LS-Update.
     pub(super) fn ospf_flood(&mut self, area_id: u32, lsas: &[Lsa], exclude: Option<u64>) {
         if lsas.is_empty() {
             return;
         }
+        let now_ms = self.now_ms;
         for (handle, state) in self.sessions.iter_mut() {
             let SessionState::Ospf { runtime, conn, .. } = state else {
                 continue;
             };
             if runtime.area_id != area_id || exclude == Some(*handle) {
                 continue;
+            }
+            // §13.5 step 5: record the LSA on this neighbor's
+            // retransmission list BEFORE sending, so a fast ack that
+            // races the packet egress can still find the entry on the
+            // list (and not trigger a stray-ack diagnostic). The
+            // list keeps the most recently flooded instance per LSA
+            // identity — overwriting the entry for a re-flood of the
+            // same LSA is correct (§13.3 step 4 — if the LSA is
+            // already on the list, do not add a second instance; the
+            // newer instance is the one we want to track).
+            for lsa in lsas {
+                runtime.retransmit.record_flood(lsa.clone(), now_ms);
             }
             let packet =
                 ospf_ls_update(runtime.protocol, runtime.router_id, area_id, lsas.to_vec());
