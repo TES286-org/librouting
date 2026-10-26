@@ -25,6 +25,14 @@ pub const LS_TYPE_INTER_PREFIX: u16 = 0x2003;
 pub const LS_TYPE_INTER_ROUTER: u16 = 0x2004;
 /// AS-External-LSA (0x4005) — AS scope.
 pub const LS_TYPE_AS_EXTERNAL: u16 = 0x4005;
+/// NSSA-LSA (0x2007) — area scope (RFC 5340 §4.4.3.6 / RFC 3101 §2.4).
+/// The body is byte-identical to the AS-External-LSA body
+/// ([`V3AsExternalBody`]); only the LSA type's scope and the
+/// selection rules differ (the forwarding address must be covered by
+/// an intra-area path, the ASBR must be reachable within the NSSA
+/// itself, and the type-7 default's P-bit governs border-router
+/// install rules — see [`crate::nssa::nssa_routes_v3`]).
+pub const LS_TYPE_NSSA: u16 = 0x2007;
 /// Link-LSA (0x0008) — link scope.
 pub const LS_TYPE_LINK: u16 = 0x0008;
 /// Intra-Area-Prefix-LSA (0x2009) — area scope.
@@ -801,6 +809,59 @@ pub fn originate_v3_as_external_lsa(
         b
     };
     Some(v3_lsa(LS_TYPE_AS_EXTERNAL, ls_id, router_id, seq, body))
+}
+
+/// Originate an OSPFv3 NSSA-LSA (RFC 5340 §4.4.3.6 / RFC 3101 §2.4, LS
+/// type 0x2007) for `dest`. The body is byte-identical to the v3
+/// AS-External-LSA body ([`V3AsExternalBody`]) — only the LSA type
+/// differs (area-scope vs AS-scope) and the P-bit's location: v3 LSA
+/// headers carry no options byte (RFC 5340 §A.4.2), so the NSSA
+/// propagate (P) bit rides in the prefix-options byte (the
+/// [`PREFIX_OPT_P`] bit, RFC 5340 §A.4.1.1).
+///
+/// `p_bit = true` requests the area's border routers to translate this
+/// LSA into a type-5 (RFC 3101 §2.4); a P-bit-set type-7 must carry a
+/// non-zero forwarding address (§2.3), so `None` returns when `p_bit`
+/// is set but `dest.forwarding_addr` is `None`. Returns `None` for
+/// non-IPv6 destinations or when the sequence space is exhausted.
+///
+/// Mirrors [`originate_v3_as_external_lsa`] for the type-7 path; see
+/// [`crate::nssa::nssa_routes_v3`] for the receiving side.
+pub fn originate_v3_nssa_lsa(
+    router_id: u32,
+    ls_id: u32,
+    dest: &V3ExternalDestination,
+    p_bit: bool,
+    prev_seq: Option<u32>,
+) -> Option<Lsa> {
+    let IpAddr::V6(octets) = dest.prefix.network() else {
+        return None; // the v3 external plane advertises IPv6 prefixes
+    };
+    // §2.3: a P-bit-set type-7 must carry a non-zero forwarding
+    // address — otherwise the LSA is not originated at all.
+    if p_bit && dest.forwarding_addr.is_none() {
+        return None;
+    }
+    let seq = next_sequence(prev_seq)?;
+    let body = {
+        let mut b = Vec::with_capacity(4 + 8 + 24);
+        V3AsExternalBody {
+            e_bit: dest.type2,
+            metric: dest.metric,
+            prefix: V3Prefix {
+                prefix_len: dest.prefix.prefix_len,
+                options: if p_bit { PREFIX_OPT_P } else { 0 },
+                metric: 0, // Referenced LS Type — reserved, stays 0
+                addr: octets,
+            },
+            forwarding_addr: dest.forwarding_addr,
+            route_tag: dest.route_tag,
+            referenced_ls_id: None,
+        }
+        .encode(&mut b);
+        b
+    };
+    Some(v3_lsa(LS_TYPE_NSSA, ls_id, router_id, seq, body))
 }
 
 #[cfg(test)]
