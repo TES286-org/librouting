@@ -174,6 +174,109 @@ int main(void) {
     rc = lr_bgp_encode_update_withdraw_v4(&v6p, 1, &enc);
     check(rc == -3, "withdraw rejects IPv6 in the legacy NLRI section");
 
+    /* Structured BGP message inspection — decode the encoded bytes
+     * back into an owned lr_bgp_message_t and read the variant
+     * fields. Mirrors tests/ffi/harness.cpp's RAII test block. */
+    {
+        /* OPEN with 4-byte AS: reader must surface the real AS. */
+        rc = lr_bgp_encode_open(4200000000u, 180, rid, 1, &enc);
+        check(rc == 0, "encode_open for inspection");
+        lr_bgp_message_t m = lr_bgp_decode_message(lr_bytes_ptr(&enc), lr_bytes_len(&enc));
+        check(m != NULL, "decode_message OPEN returns non-null handle");
+        uint8_t kind = 0;
+        check(lr_bgp_message_type(m, &kind) == 0, "lr_bgp_message_type OPEN");
+        check(kind == LR_BGP_MSG_OPEN, "decoded kind == OPEN");
+        uint8_t ver = 0;
+        check(lr_bgp_message_open_version(m, &ver) == 0, "open_version");
+        check(ver == 4, "OPEN version 4");
+        uint32_t asn = 0;
+        check(lr_bgp_message_open_my_as(m, &asn) == 0, "open_my_as");
+        check(asn == 4200000000u, "OPEN my_as unwraps AS_TRANS → 4-byte AS");
+        uint16_t hold = 0;
+        check(lr_bgp_message_open_hold_time(m, &hold) == 0, "open_hold_time");
+        check(hold == 180, "OPEN hold time 180");
+        uint8_t id[4] = {0};
+        check(lr_bgp_message_open_bgp_id(m, id) == 0, "open_bgp_id");
+        check(id[0] == 10 && id[1] == 0 && id[2] == 0 && id[3] == 1,
+              "OPEN bgp_id == 10.0.0.1");
+        /* Exactly one optional parameter — the capabilities TLV
+         * carrying the Four-Octet-AS capability (code 65, len 4). */
+        check(lr_bgp_message_open_param_count(m) == 1, "OPEN has one optional parameter");
+        uint8_t ptype = 0;
+        lr_bytes_t pval = {0};
+        check(lr_bgp_message_open_param_at(m, 0, &ptype, &pval) == 0, "open_param_at(0)");
+        check(ptype == 2, "OPEN param type 2 (capabilities, RFC 5492)");
+        check(lr_bytes_len(&pval) >= 6, "OPEN capabilities payload >= 6 bytes");
+        check(lr_bytes_ptr(&pval)[0] == 65, "OPEN capability code 65 (Four-Octet-AS)");
+        check(lr_bytes_ptr(&pval)[1] == 4, "OPEN capability length 4");
+        uint32_t cap_as = ((uint32_t)lr_bytes_ptr(&pval)[2] << 24) |
+                         ((uint32_t)lr_bytes_ptr(&pval)[3] << 16) |
+                         ((uint32_t)lr_bytes_ptr(&pval)[4] << 8) |
+                         (uint32_t)lr_bytes_ptr(&pval)[5];
+        check(cap_as == 4200000000u, "OPEN capability carries the real 4-byte AS");
+        lr_bytes_free(&pval);
+        /* Out-of-range param returns LR_ERR_OTHER (-6). */
+        check(lr_bgp_message_open_param_at(m, 99, &ptype, &pval) == -6,
+              "open_param_at(99) returns LR_ERR_OTHER");
+        /* Variant mismatch reader returns LR_ERR_INVALID_HANDLE (-2). */
+        check(lr_bgp_message_notification_code(m, &ver) == -2,
+              "notification_code on OPEN returns LR_ERR_INVALID_HANDLE");
+        lr_bgp_message_free(m);
+        lr_bytes_free(&enc);
+
+        /* NOTIFICATION with diagnostic data. */
+        const uint8_t notif_data2[4] = {0xde, 0xad, 0xbe, 0xef};
+        rc = lr_bgp_encode_notification(1, 2, notif_data2, 4, &enc);
+        check(rc == 0, "encode_notification for inspection");
+        lr_bgp_message_t nm = lr_bgp_decode_message(lr_bytes_ptr(&enc), lr_bytes_len(&enc));
+        check(nm != NULL, "decode_message NOTIFICATION returns non-null");
+        check(lr_bgp_message_type(nm, &kind) == 0, "lr_bgp_message_type NOTIFICATION");
+        check(kind == LR_BGP_MSG_NOTIFICATION, "decoded kind == NOTIFICATION");
+        uint8_t code = 0, sub = 0;
+        check(lr_bgp_message_notification_code(nm, &code) == 0, "notification_code");
+        check(lr_bgp_message_notification_subcode(nm, &sub) == 0, "notification_subcode");
+        check(code == 1, "NOTIFICATION code 1 (Header)");
+        check(sub == 2, "NOTIFICATION subcode 2 (Conn-Not-Sync)");
+        lr_bytes_t ndata = {0};
+        check(lr_bgp_message_notification_data(nm, &ndata) == 0, "notification_data");
+        check(lr_bytes_len(&ndata) == 4, "NOTIFICATION data 4 bytes");
+        check(lr_bytes_ptr(&ndata)[0] == 0xde && lr_bytes_ptr(&ndata)[3] == 0xef,
+              "NOTIFICATION data round-trips");
+        lr_bytes_free(&ndata);
+        lr_bgp_message_free(nm);
+        lr_bytes_free(&enc);
+
+        /* Withdraw-only UPDATE: two prefixes, zero attributes. */
+        rc = lr_bgp_encode_update_withdraw_v4(w, 2, &enc);
+        check(rc == 0, "encode_update_withdraw_v4 for inspection");
+        lr_bgp_message_t um = lr_bgp_decode_message(lr_bytes_ptr(&enc), lr_bytes_len(&enc));
+        check(um != NULL, "decode_message UPDATE returns non-null");
+        check(lr_bgp_message_type(um, &kind) == 0, "lr_bgp_message_type UPDATE");
+        check(kind == LR_BGP_MSG_UPDATE, "decoded kind == UPDATE");
+        check(lr_bgp_message_update_withdrawn_count(um) == 2, "UPDATE 2 withdrawn");
+        check(lr_bgp_message_update_nlri_count(um) == 0, "UPDATE withdraw-only no NLRI");
+        check(lr_bgp_message_update_attr_count(um) == 0, "UPDATE withdraw-only 0 attrs");
+        lr_prefix_t got = {0};
+        check(lr_bgp_message_update_withdrawn_at(um, 0, &got) == 0, "withdrawn_at(0)");
+        check(got.addr[0] == 203 && got.prefix_len == 24, "withdrawn[0] = 203.0.113.0/24");
+        check(lr_bgp_message_update_withdrawn_at(um, 1, &got) == 0, "withdrawn_at(1)");
+        check(got.addr[0] == 198 && got.prefix_len == 24, "withdrawn[1] = 198.51.100.0/24");
+        check(lr_bgp_message_update_withdrawn_at(um, 99, &got) == -6,
+              "withdrawn_at(99) returns LR_ERR_OTHER");
+        lr_bgp_message_free(um);
+        lr_bytes_free(&enc);
+
+        /* KEEPALIVE: variant tag only. */
+        rc = lr_bgp_encode_keepalive(&enc);
+        check(rc == 0, "encode_keepalive for inspection");
+        lr_bgp_message_t km = lr_bgp_decode_message(lr_bytes_ptr(&enc), lr_bytes_len(&enc));
+        check(km != NULL, "decode_message KEEPALIVE returns non-null");
+        check(lr_bgp_message_type(km, &kind) == 0, "lr_bgp_message_type KEEPALIVE");
+        check(kind == LR_BGP_MSG_KEEPALIVE, "decoded kind == KEEPALIVE");
+        lr_bgp_message_free(km);
+        lr_bytes_free(&enc);
+    }
+
     /* Drain output — should be empty since we didn't feed input */
     lr_bytes_t out = {0};
     rc = lr_router_drain_output(r, h, &out);
