@@ -522,6 +522,55 @@ follow-up — the route computation is the substantive gap the defect
 flagged, and the translator election logic stays v2-scoped until a
 follow-up adds the v3 origination side of the translation.
 
+**Python and Go `Route` bindings now expose every reader and bulk
+replacer the C ABI ships** (`bindings`, issue #92). The Python
+`Route` class (`bindings/lr-python/src/librouting/policy.py`) was
+missing `next_hop()` / `origin()` / `tag()` readers and
+`set_large_communities()` / `set_ext_communities()` /
+`ext_communities()` — an operator who set the attribute through the
+binding could not read it back, and the bulk-replacer variants the C
+ABI exposes (`lr_route_set_large_communities`,
+`lr_route_set_ext_communities`) had no Python surface at all. The Go
+`Route` type (`bindings/lr-go/librouting.go`) had the same
+asymmetry for `NextHop()` / `Origin()` / `Tag()` readers and
+`SetLargeCommunities()` / `SetExtCommunities()` / `Metric()`. The
+C++ wrapper in `include/librouting.hpp` was already complete for
+the reader/replacer set except `set_ext_communities`; the C ABI
+itself was unchanged (the underlying `lr_route_*` symbols were all
+already exposed by `crates/lr-ffi/src/policy_objects.rs`).
+
+The new Python methods mirror the existing readers' shape — `None`
+when the attribute is absent (the C ABI returns 1 in that case), an
+`LrError` on any negative rc, and the address length signals the
+family for `next_hop()` (4 bytes for IPv4, 16 for IPv6, matching the
+C ABI's `out_is_ipv6` discriminator). The Go readers mirror the
+`(value, ok, error)` triple used by the existing `LocalPref()` /
+`Med()` readers. `set_large_communities` / `SetLargeCommunities`
+take a flat `[g1, d1_1, d1_2, g2, ...]` slice that must be a multiple
+of three (each triple is one RFC 8092 large community); the C ABI
+takes the entry count, not the `u32` count, so the binding divides
+the slice length by three before the call (matching the C++ wrapper
+in `set_large_communities`). `set_ext_communities` /
+`SetExtCommunities` take a list of `(kind, subtype, global, local)`
+tuples / `ExtCommunity` structs mirroring `lr_ext_comm_t`; the
+Python binding uses `getattr(arr[i], "global")` and `setattr` because
+`global` is a Python keyword and cannot appear as an attribute
+access expression. `Metric()` mirrors the existing `SetMetric`;
+the previous Python `metric()` reader already existed.
+
+One new test per binding covers the round trip:
+`test_route_attribute_readers_and_replacers` in
+`bindings/lr-python/tests/test_librouting.py` and
+`TestRouteAttributeReadersAndReplacers` in
+`bindings/lr-go/librouting_test.go`. Each test exercises the
+absent-default, the v4/v6 next-hop round trip (IPv6 discriminator
+covered), the IGP/EGP/INCOMPLETE origin round trip, the bulk
+replace + drop (empty list) + malformed-triples rejection for both
+community kinds, the metric round trip, and the tag set/clear/
+zero-tag-still-present round trip. The Python suite stays at 34
+passing tests (was 33); the Go suite stays green. No Rust change,
+no C ABI change, no version bump — additive binding surface only.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
