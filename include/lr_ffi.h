@@ -57,6 +57,44 @@
 #define LR_MAX_PREFIX_RESTART 2
 
 
+
+
+
+
+#define LR_BABEL_TLV_PAD1 0
+
+#define LR_BABEL_TLV_PADN 1
+
+#define LR_BABEL_TLV_ACK_REQ 2
+
+#define LR_BABEL_TLV_ACK 3
+
+#define LR_BABEL_TLV_HELLO 4
+
+#define LR_BABEL_TLV_IHU 5
+
+#define LR_BABEL_TLV_ROUTER_ID 6
+
+#define LR_BABEL_TLV_NEXT_HOP 7
+
+#define LR_BABEL_TLV_UPDATE 8
+
+#define LR_BABEL_TLV_ROUTE_REQUEST 9
+
+#define LR_BABEL_TLV_SEQNO_REQUEST 10
+
+#define LR_BABEL_TLV_TS_PC 11
+
+#define LR_BABEL_TLV_HMAC 12
+
+#define LR_BABEL_TLV_MAC 16
+
+#define LR_BABEL_TLV_PC 17
+
+#define LR_BABEL_TLV_CHALLENGE_REQUEST 18
+
+#define LR_BABEL_TLV_CHALLENGE_REPLY 19
+
 /**
  * State: AdminDown (RFC 5880 §6.1).
  */
@@ -277,6 +315,32 @@
 
 #define LR_MRT_RECORD_UNKNOWN 5
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#define LR_OSPF_BODY_HELLO 1
+
+#define LR_OSPF_BODY_DB_DESC 2
+
+#define LR_OSPF_BODY_LS_REQUEST 3
+
+#define LR_OSPF_BODY_LS_UPDATE 4
+
+#define LR_OSPF_BODY_LS_ACK 5
+
+#define LR_OSPF_BODY_RAW 6
+
 /**
  * ORIGIN values (RFC 4271 §5.1.1).
  */
@@ -376,13 +440,13 @@
 #define LR_OSPF_V3 3
 
 /**
- * Opaque `BfdPacket` handle.
+ * Opaque `BabelFrame` handle.
  */
-typedef struct OpaqueBfdPacket {
+typedef struct OpaqueBabelFrame {
   uint8_t _private[0];
-} OpaqueBfdPacket;
+} OpaqueBabelFrame;
 
-typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
+typedef struct OpaqueBabelFrame *lr_babel_frame_t;
 
 /**
  * Rust-allocated byte slice that the embedder owns and must free.
@@ -392,6 +456,15 @@ typedef struct lr_bytes_t {
   uintptr_t len;
   uintptr_t cap;
 } lr_bytes_t;
+
+/**
+ * Opaque `BfdPacket` handle.
+ */
+typedef struct OpaqueBfdPacket {
+  uint8_t _private[0];
+} OpaqueBfdPacket;
+
+typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
 
 /**
  * Opaque `BmpMessage` handle.
@@ -920,6 +993,15 @@ typedef struct OpaqueMrtRibDump {
 typedef struct OpaqueMrtRibDump *lr_mrt_rib_dump_t;
 
 /**
+ * Opaque `OspfPacket` handle.
+ */
+typedef struct OpaqueOspfPacket {
+  uint8_t _private[0];
+} OpaqueOspfPacket;
+
+typedef struct OpaqueOspfPacket *lr_ospf_packet_t;
+
+/**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
  */
@@ -1121,6 +1203,75 @@ typedef struct OpaqueSrv6Locator {
 } OpaqueSrv6Locator;
 
 typedef struct OpaqueSrv6Locator *lr_srv6_locator_t;
+
+/**
+ * Decode one Babel frame from `data`. On success, writes a freshly-
+ * allocated `lr_babel_frame_t` to `*out`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_babel_frame_t`.
+ */
+int32_t lr_babel_decode_frame(const uint8_t *data, uintptr_t len, lr_babel_frame_t *out);
+
+/**
+ * Encode a Babel frame to its wire form.
+ *
+ * # Safety
+ * `frame` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_babel_encode_frame(lr_babel_frame_t frame, struct lr_bytes_t *out);
+
+/**
+ * Read the number of TLVs the frame carries.
+ *
+ * # Safety
+ * `frame` must be a valid handle.
+ */
+uintptr_t lr_babel_frame_tlv_count(lr_babel_frame_t frame);
+
+/**
+ * Read the TLV-type code of TLV `index` (one of the
+ * `LR_BABEL_TLV_*` constants). Returns 0 on a NULL handle or an
+ * out-of-range index.
+ *
+ * # Safety
+ * `frame` must be a valid handle.
+ */
+uint8_t lr_babel_frame_tlv_type_at(lr_babel_frame_t frame, uintptr_t index);
+
+/**
+ * Read the TLV value length of TLV `index`. Returns 0 on a NULL
+ * handle or an out-of-range index.
+ *
+ * # Safety
+ * `frame` must be a valid handle.
+ */
+uintptr_t lr_babel_frame_tlv_value_len_at(lr_babel_frame_t frame, uintptr_t index);
+
+/**
+ * Copy the TLV value bytes of TLV `index` into the caller-supplied
+ * buffer. Returns the number of bytes copied (0 on a NULL handle,
+ * an out-of-range index, or a NULL `out`).
+ *
+ * # Safety
+ * `frame` must be a valid handle. `out` must point to at least `cap`
+ * writable bytes.
+ */
+uintptr_t lr_babel_frame_tlv_value_at(lr_babel_frame_t frame,
+                                      uintptr_t index,
+                                      uint8_t *out,
+                                      uintptr_t cap);
+
+/**
+ * Drop a boxed `BabelFrame`. Safe to call with NULL.
+ *
+ * # Safety
+ * `frame` must have been produced by a `lr_babel_*_frame` constructor
+ * and must not be used after this call.
+ */
+void lr_babel_frame_free(lr_babel_frame_t frame);
 
 /**
  * Decode one BFD Control packet from `data`. On success, writes a
@@ -2696,6 +2847,84 @@ lr_mrt_record_t lr_mrt_record_bgp4mp_state_change(uint32_t peer_as,
                                                   uintptr_t local_addr_len,
                                                   uint16_t old_state,
                                                   uint16_t new_state);
+
+/**
+ * Decode one OSPFv2 packet from `data`. On success, writes a freshly-
+ * allocated `lr_ospf_packet_t` to `*out`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_ospf_packet_t`.
+ */
+int32_t lr_ospf_decode_v2_packet(const uint8_t *data, uintptr_t len, lr_ospf_packet_t *out);
+
+/**
+ * Decode one OSPFv3 packet from `data`.
+ *
+ * # Safety
+ * See [`lr_ospf_decode_v2_packet`].
+ */
+int32_t lr_ospf_decode_v3_packet(const uint8_t *data, uintptr_t len, lr_ospf_packet_t *out);
+
+/**
+ * Encode an OSPF packet to its wire form. The version field on the
+ * header selects v2 vs v3.
+ *
+ * # Safety
+ * `packet` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_ospf_encode_packet(lr_ospf_packet_t packet, struct lr_bytes_t *out);
+
+/**
+ * Read the OSPF version field (2 for v2, 3 for v3).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_ospf_packet_version(lr_ospf_packet_t packet);
+
+/**
+ * Read the packet-type code (`LR_OSPF_PACKET_*`).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_ospf_packet_type(lr_ospf_packet_t packet);
+
+/**
+ * Read the OSPF Router ID (big-endian, 4 bytes).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint32_t lr_ospf_packet_router_id(lr_ospf_packet_t packet);
+
+/**
+ * Read the OSPF Area ID (big-endian, 4 bytes).
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint32_t lr_ospf_packet_area_id(lr_ospf_packet_t packet);
+
+/**
+ * Read the body variant tag — one of the `LR_OSPF_BODY_*` constants.
+ * Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_ospf_packet_body_kind(lr_ospf_packet_t packet);
+
+/**
+ * Drop a boxed `OspfPacket`. Safe to call with NULL.
+ *
+ * # Safety
+ * `packet` must have been produced by a `lr_ospf_*_packet` constructor
+ * and must not be used after this call.
+ */
+void lr_ospf_packet_free(lr_ospf_packet_t packet);
 
 /**
  * Install one redistribution pipe on the router.

@@ -110,4 +110,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/mrt.rs");
     println!("cargo:rerun-if-changed=src/core.rs");
     println!("cargo:rerun-if-changed=src/ldp.rs");
+    println!("cargo:rerun-if-changed=src/ospf.rs");
+    println!("cargo:rerun-if-changed=src/babel.rs");
 }
