@@ -487,6 +487,18 @@ typedef struct lr_bytes_t {
   uintptr_t cap;
 } lr_bytes_t;
 
+typedef struct OpaqueBabelNeighbor {
+  uint8_t _private[0];
+} OpaqueBabelNeighbor;
+
+typedef struct OpaqueBabelNeighbor *lr_babel_neighbor_t;
+
+typedef struct OpaqueBabelRouteTable {
+  uint8_t _private[0];
+} OpaqueBabelRouteTable;
+
+typedef struct OpaqueBabelRouteTable *lr_babel_route_table_t;
+
 /**
  * Repr-C `BestPathConfig`. Mirrors `lr_bgp::best_path::BestPathConfig`.
  */
@@ -1437,6 +1449,104 @@ uintptr_t lr_babel_frame_tlv_value_at(lr_babel_frame_t frame,
  * and must not be used after this call.
  */
 void lr_babel_frame_free(lr_babel_frame_t frame);
+
+/**
+ * Construct a `BabelNeighbor` for the given remote address (RFC
+ * 8966 §3.4.1). `addr_v4` is the 4-byte IPv4 address (NULL when
+ * IPv6); `addr_v6` is the 16-byte IPv6 address (NULL when IPv4).
+ * `now_ms` is the wall-clock millisecond timestamp of construction.
+ *
+ * Returns NULL when both pointers are NULL or on a panic.
+ *
+ * # Safety
+ * At most one of `addr_v4` / `addr_v6` is non-NULL. The non-NULL
+ * pointer must point to 4 (v4) or 16 (v6) readable bytes.
+ */
+lr_babel_neighbor_t lr_babel_neighbor_new(const uint8_t *addr_v4,
+                                          const uint8_t *addr_v6,
+                                          uint64_t now_ms);
+
+/**
+ * Drop a boxed BabelNeighbor. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_babel_neighbor_new` and not
+ * already freed.
+ */
+void lr_babel_neighbor_free(lr_babel_neighbor_t r);
+
+/**
+ * Feed one Hello TLV into the neighbor (RFC 8966 §3.4.1). Updates
+ * the neighbor's hello history and rxcost.
+ *
+ * # Safety
+ * `r` must be a valid BabelNeighbor handle.
+ */
+int32_t lr_babel_neighbor_hello(lr_babel_neighbor_t r,
+                                uint16_t seqno,
+                                uint16_t interval_cs,
+                                uint64_t now_ms);
+
+/**
+ * Feed one IHU TLV into the neighbor (RFC 8966 §3.4.2). Updates the
+ * neighbor's rxcost.
+ *
+ * # Safety
+ * See [`lr_babel_neighbor_hello`].
+ */
+int32_t lr_babel_neighbor_ihu(lr_babel_neighbor_t r,
+                              uint16_t rxcost,
+                              uint16_t interval_cs,
+                              uint64_t now_ms);
+
+/**
+ * Read the current RTT estimate in microseconds, or 0 when no
+ * valid RTT sample is available (RFC 8966 §3.4.3 — the RTT is
+ * valid for `RTT_VALIDITY_MS` after the last sample).
+ *
+ * # Safety
+ * `r` must be a valid BabelNeighbor handle.
+ */
+uint32_t lr_babel_neighbor_rtt_us(lr_babel_neighbor_t r, uint64_t now_ms);
+
+/**
+ * 1 when the RTT estimate is within the validity window (RFC 8966
+ * §3.4.3 — `RTT_VALIDITY_MS` after the last sample), 0 otherwise.
+ *
+ * # Safety
+ * See [`lr_babel_neighbor_rtt_us`].
+ */
+uint8_t lr_babel_neighbor_rtt_valid(lr_babel_neighbor_t r, uint64_t now_ms);
+
+/**
+ * Construct an empty `BabelRouteTable` (RFC 8966 §3.5).
+ */
+lr_babel_route_table_t lr_babel_route_table_new(void);
+
+/**
+ * Drop a boxed BabelRouteTable. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_babel_route_table_new` and not
+ * already freed.
+ */
+void lr_babel_route_table_free(lr_babel_route_table_t r);
+
+/**
+ * Number of routes in the table. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BabelRouteTable handle.
+ */
+uintptr_t lr_babel_route_table_len(lr_babel_route_table_t r);
+
+/**
+ * True when the table holds no routes. Returns 1 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_babel_route_table_len`].
+ */
+uint8_t lr_babel_route_table_is_empty(lr_babel_route_table_t r);
 
 /**
  * Construct a `BestPathConfig` with the RFC 4271 §9.1.2.2 defaults.
