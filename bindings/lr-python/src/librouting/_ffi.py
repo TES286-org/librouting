@@ -189,6 +189,81 @@ int64_t lr_router_rib_len(lr_router_t r);
 int32_t lr_router_rib_dump(lr_router_t r, lr_bytes_t *out);
 int32_t lr_router_sessions_dump(lr_router_t r, lr_bytes_t *out);
 
+/* ===== Structured inspection surface (issue #92) =====
+ *
+ * Mirrors the Rust pub API of DefaultRouter::session_summaries /
+ * ospf_area_ids / ospf_area_topology_version / ospf_area_lsa /
+ * bgp_session_identity_hash / drain_ospf_grace_events so the
+ * embedder no longer has to parse the JSON-form dumps above. */
+#define LR_SESSION_TEXT_MAX 32
+#define LR_SESSION_KIND_BGP 1
+#define LR_SESSION_KIND_OSPF 2
+#define LR_SESSION_KIND_OSPF3 3
+#define LR_SESSION_KIND_BABEL 4
+
+typedef struct lr_session_summary_t {
+    uint64_t handle;
+    int32_t kind;
+    uint8_t kind_text[LR_SESSION_TEXT_MAX];
+    uint32_t local_as;
+    uint32_t peer_as;
+    uint8_t state_text[LR_SESSION_TEXT_MAX];
+    uint8_t established;
+    uint8_t peer_bgp_id_present;
+    uint32_t peer_bgp_id;
+    uint16_t negotiated_hold_time;
+    uint64_t adj_rib_in_len;
+    uint64_t updates_received;
+    uint64_t updates_sent;
+} lr_session_summary_t;
+
+typedef struct lr_ospf_lsa_t {
+    uint16_t ls_age;
+    uint8_t options;
+    uint16_t ls_type;
+    uint32_t link_state_id;
+    uint32_t advertising_router;
+    uint32_t ls_sequence_number;
+    uint16_t ls_checksum;
+    uint16_t length;
+    lr_bytes_t body;
+} lr_ospf_lsa_t;
+
+typedef struct lr_ospf_grace_event_t {
+    uint32_t area;
+    uint32_t advertising_router;
+    uint32_t grace_period_secs;
+    uint8_t reason;
+    uint8_t interface_addr_v4_present;
+    uint8_t interface_addr_v4[4];
+    uint8_t interface_addr_v6_present;
+    uint8_t interface_addr_v6[16];
+    uint16_t ls_age_secs;
+    uint8_t purged;
+} lr_ospf_grace_event_t;
+
+uintptr_t lr_router_session_count(lr_router_t r);
+int32_t lr_router_session_summary_at(lr_router_t r,
+                                     uintptr_t index,
+                                     struct lr_session_summary_t *out);
+uintptr_t lr_router_ospf_area_count(lr_router_t r);
+int32_t lr_router_ospf_area_id_at(lr_router_t r,
+                                  uintptr_t index,
+                                  uint32_t *out);
+int32_t lr_router_ospf_area_topology_version(lr_router_t r,
+                                             uint32_t area_id,
+                                             uint64_t *out);
+int32_t lr_router_ospf_area_lsa(lr_router_t r,
+                                uint32_t area_id,
+                                uint16_t ls_type,
+                                uint32_t link_state_id,
+                                uint32_t advertising_router,
+                                struct lr_ospf_lsa_t *out);
+uint64_t lr_router_bgp_session_identity_hash(lr_router_t r);
+intptr_t lr_router_drain_ospf_grace_events(lr_router_t r,
+                                           struct lr_ospf_grace_event_t *out,
+                                           uintptr_t cap);
+
 int32_t lr_bgp_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_bgp_encode_keepalive(lr_bytes_t *out);
 int32_t lr_bgp_encode_open(uint32_t my_as,

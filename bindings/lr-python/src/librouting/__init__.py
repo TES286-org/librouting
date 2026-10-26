@@ -71,6 +71,10 @@ from .router import (
     PROTO_OSPF,
     PROTO_OSPF3,
     PROTO_STATIC,
+    SESSION_KIND_BABEL,
+    SESSION_KIND_BGP,
+    SESSION_KIND_OSPF,
+    SESSION_KIND_OSPF3,
     Damping,
     LrError,
     Router,
@@ -142,6 +146,11 @@ __all__ = [
     "FILTER_ACCEPT",
     "FILTER_REJECT",
     "FILTER_FALLTHROUGH",
+    # Structured inspection constants (issue #92).
+    "SESSION_KIND_BGP",
+    "SESSION_KIND_OSPF",
+    "SESSION_KIND_OSPF3",
+    "SESSION_KIND_BABEL",
 ]
 
 # The single source of truth for the package version: pyproject.toml reads

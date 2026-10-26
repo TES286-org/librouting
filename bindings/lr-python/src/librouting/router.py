@@ -661,6 +661,153 @@ class Router:
         finally:
             free_bytes(b)
 
+    # ------------------------------------------------------------------
+    # Structured inspection surface (issue #92).
+    #
+    # These methods mirror the Rust pub API of `DefaultRouter` — same
+    # names, same return shape — so an embedder no longer has to
+    # parse the JSON-form `sessions_dump` / `rib_dump` output.
+    # ------------------------------------------------------------------
+
+    def session_count(self) -> int:
+        """Number of sessions currently registered on the router.
+
+        Mirrors ``DefaultRouter::session_summaries().len()``.
+        """
+        return int(get_lib().lr_router_session_count(self._ptr))
+
+    def session_summary_at(self, index: int) -> dict:
+        """Read one session summary by index.
+
+        Mirrors ``DefaultRouter::session_summaries()[index]``. The
+        order is stable (insertion order, sorted by handle). Raises
+        :class:`LrError` when ``index`` is out of range.
+        """
+        out = ffi.new("lr_session_summary_t*")
+        rc = get_lib().lr_router_session_summary_at(self._ptr, index, out)
+        if rc != 0:
+            raise LrError(
+                f"lr_router_session_summary_at failed (rc={rc}): {last_error()}"
+            )
+        return _decode_session_summary(out)
+
+    def session_summaries(self) -> list[dict]:
+        """Snapshot of every session's operational summary.
+
+        Convenience wrapper around :meth:`session_count` +
+        :meth:`session_summary_at`. Mirrors
+        ``DefaultRouter::session_summaries()``.
+        """
+        n = self.session_count()
+        return [self.session_summary_at(i) for i in range(n)]
+
+    def ospf_area_count(self) -> int:
+        """Number of OSPF areas the router currently holds.
+
+        Mirrors ``DefaultRouter::ospf_area_ids().len()``.
+        """
+        return int(get_lib().lr_router_ospf_area_count(self._ptr))
+
+    def ospf_area_id_at(self, index: int) -> int:
+        """Read one OSPF area ID by index. Mirrors
+        ``DefaultRouter::ospf_area_ids()[index]``. The order is
+        ascending (BTreeMap iteration).
+        """
+        out = ffi.new("uint32_t*")
+        rc = get_lib().lr_router_ospf_area_id_at(self._ptr, index, out)
+        if rc != 0:
+            raise LrError(
+                f"lr_router_ospf_area_id_at failed (rc={rc}): {last_error()}"
+            )
+        return int(out[0])
+
+    def ospf_area_ids(self) -> list[int]:
+        """Snapshot of every OSPF area ID. Convenience wrapper around
+        :meth:`ospf_area_count` + :meth:`ospf_area_id_at`.
+        """
+        n = self.ospf_area_count()
+        return [self.ospf_area_id_at(i) for i in range(n)]
+
+    def ospf_area_topology_version(self, area_id: int) -> int:
+        """OSPF area topology version — a monotonic counter bumped on
+        every *content* change of a topology LSA (types 1-5, 7).
+
+        Mirrors ``DefaultRouter::ospf_area_topology_version``. Raises
+        :class:`LrError` when the area is unknown.
+        """
+        out = ffi.new("uint64_t*")
+        rc = get_lib().lr_router_ospf_area_topology_version(
+            self._ptr, area_id, out
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_ospf_area_topology_version failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return int(out[0])
+
+    def ospf_area_lsa(
+        self,
+        area_id: int,
+        ls_type: int,
+        link_state_id: int,
+        advertising_router: int,
+    ) -> dict:
+        """Read one LSA out of an area's LSDB by its exact key.
+
+        Mirrors ``DefaultRouter::ospf_area_lsa``. Raises
+        :class:`LrError` when the area or LSA is unknown. The returned
+        dict carries the LSA header fields plus the LSA body as
+        ``body`` (bytes).
+        """
+        out = ffi.new("lr_ospf_lsa_t*")
+        rc = get_lib().lr_router_ospf_area_lsa(
+            self._ptr,
+            area_id,
+            ls_type,
+            link_state_id,
+            advertising_router,
+            out,
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_ospf_area_lsa failed (rc={rc}): {last_error()}"
+            )
+        result = _decode_ospf_lsa(out)
+        # The body bytes are owned by the caller through lr_bytes_t —
+        # free them once we have copied the bytes into Python.
+        free_bytes(ffi.addressof(out.body))
+        return result
+
+    def bgp_session_identity_hash(self) -> int:
+        """Stable, content-derived hash that changes when the set of
+        BGP sessions changes structurally (session added/removed,
+        peer address changed, ASN4 mode flipped).
+
+        Mirrors ``DefaultRouter::bgp_session_identity_hash``.
+        """
+        return int(get_lib().lr_router_bgp_session_identity_hash(self._ptr))
+
+    def drain_ospf_grace_events(self, capacity: int = 32) -> list[dict]:
+        """Drain pending OSPF Graceful-Restart events (RFC 3623 §3 /
+        RFC 5187 §2). Mirrors ``DefaultRouter::drain_ospf_grace_events``.
+        Events past ``capacity`` stay queued for the next call.
+        """
+        if capacity <= 0:
+            raise LrError(
+                f"drain_ospf_grace_events: capacity must be positive, got {capacity}"
+            )
+        arr = ffi.new("lr_ospf_grace_event_t[]", capacity)
+        n = get_lib().lr_router_drain_ospf_grace_events(
+            self._ptr, arr, capacity
+        )
+        if n < 0:
+            raise LrError(
+                f"lr_router_drain_ospf_grace_events failed (rc={n}): "
+                f"{last_error()}"
+            )
+        return [_decode_ospf_grace_event(arr[i]) for i in range(int(n))]
+
     def add_roa_entry(
         self,
         prefix: str,
@@ -871,3 +1018,90 @@ def _parse_v6_next_hop(next_hop: str | None):
     if addr.version != 6:
         raise LrError(f"not an IPv6 next-hop: {next_hop}")
     return ffi.new("uint8_t[]", addr.packed)
+
+
+# ----------------------------------------------------------------------
+# Decoders for the structured inspection surface (issue #92).
+#
+# Each helper translates one fixed-layout C struct returned by the C
+# ABI into a Python dict whose field names mirror the Rust pub API.
+# ----------------------------------------------------------------------
+
+# Wire protocol identifiers for the `kind` field on lr_session_summary_t.
+SESSION_KIND_BGP = 1
+SESSION_KIND_OSPF = 2
+SESSION_KIND_OSPF3 = 3
+SESSION_KIND_BABEL = 4
+
+_SESSION_KIND_NAME = {
+    SESSION_KIND_BGP: "bgp",
+    SESSION_KIND_OSPF: "ospf",
+    SESSION_KIND_OSPF3: "ospf3",
+    SESSION_KIND_BABEL: "babel",
+}
+
+
+def _c_text_to_str(buf) -> str:
+    """Decode a NUL-terminated fixed-size uint8 array as UTF-8."""
+    end = 0
+    while end < len(buf) and buf[end] != 0:
+        end += 1
+    return bytes(buf[0:end]).decode("utf-8", "replace")
+
+
+def _decode_session_summary(out) -> dict:
+    return {
+        "handle": int(out.handle),
+        "kind": int(out.kind),
+        "kind_text": _c_text_to_str(out.kind_text),
+        "local_as": int(out.local_as),
+        "peer_as": int(out.peer_as),
+        "state": _c_text_to_str(out.state_text),
+        "established": bool(out.established),
+        "peer_bgp_id_present": bool(out.peer_bgp_id_present),
+        "peer_bgp_id": int(out.peer_bgp_id),
+        "negotiated_hold_time": int(out.negotiated_hold_time),
+        "adj_rib_in_len": int(out.adj_rib_in_len),
+        "updates_received": int(out.updates_received),
+        "updates_sent": int(out.updates_sent),
+    }
+
+
+def _decode_ospf_lsa(out) -> dict:
+    body_len = int(out.body.len)
+    if body_len == 0:
+        body = b""
+    else:
+        body = bytes(ffi.buffer(out.body.ptr, body_len))
+    return {
+        "ls_age": int(out.ls_age),
+        "options": int(out.options),
+        "ls_type": int(out.ls_type),
+        "link_state_id": int(out.link_state_id),
+        "advertising_router": int(out.advertising_router),
+        "ls_sequence_number": int(out.ls_sequence_number),
+        "ls_checksum": int(out.ls_checksum),
+        "length": int(out.length),
+        "body": body,
+    }
+
+
+def _decode_ospf_grace_event(out) -> dict:
+    return {
+        "area": int(out.area),
+        "advertising_router": int(out.advertising_router),
+        "grace_period_secs": int(out.grace_period_secs),
+        "reason": int(out.reason),
+        "interface_addr_v4": (
+            bytes(out.interface_addr_v4)
+            if out.interface_addr_v4_present
+            else None
+        ),
+        "interface_addr_v6": (
+            bytes(out.interface_addr_v6)
+            if out.interface_addr_v6_present
+            else None
+        ),
+        "ls_age_secs": int(out.ls_age_secs),
+        "purged": bool(out.purged),
+    }

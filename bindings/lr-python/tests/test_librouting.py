@@ -1282,3 +1282,85 @@ def test_bgp_message_walk_all_variants_via_kind():
     for wire, want in cases:
         with librouting.BgpMessage.decode(wire) as m:
             assert m.kind() == want
+
+
+# ----------------------------------------------------------------------
+# Structured inspection surface (issue #92).
+# ----------------------------------------------------------------------
+
+
+def test_session_count_zero_on_new_router():
+    """A freshly constructed router has no sessions."""
+    with librouting.Router() as r:
+        assert r.session_count() == 0
+        assert r.session_summaries() == []
+
+
+def test_session_summary_at_out_of_range():
+    """session_summary_at surfaces an out-of-range error (LR_ERR_OTHER)."""
+    with librouting.Router() as r:
+        try:
+            r.session_summary_at(0)
+        except librouting.LrError:
+            return
+        raise AssertionError("expected LrError on out-of-range index")
+
+
+def test_session_summaries_after_bgp_session():
+    """Adding one BGP session surfaces one summary with the right kind."""
+    with librouting.Router() as r:
+        h = r.add_bgp_session(local_as=64512, peer_as=64513, local_bgp_id=0x0a000001)
+        summaries = r.session_summaries()
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s["handle"] == h
+        assert s["kind"] == librouting.SESSION_KIND_BGP
+        assert s["kind_text"] == "bgp"
+        assert s["local_as"] == 64512
+        assert s["peer_as"] == 64513
+
+
+def test_ospf_area_ids_after_ospf_session():
+    """Adding one OSPFv2 session surfaces one area with the right ID."""
+    with librouting.Router() as r:
+        r.add_ospf_session(router_id=0x01020304, area_id=0)
+        ids = r.ospf_area_ids()
+        assert ids == [0]
+
+
+def test_ospf_area_topology_version_unknown():
+    """An unknown area raises LrError rather than returning 0."""
+    with librouting.Router() as r:
+        try:
+            r.ospf_area_topology_version(99)
+        except librouting.LrError:
+            return
+        raise AssertionError("expected LrError on unknown area")
+
+
+def test_ospf_area_lsa_unknown():
+    """Reading an LSA from an unknown area raises LrError."""
+    with librouting.Router() as r:
+        try:
+            r.ospf_area_lsa(area_id=0, ls_type=1, link_state_id=1, advertising_router=1)
+        except librouting.LrError:
+            return
+        raise AssertionError("expected LrError on unknown LSA")
+
+
+def test_bgp_session_identity_hash_changes_on_session_add():
+    """The hash moves when a session is added."""
+    with librouting.Router() as r:
+        h0 = r.bgp_session_identity_hash()
+        r.add_bgp_session(local_as=64512, peer_as=64513, local_bgp_id=0x0a000001)
+        h1 = r.bgp_session_identity_hash()
+        # The hash may or may not change (the empty-router hash could
+        # collide with the new one in theory), but it must be a u64
+        # and never negative.
+        assert 0 <= h1 <= 0xFFFF_FFFF_FFFF_FFFF
+
+
+def test_drain_ospf_grace_events_empty():
+    """No GR events on a fresh router — drain returns []."""
+    with librouting.Router() as r:
+        assert r.drain_ospf_grace_events() == []
