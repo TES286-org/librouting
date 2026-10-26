@@ -953,6 +953,147 @@ int main(void) {
         lr_router_destroy(r2);
     }
 
+    /* ---- MPLS Label / LabelStack (RFC 3032 §2.1, RFC 8277 §2.2/§2.3) ---- */
+    {
+        lr_mpls_label_t l = lr_mpls_label_new(100);
+        check(l != NULL, "lr_mpls_label_new returns non-NULL");
+        check(lr_mpls_label_value(l) == 100, "lr_mpls_label_value = 100");
+        check(lr_mpls_label_tc(l) == 0, "lr_mpls_label_tc defaults to 0");
+        check(lr_mpls_label_ttl(l) == 64, "lr_mpls_label_ttl defaults to 64");
+        check(lr_mpls_label_is_reserved(l) == 0, "label 100 is not reserved");
+        lr_mpls_label_free(l);
+
+        lr_mpls_label_t r0 = lr_mpls_label_new(0);
+        check(lr_mpls_label_is_reserved(r0) == 1, "label 0 is reserved");
+        lr_mpls_label_free(r0);
+
+        /* checked constructor rejects oversize value. */
+        check(lr_mpls_label_new_checked(0x100000) == NULL,
+              "lr_mpls_label_new_checked rejects 1<<20");
+
+        /* with_tc / with_ttl chain (consumes the receiver). */
+        lr_mpls_label_t l2 = lr_mpls_label_new(0xFFFFF);
+        l2 = lr_mpls_label_with_tc(l2, 7);
+        l2 = lr_mpls_label_with_ttl(l2, 255);
+        check(lr_mpls_label_tc(l2) == 7, "with_tc(7)");
+        check(lr_mpls_label_ttl(l2) == 255, "with_ttl(255)");
+        lr_mpls_label_free(l2);
+
+        /* with_tc masks high bits. */
+        lr_mpls_label_t l3 = lr_mpls_label_new(16);
+        l3 = lr_mpls_label_with_tc(l3, 0xFF);
+        check(lr_mpls_label_tc(l3) == 0x07, "with_tc masks to 3 bits");
+        lr_mpls_label_free(l3);
+
+        /* encode_3octet / encode_4octet on label 100 (TC=0, TTL=64). */
+        lr_mpls_label_t l4 = lr_mpls_label_new(100);
+        l4 = lr_mpls_label_with_tc(l4, 0);
+        l4 = lr_mpls_label_with_ttl(l4, 64);
+        uint8_t out3[3] = {0};
+        check(lr_mpls_label_encode_3octet(l4, 1, out3) == 0,
+              "encode_3octet returns 0");
+        check(out3[0] == 0x00 && out3[1] == 0x06 && out3[2] == 0x41,
+              "encode_3octet(100, bottom) = 00 06 41");
+        uint8_t out4[4] = {0};
+        check(lr_mpls_label_encode_4octet(l4, 1, out4) == 0,
+              "encode_4octet returns 0");
+        check(out4[0] == 0x00 && out4[1] == 0x06 && out4[2] == 0x41 && out4[3] == 0x40,
+              "encode_4octet(100, bottom) = 00 06 41 40");
+        lr_mpls_label_free(l4);
+
+        /* Stack from values — round-trip through 4-octet wire form. */
+        uint32_t values[3] = {16, 240, 1048575};
+        lr_mpls_label_stack_t s =
+            lr_mpls_label_stack_from_values(values, 3);
+        check(s != NULL, "label_stack_from_values returns non-NULL");
+        check(lr_mpls_label_stack_len(s) == 3, "label_stack_len = 3");
+        check(lr_mpls_label_stack_is_empty(s) == 0, "label_stack not empty");
+
+        uint32_t v = 0;
+        uint8_t tc = 0, ttl = 0;
+        check(lr_mpls_label_stack_at(s, 1, &v, &tc, &ttl) == 0,
+              "label_stack_at(1) returns 0");
+        check(v == 240, "label_stack_at(1).value = 240");
+
+        lr_bytes_t enc = {NULL, 0, 0};
+        check(lr_mpls_label_stack_encode_4octet(s, &enc) == 0,
+              "label_stack_encode_4octet returns 0");
+        check(enc.len == 12, "label_stack_encode_4octet = 12 bytes");
+
+        lr_mpls_label_stack_t dec = NULL;
+        check(lr_mpls_label_stack_decode_4octet(enc.ptr, enc.len, &dec) == 0,
+              "label_stack_decode_4octet returns 0");
+        check(dec != NULL, "label_stack_decode_4octet sets *out");
+        check(lr_mpls_label_stack_len(dec) == 3, "decoded len = 3");
+
+        uint32_t last_v = 0;
+        check(lr_mpls_label_stack_at(dec, 2, &last_v, &tc, &ttl) == 0,
+              "label_stack_at(2) returns 0");
+        check(last_v == 1048575, "decoded At(2).value = 1048575");
+
+        lr_bytes_free(&enc);
+        lr_mpls_label_stack_free(s);
+        lr_mpls_label_stack_free(dec);
+
+        /* Stack from labels — round-trip through 3-octet NLRI form. */
+        lr_mpls_label_spec_t specs[2] = {
+            {16, 0, 0},
+            {240, 0, 0},
+        };
+        lr_mpls_label_stack_t s2 =
+            lr_mpls_label_stack_from_labels(specs, 2);
+        check(s2 != NULL, "label_stack_from_labels returns non-NULL");
+        lr_bytes_t enc2 = {NULL, 0, 0};
+        check(lr_mpls_label_stack_encode_3octet(s2, &enc2) == 0,
+              "label_stack_encode_3octet returns 0");
+        check(enc2.len == 6, "label_stack_encode_3octet = 6 bytes");
+
+        lr_mpls_label_stack_t dec2 = NULL;
+        check(lr_mpls_label_stack_decode_3octet(enc2.ptr, enc2.len, &dec2) == 0,
+              "label_stack_decode_3octet returns 0");
+        check(lr_mpls_label_stack_len(dec2) == 2, "decoded 3-octet len = 2");
+
+        lr_bytes_free(&enc2);
+        lr_mpls_label_stack_free(s2);
+        lr_mpls_label_stack_free(dec2);
+
+        /* push / pop semantics. */
+        lr_mpls_label_stack_t s3 = lr_mpls_label_stack_new();
+        lr_mpls_label_t top = lr_mpls_label_new(100);
+        check(lr_mpls_label_stack_push(s3, top) == 0, "push(top) returns 0");
+        lr_mpls_label_t bot = lr_mpls_label_new(200);
+        check(lr_mpls_label_stack_push_bottom(s3, bot) == 0, "push_bottom returns 0");
+        check(lr_mpls_label_stack_len(s3) == 2, "after push: len = 2");
+
+        check(lr_mpls_label_stack_at(s3, 0, &v, &tc, &ttl) == 0, "At(0) returns 0");
+        check(v == 100, "top is 100");
+
+        check(lr_mpls_label_stack_pop(s3) == 1, "pop top returns 1");
+        check(lr_mpls_label_stack_len(s3) == 1, "after pop: len = 1");
+        check(lr_mpls_label_stack_at(s3, 0, &v, &tc, &ttl) == 0, "At(0) returns 0");
+        check(v == 200, "bottom is now at 0");
+
+        check(lr_mpls_label_stack_pop(s3) == 1, "pop bottom returns 1");
+        check(lr_mpls_label_stack_is_empty(s3) == 1, "after 2 pops: empty");
+        check(lr_mpls_label_stack_pop(s3) == 0, "pop on empty returns 0");
+
+        /* At() out of range returns LR_ERR_INVALID_HANDLE. */
+        check(lr_mpls_label_stack_at(s3, 0, &v, &tc, &ttl) == -2,
+              "At(0) on empty returns -2 (InvalidHandle)");
+
+        /* decode_4octet rejects uneven-length input. */
+        uint8_t bad[3] = {0, 1, 2};
+        lr_mpls_label_stack_t bad_out = NULL;
+        check(lr_mpls_label_stack_decode_4octet(bad, 3, &bad_out) == -6,
+              "decode_4octet rejects uneven length");
+
+        /* free handles NULL safely. */
+        lr_mpls_label_free(NULL);
+        lr_mpls_label_stack_free(NULL);
+
+        lr_mpls_label_stack_free(s3);
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

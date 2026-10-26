@@ -621,6 +621,117 @@ int main() {
         check(gr_events.empty(), "drain_ospf_grace_events: empty on fresh router");
     }
 
+    // ---- MPLS Label / LabelStack (RFC 3032 §2.1, RFC 8277 §2.2/§2.3) ----
+    {
+        auto l = make_label(100);
+        check(label_value(l) == 100, "label_value(100)");
+        check(label_tc(l) == 0, "label_tc defaults to 0");
+        check(label_ttl(l) == 64, "label_ttl defaults to 64");
+        check(!label_is_reserved(l), "label 100 is not reserved");
+
+        auto r0 = make_label(0);
+        check(label_is_reserved(r0), "label 0 is reserved");
+
+        bool threw = false;
+        try {
+            make_label_checked(0x100000);  // 1 << 20 = MAX + 1
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "make_label_checked rejects oversize value");
+
+        // with_tc / with_ttl chain (consumes the receiver).
+        auto l2 = make_label(0xFFFFF);
+        l2 = label_with_tc(l2, 7);
+        l2 = label_with_ttl(l2, 255);
+        check(label_tc(l2) == 7, "label_with_tc(7)");
+        check(label_ttl(l2) == 255, "label_with_ttl(255)");
+
+        auto l3 = make_label(16);
+        l3 = label_with_tc(l3, 0xFF);
+        check(label_tc(l3) == 0x07, "label_with_tc masks high bits");
+
+        // encode_3octet / encode_4octet on label 100 (TC=0, TTL=64).
+        auto l4 = make_label(100);
+        l4 = label_with_tc(l4, 0);
+        l4 = label_with_ttl(l4, 64);
+        auto e3 = label_encode_3octet(l4, true);
+        check(e3.size() == 3, "label_encode_3octet returns 3 bytes");
+        check(e3[0] == 0x00 && e3[1] == 0x06 && e3[2] == 0x41,
+              "label_encode_3octet(100, bottom) = 00 06 41");
+        auto e4 = label_encode_4octet(l4, true);
+        check(e4.size() == 4, "label_encode_4octet returns 4 bytes");
+        check(e4[0] == 0x00 && e4[1] == 0x06 && e4[2] == 0x41 && e4[3] == 0x40,
+              "label_encode_4octet(100, bottom) = 00 06 41 40");
+
+        // Stack from values — round-trip through 4-octet wire form.
+        auto s = make_label_stack_from_values({16, 240, 1048575});
+        check(label_stack_len(s) == 3, "label_stack_len = 3");
+        check(!label_stack_is_empty(s), "label_stack not empty");
+        auto mid = label_stack_at(s, 1);
+        check(mid.value == 240, "label_stack_at(1).value = 240");
+
+        auto enc = label_stack_encode_4octet(s);
+        check(lr_bytes_len(enc.get()) == 12, "label_stack_encode_4octet = 12 bytes");
+
+        auto dec = decode_label_stack_4octet(lr_bytes_ptr(enc.get()), lr_bytes_len(enc.get()));
+        check(label_stack_len(dec) == 3, "decoded label_stack_len = 3");
+        auto last = label_stack_at(dec, 2);
+        check(last.value == 1048575, "decoded At(2).value = 1048575");
+
+        // Stack from labels — round-trip through 3-octet NLRI form.
+        std::vector<MplsLabelSpec> specs = {
+            {16, 0, 0},
+            {240, 0, 0},
+        };
+        auto s2 = make_label_stack_from_labels(specs);
+        auto enc2 = label_stack_encode_3octet(s2);
+        check(lr_bytes_len(enc2.get()) == 6, "label_stack_encode_3octet = 6 bytes");
+        auto dec2 = decode_label_stack_3octet(lr_bytes_ptr(enc2.get()), lr_bytes_len(enc2.get()));
+        check(label_stack_len(dec2) == 2, "decoded 3-octet label_stack_len = 2");
+
+        // push / pop semantics.
+        auto s3 = make_label_stack();
+        auto top = make_label(100);
+        label_stack_push(s3, top);
+        auto bot = make_label(200);
+        label_stack_push_bottom(s3, bot);
+        check(label_stack_len(s3) == 2, "after push: len = 2");
+        check(label_stack_at(s3, 0).value == 100, "top is 100");
+
+        check(label_stack_pop(s3), "pop top returns true");
+        check(label_stack_len(s3) == 1, "after pop: len = 1");
+        check(label_stack_at(s3, 0).value == 200, "bottom is now at 0");
+
+        check(label_stack_pop(s3), "pop bottom returns true");
+        check(label_stack_is_empty(s3), "after 2 pops: empty");
+        check(!label_stack_pop(s3), "pop on empty stack returns false");
+
+        // At() out of range throws.
+        threw = false;
+        try {
+            (void)label_stack_at(s3, 0);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "label_stack_at out-of-range throws");
+
+        // decode_4octet rejects uneven-length input.
+        threw = false;
+        try {
+            (void)decode_label_stack_4octet(std::vector<std::uint8_t>{0, 1, 2});
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "decode_label_stack_4octet rejects uneven length");
+
+        // label_stack_labels returns all specs.
+        auto s4 = make_label_stack_from_values({16, 240, 1048575});
+        auto all = label_stack_labels(s4);
+        check(all.size() == 3, "label_stack_labels returns 3 specs");
+        check(all[2].value == 1048575, "label_stack_labels[2].value = 1048575");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");
