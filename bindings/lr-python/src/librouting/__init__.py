@@ -27,6 +27,7 @@ from .codec import (
     encode_update_announce_v4,
     encode_update_withdraw_v4,
 )
+from .mpls import Label, LabelSpec, LabelStack
 from .policy import (
     EVAL_DENY,
     EVAL_FALLTHROUGH,
@@ -151,6 +152,10 @@ __all__ = [
     "SESSION_KIND_OSPF",
     "SESSION_KIND_OSPF3",
     "SESSION_KIND_BABEL",
+    # MPLS Label / LabelStack codec (RFC 3032 §2.1, RFC 8277 §2.2/§2.3).
+    "Label",
+    "LabelSpec",
+    "LabelStack",
 ]
 
 # The single source of truth for the package version: pyproject.toml reads

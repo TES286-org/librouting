@@ -520,6 +520,51 @@ int32_t lr_filter_evaluate(lr_filter_t filter,
                            const struct lr_filter_context_t *ctx,
                            int32_t *out_verdict,
                            lr_bytes_t *out_reason);
+
+/* MPLS label and label-stack codec (RFC 3032 §2.1, RFC 8277 §2.2/§2.3).
+ * Mirrors the public Rust API of lr_mpls::{Label, LabelStack} and the
+ * lr_mpls_* symbols in lr_ffi.h. */
+typedef struct OpaqueMplsLabel OpaqueMplsLabel;
+typedef struct OpaqueMplsLabel *lr_mpls_label_t;
+typedef struct OpaqueMplsLabelStack OpaqueMplsLabelStack;
+typedef struct OpaqueMplsLabelStack *lr_mpls_label_stack_t;
+
+struct lr_mpls_label_spec_t {
+    uint32_t value;
+    uint8_t tc;
+    uint8_t ttl;
+};
+
+lr_mpls_label_t lr_mpls_label_new(uint32_t value);
+lr_mpls_label_t lr_mpls_label_new_checked(uint32_t value);
+lr_mpls_label_t lr_mpls_label_with_tc(lr_mpls_label_t label, uint8_t tc);
+lr_mpls_label_t lr_mpls_label_with_ttl(lr_mpls_label_t label, uint8_t ttl);
+uint32_t lr_mpls_label_value(lr_mpls_label_t label);
+uint8_t lr_mpls_label_tc(lr_mpls_label_t label);
+uint8_t lr_mpls_label_ttl(lr_mpls_label_t label);
+uint8_t lr_mpls_label_is_reserved(lr_mpls_label_t label);
+int32_t lr_mpls_label_encode_3octet(lr_mpls_label_t label, uint8_t bottom, uint8_t *out);
+int32_t lr_mpls_label_encode_4octet(lr_mpls_label_t label, uint8_t bottom, uint8_t *out);
+void lr_mpls_label_free(lr_mpls_label_t label);
+
+lr_mpls_label_stack_t lr_mpls_label_stack_new(void);
+lr_mpls_label_stack_t lr_mpls_label_stack_from_values(const uint32_t *values, uintptr_t count);
+lr_mpls_label_stack_t lr_mpls_label_stack_from_labels(const struct lr_mpls_label_spec_t *labels, uintptr_t count);
+int32_t lr_mpls_label_stack_decode_4octet(const uint8_t *data, uintptr_t len, lr_mpls_label_stack_t *out);
+int32_t lr_mpls_label_stack_decode_3octet(const uint8_t *data, uintptr_t len, lr_mpls_label_stack_t *out);
+int32_t lr_mpls_label_stack_encode_4octet(lr_mpls_label_stack_t stack, lr_bytes_t *out);
+int32_t lr_mpls_label_stack_encode_3octet(lr_mpls_label_stack_t stack, lr_bytes_t *out);
+uintptr_t lr_mpls_label_stack_len(lr_mpls_label_stack_t stack);
+uint8_t lr_mpls_label_stack_is_empty(lr_mpls_label_stack_t stack);
+int32_t lr_mpls_label_stack_at(lr_mpls_label_stack_t stack,
+                               uintptr_t index,
+                               uint32_t *out_value,
+                               uint8_t *out_tc,
+                               uint8_t *out_ttl);
+int32_t lr_mpls_label_stack_push(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
+int32_t lr_mpls_label_stack_push_bottom(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
+int32_t lr_mpls_label_stack_pop(lr_mpls_label_stack_t stack);
+void lr_mpls_label_stack_free(lr_mpls_label_stack_t stack);
 """
 
 
