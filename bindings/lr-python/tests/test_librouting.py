@@ -602,6 +602,61 @@ def test_policy_objects():
     assert pid == 0
 
 
+def test_route_attribute_readers_and_replacers():
+    """Round-trip coverage for the Route readers and bulk replacers that
+    were previously asymmetric with the C ABI (defects.txt L242):
+    ``next_hop`` / ``origin`` / ``tag`` readers, and
+    ``set_large_communities`` / ``set_ext_communities`` /
+    ``ext_communities``."""
+    rt = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+
+    # next_hop: absent by default; v4 round-trip; v6 round-trip.
+    assert rt.next_hop() is None
+    rt.set_next_hop(bytes([198, 51, 100, 1]))
+    assert rt.next_hop() == bytes([198, 51, 100, 1])
+    v6 = bytes([0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+    rt.set_next_hop(v6)
+    assert rt.next_hop() == v6
+
+    # origin: absent by default; IGP / EGP / INCOMPLETE round-trip.
+    assert rt.origin() is None
+    for value in (0, 1, 2):
+        rt.set_origin(value)
+        assert rt.origin() == value
+
+    # set_large_communities replaces the whole attribute.
+    rt.set_large_communities([4200000000, 7, 9, 4200000001, 8, 10])
+    assert rt.large_communities() == [4200000000, 7, 9, 4200000001, 8, 10]
+    # An empty list drops the attribute.
+    rt.set_large_communities([])
+    assert rt.large_communities() == []
+    # Triples must come in groups of three.
+    try:
+        rt.set_large_communities([1, 2])
+        raise AssertionError("odd triples must be rejected")
+    except librouting.LrError:
+        pass
+
+    # ext_communities: set/round-trip.
+    rt.set_ext_communities([(0x42, 0x02, 64512, 5), (0x01, 0x01, 65000, 100)])
+    assert rt.ext_communities() == [(0x42, 0x02, 64512, 5), (0x01, 0x01, 65000, 100)]
+    # Empty drops.
+    rt.set_ext_communities([])
+    assert rt.ext_communities() == []
+
+    # tag: None when absent; set/clear round-trip.
+    assert rt.tag() is None
+    rt.set_tag(3735928559)
+    assert rt.tag() == 3735928559
+    rt.set_tag(None)
+    assert rt.tag() is None
+    # A zero tag set with has_tag=1 is still present.
+    rt.set_tag(0)
+    assert rt.tag() == 0
+    rt.set_tag(None)
+    assert rt.tag() is None
+
+
 def test_filter_dsl():
     f = librouting.compile_filter("py-f", "if bgp.local_pref >= 200 then { accept; } else { reject with \"low\"; }")
     assert f.name() == "py-f"

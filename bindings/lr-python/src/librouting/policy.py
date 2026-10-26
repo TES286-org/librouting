@@ -120,6 +120,21 @@ class Route:
         if rc != 0:
             raise LrError(f"lr_route_set_next_hop failed (rc={rc}): {last_error()}")
 
+    def next_hop(self) -> bytes | None:
+        """Read the route's next hop (RFC 4271 §5.1.3). Returns the
+        4- or 16-byte address, or ``None`` when the attribute is
+        absent. The address length signals the family: 4 bytes for
+        IPv4, 16 bytes for IPv6."""
+        buf = ffi.new("uint8_t[16]")
+        is_v6 = ffi.new("int32_t*")
+        rc = get_lib().lr_route_next_hop(self._ptr, buf, is_v6)
+        if rc == 1:
+            return None
+        if rc != 0:
+            raise LrError(f"lr_route_next_hop failed (rc={rc}): {last_error()}")
+        n = 16 if is_v6[0] else 4
+        return bytes(buf[0:n])
+
     def set_local_pref(self, value: int) -> None:
         rc = get_lib().lr_route_set_local_pref(self._ptr, int(value))
         if rc != 0:
@@ -152,6 +167,17 @@ class Route:
         rc = get_lib().lr_route_set_origin(self._ptr, int(origin))
         if rc != 0:
             raise LrError(f"lr_route_set_origin failed (rc={rc}): {last_error()}")
+
+    def origin(self) -> int | None:
+        """Read the BGP ORIGIN (RFC 4271 §5.1.1): 0 IGP, 1 EGP, 2
+        INCOMPLETE. Returns ``None`` when the attribute is absent."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_origin(self._ptr, out)
+        if rc == 1:
+            return None
+        if rc != 0:
+            raise LrError(f"lr_route_origin failed (rc={rc}): {last_error()}")
+        return int(out[0])
 
     def set_as_path(self, asns: list[int]) -> None:
         arr = ffi.new("uint32_t[]", [int(a) for a in asns]) if asns else ffi.NULL
@@ -210,12 +236,55 @@ class Route:
             raise LrError(f"lr_route_large_communities failed (rc={rc}): {last_error()}")
         return list(out)
 
+    def set_large_communities(self, triples: list[int]) -> None:
+        """Replace the LARGE_COMMUNITIES attribute (RFC 8092) from a
+        flat ``[g1, d1_1, d1_2, g2, d2_1, d2_2, ...]`` list. An empty
+        list drops the attribute. ``len(triples)`` must be a multiple
+        of three; each triple is ``(global_admin, local_data1,
+        local_data2)``."""
+        if len(triples) % 3 != 0:
+            raise LrError("large communities triples must come in groups of three")
+        arr = ffi.new("uint32_t[]", [int(v) for v in triples]) if triples else ffi.NULL
+        # The C ABI takes the entry count, not the u32 count.
+        rc = get_lib().lr_route_set_large_communities(self._ptr, arr, len(triples) // 3)
+        if rc != 0:
+            raise LrError(f"lr_route_set_large_communities failed (rc={rc}): {last_error()}")
+
     def add_ext_community(self, kind: int, subtype: int, global_: int, local: int) -> None:
         rc = get_lib().lr_route_add_ext_community(
             self._ptr, int(kind), int(subtype), int(global_), int(local)
         )
         if rc != 0:
             raise LrError(f"lr_route_add_ext_community failed (rc={rc}): {last_error()}")
+
+    def ext_communities(self) -> list[tuple[int, int, int, int]]:
+        """Read the EXTENDED_COMMUNITIES attribute (RFC 4360). Each
+        element is a ``(kind, subtype, global, local)`` tuple mirroring
+        ``lr_ext_comm_t``."""
+        n = get_lib().lr_route_ext_communities(self._ptr, ffi.NULL, 0)
+        if n <= 0:
+            return []
+        out = ffi.new("struct lr_ext_comm_t[]", n)
+        rc = get_lib().lr_route_ext_communities(self._ptr, out, n)
+        if rc < 0:
+            raise LrError(f"lr_route_ext_communities failed (rc={rc}): {last_error()}")
+        # `global` is a Python keyword; go through getattr for the field.
+        return [(int(e.kind), int(e.subtype), int(getattr(e, "global")), int(e.local)) for e in out]
+
+    def set_ext_communities(self, items: list[tuple[int, int, int, int]]) -> None:
+        """Replace the EXTENDED_COMMUNITIES attribute (RFC 4360) from a
+        list of ``(kind, subtype, global, local)`` tuples. An empty list
+        drops the attribute."""
+        arr = ffi.new("struct lr_ext_comm_t[]", len(items)) if items else ffi.NULL
+        for i, item in enumerate(items):
+            kind, subtype, global_, local = item
+            arr[i].kind = int(kind)
+            arr[i].subtype = int(subtype)
+            setattr(arr[i], "global", int(global_))
+            arr[i].local = int(local)
+        rc = get_lib().lr_route_set_ext_communities(self._ptr, arr, len(items))
+        if rc != 0:
+            raise LrError(f"lr_route_set_ext_communities failed (rc={rc}): {last_error()}")
 
     def set_metric(self, value: int) -> None:
         rc = get_lib().lr_route_set_metric(self._ptr, int(value))
@@ -233,6 +302,17 @@ class Route:
         rc = get_lib().lr_route_set_tag(self._ptr, 0 if tag is None else 1, int(tag or 0))
         if rc != 0:
             raise LrError(f"lr_route_set_tag failed (rc={rc}): {last_error()}")
+
+    def tag(self) -> int | None:
+        """Read the operator route tag. Returns ``None`` when the tag is
+        absent (the route was created without calling ``set_tag``)."""
+        out = ffi.new("uint32_t*")
+        rc = get_lib().lr_route_tag(self._ptr, out)
+        if rc == 1:
+            return None
+        if rc != 0:
+            raise LrError(f"lr_route_tag failed (rc={rc}): {last_error()}")
+        return int(out[0])
 
 
 class PrefixList:
