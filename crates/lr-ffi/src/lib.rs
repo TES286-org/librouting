@@ -22,6 +22,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::drop_non_drop)]
 
+pub mod bfd;
+pub mod bmp;
 pub mod bytes;
 pub mod codec;
 pub mod error;
@@ -30,6 +32,7 @@ pub mod filters;
 pub mod handle;
 pub mod inspection;
 pub mod mpls;
+pub mod mrt;
 pub mod policy;
 pub mod policy_objects;
 pub mod roa_store;
