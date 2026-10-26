@@ -108,4 +108,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/bfd.rs");
     println!("cargo:rerun-if-changed=src/bmp.rs");
     println!("cargo:rerun-if-changed=src/mrt.rs");
+    println!("cargo:rerun-if-changed=src/core.rs");
 }

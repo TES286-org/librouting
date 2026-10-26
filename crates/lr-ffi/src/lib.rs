@@ -26,6 +26,7 @@ pub mod bfd;
 pub mod bmp;
 pub mod bytes;
 pub mod codec;
+pub mod core;
 pub mod error;
 pub mod events;
 pub mod filters;

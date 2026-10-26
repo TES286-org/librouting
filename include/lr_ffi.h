@@ -182,6 +182,23 @@
 
 #define LR_BGP_RR_SUBTYPE_EORR 2
 
+/**
+ * Repr-C Protocol constants (mirrors `lr_core::rib::Protocol`).
+ */
+#define LR_PROTOCOL_BGP 0
+
+#define LR_PROTOCOL_OSPFV2 1
+
+#define LR_PROTOCOL_OSPFV3 2
+
+#define LR_PROTOCOL_BABEL 3
+
+#define LR_PROTOCOL_STATIC 4
+
+#define LR_PROTOCOL_CONNECTED 5
+
+#define LR_PROTOCOL_OTHER 6
+
 
 
 /**
@@ -387,14 +404,24 @@ typedef struct lr_bmp_tlv_t {
 } lr_bmp_tlv_t;
 
 /**
- * One IPv4/IPv6 prefix (embedder-side). IPv4 addresses go in the
- * first four bytes of `addr` with `is_ipv6 = 0`; IPv6 uses all
- * sixteen bytes with `is_ipv6 = 1` — the same convention as
- * `lr_roa_entry_t`.
+ * Repr-C IpAddr. Carries a `is_ipv6` flag plus 16 bytes (IPv4 occupies
+ * the last 4; the first 12 are zero).
+ */
+typedef struct lr_ip_addr_t {
+  uint8_t is_ipv6;
+  /**
+   * Always 16 bytes; v4 occupies the last 4 (the first 12 are zero
+   * so the address reads as an IPv4-mapped IPv6 in the standard
+   * `::ffff:a.b.c.d` form when interpreted as IPv6).
+   */
+  uint8_t octets[16];
+} lr_ip_addr_t;
+
+/**
+ * Repr-C Prefix. Mirrors `lr_core::addr::Prefix`.
  */
 typedef struct lr_prefix_t {
-  uint8_t addr[16];
-  uint8_t is_ipv6;
+  struct lr_ip_addr_t addr;
   uint8_t prefix_len;
 } lr_prefix_t;
 
@@ -406,6 +433,20 @@ typedef struct OpaqueBgpMessage {
 } OpaqueBgpMessage;
 
 typedef struct OpaqueBgpMessage *lr_bgp_message_t;
+
+/**
+ * Repr-C Asn. Mirrors `lr_core::addr::Asn(pub u32)`.
+ */
+typedef struct lr_asn_t {
+  uint32_t value;
+} lr_asn_t;
+
+/**
+ * Repr-C RouterId. Mirrors `lr_core::addr::RouterId(pub u32)`.
+ */
+typedef struct lr_router_id_t {
+  uint32_t value;
+} lr_router_id_t;
 
 /**
  * Opaque router handle. C side never touches internals.
@@ -1731,6 +1772,151 @@ int32_t lr_bgp_message_update_attr_at(lr_bgp_message_t m,
                                       uint8_t *out_type,
                                       uint8_t *out_flags,
                                       struct lr_bytes_t *out_value);
+
+/**
+ * Construct an IPv4 `lr_ip_addr_t` from 4 octets.
+ *
+ * # Safety
+ * `octets` must point to 4 readable bytes.
+ */
+struct lr_ip_addr_t lr_ip_addr_v4(const uint8_t *octets);
+
+/**
+ * Construct an IPv6 `lr_ip_addr_t` from 16 octets.
+ *
+ * # Safety
+ * `octets` must point to 16 readable bytes.
+ */
+struct lr_ip_addr_t lr_ip_addr_v6(const uint8_t *octets);
+
+/**
+ * 1 when `addr` is IPv4, 0 when IPv6 (or zero-initialized default).
+ */
+uint8_t lr_ip_addr_is_ipv4(struct lr_ip_addr_t addr);
+
+/**
+ * 1 when `addr` is IPv6.
+ */
+uint8_t lr_ip_addr_is_ipv6(struct lr_ip_addr_t addr);
+
+/**
+ * 1 when `addr` is the unspecified address (0.0.0.0 or ::).
+ */
+uint8_t lr_ip_addr_is_unspecified(struct lr_ip_addr_t addr);
+
+/**
+ * 1 when `addr` is a multicast address (224.0.0.0/4 or ff00::/8).
+ */
+uint8_t lr_ip_addr_is_multicast(struct lr_ip_addr_t addr);
+
+/**
+ * Copy the address's octets into the caller-supplied buffer. For IPv4
+ * the buffer needs 4 bytes; for IPv6, 16 bytes. Returns the number of
+ * bytes written.
+ *
+ * # Safety
+ * `out` must point to at least `cap` writable bytes.
+ */
+uintptr_t lr_ip_addr_octets(struct lr_ip_addr_t addr, uint8_t *out, uintptr_t cap);
+
+/**
+ * Construct an IPv4 prefix from 4 octets + prefix length.
+ *
+ * # Safety
+ * `octets` must point to 4 readable bytes.
+ */
+struct lr_prefix_t lr_prefix_v4(const uint8_t *octets, uint8_t prefix_len);
+
+/**
+ * Construct an IPv6 prefix from 16 octets + prefix length.
+ *
+ * # Safety
+ * `octets` must point to 16 readable bytes.
+ */
+struct lr_prefix_t lr_prefix_v6(const uint8_t *octets, uint8_t prefix_len);
+
+/**
+ * 1 when `prefix` is IPv4.
+ */
+uint8_t lr_prefix_is_ipv4(struct lr_prefix_t prefix);
+
+/**
+ * 1 when `prefix` is IPv6.
+ */
+uint8_t lr_prefix_is_ipv6(struct lr_prefix_t prefix);
+
+/**
+ * 1 when `addr` falls within `prefix` (RFC 4632 §3.1 — bit-level
+ * containment, not byte-level).
+ */
+uint8_t lr_prefix_contains(struct lr_prefix_t prefix, struct lr_ip_addr_t addr);
+
+/**
+ * 1 when `inner` falls within `outer` (bit-level containment).
+ */
+uint8_t lr_prefix_contains_prefix(struct lr_prefix_t outer, struct lr_prefix_t inner);
+
+/**
+ * Compute the network address (host bits zeroed). The result is
+ * written into `*out`.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_ip_addr_t`.
+ */
+int32_t lr_prefix_network(struct lr_prefix_t prefix, struct lr_ip_addr_t *out);
+
+/**
+ * Construct an Asn from a u32 value.
+ */
+struct lr_asn_t lr_asn_new(uint32_t value);
+
+/**
+ * 1 when the ASN is RFC 6996 private range (64512..=65534 or
+ * 4200000000..=4294967294).
+ */
+uint8_t lr_asn_is_private(struct lr_asn_t asn);
+
+/**
+ * 1 when the ASN is AS_TRANS (23456, RFC 6793 §4.2.3 — the
+ * placeholder for 4-byte ASes on a 2-byte session).
+ */
+uint8_t lr_asn_is_as_trans(struct lr_asn_t asn);
+
+/**
+ * Construct a RouterId from a u32.
+ */
+struct lr_router_id_t lr_router_id_from_u32(uint32_t value);
+
+/**
+ * Construct a RouterId from 4 IPv4 octets (e.g. `[10, 0, 0, 1]`).
+ *
+ * # Safety
+ * `octets` must point to 4 readable bytes.
+ */
+struct lr_router_id_t lr_router_id_from_v4(const uint8_t *octets);
+
+/**
+ * Write the RouterId's 4 IPv4 octets into `out_octets`.
+ *
+ * # Safety
+ * `out_octets` must point to 4 writable bytes.
+ */
+int32_t lr_router_id_to_v4_bytes(struct lr_router_id_t rid, uint8_t *out_octets);
+
+/**
+ * Read the BIRD-style name of a `LR_PROTOCOL_*` constant (e.g.
+ * `"bgp"`, `"ospf"`). Writes a NUL-terminated string into `out_name`.
+ *
+ * # Safety
+ * `out_name` must point to at least `name_cap` writable bytes.
+ */
+uintptr_t lr_protocol_bird_name(uint8_t proto, char *out_name, uintptr_t name_cap);
+
+/**
+ * Read the default administrative distance for a `LR_PROTOCOL_*`
+ * constant (e.g. 20 for BGP eBGP, 110 for OSPF).
+ */
+uint32_t lr_protocol_default_admin_distance(uint8_t proto);
 
 /**
  * Get the last error message. Returned string is NUL-terminated UTF-8.
