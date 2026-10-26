@@ -1837,4 +1837,182 @@ inline Bytes label_stack_encode_3octet(const MplsLabelStack& s) {
     return Bytes(out.release());
 }
 
+// ---------------------------------------------------------------------------
+// BFD Control packet (RFC 5880 §4.1)
+//
+// Mirrors the public Rust API of lr_bfd::{BfdCodec, BfdPacket, State,
+// Diagnostic, PacketFlags} and the lr_bfd_* C ABI surface.
+// ---------------------------------------------------------------------------
+
+namespace bfd_state {
+constexpr std::uint8_t kAdminDown = LR_BFD_STATE_ADMIN_DOWN;
+constexpr std::uint8_t kDown = LR_BFD_STATE_DOWN;
+constexpr std::uint8_t kInit = LR_BFD_STATE_INIT;
+constexpr std::uint8_t kUp = LR_BFD_STATE_UP;
+}  // namespace bfd_state
+
+namespace bfd_diag {
+constexpr std::uint8_t kNone = LR_BFD_DIAG_NONE;
+constexpr std::uint8_t kCtrlExpired = LR_BFD_DIAG_CTRL_EXPIRED;
+constexpr std::uint8_t kEchoFailed = LR_BFD_DIAG_ECHO_FAILED;
+constexpr std::uint8_t kNeighborSignaled = LR_BFD_DIAG_NEIGHBOR_SIGNALLED;
+constexpr std::uint8_t kFwdReset = LR_BFD_DIAG_FWD_RESET;
+constexpr std::uint8_t kPathDown = LR_BFD_DIAG_PATH_DOWN;
+constexpr std::uint8_t kConcatPathDown = LR_BFD_DIAG_CONCAT_PATH_DOWN;
+constexpr std::uint8_t kAdminDown = LR_BFD_DIAG_ADMIN_DOWN;
+constexpr std::uint8_t kRevPathDown = LR_BFD_DIAG_REV_PATH_DOWN;
+constexpr std::uint8_t kMisConnDefect = LR_BFD_DIAG_MISCONN_DEFECT;
+}  // namespace bfd_diag
+
+struct BfdPacketDeleter {
+    void operator()(lr_bfd_packet_t p) const noexcept {
+        if (p) lr_bfd_packet_free(p);
+    }
+};
+
+/// RAII handle to a BFD Control packet.
+using BfdPacket = std::unique_ptr<OpaqueBfdPacket, BfdPacketDeleter>;
+
+/// Construct an empty BFD packet with sensible defaults (state=Down,
+/// diag=None, detect_mult=3, intervals=1s, no auth).
+inline BfdPacket make_bfd_packet() {
+    auto p = lr_bfd_packet_new();
+    if (!p) throw Error("lr_bfd_packet_new returned null");
+    return BfdPacket(p);
+}
+
+/// Construct an "Up" heartbeat packet.
+inline BfdPacket make_bfd_heartbeat(std::uint32_t my_disc, std::uint32_t your_disc) {
+    auto p = lr_bfd_packet_heartbeat(my_disc, your_disc);
+    if (!p) throw Error("lr_bfd_packet_heartbeat returned null");
+    return BfdPacket(p);
+}
+
+inline std::uint8_t bfd_packet_version(const BfdPacket& p) {
+    return lr_bfd_packet_version(p.get());
+}
+inline std::uint8_t bfd_packet_diag(const BfdPacket& p) {
+    return lr_bfd_packet_diag(p.get());
+}
+inline std::uint8_t bfd_packet_state(const BfdPacket& p) {
+    return lr_bfd_packet_state(p.get());
+}
+inline std::uint8_t bfd_packet_flags(const BfdPacket& p) {
+    return lr_bfd_packet_flags(p.get());
+}
+inline std::uint8_t bfd_packet_detect_mult(const BfdPacket& p) {
+    return lr_bfd_packet_detect_mult(p.get());
+}
+inline std::uint32_t bfd_packet_my_discriminator(const BfdPacket& p) {
+    return lr_bfd_packet_my_discriminator(p.get());
+}
+inline std::uint32_t bfd_packet_your_discriminator(const BfdPacket& p) {
+    return lr_bfd_packet_your_discriminator(p.get());
+}
+inline std::uint32_t bfd_packet_desired_min_tx_interval(const BfdPacket& p) {
+    return lr_bfd_packet_desired_min_tx_interval(p.get());
+}
+inline std::uint32_t bfd_packet_required_min_rx_interval(const BfdPacket& p) {
+    return lr_bfd_packet_required_min_rx_interval(p.get());
+}
+inline std::uint32_t bfd_packet_required_min_echo_interval(const BfdPacket& p) {
+    return lr_bfd_packet_required_min_echo_interval(p.get());
+}
+inline std::uint8_t bfd_packet_length(const BfdPacket& p) {
+    return lr_bfd_packet_length(p.get());
+}
+
+inline void bfd_packet_set_diag(BfdPacket& p, std::uint8_t diag) {
+    std::int32_t rc = lr_bfd_packet_set_diag(p.get(), diag);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_diag failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_state(BfdPacket& p, std::uint8_t state) {
+    std::int32_t rc = lr_bfd_packet_set_state(p.get(), state);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_state failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_flags(BfdPacket& p, std::uint8_t flags) {
+    std::int32_t rc = lr_bfd_packet_set_flags(p.get(), flags);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_flags failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_detect_mult(BfdPacket& p, std::uint8_t mult) {
+    std::int32_t rc = lr_bfd_packet_set_detect_mult(p.get(), mult);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_detect_mult failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_my_discriminator(BfdPacket& p, std::uint32_t disc) {
+    std::int32_t rc = lr_bfd_packet_set_my_discriminator(p.get(), disc);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_my_discriminator failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_your_discriminator(BfdPacket& p, std::uint32_t disc) {
+    std::int32_t rc = lr_bfd_packet_set_your_discriminator(p.get(), disc);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_your_discriminator failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_desired_min_tx_interval(BfdPacket& p, std::uint32_t interval) {
+    std::int32_t rc = lr_bfd_packet_set_desired_min_tx_interval(p.get(), interval);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_desired_min_tx_interval failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_required_min_rx_interval(BfdPacket& p, std::uint32_t interval) {
+    std::int32_t rc = lr_bfd_packet_set_required_min_rx_interval(p.get(), interval);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_required_min_rx_interval failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_packet_set_required_min_echo_interval(BfdPacket& p, std::uint32_t interval) {
+    std::int32_t rc = lr_bfd_packet_set_required_min_echo_interval(p.get(), interval);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_required_min_echo_interval failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// Encode the packet to its wire form (24 bytes + auth).
+inline Bytes bfd_packet_encode(const BfdPacket& p) {
+    auto out = std::make_unique<lr_bytes_t>();
+    std::int32_t rc = lr_bfd_encode(p.get(), out.get());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_encode failed: " + std::string(err ? err : "unknown"));
+    }
+    return Bytes(out.release());
+}
+
+/// Decode one BFD Control packet from raw bytes.
+inline BfdPacket decode_bfd_packet(const std::uint8_t* data, std::size_t len) {
+    lr_bfd_packet_t p = nullptr;
+    std::int32_t rc = lr_bfd_decode(data, len, &p);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_decode failed: " + std::string(err ? err : "unknown"));
+    }
+    if (!p) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_decode returned null: " + std::string(err ? err : "unknown"));
+    }
+    return BfdPacket(p);
+}
+inline BfdPacket decode_bfd_packet(const std::vector<std::uint8_t>& bytes) {
+    return decode_bfd_packet(bytes.data(), bytes.size());
+}
+
 } // namespace librouting

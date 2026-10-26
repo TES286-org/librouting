@@ -732,6 +732,50 @@ int main() {
         check(all[2].value == 1048575, "label_stack_labels[2].value = 1048575");
     }
 
+    // ---- BFD Control packet (RFC 5880 §4.1) ----
+    {
+        auto p = make_bfd_packet();
+        check(bfd_packet_version(p) == 1, "bfd_packet_version = 1");
+        check(bfd_packet_state(p) == bfd_state::kDown, "default state = Down");
+        check(bfd_packet_detect_mult(p) == 3, "default detect_mult = 3");
+        check(bfd_packet_desired_min_tx_interval(p) == 1'000'000, "default tx_interval = 1s");
+        check(bfd_packet_length(p) == 24, "default length = 24");
+
+        auto hb = make_bfd_heartbeat(0xDEADBEEF, 0xCAFEBABE);
+        check(bfd_packet_state(hb) == bfd_state::kUp, "heartbeat state = Up");
+        check(bfd_packet_my_discriminator(hb) == 0xDEADBEEF, "heartbeat my_disc");
+        check(bfd_packet_your_discriminator(hb) == 0xCAFEBABE, "heartbeat your_disc");
+
+        // Setters.
+        bfd_packet_set_diag(p, bfd_diag::kCtrlExpired);
+        bfd_packet_set_state(p, bfd_state::kUp);
+        bfd_packet_set_flags(p, 0x20);  // Poll bit
+        bfd_packet_set_detect_mult(p, 5);
+        bfd_packet_set_my_discriminator(p, 0xAABBCCDD);
+        check(bfd_packet_diag(p) == bfd_diag::kCtrlExpired, "set_diag");
+        check(bfd_packet_state(p) == bfd_state::kUp, "set_state");
+        check(bfd_packet_flags(p) == 0x20, "set_flags");
+        check(bfd_packet_detect_mult(p) == 5, "set_detect_mult");
+        check(bfd_packet_my_discriminator(p) == 0xAABBCCDD, "set_my_disc");
+
+        // SetState clamps invalid values.
+        bfd_packet_set_state(p, 99);
+        check(bfd_packet_state(p) == bfd_state::kAdminDown, "invalid state clamps to AdminDown");
+
+        // SetFlags masks reserved bits.
+        bfd_packet_set_flags(p, 0xFF);
+        check(bfd_packet_flags(p) == 0x3f, "reserved flag bits masked");
+
+        // Encode/decode roundtrip.
+        auto hb2 = make_bfd_heartbeat(0xDEADBEEF, 0xCAFEBABE);
+        auto enc = bfd_packet_encode(hb2);
+        check(lr_bytes_len(enc.get()) == 24, "encoded length = 24");
+        auto dec = decode_bfd_packet(lr_bytes_ptr(enc.get()), lr_bytes_len(enc.get()));
+        check(bfd_packet_state(dec) == bfd_state::kUp, "decoded state = Up");
+        check(bfd_packet_my_discriminator(dec) == 0xDEADBEEF, "decoded my_disc");
+        check(bfd_packet_your_discriminator(dec) == 0xCAFEBABE, "decoded your_disc");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

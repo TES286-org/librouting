@@ -1094,6 +1094,73 @@ int main(void) {
         lr_mpls_label_stack_free(s3);
     }
 
+    /* ---- BFD Control packet (RFC 5880 §4.1) ---- */
+    {
+        lr_bfd_packet_t p = lr_bfd_packet_new();
+        check(p != NULL, "lr_bfd_packet_new returns non-NULL");
+        check(lr_bfd_packet_version(p) == 1, "BFD version = 1");
+        check(lr_bfd_packet_state(p) == LR_BFD_STATE_DOWN, "default state = Down");
+        check(lr_bfd_packet_detect_mult(p) == 3, "default detect_mult = 3");
+        check(lr_bfd_packet_desired_min_tx_interval(p) == 1000000,
+              "default tx_interval = 1s");
+        check(lr_bfd_packet_length(p) == 24, "default length = 24");
+        lr_bfd_packet_free(p);
+
+        lr_bfd_packet_t hb = lr_bfd_packet_heartbeat(0xDEADBEEF, 0xCAFEBABE);
+        check(hb != NULL, "heartbeat returns non-NULL");
+        check(lr_bfd_packet_state(hb) == LR_BFD_STATE_UP, "heartbeat state = Up");
+        check(lr_bfd_packet_my_discriminator(hb) == 0xDEADBEEF, "heartbeat my_disc");
+        check(lr_bfd_packet_your_discriminator(hb) == 0xCAFEBABE, "heartbeat your_disc");
+
+        /* Setters mutate in place. */
+        check(lr_bfd_packet_set_diag(hb, LR_BFD_DIAG_CTRL_EXPIRED) == 0, "set_diag");
+        check(lr_bfd_packet_set_state(hb, LR_BFD_STATE_UP) == 0, "set_state");
+        check(lr_bfd_packet_set_flags(hb, 0x20) == 0, "set_flags (Poll)");
+        check(lr_bfd_packet_set_detect_mult(hb, 5) == 0, "set_detect_mult");
+        check(lr_bfd_packet_set_my_discriminator(hb, 0xAABBCCDD) == 0, "set_my_disc");
+        check(lr_bfd_packet_diag(hb) == LR_BFD_DIAG_CTRL_EXPIRED, "diag = CtrlExpired");
+        check(lr_bfd_packet_state(hb) == LR_BFD_STATE_UP, "state = Up");
+        check(lr_bfd_packet_flags(hb) == 0x20, "flags = Poll");
+        check(lr_bfd_packet_detect_mult(hb) == 5, "detect_mult = 5");
+        check(lr_bfd_packet_my_discriminator(hb) == 0xAABBCCDD, "my_disc = 0xAABBCCDD");
+
+        /* SetState clamps invalid values to AdminDown. */
+        check(lr_bfd_packet_set_state(hb, 99) == 0, "set_state(99) returns 0");
+        check(lr_bfd_packet_state(hb) == LR_BFD_STATE_ADMIN_DOWN,
+              "invalid state clamps to AdminDown");
+
+        /* SetFlags masks reserved bits (M|D|A|C|F|P only). */
+        check(lr_bfd_packet_set_flags(hb, 0xFF) == 0, "set_flags(0xFF) returns 0");
+        check(lr_bfd_packet_flags(hb) == 0x3F, "reserved bits masked to 0x3F");
+
+        /* Encode/decode roundtrip. */
+        lr_bfd_packet_t hb2 = lr_bfd_packet_heartbeat(0xDEADBEEF, 0xCAFEBABE);
+        lr_bytes_t enc = {NULL, 0, 0};
+        check(lr_bfd_encode(hb2, &enc) == 0, "lr_bfd_encode returns 0");
+        check(enc.len == 24, "encoded length = 24");
+
+        lr_bfd_packet_t dec = NULL;
+        check(lr_bfd_decode(enc.ptr, enc.len, &dec) == 0, "lr_bfd_decode returns 0");
+        check(dec != NULL, "decode sets *out");
+        check(lr_bfd_packet_state(dec) == LR_BFD_STATE_UP, "decoded state = Up");
+        check(lr_bfd_packet_my_discriminator(dec) == 0xDEADBEEF, "decoded my_disc");
+        check(lr_bfd_packet_your_discriminator(dec) == 0xCAFEBABE, "decoded your_disc");
+
+        lr_bytes_free(&enc);
+        lr_bfd_packet_free(hb);
+        lr_bfd_packet_free(hb2);
+        lr_bfd_packet_free(dec);
+
+        /* free handles NULL safely. */
+        lr_bfd_packet_free(NULL);
+
+        /* decode rejects too-short input. */
+        uint8_t bad[3] = {0, 1, 2};
+        lr_bfd_packet_t bad_out = NULL;
+        check(lr_bfd_decode(bad, 3, &bad_out) < 0, "decode rejects too-short");
+        check(bad_out == NULL, "decode sets *out to NULL on failure");
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");
