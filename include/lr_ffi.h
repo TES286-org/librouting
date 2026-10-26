@@ -335,6 +335,16 @@
 
 #define LR_LDP_MSG_LABEL_ABORT 1028
 
+#define LR_LDP_SESSION_STATE_NON_EXISTENT 1
+
+#define LR_LDP_SESSION_STATE_INITIALIZED 2
+
+#define LR_LDP_SESSION_STATE_OPEN_REC 3
+
+#define LR_LDP_SESSION_STATE_OPEN_SENT 4
+
+#define LR_LDP_SESSION_STATE_OPERATIONAL 5
+
 #define LR_MRT_RECORD_PEER_INDEX_TABLE 1
 
 #define LR_MRT_RECORD_RIB 2
@@ -990,6 +1000,12 @@ typedef struct OpaqueLdpPdu {
 } OpaqueLdpPdu;
 
 typedef struct OpaqueLdpPdu *lr_ldp_pdu_t;
+
+typedef struct OpaqueLdpSession {
+  uint8_t _private[0];
+} OpaqueLdpSession;
+
+typedef struct OpaqueLdpSession *lr_ldp_session_t;
 
 /**
  * Opaque `Label` handle. C side never touches internals.
@@ -2973,6 +2989,74 @@ uint32_t lr_ldp_pdu_message_id_at(lr_ldp_pdu_t pdu, uintptr_t index);
  * used after this call.
  */
 void lr_ldp_pdu_free(lr_ldp_pdu_t pdu);
+
+/**
+ * Construct a `LdpSession` for the active role (RFC 5036 §2.5.2 —
+ * the local LSR initiates the TCP connection). `local_lsr_id` and
+ * `local_label_space` identify the local label space; `peer_lsr_id`
+ * and `peer_label_space` identify the peer's.
+ *
+ * `keepalive_time` is the proposed KeepAlive time (seconds, RFC
+ * 5036 §3.5.3); 0 means use the default (180 s).
+ * `max_pdu_len` is the proposed Max PDU Length (octets); 0 means
+ * use the default (4096).
+ *
+ * Returns NULL on a panic.
+ */
+lr_ldp_session_t lr_ldp_session_new(uint32_t local_lsr_id,
+                                    uint16_t local_label_space,
+                                    uint32_t peer_lsr_id,
+                                    uint16_t peer_label_space,
+                                    uint16_t keepalive_time,
+                                    uint16_t max_pdu_len);
+
+/**
+ * Drop a boxed LdpSession. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_ldp_session_new` and not
+ * already freed.
+ */
+void lr_ldp_session_free(lr_ldp_session_t r);
+
+/**
+ * Read the current FSM state. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle.
+ */
+int32_t lr_ldp_session_state(lr_ldp_session_t r);
+
+/**
+ * 1 when the session is in Operational state (RFC 5036 §2.5.4 —
+ * the FSM has completed the Initialization negotiation and is
+ * ready to exchange label mappings). Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_ldp_session_state`].
+ */
+uint8_t lr_ldp_session_is_operational(lr_ldp_session_t r);
+
+/**
+ * Drive the FSM with the `start` event (RFC 5036 §2.5.4 — emits the
+ * Initialization message and transitions to OpenSent). `now_ms`
+ * is the wall-clock millisecond timestamp.
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle.
+ */
+int32_t lr_ldp_session_start(lr_ldp_session_t r, uint64_t now_ms);
+
+/**
+ * Drain the session's outbound PDU buffer. Returns 0 on success and
+ * writes a freshly-allocated `lr_bytes_t` to `*out`. The caller
+ * frees it via `lr_bytes_free`.
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle. `out` must point to
+ * writable memory.
+ */
+int32_t lr_ldp_session_drain_outgoing(lr_ldp_session_t r, struct lr_bytes_t *out);
 
 /**
  * Construct a `Label` with default TC=0 and TTL=64 (RFC 3032 §2.1).
