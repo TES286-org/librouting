@@ -845,15 +845,15 @@ pub(super) fn run_ospf_daemon(
     }
     // Graceful shutdown. With graceful restart enabled (RFC 3623 §2.1)
     // the teardown is replaced: originate a Grace-LSA per interface
-    // (retransmitted a few times — the flood path has no acks) and
-    // exit *without* closing sessions, so no Loc-RIB withdrawals fire
-    // and the kernel FIB the forwarding plane relies on survives the
-    // restart. Between flood rounds the daemon keeps servicing the
-    // protocol (see `graceful_shutdown_flood`) so peers whose LSA
-    // refresh is still un-ACKed can drain their retransmission lists
-    // and engage helper mode on a later round. Without it: close every
-    // session so the router emits the down events, then let the ticker
-    // drain them.
+    // (retransmitted a few times via the per-neighbor Link State
+    // Retransmission List, RFC 2328 §13.6) and exit *without* closing
+    // sessions, so no Loc-RIB withdrawals fire and the kernel FIB the
+    // forwarding plane relies on survives the restart. Between flood
+    // rounds the daemon keeps servicing the protocol (see
+    // `graceful_shutdown_flood`) so peers whose LSA refresh is still
+    // un-ACKed can drain their retransmission lists and engage helper
+    // mode on a later round. Without it: close every session so the
+    // router emits the down events, then let the ticker drain them.
     if cfg.ospf_graceful_restart {
         daemon.graceful_shutdown_flood(&mut recv_buf, &start);
         let period = lr_ospf::gr::clamp_grace_period(cfg.ospf_grace_period);

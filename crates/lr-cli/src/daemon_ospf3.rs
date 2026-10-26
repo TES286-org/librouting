@@ -967,12 +967,13 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
     // Graceful shutdown. With graceful restart enabled (RFC 5187 §2.1,
     // inheriting RFC 3623 §2.1) the teardown is replaced: originate a
     // Grace-LSA per interface (LS type 0x000b, Link State ID = the
-    // Interface ID, retransmitted a few times — the flood path has no
-    // acks) and exit *without* closing sessions, so no Loc-RIB
-    // withdrawals fire and the kernel FIB the forwarding plane relies
-    // on survives the restart. Between flood rounds the daemon keeps
-    // servicing the protocol (see `graceful_shutdown_flood`) so peers
-    // whose LSA refresh is still un-ACKed can drain their retransmission
+    // Interface ID, retransmitted a few times via the per-neighbor
+    // Link State Retransmission List, RFC 2328 §13.6) and exit
+    // *without* closing sessions, so no Loc-RIB withdrawals fire and
+    // the kernel FIB the forwarding plane relies on survives the
+    // restart. Between flood rounds the daemon keeps servicing the
+    // protocol (see `graceful_shutdown_flood`) so peers whose LSA
+    // refresh is still un-ACKed can drain their retransmission
     // lists and engage helper mode on a later round. Without it: close
     // every session so the router emits the down events, then let the
     // ticker drain them.

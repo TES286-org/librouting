@@ -18,11 +18,12 @@
 //!
 //! The embedder supplies every input: [`HelperEntry::on_grace_lsa`]
 //! evaluates the §3.1 entry checks against the caller's neighbour
-//! state and policy, and the §3.1(2) retransmission-list check is
-//! trivially satisfied in lr (the OSPF flood path is fire-and-forget
-//! — there is no LSA retransmission list that could hold unsent
-//! changes; the same simplification BIRD documents in
-//! `neighbor.c::changes_in_lsrtl`).
+//! state and policy, and the §3.1(2) retransmission-list check
+//! (was a topology change queued on the helper's per-neighbor
+//! retransmission list?) is satisfied via [`crate::retransmit`]:
+//! the list carries every LSA we have flooded and not yet seen
+//! acknowledged (RFC 2328 §13.5), drained by §13.7 acks and
+//! re-flooded by the §13.6 poll loop.
 //!
 //! The grace clock is the caller's millisecond clock (the daemon's
 //! main-loop `now_ms`), consistent with [`crate::lsdb`].

@@ -758,6 +758,58 @@ semver drift on `Event` is documented in `CHANGELOG.md` rc.3 / 1.0.0
 next minor); the variants are additive for embedders whose `match`
 includes a `_ => ...` arm.
 
+### `lr-ospf` / `lr-router`: OSPF LSA retransmission list (RFC 2328 §13.5 / §13.6 / §13.7, issue #92)
+
+The OSPF flood path (`DefaultRouter::ospf_flood`) and the
+`OspfBody::LsAck` handler in `crates/lr-router/src/instance/ospf.rs`
+were a no-op stub: `ospf_flood` was documented as
+"simplified: no ack/retransmission bookkeeping — the poll-driven
+embedder handles transport reliability", and the LS-Ack handler
+returned `OspfStep::default()` without consulting any state. A
+single dropped LS-Update (or dropped LS-Ack) left the two LSDBs
+permanently out of sync and SPF computed against a stale view of
+the area — the kind of bug BIRD and FRR have not had since their
+initial releases.
+
+This release closes the gap. A new public module
+`lr_ospf::retransmit` exposes `LinkStateRetransmissionList` — a
+`BTreeMap<LsaKey, (Lsa, last_sent_ms)>` keyed by `(ls_type,
+link_state_id, advertising_router)`, matching the LSA identity the
+LSDB already uses:
+
+- `record_flood(lsa, now_ms)` adds an LSA to the list before the
+  LSU is placed on the wire (§13.5 step 5).
+- `apply_acks(&[LsaHeader])` drains acked entries (§13.7), matching
+  on LSA identity rather than sequence number per §13.7 step 5
+  ("the receiver may acknowledge an older instance").
+- `poll(now_ms, rxmt_interval)` returns LSAs that have waited
+  `RxmtInterval` without an ack (§13.6) and bumps their
+  `last_sent_ms` so the next cycle waits another full interval.
+- `remove(&LsaKey)`, `clear()`, `contains(&LsaKey)`, `iter()` round
+  out the surface for LSDB-replacement cleanup, neighbor reset, and
+  the `show ospf neighbor` renderer.
+
+`OspfRuntime` gains a `retransmit: LinkStateRetransmissionList`
+field; `ospf_flood` records each flooded LSA on the receiving
+neighbor's list before sending, and `OspfBody::LsAck` now invokes
+`OspfRuntime::on_ls_ack` which drains the list per §13.7. The
+existing poll loop in `crates/lr-router/src/instance/mod.rs` (which
+already drives the DBD/LSR exchange retransmissions) gains a
+second pass that walks every OSPF session's retransmit list and
+re-floods aged entries as a unicast LS-Update to that neighbor —
+matching BIRD's `ospf_ls_upd_queue_lsa` per-neighbor shape.
+
+§13.7 step 5 mandates that stray / duplicate acks are accepted
+silently; `on_ls_ack` surfaces a `RouterEvent::Log` action when an
+ack does not match any pending entry so the operator can
+correlate it with a possible session de-sync.
+
+The change is internal: no public Rust API shape changes, no C ABI
+changes, no protocol-on-the-wire changes. Existing OSPF tests
+(42 of them in `lr-router`'s `instance::tests`) continue to pass,
+and the OSPF + BIRD 2.17.5 interop (`tests/interop/ospf_bird.sh`,
+`ospf_gr_bird.sh`, `ospf_broadcast.sh`) remains green.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
