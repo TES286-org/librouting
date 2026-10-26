@@ -4,6 +4,7 @@ use lr_core::addr::Asn;
 use lr_core::addr::RouterId;
 use lr_core::fsm::TimerSpec;
 use lr_ospf::abr::originate_summary_lsa;
+use lr_ospf::lsa::LsaHeader;
 use lr_ospf::packet::{LsUpdateBody, OspfBody};
 
 /// Test helper: encode one LS-Update carrying `lsas` as if received
@@ -5104,4 +5105,199 @@ fn bgp_session_identity_hash_ignores_non_bgp_sessions() {
         h_empty, h_with_ospf,
         "OSPF session must not affect the BGP identity hash"
     );
+}
+
+// ----------------------------------------------------------------------
+// OSPF LSA retransmission list (RFC 2328 §13.5 / §13.6 / §13.7)
+// ----------------------------------------------------------------------
+
+/// Encode one LS-Ack carrying `headers` as a v2 packet (RFC 2328 §A.3.6).
+fn ospf_lsack_bytes(router_id: u32, area_id: u32, headers: Vec<LsaHeader>) -> Vec<u8> {
+    let packet = ospf_ls_ack(Protocol::Ospfv2, router_id, area_id, headers);
+    let mut bytes = lr_ospf::codec::OspfCodec::v2()
+        .encode_vec(&packet)
+        .expect("encode LS-Ack");
+    lr_ospf::origination::finalize_v2_stream(&mut bytes);
+    bytes
+}
+
+/// A neighbor that owes us an LS-Ack must see the LSA retransmitted at
+/// `RxmtInterval`. With no ack the LSA re-floods forever; with an ack
+/// the retransmissions stop. This exercises the §13.6 timer path and
+/// the §13.7 drain path end-to-end through `DefaultRouter::tick`.
+#[test]
+fn ospf_lsa_retransmits_until_acked() {
+    use lr_ospf::exchange::RXMT_INTERVAL_MS;
+
+    let mut r = DefaultRouter::new();
+    let rid = RouterId::from_u32(0x01010101);
+    let a = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+
+    // One Router-LSA from a peer — `ospf_same_area_sessions_share_lsdb`
+    // proves the LSA floods and an ack is generated. We use the same
+    // shape to drive a flood, then check the retransmit behavior on
+    // the session that received it (which would be `b` in a 2-session
+    // setup; here we install a second session so the LSA has somewhere
+    // to be flooded to).
+    let b = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+    let peer_rid = 0x02020202u32;
+    let lsa = router_lsa(peer_rid, vec![(0x0a0a0a00, 0xffff_ff00, STUB, 10)]);
+    // Install at t=0 so the LSA is fresh; the flood path runs through
+    // `feed_input` -> `handle_packet` -> exchange driver -> flood.
+    r.feed_input(a, &ospf_lsu_bytes(peer_rid, 0, vec![lsa.clone()]))
+        .unwrap();
+    let _ = r.poll_events();
+
+    // Session b received the flood: it now holds `lsa` on its
+    // retransmission list (§13.5) and the LSU is in the drained
+    // output. The ack session a sent back is in a's drained output
+    // (the exchange driver's direct ack from §13.7).
+    let b_initial = r.drain_output(b);
+    let updates = decode_lsus(&b_initial);
+    assert_eq!(updates.len(), 1, "b must see the flooded LSA once");
+    assert_eq!(updates[0].lsas.len(), 1);
+    assert_eq!(updates[0].lsas[0].header.advertising_router, peer_rid);
+
+    // Tick forward to BEFORE RxmtInterval: no retransmit yet.
+    r.tick(Instant(RXMT_INTERVAL_MS - 1));
+    assert!(
+        r.drain_output(b).is_empty(),
+        "no retransmit before RxmtInterval has elapsed"
+    );
+
+    // Tick to exactly RxmtInterval: the LSA must retransmit.
+    r.tick(Instant(RXMT_INTERVAL_MS));
+    let retransmits = decode_lsus(&r.drain_output(b));
+    assert_eq!(
+        retransmits.len(),
+        1,
+        "exactly one retransmit LSU at RxmtInterval"
+    );
+    assert_eq!(retransmits[0].lsas.len(), 1);
+    assert_eq!(retransmits[0].lsas[0].header.advertising_router, peer_rid);
+
+    // Now session b's peer acks the LSA (§13.7) — the retransmit
+    // list must drain.
+    let ack = ospf_lsack_bytes(peer_rid, 0, vec![lsa.header]);
+    r.feed_input(b, &ack).unwrap();
+    let _ = r.poll_events();
+    // The ack handler does not produce outbound traffic itself (it
+    // only drains the list), so b's output stays empty here.
+    assert!(r.drain_output(b).is_empty());
+
+    // Tick to 2 * RxmtInterval: NO further retransmit — the ack
+    // cleared the list.
+    r.tick(Instant(2 * RXMT_INTERVAL_MS));
+    assert!(
+        r.drain_output(b).is_empty(),
+        "no retransmit after the LS-Ack drained the list"
+    );
+}
+
+/// A stray LS-Ack (one referencing an LSA we never flooded) is accepted
+/// silently per §13.7 step 5 — no panic, no protocol violation, but a
+/// `Log` action is emitted so the operator can correlate it.
+#[test]
+fn ospf_stray_ls_ack_emits_log_action() {
+    let mut r = DefaultRouter::new();
+    let rid = RouterId::from_u32(0x01010101);
+    let a = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+
+    // Forge an ack for an LSA we never flooded — a stray header.
+    let stray = LsaHeader {
+        ls_age: 0,
+        options: 0,
+        ls_type: 1,
+        link_state_id: 0xc0ffee00,
+        advertising_router: 0xdead_beef,
+        ls_sequence_number: 0x80000001,
+        ls_checksum: 0,
+        length: LsaHeader::LEN as u16,
+    };
+    r.feed_input(a, &ospf_lsack_bytes(0x02020202, 0, vec![stray]))
+        .unwrap();
+    let events = r.poll_events();
+    // The stray ack surfaces a Log action so the operator can see it.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, crate::event::RouterEvent::Log(ref s)
+                if s.contains("LS-Ack"))),
+        "stray LS-Ack must produce a Log action; got {events:?}"
+    );
+}
+
+/// Flooded LSAs accumulate on the retransmission list; acking one
+/// drains only that one, leaving the others pending retransmit. This
+/// proves the §13.7 key-match drain does not over-delete.
+#[test]
+fn ospf_partial_ack_leaves_other_lsas_pending() {
+    use lr_ospf::exchange::RXMT_INTERVAL_MS;
+
+    let mut r = DefaultRouter::new();
+    let rid = RouterId::from_u32(0x01010101);
+    let a = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+    let b = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+
+    // Two distinct Router-LSAs from the peer (different LS-IDs).
+    let peer_rid = 0x02020202u32;
+    let lsa1 = router_lsa(peer_rid, vec![(0x0a0a0a00, 0xffff_ff00, STUB, 10)]);
+    let lsa2 = Lsa {
+        header: LsaHeader {
+            ls_age: 0,
+            options: 0,
+            ls_type: 1,
+            // Distinct LS-ID so this is a separate LSA identity.
+            link_state_id: peer_rid.wrapping_add(1),
+            advertising_router: peer_rid,
+            ls_sequence_number: 0x80000001,
+            ls_checksum: 0,
+            length: LsaHeader::LEN as u16,
+        },
+        body: router_lsa_body(vec![(0x0b0b0b00, 0xffff_ff00, STUB, 10)]),
+    };
+    r.feed_input(
+        a,
+        &ospf_lsu_bytes(peer_rid, 0, vec![lsa1.clone(), lsa2.clone()]),
+    )
+    .unwrap();
+    let _ = r.poll_events();
+
+    // Session b received both flooded LSAs — both are now on its
+    // retransmission list.
+    let b_initial = r.drain_output(b);
+    let updates = decode_lsus(&b_initial);
+    assert_eq!(updates.len(), 1, "one LSU carrying both LSAs");
+    assert_eq!(updates[0].lsas.len(), 2);
+
+    // Session b's peer acks only lsa1 — lsa2 stays on the list.
+    let ack = ospf_lsack_bytes(peer_rid, 0, vec![lsa1.header]);
+    r.feed_input(b, &ack).unwrap();
+    let _ = r.poll_events();
+
+    // Tick past RxmtInterval: only lsa2 retransmits (lsa1 was drained).
+    r.tick(Instant(RXMT_INTERVAL_MS));
+    let retransmits = decode_lsus(&r.drain_output(b));
+    assert_eq!(retransmits.len(), 1, "one retransmit LSU");
+    assert_eq!(retransmits[0].lsas.len(), 1, "only the un-acked LSA");
+    assert_eq!(
+        retransmits[0].lsas[0].header.link_state_id, lsa2.header.link_state_id,
+        "the retransmitted LSA is the one that was not acked"
+    );
+}
+
+/// Helper: build the body of a Router-LSA without the wrapping `Lsa`
+/// (used to assemble a second LSA with a distinct LS-ID).
+fn router_lsa_body(links: Vec<(u32, u32, u8, u16)>) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&0u16.to_be_bytes()); // flags
+    body.extend_from_slice(&0u16.to_be_bytes()); // # links
+    for (link_id, link_data, link_type, metric) in links {
+        body.extend_from_slice(&link_id.to_be_bytes());
+        body.extend_from_slice(&link_data.to_be_bytes());
+        body.push(link_type);
+        body.extend_from_slice(&0u8.to_be_bytes()); // # TOS
+        body.extend_from_slice(&metric.to_be_bytes());
+    }
+    body
 }
