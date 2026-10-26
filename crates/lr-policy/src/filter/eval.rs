@@ -87,6 +87,16 @@ pub enum EvalErrorKind {
     /// A user-function call chain exceeded [`MAX_CALL_DEPTH`] —
     /// runaway recursion is rejected instead of exhausting the stack.
     CallDepthExceeded(u32),
+    /// A peephole-pass invariant was violated at runtime. The peephole
+    /// pass is supposed to gate the optimized instructions so the
+    /// fall-through arm of each fused `match` is genuinely unreachable;
+    /// returning an `Err` here hardens the data path against future
+    /// peephole drift (a change that drops a gate would surface as a
+    /// filter-eval error instead of a `panic!` on the production hot
+    /// path). The string identifies the violated invariant for
+    /// diagnostics; the surrounding span points at the offending
+    /// instruction in the filter source.
+    InternalInvariant(&'static str),
 }
 
 impl fmt::Display for EvalError {
@@ -132,6 +142,9 @@ impl fmt::Display for EvalErrorKind {
             }
             EvalErrorKind::CallDepthExceeded(d) => {
                 write!(f, "user-function call depth exceeded {d}")
+            }
+            EvalErrorKind::InternalInvariant(s) => {
+                write!(f, "internal invariant violated: {s}")
             }
         }
     }
@@ -1412,7 +1425,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// the AIGP attribute's TLV stream. The `unwrap_or(0)` semantics
     /// for absent attributes mirror `read_route_field` exactly so the
     /// fused and unfused paths agree for every route.
-    fn read_int_route_field(&self, field: &RouteField, route: &Route) -> Result<i64, EvalError> {
+    fn read_int_route_field(
+        &self,
+        field: &RouteField,
+        route: &Route,
+        span: Span,
+    ) -> Result<i64, EvalError> {
         Ok(match field.kind {
             RouteFieldKind::Source => i64::from(route.origin.proto),
             RouteFieldKind::BgpLocalPref => self.ctx.bgp_local_pref(route).unwrap_or(0) as i64,
@@ -1506,10 +1524,22 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BabelRouterId => self.ctx.babel_router_id(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
             // one of the arms above; the LRXP int-typed fields
-            // and `bgp.aigp` fall through to the unreachable arm
-            // (the gate refuses to fuse them) and run the unfused
-            // `read_route_field` path instead.
-            _ => unreachable!("peephole is_int_field gates this"),
+            // and `bgp.aigp` fall through to this arm (the gate
+            // refuses to fuse them) and run the unfused
+            // `read_route_field` path instead. Returning an `Err`
+            // here hardens the data path against future peephole
+            // drift: a change that drops the `is_int_field` gate
+            // surfaces as a filter-eval error rather than a
+            // `panic!` on the production hot path. The span points
+            // at the offending instruction in the filter source.
+            _ => {
+                return Err(self.err(
+                    span,
+                    EvalErrorKind::InternalInvariant(
+                        "read_int_route_field: peephole is_int_field gates this",
+                    ),
+                ));
+            }
         })
     }
 
@@ -2211,7 +2241,20 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     BinaryOp::Le => li <= ri,
                     BinaryOp::Gt => li > ri,
                     BinaryOp::Ge => li >= ri,
-                    _ => unreachable!(),
+                    // Outer match arm selects only Lt/Le/Gt/Ge; the
+                    // peephole pass and the parser guarantee no
+                    // other variant reaches here. Surfacing an `Err`
+                    // hardens against an outer-match refactor that
+                    // widens the variant set without updating the
+                    // inner dispatch.
+                    _ => {
+                        return Err(self.err(
+                            span,
+                            EvalErrorKind::InternalInvariant(
+                                "eval_binary(Lt/Le/Gt/Ge): op variant drifted past the outer match",
+                            ),
+                        ));
+                    }
                 };
                 Ok(Value::Bool(b))
             }
@@ -2236,7 +2279,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                         }
                         Some(li.checked_rem(ri).unwrap_or(0))
                     }
-                    _ => unreachable!(),
+                    // Outer match arm selects only Add/Sub/Mul/Div/Mod;
+                    // surfacing an `Err` hardens against an outer-match
+                    // refactor that widens the variant set without
+                    // updating the inner dispatch.
+                    _ => {
+                        return Err(self.err(
+                            span,
+                            EvalErrorKind::InternalInvariant(
+                                "eval_binary(Add/Sub/Mul/Div/Mod): op variant drifted past the outer match",
+                            ),
+                        ));
+                    }
                 };
                 v.map(Value::Int)
                     .ok_or_else(|| self.err(span, EvalErrorKind::Overflow))
@@ -2250,7 +2304,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     BinaryOp::BitAnd => li & ri,
                     BinaryOp::BitOr => li | ri,
                     BinaryOp::BitXor => li ^ ri,
-                    _ => unreachable!(),
+                    // Outer match arm selects only BitAnd/BitOr/BitXor;
+                    // surfacing an `Err` hardens against an outer-match
+                    // refactor that widens the variant set without
+                    // updating the inner dispatch.
+                    _ => {
+                        return Err(self.err(
+                            span,
+                            EvalErrorKind::InternalInvariant(
+                                "eval_binary(BitAnd/BitOr/BitXor): op variant drifted past the outer match",
+                            ),
+                        ));
+                    }
                 };
                 Ok(Value::Int(v))
             }
@@ -2265,7 +2330,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 let v = match op {
                     BinaryOp::Shl => li << ri,
                     BinaryOp::Shr => li >> ri,
-                    _ => unreachable!(),
+                    // Outer match arm selects only Shl/Shr; surfacing
+                    // an `Err` hardens against an outer-match refactor
+                    // that widens the variant set without updating the
+                    // inner dispatch.
+                    _ => {
+                        return Err(self.err(
+                            span,
+                            EvalErrorKind::InternalInvariant(
+                                "eval_binary(Shl/Shr): op variant drifted past the outer match",
+                            ),
+                        ));
+                    }
                 };
                 Ok(Value::Int(v))
             }
@@ -2746,9 +2822,11 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 // stack traffic. The peephole pass only emits this
                 // for the four int-typed fields
                 // (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`)
-                // and the six comparison ops, so the `match op`
-                // body's `unreachable!` arms are genuinely
-                // unreachable.
+                // and the six comparison ops. Returning an `Err`
+                // on the fall-through arm hardens the data path
+                // against future peephole drift — a change that
+                // drops the `is_int_cmp_op` gate surfaces as a
+                // filter-eval error rather than a `panic!`.
                 Instr::BranchFieldIntCmp {
                     field,
                     op,
@@ -2756,7 +2834,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     target,
                     jump_if_true,
                 } => {
-                    let n = self.read_int_route_field(field, route)?;
+                    let span = spans[ip];
+                    let n = self.read_int_route_field(field, route, span)?;
                     let r = match op {
                         BinaryOp::Eq => n == *val,
                         BinaryOp::Ne => n != *val,
@@ -2764,7 +2843,14 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                         BinaryOp::Le => n <= *val,
                         BinaryOp::Gt => n > *val,
                         BinaryOp::Ge => n >= *val,
-                        _ => unreachable!("peephole is_int_cmp_op gates this"),
+                        _ => {
+                            return Err(self.err(
+                                span,
+                                EvalErrorKind::InternalInvariant(
+                                    "BranchFieldIntCmp: peephole is_int_cmp_op gates this",
+                                ),
+                            ));
+                        }
                     };
                     let take = if *jump_if_true { r } else { !r };
                     if take {
