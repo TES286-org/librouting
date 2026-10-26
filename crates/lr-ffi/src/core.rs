@@ -185,12 +185,12 @@ pub unsafe extern "C" fn lr_ip_addr_octets(addr: lr_ip_addr_t, out: *mut u8, cap
 /// Repr-C Prefix. Mirrors `lr_core::addr::Prefix`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-pub struct lr_prefix_t {
+pub struct lr_core_prefix_t {
     pub addr: lr_ip_addr_t,
     pub prefix_len: u8,
 }
 
-impl From<Prefix> for lr_prefix_t {
+impl From<Prefix> for lr_core_prefix_t {
     fn from(p: Prefix) -> Self {
         Self {
             addr: p.addr.into(),
@@ -199,8 +199,8 @@ impl From<Prefix> for lr_prefix_t {
     }
 }
 
-impl From<lr_prefix_t> for Prefix {
-    fn from(c: lr_prefix_t) -> Self {
+impl From<lr_core_prefix_t> for Prefix {
+    fn from(c: lr_core_prefix_t) -> Self {
         Self {
             addr: c.addr.into(),
             prefix_len: c.prefix_len,
@@ -213,11 +213,11 @@ impl From<lr_prefix_t> for Prefix {
 /// # Safety
 /// `octets` must point to 4 readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn lr_prefix_v4(octets: *const u8, prefix_len: u8) -> lr_prefix_t {
+pub unsafe extern "C" fn lr_core_prefix_v4(octets: *const u8, prefix_len: u8) -> lr_core_prefix_t {
     guarded(
         || unsafe {
             if octets.is_null() {
-                return lr_prefix_t::default();
+                return lr_core_prefix_t::default();
             }
             let mut buf = [0u8; 4];
             let src = unsafe { std::slice::from_raw_parts(octets, 4) };
@@ -225,7 +225,7 @@ pub unsafe extern "C" fn lr_prefix_v4(octets: *const u8, prefix_len: u8) -> lr_p
             let p = Prefix::new_v4(buf, prefix_len);
             p.into()
         },
-        lr_prefix_t::default(),
+        lr_core_prefix_t::default(),
     )
 }
 
@@ -234,11 +234,11 @@ pub unsafe extern "C" fn lr_prefix_v4(octets: *const u8, prefix_len: u8) -> lr_p
 /// # Safety
 /// `octets` must point to 16 readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn lr_prefix_v6(octets: *const u8, prefix_len: u8) -> lr_prefix_t {
+pub unsafe extern "C" fn lr_core_prefix_v6(octets: *const u8, prefix_len: u8) -> lr_core_prefix_t {
     guarded(
         || unsafe {
             if octets.is_null() {
-                return lr_prefix_t::default();
+                return lr_core_prefix_t::default();
             }
             let mut buf = [0u8; 16];
             let src = unsafe { std::slice::from_raw_parts(octets, 16) };
@@ -246,26 +246,26 @@ pub unsafe extern "C" fn lr_prefix_v6(octets: *const u8, prefix_len: u8) -> lr_p
             let p = Prefix::new_v6(buf, prefix_len);
             p.into()
         },
-        lr_prefix_t::default(),
+        lr_core_prefix_t::default(),
     )
 }
 
 /// 1 when `prefix` is IPv4.
 #[no_mangle]
-pub extern "C" fn lr_prefix_is_ipv4(prefix: lr_prefix_t) -> u8 {
+pub extern "C" fn lr_core_prefix_is_ipv4(prefix: lr_core_prefix_t) -> u8 {
     guarded(|| lr_ip_addr_is_ipv4(prefix.addr), 0)
 }
 
 /// 1 when `prefix` is IPv6.
 #[no_mangle]
-pub extern "C" fn lr_prefix_is_ipv6(prefix: lr_prefix_t) -> u8 {
+pub extern "C" fn lr_core_prefix_is_ipv6(prefix: lr_core_prefix_t) -> u8 {
     guarded(|| lr_ip_addr_is_ipv6(prefix.addr), 0)
 }
 
 /// 1 when `addr` falls within `prefix` (RFC 4632 §3.1 — bit-level
 /// containment, not byte-level).
 #[no_mangle]
-pub extern "C" fn lr_prefix_contains(prefix: lr_prefix_t, addr: lr_ip_addr_t) -> u8 {
+pub extern "C" fn lr_core_prefix_contains(prefix: lr_core_prefix_t, addr: lr_ip_addr_t) -> u8 {
     guarded(
         || {
             let p: Prefix = prefix.into();
@@ -278,7 +278,10 @@ pub extern "C" fn lr_prefix_contains(prefix: lr_prefix_t, addr: lr_ip_addr_t) ->
 
 /// 1 when `inner` falls within `outer` (bit-level containment).
 #[no_mangle]
-pub extern "C" fn lr_prefix_contains_prefix(outer: lr_prefix_t, inner: lr_prefix_t) -> u8 {
+pub extern "C" fn lr_core_prefix_contains_prefix(
+    outer: lr_core_prefix_t,
+    inner: lr_core_prefix_t,
+) -> u8 {
     guarded(
         || {
             let o: Prefix = outer.into();
@@ -295,7 +298,10 @@ pub extern "C" fn lr_prefix_contains_prefix(outer: lr_prefix_t, inner: lr_prefix
 /// # Safety
 /// `out` must point to a writable `lr_ip_addr_t`.
 #[no_mangle]
-pub unsafe extern "C" fn lr_prefix_network(prefix: lr_prefix_t, out: *mut lr_ip_addr_t) -> i32 {
+pub unsafe extern "C" fn lr_core_prefix_network(
+    prefix: lr_core_prefix_t,
+    out: *mut lr_ip_addr_t,
+) -> i32 {
     guarded(
         || unsafe {
             if out.is_null() {
@@ -520,12 +526,12 @@ pub extern "C" fn lr_protocol_default_admin_distance(proto: u8) -> u32 {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct lr_route_key_t {
-    pub prefix: lr_prefix_t,
+    pub prefix: lr_core_prefix_t,
     /// AFI/SAFI packed as `afi << 8 | safi`. See lr_core::nlri::NlriFamily.
     pub afi_safi: u16,
     /// 1 when `source_prefix` carries a value, 0 otherwise.
     pub has_source: u8,
-    pub source_prefix: lr_prefix_t,
+    pub source_prefix: lr_core_prefix_t,
 }
 
 /// Repr-C RouteOrigin. Mirrors `lr_core::rib::RouteOrigin`.
@@ -610,25 +616,25 @@ mod tests {
     #[test]
     fn ffi_prefix_v4_and_contains() {
         let p_bytes = [10u8, 0, 0, 0];
-        let p = unsafe { lr_prefix_v4(p_bytes.as_ptr(), 24) };
-        assert_eq!(lr_prefix_is_ipv4(p), 1);
+        let p = unsafe { lr_core_prefix_v4(p_bytes.as_ptr(), 24) };
+        assert_eq!(lr_core_prefix_is_ipv4(p), 1);
         let inside_bytes = [10u8, 0, 0, 5];
         let inside = unsafe { lr_ip_addr_v4(inside_bytes.as_ptr()) };
         let outside_bytes = [192u8, 168, 1, 1];
         let outside = unsafe { lr_ip_addr_v4(outside_bytes.as_ptr()) };
-        assert_eq!(lr_prefix_contains(p, inside), 1);
-        assert_eq!(lr_prefix_contains(p, outside), 0);
+        assert_eq!(lr_core_prefix_contains(p, inside), 1);
+        assert_eq!(lr_core_prefix_contains(p, outside), 0);
     }
 
     #[test]
     fn ffi_prefix_v6_and_contains() {
         let octets = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let p = unsafe { lr_prefix_v6(octets.as_ptr(), 32) };
+        let p = unsafe { lr_core_prefix_v6(octets.as_ptr(), 32) };
         let inside_octets = [
             0x20, 0x01, 0x0d, 0xb8, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
         ];
         let inside = unsafe { lr_ip_addr_v6(inside_octets.as_ptr()) };
-        assert_eq!(lr_prefix_contains(p, inside), 1);
+        assert_eq!(lr_core_prefix_contains(p, inside), 1);
     }
 
     #[test]
@@ -637,21 +643,21 @@ mod tests {
         let outer_bytes = [10u8, 0, 0, 0];
         let inner_bytes = [10u8, 0, 1, 0];
         let other_bytes = [192u8, 168, 0, 0];
-        let outer = unsafe { lr_prefix_v4(outer_bytes.as_ptr(), 16) };
-        let inner = unsafe { lr_prefix_v4(inner_bytes.as_ptr(), 24) };
-        let other = unsafe { lr_prefix_v4(other_bytes.as_ptr(), 24) };
-        assert_eq!(lr_prefix_contains_prefix(outer, inner), 1);
-        assert_eq!(lr_prefix_contains_prefix(outer, other), 0);
+        let outer = unsafe { lr_core_prefix_v4(outer_bytes.as_ptr(), 16) };
+        let inner = unsafe { lr_core_prefix_v4(inner_bytes.as_ptr(), 24) };
+        let other = unsafe { lr_core_prefix_v4(other_bytes.as_ptr(), 24) };
+        assert_eq!(lr_core_prefix_contains_prefix(outer, inner), 1);
+        assert_eq!(lr_core_prefix_contains_prefix(outer, other), 0);
     }
 
     #[test]
     fn ffi_prefix_network() {
         // 10.0.0.5/24 — network address is 10.0.0.0/24.
         let bytes = [10u8, 0, 0, 5];
-        let p = unsafe { lr_prefix_v4(bytes.as_ptr(), 24) };
+        let p = unsafe { lr_core_prefix_v4(bytes.as_ptr(), 24) };
         let mut out = lr_ip_addr_t::default();
         unsafe {
-            assert_eq!(lr_prefix_network(p, &raw mut out), 0);
+            assert_eq!(lr_core_prefix_network(p, &raw mut out), 0);
             let mut bytes = [0u8; 4];
             assert_eq!(lr_ip_addr_octets(out, bytes.as_mut_ptr(), 4), 4);
             assert_eq!(bytes, [10, 0, 0, 0]);

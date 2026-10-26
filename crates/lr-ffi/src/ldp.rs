@@ -297,10 +297,7 @@ pub unsafe extern "C" fn lr_ldp_pdu_message_type_at(pdu: lr_ldp_pdu_t, index: us
             let Some(p) = borrow_pdu(pdu) else {
                 return 0;
             };
-            p.messages
-                .get(index)
-                .map(message_type_code)
-                .unwrap_or(0)
+            p.messages.get(index).map(message_type_code).unwrap_or(0)
         },
         0,
     )

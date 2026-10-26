@@ -139,11 +139,7 @@ pub unsafe extern "C" fn lr_srv6_behavior_from_wire(
                 let bytes = name.as_bytes();
                 let take = bytes.len().min(name_cap - 1);
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        out_name as *mut u8,
-                        take,
-                    );
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_name as *mut u8, take);
                     *out_name.add(take) = 0;
                 }
             }
@@ -275,11 +271,7 @@ pub unsafe extern "C" fn lr_srv6_behavior_name(
             let bytes = name.as_bytes();
             let take = bytes.len().min(name_cap - 1);
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    out_name as *mut u8,
-                    take,
-                );
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_name as *mut u8, take);
                 *out_name.add(take) = 0;
             }
             take

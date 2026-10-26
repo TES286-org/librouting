@@ -559,6 +559,27 @@ typedef struct OpaqueBgpCapability {
 typedef struct OpaqueBgpCapability *lr_bgp_capability_t;
 
 /**
+ * One IPv4/IPv6 prefix (embedder-side). IPv4 addresses go in the
+ * first four bytes of `addr` with `is_ipv6 = 0`; IPv6 uses all
+ * sixteen bytes with `is_ipv6 = 1` — the same convention as
+ * `lr_roa_entry_t`.
+ */
+typedef struct lr_prefix_t {
+  uint8_t addr[16];
+  uint8_t is_ipv6;
+  uint8_t prefix_len;
+} lr_prefix_t;
+
+/**
+ * Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
+ */
+typedef struct OpaqueBgpMessage {
+  uint8_t _private[0];
+} OpaqueBgpMessage;
+
+typedef struct OpaqueBgpMessage *lr_bgp_message_t;
+
+/**
  * Repr-C IpAddr. Carries a `is_ipv6` flag plus 16 bytes (IPv4 occupies
  * the last 4; the first 12 are zero).
  */
@@ -575,19 +596,10 @@ typedef struct lr_ip_addr_t {
 /**
  * Repr-C Prefix. Mirrors `lr_core::addr::Prefix`.
  */
-typedef struct lr_prefix_t {
+typedef struct lr_core_prefix_t {
   struct lr_ip_addr_t addr;
   uint8_t prefix_len;
-} lr_prefix_t;
-
-/**
- * Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
- */
-typedef struct OpaqueBgpMessage {
-  uint8_t _private[0];
-} OpaqueBgpMessage;
-
-typedef struct OpaqueBgpMessage *lr_bgp_message_t;
+} lr_core_prefix_t;
 
 /**
  * Repr-C Asn. Mirrors `lr_core::addr::Asn(pub u32)`.
@@ -2161,7 +2173,7 @@ uintptr_t lr_ip_addr_octets(struct lr_ip_addr_t addr, uint8_t *out, uintptr_t ca
  * # Safety
  * `octets` must point to 4 readable bytes.
  */
-struct lr_prefix_t lr_prefix_v4(const uint8_t *octets, uint8_t prefix_len);
+struct lr_core_prefix_t lr_core_prefix_v4(const uint8_t *octets, uint8_t prefix_len);
 
 /**
  * Construct an IPv6 prefix from 16 octets + prefix length.
@@ -2169,28 +2181,29 @@ struct lr_prefix_t lr_prefix_v4(const uint8_t *octets, uint8_t prefix_len);
  * # Safety
  * `octets` must point to 16 readable bytes.
  */
-struct lr_prefix_t lr_prefix_v6(const uint8_t *octets, uint8_t prefix_len);
+struct lr_core_prefix_t lr_core_prefix_v6(const uint8_t *octets, uint8_t prefix_len);
 
 /**
  * 1 when `prefix` is IPv4.
  */
-uint8_t lr_prefix_is_ipv4(struct lr_prefix_t prefix);
+uint8_t lr_core_prefix_is_ipv4(struct lr_core_prefix_t prefix);
 
 /**
  * 1 when `prefix` is IPv6.
  */
-uint8_t lr_prefix_is_ipv6(struct lr_prefix_t prefix);
+uint8_t lr_core_prefix_is_ipv6(struct lr_core_prefix_t prefix);
 
 /**
  * 1 when `addr` falls within `prefix` (RFC 4632 §3.1 — bit-level
  * containment, not byte-level).
  */
-uint8_t lr_prefix_contains(struct lr_prefix_t prefix, struct lr_ip_addr_t addr);
+uint8_t lr_core_prefix_contains(struct lr_core_prefix_t prefix, struct lr_ip_addr_t addr);
 
 /**
  * 1 when `inner` falls within `outer` (bit-level containment).
  */
-uint8_t lr_prefix_contains_prefix(struct lr_prefix_t outer, struct lr_prefix_t inner);
+uint8_t lr_core_prefix_contains_prefix(struct lr_core_prefix_t outer,
+                                       struct lr_core_prefix_t inner);
 
 /**
  * Compute the network address (host bits zeroed). The result is
@@ -2199,7 +2212,7 @@ uint8_t lr_prefix_contains_prefix(struct lr_prefix_t outer, struct lr_prefix_t i
  * # Safety
  * `out` must point to a writable `lr_ip_addr_t`.
  */
-int32_t lr_prefix_network(struct lr_prefix_t prefix, struct lr_ip_addr_t *out);
+int32_t lr_core_prefix_network(struct lr_core_prefix_t prefix, struct lr_ip_addr_t *out);
 
 /**
  * Construct an Asn from a u32 value.
