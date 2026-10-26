@@ -381,6 +381,22 @@
 
 #define LR_OSPF_BODY_RAW 6
 
+#define LR_OSPF_NEIGHBOR_STATE_DOWN 1
+
+#define LR_OSPF_NEIGHBOR_STATE_ATTEMPT 2
+
+#define LR_OSPF_NEIGHBOR_STATE_INIT 3
+
+#define LR_OSPF_NEIGHBOR_STATE_TWO_WAY 4
+
+#define LR_OSPF_NEIGHBOR_STATE_EX_START 5
+
+#define LR_OSPF_NEIGHBOR_STATE_EXCHANGE 6
+
+#define LR_OSPF_NEIGHBOR_STATE_LOADING 7
+
+#define LR_OSPF_NEIGHBOR_STATE_FULL 8
+
 /**
  * ORIGIN values (RFC 4271 §5.1.1).
  */
@@ -1169,6 +1185,12 @@ typedef struct OpaqueOspfLsaHdrBox {
  * `lr_ospf_lsa_header_new` / `_free` constructor / destructor pair).
  */
 typedef struct OpaqueOspfLsaHdrBox *lr_ospf_lsa_hdr_box_t;
+
+typedef struct OpaqueOspfNeighbor {
+  uint8_t _private[0];
+} OpaqueOspfNeighbor;
+
+typedef struct OpaqueOspfNeighbor *lr_ospf_neighbor_t;
 
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
@@ -3727,6 +3749,62 @@ lr_ospf_lsa_hdr_box_t lr_ospf_lsa_header_new(uint16_t ls_age,
  * already freed.
  */
 void lr_ospf_lsa_header_free(lr_ospf_lsa_hdr_box_t h);
+
+/**
+ * Construct an `OspfNeighbor` for the given router-id (RFC 2328
+ * §10.1 — the neighbor starts in Down state).
+ */
+lr_ospf_neighbor_t lr_ospf_neighbor_new(uint32_t router_id);
+
+/**
+ * Drop a boxed OspfNeighbor. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_ospf_neighbor_new` and not
+ * already freed.
+ */
+void lr_ospf_neighbor_free(lr_ospf_neighbor_t r);
+
+/**
+ * Read the current FSM state. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid OspfNeighbor handle.
+ */
+int32_t lr_ospf_neighbor_state(lr_ospf_neighbor_t r);
+
+/**
+ * Drive the FSM with `HelloSeen` (RFC 2328 §10.5 — a Hello listing
+ * us as seen arrived from this neighbor).
+ *
+ * Returns the new state as one of the `LR_OSPF_NEIGHBOR_STATE_*`
+ * constants, or 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid OspfNeighbor handle.
+ */
+int32_t lr_ospf_neighbor_step_hello_seen(lr_ospf_neighbor_t r,
+                                         uint32_t dr,
+                                         uint32_t bdr,
+                                         uint8_t priority);
+
+/**
+ * Drive the FSM with `AdjOk` (RFC 2328 §10.4 — decide whether to
+ * become adjacent). `proceed` is 1 to start adjacency, 0 to break it.
+ *
+ * # Safety
+ * See [`lr_ospf_neighbor_step_hello_seen`].
+ */
+int32_t lr_ospf_neighbor_step_adj_ok(lr_ospf_neighbor_t r, uint8_t proceed);
+
+/**
+ * Drive the FSM with `Kill` (RFC 2328 §10.1 — tear down the
+ * adjacency). The neighbor returns to Down.
+ *
+ * # Safety
+ * See [`lr_ospf_neighbor_step_hello_seen`].
+ */
+int32_t lr_ospf_neighbor_step_kill(lr_ospf_neighbor_t r);
 
 /**
  * Install one redistribution pipe on the router.
