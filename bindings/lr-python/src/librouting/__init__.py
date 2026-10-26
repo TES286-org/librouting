@@ -7,6 +7,15 @@ in the workspace's `target/release` directory.
 """
 
 from .codec import (
+    BGP_MSG_KEEPALIVE,
+    BGP_MSG_NOTIFICATION,
+    BGP_MSG_OPEN,
+    BGP_MSG_ROUTE_REFRESH,
+    BGP_MSG_UPDATE,
+    BGP_RR_SUBTYPE_BORR,
+    BGP_RR_SUBTYPE_EORR,
+    BGP_RR_SUBTYPE_NORMAL,
+    BgpMessage,
     decode_babel,
     decode_bgp,
     decode_ospf_v2,

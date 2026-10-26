@@ -1109,3 +1109,176 @@ def test_package_version_tracks_the_workspace():
         f"librouting.__version__ is {librouting.__version__!r} but the "
         f"workspace version is {workspace!r}"
     )
+
+
+def test_bgp_message_decode_open_round_trip():
+    """OPEN with 4-byte AS: BgpMessage.open_my_as unwraps AS_TRANS
+    (23456) and surfaces the real 32-bit AS from the RFC 6793
+    capability. All other variant fields round-trip."""
+    wire = librouting.encode_open(4_200_000_000, 180, "10.0.0.1", as4=True)
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.kind() == librouting.BGP_MSG_OPEN
+        assert m.open_version() == 4
+        assert m.open_my_as() == 4_200_000_000, "AS_TRANS unwrapped to real 32-bit AS"
+        assert m.open_hold_time() == 180
+        assert m.open_bgp_id() == b"\x0a\x00\x00\x01"
+
+        # Exactly one optional parameter: the capabilities TLV
+        # carrying the Four-Octet-AS capability (code 65, length 4).
+        assert m.open_param_count() == 1
+        ptype, pvalue = m.open_param_at(0)
+        assert ptype == 2, "param type 2 = capabilities (RFC 5492)"
+        assert len(pvalue) >= 6
+        assert pvalue[0] == 65, "capability code 65 (Four-Octet-AS)"
+        assert pvalue[1] == 4, "capability length 4"
+        cap_as = int.from_bytes(pvalue[2:6], "big")
+        assert cap_as == 4_200_000_000, "real 4-byte AS in the capability value"
+
+        params = m.open_params()
+        assert len(params) == 1 and params[0] == (ptype, pvalue)
+
+        # Out-of-range returns LrError (rc=-6 = LR_ERR_OTHER).
+        try:
+            m.open_param_at(99)
+        except librouting.LrError:
+            pass
+        else:
+            raise AssertionError("open_param_at(99) must raise")
+
+        # Variant-mismatch reader returns LrError (rc=-2 = LR_ERR_INVALID_HANDLE).
+        try:
+            m.notification_code()
+        except librouting.LrError:
+            pass
+        else:
+            raise AssertionError("notification_code on OPEN must raise")
+
+
+def test_bgp_message_decode_open_16bit_no_capability():
+    """An OPEN with a 16-bit AS and no Four-Octet-AS capability
+    returns the raw 16-bit field value (no AS_TRANS unwrap)."""
+    wire = librouting.encode_open(64512, 90, "10.0.0.1", as4=False)
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.kind() == librouting.BGP_MSG_OPEN
+        # No Four-Octet-AS capability → the 16-bit field is the answer.
+        assert m.open_my_as() == 64512
+        assert m.open_param_count() == 0
+
+
+def test_bgp_message_decode_notification_round_trip():
+    """NOTIFICATION code/subcode/data round-trip through the inspection API."""
+    wire = librouting.encode_notification(1, 2, b"\xde\xad\xbe\xef")
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.kind() == librouting.BGP_MSG_NOTIFICATION
+        assert m.notification_code() == 1
+        assert m.notification_subcode() == 2
+        assert m.notification_data() == b"\xde\xad\xbe\xef"
+
+
+def test_bgp_message_decode_notification_compact():
+    """A compact NOTIFICATION (no diagnostic data) returns empty bytes."""
+    wire = librouting.encode_notification(6, 4)  # Cease / Administrative Reset
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.kind() == librouting.BGP_MSG_NOTIFICATION
+        assert m.notification_code() == 6
+        assert m.notification_subcode() == 4
+        assert m.notification_data() == b""
+
+
+def test_bgp_message_decode_update_withdraw_only():
+    """UPDATE with two withdrawn prefixes, zero attributes, zero NLRI."""
+    wire = librouting.encode_update_withdraw_v4(["203.0.113.0/24", "198.51.100.0/25"])
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.kind() == librouting.BGP_MSG_UPDATE
+        assert m.update_withdrawn_count() == 2
+        assert m.update_nlri_count() == 0
+        assert m.update_attr_count() == 0
+
+        addr0, len0 = m.update_withdrawn_at(0)
+        assert addr0 == b"\xcb\x00\x71\x00"  # 203.0.113.0
+        assert len0 == 24
+
+        addr1, len1 = m.update_withdrawn_at(1)
+        assert addr1 == b"\xc6\x33\x64\x00"  # 198.51.100.0
+        assert len1 == 25
+
+        try:
+            m.update_withdrawn_at(99)
+        except librouting.LrError:
+            pass
+        else:
+            raise AssertionError("update_withdrawn_at(99) must raise")
+
+
+def test_bgp_message_decode_update_announce():
+    """UPDATE with NLRI + path attributes round-trips."""
+    wire = librouting.encode_update_announce_v4(
+        ["203.0.113.0/24"],
+        next_hop="192.0.2.1",
+        as_path=[64512, 64513, 64514],
+        origin=0,  # IGP
+    )
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.kind() == librouting.BGP_MSG_UPDATE
+        assert m.update_nlri_count() == 1
+        assert m.update_withdrawn_count() == 0
+
+        addr, length = m.update_nlri_at(0)
+        assert addr == b"\xcb\x00\x71\x00"
+        assert length == 24
+
+        # The encoder writes ORIGIN (1) + AS_PATH (2) + NEXT_HOP (3).
+        attrs = m.update_attrs()
+        assert len(attrs) >= 3
+        by_type = {t: (f, v) for (t, f, v) in attrs}
+        assert 1 in by_type, "ORIGIN attribute present"
+        assert 3 in by_type, "NEXT_HOP attribute present"
+        # ORIGIN value is a single byte = 0 (IGP).
+        assert by_type[1][1] == b"\x00"
+        # NEXT_HOP value is the 4-byte next-hop.
+        assert by_type[3][1] == b"\xc0\x00\x02\x01"
+
+
+def test_bgp_message_decode_keepalive():
+    """KEEPALIVE: variant tag only — no fields to read."""
+    wire = librouting.encode_keepalive()
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.kind() == librouting.BGP_MSG_KEEPALIVE
+
+
+def test_bgp_message_decode_rejects_truncated():
+    """4 bytes cannot fit a 19-byte BGP header — decode must raise."""
+    try:
+        librouting.BgpMessage.decode(b"\xff\xff\xff\xff")
+    except librouting.LrError:
+        pass
+    else:
+        raise AssertionError("decode(truncated) must raise")
+
+
+def test_bgp_message_close_is_idempotent():
+    """Closing the handle twice (or via __exit__) is a safe no-op."""
+    wire = librouting.encode_keepalive()
+    m = librouting.BgpMessage.decode(wire)
+    m.close()
+    m.close()  # second close is a no-op
+    # Subsequent accessors raise (handle already closed).
+    try:
+        m.kind()
+    except librouting.LrError:
+        pass
+    else:
+        raise AssertionError("kind() after close must raise")
+
+
+def test_bgp_message_walk_all_variants_via_kind():
+    """A switch-like dispatch on kind() reaches every variant."""
+    cases = [
+        (librouting.encode_open(64512, 90, "10.0.0.1"), librouting.BGP_MSG_OPEN),
+        (librouting.encode_keepalive(), librouting.BGP_MSG_KEEPALIVE),
+        (librouting.encode_notification(6, 4), librouting.BGP_MSG_NOTIFICATION),
+        (librouting.encode_update_withdraw_v4(["203.0.113.0/24"]), librouting.BGP_MSG_UPDATE),
+    ]
+    for wire, want in cases:
+        with librouting.BgpMessage.decode(wire) as m:
+            assert m.kind() == want

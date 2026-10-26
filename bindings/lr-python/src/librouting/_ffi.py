@@ -217,6 +217,48 @@ int32_t lr_babel_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_srv6_decode_srh(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 
+/* Structured BGP message inspection — opaque handle + variant readers
+ * (mirrors lr_bgp::BgpMessage). */
+typedef struct OpaqueBgpMessage OpaqueBgpMessage;
+typedef struct OpaqueBgpMessage *lr_bgp_message_t;
+
+lr_bgp_message_t lr_bgp_decode_message(const uint8_t *data, uintptr_t len);
+void lr_bgp_message_free(lr_bgp_message_t m);
+int32_t lr_bgp_message_type(lr_bgp_message_t m, uint8_t *out);
+
+int32_t lr_bgp_message_open_version(lr_bgp_message_t m, uint8_t *out);
+int32_t lr_bgp_message_open_my_as(lr_bgp_message_t m, uint32_t *out);
+int32_t lr_bgp_message_open_hold_time(lr_bgp_message_t m, uint16_t *out);
+int32_t lr_bgp_message_open_bgp_id(lr_bgp_message_t m, uint8_t *out);
+uintptr_t lr_bgp_message_open_param_count(lr_bgp_message_t m);
+int32_t lr_bgp_message_open_param_at(lr_bgp_message_t m,
+                                     uintptr_t idx,
+                                     uint8_t *out_type,
+                                     lr_bytes_t *out_value);
+
+int32_t lr_bgp_message_notification_code(lr_bgp_message_t m, uint8_t *out);
+int32_t lr_bgp_message_notification_subcode(lr_bgp_message_t m, uint8_t *out);
+int32_t lr_bgp_message_notification_data(lr_bgp_message_t m, lr_bytes_t *out);
+
+int32_t lr_bgp_message_route_refresh_afi(lr_bgp_message_t m, uint16_t *out);
+int32_t lr_bgp_message_route_refresh_safi(lr_bgp_message_t m, uint8_t *out);
+int32_t lr_bgp_message_route_refresh_subtype(lr_bgp_message_t m, uint8_t *out);
+
+uintptr_t lr_bgp_message_update_withdrawn_count(lr_bgp_message_t m);
+uintptr_t lr_bgp_message_update_nlri_count(lr_bgp_message_t m);
+uintptr_t lr_bgp_message_update_attr_count(lr_bgp_message_t m);
+int32_t lr_bgp_message_update_withdrawn_at(lr_bgp_message_t m,
+                                           uintptr_t idx,
+                                           struct lr_prefix_t *out);
+int32_t lr_bgp_message_update_nlri_at(lr_bgp_message_t m,
+                                       uintptr_t idx,
+                                       struct lr_prefix_t *out);
+int32_t lr_bgp_message_update_attr_at(lr_bgp_message_t m,
+                                      uintptr_t idx,
+                                      uint8_t *out_type,
+                                      uint8_t *out_flags,
+                                      lr_bytes_t *out_value);
+
 typedef struct OpaqueRoaStore OpaqueRoaStore;
 typedef struct OpaqueRoaStore *lr_roa_store_t;
 
