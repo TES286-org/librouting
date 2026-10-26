@@ -682,6 +682,82 @@ zero-tag-still-present round trip. The Python suite stays at 34
 passing tests (was 33); the Go suite stays green. No Rust change,
 no C ABI change, no version bump — additive binding surface only.
 
+### `lr-policy`: fail-closed hardening for BGP `SetAction` variants (issue #92)
+
+`SetAction::SetLocalPref`, `SetAction::SetMed`, `SetAction::PrependAs`
+and `SetAction::AddCommunity` are BGP-specific path-attribute mutations
+(RFC 4271 §5.1.5 / §5.1.4 / §5.1.2 / RFC 1997). When `lr-policy` was
+built without the `bgp` feature, the four variants were silent no-ops:
+`apply_set` discarded the action with no signal, so an operator who
+configured `set local-preference` against a no-`bgp` build saw the
+route pass through unchanged, with no indication the policy had been
+silently bypassed.
+
+The fail-closed contract is now exposed through
+`lr_policy::action::apply_set_checked`, which returns
+`ApplySetError::RequiresBgpFeature` for the four variants when the
+`bgp` feature is off. `RouteMap::evaluate` consumes the checked form
+and denies the route on `Err` — matching the fail-closed tightening
+that landed for `CommunityList` / `AsPathFilter`. The legacy
+`apply_set` keeps its infallible signature for ABI-stable embedders
+and now logs the dropped action through `tracing::warn!` so the silent
+failure is at least observable in the daemon's log stream.
+
+The crate's `--no-default-features --features std` build is currently
+blocked upstream of this module (`filter/eval.rs`'s default method
+bodies reference `crate::bgp::*` unconditionally), so the no-`bgp`
+fail-closed tests in `action.rs` and `route_map.rs` pin the contract
+for the future follow-up that lands the no-`bgp` build.
+
+### `lr-policy`: filter VM `unreachable!()` arms hardened to `EvalError` (issue #92)
+
+Six `unreachable!()` arms in `crates/lr-policy/src/filter/eval.rs` —
+one in `read_int_route_field`, four in `eval_binary` (the Lt/Le/Gt/Ge,
+Add/Sub/Mul/Div/Mod, BitAnd/BitOr/BitXor, Shl/Shr match arms), and one
+in the `BranchFieldIntCmp` instruction dispatch — were defended by
+peephole-pass invariants that, if violated by a future refactor, would
+panic on the production data path.
+
+Each `unreachable!()` is replaced by an
+`Err(EvalErrorKind::InternalInvariant(&'static str))`
+return. The new `InternalInvariant` variant identifies the violated
+invariant for diagnostics; the surrounding span points at the offending
+instruction in the filter source. The hot path's success case is
+unchanged — the `Err` return only fires on peephole drift, where the
+previous behavior was a `panic!`. The `read_int_route_field` signature
+gains a `span: Span` parameter so the error carries the source span
+of the calling `BranchFieldIntCmp` instruction.
+
+### `lr-bgp` / `lr-core`: trait adapter surfaces RouteRefresh / EndOfRib (issue #92)
+
+`BgpAction::RouteRefreshRequested` (RFC 2918 §2) and
+`BgpAction::EndOfRib` (RFC 4724 §4) were silently dropped to
+`Action::None` by the `StateMachine for BgpPeer` trait adapter in
+`crates/lr-bgp/src/fsm.rs`. A trait-only embedder that drives the BGP
+FSM through the generic `lr_core::fsm::StateMachine` trait — instead of
+consuming `BgpAction` directly as the daemon does — saw neither signal,
+masking both the route-refresh request and the End-of-RIB marker.
+
+The adapter now maps both variants to `Action::EmitEvent(Event::*)`,
+where `Event` gains two new variants:
+
+- `Event::RouteRefreshRequested { session, family }`
+- `Event::EndOfRib { session, family }`
+
+The `From<Event> for RouterEvent` impl in `crates/lr-router/src/event.rs`
+maps the two new variants to `RouterEvent::Log(...)` so the daemon's
+event stream keeps a trace of the trait-only path; router-aware
+embedders that consume `BgpAction` directly (the daemon's shape) are
+unchanged. The session id is `cfg.peer_id` of the receiving peer,
+matching what `BgpPeer::step()` populates for `Event::PeerStateChange`.
+
+The two new `Event` variants are a breaking change for downstream
+`match` exhaustiveness on `Event`. The project's tolerance for
+semver drift on `Event` is documented in `CHANGELOG.md` rc.3 / 1.0.0
+(`cargo semver-checks` runs with `continue-on-error: true` until the
+next minor); the variants are additive for embedders whose `match`
+includes a `_ => ...` arm.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
