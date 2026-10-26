@@ -2,6 +2,7 @@
 package librouting
 
 import (
+	"bytes"
 	"math"
 	"strings"
 	"testing"
@@ -864,6 +865,123 @@ func TestPolicyObjects(t *testing.T) {
 	if verdict, err := rm.Evaluate(rt, nil); err != nil || verdict != EvalFallthrough {
 		t.Fatalf("NULL resolver must fail the match: got (%d, %v), want (%d, nil)",
 			verdict, err, EvalFallthrough)
+	}
+}
+
+func TestRouteAttributeReadersAndReplacers(t *testing.T) {
+	// Round-trip coverage for the Route readers and bulk replacers
+	// that were previously asymmetric with the C ABI (defects.txt L243):
+	// NextHop / Origin / Tag readers, and SetLargeCommunities /
+	// SetExtCommunities / Metric.
+	rt, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV4: %v", err)
+	}
+	defer rt.Free()
+
+	// NextHop: absent by default; v4 round-trip; v6 round-trip.
+	if nh, ok, err := rt.NextHop(); err != nil || ok || nh != nil {
+		t.Fatalf("NextHop default: got (%v, %v, %v), want (nil, false, nil)", nh, ok, err)
+	}
+	v4 := []byte{198, 51, 100, 1}
+	if err := rt.SetNextHop(v4); err != nil {
+		t.Fatalf("SetNextHop v4: %v", err)
+	}
+	if nh, ok, err := rt.NextHop(); err != nil || !ok || !bytes.Equal(nh, v4) {
+		t.Fatalf("NextHop v4: got (%v, %v, %v), want (%v, true, nil)", nh, ok, err, v4)
+	}
+	v6 := []byte{0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	if err := rt.SetNextHop(v6); err != nil {
+		t.Fatalf("SetNextHop v6: %v", err)
+	}
+	if nh, ok, err := rt.NextHop(); err != nil || !ok || !bytes.Equal(nh, v6) {
+		t.Fatalf("NextHop v6: got (%v, %v, %v), want (%v, true, nil)", nh, ok, err, v6)
+	}
+
+	// Origin: absent by default; IGP / EGP / INCOMPLETE round-trip.
+	if o, ok, err := rt.Origin(); err != nil || ok || o != 0 {
+		t.Fatalf("Origin default: got (%d, %v, %v), want (0, false, nil)", o, ok, err)
+	}
+	for _, o := range []byte{0, 1, 2} {
+		if err := rt.SetOrigin(o); err != nil {
+			t.Fatalf("SetOrigin(%d): %v", o, err)
+		}
+		got, ok, err := rt.Origin()
+		if err != nil || !ok || got != o {
+			t.Fatalf("Origin(%d): got (%d, %v, %v), want (%d, true, nil)", o, got, ok, err, o)
+		}
+	}
+
+	// SetLargeCommunities replaces the whole attribute.
+	if err := rt.SetLargeCommunities([]uint32{4200000000, 7, 9, 4200000001, 8, 10}); err != nil {
+		t.Fatalf("SetLargeCommunities: %v", err)
+	}
+	lc, err := rt.LargeCommunities()
+	if err != nil || len(lc) != 6 || lc[0] != 4200000000 || lc[5] != 10 {
+		t.Fatalf("LargeCommunities: got %v, %v", lc, err)
+	}
+	// Empty drops the attribute.
+	if err := rt.SetLargeCommunities(nil); err != nil {
+		t.Fatalf("SetLargeCommunities(nil): %v", err)
+	}
+	if lc, err := rt.LargeCommunities(); err != nil || len(lc) != 0 {
+		t.Fatalf("LargeCommunities after drop: got %v, %v", lc, err)
+	}
+	// Triples must come in groups of three.
+	if err := rt.SetLargeCommunities([]uint32{1, 2}); err == nil {
+		t.Fatal("SetLargeCommunities odd triples must be rejected")
+	}
+
+	// SetExtCommunities: set/round-trip.
+	items := []ExtCommunity{
+		{Kind: 0x42, Subtype: 0x02, Global: 64512, Local: 5},
+		{Kind: 0x01, Subtype: 0x01, Global: 65000, Local: 100},
+	}
+	if err := rt.SetExtCommunities(items); err != nil {
+		t.Fatalf("SetExtCommunities: %v", err)
+	}
+	ec, err := rt.ExtCommunities()
+	if err != nil || len(ec) != 2 || ec[0] != items[0] || ec[1] != items[1] {
+		t.Fatalf("ExtCommunities: got %v, %v", ec, err)
+	}
+	// Empty drops.
+	if err := rt.SetExtCommunities(nil); err != nil {
+		t.Fatalf("SetExtCommunities(nil): %v", err)
+	}
+	if ec, err := rt.ExtCommunities(); err != nil || len(ec) != 0 {
+		t.Fatalf("ExtCommunities after drop: got %v, %v", ec, err)
+	}
+
+	// Metric: round-trip.
+	if err := rt.SetMetric(42); err != nil {
+		t.Fatalf("SetMetric: %v", err)
+	}
+	if m, err := rt.Metric(); err != nil || m != 42 {
+		t.Fatalf("Metric: got (%d, %v), want (42, nil)", m, err)
+	}
+
+	// Tag: absent by default; set/clear round-trip.
+	if tag, ok, err := rt.Tag(); err != nil || ok || tag != 0 {
+		t.Fatalf("Tag default: got (%d, %v, %v), want (0, false, nil)", tag, ok, err)
+	}
+	if err := rt.SetTag(3735928559, true); err != nil {
+		t.Fatalf("SetTag: %v", err)
+	}
+	if tag, ok, err := rt.Tag(); err != nil || !ok || tag != 3735928559 {
+		t.Fatalf("Tag after set: got (%d, %v, %v), want (3735928559, true, nil)", tag, ok, err)
+	}
+	if err := rt.SetTag(0, false); err != nil {
+		t.Fatalf("SetTag clear: %v", err)
+	}
+	if tag, ok, err := rt.Tag(); err != nil || ok || tag != 0 {
+		t.Fatalf("Tag after clear: got (%d, %v, %v), want (0, false, nil)", tag, ok, err)
+	}
+	// A zero tag set with ok=true is still present.
+	if err := rt.SetTag(0, true); err != nil {
+		t.Fatalf("SetTag(0,true): %v", err)
+	}
+	if tag, ok, err := rt.Tag(); err != nil || !ok || tag != 0 {
+		t.Fatalf("Tag(0,true): got (%d, %v, %v), want (0, true, nil)", tag, ok, err)
 	}
 }
 

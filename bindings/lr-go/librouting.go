@@ -1531,6 +1531,30 @@ func (r *Route) SetNextHop(addr []byte) error {
 	return nil
 }
 
+// NextHop reads the route's next hop (RFC 4271 §5.1.3). The returned
+// slice is 4 bytes for IPv4, 16 bytes for IPv6. ok is false when the
+// attribute is absent.
+func (r *Route) NextHop() (addr []byte, ok bool, err error) {
+	var buf [16]C.uint8_t
+	var isV6 C.int32_t
+	rc := C.lr_route_next_hop(r.ptr, &buf[0], &isV6)
+	if rc == 1 {
+		return nil, false, nil
+	}
+	if rc != 0 {
+		return nil, false, fmt.Errorf("lr_route_next_hop: %s (rc=%d)", LastError(), int(rc))
+	}
+	n := 4
+	if isV6 != 0 {
+		n = 16
+	}
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		out[i] = byte(buf[i])
+	}
+	return out, true, nil
+}
+
 // SetLocalPref sets the BGP LOCAL_PREF (RFC 4271 §5.1.5).
 func (r *Route) SetLocalPref(value uint32) error {
 	if rc := C.lr_route_set_local_pref(r.ptr, C.uint32_t(value)); rc != 0 {
@@ -1579,6 +1603,20 @@ func (r *Route) SetOrigin(origin byte) error {
 		return fmt.Errorf("lr_route_set_origin: %s (rc=%d)", LastError(), int(rc))
 	}
 	return nil
+}
+
+// Origin reads the BGP ORIGIN (RFC 4271 §5.1.1): 0 IGP, 1 EGP, 2
+// INCOMPLETE. ok is false when the attribute is absent.
+func (r *Route) Origin() (byte, bool, error) {
+	var v C.uint8_t
+	rc := C.lr_route_origin(r.ptr, &v)
+	if rc == 1 {
+		return 0, false, nil
+	}
+	if rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_origin: %s (rc=%d)", LastError(), int(rc))
+	}
+	return byte(v), true, nil
 }
 
 // SetAsPath replaces the AS_PATH with a flat sequence (empty drops it).
@@ -1668,6 +1706,24 @@ func (r *Route) LargeCommunities() ([]uint32, error) {
 	return out, nil
 }
 
+// SetLargeCommunities replaces the LARGE_COMMUNITIES attribute (RFC 8092)
+// from flat triples [g1, d1_1, d1_2, g2, d2_1, d2_2, ...]. An empty slice
+// drops the attribute. len(triples) must be a multiple of three.
+func (r *Route) SetLargeCommunities(triples []uint32) error {
+	if len(triples)%3 != 0 {
+		return fmt.Errorf("SetLargeCommunities: triples must come in groups of three")
+	}
+	var p *C.uint32_t
+	if len(triples) > 0 {
+		p = (*C.uint32_t)(unsafe.Pointer(&triples[0]))
+	}
+	// The C ABI takes the entry count, not the u32 count.
+	if rc := C.lr_route_set_large_communities(r.ptr, p, C.size_t(len(triples)/3)); rc != 0 {
+		return fmt.Errorf("lr_route_set_large_communities: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
 // AddExtCommunity appends one RFC 4360 extended community.
 func (r *Route) AddExtCommunity(kind, subtype byte, global uint32, local uint16) error {
 	if rc := C.lr_route_add_ext_community(r.ptr, C.uint8_t(kind), C.uint8_t(subtype),
@@ -1697,6 +1753,26 @@ func (r *Route) ExtCommunities() ([]ExtCommunity, error) {
 	return out, nil
 }
 
+// SetExtCommunities replaces the whole EXTENDED_COMMUNITIES attribute
+// (RFC 4360). An empty slice drops the attribute.
+func (r *Route) SetExtCommunities(items []ExtCommunity) error {
+	var p *C.struct_lr_ext_comm_t
+	if len(items) > 0 {
+		raw := make([]C.struct_lr_ext_comm_t, len(items))
+		for i, it := range items {
+			raw[i].kind = C.uint8_t(it.Kind)
+			raw[i].subtype = C.uint8_t(it.Subtype)
+			raw[i].global = C.uint32_t(it.Global)
+			raw[i].local = C.uint16_t(it.Local)
+		}
+		p = &raw[0]
+	}
+	if rc := C.lr_route_set_ext_communities(r.ptr, p, C.size_t(len(items))); rc != 0 {
+		return fmt.Errorf("lr_route_set_ext_communities: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
 // ExtCommunity mirrors lr_ext_comm_t (RFC 4360).
 type ExtCommunity struct {
 	Kind    byte
@@ -1713,12 +1789,34 @@ func (r *Route) SetMetric(value uint32) error {
 	return nil
 }
 
+// Metric reads the route's cross-protocol metric.
+func (r *Route) Metric() (uint32, error) {
+	var v C.uint32_t
+	if rc := C.lr_route_metric(r.ptr, &v); rc != 0 {
+		return 0, fmt.Errorf("lr_route_metric: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint32(v), nil
+}
+
 // SetTag sets (or, with ok=false, clears) the route tag.
 func (r *Route) SetTag(tag uint32, ok bool) error {
 	if rc := C.lr_route_set_tag(r.ptr, cIntBool(ok), C.uint32_t(tag)); rc != 0 {
 		return fmt.Errorf("lr_route_set_tag: %s (rc=%d)", LastError(), int(rc))
 	}
 	return nil
+}
+
+// Tag reads the operator route tag. ok is false when the tag is absent.
+func (r *Route) Tag() (uint32, bool, error) {
+	var v C.uint32_t
+	rc := C.lr_route_tag(r.ptr, &v)
+	if rc == 1 {
+		return 0, false, nil
+	}
+	if rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_tag: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint32(v), true, nil
 }
 
 // PrefixList is an owned prefix-list handle (FRR ge/le semantics,
