@@ -46,7 +46,7 @@ pub struct OpaqueMrtRecord {
 
 pub type lr_mrt_record_t = *mut OpaqueMrtRecord;
 
-fn box_record(r: MrtRecord) -> lr_mrt_record_t {
+pub(crate) fn box_record(r: MrtRecord) -> lr_mrt_record_t {
     Box::into_raw(Box::new(r)) as lr_mrt_record_t
 }
 

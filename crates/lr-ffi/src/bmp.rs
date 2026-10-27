@@ -47,7 +47,7 @@ pub struct OpaqueBmpMessage {
 
 pub type lr_bmp_message_t = *mut OpaqueBmpMessage;
 
-fn box_message(m: BmpMessage) -> lr_bmp_message_t {
+pub(crate) fn box_message(m: BmpMessage) -> lr_bmp_message_t {
     Box::into_raw(Box::new(m)) as lr_bmp_message_t
 }
 

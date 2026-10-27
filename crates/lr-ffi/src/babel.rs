@@ -31,7 +31,7 @@ pub struct OpaqueBabelFrame {
 
 pub type lr_babel_frame_t = *mut OpaqueBabelFrame;
 
-fn box_frame(f: BabelFrame) -> lr_babel_frame_t {
+pub(crate) fn box_frame(f: BabelFrame) -> lr_babel_frame_t {
     Box::into_raw(Box::new(f)) as lr_babel_frame_t
 }
 
