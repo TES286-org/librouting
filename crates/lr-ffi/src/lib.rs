@@ -56,6 +56,7 @@ pub mod policy_safety;
 pub mod rib;
 pub mod roa_store;
 pub mod roa_table;
+pub mod role_topology;
 pub mod router;
 pub mod rtr_client;
 pub mod sessions;

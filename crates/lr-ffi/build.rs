@@ -122,4 +122,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ospf_db_exchange.rs");
     println!("cargo:rerun-if-changed=src/ldp_label_store.rs");
     println!("cargo:rerun-if-changed=src/ospf_retransmit.rs");
+    println!("cargo:rerun-if-changed=src/role_topology.rs");
 }

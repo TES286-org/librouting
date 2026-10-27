@@ -471,6 +471,26 @@
 
 #define LR_ROA_INVALID 2
 
+#define LR_OTC_ROLE_UNSET 0
+
+#define LR_OTC_ROLE_PROVIDER 1
+
+#define LR_OTC_ROLE_CUSTOMER 2
+
+#define LR_OTC_ROLE_PEER 3
+
+#define LR_OTC_ROLE_ROUTE_SERVER 4
+
+#define LR_OTC_ROLE_RS_CLIENT 5
+
+#define LR_PEER_ROLE_EBGP 0
+
+#define LR_PEER_ROLE_IBGP 1
+
+#define LR_PEER_ROLE_CONFED_EXTERNAL 2
+
+#define LR_PEER_ROLE_CONFED_INTERNAL 3
+
 /**
  * Area kind ids shared by `lr_router_add_ospf_session_ext`. The stub
  * and NSSA kinds carry a `default_metric` (the border-router-injected
@@ -1545,6 +1565,36 @@ typedef struct OpaqueRoaTable {
 } OpaqueRoaTable;
 
 typedef struct OpaqueRoaTable *lr_roa_table_t;
+
+typedef struct OpaqueOtc {
+  uint8_t _private[0];
+} OpaqueOtc;
+
+typedef struct OpaqueOtc *lr_bgp_otc_t;
+
+typedef struct OpaquePeerTopology {
+  uint8_t _private[0];
+} OpaquePeerTopology;
+
+typedef struct OpaquePeerTopology *lr_bgp_peer_topology_t;
+
+typedef struct OpaqueRouteReflectorConfig {
+  uint8_t _private[0];
+} OpaqueRouteReflectorConfig;
+
+typedef struct OpaqueRouteReflectorConfig *lr_bgp_rr_config_t;
+
+typedef struct OpaqueConfederationConfig {
+  uint8_t _private[0];
+} OpaqueConfederationConfig;
+
+typedef struct OpaqueConfederationConfig *lr_bgp_confed_config_t;
+
+typedef struct OpaqueRouteServerConfig {
+  uint8_t _private[0];
+} OpaqueRouteServerConfig;
+
+typedef struct OpaqueRouteServerConfig *lr_bgp_rs_config_t;
 
 /**
  * Opaque `RtrClient` handle.
@@ -6004,6 +6054,100 @@ int32_t lr_roa_table_entry_at(lr_roa_table_t t,
                               uint8_t *out_prefix_len,
                               uint8_t *out_max_length,
                               uint32_t *out_asn);
+
+uint8_t lr_bgp_otc_role_from_u8(uint8_t v);
+
+uint8_t lr_bgp_otc_role_to_u8(uint8_t role);
+
+uint8_t lr_bgp_otc_role_is_upstream(uint8_t role);
+
+uint8_t lr_bgp_otc_role_is_route_server(uint8_t role);
+
+lr_bgp_otc_t lr_bgp_otc_new(uint32_t asn);
+
+lr_bgp_otc_t lr_bgp_otc_decode(const uint8_t *data, uintptr_t len);
+
+int32_t lr_bgp_otc_encode(lr_bgp_otc_t otc, uint8_t *out);
+
+uint32_t lr_bgp_otc_value(lr_bgp_otc_t otc);
+
+uint8_t lr_bgp_otc_is_set(lr_bgp_otc_t otc);
+
+void lr_bgp_otc_free(lr_bgp_otc_t otc);
+
+uint8_t lr_bgp_peer_role_from_asns(uint32_t local_as,
+                                   uint32_t peer_as,
+                                   const uint32_t *confed,
+                                   uintptr_t confed_count);
+
+uint8_t lr_bgp_peer_role_is_internal(uint8_t role);
+
+uint8_t lr_bgp_peer_role_is_external(uint8_t role);
+
+uint8_t lr_bgp_peer_role_prepends_as_path(uint8_t role);
+
+uint8_t lr_bgp_peer_role_rewrites_next_hop(uint8_t role);
+
+lr_bgp_peer_topology_t lr_bgp_peer_topology_new(uint8_t role,
+                                                uint8_t rr_client,
+                                                uint8_t rs_client,
+                                                uint8_t otc_role);
+
+void lr_bgp_peer_topology_free(lr_bgp_peer_topology_t t);
+
+uint8_t lr_bgp_peer_topology_role(lr_bgp_peer_topology_t t);
+
+uint8_t lr_bgp_peer_topology_rr_client(lr_bgp_peer_topology_t t);
+
+uint8_t lr_bgp_peer_topology_rs_client(lr_bgp_peer_topology_t t);
+
+uint8_t lr_bgp_peer_topology_otc_role(lr_bgp_peer_topology_t t);
+
+uint8_t lr_bgp_peer_topology_can_advertise(lr_bgp_peer_topology_t to,
+                                           lr_bgp_peer_topology_t from,
+                                           lr_bgp_otc_t route_otc);
+
+uint32_t lr_bgp_cluster_id_from_u32(uint32_t v);
+
+int32_t lr_bgp_cluster_id_to_v4_bytes(uint32_t cluster_id, uint8_t *out);
+
+lr_bgp_rr_config_t lr_bgp_rr_config_new(uint32_t cluster_id, uint8_t enabled);
+
+void lr_bgp_rr_config_free(lr_bgp_rr_config_t c);
+
+uint32_t lr_bgp_rr_config_cluster_id(lr_bgp_rr_config_t c);
+
+uint8_t lr_bgp_rr_config_enabled(lr_bgp_rr_config_t c);
+
+lr_bgp_confed_config_t lr_bgp_confed_config_new(const uint32_t *members,
+                                                uintptr_t count,
+                                                uint32_t confederation_id);
+
+void lr_bgp_confed_config_free(lr_bgp_confed_config_t c);
+
+uint8_t lr_bgp_confed_config_contains(lr_bgp_confed_config_t c, uint32_t asn);
+
+uint32_t lr_bgp_confed_config_external_as(lr_bgp_confed_config_t c);
+
+uintptr_t lr_bgp_confed_config_member_count(lr_bgp_confed_config_t c);
+
+uint32_t lr_bgp_confed_config_member_at(lr_bgp_confed_config_t c, uintptr_t index);
+
+lr_bgp_rs_config_t lr_bgp_rs_config_new(uint8_t client,
+                                        const char *inbound_policy,
+                                        const char *outbound_policy);
+
+void lr_bgp_rs_config_free(lr_bgp_rs_config_t c);
+
+uint8_t lr_bgp_rs_config_client(lr_bgp_rs_config_t c);
+
+uintptr_t lr_bgp_rs_config_strip_count(lr_bgp_rs_config_t c);
+
+uint32_t lr_bgp_rs_config_strip_at(lr_bgp_rs_config_t c, uintptr_t index);
+
+uintptr_t lr_bgp_rs_config_add_count(lr_bgp_rs_config_t c);
+
+uint32_t lr_bgp_rs_config_add_at(lr_bgp_rs_config_t c, uintptr_t index);
 
 /**
  * Create a new router instance.
