@@ -26,6 +26,7 @@ pub mod babel;
 pub mod babel_neighbor;
 pub mod best_path;
 pub mod bfd;
+pub mod bgp_path;
 pub mod bgp_peer;
 pub mod bmp;
 pub mod bytes;

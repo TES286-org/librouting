@@ -561,6 +561,24 @@ typedef struct OpaqueBfdPacket {
 
 typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
 
+/**
+ * Opaque `AsPath` handle.
+ */
+typedef struct OpaqueBgpAsPath {
+  uint8_t _private[0];
+} OpaqueBgpAsPath;
+
+typedef struct OpaqueBgpAsPath *lr_bgp_as_path_t;
+
+/**
+ * Opaque `PathAttributes` handle.
+ */
+typedef struct OpaqueBgpPathAttrs {
+  uint8_t _private[0];
+} OpaqueBgpPathAttrs;
+
+typedef struct OpaqueBgpPathAttrs *lr_bgp_path_attrs_t;
+
 typedef struct OpaqueBgpPeer {
   uint8_t _private[0];
 } OpaqueBgpPeer;
@@ -1837,6 +1855,412 @@ int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uin
  * and must not be used after this call.
  */
 void lr_bfd_packet_free(lr_bfd_packet_t packet);
+
+/**
+ * Translate an `AttrType` value to its RFC 4271 §5 wire code (1..).
+ * Returns 0 for `Other(u8)` values whose wire code is 0 (unreachable
+ * in practice — `AttrType::Other(v)` always carries `v != 0`).
+ */
+uint8_t lr_bgp_attr_type_to_u8(uint8_t t);
+
+/**
+ * Translate a wire code to an `AttrType` value, returning 1 if the
+ * code is recognised (well-known or assigned) and 0 if it is
+ * `Other(u8)`. The caller passes the wire code in `wire` and
+ * receives the canonical wire code back in `*out_canonical` (which
+ * equals `wire` for every assigned code; for `Other(v)` it equals
+ * `v` too — the round-trip is the identity on the wire form).
+ */
+int32_t lr_bgp_attr_type_from_u8(uint8_t wire, uint8_t *out_canonical);
+
+/**
+ * Construct an empty `AsPath`.
+ */
+lr_bgp_as_path_t lr_bgp_as_path_new(void);
+
+/**
+ * Construct an `AsPath` from a single AS_SEQUENCE segment carrying
+ * `count` ASes from `ases` (a flat `uint32_t` array). The path's
+ * `length()` per RFC 4271 §9.1.2.2(a) is `count`.
+ *
+ * # Safety
+ * `ases` must point to `count` readable `uint32_t` values, or be
+ * NULL when `count == 0`.
+ */
+lr_bgp_as_path_t lr_bgp_as_path_from_sequence(const uint32_t *ases, uintptr_t count);
+
+/**
+ * Drop a boxed `AsPath`. Safe to call with NULL.
+ *
+ * # Safety
+ * `p` must have been produced by a `lr_bgp_as_path_*` constructor
+ * and not already freed.
+ */
+void lr_bgp_as_path_free(lr_bgp_as_path_t p);
+
+/**
+ * RFC 4271 §9.1.2.2(a) length: each AS_SEQUENCE entry counts as 1,
+ * each AS_SET segment counts as 1 regardless of size; confederation
+ * segments are NOT counted (RFC 5065 §5.3). Returns 0 on a NULL
+ * handle.
+ *
+ * # Safety
+ * `p` must be a valid AsPath handle.
+ */
+uintptr_t lr_bgp_as_path_length(lr_bgp_as_path_t p);
+
+/**
+ * Length counting confederation segments too (RFC 5065 §5.3 — the
+ * operator may opt into counting them via
+ * `BestPathConfig::count_confed_in_path_len`).
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_length`].
+ */
+uintptr_t lr_bgp_as_path_length_with_confed(lr_bgp_as_path_t p);
+
+/**
+ * Flattened AS_SEQUENCE — concatenates every AS_SEQUENCE segment's
+ * ASes (skipping AS_SET and confederation segments). Writes the
+ * ASes to `out` (a `uint32_t` array of capacity `cap`) and returns
+ * the number written. When `cap` is 0 or `out` is NULL, returns
+ * the number of ASes that WOULD be written (caller-allocates
+ * pattern — call once with `cap=0` to size, then again to fill).
+ *
+ * # Safety
+ * `p` must be a valid AsPath handle. `out` must point to writable
+ * memory of `cap` `uint32_t` values (NULL only when `cap == 0`).
+ */
+uintptr_t lr_bgp_as_path_as_sequence(lr_bgp_as_path_t p, uint32_t *out, uintptr_t cap);
+
+/**
+ * Number of segments in the path (AS_SEQUENCE, AS_SET, AS_CONFED_*).
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_length`].
+ */
+uintptr_t lr_bgp_as_path_segment_count(lr_bgp_as_path_t p);
+
+/**
+ * Read one segment by index. Writes the segment's `kind` (1=Set,
+ * 2=Sequence, 3=ConfedSequence, 4=ConfedSet per RFC 5065) to
+ * `*out_kind` and the segment's AS count to `*out_count`. Use
+ * [`lr_bgp_as_path_segment_ases`] to read the ASes themselves.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL path,
+ * `LR_ERR_INVALID_HANDLE` (-2) when the index is out of range.
+ *
+ * # Safety
+ * `p` must be a valid AsPath handle. `out_kind` and `out_count`
+ * must point to writable `uint8_t` and `uintptr_t`.
+ */
+int32_t lr_bgp_as_path_segment_at(lr_bgp_as_path_t p,
+                                  uintptr_t index,
+                                  uint8_t *out_kind,
+                                  uintptr_t *out_count);
+
+/**
+ * Read the ASes of segment `index`. Writes `min(seg_count, cap)`
+ * ASes to `out`. Returns the segment's full AS count (so the
+ * caller can size + re-call like `as_sequence`). Returns 0 when
+ * the path is NULL or the index is out of range.
+ *
+ * # Safety
+ * `p` must be a valid AsPath handle. `out` must point to writable
+ * memory of `cap` `uint32_t` values (NULL only when `cap == 0`).
+ */
+uintptr_t lr_bgp_as_path_segment_ases(lr_bgp_as_path_t p,
+                                      uintptr_t index,
+                                      uint32_t *out,
+                                      uintptr_t cap);
+
+/**
+ * Prepend an AS to the path (RFC 4271 §5.1.2 — prepended to the
+ * most-recent AS_SEQUENCE segment, or wrapped in a new segment when
+ * the path is empty or starts with an AS_SET).
+ *
+ * # Safety
+ * `p` must be a valid AsPath handle.
+ */
+int32_t lr_bgp_as_path_prepend(lr_bgp_as_path_t p, uint32_t as_);
+
+/**
+ * Prepend a confederation AS (RFC 5065 §4.1(b) — adds to the most
+ * recent AS_CONFED_SEQUENCE segment, or wraps in a new one).
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_prepend`].
+ */
+int32_t lr_bgp_as_path_prepend_confed(lr_bgp_as_path_t p, uint32_t as_);
+
+/**
+ * Strip every AS_CONFED_* segment from the path (RFC 5065 §4.1(c)(5)
+ * — confederation segments are removed before advertising outside
+ * the confederation). Returns 1 if at least one segment was
+ * stripped, 0 otherwise; `LR_ERR_NULL` (-1) on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_prepend`].
+ */
+int32_t lr_bgp_as_path_strip_confed(lr_bgp_as_path_t p);
+
+/**
+ * True when the path contains any AS_CONFED_* segment.
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_prepend`].
+ */
+uint8_t lr_bgp_as_path_has_confed(lr_bgp_as_path_t p);
+
+/**
+ * Loop check — true when `my_as` appears in any AS_SEQUENCE segment
+ * (RFC 4271 §9.1.2.2(b) — the path would form a loop). Used by the
+ * import filter to reject a route whose AS_PATH contains our own
+ * AS before any policy evaluation.
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_prepend`].
+ */
+uint8_t lr_bgp_as_path_loop_check(lr_bgp_as_path_t p, uint32_t my_as);
+
+/**
+ * Decode the 2-octet-AS form (RFC 4271 §5.1.2). Returns a new
+ * AsPath handle on success, NULL on a decode failure (the
+ * last-error string is set).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes.
+ */
+lr_bgp_as_path_t lr_bgp_as_path_decode_2(const uint8_t *data, uintptr_t len);
+
+/**
+ * Decode the 4-octet-AS form (RFC 6793 §3 — AS4_PATH).
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_decode_2`].
+ */
+lr_bgp_as_path_t lr_bgp_as_path_decode_4(const uint8_t *data, uintptr_t len);
+
+/**
+ * Encode to the 2-octet-AS wire form. Writes the bytes to a
+ * freshly-allocated `lr_bytes_t` at `*out`.
+ *
+ * # Safety
+ * `p` must be a valid AsPath handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bgp_as_path_encode_2(lr_bgp_as_path_t p, struct lr_bytes_t *out);
+
+/**
+ * Encode to the 4-octet-AS wire form (RFC 6793 §3 — AS4_PATH).
+ *
+ * # Safety
+ * See [`lr_bgp_as_path_encode_2`].
+ */
+int32_t lr_bgp_as_path_encode_4(lr_bgp_as_path_t p, struct lr_bytes_t *out);
+
+/**
+ * Construct an empty `PathAttributes`.
+ */
+lr_bgp_path_attrs_t lr_bgp_path_attrs_new(void);
+
+/**
+ * Drop a boxed `PathAttributes`. Safe to call with NULL.
+ *
+ * # Safety
+ * `a` must have been produced by a `lr_bgp_path_attrs_*` constructor
+ * and not already freed.
+ */
+void lr_bgp_path_attrs_free(lr_bgp_path_attrs_t a);
+
+/**
+ * Number of attributes in the set. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle.
+ */
+uintptr_t lr_bgp_path_attrs_len(lr_bgp_path_attrs_t a);
+
+/**
+ * True when the set holds no attributes. Returns 1 (true) on a NULL
+ * handle.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_len`].
+ */
+uint8_t lr_bgp_path_attrs_is_empty(lr_bgp_path_attrs_t a);
+
+/**
+ * Read the ORIGIN attribute (RFC 4271 §5.1.1 — IGP=0, EGP=1,
+ * INCOMPLETE=2). Writes the origin code to `*out_origin` and
+ * returns 1 if the attribute is present, 0 if absent.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. `out_origin` must
+ * point to a writable `uint8_t`.
+ */
+uint8_t lr_bgp_path_attrs_origin(lr_bgp_path_attrs_t a, uint8_t *out_origin);
+
+/**
+ * Read the MULTI_EXIT_DISC attribute (RFC 4271 §5.1.4). Writes the
+ * MED value to `*out_med` and returns 1 if present, 0 if absent.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_med(lr_bgp_path_attrs_t a, uint32_t *out_med);
+
+/**
+ * Read the LOCAL_PREF attribute (RFC 4271 §5.1.5). Writes the value
+ * to `*out_lp` and returns 1 if present, 0 if absent.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_local_pref(lr_bgp_path_attrs_t a, uint32_t *out_lp);
+
+/**
+ * Set the LOCAL_PREF attribute (RFC 4271 §5.1.5). The previous
+ * value, if any, is overwritten.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle.
+ */
+int32_t lr_bgp_path_attrs_set_local_pref(lr_bgp_path_attrs_t a, uint32_t value);
+
+/**
+ * True when the ATOMIC_AGGREGATE attribute is present (RFC 4271
+ * §5.1.6 — the route was aggregated; the receiving speaker must NOT
+ * try to de-aggregate it).
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_atomic_aggregate(lr_bgp_path_attrs_t a);
+
+/**
+ * Read the AGGREGATOR attribute (RFC 4271 §5.1.7 — the AS that
+ * aggregated the route, plus the speaker that originated the
+ * aggregation). Writes the AS to `*out_asn` and the speaker to
+ * `*out_speaker` (4-byte IPv4) and returns 1 if present, 0 if
+ * absent.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. `out_asn` and
+ * `out_speaker` must point to writable `uint32_t` values.
+ */
+uint8_t lr_bgp_path_attrs_aggregator(lr_bgp_path_attrs_t a,
+                                     uint32_t *out_asn,
+                                     uint32_t *out_speaker);
+
+/**
+ * Read the ORIGINATOR_ID attribute (RFC 4456 §4 — the route
+ * reflector that originated the route). Writes the ID to
+ * `*out_originator` and returns 1 if present, 0 if absent.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_originator_id(lr_bgp_path_attrs_t a, uint32_t *out_originator);
+
+/**
+ * True when the CLUSTER_LIST attribute is present (RFC 4456 §8).
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_has_cluster_list(lr_bgp_path_attrs_t a);
+
+/**
+ * True when the OTC (Only To Customer) attribute is present
+ * (RFC 9234 §4.1).
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_has_otc(lr_bgp_path_attrs_t a);
+
+/**
+ * Read the OTC attribute (RFC 9234 §4.1). Writes the value to
+ * `*out_otc` and returns 1 if present, 0 if absent.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_otc(lr_bgp_path_attrs_t a, uint32_t *out_otc);
+
+/**
+ * True when the AIGP attribute is present (RFC 7311 — accumulated
+ * IGP metric).
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_has_aigp(lr_bgp_path_attrs_t a);
+
+/**
+ * Read the AIGP attribute (RFC 7311 — the type-1 TLV's accumulated
+ * IGP metric). Writes the metric to `*out_aigp` and returns 1 if
+ * present, 0 if absent.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_aigp(lr_bgp_path_attrs_t a, uint64_t *out_aigp);
+
+/**
+ * True when the PMSI Tunnel attribute is present (RFC 6514 §5 —
+ * used by MVPN / EVPN to carry the provider tunnel identifier).
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_origin`].
+ */
+uint8_t lr_bgp_path_attrs_has_pmsi_tunnel(lr_bgp_path_attrs_t a);
+
+/**
+ * Read the COMMUNITIES attribute (RFC 1997). Each community is a
+ * 32-bit value (high 16 bits = ASN, low 16 bits = local value).
+ * Writes the flat `uint32_t` array to a freshly-allocated
+ * `lr_bytes_t` at `*out` — the byte length is `count * 4`. Returns
+ * the number of communities, or 0 on a NULL handle / absent
+ * attribute.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+uintptr_t lr_bgp_path_attrs_communities(lr_bgp_path_attrs_t a, struct lr_bytes_t *out);
+
+/**
+ * Read the EXTENDED COMMUNITIES attribute (RFC 4360 — each is an
+ * 8-octet value). Writes the flat byte stream to a
+ * freshly-allocated `lr_bytes_t` at `*out`. Returns the count of
+ * extended communities, or 0 on a NULL handle / absent attribute.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_communities`].
+ */
+uintptr_t lr_bgp_path_attrs_ext_communities(lr_bgp_path_attrs_t a, struct lr_bytes_t *out);
+
+/**
+ * Read the LARGE COMMUNITIES attribute (RFC 8092 — each is a 12-byte
+ * `(global_admin, local_data1, local_data2)` triple). Writes the
+ * flat byte stream to a freshly-allocated `lr_bytes_t` at `*out`.
+ * Returns the count, or 0 on a NULL handle / absent attribute.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_communities`].
+ */
+uintptr_t lr_bgp_path_attrs_large_communities(lr_bgp_path_attrs_t a, struct lr_bytes_t *out);
+
+/**
+ * Insert a COMMUNITY (RFC 1997 — `asn << 16 | value`) into the set.
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle.
+ */
+int32_t lr_bgp_path_attrs_insert_community(lr_bgp_path_attrs_t a, uint32_t community);
 
 /**
  * Construct a `BgpPeer` from the BGP-4 mandatory parameters (RFC
