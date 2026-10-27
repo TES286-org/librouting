@@ -513,6 +513,194 @@ pub unsafe extern "C" fn lr_srv6_locator_sid_with_tail(
     )
 }
 
+/// Construct a locator from a SID and a block-bits count (RFC 8754
+/// §3.1). Returns NULL on a NULL `sid` handle or when the SID cannot
+/// host a locator of the requested width.
+///
+/// # Safety
+/// `sid` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_srv6_locator_from_sid(
+    sid: lr_srv6_sid_t,
+    block_bits: u8,
+) -> lr_srv6_locator_t {
+    guarded(
+        || unsafe {
+            if sid.is_null() {
+                return std::ptr::null_mut();
+            }
+            let s = unsafe { &*(sid as *const Sid) };
+            match Locator::from_sid(*s, block_bits) {
+                Some(l) => Box::into_raw(Box::new(l)) as lr_srv6_locator_t,
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// The locator's block byte width (block_bits / 8, rounded up).
+/// Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `loc` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_srv6_locator_block_bytes(loc: lr_srv6_locator_t) -> usize {
+    guarded(
+        || unsafe {
+            if loc.is_null() {
+                return 0;
+            }
+            let l = unsafe { &*(loc as *const Locator) };
+            l.block_bytes()
+        },
+        0,
+    )
+}
+
+/// Build a SID by combining this locator with a 32-bit function
+/// index (RFC 8754 §3.2). The index is placed in the function-bits
+/// portion of the SID. Returns NULL when the locator cannot host
+/// the index (e.g. the locator's block width leaves no room).
+///
+/// # Safety
+/// `loc` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_srv6_locator_sid_with_index(
+    loc: lr_srv6_locator_t,
+    function_index: u32,
+) -> lr_srv6_sid_t {
+    guarded(
+        || unsafe {
+            if loc.is_null() {
+                return std::ptr::null_mut();
+            }
+            let l = unsafe { &*(loc as *const Locator) };
+            match l.sid_with_index(function_index) {
+                Some(sid) => Box::into_raw(Box::new(sid)) as lr_srv6_sid_t,
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Compute the (offset, length) byte range of the locator inside a
+/// SID, given the locator's block-bits count. Writes the offset and
+/// length to `*out_offset` and `*out_len`. Returns 1 on success, 0
+/// when the locator block-bits value is invalid for this SID.
+///
+/// # Safety
+/// `sid` must be a valid handle. `out_offset` and `out_len` must
+/// point to writable `uintptr_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_srv6_sid_locator_slice(
+    sid: lr_srv6_sid_t,
+    locator_block_bits: u8,
+    out_offset: *mut usize,
+    out_len: *mut usize,
+) -> u8 {
+    guarded(
+        || unsafe {
+            if sid.is_null() || out_offset.is_null() || out_len.is_null() {
+                return 0;
+            }
+            let s = unsafe { &*(sid as *const Sid) };
+            match s.locator_slice(locator_block_bits) {
+                Some((off, len)) => {
+                    unsafe {
+                        *out_offset = off;
+                        *out_len = len;
+                    }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// Build a SID by concatenating a locator byte string and a tail
+/// byte string, given the locator's block-bits count. Returns NULL
+/// when the widths are inconsistent.
+///
+/// # Safety
+/// `locator` and `tail` must each point to 16 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_srv6_sid_from_locator_tail(
+    locator: *const u8,
+    tail: *const u8,
+    locator_block_bits: u8,
+) -> lr_srv6_sid_t {
+    guarded(
+        || unsafe {
+            if locator.is_null() || tail.is_null() {
+                return std::ptr::null_mut();
+            }
+            let loc_bytes = unsafe { std::slice::from_raw_parts(locator, 16) };
+            let tail_bytes = unsafe { std::slice::from_raw_parts(tail, 16) };
+            match Sid::from_locator_tail(loc_bytes, tail_bytes, locator_block_bits) {
+                Some(sid) => Box::into_raw(Box::new(sid)) as lr_srv6_sid_t,
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// True when the SID lives inside the locator byte string of width
+/// `locator_block_bits`. The `locator` pointer must point to
+/// `block_bits / 8` readable bytes (NOT 16). Returns 0 on a NULL sid
+/// handle or an invalid block-bits value.
+///
+/// # Safety
+/// `sid` must be a valid handle. `locator` must point to
+/// `block_bits / 8` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_srv6_sid_is_inside_locator(
+    sid: lr_srv6_sid_t,
+    locator: *const u8,
+    locator_block_bits: u8,
+) -> u8 {
+    guarded(
+        || unsafe {
+            if sid.is_null() || locator.is_null() {
+                return 0;
+            }
+            if locator_block_bits > 128 || !locator_block_bits.is_multiple_of(8) {
+                return 0;
+            }
+            let loc_bytes = (locator_block_bits / 8) as usize;
+            let s = unsafe { &*(sid as *const Sid) };
+            let loc_slice = unsafe { std::slice::from_raw_parts(locator, loc_bytes) };
+            s.is_inside_locator(loc_slice, locator_block_bits) as u8
+        },
+        0,
+    )
+}
+
+/// Read the SID's byte slice as a `*const uint8_t` pointer (16 bytes
+/// readable). The pointer is valid as long as the SID handle is alive.
+/// Returns NULL on a NULL sid handle.
+///
+/// # Safety
+/// `sid` must be a valid handle. The caller must not free the returned
+/// pointer (it borrows from the SID handle).
+#[no_mangle]
+pub unsafe extern "C" fn lr_srv6_sid_as_ptr(sid: lr_srv6_sid_t) -> *const u8 {
+    guarded(
+        || unsafe {
+            if sid.is_null() {
+                return std::ptr::null();
+            }
+            let s = unsafe { &*(sid as *const Sid) };
+            s.as_bytes().as_ptr()
+        },
+        std::ptr::null(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,5 +927,107 @@ mod tests {
     #[test]
     fn ffi_locator_free_handles_null() {
         unsafe { lr_srv6_locator_free(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn ffi_locator_from_sid_round_trip() {
+        let loc_addr: [u8; 16] = [0xfc, 0xbb, 0xbb, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let loc = unsafe { lr_srv6_locator_new(loc_addr.as_ptr(), 32) };
+        assert!(!loc.is_null());
+        // Build a SID from the locator + a tail.
+        let tail: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let sid = unsafe { lr_srv6_locator_sid_with_tail(loc, tail.as_ptr()) };
+        assert!(!sid.is_null());
+        // Reconstruct a locator from the SID.
+        let loc2 = unsafe { lr_srv6_locator_from_sid(sid, 32) };
+        assert!(!loc2.is_null());
+        let mut out_addr = [0u8; 16];
+        unsafe {
+            assert_eq!(lr_srv6_locator_addr(loc2, out_addr.as_mut_ptr()), 0);
+            assert_eq!(&out_addr[..4], &loc_addr[..4]);
+            lr_srv6_locator_free(loc2);
+            lr_srv6_sid_free(sid);
+            lr_srv6_locator_free(loc);
+        }
+    }
+
+    #[test]
+    fn ffi_locator_block_bytes() {
+        let loc_addr: [u8; 16] = [0xfc, 0xbb, 0xbb, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let loc = unsafe { lr_srv6_locator_new(loc_addr.as_ptr(), 32) };
+        assert_eq!(unsafe { lr_srv6_locator_block_bytes(loc) }, 4);
+        unsafe { lr_srv6_locator_free(loc) };
+    }
+
+    #[test]
+    fn ffi_locator_sid_with_index() {
+        let loc_addr: [u8; 16] = [0xfc, 0xbb, 0xbb, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let loc = unsafe { lr_srv6_locator_new(loc_addr.as_ptr(), 32) };
+        let sid = unsafe { lr_srv6_locator_sid_with_index(loc, 1) };
+        assert!(!sid.is_null());
+        let mut out = [0u8; 16];
+        unsafe {
+            assert_eq!(lr_srv6_sid_octets(sid, out.as_mut_ptr()), 0);
+            // Locator prefix preserved.
+            assert_eq!(&out[..4], &loc_addr[..4]);
+            lr_srv6_sid_free(sid);
+            lr_srv6_locator_free(loc);
+        }
+    }
+
+    #[test]
+    fn ffi_sid_locator_slice() {
+        let loc_addr: [u8; 16] = [0xfc, 0xbb, 0xbb, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let loc = unsafe { lr_srv6_locator_new(loc_addr.as_ptr(), 32) };
+        let tail: [u8; 16] = [0; 16];
+        let sid = unsafe { lr_srv6_locator_sid_with_tail(loc, tail.as_ptr()) };
+        let mut off = 0usize;
+        let mut len = 0usize;
+        assert_eq!(
+            unsafe { lr_srv6_sid_locator_slice(sid, 32, &raw mut off, &raw mut len) },
+            1
+        );
+        assert_eq!(off, 0);
+        assert_eq!(len, 4);
+        unsafe {
+            lr_srv6_sid_free(sid);
+            lr_srv6_locator_free(loc);
+        }
+    }
+
+    #[test]
+    fn ffi_sid_is_inside_locator() {
+        let loc_addr: [u8; 16] = [0xfc, 0xbb, 0xbb, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let loc = unsafe { lr_srv6_locator_new(loc_addr.as_ptr(), 32) };
+        let tail: [u8; 16] = [0; 16];
+        let sid = unsafe { lr_srv6_locator_sid_with_tail(loc, tail.as_ptr()) };
+        // The locator block prefix is 32 bits = 4 bytes.
+        let loc_prefix: [u8; 4] = [0xfc, 0xbb, 0xbb, 0x00];
+        assert_eq!(
+            unsafe { lr_srv6_sid_is_inside_locator(sid, loc_prefix.as_ptr(), 32) },
+            1
+        );
+        // Different locator prefix: not inside.
+        let other_prefix: [u8; 4] = [0xfc, 0xbb, 0xbb, 0x01];
+        assert_eq!(
+            unsafe { lr_srv6_sid_is_inside_locator(sid, other_prefix.as_ptr(), 32) },
+            0
+        );
+        unsafe {
+            lr_srv6_sid_free(sid);
+            lr_srv6_locator_free(loc);
+        }
+    }
+
+    #[test]
+    fn ffi_sid_as_ptr_round_trip() {
+        let octets: [u8; 16] = [0xfc, 0xbb, 0xbb, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let sid = unsafe { lr_srv6_sid_new(octets.as_ptr()) };
+        let p = unsafe { lr_srv6_sid_as_ptr(sid) };
+        assert!(!p.is_null());
+        // Read back 16 bytes via the pointer.
+        let bytes = unsafe { std::slice::from_raw_parts(p, 16) };
+        assert_eq!(bytes, &octets);
+        unsafe { lr_srv6_sid_free(sid) };
     }
 }
