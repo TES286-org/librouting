@@ -179,6 +179,45 @@
 
 #define LR_BFD_EVENT_OUTBOUND_QUEUED 5
 
+/**
+ * Well-known community kind constants — mirror
+ * `CommunityKind::*`. Published as `#define`s in `lr_ffi.h` so
+ * pre-C23 consumers can switch on them.
+ */
+#define LR_COMMUNITY_KIND_CUSTOM 0
+
+#define LR_COMMUNITY_KIND_NO_EXPORT 1
+
+#define LR_COMMUNITY_KIND_NO_ADVERTISE 2
+
+#define LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED 3
+
+#define LR_COMMUNITY_KIND_NO_PEER 4
+
+#define LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN 5
+
+#define LR_COMMUNITY_KIND_LLGR_STALE 6
+
+#define LR_COMMUNITY_KIND_NO_LLGR 7
+
+/**
+ * Well-known community wire constants — mirror `Community::*`
+ * (RFC 1997 §2 + RFC 8326 §4 + RFC 9494 §3.2/§3.3).
+ */
+#define LR_BGP_COMMUNITY_NO_EXPORT 4294967041
+
+#define LR_BGP_COMMUNITY_NO_ADVERTISE 4294967042
+
+#define LR_BGP_COMMUNITY_NO_EXPORT_SUBCONFED 4294967043
+
+#define LR_BGP_COMMUNITY_NOPEER 4294967044
+
+#define LR_BGP_COMMUNITY_GRACEFUL_SHUTDOWN 4294901760
+
+#define LR_BGP_COMMUNITY_LLGR_STALE 4294901766
+
+#define LR_BGP_COMMUNITY_NO_LLGR 4294901767
+
 #define LR_BGP_ERR_HEADER 1
 
 #define LR_BGP_ERR_OPEN 2
@@ -561,6 +600,13 @@
 
 #define LR_OSPF_PHASE_FULL 4
 
+/**
+ * Metric type constants — mirror `ExternalMetricType::*`.
+ */
+#define LR_OSPF_METRIC_TYPE_1 0
+
+#define LR_OSPF_METRIC_TYPE_2 1
+
 #define LR_OSPF_IF_STATE_DOWN 1
 
 #define LR_OSPF_IF_STATE_LOOPBACK 2
@@ -800,6 +846,33 @@ typedef struct OpaqueBfdSessionEvent {
 } OpaqueBfdSessionEvent;
 
 typedef struct OpaqueBfdSessionEvent *lr_bfd_session_event_t;
+
+/**
+ * Opaque BGP-standard-community handle (RFC 1997).
+ */
+typedef struct OpaqueBgpCommunity {
+  uint8_t _private[0];
+} OpaqueBgpCommunity;
+
+typedef struct OpaqueBgpCommunity *lr_bgp_community_t;
+
+/**
+ * Opaque BGP-large-community handle (RFC 8092).
+ */
+typedef struct OpaqueBgpLargeCommunity {
+  uint8_t _private[0];
+} OpaqueBgpLargeCommunity;
+
+typedef struct OpaqueBgpLargeCommunity *lr_bgp_large_community_t;
+
+/**
+ * Opaque BGP-extended-community handle (RFC 4360/7153).
+ */
+typedef struct OpaqueBgpExtCommunity {
+  uint8_t _private[0];
+} OpaqueBgpExtCommunity;
+
+typedef struct OpaqueBgpExtCommunity *lr_bgp_ext_community_t;
 
 /**
  * Opaque `AsPath` handle.
@@ -1521,6 +1594,90 @@ typedef struct OpaqueOspfDbExchange {
 
 typedef struct OpaqueOspfDbExchange *lr_ospf_db_exchange_t;
 
+/**
+ * Opaque `ExternalDestination` handle (origination input).
+ */
+typedef struct OpaqueOspfExternalDest {
+  uint8_t _private[0];
+} OpaqueOspfExternalDest;
+
+typedef struct OpaqueOspfExternalDest *lr_ospf_external_dest_t;
+
+/**
+ * Opaque `AsbrDestination` handle (type-4 origination input).
+ */
+typedef struct OpaqueOspfAsbrDest {
+  uint8_t _private[0];
+} OpaqueOspfAsbrDest;
+
+typedef struct OpaqueOspfAsbrDest *lr_ospf_asbr_dest_t;
+
+typedef struct OpaqueOspfLsaBox {
+  uint8_t _private[0];
+} OpaqueOspfLsaBox;
+
+/**
+ * Opaque boxed-LSA handle. The C-side LSA *projection* is
+ * `lr_ospf_lsa_hdr_t` (a struct the caller can read fields from);
+ * this is the boxed owned-LSA handle the embedder passes back to
+ * `lr_ospf_lsa_*` functions.
+ */
+typedef struct OpaqueOspfLsaBox *lr_ospf_lsa_box_t;
+
+/**
+ * Opaque `Vec<ExternalRoute>` handle (the §16.4 calculation output).
+ */
+typedef struct OpaqueOspfExternalRouteVec {
+  uint8_t _private[0];
+} OpaqueOspfExternalRouteVec;
+
+typedef struct OpaqueOspfExternalRouteVec *lr_ospf_external_route_vec_t;
+
+typedef struct OpaqueOspfLsdb {
+  uint8_t _private[0];
+} OpaqueOspfLsdb;
+
+typedef struct OpaqueOspfLsdb *lr_ospf_lsdb_t;
+
+typedef struct OpaqueOspfSpfResult {
+  uint8_t _private[0];
+} OpaqueOspfSpfResult;
+
+typedef struct OpaqueOspfSpfResult *lr_ospf_spf_result_t;
+
+/**
+ * Opaque `ExternalRoute` handle (one §16.4 candidate).
+ */
+typedef struct OpaqueOspfExternalRoute {
+  uint8_t _private[0];
+} OpaqueOspfExternalRoute;
+
+typedef struct OpaqueOspfExternalRoute *lr_ospf_external_route_t;
+
+/**
+ * Opaque `Vec<ExternalRouteV3>` handle.
+ */
+typedef struct OpaqueOspfExternalRouteV3Vec {
+  uint8_t _private[0];
+} OpaqueOspfExternalRouteV3Vec;
+
+typedef struct OpaqueOspfExternalRouteV3Vec *lr_ospf_external_route_v3_vec_t;
+
+typedef struct OpaqueOspfSpfResultV3 {
+  uint8_t _private[0];
+} OpaqueOspfSpfResultV3;
+
+typedef struct OpaqueOspfSpfResultV3 *lr_ospf_spf_v3_result_t;
+
+/**
+ * Opaque `ExternalRouteV3` handle (one v3 §4.8.5 candidate).
+ */
+typedef struct OpaqueOspfExternalRouteV3 {
+  uint8_t _private[0];
+} OpaqueOspfExternalRouteV3;
+
+typedef struct OpaqueOspfExternalRouteV3 *lr_ospf_external_route_v3_t;
+
 typedef struct OpaqueOspfInterface {
   uint8_t _private[0];
 } OpaqueOspfInterface;
@@ -1548,24 +1705,6 @@ typedef struct lr_ospf_v3_elector_t {
   uint32_t stated_bdr;
 } lr_ospf_v3_elector_t;
 
-typedef struct OpaqueOspfLsdb {
-  uint8_t _private[0];
-} OpaqueOspfLsdb;
-
-typedef struct OpaqueOspfLsdb *lr_ospf_lsdb_t;
-
-typedef struct OpaqueOspfLsaBox {
-  uint8_t _private[0];
-} OpaqueOspfLsaBox;
-
-/**
- * Opaque boxed-LSA handle. The C-side LSA *projection* is
- * `lr_ospf_lsa_hdr_t` (a struct the caller can read fields from);
- * this is the boxed owned-LSA handle the embedder passes back to
- * `lr_ospf_lsa_*` functions.
- */
-typedef struct OpaqueOspfLsaBox *lr_ospf_lsa_box_t;
-
 typedef struct OpaqueOspfLsaHdrBox {
   uint8_t _private[0];
 } OpaqueOspfLsaHdrBox;
@@ -1587,12 +1726,6 @@ typedef struct OpaqueOspfRetransmitList {
 } OpaqueOspfRetransmitList;
 
 typedef struct OpaqueOspfRetransmitList *lr_ospf_retransmit_t;
-
-typedef struct OpaqueOspfSpfResult {
-  uint8_t _private[0];
-} OpaqueOspfSpfResult;
-
-typedef struct OpaqueOspfSpfResult *lr_ospf_spf_result_t;
 
 /**
  * One SPF route projection. Used by `lr_ospf_spf_route_at`,
@@ -1643,12 +1776,6 @@ typedef struct lr_ospf_spf_route_t {
    */
   uint32_t advertising_router;
 } lr_ospf_spf_route_t;
-
-typedef struct OpaqueOspfSpfResultV3 {
-  uint8_t _private[0];
-} OpaqueOspfSpfResultV3;
-
-typedef struct OpaqueOspfSpfResultV3 *lr_ospf_spf_v3_result_t;
 
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
@@ -2470,6 +2597,251 @@ int32_t lr_bfd_session_event_state_change_fields(lr_bfd_session_event_t e,
 void lr_bfd_session_event_free(lr_bfd_session_event_t e);
 
 void lr_bfd_session_event_array_free(lr_bfd_session_event_t *array, uintptr_t count);
+
+/**
+ * Construct a `Community` from `(asn, value)` (RFC 1997 §2:
+ * `asn << 16 | value`).
+ */
+lr_bgp_community_t lr_bgp_community_new(uint16_t asn, uint16_t value);
+
+/**
+ * Construct a `Community` from a raw `u32` wire value.
+ */
+lr_bgp_community_t lr_bgp_community_from_u32(uint32_t value);
+
+/**
+ * Construct a well-known `Community` by kind id (one of the
+ * `LR_COMMUNITY_KIND_*` constants). Returns `NULL` for an unknown
+ * kind id.
+ */
+lr_bgp_community_t lr_bgp_community_new_well_known(int32_t kind);
+
+/**
+ * Read the raw 32-bit wire value.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+uint32_t lr_bgp_community_as_u32(lr_bgp_community_t c);
+
+/**
+ * Read the high 16-bit AS field.
+ *
+ * # Safety
+ * See [`lr_bgp_community_as_u32`].
+ */
+uint16_t lr_bgp_community_asn(lr_bgp_community_t c);
+
+/**
+ * Read the low 16-bit value field.
+ *
+ * # Safety
+ * See [`lr_bgp_community_as_u32`].
+ */
+uint16_t lr_bgp_community_value(lr_bgp_community_t c);
+
+/**
+ * Read the well-known kind (one of `LR_COMMUNITY_KIND_*`).
+ *
+ * # Safety
+ * See [`lr_bgp_community_as_u32`].
+ */
+int32_t lr_bgp_community_kind(lr_bgp_community_t c);
+
+/**
+ * Drop a boxed `Community`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `c` must have been produced by a `lr_bgp_community_*` constructor
+ * and must not be used after this call.
+ */
+void lr_bgp_community_free(lr_bgp_community_t c);
+
+/**
+ * Encode a flat array of community wire values (`count * 4` bytes
+ * big-endian) as the on-wire COMMUNITIES attribute body (RFC 1997
+ * §2). The caller frees `*out` with [`crate::bytes::lr_bytes_free`].
+ *
+ * # Safety
+ * `values` must point to `count` readable `uint32_t` values; `out`
+ * must point to writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_community_encode_set(const uint32_t *values,
+                                    uintptr_t count,
+                                    struct lr_bytes_t *out);
+
+/**
+ * Decode a COMMUNITIES attribute body (RFC 1997 §2 — flat `count * 4`
+ * bytes big-endian) into a freshly-allocated `uint32_t` array. The
+ * caller frees `*out_values` with [`crate::handle::lr_bytes_free`]
+ * (treat it as a byte buffer of `count * 4` bytes).
+ *
+ * Writes the element count to `*out_count`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes; `out_values` and
+ * `out_count` must point to writable memory.
+ */
+int32_t lr_bgp_community_decode_set(const uint8_t *data,
+                                    uintptr_t len,
+                                    struct lr_bytes_t *out_values,
+                                    uintptr_t *out_count);
+
+/**
+ * Construct a `LargeCommunity` (RFC 8092 §2:
+ * `global_admin:local_data1:local_data2`).
+ */
+lr_bgp_large_community_t lr_bgp_large_community_new(uint32_t global_admin,
+                                                    uint32_t local_data1,
+                                                    uint32_t local_data2);
+
+/**
+ * Read the global-administrator field (RFC 8092 §2).
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+uint32_t lr_bgp_large_community_global_admin(lr_bgp_large_community_t c);
+
+/**
+ * Read the local-data-1 field.
+ *
+ * # Safety
+ * See [`lr_bgp_large_community_global_admin`].
+ */
+uint32_t lr_bgp_large_community_local_data1(lr_bgp_large_community_t c);
+
+/**
+ * Read the local-data-2 field.
+ *
+ * # Safety
+ * See [`lr_bgp_large_community_global_admin`].
+ */
+uint32_t lr_bgp_large_community_local_data2(lr_bgp_large_community_t c);
+
+/**
+ * Drop a boxed `LargeCommunity`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `c` must have been produced by [`lr_bgp_large_community_new`] and
+ * must not be used after this call.
+ */
+void lr_bgp_large_community_free(lr_bgp_large_community_t c);
+
+/**
+ * Encode a flat array of `(global_admin, local_data1, local_data2)`
+ * triples as the on-wire LARGE_COMMUNITIES attribute body (RFC 8092
+ * §2). Each triple occupies `3 * sizeof(uint32_t)`; the caller frees
+ * `*out` with [`crate::bytes::lr_bytes_free`].
+ *
+ * # Safety
+ * `triples` must point to `count * 3` readable `uint32_t` values;
+ * `out` must point to writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_large_community_encode_set(const uint32_t *triples,
+                                          uintptr_t count,
+                                          struct lr_bytes_t *out);
+
+/**
+ * Decode a LARGE_COMMUNITIES attribute body (RFC 8092 §2 — flat
+ * `count * 12` bytes big-endian) into a flat `uint32_t` array (3
+ * entries per community). The caller frees `*out_values` with
+ * [`crate::handle::lr_bytes_free`] and reads `*out_count` triples.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes; `out_values` and
+ * `out_count` must point to writable memory.
+ */
+int32_t lr_bgp_large_community_decode_set(const uint8_t *data,
+                                          uintptr_t len,
+                                          struct lr_bytes_t *out_values,
+                                          uintptr_t *out_count);
+
+/**
+ * Construct an `ExtendedCommunity` (RFC 4360/7153:
+ * `kind:subtype:global:local`, 8 bytes wire form).
+ */
+lr_bgp_ext_community_t lr_bgp_ext_community_new(uint8_t kind,
+                                                uint8_t subtype,
+                                                uint32_t global,
+                                                uint16_t local);
+
+/**
+ * Read the kind (high) byte.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+uint8_t lr_bgp_ext_community_kind(lr_bgp_ext_community_t c);
+
+/**
+ * Read the subtype byte.
+ *
+ * # Safety
+ * See [`lr_bgp_ext_community_kind`].
+ */
+uint8_t lr_bgp_ext_community_subtype(lr_bgp_ext_community_t c);
+
+/**
+ * Read the 32-bit global-administrator field.
+ *
+ * # Safety
+ * See [`lr_bgp_ext_community_kind`].
+ */
+uint32_t lr_bgp_ext_community_global(lr_bgp_ext_community_t c);
+
+/**
+ * Read the 16-bit local-data field.
+ *
+ * # Safety
+ * See [`lr_bgp_ext_community_kind`].
+ */
+uint16_t lr_bgp_ext_community_local(lr_bgp_ext_community_t c);
+
+/**
+ * Drop a boxed `ExtendedCommunity`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `c` must have been produced by [`lr_bgp_ext_community_new`] and
+ * must not be used after this call.
+ */
+void lr_bgp_ext_community_free(lr_bgp_ext_community_t c);
+
+/**
+ * Encode a flat array of `(kind, subtype, global, local)` specs as
+ * the on-wire EXTENDED_COMMUNITIES attribute body (RFC 4360 §3 —
+ * 8 bytes per entry). The specs are passed as a flat `uint32_t`
+ * array (`kind << 24 | subtype << 16 | global_hi << 8 | global_lo`
+ * in slot 0, `global_lo_or_local_hi` etc.). For ABI simplicity the
+ * caller passes a flat `uint32_t` array of `count * 3` values:
+ * `(kind_subtype_combined, global, local)`, where
+ * `kind_subtype_combined = (kind << 8) | subtype`.
+ *
+ * The caller frees `*out` with [`crate::bytes::lr_bytes_free`].
+ *
+ * # Safety
+ * `specs` must point to `count * 3` readable `uint32_t` values;
+ * `out` must point to writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_ext_community_encode_set(const uint32_t *specs,
+                                        uintptr_t count,
+                                        struct lr_bytes_t *out);
+
+/**
+ * Decode an EXTENDED_COMMUNITIES attribute body (RFC 4360 §3 — flat
+ * `count * 8` bytes big-endian) into a flat `uint32_t` array (3
+ * entries per extended community: `kind_subtype_combined`, `global`,
+ * `local`). The caller frees `*out_values` with
+ * [`crate::handle::lr_bytes_free`] and reads `*out_count` triples.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes; `out_values` and
+ * `out_count` must point to writable memory.
+ */
+int32_t lr_bgp_ext_community_decode_set(const uint8_t *data,
+                                        uintptr_t len,
+                                        struct lr_bytes_t *out_values,
+                                        uintptr_t *out_count);
 
 /**
  * Translate an `AttrType` value to its RFC 4271 §5 wire code (1..).
@@ -5512,6 +5884,430 @@ lr_ospf_packet_t lr_ospf_db_exchange_take_ls_request(lr_ospf_db_exchange_t e, ui
  * See [`lr_ospf_db_exchange_rxmt_interval_ms`].
  */
 uintptr_t lr_ospf_db_exchange_pending_requests(lr_ospf_db_exchange_t e);
+
+/**
+ * Construct an `ExternalDestination` for type-5 / type-7 origination
+ * (RFC 2328 §12.4.3). The `prefix_v4` / `prefix_v6` slots follow the
+ * same convention as the rest of the FFI: pass exactly one of them,
+ * the other NULL.
+ *
+ * # Safety
+ * `prefix_v4` must point to 4 readable bytes when `is_ipv6 == 0`;
+ * `prefix_v6` must point to 16 readable bytes when `is_ipv6 == 1`.
+ */
+lr_ospf_external_dest_t lr_ospf_external_dest_new(const uint8_t *prefix_v4,
+                                                  const uint8_t *prefix_v6,
+                                                  uint8_t prefix_len,
+                                                  uint32_t metric,
+                                                  int32_t metric_type);
+
+/**
+ * Set the forwarding address (RFC 2328 §A.4.5 bullet f). `0` means
+ * "forward to the ASBR" (the default).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+int32_t lr_ospf_external_dest_set_forwarding_addr(lr_ospf_external_dest_t d,
+                                                  uint32_t forwarding_addr);
+
+/**
+ * Set the external route tag (RFC 2328 §A.4.5 bullet h). `0` is
+ * well-formed.
+ *
+ * # Safety
+ * See [`lr_ospf_external_dest_set_forwarding_addr`].
+ */
+int32_t lr_ospf_external_dest_set_route_tag(lr_ospf_external_dest_t d, uint32_t route_tag);
+
+/**
+ * Set the P-bit (RFC 3101 §2.4): ask NSSA border routers to translate
+ * the type-7 into a type-5. Default is true.
+ *
+ * # Safety
+ * See [`lr_ospf_external_dest_set_forwarding_addr`].
+ */
+int32_t lr_ospf_external_dest_set_p_bit(lr_ospf_external_dest_t d, uint8_t p_bit);
+
+/**
+ * Read the prefix as `(is_ipv6, octets_out[16], prefix_len_out)`.
+ * Writes 16 bytes to `octets_out` (first 4 valid for v4, all 16 for
+ * v6). `prefix_len_out` receives the prefix length.
+ *
+ * # Safety
+ * `d` must be a valid handle. `octets_out` must point to 16 writable
+ * bytes; `prefix_len_out` must point to a writable `uint8_t`.
+ */
+int32_t lr_ospf_external_dest_prefix(lr_ospf_external_dest_t d,
+                                     uint8_t *octets_out,
+                                     uint8_t *prefix_len_out);
+
+/**
+ * Read the metric (capped at LSInfinity - 1).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+uint32_t lr_ospf_external_dest_metric(lr_ospf_external_dest_t d);
+
+/**
+ * Read the metric type (`LR_OSPF_METRIC_TYPE_*`).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+int32_t lr_ospf_external_dest_metric_type(lr_ospf_external_dest_t d);
+
+/**
+ * Read the forwarding address (`0` = ASBR itself).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+uint32_t lr_ospf_external_dest_forwarding_addr(lr_ospf_external_dest_t d);
+
+/**
+ * Read the external route tag.
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+uint32_t lr_ospf_external_dest_route_tag(lr_ospf_external_dest_t d);
+
+/**
+ * Read the P-bit (RFC 3101 §2.4). Returns 1 when set, 0 otherwise.
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+uint8_t lr_ospf_external_dest_p_bit(lr_ospf_external_dest_t d);
+
+/**
+ * Drop a boxed `ExternalDestination`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `d` must have been produced by [`lr_ospf_external_dest_new`] and not
+ * already freed.
+ */
+void lr_ospf_external_dest_free(lr_ospf_external_dest_t d);
+
+/**
+ * Construct an `AsbrDestination` for type-4 summary-ASBR-LSA
+ * origination (RFC 2328 §12.4.3). `asbr` is the ASBR's router ID;
+ * `metric` is the cost to reach it.
+ */
+lr_ospf_asbr_dest_t lr_ospf_asbr_dest_new(uint32_t asbr, uint32_t metric);
+
+/**
+ * Read the ASBR router ID.
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+uint32_t lr_ospf_asbr_dest_asbr(lr_ospf_asbr_dest_t d);
+
+/**
+ * Read the metric (capped at LSInfinity - 1).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+uint32_t lr_ospf_asbr_dest_metric(lr_ospf_asbr_dest_t d);
+
+/**
+ * Drop a boxed `AsbrDestination`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `d` must have been produced by [`lr_ospf_asbr_dest_new`] and not
+ * already freed.
+ */
+void lr_ospf_asbr_dest_free(lr_ospf_asbr_dest_t d);
+
+/**
+ * Originate a type-5 AS-external-LSA for `dest` (RFC 2328 §12.4.3).
+ * `prev_seq` carries the previous instance's sequence number (`NULL`
+ * to start fresh); the new LSA continues the sequence space.
+ *
+ * Writes a freshly-allocated `lr_ospf_lsa_box_t` to `*out` on success.
+ * Returns 0 on success, negative on error:
+ * - `LR_ERR_NULL` (-1): NULL pointer.
+ * - `LR_ERR_OTHER` (-6): non-IPv4 prefix or sequence-space exhausted.
+ *
+ * # Safety
+ * `dest` must be a valid `ExternalDestination` handle; `out` must
+ * point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_external_lsa(uint32_t router_id,
+                                       lr_ospf_external_dest_t dest,
+                                       const uint32_t *prev_seq,
+                                       lr_ospf_lsa_box_t *out);
+
+/**
+ * Flush (MaxAge) an existing type-5 / type-7 LSA instance (RFC 2328
+ * §14.1). `prev_seq` is the previous instance's sequence number
+ * (`NULL` to start fresh).
+ *
+ * # Safety
+ * `existing` must be a valid `lr_ospf_lsa_box_t` handle (it is borrowed,
+ * not consumed); `out` must point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_flush_external_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t *out);
+
+/**
+ * Originate a type-4 summary-ASBR-LSA (RFC 2328 §12.4.3) for the
+ * given `asbr_dest`.
+ *
+ * # Safety
+ * `asbr_dest` must be a valid `AsbrDestination` handle; `out` must
+ * point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_summary_asbr_lsa(uint32_t router_id,
+                                           lr_ospf_asbr_dest_t asbr_dest,
+                                           const uint32_t *prev_seq,
+                                           lr_ospf_lsa_box_t *out);
+
+/**
+ * Compute the §16.4 external route candidates for one area (RFC 2328
+ * §16.4). The LSDB and SPF result are borrowed (read-only) — the
+ * caller retains ownership. Returns a freshly-allocated
+ * `lr_ospf_external_route_vec_t` on success, NULL on a NULL input.
+ *
+ * # Safety
+ * `lsdb` and `spf_result` must be valid handles produced by
+ * `lr_ospf_lsdb_*` / `lr_ospf_spf_*`.
+ */
+lr_ospf_external_route_vec_t lr_ospf_external_routes(lr_ospf_lsdb_t lsdb,
+                                                     lr_ospf_spf_result_t spf_result);
+
+/**
+ * Number of `ExternalRoute` candidates in a `route_vec`.
+ *
+ * # Safety
+ * `v` must be a valid handle.
+ */
+uintptr_t lr_ospf_external_route_vec_len(lr_ospf_external_route_vec_t v);
+
+/**
+ * Borrow one `ExternalRoute` from a `route_vec` by index. The
+ * returned handle is borrowed (do NOT free it); it is invalid after
+ * `lr_ospf_external_route_vec_free` runs.
+ *
+ * # Safety
+ * `v` must be a valid handle; `index` must be in range.
+ */
+lr_ospf_external_route_t lr_ospf_external_route_vec_at(lr_ospf_external_route_vec_t v,
+                                                       uintptr_t index);
+
+/**
+ * Drop a boxed `Vec<ExternalRoute>`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `v` must have been produced by [`lr_ospf_external_routes`] and not
+ * already freed.
+ */
+void lr_ospf_external_route_vec_free(lr_ospf_external_route_vec_t v);
+
+/**
+ * Read the prefix as `(is_ipv6, octets_out[16], prefix_len_out)`.
+ *
+ * # Safety
+ * `r` must be a valid handle (borrowed from a route_vec).
+ */
+int32_t lr_ospf_external_route_prefix(lr_ospf_external_route_t r,
+                                      uint8_t *octets_out,
+                                      uint8_t *prefix_len_out);
+
+/**
+ * Read the metric (type 1: cost-to-ASBR + external; type 2: external
+ * only).
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint64_t lr_ospf_external_route_metric(lr_ospf_external_route_t r);
+
+/**
+ * Read the metric type (`LR_OSPF_METRIC_TYPE_*`).
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+int32_t lr_ospf_external_route_metric_type(lr_ospf_external_route_t r);
+
+/**
+ * Read the cost of the internal path to the ASBR (or forwarding
+ * address). Used as the type-2 tie-breaker (§16.4 (6)).
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint64_t lr_ospf_external_route_internal_cost(lr_ospf_external_route_t r);
+
+/**
+ * Read the advertising ASBR router ID.
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint32_t lr_ospf_external_route_asbr(lr_ospf_external_route_t r);
+
+/**
+ * Read the border router when the ASBR was reached inter-area
+ * (§16.4 (b)); writes 1 to `*present` and the router ID to
+ * `*border_router`, or 0 to `*present` when the path is intra-area.
+ *
+ * # Safety
+ * `r` must be a valid handle; `present` and `border_router` must
+ * point to writable memory.
+ */
+int32_t lr_ospf_external_route_border_router(lr_ospf_external_route_t r,
+                                             uint8_t *present,
+                                             uint32_t *border_router);
+
+/**
+ * Read the forwarding address (`0` = ASBR itself).
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint32_t lr_ospf_external_route_forwarding_addr(lr_ospf_external_route_t r);
+
+/**
+ * Read the external route tag.
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint32_t lr_ospf_external_route_tag(lr_ospf_external_route_t r);
+
+/**
+ * Compute the v3 §4.8.5 external route candidates (RFC 5340 §4.8.5).
+ *
+ * # Safety
+ * `lsdb` and `spf_result` must be valid handles.
+ */
+lr_ospf_external_route_v3_vec_t lr_ospf_external_routes_v3(lr_ospf_lsdb_t lsdb,
+                                                           lr_ospf_spf_v3_result_t spf_result);
+
+/**
+ * Compute the v3 §4.8.5 external route candidates in Extended-LSA
+ * mode (RFC 8362 §6.1): E-AS-External-LSAs (0xC025) contribute
+ * alongside the legacy 0x4005s.
+ *
+ * # Safety
+ * `lsdb` and `spf_result` must be valid handles.
+ */
+lr_ospf_external_route_v3_vec_t lr_ospf_external_routes_v3_extended(lr_ospf_lsdb_t lsdb,
+                                                                    lr_ospf_spf_v3_result_t spf_result);
+
+/**
+ * Number of `ExternalRouteV3` candidates in a v3 route_vec.
+ *
+ * # Safety
+ * `v` must be a valid handle.
+ */
+uintptr_t lr_ospf_external_route_v3_vec_len(lr_ospf_external_route_v3_vec_t v);
+
+/**
+ * Borrow one `ExternalRouteV3` by index. The returned handle is
+ * borrowed (do NOT free it).
+ *
+ * # Safety
+ * `v` must be a valid handle; `index` must be in range.
+ */
+lr_ospf_external_route_v3_t lr_ospf_external_route_v3_vec_at(lr_ospf_external_route_v3_vec_t v,
+                                                             uintptr_t index);
+
+/**
+ * Drop a boxed `Vec<ExternalRouteV3>`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `v` must have been produced by `lr_ospf_external_routes_v3` (or
+ * `_extended`) and not already freed.
+ */
+void lr_ospf_external_route_v3_vec_free(lr_ospf_external_route_v3_vec_t v);
+
+/**
+ * Read the prefix as `(is_ipv6, octets_out[16], prefix_len_out)`.
+ *
+ * # Safety
+ * `r` must be a valid handle (borrowed from a v3 route_vec).
+ */
+int32_t lr_ospf_external_route_v3_prefix(lr_ospf_external_route_v3_t r,
+                                         uint8_t *octets_out,
+                                         uint8_t *prefix_len_out);
+
+/**
+ * Read the metric.
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint64_t lr_ospf_external_route_v3_metric(lr_ospf_external_route_v3_t r);
+
+/**
+ * Read the metric type (`LR_OSPF_METRIC_TYPE_*`).
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+int32_t lr_ospf_external_route_v3_metric_type(lr_ospf_external_route_v3_t r);
+
+/**
+ * Read the internal cost to the ASBR (type-2 tie-breaker).
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint64_t lr_ospf_external_route_v3_internal_cost(lr_ospf_external_route_v3_t r);
+
+/**
+ * Read the advertising ASBR router ID.
+ *
+ * # Safety
+ * `r` must be a valid handle.
+ */
+uint32_t lr_ospf_external_route_v3_asbr(lr_ospf_external_route_v3_t r);
+
+/**
+ * Read the border router when the ASBR was reached inter-area.
+ * Writes 1 to `*present` and the router ID to `*border_router`, or 0
+ * to `*present` when the path is intra-area.
+ *
+ * # Safety
+ * `r` must be a valid handle; `present` and `border_router` must
+ * point to writable memory.
+ */
+int32_t lr_ospf_external_route_v3_border_router(lr_ospf_external_route_v3_t r,
+                                                uint8_t *present,
+                                                uint32_t *border_router);
+
+/**
+ * Read the next-hop address as `(is_ipv6, octets_out[16],
+ * present_out)`. Writes 1 to `*present` when the route carries a
+ * next hop, 0 otherwise (16 zero bytes in that case).
+ *
+ * # Safety
+ * `r` must be a valid handle; `octets_out` and `present_out` must
+ * point to writable memory.
+ */
+int32_t lr_ospf_external_route_v3_next_hop(lr_ospf_external_route_v3_t r,
+                                           uint8_t *octets_out,
+                                           uint8_t *present_out);
+
+/**
+ * Read the external route tag. Writes 1 to `*present` and the tag
+ * to `*tag`, or 0 to `*present` when the LSA carries no tag (RFC 5340
+ * §A.4.7 T bit clear / RFC 8362 §3.6 External-Prefix sub-TLV 3
+ * absent).
+ *
+ * # Safety
+ * `r` must be a valid handle; `present` and `tag` must point to
+ * writable memory.
+ */
+int32_t lr_ospf_external_route_v3_route_tag(lr_ospf_external_route_v3_t r,
+                                            uint8_t *present,
+                                            uint32_t *tag);
 
 lr_ospf_interface_t lr_ospf_interface_new(uint32_t area_id);
 

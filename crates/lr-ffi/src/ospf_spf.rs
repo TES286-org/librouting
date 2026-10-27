@@ -49,7 +49,7 @@ pub type lr_ospf_spf_result_t = *mut OpaqueOspfSpfResult;
 fn box_result(r: SpfResult) -> lr_ospf_spf_result_t {
     Box::into_raw(Box::new(r)) as lr_ospf_spf_result_t
 }
-unsafe fn borrow_result(r: lr_ospf_spf_result_t) -> Option<&'static SpfResult> {
+pub(crate) unsafe fn borrow_result(r: lr_ospf_spf_result_t) -> Option<&'static SpfResult> {
     if r.is_null() {
         return None;
     }
@@ -71,7 +71,7 @@ pub type lr_ospf_spf_v3_result_t = *mut OpaqueOspfSpfResultV3;
 fn box_v3_result(r: SpfResultV3) -> lr_ospf_spf_v3_result_t {
     Box::into_raw(Box::new(r)) as lr_ospf_spf_v3_result_t
 }
-unsafe fn borrow_v3_result(r: lr_ospf_spf_v3_result_t) -> Option<&'static SpfResultV3> {
+pub(crate) unsafe fn borrow_v3_result(r: lr_ospf_spf_v3_result_t) -> Option<&'static SpfResultV3> {
     if r.is_null() {
         return None;
     }

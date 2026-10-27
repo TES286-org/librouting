@@ -125,10 +125,10 @@ unsafe fn unbox_lsdb(r: lr_ospf_lsdb_t) -> Option<Box<Lsdb>> {
 
 // ---- LSA box / unbox helpers ----
 
-fn box_lsa(l: Lsa) -> lr_ospf_lsa_box_t {
+pub(crate) fn box_lsa(l: Lsa) -> lr_ospf_lsa_box_t {
     Box::into_raw(Box::new(l)) as lr_ospf_lsa_box_t
 }
-unsafe fn borrow_lsa(r: lr_ospf_lsa_box_t) -> Option<&'static Lsa> {
+pub(crate) unsafe fn borrow_lsa(r: lr_ospf_lsa_box_t) -> Option<&'static Lsa> {
     if r.is_null() {
         return None;
     }
