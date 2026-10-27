@@ -381,6 +381,14 @@
 
 #define LR_OSPF_BODY_RAW 6
 
+#define LR_OSPF_PHASE_EX_START 1
+
+#define LR_OSPF_PHASE_EXCHANGE 2
+
+#define LR_OSPF_PHASE_LOADING 3
+
+#define LR_OSPF_PHASE_FULL 4
+
 #define LR_OSPF_NEIGHBOR_STATE_DOWN 1
 
 #define LR_OSPF_NEIGHBOR_STATE_ATTEMPT 2
@@ -1144,6 +1152,15 @@ typedef struct OpaqueOspfPacket {
 } OpaqueOspfPacket;
 
 typedef struct OpaqueOspfPacket *lr_ospf_packet_t;
+
+/**
+ * Opaque `DbExchange` handle.
+ */
+typedef struct OpaqueOspfDbExchange {
+  uint8_t _private[0];
+} OpaqueOspfDbExchange;
+
+typedef struct OpaqueOspfDbExchange *lr_ospf_db_exchange_t;
 
 typedef struct OpaqueOspfLsdb {
   uint8_t _private[0];
@@ -4231,6 +4248,152 @@ uint8_t lr_ospf_packet_body_kind(lr_ospf_packet_t packet);
  * and must not be used after this call.
  */
 void lr_ospf_packet_free(lr_ospf_packet_t packet);
+
+/**
+ * Construct a `DbExchange` for v2 (RFC 2328 §10.3). The driver
+ * starts in ExStart with no pending DBD. Use
+ * [`lr_ospf_db_exchange_with_version`] for a v3 driver.
+ */
+lr_ospf_db_exchange_t lr_ospf_db_exchange_new(uint32_t router_id,
+                                              uint32_t area_id,
+                                              uint16_t iface_mtu);
+
+/**
+ * Construct a `DbExchange` for `version` (1 = v2, anything else =
+ * v3 / RFC 5340).
+ */
+lr_ospf_db_exchange_t lr_ospf_db_exchange_with_version(uint32_t router_id,
+                                                       uint32_t area_id,
+                                                       uint16_t iface_mtu,
+                                                       uint8_t version);
+
+/**
+ * Override the per-neighbor retransmit interval (RFC 2328 Appendix B
+ * `RxmtInterval`; BIRD `rxmtint` / FRR `retransmit-interval`). The
+ * default is 5000 ms; values of 0 are clamped to 1 ms so the poll
+ * loop never busy-spins.
+ *
+ * # Safety
+ * `e` must be a valid DbExchange handle.
+ */
+int32_t lr_ospf_db_exchange_with_rxmt_interval(lr_ospf_db_exchange_t e, uint64_t ms);
+
+/**
+ * Drop a boxed `DbExchange`. Safe to call with NULL.
+ *
+ * # Safety
+ * `e` must have been produced by a `lr_ospf_db_exchange_*`
+ * constructor and not already freed.
+ */
+void lr_ospf_db_exchange_free(lr_ospf_db_exchange_t e);
+
+/**
+ * The current retransmit interval in milliseconds. Returns 0 on a
+ * NULL handle.
+ *
+ * # Safety
+ * `e` must be a valid DbExchange handle.
+ */
+uint64_t lr_ospf_db_exchange_rxmt_interval_ms(lr_ospf_db_exchange_t e);
+
+/**
+ * The current phase. Returns one of the `LR_OSPF_PHASE_*`
+ * constants, or 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_ospf_db_exchange_rxmt_interval_ms`].
+ */
+int32_t lr_ospf_db_exchange_phase(lr_ospf_db_exchange_t e);
+
+/**
+ * True when the adjacency reached Full. Returns 1 on Full, 0
+ * otherwise (or NULL handle).
+ *
+ * # Safety
+ * See [`lr_ospf_db_exchange_rxmt_interval_ms`].
+ */
+uint8_t lr_ospf_db_exchange_is_full(lr_ospf_db_exchange_t e);
+
+/**
+ * True once the initial DBD was sent for this round (restarted by
+ * a sequence mismatch). Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_ospf_db_exchange_rxmt_interval_ms`].
+ */
+uint8_t lr_ospf_db_exchange_started(lr_ospf_db_exchange_t e);
+
+/**
+ * Reset for a fresh negotiation round (ExStart re-entry — §10.9
+ * sequence-mismatch handling).
+ *
+ * # Safety
+ * `e` must be a valid DbExchange handle.
+ */
+int32_t lr_ospf_db_exchange_restart(lr_ospf_db_exchange_t e, uint32_t seq);
+
+/**
+ * Build the initial DBD packet (§10.3 — I|M|MS set, empty, sequence
+ * chosen by the caller). Idempotent per negotiation round.
+ * Returns a new `lr_ospf_packet_t` handle; the caller frees it with
+ * `lr_ospf_packet_free`.
+ *
+ * # Safety
+ * `e` must be a valid DbExchange handle.
+ */
+lr_ospf_packet_t lr_ospf_db_exchange_initial_db_desc(lr_ospf_db_exchange_t e,
+                                                     uint32_t seq,
+                                                     uint64_t now_ms);
+
+/**
+ * Periodic retransmission (§10.8 RxmtInterval): returns a freshly
+ * allocated array of `lr_ospf_packet_t` handles (one per pending
+ * retransmit — DBD and/or LS-Request). The array length is written
+ * to `*out_count`; the array itself is written to `*out_packets`
+ * (caller frees each entry with `lr_ospf_packet_free`, then frees
+ * the array with `lr_ospf_db_exchange_packet_array_free`).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle / NULL
+ * out-pointers.
+ *
+ * # Safety
+ * `e` must be a valid DbExchange handle. `out_packets` and
+ * `out_count` must point to writable memory.
+ */
+int32_t lr_ospf_db_exchange_poll(lr_ospf_db_exchange_t e,
+                                 uint64_t now_ms,
+                                 lr_ospf_packet_t **out_packets,
+                                 uintptr_t *out_count);
+
+/**
+ * Drop an array of `lr_ospf_packet_t` handles returned by
+ * `lr_ospf_db_exchange_poll`. Frees each entry via
+ * `lr_ospf_packet_free`, then frees the array allocation.
+ *
+ * # Safety
+ * `packets` must have been produced by `lr_ospf_db_exchange_poll`
+ * and `count` must match the count returned by that call.
+ */
+void lr_ospf_db_exchange_packet_array_free(lr_ospf_packet_t *packets, uintptr_t count);
+
+/**
+ * Build the LS-Request packet for the current queue (Loading).
+ * Returns a new `lr_ospf_packet_t` handle when there are pending
+ * requests, NULL when the queue is empty (or NULL exchange).
+ *
+ * # Safety
+ * `e` must be a valid DbExchange handle.
+ */
+lr_ospf_packet_t lr_ospf_db_exchange_take_ls_request(lr_ospf_db_exchange_t e, uint64_t now_ms);
+
+/**
+ * Number of LSAs still queued in Loading (the LS-Request queue
+ * length). Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_ospf_db_exchange_rxmt_interval_ms`].
+ */
+uintptr_t lr_ospf_db_exchange_pending_requests(lr_ospf_db_exchange_t e);
 
 /**
  * Construct an empty LSDB (RFC 2328 §12).
