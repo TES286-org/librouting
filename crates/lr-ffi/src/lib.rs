@@ -40,6 +40,7 @@ pub mod handle;
 pub mod inspection;
 pub mod ldp;
 pub mod ldp_session;
+pub mod ldp_transit;
 pub mod mpls;
 pub mod mrt;
 pub mod ospf;

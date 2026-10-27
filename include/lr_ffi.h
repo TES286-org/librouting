@@ -1042,6 +1042,15 @@ typedef struct OpaqueLdpSession {
 typedef struct OpaqueLdpSession *lr_ldp_session_t;
 
 /**
+ * Opaque `TransitAllocator` handle.
+ */
+typedef struct OpaqueLdpTransit {
+  uint8_t _private[0];
+} OpaqueLdpTransit;
+
+typedef struct OpaqueLdpTransit *lr_ldp_transit_t;
+
+/**
  * Opaque `Label` handle. C side never touches internals.
  */
 typedef struct OpaqueMplsLabel {
@@ -3634,6 +3643,97 @@ int32_t lr_ldp_session_start(lr_ldp_session_t r, uint64_t now_ms);
  * writable memory.
  */
 int32_t lr_ldp_session_drain_outgoing(lr_ldp_session_t r, struct lr_bytes_t *out);
+
+/**
+ * Construct a `TransitAllocator` over `[label_min, label_max]`,
+ * reserving the labels in `reserved` (RFC 5036 §3.5.7.1.1 — the
+ * operator's static label range; new allocations never reuse them).
+ * `label_min` must be <= `label_max`; `reserved` may be NULL when
+ * `reserved_count == 0`.
+ *
+ * # Safety
+ * `reserved` must point to `reserved_count` readable `uint32_t`
+ * values (NULL only when `reserved_count == 0`).
+ */
+lr_ldp_transit_t lr_ldp_transit_new(uint32_t label_min,
+                                    uint32_t label_max,
+                                    const uint32_t *reserved,
+                                    uintptr_t reserved_count);
+
+/**
+ * Drop a boxed `TransitAllocator`. Safe to call with NULL.
+ *
+ * # Safety
+ * `a` must have been produced by `lr_ldp_transit_new` and not already
+ * freed.
+ */
+void lr_ldp_transit_free(lr_ldp_transit_t a);
+
+/**
+ * Read the transit label already allocated to `prefix`, if any.
+ * Returns 1 and writes the label to `*out_label` when allocated,
+ * 0 otherwise (or NULL handle).
+ *
+ * # Safety
+ * `a` must be a valid TransitAllocator handle. `out_label` must
+ * point to a writable `uint32_t`. `prefix_addr` must point to 4
+ * (v4) or 16 (v6) readable bytes.
+ */
+uint8_t lr_ldp_transit_label_of(lr_ldp_transit_t a,
+                                const uint8_t *prefix_addr,
+                                uint8_t is_ipv6,
+                                uint8_t prefix_len,
+                                uint32_t *out_label);
+
+/**
+ * True when `prefix` already holds a transit label.
+ *
+ * # Safety
+ * See [`lr_ldp_transit_label_of`].
+ */
+uint8_t lr_ldp_transit_is_allocated(lr_ldp_transit_t a,
+                                    const uint8_t *prefix_addr,
+                                    uint8_t is_ipv6,
+                                    uint8_t prefix_len);
+
+/**
+ * Number of prefixes currently holding a transit label. Returns 0
+ * on a NULL handle.
+ *
+ * # Safety
+ * `a` must be a valid TransitAllocator handle.
+ */
+uintptr_t lr_ldp_transit_allocated_count(lr_ldp_transit_t a);
+
+/**
+ * Allocate a fresh transit label for `prefix` (RFC 5036 §3.5.7.1.1).
+ * Returns 1 and writes the label to `*out_label` on success, 0
+ * when the range is exhausted (or the prefix already holds a label
+ * — use `label_of` to read the existing one).
+ *
+ * # Safety
+ * See [`lr_ldp_transit_label_of`].
+ */
+uint8_t lr_ldp_transit_allocate(lr_ldp_transit_t a,
+                                const uint8_t *prefix_addr,
+                                uint8_t is_ipv6,
+                                uint8_t prefix_len,
+                                uint32_t *out_label);
+
+/**
+ * Release the transit label held by `prefix` (RFC 5036 §3.5.7.1.1 —
+ * the label returns to the free pool). Returns 1 and writes the
+ * released label to `*out_label` when the prefix held one, 0
+ * otherwise.
+ *
+ * # Safety
+ * See [`lr_ldp_transit_label_of`].
+ */
+uint8_t lr_ldp_transit_release(lr_ldp_transit_t a,
+                               const uint8_t *prefix_addr,
+                               uint8_t is_ipv6,
+                               uint8_t prefix_len,
+                               uint32_t *out_label);
 
 /**
  * Construct a `Label` with default TC=0 and TTL=64 (RFC 3032 §2.1).
