@@ -7174,6 +7174,73 @@ int32_t lr_ldp_session_start(lr_ldp_session_t r, uint64_t now_ms);
 int32_t lr_ldp_session_drain_outgoing(lr_ldp_session_t r, struct lr_bytes_t *out);
 
 /**
+ * Read the peer's LDP identifier (RFC 5036 §2.2.2 — the 6-byte
+ * LDP identifier the peer advertised in its Initialization
+ * message). Returns 0 on success and writes the id to `*out`; returns
+ * 1 when no peer has been established yet (the session is still in
+ * NonExistent / OpenSent); returns `LR_ERR_NULL` (-1) on a NULL
+ * handle / null out pointer.
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle. `out` must point to a
+ * writable `lr_ldp_id_t`.
+ */
+int32_t lr_ldp_session_peer(lr_ldp_session_t r, struct lr_ldp_id_t *out);
+
+/**
+ * Read the negotiated session parameters (RFC 5036 §3.5.3 — the
+ * KeepAlive time, Max PDU Length and other parameters the two
+ * speakers agreed on during the Initialization exchange). Returns 0
+ * on success and writes the parameters to `*out_keepalive` and
+ * `*out_max_pdu_len`; returns 1 when no parameters have been
+ * negotiated yet (the session is still in NonExistent / OpenSent /
+ * OpenRec); returns `LR_ERR_NULL` (-1) on a NULL handle / null out
+ * pointer.
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle. `out_keepalive` and
+ * `out_max_pdu_len` must point to writable `uint16_t` values.
+ */
+int32_t lr_ldp_session_negotiated(lr_ldp_session_t r,
+                                  uint16_t *out_keepalive,
+                                  uint16_t *out_max_pdu_len);
+
+/**
+ * Drive the FSM with a tick event (RFC 5036 §3.5.1.2 — the
+ * KeepAlive timer fires; the session emits a KeepAlive message or
+ * transitions to NonExistent on timeout). `now_ms` is the wall-clock
+ * millisecond timestamp. Returns 0 on success; the outbound PDU
+ * buffer is drained separately via [`lr_ldp_session_drain_outgoing`].
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle.
+ */
+int32_t lr_ldp_session_tick(lr_ldp_session_t r, uint64_t now_ms);
+
+/**
+ * Drive the FSM with a transport-closed event (RFC 5036 §2.5.4 —
+ * the TCP connection was lost). The session transitions to
+ * NonExistent; subsequent drain_outgoing / state calls reflect the
+ * new state. Returns 0 on success.
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle.
+ */
+int32_t lr_ldp_session_transport_closed(lr_ldp_session_t r);
+
+/**
+ * Drive the FSM with a shutdown event (RFC 5036 §3.5.7 — the local
+ * speaker initiates a graceful shutdown by sending a Shutdown
+ * Notification). `now_ms` is the wall-clock millisecond timestamp.
+ * Returns 0 on success; the outbound PDU buffer is drained separately
+ * via [`lr_ldp_session_drain_outgoing`].
+ *
+ * # Safety
+ * `r` must be a valid LdpSession handle.
+ */
+int32_t lr_ldp_session_shutdown(lr_ldp_session_t r, uint64_t now_ms);
+
+/**
  * Construct a `GenericLabel` (RFC 5036 §3.4.2.1) from the 20-bit
  * label value.
  */

@@ -254,6 +254,148 @@ pub unsafe extern "C" fn lr_ldp_session_drain_outgoing(
     )
 }
 
+/// Read the peer's LDP identifier (RFC 5036 §2.2.2 — the 6-byte
+/// LDP identifier the peer advertised in its Initialization
+/// message). Returns 0 on success and writes the id to `*out`; returns
+/// 1 when no peer has been established yet (the session is still in
+/// NonExistent / OpenSent); returns `LR_ERR_NULL` (-1) on a NULL
+/// handle / null out pointer.
+///
+/// # Safety
+/// `r` must be a valid LdpSession handle. `out` must point to a
+/// writable `lr_ldp_id_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_peer(
+    r: lr_ldp_session_t,
+    out: *mut crate::ldp::lr_ldp_id_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(s) = borrow_session(r) else {
+                return LR_ERR_NULL;
+            };
+            match s.peer() {
+                Some(id) => {
+                    unsafe { *out = crate::ldp::lr_ldp_id_t::from(id) };
+                    0
+                }
+                None => 1,
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read the negotiated session parameters (RFC 5036 §3.5.3 — the
+/// KeepAlive time, Max PDU Length and other parameters the two
+/// speakers agreed on during the Initialization exchange). Returns 0
+/// on success and writes the parameters to `*out_keepalive` and
+/// `*out_max_pdu_len`; returns 1 when no parameters have been
+/// negotiated yet (the session is still in NonExistent / OpenSent /
+/// OpenRec); returns `LR_ERR_NULL` (-1) on a NULL handle / null out
+/// pointer.
+///
+/// # Safety
+/// `r` must be a valid LdpSession handle. `out_keepalive` and
+/// `out_max_pdu_len` must point to writable `uint16_t` values.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_negotiated(
+    r: lr_ldp_session_t,
+    out_keepalive: *mut u16,
+    out_max_pdu_len: *mut u16,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out_keepalive.is_null() || out_max_pdu_len.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(s) = borrow_session(r) else {
+                return LR_ERR_NULL;
+            };
+            match s.negotiated() {
+                Some(p) => {
+                    unsafe {
+                        *out_keepalive = p.keepalive_time;
+                        *out_max_pdu_len = p.max_pdu_len;
+                    }
+                    0
+                }
+                None => 1,
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Drive the FSM with a tick event (RFC 5036 §3.5.1.2 — the
+/// KeepAlive timer fires; the session emits a KeepAlive message or
+/// transitions to NonExistent on timeout). `now_ms` is the wall-clock
+/// millisecond timestamp. Returns 0 on success; the outbound PDU
+/// buffer is drained separately via [`lr_ldp_session_drain_outgoing`].
+///
+/// # Safety
+/// `r` must be a valid LdpSession handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_tick(r: lr_ldp_session_t, now_ms: u64) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let _ = s.tick(Instant(now_ms));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Drive the FSM with a transport-closed event (RFC 5036 §2.5.4 —
+/// the TCP connection was lost). The session transitions to
+/// NonExistent; subsequent drain_outgoing / state calls reflect the
+/// new state. Returns 0 on success.
+///
+/// # Safety
+/// `r` must be a valid LdpSession handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_transport_closed(r: lr_ldp_session_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let mut events = Vec::new();
+            s.transport_closed(&mut events);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Drive the FSM with a shutdown event (RFC 5036 §3.5.7 — the local
+/// speaker initiates a graceful shutdown by sending a Shutdown
+/// Notification). `now_ms` is the wall-clock millisecond timestamp.
+/// Returns 0 on success; the outbound PDU buffer is drained separately
+/// via [`lr_ldp_session_drain_outgoing`].
+///
+/// # Safety
+/// `r` must be a valid LdpSession handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_shutdown(r: lr_ldp_session_t, now_ms: u64) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let _ = s.shutdown(Instant(now_ms));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +458,104 @@ mod tests {
         }
 
         unsafe { lr_ldp_session_free(s) };
+    }
+
+    #[test]
+    fn ffi_ldp_session_peer_returns_1_on_fresh_session() {
+        let s = lr_ldp_session_new(0x0a000001, 0, 0x0a000002, 0, 0, 0);
+        let mut id = crate::ldp::lr_ldp_id_t::default();
+        let rc = unsafe { lr_ldp_session_peer(s, &raw mut id) };
+        assert_eq!(rc, 1, "fresh session has no peer yet");
+        unsafe { lr_ldp_session_free(s) };
+    }
+
+    #[test]
+    fn ffi_ldp_session_negotiated_returns_1_on_fresh_session() {
+        let s = lr_ldp_session_new(0x0a000001, 0, 0x0a000002, 0, 0, 0);
+        let mut keepalive: u16 = 0;
+        let mut max_pdu: u16 = 0;
+        let rc = unsafe {
+            lr_ldp_session_negotiated(s, &raw mut keepalive, &raw mut max_pdu)
+        };
+        assert_eq!(rc, 1, "fresh session has no negotiated params yet");
+        unsafe { lr_ldp_session_free(s) };
+    }
+
+    #[test]
+    fn ffi_ldp_session_tick_does_not_panic() {
+        let s = lr_ldp_session_new(0x0a000001, 0, 0x0a000002, 0, 0, 0);
+        // Start + tick — neither should panic.
+        let _ = unsafe { lr_ldp_session_start(s, 0) };
+        let rc = unsafe { lr_ldp_session_tick(s, 1000) };
+        assert_eq!(rc, 0);
+        unsafe { lr_ldp_session_free(s) };
+    }
+
+    #[test]
+    fn ffi_ldp_session_shutdown_transitions_to_nonexistent() {
+        let s = lr_ldp_session_new(0x0a000001, 0, 0x0a000002, 0, 0, 0);
+        let _ = unsafe { lr_ldp_session_start(s, 0) };
+        let rc = unsafe { lr_ldp_session_shutdown(s, 1000) };
+        assert_eq!(rc, 0);
+        // After shutdown the state should be NonExistent.
+        let st = unsafe { lr_ldp_session_state(s) };
+        assert_eq!(
+            st, LR_LDP_SESSION_STATE_NON_EXISTENT,
+            "shutdown transitions to NonExistent (got {st})"
+        );
+        unsafe { lr_ldp_session_free(s) };
+    }
+
+    #[test]
+    fn ffi_ldp_session_transport_closed_transitions_to_nonexistent() {
+        let s = lr_ldp_session_new(0x0a000001, 0, 0x0a000002, 0, 0, 0);
+        let _ = unsafe { lr_ldp_session_start(s, 0) };
+        let rc = unsafe { lr_ldp_session_transport_closed(s) };
+        assert_eq!(rc, 0);
+        let st = unsafe { lr_ldp_session_state(s) };
+        assert_eq!(
+            st, LR_LDP_SESSION_STATE_NON_EXISTENT,
+            "transport_closed transitions to NonExistent (got {st})"
+        );
+        unsafe { lr_ldp_session_free(s) };
+    }
+
+    #[test]
+    fn ffi_ldp_session_peer_null_handle_returns_lr_err_null() {
+        let mut id = crate::ldp::lr_ldp_id_t::default();
+        let rc = unsafe { lr_ldp_session_peer(std::ptr::null_mut(), &raw mut id) };
+        assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    #[test]
+    fn ffi_ldp_session_negotiated_null_handle_returns_lr_err_null() {
+        let mut keepalive: u16 = 0;
+        let mut max_pdu: u16 = 0;
+        let rc = unsafe {
+            lr_ldp_session_negotiated(
+                std::ptr::null_mut(),
+                &raw mut keepalive,
+                &raw mut max_pdu,
+            )
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    #[test]
+    fn ffi_ldp_session_tick_null_handle_returns_lr_err_null() {
+        let rc = unsafe { lr_ldp_session_tick(std::ptr::null_mut(), 0) };
+        assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    #[test]
+    fn ffi_ldp_session_shutdown_null_handle_returns_lr_err_null() {
+        let rc = unsafe { lr_ldp_session_shutdown(std::ptr::null_mut(), 0) };
+        assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    #[test]
+    fn ffi_ldp_session_transport_closed_null_handle_returns_lr_err_null() {
+        let rc = unsafe { lr_ldp_session_transport_closed(std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
     }
 }
