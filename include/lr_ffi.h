@@ -1506,6 +1506,51 @@ typedef struct OpaqueRoaTable {
 typedef struct OpaqueRoaTable *lr_roa_table_t;
 
 /**
+ * Opaque `RtrClient` handle.
+ */
+typedef struct OpaqueRtrClient {
+  uint8_t _private[0];
+} OpaqueRtrClient;
+
+typedef struct OpaqueRtrClient *lr_rtr_client_t;
+
+/**
+ * One `ClientStep` projection — what the embedder should do after
+ * one protocol step. The `send_bytes` field carries the wire bytes
+ * to transmit (NULL `lr_bytes_t` when empty); `roa_deltas` carries
+ * the atomic ROA deltas at End of Data; the boolean flags surface
+ * `synced` / `drop` / `expired`.
+ */
+typedef struct lr_rtr_client_step_t {
+  /**
+   * Wire bytes to transmit (zero or more complete PDUs). NULL when
+   * empty — caller must call `lr_bytes_free` to release.
+   */
+  struct lr_bytes_t send_bytes;
+  /**
+   * 1 when this step completed a sync (End of Data processed).
+   */
+  uint8_t synced;
+  /**
+   * 1 when the transport connection should be closed.
+   */
+  uint8_t drop;
+  /**
+   * 1 when the last synced data exceeded its expire interval
+   * without a successful poll (§6) — validation on it must stop.
+   */
+  uint8_t expired;
+  /**
+   * Number of ROA deltas in this step (zero unless `synced`).
+   */
+  uintptr_t roa_delta_count;
+  /**
+   * Number of diagnostic log lines in this step.
+   */
+  uintptr_t log_count;
+} lr_rtr_client_step_t;
+
+/**
  * Opaque `Sid` handle.
  */
 typedef struct OpaqueSrv6Sid {
@@ -6072,6 +6117,150 @@ int32_t lr_router_add_roa_entry(lr_router_t r,
  * `r` must be a valid `lr_router_t`.
  */
 int32_t lr_router_set_roa_validate(lr_router_t r, uint8_t enable);
+
+/**
+ * Construct a fresh `RtrClient` (RFC 8210 §8.1 cold start — no
+ * session memory, protocol version starts at RTR_VERSION_MAX).
+ */
+lr_rtr_client_t lr_rtr_client_new(void);
+
+/**
+ * Drop a boxed `RtrClient`. Safe to call with NULL.
+ *
+ * # Safety
+ * `c` must have been produced by `lr_rtr_client_new` and not already
+ * freed.
+ */
+void lr_rtr_client_free(lr_rtr_client_t c);
+
+/**
+ * The protocol version currently spoken (post-§7 downgrade).
+ * Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle.
+ */
+uint8_t lr_rtr_client_version(lr_rtr_client_t c);
+
+/**
+ * The remembered session ID (None until the first Cache Response).
+ * Writes the session ID to `*out_session` and returns 1 if present,
+ * 0 if absent (or NULL handle).
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle. `out_session` must point to
+ * a writable `uint16_t`.
+ */
+uint8_t lr_rtr_client_session_id(lr_rtr_client_t c, uint16_t *out_session);
+
+/**
+ * The serial of the last completed sync. Writes to `*out_serial`
+ * and returns 1 if present, 0 if absent (or NULL handle).
+ *
+ * # Safety
+ * See [`lr_rtr_client_session_id`].
+ */
+uint8_t lr_rtr_client_serial(lr_rtr_client_t c, uint32_t *out_serial);
+
+/**
+ * The current phase name (diagnostics: "awaiting-reset",
+ * "awaiting-serial", "receiving", "synced"). Writes a NUL-terminated
+ * string to `out_buf` (capacity `cap`); returns the length needed
+ * (excluding NUL) — call with `cap=0` to size.
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle. `out_buf` must point to
+ * writable bytes (NULL only when `cap == 0`).
+ */
+uintptr_t lr_rtr_client_phase_name(lr_rtr_client_t c, uint8_t *out_buf, uintptr_t cap);
+
+/**
+ * The §6 timing intervals in effect (refresh, retry, expire —
+ * seconds). Writes to the three out-pointers. Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL client or NULL out-pointers.
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle. The out-pointers must point
+ * to writable `uint32_t` values.
+ */
+int32_t lr_rtr_client_intervals(lr_rtr_client_t c,
+                                uint32_t *out_refresh,
+                                uint32_t *out_retry,
+                                uint32_t *out_expire);
+
+/**
+ * Override the initial §6 intervals (refresh, retry, expire —
+ * seconds). The embedder calls this once at construction from its
+ * configuration; a v1+ cache replaces all three from every
+ * End-of-Data PDU (§6), so this only shapes the behaviour before
+ * the first End of Data and for v0 caches.
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle.
+ */
+int32_t lr_rtr_client_set_intervals(lr_rtr_client_t c,
+                                    uint32_t refresh,
+                                    uint32_t retry,
+                                    uint32_t expire);
+
+/**
+ * Bytes to transmit when the transport comes up (§8.1): a Serial
+ * Query when the client remembers an unexpired session, a Reset
+ * Query otherwise. Writes the wire bytes to `*out`.
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle. `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+int32_t lr_rtr_client_on_connect(lr_rtr_client_t c, struct lr_bytes_t *out);
+
+/**
+ * Run the §6 timing rules at `now_ms`. Returns the `ClientStep`
+ * projection: refresh polls while synced, data-expiry reporting
+ * once the expire interval passes without a successful sync.
+ *
+ * Writes the step's `synced` / `drop` / `expired` flags to the
+ * out-struct; the wire bytes are written to `out_step.send_bytes`
+ * (caller frees with `lr_bytes_free`).
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle. `out_step` must point to a
+ * writable `lr_rtr_client_step_t`.
+ */
+int32_t lr_rtr_client_poll(lr_rtr_client_t c,
+                           uint64_t now_ms,
+                           struct lr_rtr_client_step_t *out_step);
+
+/**
+ * Decode one RTR PDU from `data` and feed it to the client.
+ * Returns the `ClientStep` projection. This is the receive-side
+ * entry point for the RTR protocol (RFC 8210 §5/§8.2).
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle. `data` must point to `len`
+ * readable bytes. `out_step` must point to a writable
+ * `lr_rtr_client_step_t`.
+ */
+int32_t lr_rtr_client_on_pdu_raw(lr_rtr_client_t c,
+                                 const uint8_t *data,
+                                 uintptr_t len,
+                                 uint64_t now_ms,
+                                 struct lr_rtr_client_step_t *out_step);
+
+/**
+ * Read the authoritative ROA record set after the last completed
+ * sync, sorted for deterministic snapshots. Writes the entries to
+ * `out_entries` (a flat `lr_roa_entry_t` array of capacity `cap`).
+ * Returns the number of entries (caller-allocates pattern: call
+ * with `cap=0` to size, then again to fill).
+ *
+ * # Safety
+ * `c` must be a valid RtrClient handle. `out_entries` must point
+ * to writable `lr_roa_entry_t` values (NULL only when `cap == 0`).
+ */
+uintptr_t lr_rtr_client_snapshot(lr_rtr_client_t c,
+                                 struct lr_roa_entry_t *out_entries,
+                                 uintptr_t cap);
 
 /**
  * Add an OSPFv2 session with the library defaults: MTU 1500,
