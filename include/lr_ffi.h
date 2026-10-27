@@ -179,6 +179,84 @@
 
 #define LR_BFD_EVENT_OUTBOUND_QUEUED 5
 
+#define LR_BGP_ERR_HEADER 1
+
+#define LR_BGP_ERR_OPEN 2
+
+#define LR_BGP_ERR_UPDATE 3
+
+#define LR_BGP_ERR_HOLD_TIMER_EXPIRED 4
+
+#define LR_BGP_ERR_FSM_ERROR 5
+
+#define LR_BGP_ERR_CEASE 6
+
+#define LR_BGP_ERR_ROUTE_REFRESH 7
+
+#define LR_BGP_OPEN_UNSUPPORTED_VERSION 1
+
+#define LR_BGP_OPEN_BAD_PEER_AS 2
+
+#define LR_BGP_OPEN_BAD_BGP_IDENTIFIER 3
+
+#define LR_BGP_OPEN_UNSUPPORTED_OPTIONAL_PARAM 4
+
+#define LR_BGP_OPEN_AUTHENTICATION_FAILURE 5
+
+#define LR_BGP_OPEN_UNACCEPTABLE_HOLD_TIME 6
+
+#define LR_BGP_OPEN_UNSUPPORTED_CAPABILITY 7
+
+#define LR_BGP_OPEN_BAD_OPEN_LENGTH 8
+
+#define LR_BGP_UPDATE_MALFORMED_ATTRIBUTE_LIST 1
+
+#define LR_BGP_UPDATE_UNRECOGNIZED_WELL_KNOWN_ATTR 2
+
+#define LR_BGP_UPDATE_MISSING_WELL_KNOWN_ATTR 3
+
+#define LR_BGP_UPDATE_ATTRIBUTE_FLAGS_ERROR 4
+
+#define LR_BGP_UPDATE_ATTRIBUTE_LENGTH_ERROR 5
+
+#define LR_BGP_UPDATE_INVALID_ORIGIN_ATTR 6
+
+#define LR_BGP_UPDATE_ATTR_DISCONTINUED_DEPRECATED 7
+
+#define LR_BGP_UPDATE_INVALID_AS_PATH 8
+
+#define LR_BGP_UPDATE_INVALID_NEXT_HOP 9
+
+#define LR_BGP_UPDATE_OPTIONAL_ATTRIBUTE_ERROR 10
+
+#define LR_BGP_UPDATE_INVALID_NETWORK_FIELD 11
+
+#define LR_BGP_UPDATE_MALFORMED_AS_PATH 12
+
+#define LR_BGP_HDR_CONNECTION_NOT_SYNCHRONIZED 1
+
+#define LR_BGP_HDR_BAD_MESSAGE_LENGTH 2
+
+#define LR_BGP_HDR_BAD_MESSAGE_TYPE 3
+
+#define LR_BGP_CEASE_MAXIMUM_PREFIXES 1
+
+#define LR_BGP_CEASE_ADMINISTRATIVE_SHUTDOWN 2
+
+#define LR_BGP_CEASE_PEER_DECONFIGURED 3
+
+#define LR_BGP_CEASE_ADMINISTRATIVE_RESET 4
+
+#define LR_BGP_CEASE_CONNECTION_REJECTED 5
+
+#define LR_BGP_CEASE_OTHER_CONFIG_CHANGE 6
+
+#define LR_BGP_CEASE_CONNECTION_COLLISION 7
+
+#define LR_BGP_CEASE_OUT_OF_RESOURCES 8
+
+#define LR_BGP_CEASE_HARD_RESET 9
+
 #define LR_BGP_STATE_IDLE 1
 
 #define LR_BGP_STATE_CONNECT 2
@@ -1258,6 +1336,33 @@ typedef struct OpaqueOspfDbExchange {
 
 typedef struct OpaqueOspfDbExchange *lr_ospf_db_exchange_t;
 
+typedef struct OpaqueOspfInterface {
+  uint8_t _private[0];
+} OpaqueOspfInterface;
+
+typedef struct OpaqueOspfInterface *lr_ospf_interface_t;
+
+typedef struct OpaqueOspfIfAction {
+  uint8_t _private[0];
+} OpaqueOspfIfAction;
+
+typedef struct OpaqueOspfIfAction *lr_ospf_if_action_t;
+
+typedef struct lr_ospf_elector_t {
+  uint32_t router_id;
+  uint32_t ip;
+  uint8_t priority;
+  uint32_t stated_dr;
+  uint32_t stated_bdr;
+} lr_ospf_elector_t;
+
+typedef struct lr_ospf_v3_elector_t {
+  uint32_t router_id;
+  uint8_t priority;
+  uint32_t stated_dr;
+  uint32_t stated_bdr;
+} lr_ospf_v3_elector_t;
+
 typedef struct OpaqueOspfLsdb {
   uint8_t _private[0];
 } OpaqueOspfLsdb;
@@ -1325,33 +1430,6 @@ typedef struct OpaqueOspfLsaHdrBox {
  * `lr_ospf_lsa_header_new` / `_free` constructor / destructor pair).
  */
 typedef struct OpaqueOspfLsaHdrBox *lr_ospf_lsa_hdr_box_t;
-
-typedef struct OpaqueOspfInterface {
-  uint8_t _private[0];
-} OpaqueOspfInterface;
-
-typedef struct OpaqueOspfInterface *lr_ospf_interface_t;
-
-typedef struct OpaqueOspfIfAction {
-  uint8_t _private[0];
-} OpaqueOspfIfAction;
-
-typedef struct OpaqueOspfIfAction *lr_ospf_if_action_t;
-
-typedef struct lr_ospf_elector_t {
-  uint32_t router_id;
-  uint32_t ip;
-  uint8_t priority;
-  uint32_t stated_dr;
-  uint32_t stated_bdr;
-} lr_ospf_elector_t;
-
-typedef struct lr_ospf_v3_elector_t {
-  uint32_t router_id;
-  uint8_t priority;
-  uint32_t stated_dr;
-  uint32_t stated_bdr;
-} lr_ospf_v3_elector_t;
 
 typedef struct OpaqueOspfNeighbor {
   uint8_t _private[0];
@@ -4783,6 +4861,89 @@ lr_ospf_packet_t lr_ospf_db_exchange_take_ls_request(lr_ospf_db_exchange_t e, ui
  */
 uintptr_t lr_ospf_db_exchange_pending_requests(lr_ospf_db_exchange_t e);
 
+lr_ospf_interface_t lr_ospf_interface_new(uint32_t area_id);
+
+void lr_ospf_interface_free(lr_ospf_interface_t i);
+
+uint8_t lr_ospf_interface_state(lr_ospf_interface_t i);
+
+uint8_t lr_ospf_interface_priority(lr_ospf_interface_t i);
+
+uint16_t lr_ospf_interface_hello_interval(lr_ospf_interface_t i);
+
+uint32_t lr_ospf_interface_dead_interval(lr_ospf_interface_t i);
+
+uint32_t lr_ospf_interface_dr(lr_ospf_interface_t i);
+
+uint32_t lr_ospf_interface_bdr(lr_ospf_interface_t i);
+
+uint32_t lr_ospf_interface_area_id(lr_ospf_interface_t i);
+
+uint32_t lr_ospf_interface_router_id(lr_ospf_interface_t i);
+
+uint32_t lr_ospf_interface_ip(lr_ospf_interface_t i);
+
+int32_t lr_ospf_interface_set_priority(lr_ospf_interface_t i, uint8_t priority);
+
+int32_t lr_ospf_interface_set_hello_interval(lr_ospf_interface_t i, uint16_t hello_interval);
+
+int32_t lr_ospf_interface_set_dead_interval(lr_ospf_interface_t i, uint32_t dead_interval);
+
+int32_t lr_ospf_interface_set_router_id(lr_ospf_interface_t i, uint32_t router_id);
+
+int32_t lr_ospf_interface_set_ip(lr_ospf_interface_t i, uint32_t ip);
+
+int32_t lr_ospf_interface_step_interface_up(lr_ospf_interface_t i,
+                                            lr_ospf_if_action_t **out_array,
+                                            uintptr_t *out_count);
+
+int32_t lr_ospf_interface_step_interface_down(lr_ospf_interface_t i,
+                                              lr_ospf_if_action_t **out_array,
+                                              uintptr_t *out_count);
+
+int32_t lr_ospf_interface_step_wait_timer(lr_ospf_interface_t i,
+                                          lr_ospf_if_action_t **out_array,
+                                          uintptr_t *out_count);
+
+int32_t lr_ospf_interface_step_backup_seen(lr_ospf_interface_t i,
+                                           lr_ospf_if_action_t **out_array,
+                                           uintptr_t *out_count);
+
+int32_t lr_ospf_interface_step_neighbor_change(lr_ospf_interface_t i,
+                                               const struct lr_ospf_elector_t *electors,
+                                               uintptr_t count,
+                                               lr_ospf_if_action_t **out_array,
+                                               uintptr_t *out_count);
+
+uint8_t lr_ospf_interface_action_kind(lr_ospf_if_action_t a);
+
+int32_t lr_ospf_interface_action_peer_state_name(lr_ospf_if_action_t a,
+                                                 uint8_t *out,
+                                                 uintptr_t cap);
+
+void lr_ospf_interface_action_free(lr_ospf_if_action_t a);
+
+void lr_ospf_interface_action_array_free(lr_ospf_if_action_t *array, uintptr_t count);
+
+int32_t lr_ospf_elect(const struct lr_ospf_elector_t *electors,
+                      uintptr_t count,
+                      uint32_t self_router_id,
+                      uint32_t self_ip,
+                      uint8_t self_priority,
+                      uint32_t self_stated_dr,
+                      uint32_t self_stated_bdr,
+                      uint32_t *out_dr,
+                      uint32_t *out_bdr);
+
+int32_t lr_ospf_elect_v3(const struct lr_ospf_v3_elector_t *electors,
+                         uintptr_t count,
+                         uint32_t self_router_id,
+                         uint8_t self_priority,
+                         uint32_t self_stated_dr,
+                         uint32_t self_stated_bdr,
+                         uint32_t *out_dr,
+                         uint32_t *out_bdr);
+
 /**
  * Construct an empty LSDB (RFC 2328 §12).
  */
@@ -4949,89 +5110,6 @@ lr_ospf_lsa_hdr_box_t lr_ospf_lsa_header_new(uint16_t ls_age,
  * already freed.
  */
 void lr_ospf_lsa_header_free(lr_ospf_lsa_hdr_box_t h);
-
-lr_ospf_interface_t lr_ospf_interface_new(uint32_t area_id);
-
-void lr_ospf_interface_free(lr_ospf_interface_t i);
-
-uint8_t lr_ospf_interface_state(lr_ospf_interface_t i);
-
-uint8_t lr_ospf_interface_priority(lr_ospf_interface_t i);
-
-uint16_t lr_ospf_interface_hello_interval(lr_ospf_interface_t i);
-
-uint32_t lr_ospf_interface_dead_interval(lr_ospf_interface_t i);
-
-uint32_t lr_ospf_interface_dr(lr_ospf_interface_t i);
-
-uint32_t lr_ospf_interface_bdr(lr_ospf_interface_t i);
-
-uint32_t lr_ospf_interface_area_id(lr_ospf_interface_t i);
-
-uint32_t lr_ospf_interface_router_id(lr_ospf_interface_t i);
-
-uint32_t lr_ospf_interface_ip(lr_ospf_interface_t i);
-
-int32_t lr_ospf_interface_set_priority(lr_ospf_interface_t i, uint8_t priority);
-
-int32_t lr_ospf_interface_set_hello_interval(lr_ospf_interface_t i, uint16_t hello_interval);
-
-int32_t lr_ospf_interface_set_dead_interval(lr_ospf_interface_t i, uint32_t dead_interval);
-
-int32_t lr_ospf_interface_set_router_id(lr_ospf_interface_t i, uint32_t router_id);
-
-int32_t lr_ospf_interface_set_ip(lr_ospf_interface_t i, uint32_t ip);
-
-int32_t lr_ospf_interface_step_interface_up(lr_ospf_interface_t i,
-                                            lr_ospf_if_action_t **out_array,
-                                            uintptr_t *out_count);
-
-int32_t lr_ospf_interface_step_interface_down(lr_ospf_interface_t i,
-                                              lr_ospf_if_action_t **out_array,
-                                              uintptr_t *out_count);
-
-int32_t lr_ospf_interface_step_wait_timer(lr_ospf_interface_t i,
-                                          lr_ospf_if_action_t **out_array,
-                                          uintptr_t *out_count);
-
-int32_t lr_ospf_interface_step_backup_seen(lr_ospf_interface_t i,
-                                           lr_ospf_if_action_t **out_array,
-                                           uintptr_t *out_count);
-
-int32_t lr_ospf_interface_step_neighbor_change(lr_ospf_interface_t i,
-                                               const struct lr_ospf_elector_t *electors,
-                                               uintptr_t count,
-                                               lr_ospf_if_action_t **out_array,
-                                               uintptr_t *out_count);
-
-uint8_t lr_ospf_interface_action_kind(lr_ospf_if_action_t a);
-
-int32_t lr_ospf_interface_action_peer_state_name(lr_ospf_if_action_t a,
-                                                 uint8_t *out,
-                                                 uintptr_t cap);
-
-void lr_ospf_interface_action_free(lr_ospf_if_action_t a);
-
-void lr_ospf_interface_action_array_free(lr_ospf_if_action_t *array, uintptr_t count);
-
-int32_t lr_ospf_elect(const struct lr_ospf_elector_t *electors,
-                      uintptr_t count,
-                      uint32_t self_router_id,
-                      uint32_t self_ip,
-                      uint8_t self_priority,
-                      uint32_t self_stated_dr,
-                      uint32_t self_stated_bdr,
-                      uint32_t *out_dr,
-                      uint32_t *out_bdr);
-
-int32_t lr_ospf_elect_v3(const struct lr_ospf_v3_elector_t *electors,
-                         uintptr_t count,
-                         uint32_t self_router_id,
-                         uint8_t self_priority,
-                         uint32_t self_stated_dr,
-                         uint32_t self_stated_bdr,
-                         uint32_t *out_dr,
-                         uint32_t *out_bdr);
 
 /**
  * Construct an `OspfNeighbor` for the given router-id (RFC 2328
