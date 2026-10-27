@@ -1186,6 +1186,35 @@
 #define LR_EVAL_FALLTHROUGH -1
 
 /**
+ * `LR_LIST_KIND_*` constants — mirrors [`lr_policy::set::ListKind`].
+ */
+#define LR_LIST_KIND_PREFIX 0
+
+#define LR_LIST_KIND_AS_PATH 1
+
+#define LR_LIST_KIND_COMMUNITY 2
+
+/**
+ * `LR_SAFETY_VIOLATION_*` constants — discriminant for
+ * [`SafetyViolation`] returned by [`lr_safety_net_check_violation`].
+ */
+#define LR_SAFETY_VIOLATION_AS_LOOP 1
+
+#define LR_SAFETY_VIOLATION_INVALID_NEXT_HOP 2
+
+#define LR_SAFETY_VIOLATION_EMPTY_AS_PATH_EBGP 3
+
+#define LR_SAFETY_VIOLATION_INVALID_ORIGIN 4
+
+#define LR_SAFETY_VIOLATION_EXCESSIVE_AS_LOOP 5
+
+#define LR_SAFETY_VIOLATION_OVERSIZED_AS_PATH 6
+
+#define LR_SAFETY_VIOLATION_MARTIAN_PREFIX 7
+
+#define LR_SAFETY_VIOLATION_OVERSIZED_LOCAL_PREF 8
+
+/**
  * Validation outcome constants (`lr_roa_store_validate` out param).
  */
 #define LR_ROA_VALID 0
@@ -9767,6 +9796,150 @@ int32_t lr_safety_net_check(lr_safety_net_t r, lr_route_t route, uint8_t is_ebgp
  * freed.
  */
 void lr_safety_net_free(lr_safety_net_t r);
+
+/**
+ * Read the global kill switch from the safety net's config. Returns
+ * 1 when enabled, 0 when disabled, `LR_ERR_NULL` (-1) on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle.
+ */
+int32_t lr_safety_net_config_enabled(lr_safety_net_t r);
+
+/**
+ * Set the global kill switch on the safety net's config.
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle.
+ */
+int32_t lr_safety_net_config_set_enabled(lr_safety_net_t r, uint8_t enabled);
+
+/**
+ * Read one of the boolean toggles on the safety net's config. `field`
+ * selects which:
+ * - 0: reject_as_loop
+ * - 1: reject_invalid_next_hop
+ * - 2: reject_empty_as_path_ebgp
+ * - 3: reject_invalid_origin
+ * - 4: reject_excessive_as_loop
+ * - 5: reject_oversized_as_path
+ * - 6: reject_martian_prefix
+ * - 7: reject_oversized_local_pref
+ * - 8: reject_martian_v4
+ * - 9: reject_martian_v6
+ *
+ * Returns the toggle value (0/1), `LR_ERR_NULL` (-1) on a NULL
+ * handle, `LR_ERR_OTHER` (-6) on an unknown field id.
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle.
+ */
+int32_t lr_safety_net_config_get_bool(lr_safety_net_t r, int32_t field);
+
+/**
+ * Set one of the boolean toggles on the safety net's config. `field`
+ * selects which (see [`lr_safety_net_config_get_bool`]); `value` is
+ * the new toggle value (0 or 1).
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle.
+ */
+int32_t lr_safety_net_config_set_bool(lr_safety_net_t r, int32_t field, uint8_t value);
+
+/**
+ * Read one of the integer tunables on the safety net's config. `field`
+ * selects which:
+ * - 0: max_as_path_loops (u8)
+ * - 1: max_as_path_length (usize)
+ * - 2: max_local_pref (u32)
+ *
+ * Returns the tunable value as a u64 (zero-extended), `LR_ERR_NULL`
+ * (-1) on a NULL handle, `LR_ERR_OTHER` (-6) on an unknown field id.
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle.
+ */
+uint64_t lr_safety_net_config_get_u64(lr_safety_net_t r, int32_t field);
+
+/**
+ * Set one of the integer tunables on the safety net's config. `field`
+ * selects which (see [`lr_safety_net_config_get_u64`]); `value` is
+ * the new tunable value (truncated to the field's native width).
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle.
+ */
+int32_t lr_safety_net_config_set_u64(lr_safety_net_t r, int32_t field, uint64_t value);
+
+/**
+ * Check one route against the safety net and surface the violation
+ * discriminant when one is detected. Returns 0 when the route passes,
+ * a positive `LR_SAFETY_VIOLATION_*` constant when a violation was
+ * detected (the human-readable message is recorded in the last-error
+ * string), `LR_ERR_NULL` (-1) on a NULL handle, `LR_ERR_PANIC` (-4)
+ * on a panic.
+ *
+ * # Safety
+ * `r` must be a valid SafetyNet handle. `route` must be a valid
+ * route handle.
+ */
+int32_t lr_safety_net_check_violation(lr_safety_net_t r, lr_route_t route, uint8_t is_ebgp);
+
+/**
+ * Look up a list id by name and kind. Returns the list id (>= 1)
+ * when found, 0 when the name is not registered, negative on error.
+ *
+ * `kind` is one of the `LR_LIST_KIND_*` constants.
+ *
+ * # Safety
+ * `r` must be a valid resolver handle. `name` must be a
+ * NUL-terminated C string.
+ */
+int32_t lr_resolver_list_id(lr_resolver_t r, int32_t kind, const char *name);
+
+/**
+ * Count the route-maps registered on the resolver. Returns 0 on a
+ * NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid resolver handle.
+ */
+uintptr_t lr_resolver_route_map_count(lr_resolver_t r);
+
+/**
+ * Enumerate the route-map names registered on the resolver. Writes
+ * up to `cap` NUL-terminated UTF-8 strings into `out_buf` (each
+ * pointer points into a single contiguous buffer of `cap` bytes
+ * total). Writes the matching string offsets into `out_offsets` /
+ * `out_lens`. Returns the total number of route-maps (>= 0) — a
+ * return value greater than `cap` means the buffer was too small.
+ *
+ * The caller should size the buffer by calling
+ * [`lr_resolver_route_map_count`] first, then call this with a buffer
+ * of `count * 64` bytes (route-map names are bounded by 64 chars in
+ * practice).
+ *
+ * # Safety
+ * `r` must be a valid resolver handle. `out_buf` (when non-null)
+ * must point to `cap` writable bytes. `out_offsets` / `out_lens`
+ * (when non-null) must point to `cap` writable `uintptr_t` values.
+ */
+uintptr_t lr_resolver_route_map_names(lr_resolver_t r,
+                                      char *out_buf,
+                                      uintptr_t *out_offsets,
+                                      uintptr_t *out_lens,
+                                      uintptr_t cap);
+
+/**
+ * Append an entry to an existing route-map. Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL resolver / map handle, `LR_ERR_OTHER` (-6)
+ * when the named route-map does not exist.
+ *
+ * # Safety
+ * `r` must be a valid resolver handle. `name` must be a
+ * NUL-terminated C string. `map` must be a valid route-map handle.
+ */
+int32_t lr_resolver_push_route_map_entry(lr_resolver_t r, const char *name, lr_route_map_t map);
 
 /**
  * Bind a route-map to a session's import path. Returns 0 on
