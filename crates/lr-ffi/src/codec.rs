@@ -20,6 +20,12 @@
 //! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
 //! thread-local last-error string.
 
+// The closure body passed to `guarded` is wrapped in a single
+// `unsafe` block to mirror the `pub unsafe extern "C" fn` shape —
+// the inner `unsafe { ... }` blocks would otherwise trip
+// `unused_unsafe` under the crate's `-D warnings` clippy gate.
+#![allow(unused_unsafe)]
+
 use lr_babel::BabelCodec as BabelC;
 use lr_bgp::{BgpCodec as BgpC, BgpMessage};
 use lr_ospf::OspfCodec as OspfC;
@@ -1222,6 +1228,120 @@ fn prefix_to_lr_prefix(p: &lr_core::addr::Prefix) -> crate::policy::lr_prefix_t 
     out
 }
 
+// ---- IPv4 NLRI codec (RFC 4271 §4.3) ----
+//
+// The legacy IPv4 NLRI codec lives in `lr_bgp::nlri` and is the form
+// UPDATE messages carry outside of MP_REACH_NLRI / MP_UNREACH_NLRI.
+// `lr_bgp_encode_update_announce_v4` already wraps it inside a full
+// UPDATE; the helpers below expose the raw NLRI byte form so an
+// embedder can build / parse NLRI lists directly (e.g. for a BGP-LS
+// projection or a custom UPDATE encoder).
+
+/// Encode a list of IPv4 prefixes as RFC 4271 §4.3 NLRI bytes
+/// (variable-length prefix-length + minimal address bytes). Each
+/// prefix must be IPv4 (the `is_ipv6` flag of every `lr_prefix_t`
+/// must be 0); a non-IPv4 prefix sets the last-error string and
+/// returns `LR_ERR_OTHER` (-6).
+///
+/// `prefixes` points to `count` `lr_prefix_t` entries. The encoded
+/// bytes are written to `*out` as a freshly-allocated `lr_bytes_t`
+/// (caller frees via `lr_bytes_free`).
+///
+/// # Safety
+/// `prefixes` (when `count > 0`) must point to `count` readable
+/// `lr_prefix_t` entries. `out` must point to a writable
+/// `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_encode_ipv4_nlri(
+    prefixes: *const crate::policy::lr_prefix_t,
+    count: usize,
+    out: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            if count == 0 {
+                unsafe { *out = lr_bytes_t::from_vec(Vec::new()) }
+                return 0;
+            }
+            if prefixes.is_null() {
+                return LR_ERR_NULL;
+            }
+            let slice = unsafe { core::slice::from_raw_parts(prefixes, count) };
+            let mut prefixes_vec: Vec<lr_core::addr::Prefix> = Vec::with_capacity(count);
+            for spec in slice {
+                let Some(p) = spec.to_prefix() else {
+                    set_last_error(format!("invalid prefix length {}", spec.prefix_len));
+                    return LR_ERR_OTHER;
+                };
+                if p.is_ipv6() {
+                    set_last_error("ipv4 NLRI must contain IPv4 prefixes".to_string());
+                    return LR_ERR_OTHER;
+                }
+                prefixes_vec.push(p);
+            }
+            let bytes = lr_bgp::nlri::encode_ipv4_nlri(&prefixes_vec);
+            unsafe { *out = lr_bytes_t::from_vec(bytes) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Decode RFC 4271 §4.3 NLRI bytes into a list of IPv4 prefixes.
+/// On success writes a freshly-allocated `lr_bytes_t` to `*out`
+/// carrying `n * 17` bytes (each prefix occupies 16 bytes of address
+/// octets + 1 byte of prefix length — the address octets are
+/// zero-padded to 16 bytes so the caller can re-use `lr_prefix_t`
+/// regardless of family). Returns 0 on success, `LR_ERR_NULL` on
+/// NULL pointers, `LR_ERR_OTHER` (-6) on a malformed NLRI stream
+/// (prefix length > 32, or trailing bytes shorter than the prefix
+/// length demands).
+///
+/// # Safety
+/// `data` must point to `len` readable bytes. `out` must point to a
+/// writable `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_decode_ipv4_nlri(
+    data: *const u8,
+    len: usize,
+    out: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if data.is_null() || out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let slice = unsafe { core::slice::from_raw_parts(data, len) };
+            match lr_bgp::nlri::decode_ipv4_nlri(slice) {
+                Some(prefixes) => {
+                    // Each prefix: 16 bytes (IPv4 zero-padded to 16) +
+                    // 1 byte prefix_len + 1 byte is_ipv6 (always 0).
+                    let mut bytes = Vec::with_capacity(prefixes.len() * 18);
+                    for p in &prefixes {
+                        let mut addr16 = [0u8; 16];
+                        if let lr_core::addr::IpAddr::V4(b) = &p.addr {
+                            addr16[..4].copy_from_slice(b);
+                        }
+                        bytes.extend_from_slice(&addr16);
+                        bytes.push(p.prefix_len);
+                        bytes.push(0); // is_ipv6 = 0
+                    }
+                    unsafe { *out = lr_bytes_t::from_vec(bytes) }
+                    0
+                }
+                None => {
+                    set_last_error("malformed IPv4 NLRI stream".to_string());
+                    LR_ERR_OTHER
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2375,5 +2495,107 @@ mod tests {
         assert_eq!(unsafe { lr_bgp_message_type(m, &raw mut kind) }, 0);
         assert_eq!(kind, LR_BGP_MSG_KEEPALIVE);
         unsafe { lr_bgp_message_free(m) };
+    }
+
+    // ---- IPv4 NLRI codec (RFC 4271 §4.3) ----
+
+    #[test]
+    fn ffi_encode_ipv4_nlri_round_trip() {
+        let prefixes = [
+            crate::policy::lr_prefix_t {
+                addr: [203, 0, 113, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                is_ipv6: 0,
+                prefix_len: 24,
+            },
+            crate::policy::lr_prefix_t {
+                addr: [198, 51, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                is_ipv6: 0,
+                prefix_len: 16,
+            },
+        ];
+        let mut out = new_out();
+        let rc =
+            unsafe { lr_bgp_encode_ipv4_nlri(prefixes.as_ptr(), prefixes.len(), &raw mut out) };
+        assert_eq!(rc, 0);
+        let bytes = take(&out);
+        drop_bytes(out);
+        // First prefix 203.0.113.0/24 → 0x18 (24) + 3 bytes.
+        // Second prefix 198.51.100.0/16 → 0x10 (16) + 2 bytes.
+        // Total = 4 + 3 = 7 bytes.
+        assert_eq!(bytes.len(), 7);
+        assert_eq!(bytes[0], 24); // prefix length
+        assert_eq!(bytes[1..4], [203, 0, 113]); // 3 octets of /24
+        assert_eq!(bytes[4], 16); // prefix length
+        assert_eq!(bytes[5..7], [198, 51]); // 2 octets of /16
+    }
+
+    #[test]
+    fn ffi_decode_ipv4_nlri_round_trip() {
+        // Same wire form the encode test produces.
+        let wire: [u8; 7] = [24, 203, 0, 113, 16, 198, 51];
+        let mut out = new_out();
+        let rc = unsafe { lr_bgp_decode_ipv4_nlri(wire.as_ptr(), wire.len(), &raw mut out) };
+        assert_eq!(rc, 0);
+        let bytes = take(&out);
+        drop_bytes(out);
+        // Two prefixes × 18 bytes (16 addr + 1 prefix_len + 1 is_ipv6).
+        assert_eq!(bytes.len(), 36);
+        // First prefix: 203.0.113.0/24, is_ipv6=0.
+        assert_eq!(bytes[0..4], [203, 0, 113, 0]); // addr padded to 16
+        assert_eq!(bytes[16], 24); // prefix_len
+        assert_eq!(bytes[17], 0); // is_ipv6
+                                  // Second prefix: 198.51.100.0/16, is_ipv6=0.
+        assert_eq!(bytes[18..20], [198, 51]); // first 2 octets
+        assert_eq!(bytes[18 + 16], 16); // prefix_len
+        assert_eq!(bytes[18 + 17], 0); // is_ipv6
+    }
+
+    #[test]
+    fn ffi_encode_ipv4_nlri_rejects_ipv6_prefix() {
+        let prefixes = [crate::policy::lr_prefix_t {
+            addr: [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            is_ipv6: 1,
+            prefix_len: 32,
+        }];
+        let mut out = new_out();
+        let rc =
+            unsafe { lr_bgp_encode_ipv4_nlri(prefixes.as_ptr(), prefixes.len(), &raw mut out) };
+        assert_eq!(rc, LR_ERR_OTHER);
+    }
+
+    #[test]
+    fn ffi_encode_ipv4_nlri_handles_empty_input() {
+        let mut out = new_out();
+        let rc = unsafe { lr_bgp_encode_ipv4_nlri(std::ptr::null(), 0, &raw mut out) };
+        assert_eq!(rc, 0);
+        let bytes = take(&out);
+        drop_bytes(out);
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn ffi_decode_ipv4_nlri_rejects_malformed_stream() {
+        // Prefix length 40 (> 32) → invalid for IPv4.
+        let bad: [u8; 2] = [40, 0];
+        let mut out = new_out();
+        let rc = unsafe { lr_bgp_decode_ipv4_nlri(bad.as_ptr(), bad.len(), &raw mut out) };
+        assert_eq!(rc, LR_ERR_OTHER);
+    }
+
+    #[test]
+    fn ffi_encode_ipv4_nlri_handles_null_safely() {
+        let mut out = new_out();
+        // NULL out → LR_ERR_NULL.
+        let rc = unsafe { lr_bgp_encode_ipv4_nlri(std::ptr::null(), 0, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
+        // Non-zero count + NULL prefixes → LR_ERR_NULL.
+        let rc = unsafe { lr_bgp_encode_ipv4_nlri(std::ptr::null(), 1, &raw mut out) };
+        assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    #[test]
+    fn ffi_decode_ipv4_nlri_handles_null_safely() {
+        let rc = unsafe { lr_bgp_decode_ipv4_nlri(std::ptr::null(), 0, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
     }
 }

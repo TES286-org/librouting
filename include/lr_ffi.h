@@ -938,6 +938,27 @@ typedef struct OpaqueBgpCapability {
 typedef struct OpaqueBgpCapability *lr_bgp_capability_t;
 
 /**
+ * One Extended Next-Hop tuple (RFC 5549 §4): the NLRI AFI/SAFI
+ * pair and the nexthop AFI. Used by
+ * [`lr_bgp_cap_extended_next_hop`] to build a capability from a
+ * flat C array without round-tripping through individual handles.
+ */
+typedef struct lr_bgp_ext_next_hop_tuple_t {
+  /**
+   * NLRI address family (1 = IPv4, 2 = IPv6).
+   */
+  uint16_t nlri_afi;
+  /**
+   * NLRI subsequent address family (1 = unicast, etc.).
+   */
+  uint8_t nlri_safi;
+  /**
+   * Nexthop address family (2 = IPv6, for RFC 5549 IPv4-over-IPv6).
+   */
+  uint16_t nexthop_afi;
+} lr_bgp_ext_next_hop_tuple_t;
+
+/**
  * Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
  */
 typedef struct OpaqueBgpMessage {
@@ -3486,6 +3507,83 @@ uintptr_t lr_bgp_cap_value(lr_bgp_capability_t cap, uint8_t *out, uintptr_t cap_
 uint32_t lr_bgp_cap_as_four_octet(lr_bgp_capability_t cap);
 
 /**
+ * Construct a Multiprotocol capability (RFC 4760 §4) carrying the
+ * given AFI/SAFI tuple. Returns an opaque `lr_bgp_capability_t`
+ * handle.
+ */
+lr_bgp_capability_t lr_bgp_cap_multiprotocol(uint16_t afi, uint8_t safi);
+
+/**
+ * For a Multiprotocol capability (RFC 4760 §4), read the AFI/SAFI
+ * pair. Writes the AFI to `*out_afi` and the SAFI to `*out_safi`
+ * and returns 1 when the capability is a Multiprotocol one; returns
+ * 0 on a NULL handle, NULL out-pointers, or a non-Multiprotocol
+ * capability.
+ *
+ * # Safety
+ * `cap` must be a valid handle. `out_afi` / `out_safi` must point
+ * to writable `uint16_t` / `uint8_t`.
+ */
+uint8_t lr_bgp_cap_as_multiprotocol(lr_bgp_capability_t cap, uint16_t *out_afi, uint8_t *out_safi);
+
+/**
+ * Construct an Extended Next-Hop capability (RFC 5549 §4) carrying
+ * the given list of `(nlri_afi, nlri_safi, nexthop_afi)` tuples.
+ * Each tuple says "NLRI of family (nlri_afi, nlri_safi) may be
+ * resolved over a nexthop of family nexthop_afi". A typical tuple
+ * is `(1, 1, 2)` — IPv4 unicast over an IPv6 nexthop.
+ *
+ * `tuples` points to `count` `lr_bgp_ext_next_hop_tuple_t` entries.
+ * Returns an opaque `lr_bgp_capability_t` handle, or NULL on a
+ * NULL `tuples` with non-zero `count`.
+ *
+ * # Safety
+ * `tuples` (when `count > 0`) must point to `count` readable
+ * `lr_bgp_ext_next_hop_tuple_t` entries.
+ */
+lr_bgp_capability_t lr_bgp_cap_extended_next_hop(const struct lr_bgp_ext_next_hop_tuple_t *tuples,
+                                                 uintptr_t count);
+
+/**
+ * For an Extended Next-Hop capability (RFC 5549 §4), return the
+ * number of `(nlri_afi, nlri_safi, nexthop_afi)` tuples it carries.
+ * Returns 0 on a NULL handle or a non-Extended-Next-Hop capability.
+ *
+ * # Safety
+ * `cap` must be a valid handle.
+ */
+uintptr_t lr_bgp_cap_extended_next_hop_len(lr_bgp_capability_t cap);
+
+/**
+ * For an Extended Next-Hop capability (RFC 5549 §4), copy the
+ * `(nlri_afi, nlri_safi, nexthop_afi)` tuples into the caller-
+ * supplied buffer. Each tuple occupies one
+ * `lr_bgp_ext_next_hop_tuple_t`. Returns the number of tuples
+ * actually copied (capped at `cap_size`). Use
+ * [`lr_bgp_cap_extended_next_hop_len`] to size the buffer first.
+ *
+ * # Safety
+ * `cap` must be a valid handle. `out` must point to at least
+ * `cap_size` writable `lr_bgp_ext_next_hop_tuple_t` entries.
+ */
+uintptr_t lr_bgp_cap_extended_next_hop_tuples(lr_bgp_capability_t cap,
+                                              struct lr_bgp_ext_next_hop_tuple_t *out,
+                                              uintptr_t cap_size);
+
+/**
+ * Construct a generic capability from a wire code + raw value bytes.
+ * Returns an opaque `lr_bgp_capability_t` handle. The wire code is
+ * the IANA `CapabilityCode` value; `value` points to `value_len`
+ * bytes of capability-specific data (NULL + 0 length is legal and
+ * produces a zero-value capability — used by Route Refresh, code 2).
+ *
+ * # Safety
+ * `value` (when `value_len > 0`) must point to `value_len` readable
+ * bytes.
+ */
+lr_bgp_capability_t lr_bgp_cap_new(uint8_t code, const uint8_t *value, uintptr_t value_len);
+
+/**
  * Drop a boxed `Capability`. Safe to call with NULL.
  *
  * # Safety
@@ -3822,6 +3920,43 @@ int32_t lr_bgp_message_update_attr_at(lr_bgp_message_t m,
                                       uint8_t *out_type,
                                       uint8_t *out_flags,
                                       struct lr_bytes_t *out_value);
+
+/**
+ * Encode a list of IPv4 prefixes as RFC 4271 §4.3 NLRI bytes
+ * (variable-length prefix-length + minimal address bytes). Each
+ * prefix must be IPv4 (the `is_ipv6` flag of every `lr_prefix_t`
+ * must be 0); a non-IPv4 prefix sets the last-error string and
+ * returns `LR_ERR_OTHER` (-6).
+ *
+ * `prefixes` points to `count` `lr_prefix_t` entries. The encoded
+ * bytes are written to `*out` as a freshly-allocated `lr_bytes_t`
+ * (caller frees via `lr_bytes_free`).
+ *
+ * # Safety
+ * `prefixes` (when `count > 0`) must point to `count` readable
+ * `lr_prefix_t` entries. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bgp_encode_ipv4_nlri(const struct lr_prefix_t *prefixes,
+                                uintptr_t count,
+                                struct lr_bytes_t *out);
+
+/**
+ * Decode RFC 4271 §4.3 NLRI bytes into a list of IPv4 prefixes.
+ * On success writes a freshly-allocated `lr_bytes_t` to `*out`
+ * carrying `n * 17` bytes (each prefix occupies 16 bytes of address
+ * octets + 1 byte of prefix length — the address octets are
+ * zero-padded to 16 bytes so the caller can re-use `lr_prefix_t`
+ * regardless of family). Returns 0 on success, `LR_ERR_NULL` on
+ * NULL pointers, `LR_ERR_OTHER` (-6) on a malformed NLRI stream
+ * (prefix length > 32, or trailing bytes shorter than the prefix
+ * length demands).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_decode_ipv4_nlri(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
 
 /**
  * Construct an IPv4 `lr_ip_addr_t` from 4 octets.
