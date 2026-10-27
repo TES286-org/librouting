@@ -1431,6 +1431,671 @@ pub unsafe extern "C" fn lr_bgp_path_attrs_mp_unreach(
     )
 }
 
+// ---- Additional typed setters (RFC 4271 §5 + lr-bgp extensions) ----
+
+/// Attach the OSPF type-2 external metric (RFC 2328 §16.4) under the
+/// private `LrOspfMetric2` tag. The tag is never transmitted on the
+/// wire — it carries the type-2 external metric through the Loc-RIB
+/// so the filter DSL's `ospf.metric2` field can surface it. `metric`
+/// is masked to the 24-bit OSPF external-metric width.
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_set_ospf_metric2(
+    a: lr_bgp_path_attrs_t,
+    metric: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            attrs.set_ospf_metric2(metric);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read back the OSPF type-2 external metric. Returns 1 and writes
+/// `*out_metric` when the attribute is present; returns 0 otherwise.
+///
+/// # Safety
+/// `a` must be a valid handle. `out_metric` must point to a writable
+/// `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_ospf_metric2(
+    a: lr_bgp_path_attrs_t,
+    out_metric: *mut u32,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_metric.is_null() {
+                return 0;
+            }
+            match attrs.ospf_metric2() {
+                Some(m) => {
+                    unsafe { *out_metric = m };
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// True when an OSPF type-2 metric tag is physically present.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_ospf_metric2`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_has_ospf_metric2(a: lr_bgp_path_attrs_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_attrs(a)
+                .map(|x| x.has_ospf_metric2() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Attach the OSPF Advertising Router ID (RFC 2328 §A.4.1) under the
+/// private `LrOspfRouterId` tag. Never transmitted on the wire; the
+/// tag carries the OSPF route's advertising router through the
+/// Loc-RIB so the filter DSL's `ospf.router_id` field can surface it.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_set_ospf_metric2`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_set_ospf_router_id(
+    a: lr_bgp_path_attrs_t,
+    router_id: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            attrs.set_ospf_router_id(router_id);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read back the OSPF advertising router ID. Returns 1 and writes
+/// `*out_router_id` when the tag is present; returns 0 otherwise.
+///
+/// # Safety
+/// `a` must be a valid handle. `out_router_id` must point to a
+/// writable `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_ospf_router_id(
+    a: lr_bgp_path_attrs_t,
+    out_router_id: *mut u32,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_router_id.is_null() {
+                return 0;
+            }
+            match attrs.ospf_router_id() {
+                Some(id) => {
+                    unsafe { *out_router_id = id };
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// True when an OSPF router-id tag is physically present.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_ospf_router_id`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_has_ospf_router_id(a: lr_bgp_path_attrs_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_attrs(a)
+                .map(|x| x.has_ospf_router_id() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Attach the Babel sequence number (RFC 8966 §3.2) under the private
+/// `LrBabelSeqno` tag. Carries the source route's sequence number
+/// through the Loc-RIB so the filter DSL's `babel.seqno` field can
+/// surface it.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_set_ospf_metric2`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_set_babel_seqno(
+    a: lr_bgp_path_attrs_t,
+    seqno: u16,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            attrs.set_babel_seqno(seqno);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read back the Babel sequence number. Returns 1 and writes
+/// `*out_seqno` when the tag is present; returns 0 otherwise.
+///
+/// # Safety
+/// `a` must be a valid handle. `out_seqno` must point to a writable
+/// `uint16_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_babel_seqno(
+    a: lr_bgp_path_attrs_t,
+    out_seqno: *mut u16,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_seqno.is_null() {
+                return 0;
+            }
+            match attrs.babel_seqno() {
+                Some(s) => {
+                    unsafe { *out_seqno = s };
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// True when a Babel seqno tag is physically present.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_babel_seqno`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_has_babel_seqno(a: lr_bgp_path_attrs_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_attrs(a)
+                .map(|x| x.has_babel_seqno() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Attach the Babel router-id (RFC 8966 §3.1 — the 8-byte EUI-64
+/// originator of the source route) under the private
+/// `LrBabelRouterId` tag. Surfaces through the filter DSL's
+/// `babel.router_id` field.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_set_ospf_metric2`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_set_babel_router_id(
+    a: lr_bgp_path_attrs_t,
+    router_id: u64,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            attrs.set_babel_router_id(router_id);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read back the Babel router-id. Returns 1 and writes `*out_router_id`
+/// when the tag is present; returns 0 otherwise.
+///
+/// # Safety
+/// `a` must be a valid handle. `out_router_id` must point to a
+/// writable `uint64_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_babel_router_id(
+    a: lr_bgp_path_attrs_t,
+    out_router_id: *mut u64,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_router_id.is_null() {
+                return 0;
+            }
+            match attrs.babel_router_id() {
+                Some(id) => {
+                    unsafe { *out_router_id = id };
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// True when a Babel router-id tag is physically present.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_babel_router_id`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_has_babel_router_id(a: lr_bgp_path_attrs_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_attrs(a)
+                .map(|x| x.has_babel_router_id() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Attach the IGP metric (RFC 4271 §9.1.2.2 step (g) — the IGP cost
+/// to the BGP NEXT_HOP) under the private `LrIgpMetric` tag. Used by
+/// the best-path step-7 comparison; the daemon computes it from the
+/// OSPF / Babel SPF result, but an FFI embedder building routes by
+/// hand can supply it directly.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_set_ospf_metric2`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_set_igp_metric(
+    a: lr_bgp_path_attrs_t,
+    metric: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            attrs.set_igp_metric(metric);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read back the IGP metric. Returns 1 and writes `*out_metric` when
+/// the tag is present; returns 0 otherwise.
+///
+/// # Safety
+/// `a` must be a valid handle. `out_metric` must point to a writable
+/// `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_igp_metric(
+    a: lr_bgp_path_attrs_t,
+    out_metric: *mut u32,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_metric.is_null() {
+                return 0;
+            }
+            match attrs.igp_metric() {
+                Some(m) => {
+                    unsafe { *out_metric = m };
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// True when an IGP metric tag is physically present.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_igp_metric`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_has_igp_metric(a: lr_bgp_path_attrs_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_attrs(a)
+                .map(|x| x.has_igp_metric() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Attach the peer-source-address tag (RFC 4271 §9.1.2.2 step (h)).
+/// The tag carries the BGP peer's transport address through the
+/// Loc-RIB so the best-path step-8 comparison can prefer routes
+/// whose NEXT_HOP equals the peer's source address.
+///
+/// `is_ipv6` selects the address family; `addr` points to 4 bytes
+/// (v4) or 16 bytes (v6).
+///
+/// # Safety
+/// `a` must be a valid handle. `addr` must point to 4 (v4) or 16 (v6)
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_set_peer_source_address(
+    a: lr_bgp_path_attrs_t,
+    addr: *const u8,
+    is_ipv6: u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            if addr.is_null() {
+                return LR_ERR_NULL;
+            }
+            let ip = if is_ipv6 != 0 {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(unsafe { std::slice::from_raw_parts(addr, 16) });
+                lr_core::addr::IpAddr::V6(b)
+            } else {
+                let mut b = [0u8; 4];
+                b.copy_from_slice(unsafe { std::slice::from_raw_parts(addr, 4) });
+                lr_core::addr::IpAddr::V4(b)
+            };
+            attrs.set_peer_source_address(ip);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read back the peer source address. Writes `*out_is_ipv6` (1 for
+/// v6, 0 for v4) and 4 or 16 bytes to `out_addr`. Returns 1 when
+/// the tag is present, 0 otherwise.
+///
+/// # Safety
+/// `a` must be a valid handle. `out_addr` must point to at least 16
+/// writable bytes (the function writes 4 for v4, 16 for v6).
+/// `out_is_ipv6` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_peer_source_address(
+    a: lr_bgp_path_attrs_t,
+    out_addr: *mut u8,
+    out_is_ipv6: *mut u8,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_addr.is_null() || out_is_ipv6.is_null() {
+                return 0;
+            }
+            match attrs.peer_source_address() {
+                Some(ip) => {
+                    match ip {
+                        lr_core::addr::IpAddr::V4(b) => unsafe {
+                            std::ptr::copy_nonoverlapping(b.as_ptr(), out_addr, 4);
+                            *out_is_ipv6 = 0;
+                        },
+                        lr_core::addr::IpAddr::V6(b) => unsafe {
+                            std::ptr::copy_nonoverlapping(b.as_ptr(), out_addr, 16);
+                            *out_is_ipv6 = 1;
+                        },
+                    }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// True when a peer-source-address tag is physically present.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_peer_source_address`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_has_peer_source_address(a: lr_bgp_path_attrs_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_attrs(a)
+                .map(|x| x.has_peer_source_address() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// True when the COMMUNITIES attribute contains `community` (RFC 1997
+/// §4 — `asn << 16 | value`). Returns 0 on a NULL attrs handle.
+///
+/// # Safety
+/// `a` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_has_community(
+    a: lr_bgp_path_attrs_t,
+    community: u32,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            attrs.has_community(lr_bgp::path::communities::Community(community)) as u8
+        },
+        0,
+    )
+}
+
+/// Attach a LARGE_COMMUNITY (RFC 8092 §2) to the attribute set,
+/// idempotent. The community is appended to the existing set when
+/// not already present.
+///
+/// # Safety
+/// `a` must be a valid handle. `c` must be a valid LargeCommunity
+/// handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_insert_large_community(
+    a: lr_bgp_path_attrs_t,
+    c: crate::bgp_communities::lr_bgp_large_community_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            let Some(c_ref) = crate::bgp_communities::borrow_large(c) else {
+                return LR_ERR_NULL;
+            };
+            attrs.insert_large_community(*c_ref);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Remove every attribute whose type code matches `attr_type`. Returns
+/// 1 when an attribute was removed, 0 when no attribute of that type
+/// was present.
+///
+/// # Safety
+/// `a` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_remove(a: lr_bgp_path_attrs_t, attr_type: u8) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return 0;
+            };
+            let t = lr_bgp::path::AttrType::from_u8(attr_type);
+            attrs.remove(t).is_some() as u8
+        },
+        0,
+    )
+}
+
+/// Get one attribute by type code. Writes a flat `(flags, type, value)`
+/// triple to the out-pointers; the value bytes are returned as a
+/// freshly-allocated `lr_bytes_t` (caller frees via `lr_bytes_free`).
+/// Returns 1 when the attribute is present, 0 otherwise.
+///
+/// # Safety
+/// `a` must be a valid handle. `out_flags` and `out_type` must point
+/// to writable `uint8_t`. `out_value` must point to a writable
+/// `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_get(
+    a: lr_bgp_path_attrs_t,
+    attr_type: u8,
+    out_flags: *mut u8,
+    out_type: *mut u8,
+    out_value: *mut crate::handle::lr_bytes_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_flags.is_null() || out_type.is_null() || out_value.is_null() {
+                return 0;
+            }
+            let t = lr_bgp::path::AttrType::from_u8(attr_type);
+            match attrs.get(t) {
+                Some(attr) => {
+                    unsafe {
+                        *out_flags = attr.flags.0;
+                        *out_type = attr.attr_type.to_u8();
+                        *out_value = crate::handle::lr_bytes_t::from_vec(attr.value.clone());
+                    }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// Insert a raw `PathAttribute` (RFC 4271 §5). Replaces any
+/// existing attribute with the same type code. `flags` is the raw
+/// flags byte (RFC 4271 §5.1: Optional / Transitive / Partial /
+/// Extended Length). `attr_type` is the type code (1..255). `value`
+/// points to `value_len` bytes of attribute value.
+///
+/// # Safety
+/// `a` must be a valid handle. `value` must point to `value_len`
+/// readable bytes (NULL only when `value_len` is 0).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_insert_raw(
+    a: lr_bgp_path_attrs_t,
+    flags: u8,
+    attr_type: u8,
+    value: *const u8,
+    value_len: usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            if value.is_null() && value_len != 0 {
+                return LR_ERR_NULL;
+            }
+            let bytes = if value.is_null() {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(value, value_len).to_vec() }
+            };
+            let attr = lr_bgp::path::PathAttribute::new(
+                lr_bgp::path::PathAttrFlags(flags),
+                lr_bgp::path::AttrType::from_u8(attr_type),
+                bytes,
+            );
+            attrs.insert(attr);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of attributes in the set (mirrors `PathAttributes::len`).
+/// Re-exposed as a free function for callers that received a handle
+/// without going through `lr_bgp_path_attrs_new`.
+///
+/// # Safety
+/// `a` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_count(a: lr_bgp_path_attrs_t) -> usize {
+    guarded(
+        || unsafe { borrow_attrs(a).map(|x| x.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read one attribute by index (in insertion order). Writes the
+/// `(flags, type, value)` triple like [`lr_bgp_path_attrs_get`].
+/// Returns 1 when the index is in range, 0 otherwise.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_get`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_at(
+    a: lr_bgp_path_attrs_t,
+    index: usize,
+    out_flags: *mut u8,
+    out_type: *mut u8,
+    out_value: *mut crate::handle::lr_bytes_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_flags.is_null() || out_type.is_null() || out_value.is_null() {
+                return 0;
+            }
+            // Walk the iterator to the requested index — `iter()` is the
+            // only public surface; the underlying Vec is private.
+            match attrs.iter().nth(index) {
+                Some(attr) => {
+                    unsafe {
+                        *out_flags = attr.flags.0;
+                        *out_type = attr.attr_type.to_u8();
+                        *out_value = crate::handle::lr_bytes_t::from_vec(attr.value.clone());
+                    }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1782,6 +2447,255 @@ mod tests {
             },
             0
         );
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_set_ospf_metric2_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        assert!(!a.is_null());
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_ospf_metric2(a) }, 0);
+        assert_eq!(unsafe { lr_bgp_path_attrs_set_ospf_metric2(a, 0x1234) }, 0);
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_ospf_metric2(a) }, 1);
+        let mut m = 0u32;
+        assert_eq!(unsafe { lr_bgp_path_attrs_ospf_metric2(a, &raw mut m) }, 1);
+        assert_eq!(m, 0x1234);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_ospf_metric2_masks_high_bits() {
+        let a = lr_bgp_path_attrs_new();
+        // 0x01ff_ffff + 1 = 0x0200_0000 → masked to 0x00ff_ffff.
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_set_ospf_metric2(a, 0x0100_0000) },
+            0
+        );
+        let mut m = 0u32;
+        assert_eq!(unsafe { lr_bgp_path_attrs_ospf_metric2(a, &raw mut m) }, 1);
+        assert_eq!(m, 0x0100_0000 & 0x00ff_ffff);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_set_ospf_router_id_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_ospf_router_id(a) }, 0);
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_set_ospf_router_id(a, 0x01020304) },
+            0
+        );
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_ospf_router_id(a) }, 1);
+        let mut id = 0u32;
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_ospf_router_id(a, &raw mut id) },
+            1
+        );
+        assert_eq!(id, 0x01020304);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_set_babel_seqno_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_babel_seqno(a) }, 0);
+        assert_eq!(unsafe { lr_bgp_path_attrs_set_babel_seqno(a, 0x1234) }, 0);
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_babel_seqno(a) }, 1);
+        let mut s = 0u16;
+        assert_eq!(unsafe { lr_bgp_path_attrs_babel_seqno(a, &raw mut s) }, 1);
+        assert_eq!(s, 0x1234);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_set_babel_router_id_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_babel_router_id(a) }, 0);
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_set_babel_router_id(a, 0x0102030405060708) },
+            0
+        );
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_babel_router_id(a) }, 1);
+        let mut id = 0u64;
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_babel_router_id(a, &raw mut id) },
+            1
+        );
+        assert_eq!(id, 0x0102030405060708);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_set_igp_metric_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_igp_metric(a) }, 0);
+        assert_eq!(unsafe { lr_bgp_path_attrs_set_igp_metric(a, 100) }, 0);
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_igp_metric(a) }, 1);
+        let mut m = 0u32;
+        assert_eq!(unsafe { lr_bgp_path_attrs_igp_metric(a, &raw mut m) }, 1);
+        assert_eq!(m, 100);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_set_peer_source_address_v4_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_peer_source_address(a) }, 0);
+        let addr: [u8; 4] = [192, 0, 2, 1];
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_set_peer_source_address(a, addr.as_ptr(), 0) },
+            0
+        );
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_peer_source_address(a) }, 1);
+        let mut out_addr = [0u8; 16];
+        let mut is_v6 = 0u8;
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_peer_source_address(a, out_addr.as_mut_ptr(), &raw mut is_v6)
+            },
+            1
+        );
+        assert_eq!(is_v6, 0);
+        assert_eq!(&out_addr[..4], &addr);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_set_peer_source_address_v6_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        let addr: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_set_peer_source_address(a, addr.as_ptr(), 1) },
+            0
+        );
+        let mut out_addr = [0u8; 16];
+        let mut is_v6 = 0u8;
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_peer_source_address(a, out_addr.as_mut_ptr(), &raw mut is_v6)
+            },
+            1
+        );
+        assert_eq!(is_v6, 1);
+        assert_eq!(&out_addr, &addr);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_insert_large_community_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        let c = crate::bgp_communities::lr_bgp_large_community_new(65001, 1, 2);
+        assert!(!c.is_null());
+        assert_eq!(unsafe { lr_bgp_path_attrs_insert_large_community(a, c) }, 0);
+        // communities() was the previous surface; now there's also
+        // the new count.
+        assert!(unsafe { lr_bgp_path_attrs_count(a) } >= 1);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_insert_raw_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        // LOCAL_PREF value: 4 bytes, big-endian 100.
+        let value: [u8; 4] = 100u32.to_be_bytes();
+        // attr_type 5 = LocalPref, flags 0x40 = transitive.
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_insert_raw(a, 0x40, 5, value.as_ptr(), 4) },
+            0
+        );
+        // Read it back via the typed accessor.
+        let mut lp = 0u32;
+        assert_eq!(unsafe { lr_bgp_path_attrs_local_pref(a, &raw mut lp) }, 1);
+        assert_eq!(lp, 100);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_remove_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        // Set LOCAL_PREF, then remove it (attr_type 5).
+        assert_eq!(unsafe { lr_bgp_path_attrs_set_local_pref(a, 100) }, 0);
+        let mut lp = 0u32;
+        assert_eq!(unsafe { lr_bgp_path_attrs_local_pref(a, &raw mut lp) }, 1);
+        assert_eq!(unsafe { lr_bgp_path_attrs_remove(a, 5) }, 1);
+        assert_eq!(unsafe { lr_bgp_path_attrs_local_pref(a, &raw mut lp) }, 0);
+        // Removing again is a no-op.
+        assert_eq!(unsafe { lr_bgp_path_attrs_remove(a, 5) }, 0);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_get_and_at() {
+        let a = lr_bgp_path_attrs_new();
+        // Set LOCAL_PREF (type 5, flags 0x40, value = 100 BE).
+        assert_eq!(unsafe { lr_bgp_path_attrs_set_local_pref(a, 100) }, 0);
+        assert_eq!(unsafe { lr_bgp_path_attrs_count(a) }, 1);
+
+        let mut flags = 0u8;
+        let mut ty = 0u8;
+        let mut out_bytes = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // Get by type code 5.
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_get(a, 5, &raw mut flags, &raw mut ty, &raw mut out_bytes) },
+            1
+        );
+        assert_eq!(ty, 5);
+        assert_eq!(flags, 0x40);
+        let v = unsafe { bytes_to_vec(&mut out_bytes) };
+        assert_eq!(v, 100u32.to_be_bytes());
+        // Get by index 0.
+        let mut flags2 = 0u8;
+        let mut ty2 = 0u8;
+        let mut out_bytes2 = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_at(a, 0, &raw mut flags2, &raw mut ty2, &raw mut out_bytes2)
+            },
+            1
+        );
+        assert_eq!(ty2, 5);
+        let _ = unsafe { bytes_to_vec(&mut out_bytes2) };
+        // At(99) is out of range.
+        let mut oob_flags = 0u8;
+        let mut oob_type = 0u8;
+        let mut oob_bytes = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_at(
+                    a,
+                    99,
+                    &raw mut oob_flags,
+                    &raw mut oob_type,
+                    &raw mut oob_bytes,
+                )
+            },
+            0
+        );
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_has_community_round_trip() {
+        let a = lr_bgp_path_attrs_new();
+        let community: u32 = (65001u32 << 16) | 100u32;
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_community(a, community) }, 0);
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_insert_community(a, community) },
+            0
+        );
+        assert_eq!(unsafe { lr_bgp_path_attrs_has_community(a, community) }, 1);
         unsafe { lr_bgp_path_attrs_free(a) };
     }
 }

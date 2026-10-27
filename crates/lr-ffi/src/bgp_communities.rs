@@ -69,7 +69,7 @@ unsafe fn unbox_community(c: lr_bgp_community_t) -> Option<Box<Community>> {
     }
     Some(unsafe { Box::from_raw(c as *mut Community) })
 }
-unsafe fn borrow_community(c: lr_bgp_community_t) -> Option<&'static Community> {
+pub(crate) unsafe fn borrow_community(c: lr_bgp_community_t) -> Option<&'static Community> {
     if c.is_null() {
         return None;
     }
@@ -79,7 +79,7 @@ unsafe fn borrow_community(c: lr_bgp_community_t) -> Option<&'static Community> 
 fn box_large(c: LargeCommunity) -> lr_bgp_large_community_t {
     Box::into_raw(Box::new(c)) as lr_bgp_large_community_t
 }
-unsafe fn borrow_large(c: lr_bgp_large_community_t) -> Option<&'static LargeCommunity> {
+pub(crate) unsafe fn borrow_large(c: lr_bgp_large_community_t) -> Option<&'static LargeCommunity> {
     if c.is_null() {
         return None;
     }
