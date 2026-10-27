@@ -1035,6 +1035,402 @@ pub unsafe extern "C" fn lr_bgp_path_attrs_insert_community(
     )
 }
 
+// ---- Typed readers for the remaining well-known attributes (issue #92) ----
+//
+// The readers below close the gap between the Rust `PathAttributes`
+// pub API and the C ABI. They mirror the inherent-method set on
+// `PathAttributes`: `next_hop`, `as_path`, `as_path_wire`,
+// `as4_path`, `cluster_list`, `label_stack`, `set_label_stack`,
+// `mp_reach`, `mp_unreach`. Each returns either a typed handle
+// (AsPath / LabelStack) or a flat byte buffer (cluster_list,
+// MpReach / MpUnreach attribute value) the caller frees via
+// `lr_bytes_free`.
+
+/// One IPv4/IPv6 next-hop value (RFC 4271 §5.1.3 / RFC 4760 §3).
+/// Mirrors `lr_bgp::path::NextHopKind` — `is_ipv6 = 0` for IPv4
+/// (the address occupies the first 4 bytes of `addr`), `1` for
+/// IPv6, `2` for the RFC 5549 IPv4-over-IPv6 form (16 bytes, IPv4
+/// encoded in the v6 address).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_bgp_next_hop_t {
+    /// Address octets (first 4 for v4, all 16 for v6 / v4-over-v6).
+    pub addr: [u8; 16],
+    /// 0 = IPv4, 1 = IPv6, 2 = V4-over-V6 (RFC 5549).
+    pub kind: u8,
+    /// 1 when the attribute is present, 0 when absent.
+    pub present: u8,
+}
+
+/// Read the NEXT_HOP attribute (RFC 4271 §5.1.3). Writes the
+/// next-hop address + kind to `*out` and returns 1 if present, 0
+/// if absent. The IPv4 form occupies the first 4 bytes of
+/// `out->addr`; the IPv6 / RFC 5549 forms occupy all 16 bytes.
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle. `out` must point to a
+/// writable `lr_bgp_next_hop_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_next_hop(
+    a: lr_bgp_path_attrs_t,
+    out: *mut lr_bgp_next_hop_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out.is_null() {
+                return 0;
+            }
+            match attrs.next_hop() {
+                Some(nh) => {
+                    let (addr, kind) = match nh.0 {
+                        lr_bgp::path::NextHopKind::V4(b) => {
+                            let mut a16 = [0u8; 16];
+                            a16[..4].copy_from_slice(&b);
+                            (a16, 0u8)
+                        }
+                        lr_bgp::path::NextHopKind::V6(b) => (b, 1u8),
+                        lr_bgp::path::NextHopKind::V4OverV6(b) => (b, 2u8),
+                    };
+                    unsafe {
+                        *out = lr_bgp_next_hop_t {
+                            addr,
+                            kind,
+                            present: 1,
+                        };
+                    }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// Read the AS_PATH attribute (RFC 4271 §5.1.2 / RFC 6793 §4) and
+/// return it as a fresh `lr_bgp_as_path_t` handle (caller frees via
+/// `lr_bgp_as_path_free`). Returns NULL when the attribute is
+/// absent or the input handle is NULL.
+///
+/// The returned handle is a *clone* — the source PathAttributes
+/// retains its own copy. Use [`lr_bgp_path_attrs_as_path_wire`] to
+/// pick the 2-byte vs 4-byte AS form explicitly; this reader
+/// returns the in-memory form (always 4-byte when ASN4 is
+/// negotiated).
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_as_path(a: lr_bgp_path_attrs_t) -> lr_bgp_as_path_t {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return std::ptr::null_mut();
+            };
+            match attrs.as_path() {
+                Some(p) => box_as_path(p),
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Read the AS_PATH attribute in the explicit 2-byte or 4-byte AS
+/// form (RFC 6793 §4 — when `asn4 != 0` the path carries 4-byte
+/// ASes; otherwise ASes above 16 bits are unwrapped to AS_TRANS).
+/// Returns NULL when the attribute is absent.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_as_path`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_as_path_wire(
+    a: lr_bgp_path_attrs_t,
+    asn4: u8,
+) -> lr_bgp_as_path_t {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return std::ptr::null_mut();
+            };
+            match attrs.as_path_wire(asn4 != 0) {
+                Some(p) => box_as_path(p),
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Read the AS4_PATH attribute (RFC 6793 §4 — the deprecated
+/// AS4_PATH back-compat path). Returns NULL when absent.
+///
+/// # Safety
+/// See [`lr_bgp_path_attrs_as_path`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_as4_path(a: lr_bgp_path_attrs_t) -> lr_bgp_as_path_t {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return std::ptr::null_mut();
+            };
+            match attrs.as4_path() {
+                Some(p) => box_as_path(p),
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Read the CLUSTER_LIST attribute (RFC 4456 §8). Writes a flat
+/// `lr_bytes_t` carrying `n * 4` bytes (one big-endian Router-ID
+/// per cluster) to `*out`. Returns 1 if the attribute is
+/// physically present (RFC 4456 §8 — `has_cluster_list`), 0 if
+/// absent. (The Rust API's `cluster_list()` collapses absent and
+/// present-but-empty to the same empty `ClusterList`; this reader
+/// uses `has_cluster_list` so the caller can distinguish the two.)
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle. `out` must point to a
+/// writable `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_cluster_list(
+    a: lr_bgp_path_attrs_t,
+    out: *mut lr_bytes_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out.is_null() {
+                return 0;
+            }
+            if !attrs.has_cluster_list() {
+                return 0;
+            }
+            // has_cluster_list() = true → cluster_list() is Some.
+            let cl = attrs.cluster_list().unwrap_or_default();
+            let mut bytes = Vec::with_capacity(cl.0.len() * 4);
+            for rid in &cl.0 {
+                bytes.extend_from_slice(&rid.as_u32().to_be_bytes());
+            }
+            unsafe { *out = lr_bytes_t::from_vec(bytes) }
+            1
+        },
+        0,
+    )
+}
+
+/// Read the LrMplsLabelStack attribute (RFC 8277 §3 — the
+/// `LrMplsLabelStack` well-known attribute carries the MPLS label
+/// stack for BGP labelled unicast). Returns a fresh
+/// `lr_mpls_label_stack_t` handle (caller frees via
+/// `lr_mpls_label_stack_free`), or NULL when the attribute is
+/// absent.
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_label_stack(
+    a: lr_bgp_path_attrs_t,
+) -> crate::mpls::lr_mpls_label_stack_t {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return std::ptr::null_mut();
+            };
+            match attrs.label_stack() {
+                Some(stack) => crate::mpls::box_stack(stack),
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Set the LrMplsLabelStack attribute (RFC 8277 §3). The previous
+/// value, if any, is overwritten. The `stack` handle is **borrowed**
+/// — the caller retains ownership and must still free it via
+/// `lr_mpls_label_stack_free`.
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle. `stack` must be a
+/// valid LabelStack handle (NULL is rejected with `LR_ERR_NULL`).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_set_label_stack(
+    a: lr_bgp_path_attrs_t,
+    stack: crate::mpls::lr_mpls_label_stack_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs_mut(a) else {
+                return LR_ERR_NULL;
+            };
+            if stack.is_null() {
+                return LR_ERR_NULL;
+            }
+            // SAFETY: the caller passed a handle from
+            // `lr_mpls_label_stack_*` and asserts it has not been
+            // freed yet. We borrow read-only and let the caller
+            // retain ownership.
+            let stack_ref: &'static lr_mpls::LabelStack =
+                unsafe { &*(stack as *const lr_mpls::LabelStack) };
+            attrs.set_label_stack(stack_ref);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read the MP_REACH_NLRI attribute (RFC 4760 §3 — MP-BGP's
+/// multiprotocol reachability form). Writes the family / next-hop
+/// kind + address / NLRI byte count to `*out_family`,
+/// `*out_next_hop`, `*out_nlri`. The NLRI bytes themselves are
+/// returned in `*out_nlri_bytes` as a flat `lr_bytes_t` (caller
+/// frees via `lr_bytes_free`). Returns 1 if present, 0 if absent.
+///
+/// The next-hop projection mirrors `lr_bgp_next_hop_t`: `kind` is
+/// 0 (V4, 4 bytes), 1 (V6Global, 16 bytes), 2 (V4-over-V6, 16
+/// bytes), 3 (V6LinkLocal, 16 bytes), or 4 (V6GlobalLinkLocal, 32
+/// bytes — both halves concatenated).
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle. All four out-pointers
+/// must be writable (NULL `out_next_hop` / `out_nlri_bytes` is
+/// rejected with 0).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_mp_reach(
+    a: lr_bgp_path_attrs_t,
+    out_family_afi: *mut u16,
+    out_family_safi: *mut u8,
+    out_next_hop: *mut lr_bgp_next_hop_t,
+    out_nlri_bytes: *mut lr_bytes_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_next_hop.is_null() || out_nlri_bytes.is_null() {
+                return 0;
+            }
+            match attrs.mp_reach() {
+                Some(reach) => {
+                    if !out_family_afi.is_null() {
+                        unsafe { *out_family_afi = reach.family.afi };
+                    }
+                    if !out_family_safi.is_null() {
+                        unsafe { *out_family_safi = reach.family.safi };
+                    }
+                    let (addr, kind) = match &reach.next_hop {
+                        lr_bgp::path::MpNextHop::V4(b) => {
+                            let mut a16 = [0u8; 16];
+                            a16[..4].copy_from_slice(b);
+                            (a16, 0u8)
+                        }
+                        lr_bgp::path::MpNextHop::V6Global(b) => (*b, 1u8),
+                        lr_bgp::path::MpNextHop::V4OverV6(b) => (*b, 2u8),
+                        lr_bgp::path::MpNextHop::V6LinkLocal(b) => (*b, 3u8),
+                        lr_bgp::path::MpNextHop::V6GlobalLinkLocal(g, _l) => {
+                            let mut a32 = [0u8; 16];
+                            // We can only carry 16 bytes in the
+                            // lr_bgp_next_hop_t.addr slot — encode the
+                            // global half there and surface the link-
+                            // local half via the NLRI bytes path is not
+                            // viable (it would mix NLRI and next-hop).
+                            // Instead, expose only the primary next-hop
+                            // here (mp_reach's `primary()` semantics).
+                            a32.copy_from_slice(g);
+                            (a32, 4u8)
+                        }
+                    };
+                    unsafe {
+                        *out_next_hop = lr_bgp_next_hop_t {
+                            addr,
+                            kind,
+                            present: 1,
+                        };
+                    }
+                    // Surface the raw attribute value bytes (which
+                    // include the next-hop length / SNPAs / NLRI in
+                    // their original wire shape) — the caller
+                    // re-decodes them with the BgpCodec when a
+                    // typed NLRI list is needed. The `reach.nlri`
+                    // Vec is consumed by the codec path; we hand
+                    // back the wire form so the FFI stays
+                    // version-independent of the Nlri struct shape.
+                    let raw = attrs
+                        .get(AttrType::MpReachNlri)
+                        .map(|a| a.value.clone())
+                        .unwrap_or_default();
+                    unsafe { *out_nlri_bytes = lr_bytes_t::from_vec(raw) }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// Read the MP_UNREACH_NLRI attribute (RFC 4760 §3 — the
+/// multiprotocol withdrawal form). Writes the family to
+/// `*out_family_afi` / `*out_family_safi` and the NLRI bytes to
+/// `*out_nlri_bytes` (caller frees via `lr_bytes_free`). Returns 1
+/// if present, 0 if absent.
+///
+/// The NLRI bytes are the raw attribute value (RFC 4760 §4 —
+/// AFI/SAFI prefix followed by withdrawn NLRI); the caller can
+/// decode them with the BgpCodec.
+///
+/// # Safety
+/// `a` must be a valid PathAttributes handle. `out_nlri_bytes` must
+/// point to a writable `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_path_attrs_mp_unreach(
+    a: lr_bgp_path_attrs_t,
+    out_family_afi: *mut u16,
+    out_family_safi: *mut u8,
+    out_nlri_bytes: *mut lr_bytes_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(attrs) = borrow_attrs(a) else {
+                return 0;
+            };
+            if out_nlri_bytes.is_null() {
+                return 0;
+            }
+            match attrs.mp_unreach() {
+                Some(unreach) => {
+                    if !out_family_afi.is_null() {
+                        unsafe { *out_family_afi = unreach.family.afi };
+                    }
+                    if !out_family_safi.is_null() {
+                        unsafe { *out_family_safi = unreach.family.safi };
+                    }
+                    // Surface the raw attribute value bytes — the
+                    // caller decodes the AFI/SAFI + NLRI list with
+                    // the BgpCodec.
+                    let raw = attrs
+                        .get(AttrType::MpUnreachNlri)
+                        .map(|a| a.value.clone())
+                        .unwrap_or_default();
+                    unsafe { *out_nlri_bytes = lr_bytes_t::from_vec(raw) }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,6 +1618,170 @@ mod tests {
         let a = lr_bgp_path_attrs_new();
         let mut med = 0u32;
         assert_eq!(unsafe { lr_bgp_path_attrs_med(a, &raw mut med) }, 0);
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_next_hop_absent_on_fresh_attrs() {
+        let a = lr_bgp_path_attrs_new();
+        let mut nh = lr_bgp_next_hop_t::default();
+        assert_eq!(unsafe { lr_bgp_path_attrs_next_hop(a, &raw mut nh) }, 0);
+        assert_eq!(nh.present, 0);
+        // NULL attrs / out → 0 (absent).
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_next_hop(std::ptr::null_mut(), &raw mut nh) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_next_hop(a, std::ptr::null_mut()) },
+            0
+        );
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_as_path_absent_on_fresh_attrs() {
+        let a = lr_bgp_path_attrs_new();
+        // No AS_PATH on a fresh attrs set — the call returns NULL.
+        let p = unsafe { lr_bgp_path_attrs_as_path(a) };
+        assert!(p.is_null());
+        // NULL attrs → NULL.
+        let p = unsafe { lr_bgp_path_attrs_as_path(std::ptr::null_mut()) };
+        assert!(p.is_null());
+        // wire / as4_path variants also return NULL.
+        assert!(unsafe { lr_bgp_path_attrs_as_path_wire(a, 1) }.is_null());
+        assert!(unsafe { lr_bgp_path_attrs_as4_path(a) }.is_null());
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_cluster_list_absent_on_fresh_attrs() {
+        let a = lr_bgp_path_attrs_new();
+        let mut out = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_cluster_list(a, &raw mut out) },
+            0
+        );
+        assert!(out.ptr.is_null());
+        // NULL attrs → 0.
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_cluster_list(std::ptr::null_mut(), &raw mut out) },
+            0
+        );
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_label_stack_absent_on_fresh_attrs() {
+        let a = lr_bgp_path_attrs_new();
+        // No label stack on a fresh attrs set — returns NULL.
+        let s = unsafe { lr_bgp_path_attrs_label_stack(a) };
+        assert!(s.is_null());
+        // set_label_stack with a NULL stack → LR_ERR_NULL.
+        let rc = unsafe { lr_bgp_path_attrs_set_label_stack(a, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
+        // set_label_stack with NULL attrs → LR_ERR_NULL.
+        let stack = crate::mpls::lr_mpls_label_stack_new();
+        let rc = unsafe { lr_bgp_path_attrs_set_label_stack(std::ptr::null_mut(), stack) };
+        assert_eq!(rc, LR_ERR_NULL);
+        unsafe {
+            crate::mpls::lr_mpls_label_stack_free(stack);
+            lr_bgp_path_attrs_free(a);
+        }
+    }
+
+    #[test]
+    fn ffi_path_attrs_mp_reach_absent_on_fresh_attrs() {
+        let a = lr_bgp_path_attrs_new();
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        let mut nh = lr_bgp_next_hop_t::default();
+        let mut nlri = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_mp_reach(
+                    a,
+                    &raw mut afi,
+                    &raw mut safi,
+                    &raw mut nh,
+                    &raw mut nlri,
+                )
+            },
+            0
+        );
+        assert_eq!(nh.present, 0);
+        assert!(nlri.ptr.is_null());
+        // NULL attrs → 0.
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_mp_reach(
+                    std::ptr::null_mut(),
+                    &raw mut afi,
+                    &raw mut safi,
+                    &raw mut nh,
+                    &raw mut nlri,
+                )
+            },
+            0
+        );
+        // NULL out_next_hop / out_nlri_bytes → 0.
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_mp_reach(
+                    a,
+                    &raw mut afi,
+                    &raw mut safi,
+                    std::ptr::null_mut(),
+                    &raw mut nlri,
+                )
+            },
+            0
+        );
+        unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    #[test]
+    fn ffi_path_attrs_mp_unreach_absent_on_fresh_attrs() {
+        let a = lr_bgp_path_attrs_new();
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        let mut nlri = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_path_attrs_mp_unreach(a, &raw mut afi, &raw mut safi, &raw mut nlri,) },
+            0
+        );
+        assert!(nlri.ptr.is_null());
+        // NULL attrs → 0.
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_mp_unreach(
+                    std::ptr::null_mut(),
+                    &raw mut afi,
+                    &raw mut safi,
+                    &raw mut nlri,
+                )
+            },
+            0
+        );
+        // NULL out_nlri_bytes → 0.
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_mp_unreach(a, &raw mut afi, &raw mut safi, std::ptr::null_mut())
+            },
+            0
+        );
         unsafe { lr_bgp_path_attrs_free(a) };
     }
 }

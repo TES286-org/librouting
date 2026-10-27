@@ -95,7 +95,7 @@ unsafe fn borrow_label(l: lr_mpls_label_t) -> Option<&'static Label> {
 }
 
 /// Box a `LabelStack` into an opaque handle.
-fn box_stack(s: LabelStack) -> lr_mpls_label_stack_t {
+pub(crate) fn box_stack(s: LabelStack) -> lr_mpls_label_stack_t {
     Box::into_raw(Box::new(s)) as lr_mpls_label_stack_t
 }
 

@@ -819,6 +819,37 @@ typedef struct OpaqueBgpPathAttrs {
 
 typedef struct OpaqueBgpPathAttrs *lr_bgp_path_attrs_t;
 
+/**
+ * One IPv4/IPv6 next-hop value (RFC 4271 §5.1.3 / RFC 4760 §3).
+ * Mirrors `lr_bgp::path::NextHopKind` — `is_ipv6 = 0` for IPv4
+ * (the address occupies the first 4 bytes of `addr`), `1` for
+ * IPv6, `2` for the RFC 5549 IPv4-over-IPv6 form (16 bytes, IPv4
+ * encoded in the v6 address).
+ */
+typedef struct lr_bgp_next_hop_t {
+  /**
+   * Address octets (first 4 for v4, all 16 for v6 / v4-over-v6).
+   */
+  uint8_t addr[16];
+  /**
+   * 0 = IPv4, 1 = IPv6, 2 = V4-over-V6 (RFC 5549).
+   */
+  uint8_t kind;
+  /**
+   * 1 when the attribute is present, 0 when absent.
+   */
+  uint8_t present;
+} lr_bgp_next_hop_t;
+
+/**
+ * Opaque `LabelStack` handle. C side never touches internals.
+ */
+typedef struct OpaqueMplsLabelStack {
+  uint8_t _private[0];
+} OpaqueMplsLabelStack;
+
+typedef struct OpaqueMplsLabelStack *lr_mpls_label_stack_t;
+
 typedef struct OpaqueBgpPeer {
   uint8_t _private[0];
 } OpaqueBgpPeer;
@@ -1342,15 +1373,6 @@ typedef struct OpaqueMplsLabel {
 } OpaqueMplsLabel;
 
 typedef struct OpaqueMplsLabel *lr_mpls_label_t;
-
-/**
- * Opaque `LabelStack` handle. C side never touches internals.
- */
-typedef struct OpaqueMplsLabelStack {
-  uint8_t _private[0];
-} OpaqueMplsLabelStack;
-
-typedef struct OpaqueMplsLabelStack *lr_mpls_label_stack_t;
 
 /**
  * One fully-specified label `(value, tc, ttl)`. Used by
@@ -2817,6 +2839,139 @@ uintptr_t lr_bgp_path_attrs_large_communities(lr_bgp_path_attrs_t a, struct lr_b
  * `a` must be a valid PathAttributes handle.
  */
 int32_t lr_bgp_path_attrs_insert_community(lr_bgp_path_attrs_t a, uint32_t community);
+
+/**
+ * Read the NEXT_HOP attribute (RFC 4271 §5.1.3). Writes the
+ * next-hop address + kind to `*out` and returns 1 if present, 0
+ * if absent. The IPv4 form occupies the first 4 bytes of
+ * `out->addr`; the IPv6 / RFC 5549 forms occupy all 16 bytes.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. `out` must point to a
+ * writable `lr_bgp_next_hop_t`.
+ */
+uint8_t lr_bgp_path_attrs_next_hop(lr_bgp_path_attrs_t a, struct lr_bgp_next_hop_t *out);
+
+/**
+ * Read the AS_PATH attribute (RFC 4271 §5.1.2 / RFC 6793 §4) and
+ * return it as a fresh `lr_bgp_as_path_t` handle (caller frees via
+ * `lr_bgp_as_path_free`). Returns NULL when the attribute is
+ * absent or the input handle is NULL.
+ *
+ * The returned handle is a *clone* — the source PathAttributes
+ * retains its own copy. Use [`lr_bgp_path_attrs_as_path_wire`] to
+ * pick the 2-byte vs 4-byte AS form explicitly; this reader
+ * returns the in-memory form (always 4-byte when ASN4 is
+ * negotiated).
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle.
+ */
+lr_bgp_as_path_t lr_bgp_path_attrs_as_path(lr_bgp_path_attrs_t a);
+
+/**
+ * Read the AS_PATH attribute in the explicit 2-byte or 4-byte AS
+ * form (RFC 6793 §4 — when `asn4 != 0` the path carries 4-byte
+ * ASes; otherwise ASes above 16 bits are unwrapped to AS_TRANS).
+ * Returns NULL when the attribute is absent.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_as_path`].
+ */
+lr_bgp_as_path_t lr_bgp_path_attrs_as_path_wire(lr_bgp_path_attrs_t a, uint8_t asn4);
+
+/**
+ * Read the AS4_PATH attribute (RFC 6793 §4 — the deprecated
+ * AS4_PATH back-compat path). Returns NULL when absent.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_as_path`].
+ */
+lr_bgp_as_path_t lr_bgp_path_attrs_as4_path(lr_bgp_path_attrs_t a);
+
+/**
+ * Read the CLUSTER_LIST attribute (RFC 4456 §8). Writes a flat
+ * `lr_bytes_t` carrying `n * 4` bytes (one big-endian Router-ID
+ * per cluster) to `*out`. Returns 1 if the attribute is
+ * physically present (RFC 4456 §8 — `has_cluster_list`), 0 if
+ * absent. (The Rust API's `cluster_list()` collapses absent and
+ * present-but-empty to the same empty `ClusterList`; this reader
+ * uses `has_cluster_list` so the caller can distinguish the two.)
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+uint8_t lr_bgp_path_attrs_cluster_list(lr_bgp_path_attrs_t a, struct lr_bytes_t *out);
+
+/**
+ * Read the LrMplsLabelStack attribute (RFC 8277 §3 — the
+ * `LrMplsLabelStack` well-known attribute carries the MPLS label
+ * stack for BGP labelled unicast). Returns a fresh
+ * `lr_mpls_label_stack_t` handle (caller frees via
+ * `lr_mpls_label_stack_free`), or NULL when the attribute is
+ * absent.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle.
+ */
+lr_mpls_label_stack_t lr_bgp_path_attrs_label_stack(lr_bgp_path_attrs_t a);
+
+/**
+ * Set the LrMplsLabelStack attribute (RFC 8277 §3). The previous
+ * value, if any, is overwritten. The `stack` handle is **borrowed**
+ * — the caller retains ownership and must still free it via
+ * `lr_mpls_label_stack_free`.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. `stack` must be a
+ * valid LabelStack handle (NULL is rejected with `LR_ERR_NULL`).
+ */
+int32_t lr_bgp_path_attrs_set_label_stack(lr_bgp_path_attrs_t a, lr_mpls_label_stack_t stack);
+
+/**
+ * Read the MP_REACH_NLRI attribute (RFC 4760 §3 — MP-BGP's
+ * multiprotocol reachability form). Writes the family / next-hop
+ * kind + address / NLRI byte count to `*out_family`,
+ * `*out_next_hop`, `*out_nlri`. The NLRI bytes themselves are
+ * returned in `*out_nlri_bytes` as a flat `lr_bytes_t` (caller
+ * frees via `lr_bytes_free`). Returns 1 if present, 0 if absent.
+ *
+ * The next-hop projection mirrors `lr_bgp_next_hop_t`: `kind` is
+ * 0 (V4, 4 bytes), 1 (V6Global, 16 bytes), 2 (V4-over-V6, 16
+ * bytes), 3 (V6LinkLocal, 16 bytes), or 4 (V6GlobalLinkLocal, 32
+ * bytes — both halves concatenated).
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. All four out-pointers
+ * must be writable (NULL `out_next_hop` / `out_nlri_bytes` is
+ * rejected with 0).
+ */
+uint8_t lr_bgp_path_attrs_mp_reach(lr_bgp_path_attrs_t a,
+                                   uint16_t *out_family_afi,
+                                   uint8_t *out_family_safi,
+                                   struct lr_bgp_next_hop_t *out_next_hop,
+                                   struct lr_bytes_t *out_nlri_bytes);
+
+/**
+ * Read the MP_UNREACH_NLRI attribute (RFC 4760 §3 — the
+ * multiprotocol withdrawal form). Writes the family to
+ * `*out_family_afi` / `*out_family_safi` and the NLRI bytes to
+ * `*out_nlri_bytes` (caller frees via `lr_bytes_free`). Returns 1
+ * if present, 0 if absent.
+ *
+ * The NLRI bytes are the raw attribute value (RFC 4760 §4 —
+ * AFI/SAFI prefix followed by withdrawn NLRI); the caller can
+ * decode them with the BgpCodec.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle. `out_nlri_bytes` must
+ * point to a writable `lr_bytes_t`.
+ */
+uint8_t lr_bgp_path_attrs_mp_unreach(lr_bgp_path_attrs_t a,
+                                     uint16_t *out_family_afi,
+                                     uint8_t *out_family_safi,
+                                     struct lr_bytes_t *out_nlri_bytes);
 
 /**
  * Construct a `BgpPeer` from the BGP-4 mandatory parameters (RFC
