@@ -44,6 +44,7 @@ pub mod capabilities;
 pub mod codec;
 pub mod core;
 pub mod core_extras;
+pub mod damping;
 pub mod error;
 pub mod events;
 pub mod filters;

@@ -1671,6 +1671,61 @@ typedef struct lr_timer_spec_t {
 } lr_timer_spec_t;
 
 /**
+ * Opaque standalone `DampingTable` handle. C side never touches internals.
+ */
+typedef struct OpaqueDampingTable {
+  uint8_t _private[0];
+} OpaqueDampingTable;
+
+typedef struct OpaqueDampingTable *lr_damping_table_t;
+
+/**
+ * RFC 2439 §4.7 damping tunables. Mirrors
+ * `lr_damping::DampingConfig` field-for-field.
+ */
+typedef struct lr_damping_config_t {
+  uint32_t additive_incr;
+  uint32_t suppress_threshold;
+  uint32_t reuse_threshold;
+  uint32_t upper_limit;
+  uint64_t decay_interval_s;
+  double decay_factor_active;
+  double decay_factor_withdrawn;
+} lr_damping_config_t;
+
+/**
+ * One projected damping entry — mirrors [`DampingEntry`] field-for-field
+ * but flattens the prefix into the same `lr_prefix_t` shape the rest of
+ * the FFI uses.
+ */
+typedef struct lr_damping_entry_t {
+  /**
+   * Network prefix (IPv4 in the low 4 bytes when `is_ipv6 == 0`).
+   */
+  struct lr_prefix_t prefix;
+  /**
+   * Figure of merit (FoM) — float in `[0, upper_limit]`.
+   */
+  double figure_of_merit;
+  /**
+   * 1 when the entry is currently suppressed, 0 otherwise.
+   */
+  uint8_t suppressed;
+  /**
+   * Wall-clock seconds of the last decay tick.
+   */
+  uint64_t last_decay_s;
+  /**
+   * Wall-clock seconds of the last flap.
+   */
+  uint64_t last_flap_s;
+  /**
+   * Number of historical flaps (does not affect suppression).
+   */
+  uint32_t flap_count;
+} lr_damping_entry_t;
+
+/**
  * Opaque router handle. C side never touches internals.
  */
 typedef struct OpaqueRouter {
@@ -2444,20 +2499,6 @@ typedef struct OpaqueDamping {
 } OpaqueDamping;
 
 typedef struct OpaqueDamping *lr_damping_t;
-
-/**
- * RFC 2439 §4.7 damping tunables. Mirrors
- * `lr_damping::DampingConfig` field-for-field.
- */
-typedef struct lr_damping_config_t {
-  uint32_t additive_incr;
-  uint32_t suppress_threshold;
-  uint32_t reuse_threshold;
-  uint32_t upper_limit;
-  uint64_t decay_interval_s;
-  double decay_factor_active;
-  double decay_factor_withdrawn;
-} lr_damping_config_t;
 
 /**
  * Opaque prefix-list handle (`lr_policy::PrefixList`).
@@ -6231,6 +6272,111 @@ uint8_t lr_ospf_lsa_checksum_ok(const uint8_t *lsa, uintptr_t len);
  * See [`lr_crc16_arc`].
  */
 uint32_t lr_fletcher32(const uint8_t *bytes, uintptr_t len);
+
+/**
+ * Construct a `DampingTable` from a config. Pass `cfg = NULL` to use
+ * the RFC 2439 defaults (see [`lr_damping_default_config`]).
+ */
+lr_damping_table_t lr_damping_table_new(const struct lr_damping_config_t *cfg);
+
+/**
+ * Returns the default RFC 2439 §4.7 damping config (Cisco-style).
+ * Useful as a starting point for caller-side tuning before passing the
+ * struct to [`lr_damping_table_new`].
+ */
+int32_t lr_damping_default_config(struct lr_damping_config_t *out);
+
+/**
+ * Record a withdrawal. Returns 1 if the route should be suppressed
+ * (dropped from the Loc-RIB) as a result, 0 otherwise. Returns
+ * `LR_ERR_NULL` (-1) on a null table or a null prefix.
+ *
+ * # Safety
+ * `t` must be a valid handle. `prefix` must point to a readable
+ * `lr_prefix_t`.
+ */
+int32_t lr_damping_table_on_withdraw(lr_damping_table_t t,
+                                     const struct lr_prefix_t *prefix,
+                                     uint64_t now_s);
+
+/**
+ * Record a re-announcement. Returns 1 if the route remains suppressed,
+ * 0 otherwise.
+ *
+ * # Safety
+ * See [`lr_damping_table_on_withdraw`].
+ */
+int32_t lr_damping_table_on_announce(lr_damping_table_t t,
+                                     const struct lr_prefix_t *prefix,
+                                     uint64_t now_s);
+
+/**
+ * True (1) when `prefix` is currently suppressed, false (0) otherwise
+ * (also 0 when the prefix is not in the table).
+ *
+ * # Safety
+ * `t` must be a valid handle. `prefix` must point to a readable
+ * `lr_prefix_t`.
+ */
+int32_t lr_damping_table_is_suppressed(lr_damping_table_t t, const struct lr_prefix_t *prefix);
+
+/**
+ * Decay all entries up to `now_s`. Routes whose FoM drops below the
+ * reuse threshold become un-suppressed. Writes the list of newly
+ * un-suppressed prefixes into `out_reactivated` (caller-allocated, at
+ * most `cap` entries) and returns the number written. A return value
+ * greater than `cap` means the buffer was too small — call again with
+ * a larger buffer (the table is unchanged; the function does not
+ * double-decay).
+ *
+ * # Safety
+ * `t` must be a valid handle. `out_reactivated` (when non-null) must
+ * point to `cap` writable `lr_prefix_t` values.
+ */
+int64_t lr_damping_table_decay_all(lr_damping_table_t t,
+                                   uint64_t now_s,
+                                   struct lr_prefix_t *out_reactivated,
+                                   uintptr_t cap);
+
+/**
+ * Forget a prefix entirely (e.g. after operator's manual reset).
+ * Returns 1 when the prefix was present (and is now removed), 0 when
+ * it was not in the table.
+ *
+ * # Safety
+ * See [`lr_damping_table_on_withdraw`].
+ */
+int32_t lr_damping_table_forget(lr_damping_table_t t, const struct lr_prefix_t *prefix);
+
+/**
+ * Number of entries currently in the table. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `t` must be a valid handle.
+ */
+uintptr_t lr_damping_table_len(lr_damping_table_t t);
+
+/**
+ * Read one entry by index. Returns 0 on success and writes a copy of
+ * the entry's `(prefix, figure_of_merit, suppressed, last_decay_s,
+ * last_flap_s, flap_count)` to `*out`. Returns `LR_ERR_NULL` (-1) on
+ * a NULL table or out pointer, `LR_ERR_INVALID_HANDLE` (-2) when the
+ * index is out of range.
+ *
+ * # Safety
+ * `t` must be a valid handle. `out` must point to a writable
+ * `lr_damping_entry_t`.
+ */
+int32_t lr_damping_table_at(lr_damping_table_t t, uintptr_t index, struct lr_damping_entry_t *out);
+
+/**
+ * Drop a boxed `DampingTable`. Safe to call with NULL.
+ *
+ * # Safety
+ * `t` must have been produced by [`lr_damping_table_new`] and must not
+ * be used after this call. Double-free is undefined behaviour.
+ */
+void lr_damping_table_free(lr_damping_table_t t);
 
 /**
  * Get the last error message. Returned string is NUL-terminated UTF-8.

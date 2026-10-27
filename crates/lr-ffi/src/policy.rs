@@ -106,7 +106,7 @@ impl LrMetricPolicy {
 /// sixteen bytes with `is_ipv6 = 1` — the same convention as
 /// `lr_roa_entry_t`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct lr_prefix_t {
     pub addr: [u8; 16],
     pub is_ipv6: u8,
@@ -114,7 +114,10 @@ pub struct lr_prefix_t {
 }
 
 impl lr_prefix_t {
-    pub(crate) fn to_prefix(self) -> Option<Prefix> {
+    /// Convert the C repr to the Rust [`Prefix`]. Public so other FFI
+    /// modules can reuse the same translation; returns `None` when the
+    /// prefix length is out of range for the address family.
+    pub fn to_prefix(self) -> Option<Prefix> {
         if self.is_ipv6 == 0 {
             if self.prefix_len > 32 {
                 return None;
@@ -147,7 +150,10 @@ pub struct lr_damping_config_t {
 }
 
 impl lr_damping_config_t {
-    fn to_config(self) -> lr_damping::DampingConfig {
+    /// Convert the C repr to the Rust [`DampingConfig`]. Public so
+    /// other FFI modules (notably [`crate::damping`]) can reuse the
+    /// same translation.
+    pub fn to_config(self) -> lr_damping::DampingConfig {
         lr_damping::DampingConfig {
             additive_incr: self.additive_incr,
             suppress_threshold: self.suppress_threshold,
