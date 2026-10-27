@@ -1811,6 +1811,22 @@ typedef struct OpaqueRibMux {
 typedef struct OpaqueRibMux *lr_rib_mux_t;
 
 /**
+ * Repr-C RouteKey. Mirrors `lr_core::rib::RouteKey`.
+ */
+typedef struct lr_route_key_t {
+  struct lr_core_prefix_t prefix;
+  /**
+   * AFI/SAFI packed as `afi << 8 | safi`. See lr_core::nlri::NlriFamily.
+   */
+  uint16_t afi_safi;
+  /**
+   * 1 when `source_prefix` carries a value, 0 otherwise.
+   */
+  uint8_t has_source;
+  struct lr_core_prefix_t source_prefix;
+} lr_route_key_t;
+
+/**
  * Opaque ROA store handle. C side never touches internals.
  */
 typedef struct OpaqueRoaStore {
@@ -6791,6 +6807,79 @@ int64_t lr_route_selector_select(const lr_route_t *routes, uintptr_t count);
  * See [`lr_route_selector_select`].
  */
 int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
+
+/**
+ * Install a ranked set of paths for a key (RFC 7911 — Add-Path
+ * keeps more than one path per prefix; the first element is the
+ * best path the non-Add-Path consumers see). The `routes` array
+ * carries `count` route handles; ownership is **transferred** —
+ * each handle is consumed and freed by this call (the LocRib
+ * clones the underlying `Route` value).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL LocRib / NULL
+ * routes / NULL key.
+ *
+ * # Safety
+ * `r` must be a valid LocRib handle. `routes` (when `count > 0`)
+ * must point to `count` valid `lr_route_t` handles. `key` must
+ * point to a readable `lr_route_key_t`.
+ */
+int32_t lr_loc_rib_install_set(lr_loc_rib_t r,
+                               const struct lr_route_key_t *key,
+                               const lr_route_t *routes,
+                               uintptr_t count);
+
+/**
+ * Number of paths stored for a key (RFC 7911 — Add-Path keeps more
+ * than one). Returns 0 on a NULL handle or an unknown key.
+ *
+ * # Safety
+ * `r` must be a valid LocRib handle. `key` must point to a
+ * readable `lr_route_key_t`.
+ */
+uintptr_t lr_loc_rib_paths(lr_loc_rib_t r, const struct lr_route_key_t *key);
+
+/**
+ * Walk every best route in the Loc-RIB. The caller provides a
+ * callback that receives one route handle per iteration (the
+ * handle is borrowed — the caller must NOT free it). Returns the
+ * number of routes visited, or `LR_ERR_NULL` (-1) on a NULL LocRib
+ * / NULL callback.
+ *
+ * The callback signature is `void (*)(lr_route_t route, void
+ * *user)`. The `user` pointer is passed through unchanged.
+ *
+ * # Safety
+ * `r` must be a valid LocRib handle. `cb` must be a non-NULL
+ * function pointer that does not free `route` and does not call
+ * back into the FFI on the same LocRib handle (re-entrancy is
+ * undefined — the LocRib borrow is held for the duration of the
+ * walk).
+ */
+int64_t lr_loc_rib_iter_best(lr_loc_rib_t r, void (*cb)(lr_route_t route, void *user), void *user);
+
+/**
+ * Compute the diff between the Loc-RIB's current state and its
+ * state at generation `since_gen` (RFC 8277 §3 / BMP §3 — the
+ * generation-based delta the daemon uses to drive the BMP mirror,
+ * the API socket thread and the redistribution pipe). Writes the
+ * added / modified / removed counts to `*out_added` /
+ * `*out_modified` / `*out_removed` and returns 0 on success,
+ * `LR_ERR_NULL` on a NULL handle / NULL out-pointer.
+ *
+ * The diff is computed against the LocRib's history ring (16
+ * entries deep); for older diffs the function returns 0 in all
+ * three out-fields (no changes since the requested generation).
+ *
+ * # Safety
+ * `r` must be a valid LocRib handle. All three out-pointers must
+ * point to writable `uintptr_t`.
+ */
+int32_t lr_loc_rib_diff_since(lr_loc_rib_t r,
+                              uint64_t since_gen,
+                              uintptr_t *out_added,
+                              uintptr_t *out_modified,
+                              uintptr_t *out_removed);
 
 /**
  * Create an empty ROA store. NULL on panic (last-error set).

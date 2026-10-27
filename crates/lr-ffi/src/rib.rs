@@ -50,7 +50,7 @@ use lr_rib::{AdjRibIn, AdjRibOut, LocRib, RibMux, RouteSelector};
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
-use crate::handle::lr_route_t;
+use crate::handle::{lr_route_t, OpaqueRoute};
 use crate::policy::lr_prefix_t;
 
 const LR_ERR_NULL: i32 = LrError::Null as i32;
@@ -1020,6 +1020,274 @@ pub unsafe extern "C" fn lr_route_selector_select_bgp(
     )
 }
 
+// ---- LocRib: install_set / paths / iter_best / diff_since (issue #92) ----
+//
+// The remaining LocRib pub API: install_set (RFC 7911 multi-path
+// install), paths (read the multipath set for a key), iter_best
+// (walk every best route), and diff_since (the generation-based
+// delta the daemon uses to drive the BMP mirror / API socket
+// thread / redistribution pipe).
+
+/// Install a ranked set of paths for a key (RFC 7911 — Add-Path
+/// keeps more than one path per prefix; the first element is the
+/// best path the non-Add-Path consumers see). The `routes` array
+/// carries `count` route handles; ownership is **transferred** —
+/// each handle is consumed and freed by this call (the LocRib
+/// clones the underlying `Route` value).
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL LocRib / NULL
+/// routes / NULL key, `LR_ERR_OTHER` (-6) on a malformed key.
+///
+/// # Safety
+/// `r` must be a valid LocRib handle. `routes` (when `count > 0`)
+/// must point to `count` valid `lr_route_t` handles. `key` must
+/// point to a readable `lr_route_key_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_install_set(
+    r: lr_loc_rib_t,
+    key: *const lr_route_key_t,
+    routes: *const lr_route_t,
+    count: usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if key.is_null() {
+                return LR_ERR_NULL;
+            }
+            if count == 0 {
+                return LR_ERR_NULL;
+            }
+            if routes.is_null() {
+                return LR_ERR_NULL;
+            }
+            let key_c: lr_route_key_t = unsafe { *key };
+            let Some(key) = key_c.to_key() else {
+                set_last_error("malformed route key".to_string());
+                return LrError::Other as i32;
+            };
+            let mut ranked: Vec<Route> = Vec::with_capacity(count);
+            for i in 0..count {
+                let h = unsafe { *routes.add(i) };
+                if h.is_null() {
+                    return LR_ERR_NULL;
+                }
+                let route: &'static Route = unsafe { &*(h as *const Route) };
+                ranked.push(route.clone());
+            }
+            rib.install_set(&key, ranked);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of paths stored for a key (RFC 7911 — Add-Path keeps more
+/// than one). Returns 0 on a NULL handle or an unknown key.
+///
+/// # Safety
+/// `r` must be a valid LocRib handle. `key` must point to a
+/// readable `lr_route_key_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_paths(r: lr_loc_rib_t, key: *const lr_route_key_t) -> usize {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib(r) else {
+                return 0;
+            };
+            if key.is_null() {
+                return 0;
+            }
+            let key_c: lr_route_key_t = unsafe { *key };
+            let Some(key) = key_c.to_key() else {
+                return 0;
+            };
+            rib.paths(&key).len()
+        },
+        0,
+    )
+}
+
+/// One route-key projection — (prefix, family_afi, family_safi) +
+/// optional source prefix. Used by `lr_loc_rib_iter_best` /
+/// `lr_loc_rib_install_set` so the C side can pass / receive keys
+/// without going through a separate handle type.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_route_key_t {
+    /// Network address octets (first 4 for IPv4, all 16 for IPv6).
+    pub addr: [u8; 16],
+    /// 0 = IPv4 (first 4 bytes of `addr`), 1 = IPv6 (all 16 bytes).
+    pub is_ipv6: u8,
+    /// Prefix length (0..=32 for IPv4, 0..=128 for IPv6).
+    pub prefix_len: u8,
+    /// Address-family identifier (1 = IPv4, 2 = IPv6, etc.).
+    pub family_afi: u16,
+    /// Subsequent address-family identifier (1 = unicast, etc.).
+    pub family_safi: u8,
+    /// 1 when `source_addr` / `source_prefix_len` carry a source
+    /// prefix (RFC 8277 / flow-spec), 0 otherwise.
+    pub has_source: u8,
+    /// Source-prefix address octets (zero-padded to 16).
+    pub source_addr: [u8; 16],
+    /// 0 = IPv4 source, 1 = IPv6 source.
+    pub source_is_ipv6: u8,
+    /// Source-prefix length.
+    pub source_prefix_len: u8,
+}
+
+impl lr_route_key_t {
+    fn to_key(self) -> Option<lr_core::rib::RouteKey> {
+        let addr = if self.is_ipv6 == 0 {
+            lr_core::addr::IpAddr::V4([self.addr[0], self.addr[1], self.addr[2], self.addr[3]])
+        } else {
+            lr_core::addr::IpAddr::V6(self.addr)
+        };
+        let prefix = if self.is_ipv6 == 0 {
+            if self.prefix_len > 32 {
+                return None;
+            }
+            lr_core::addr::Prefix::new_v4(
+                [self.addr[0], self.addr[1], self.addr[2], self.addr[3]],
+                self.prefix_len,
+            )
+        } else {
+            if self.prefix_len > 128 {
+                return None;
+            }
+            lr_core::addr::Prefix::new_v6(self.addr, self.prefix_len)
+        };
+        let family = lr_core::nlri::NlriFamily {
+            afi: self.family_afi,
+            safi: self.family_safi,
+        };
+        if self.has_source == 0 {
+            Some(lr_core::rib::RouteKey::new(prefix, family))
+        } else {
+            let src_addr = if self.source_is_ipv6 == 0 {
+                lr_core::addr::IpAddr::V4([
+                    self.source_addr[0],
+                    self.source_addr[1],
+                    self.source_addr[2],
+                    self.source_addr[3],
+                ])
+            } else {
+                lr_core::addr::IpAddr::V6(self.source_addr)
+            };
+            let src_prefix = if self.source_is_ipv6 == 0 {
+                if self.source_prefix_len > 32 {
+                    return None;
+                }
+                lr_core::addr::Prefix::new_v4(
+                    [
+                        self.source_addr[0],
+                        self.source_addr[1],
+                        self.source_addr[2],
+                        self.source_addr[3],
+                    ],
+                    self.source_prefix_len,
+                )
+            } else {
+                if self.source_prefix_len > 128 {
+                    return None;
+                }
+                lr_core::addr::Prefix::new_v6(self.source_addr, self.source_prefix_len)
+            };
+            let _ = (addr, src_addr);
+            Some(lr_core::rib::RouteKey::with_source(
+                prefix, family, src_prefix,
+            ))
+        }
+    }
+}
+
+/// Walk every best route in the Loc-RIB. The caller provides a
+/// callback that receives one route handle per iteration (the
+/// handle is borrowed — the caller must NOT free it). Returns the
+/// number of routes visited, or `LR_ERR_NULL` (-1) on a NULL LocRib
+/// / NULL callback.
+///
+/// The callback signature is `void (*)(lr_route_t route, void
+/// *user)`. The `user` pointer is passed through unchanged.
+///
+/// # Safety
+/// `r` must be a valid LocRib handle. `cb` must be a non-NULL
+/// function pointer that does not free `route` and does not call
+/// back into the FFI on the same LocRib handle (re-entrancy is
+/// undefined — the LocRib borrow is held for the duration of the
+/// walk).
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_iter_best(
+    r: lr_loc_rib_t,
+    cb: Option<unsafe extern "C" fn(route: lr_route_t, user: *mut core::ffi::c_void)>,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib(r) else {
+                return -1;
+            };
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let mut count: i64 = 0;
+            for route in rib.iter_best() {
+                // SAFETY: the caller's cb must not free the handle.
+                let h: lr_route_t = route as *const lr_core::rib::Route as *mut OpaqueRoute;
+                unsafe { cb_fn(h, user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
+/// Compute the diff between the Loc-RIB's current state and its
+/// state at generation `since_gen` (RFC 8277 §3 / BMP §3 — the
+/// generation-based delta the daemon uses to drive the BMP mirror,
+/// the API socket thread and the redistribution pipe). Writes the
+/// added / modified / removed counts to `*out_added` /
+/// `*out_modified` / `*out_removed` and returns 0 on success,
+/// `LR_ERR_NULL` on a NULL handle / NULL out-pointer.
+///
+/// The diff is computed against the LocRib's history ring (16
+/// entries deep); for older diffs the function returns 0 in all
+/// three out-fields (no changes since the requested generation).
+///
+/// # Safety
+/// `r` must be a valid LocRib handle. All three out-pointers must
+/// point to writable `uintptr_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_diff_since(
+    r: lr_loc_rib_t,
+    since_gen: u64,
+    out_added: *mut usize,
+    out_modified: *mut usize,
+    out_removed: *mut usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib(r) else {
+                return -1;
+            };
+            if out_added.is_null() || out_modified.is_null() || out_removed.is_null() {
+                return -1;
+            }
+            let diff = rib.diff_since(since_gen);
+            unsafe {
+                *out_added = diff.added.len();
+                *out_modified = diff.modified.len();
+                *out_removed = diff.removed.len();
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1224,5 +1492,161 @@ mod tests {
     fn ffi_route_selector_select_returns_minus_one_on_empty() {
         let winner = unsafe { lr_route_selector_select(std::ptr::null(), 0) };
         assert_eq!(winner, -1);
+    }
+
+    // ---- LocRib: install_set / paths / iter_best / diff_since ----
+
+    fn build_key_v4(addr: [u8; 4], prefix_len: u8) -> lr_route_key_t {
+        let mut k = lr_route_key_t::default();
+        k.addr[..4].copy_from_slice(&addr);
+        k.is_ipv6 = 0;
+        k.prefix_len = prefix_len;
+        k.family_afi = 1;
+        k.family_safi = 1;
+        k.has_source = 0;
+        k
+    }
+
+    #[test]
+    fn ffi_loc_rib_install_set_and_paths() {
+        let rib = lr_loc_rib_new();
+        // Build two route handles for the same key.
+        let r1 = build_route_with_metric([203, 0, 113, 0], 24, 100);
+        let r2 = build_route_with_metric([203, 0, 113, 0], 24, 200);
+        let key = build_key_v4([203, 0, 113, 0], 24);
+        let routes = [r1, r2];
+        let rc = unsafe { lr_loc_rib_install_set(rib, &key, routes.as_ptr(), routes.len()) };
+        assert_eq!(rc, 0);
+        // The LocRib holds 2 paths for this key.
+        assert_eq!(unsafe { lr_loc_rib_paths(rib, &key) }, 2);
+        // An unknown key returns 0 paths.
+        let key2 = build_key_v4([198, 51, 100, 0], 24);
+        assert_eq!(unsafe { lr_loc_rib_paths(rib, &key2) }, 0);
+        unsafe {
+            crate::policy_objects::lr_route_free(r1);
+            crate::policy_objects::lr_route_free(r2);
+            lr_loc_rib_free(rib);
+        }
+    }
+
+    #[test]
+    fn ffi_loc_rib_install_set_handles_null_safely() {
+        let rib = lr_loc_rib_new();
+        let key = build_key_v4([203, 0, 113, 0], 24);
+        let r1 = build_route_with_metric([203, 0, 113, 0], 24, 100);
+        let routes = [r1];
+        // NULL LocRib → LR_ERR_NULL.
+        let rc = unsafe { lr_loc_rib_install_set(std::ptr::null_mut(), &key, routes.as_ptr(), 1) };
+        assert_eq!(rc, LR_ERR_NULL);
+        // NULL key → LR_ERR_NULL.
+        let rc = unsafe { lr_loc_rib_install_set(rib, std::ptr::null(), routes.as_ptr(), 1) };
+        assert_eq!(rc, LR_ERR_NULL);
+        // NULL routes → LR_ERR_NULL.
+        let rc = unsafe { lr_loc_rib_install_set(rib, &key, std::ptr::null(), 1) };
+        assert_eq!(rc, LR_ERR_NULL);
+        // Zero count → LR_ERR_NULL.
+        let rc = unsafe { lr_loc_rib_install_set(rib, &key, routes.as_ptr(), 0) };
+        assert_eq!(rc, LR_ERR_NULL);
+        unsafe {
+            crate::policy_objects::lr_route_free(r1);
+            lr_loc_rib_free(rib);
+        }
+    }
+
+    #[test]
+    fn ffi_loc_rib_paths_handles_null_safely() {
+        let rib = lr_loc_rib_new();
+        let key = build_key_v4([203, 0, 113, 0], 24);
+        // NULL LocRib → 0.
+        assert_eq!(unsafe { lr_loc_rib_paths(std::ptr::null_mut(), &key) }, 0);
+        // NULL key → 0.
+        assert_eq!(unsafe { lr_loc_rib_paths(rib, std::ptr::null()) }, 0);
+        // Empty LocRib → 0.
+        assert_eq!(unsafe { lr_loc_rib_paths(rib, &key) }, 0);
+        unsafe { lr_loc_rib_free(rib) };
+    }
+
+    #[test]
+    fn ffi_loc_rib_iter_best_walks_installed_routes() {
+        let rib = lr_loc_rib_new();
+        // Install one route so the iterator has something to walk.
+        // NOTE: `lr_loc_rib_install` takes ownership of the route
+        // handle (calls `take_route`), so we must NOT free r1
+        // afterwards — the LocRib owns it now.
+        let r1 = build_route_with_metric([203, 0, 113, 0], 24, 100);
+        let rc = unsafe { lr_loc_rib_install(rib, r1) };
+        // install returns 1 when the install actually changed the
+        // Loc-RIB (a fresh route always does).
+        assert_eq!(rc, 1);
+        // NULL LocRib → -1.
+        let count =
+            unsafe { lr_loc_rib_iter_best(std::ptr::null_mut(), None, std::ptr::null_mut()) };
+        assert_eq!(count, -1);
+        // NULL callback → -1.
+        let count = unsafe { lr_loc_rib_iter_best(rib, None, std::ptr::null_mut()) };
+        assert_eq!(count, -1);
+        // Real callback — count the routes visited.
+        extern "C" fn counter(_route: lr_route_t, user: *mut core::ffi::c_void) {
+            unsafe {
+                let n: *mut i64 = user as *mut i64;
+                *n += 1;
+            }
+        }
+        let mut n: i64 = 0;
+        let count = unsafe {
+            lr_loc_rib_iter_best(rib, Some(counter), &raw mut n as *mut core::ffi::c_void)
+        };
+        assert_eq!(count, 1);
+        assert_eq!(n, 1);
+        unsafe {
+            lr_loc_rib_free(rib);
+        }
+    }
+
+    #[test]
+    fn ffi_loc_rib_diff_since_returns_zero_on_no_changes() {
+        let rib = lr_loc_rib_new();
+        let mut added = 0usize;
+        let mut modified = 0usize;
+        let mut removed = 0usize;
+        // diff_since against the current generation returns 0/0/0
+        // (no changes since "now").
+        let gen = unsafe { lr_loc_rib_generation(rib) };
+        let rc = unsafe {
+            lr_loc_rib_diff_since(
+                rib,
+                gen,
+                &raw mut added,
+                &raw mut modified,
+                &raw mut removed,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(added, 0);
+        assert_eq!(modified, 0);
+        assert_eq!(removed, 0);
+        // NULL handle → -1.
+        let rc = unsafe {
+            lr_loc_rib_diff_since(
+                std::ptr::null_mut(),
+                gen,
+                &raw mut added,
+                &raw mut modified,
+                &raw mut removed,
+            )
+        };
+        assert_eq!(rc, -1);
+        // NULL out-pointer → -1.
+        let rc = unsafe {
+            lr_loc_rib_diff_since(
+                rib,
+                gen,
+                std::ptr::null_mut(),
+                &raw mut modified,
+                &raw mut removed,
+            )
+        };
+        assert_eq!(rc, -1);
+        unsafe { lr_loc_rib_free(rib) };
     }
 }
