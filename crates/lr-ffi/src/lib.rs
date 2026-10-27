@@ -39,6 +39,7 @@ pub mod filters;
 pub mod handle;
 pub mod inspection;
 pub mod ldp;
+pub mod ldp_label_store;
 pub mod ldp_session;
 pub mod ldp_transit;
 pub mod mpls;

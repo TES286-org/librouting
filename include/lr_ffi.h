@@ -1043,6 +1043,15 @@ typedef struct OpaqueLdpPdu {
 
 typedef struct OpaqueLdpPdu *lr_ldp_pdu_t;
 
+/**
+ * Opaque `LabelMappingStore` handle.
+ */
+typedef struct OpaqueLdpLabelStore {
+  uint8_t _private[0];
+} OpaqueLdpLabelStore;
+
+typedef struct OpaqueLdpLabelStore *lr_ldp_label_store_t;
+
 typedef struct OpaqueLdpSession {
   uint8_t _private[0];
 } OpaqueLdpSession;
@@ -3592,6 +3601,117 @@ uint32_t lr_ldp_pdu_message_id_at(lr_ldp_pdu_t pdu, uintptr_t index);
  * used after this call.
  */
 void lr_ldp_pdu_free(lr_ldp_pdu_t pdu);
+
+/**
+ * Construct an empty `LabelMappingStore`.
+ */
+lr_ldp_label_store_t lr_ldp_label_store_new(void);
+
+/**
+ * Drop a boxed `LabelMappingStore`. Safe to call with NULL.
+ *
+ * # Safety
+ * `s` must have been produced by `lr_ldp_label_store_new` and not
+ * already freed.
+ */
+void lr_ldp_label_store_free(lr_ldp_label_store_t s);
+
+/**
+ * Learn a peer's label binding for a FEC (RFC 5036 §3.5.7). Returns
+ * 1 when the binding is new or differs from the previous value, 0
+ * when it duplicates the existing one.
+ *
+ * `peer_lsr_id` is the peer's LSR ID (4 bytes); `peer_label_space`
+ * is the 16-bit label space; `prefix_addr` / `is_ipv6` /
+ * `prefix_len` carry the FEC's prefix; `label` is the learned
+ * 20-bit label value.
+ *
+ * # Safety
+ * `s` must be a valid store handle. `prefix_addr` must point to 4
+ * (v4) or 16 (v6) readable bytes.
+ */
+uint8_t lr_ldp_label_store_learn(lr_ldp_label_store_t s,
+                                 uint32_t peer_lsr_id,
+                                 uint16_t peer_label_space,
+                                 const uint8_t *prefix_addr,
+                                 uint8_t is_ipv6,
+                                 uint8_t prefix_len,
+                                 uint32_t label);
+
+/**
+ * Unlearn a peer's binding for a FEC (RFC 5036 §3.5.7 — label
+ * release). Returns 1 and writes the released label to
+ * `*out_label` when a binding existed, 0 otherwise.
+ *
+ * # Safety
+ * See [`lr_ldp_label_store_learn`]. `out_label` may be NULL when
+ * the caller does not need the released value.
+ */
+uint8_t lr_ldp_label_store_unlearn(lr_ldp_label_store_t s,
+                                   uint32_t peer_lsr_id,
+                                   uint16_t peer_label_space,
+                                   const uint8_t *prefix_addr,
+                                   uint8_t is_ipv6,
+                                   uint8_t prefix_len,
+                                   uint32_t *out_label);
+
+/**
+ * Read the label binding a peer advertised for a FEC. Returns 1 and
+ * writes the label to `*out_label` when present, 0 otherwise.
+ *
+ * # Safety
+ * See [`lr_ldp_label_store_learn`].
+ */
+uint8_t lr_ldp_label_store_label_from(lr_ldp_label_store_t s,
+                                      uint32_t peer_lsr_id,
+                                      uint16_t peer_label_space,
+                                      const uint8_t *prefix_addr,
+                                      uint8_t is_ipv6,
+                                      uint8_t prefix_len,
+                                      uint32_t *out_label);
+
+/**
+ * Advertise a local label binding for a FEC (RFC 5036 §3.5.5).
+ * Returns 1 and writes the previous label (if any) to
+ * `*out_previous` when the call replaced an existing binding, 0
+ * when the binding is new.
+ *
+ * # Safety
+ * See [`lr_ldp_label_store_learn`].
+ */
+uint8_t lr_ldp_label_store_advertise(lr_ldp_label_store_t s,
+                                     const uint8_t *prefix_addr,
+                                     uint8_t is_ipv6,
+                                     uint8_t prefix_len,
+                                     uint32_t label,
+                                     uint32_t *out_previous);
+
+/**
+ * Withdraw a locally-advertised label binding for a FEC. Returns 1
+ * and writes the withdrawn label to `*out_label` when one existed,
+ * 0 otherwise.
+ *
+ * # Safety
+ * See [`lr_ldp_label_store_learn`].
+ */
+uint8_t lr_ldp_label_store_withdraw_advertised(lr_ldp_label_store_t s,
+                                               const uint8_t *prefix_addr,
+                                               uint8_t is_ipv6,
+                                               uint8_t prefix_len,
+                                               uint32_t *out_label);
+
+/**
+ * Read the locally-advertised label for a FEC. Returns 1 and writes
+ * the label to `*out_label` when present, 0 otherwise.
+ *
+ * # Safety
+ * See [`lr_ldp_label_store_learn`].
+ */
+uint8_t lr_ldp_label_store_advertised_label(lr_ldp_label_store_t s,
+                                            const uint8_t *prefix_addr,
+                                            uint8_t is_ipv6,
+                                            uint8_t prefix_len,
+                                            uint32_t *out_label);
 
 /**
  * Construct a `LdpSession` for the active role (RFC 5036 §2.5.2 —
