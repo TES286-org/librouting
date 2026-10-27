@@ -71,6 +71,7 @@ pub mod ospf_neighbor;
 pub mod ospf_origination;
 pub mod ospf_retransmit;
 pub mod ospf_spf;
+pub mod osroute;
 pub mod policy;
 pub mod policy_objects;
 pub mod policy_safety;

@@ -2491,6 +2491,58 @@ typedef struct lr_ospf_spf_route_t {
 } lr_ospf_spf_route_t;
 
 /**
+ * Opaque route-table handle. C side never touches internals.
+ */
+typedef struct OpaqueOsRouteTable {
+  uint8_t _private[0];
+} OpaqueOsRouteTable;
+
+typedef struct OpaqueOsRouteTable *lr_osroute_t;
+
+/**
+ * One kernel route entry — mirrors [`KernelRoute`] field-for-field.
+ *
+ * The next_hop is flattened into a 16-byte buffer + `is_ipv6` flag +
+ * `next_hop_present` flag (the kernel route may carry no next hop —
+ * blackhole routes).
+ */
+typedef struct lr_kernel_route_t {
+  /**
+   * Network prefix (IPv4 in the low 4 bytes when `prefix.is_ipv6 == 0`).
+   */
+  struct lr_prefix_t prefix;
+  /**
+   * 16-byte next-hop buffer (IPv4 in the low 4 bytes when
+   * `next_hop_is_ipv6 == 0`).
+   */
+  uint8_t next_hop[16];
+  /**
+   * 1 when `next_hop_is_ipv6` carries an IPv6 address, 0 for IPv4.
+   */
+  uint8_t next_hop_is_ipv6;
+  /**
+   * 1 when the route carries a next hop, 0 for blackhole routes.
+   */
+  uint8_t next_hop_present;
+  /**
+   * 1 when `if_index` carries a value, 0 otherwise.
+   */
+  uint8_t if_index_present;
+  /**
+   * Interface index (OS-specific; resolved via `if_nametoindex`).
+   */
+  uint32_t if_index;
+  /**
+   * Route metric / priority (lower wins on Linux).
+   */
+  uint32_t metric;
+  /**
+   * Source protocol identifier (one of the `LR_PROTO_*` constants).
+   */
+  int32_t protocol;
+} lr_kernel_route_t;
+
+/**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
  */
@@ -9080,6 +9132,129 @@ uintptr_t lr_ospf_spf_v3_locator_count(lr_ospf_spf_v3_result_t r);
 int32_t lr_ospf_spf_v3_locator_at(lr_ospf_spf_v3_result_t r,
                                   uintptr_t index,
                                   struct lr_ospf_spf_route_t *out);
+
+/**
+ * Open the platform's native route-table backend.
+ *
+ * On Linux this opens a `NETLINK_ROUTE` socket; on the BSDs/macOS a
+ * `route(4)` socket; on Windows IP Helper. Everywhere else (or when the
+ * OS denies the syscall) it returns `NULL` and sets the last-error
+ * string — call [`lr_last_error`] for details.
+ *
+ * Returns a non-NULL handle on success.
+ */
+lr_osroute_t lr_osroute_connect(void);
+
+/**
+ * Open the stub backend — always succeeds; every operation returns
+ * `LR_ERR_OTHER` with the documented stub message. Useful for testing
+ * the FFI surface on platforms without a kernel route table.
+ */
+lr_osroute_t lr_osroute_connect_stub(void);
+
+/**
+ * Returns the human-readable backend name compiled in (e.g.
+ * `"linux-rtnetlink"`, `"freebsd-route-socket"`, `"windows-ip-helper"`,
+ * `"stub"`). The pointer is valid for the lifetime of the process —
+ * do not free it. Returns `NULL` only on a panic.
+ */
+const char *lr_osroute_platform_name(void);
+
+/**
+ * Add a route: "to reach `prefix`, send via `next_hop` on `if_index`".
+ * Returns 0 on success, negative on error:
+ * - `LR_ERR_NULL` (-1): null handle / null prefix.
+ * - `LR_ERR_INVALID_HANDLE` (-2): malformed prefix length.
+ * - `LR_ERR_OTHER` (-6): backend error (see `lr_last_error`).
+ * - `LR_ERR_PANIC` (-4): panic.
+ *
+ * # Safety
+ * `t` must be a valid handle. `prefix` must point to a readable
+ * `lr_prefix_t`. `next_hop` (when non-null) must point to 4 (IPv4) or
+ * 16 (IPv6) readable bytes.
+ */
+int32_t lr_osroute_add_route(lr_osroute_t t,
+                             const struct lr_prefix_t *prefix,
+                             const uint8_t *next_hop,
+                             uintptr_t next_hop_len,
+                             uint32_t if_index);
+
+/**
+ * Add a route carrying the originating protocol's tag — the `RTPROT_*` /
+ * `RouteProtocol*` kernel identifier shown by `ip route` / `route print`
+ * and `lr routes list`. Backends that cannot tag fall back to
+ * [`lr_osroute_add_route`].
+ *
+ * `protocol` is one of the `LR_PROTO_*` constants (see `lr_ffi.h`).
+ *
+ * # Safety
+ * See [`lr_osroute_add_route`].
+ */
+int32_t lr_osroute_add_route_tagged(lr_osroute_t t,
+                                    const struct lr_prefix_t *prefix,
+                                    const uint8_t *next_hop,
+                                    uintptr_t next_hop_len,
+                                    uint32_t if_index,
+                                    int32_t protocol);
+
+/**
+ * Add a *blackhole* (discard) route: packets matching `prefix` are
+ * silently dropped by the kernel.
+ *
+ * # Safety
+ * `t` must be a valid handle. `prefix` must point to a readable
+ * `lr_prefix_t`.
+ */
+int32_t lr_osroute_add_blackhole_route(lr_osroute_t t, const struct lr_prefix_t *prefix);
+
+/**
+ * Delete a route matching the prefix.
+ *
+ * # Safety
+ * See [`lr_osroute_add_blackhole_route`].
+ */
+int32_t lr_osroute_delete_route(lr_osroute_t t, const struct lr_prefix_t *prefix);
+
+/**
+ * Returns the number of routes currently in the kernel FIB.
+ * Returns -1 (`LR_ERR_NULL`) on a NULL handle, or `LR_ERR_OTHER` (-6)
+ * on a backend error.
+ *
+ * # Safety
+ * `t` must be a valid handle.
+ */
+int64_t lr_osroute_list_routes_count(lr_osroute_t t);
+
+/**
+ * Dump all routes currently in the kernel FIB into `out` (caller-
+ * allocated, at most `cap` entries). Returns the number of entries
+ * written; a return value greater than `cap` means the buffer was too
+ * small — call [`lr_osroute_list_routes_count`] first to size it.
+ *
+ * # Safety
+ * `t` must be a valid handle. `out` (when non-null) must point to `cap`
+ * writable `lr_kernel_route_t` values.
+ */
+int64_t lr_osroute_list_routes(lr_osroute_t t, struct lr_kernel_route_t *out, uintptr_t cap);
+
+/**
+ * Convenience: does the kernel currently have a route to this prefix?
+ * Returns 1 (true), 0 (false), or a negative error code.
+ *
+ * # Safety
+ * `t` must be a valid handle. `prefix` must point to a readable
+ * `lr_prefix_t`.
+ */
+int32_t lr_osroute_has_route(lr_osroute_t t, const struct lr_prefix_t *prefix);
+
+/**
+ * Drop a boxed route-table handle. Safe to call with NULL.
+ *
+ * # Safety
+ * `t` must have been produced by [`lr_osroute_connect`] or
+ * [`lr_osroute_connect_stub`] and must not be used after this call.
+ */
+void lr_osroute_destroy(lr_osroute_t t);
 
 /**
  * Install one redistribution pipe on the router.
