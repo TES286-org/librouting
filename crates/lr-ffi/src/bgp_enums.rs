@@ -276,6 +276,144 @@ pub extern "C" fn lr_bgp_as_path_type_name(v: u8) -> *const std::os::raw::c_char
     )
 }
 
+// ---- OriginKind (RFC 4271 §5.1.2) ----
+
+/// Origin kind constants (RFC 4271 §5.1.2 — ORIGIN attribute):
+/// - 0 = Igp
+/// - 1 = Egp
+/// - 2 = Incomplete
+///
+/// Unknown values round-trip as 0xff (the Rust enum is non-exhaustive).
+#[no_mangle]
+pub extern "C" fn lr_bgp_origin_kind_from_u8(v: u8) -> u8 {
+    use lr_bgp::path::well_known::OriginKind;
+    guarded(
+        || match v {
+            0 => OriginKind::Igp as u8,
+            1 => OriginKind::Egp as u8,
+            2 => OriginKind::Incomplete as u8,
+            _ => 0xff,
+        },
+        0xff,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn lr_bgp_origin_kind_to_u8(v: u8) -> u8 {
+    v
+}
+
+#[no_mangle]
+pub extern "C" fn lr_bgp_origin_kind_name(v: u8) -> *const std::os::raw::c_char {
+    use lr_bgp::path::well_known::OriginKind;
+    guarded(
+        || match v {
+            0 => name_ptr(&format!("{:?}", OriginKind::Igp)),
+            1 => name_ptr(&format!("{:?}", OriginKind::Egp)),
+            2 => name_ptr(&format!("{:?}", OriginKind::Incomplete)),
+            _ => name_ptr("unknown"),
+        },
+        std::ptr::null(),
+    )
+}
+
+// ---- CommunityKind (RFC 1997 §4 + RFC 8326 §4 + RFC 9494 §3.2/§3.3) ----
+
+/// Community kind constants (RFC 1997 §4 well-known communities +
+/// RFC 8326 §4 GRACEFUL_SHUTDOWN + RFC 9494 §3.2/§3.3 LLGR_STALE /
+/// NO_LLGR):
+/// - 0 = NoExport
+/// - 1 = NoAdvertise
+/// - 2 = NoExportSubconfed
+/// - 3 = NoPeer
+/// - 4 = GracefulShutdown
+/// - 5 = LlgrStale
+/// - 6 = NoLlgr
+/// - 7 = Custom
+#[no_mangle]
+pub extern "C" fn lr_bgp_community_kind_from_u8(v: u8) -> u8 {
+    use lr_bgp::path::communities::CommunityKind;
+    guarded(
+        || match v {
+            0 => CommunityKind::NoExport as u8,
+            1 => CommunityKind::NoAdvertise as u8,
+            2 => CommunityKind::NoExportSubconfed as u8,
+            3 => CommunityKind::NoPeer as u8,
+            4 => CommunityKind::GracefulShutdown as u8,
+            5 => CommunityKind::LlgrStale as u8,
+            6 => CommunityKind::NoLlgr as u8,
+            7 => CommunityKind::Custom as u8,
+            _ => 0xff,
+        },
+        0xff,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn lr_bgp_community_kind_to_u8(v: u8) -> u8 {
+    v
+}
+
+#[no_mangle]
+pub extern "C" fn lr_bgp_community_kind_name(v: u8) -> *const std::os::raw::c_char {
+    use lr_bgp::path::communities::CommunityKind;
+    guarded(
+        || match v {
+            0 => name_ptr(&format!("{:?}", CommunityKind::NoExport)),
+            1 => name_ptr(&format!("{:?}", CommunityKind::NoAdvertise)),
+            2 => name_ptr(&format!("{:?}", CommunityKind::NoExportSubconfed)),
+            3 => name_ptr(&format!("{:?}", CommunityKind::NoPeer)),
+            4 => name_ptr(&format!("{:?}", CommunityKind::GracefulShutdown)),
+            5 => name_ptr(&format!("{:?}", CommunityKind::LlgrStale)),
+            6 => name_ptr(&format!("{:?}", CommunityKind::NoLlgr)),
+            7 => name_ptr(&format!("{:?}", CommunityKind::Custom)),
+            _ => name_ptr("unknown"),
+        },
+        std::ptr::null(),
+    )
+}
+
+// ---- RouteRefreshSubtype (RFC 2918 + RFC 7313) ----
+
+/// Route-refresh subtype constants (RFC 2918 + RFC 7313 §3):
+/// - 0 = Normal
+/// - 1 = BeginOfRib (BoRR)
+/// - 2 = EndOfRib (EoRR)
+/// - 0xff = Unknown — RFC 7313 §3.2 mandates silent ignore.
+#[no_mangle]
+pub extern "C" fn lr_bgp_route_refresh_subtype_from_u8(v: u8) -> u8 {
+    use lr_bgp::message::RouteRefreshSubtype;
+    guarded(
+        || match v {
+            0 => RouteRefreshSubtype::Normal as u8,
+            1 => RouteRefreshSubtype::BeginOfRib as u8,
+            2 => RouteRefreshSubtype::EndOfRib as u8,
+            _ => 0xff,
+        },
+        0xff,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn lr_bgp_route_refresh_subtype_to_u8(v: u8) -> u8 {
+    v
+}
+
+#[no_mangle]
+pub extern "C" fn lr_bgp_route_refresh_subtype_name(v: u8) -> *const std::os::raw::c_char {
+    use lr_bgp::message::RouteRefreshSubtype;
+    guarded(
+        || match v {
+            0 => name_ptr(&format!("{:?}", RouteRefreshSubtype::Normal)),
+            1 => name_ptr(&format!("{:?}", RouteRefreshSubtype::BeginOfRib)),
+            2 => name_ptr(&format!("{:?}", RouteRefreshSubtype::EndOfRib)),
+            0xff => name_ptr(&format!("{:?}", RouteRefreshSubtype::Unknown)),
+            _ => name_ptr("unknown"),
+        },
+        std::ptr::null(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +512,34 @@ mod tests {
         let n = name(2, lr_bgp_as_path_type_name);
         // The Debug string contains "Sequence" (AsPathType::Sequence = 2).
         assert!(n.contains("Sequence"), "got: {n}");
+    }
+
+    #[test]
+    fn ffi_origin_kind_round_trip() {
+        assert_eq!(lr_bgp_origin_kind_from_u8(0), 0); // Igp
+        assert_eq!(lr_bgp_origin_kind_from_u8(1), 1); // Egp
+        assert_eq!(lr_bgp_origin_kind_from_u8(2), 2); // Incomplete
+        assert_eq!(lr_bgp_origin_kind_from_u8(99), 0xff);
+    }
+
+    #[test]
+    fn ffi_origin_kind_name() {
+        let n = name(0, lr_bgp_origin_kind_name);
+        assert!(n.contains("Igp"), "got: {n}");
+    }
+
+    #[test]
+    fn ffi_community_kind_name() {
+        // GracefulShutdown (RFC 8326) — community 0xFFFF:0000.
+        let n = name(4, lr_bgp_community_kind_name);
+        assert!(n.contains("GracefulShutdown"), "got: {n}");
+    }
+
+    #[test]
+    fn ffi_route_refresh_subtype_round_trip() {
+        assert_eq!(lr_bgp_route_refresh_subtype_from_u8(0), 0); // Normal
+        assert_eq!(lr_bgp_route_refresh_subtype_from_u8(1), 1); // BeginOfRib
+        assert_eq!(lr_bgp_route_refresh_subtype_from_u8(2), 2); // EndOfRib
+        assert_eq!(lr_bgp_route_refresh_subtype_from_u8(99), 0xff); // Unknown
     }
 }
