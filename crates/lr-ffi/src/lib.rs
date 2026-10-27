@@ -50,6 +50,7 @@ pub mod policy_objects;
 pub mod policy_safety;
 pub mod rib;
 pub mod roa_store;
+pub mod roa_table;
 pub mod router;
 pub mod sessions;
 pub mod srv6;

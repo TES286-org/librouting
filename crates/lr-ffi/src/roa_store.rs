@@ -69,7 +69,7 @@ pub struct lr_roa_delta_t {
 
 impl lr_roa_entry_t {
     /// Convert a validated wire entry into a checked `RoaEntry`.
-    fn parse(&self) -> Result<RoaEntry, String> {
+    pub fn parse(&self) -> Result<RoaEntry, String> {
         let (addr, family_max) = if self.is_ipv6 == 0 {
             let mut o = [0u8; 4];
             o.copy_from_slice(&self.addr[..4]);

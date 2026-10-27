@@ -1426,6 +1426,24 @@ typedef struct lr_roa_delta_t {
 } lr_roa_delta_t;
 
 /**
+ * Opaque `RoaTableBuilder` handle.
+ */
+typedef struct OpaqueRoaTableBuilder {
+  uint8_t _private[0];
+} OpaqueRoaTableBuilder;
+
+typedef struct OpaqueRoaTableBuilder *lr_roa_table_builder_t;
+
+/**
+ * Opaque `RoaTable` handle.
+ */
+typedef struct OpaqueRoaTable {
+  uint8_t _private[0];
+} OpaqueRoaTable;
+
+typedef struct OpaqueRoaTable *lr_roa_table_t;
+
+/**
  * Opaque `Sid` handle.
  */
 typedef struct OpaqueSrv6Sid {
@@ -5175,6 +5193,137 @@ int32_t lr_roa_store_validate(lr_roa_store_t s,
                               uint32_t origin_as,
                               uint8_t has_origin_as,
                               uint8_t *out_state);
+
+/**
+ * Construct an empty `RoaTableBuilder` (RFC 6482 — add entries via
+ * `lr_roa_table_builder_add` / `_add_entry`, then call
+ * `lr_roa_table_builder_build` to finalize).
+ */
+lr_roa_table_builder_t lr_roa_table_builder_new(void);
+
+/**
+ * Drop a boxed `RoaTableBuilder`. Safe to call with NULL.
+ *
+ * # Safety
+ * `b` must have been produced by `lr_roa_table_builder_new` and not
+ * already freed (or consumed by `_build`).
+ */
+void lr_roa_table_builder_free(lr_roa_table_builder_t b);
+
+/**
+ * Add one ROA by parsed-prefix string (RFC 6482 §3.1). The prefix
+ * string follows the standard `"a.b.c.d/len"` (v4) or
+ * `"xxxx:yyyy::/len"` (v6) form. `max_length` is `0` to use the
+ * exact prefix length, otherwise must be `>= prefix_len` and `<=`
+ * the address family width (32 v4 / 128 v6).
+ *
+ * Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `b` must be a valid builder handle. `prefix` must point to a
+ * NUL-terminated UTF-8 string.
+ */
+int32_t lr_roa_table_builder_add(lr_roa_table_builder_t b,
+                                 const char *prefix,
+                                 uint8_t max_length,
+                                 uint32_t asn);
+
+/**
+ * Add one already-parsed ROA entry (the same `lr_roa_entry_t` shape
+ * `lr_roa_store_replace_static` consumes). Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL builder, `LR_ERR_OTHER` (-6) when the
+ * entry fails the RFC 6482 invariants.
+ *
+ * # Safety
+ * `b` must be a valid builder handle. `entry` must point to a
+ * readable `lr_roa_entry_t`.
+ */
+int32_t lr_roa_table_builder_add_entry(lr_roa_table_builder_t b, struct lr_roa_entry_t entry);
+
+/**
+ * Finalize the builder into an immutable `RoaTable`. Entries are
+ * deduplicated and sorted; the trie index is built once. The
+ * builder handle is consumed and freed.
+ *
+ * Returns a new `lr_roa_table_t` on success, NULL on a NULL
+ * builder.
+ *
+ * # Safety
+ * `b` must be a valid builder handle and is invalid after this call.
+ */
+lr_roa_table_t lr_roa_table_builder_build(lr_roa_table_builder_t b);
+
+/**
+ * Construct an empty `RoaTable` directly (no builder needed — use
+ * `lr_roa_table_builder_add_entry` + `_build` to populate).
+ */
+lr_roa_table_t lr_roa_table_new(void);
+
+/**
+ * Drop a boxed `RoaTable`. Safe to call with NULL.
+ *
+ * # Safety
+ * `t` must have been produced by a `lr_roa_table_*` constructor and
+ * not already freed.
+ */
+void lr_roa_table_free(lr_roa_table_t t);
+
+/**
+ * Number of ROA entries in the table. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `t` must be a valid RoaTable handle.
+ */
+uintptr_t lr_roa_table_len(lr_roa_table_t t);
+
+/**
+ * True when the table holds no entries. Returns 1 (true) on a NULL
+ * handle.
+ *
+ * # Safety
+ * See [`lr_roa_table_len`].
+ */
+uint8_t lr_roa_table_is_empty(lr_roa_table_t t);
+
+/**
+ * Validate `(prefix, origin_as)` per RFC 6811 §2. `has_origin` is 0
+ * to mean "no AS_PATH" (locally originated routes — returns
+ * `NotFound`); otherwise `origin_as` carries the AS to validate
+ * against.
+ *
+ * Returns one of the `LR_ROA_*` constants (`LR_ROA_VALID` = 0,
+ * `LR_ROA_NOT_FOUND` = 1, `LR_ROA_INVALID` = 2 — matching the
+ * values already exported by `roa_store.rs`).
+ *
+ * # Safety
+ * `t` must be a valid RoaTable handle. `addr` must point to 4
+ * (v4) or 16 (v6) readable bytes.
+ */
+uint8_t lr_roa_table_validate(lr_roa_table_t t,
+                              const uint8_t *addr,
+                              uint8_t is_ipv6,
+                              uint8_t prefix_len,
+                              uint32_t origin_as,
+                              uint8_t has_origin);
+
+/**
+ * Read one ROA entry by index. Writes the entry's fields to the
+ * out-pointers (`addr` carries v4 in the low 4 bytes when
+ * `*out_is_ipv6 == 0`, all 16 bytes when `*out_is_ipv6 == 1`).
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL table,
+ * `LR_ERR_INVALID_HANDLE` (-2) when the index is out of range.
+ *
+ * # Safety
+ * `t` must be a valid RoaTable handle. The out-pointers must point
+ * to writable memory of the right type.
+ */
+int32_t lr_roa_table_entry_at(lr_roa_table_t t,
+                              uintptr_t index,
+                              uint8_t *out_addr,
+                              uint8_t *out_is_ipv6,
+                              uint8_t *out_prefix_len,
+                              uint8_t *out_max_length,
+                              uint32_t *out_asn);
 
 /**
  * Create a new router instance.
