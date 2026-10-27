@@ -1129,6 +1129,37 @@
 #define LR_OSPF_ROUTER_LSA_LINK_RAW 3
 
 /**
+ * `LR_GTSM_MODE_*` constants — discriminant for [`lr_gtsm_mode`].
+ */
+#define LR_GTSM_MODE_DISABLED 0
+
+#define LR_GTSM_MODE_SINGLE_HOP 1
+
+#define LR_GTSM_MODE_MULTIHOP 2
+
+/**
+ * `LR_TCP_AUTH_*` constants — discriminant for [`lr_tcp_auth_kind`].
+ */
+#define LR_TCP_AUTH_NONE 0
+
+#define LR_TCP_AUTH_MD5 1
+
+#define LR_TCP_AUTH_AO 2
+
+/**
+ * `LR_TCP_AO_ALG_*` constants — mirrors [`TcpAoAlgorithm`].
+ */
+#define LR_TCP_AO_ALG_HMAC_SHA1 0
+
+#define LR_TCP_AO_ALG_CMAC_AES128 1
+
+/**
+ * Maximum key length accepted by [`lr_tcp_ao_key_new`] (RFC 5925
+ * §2 / RFC 5926: 80 octets).
+ */
+#define LR_TCP_AUTH_MAX_KEY_LEN 80
+
+/**
  * ORIGIN values (RFC 4271 §5.1.1).
  */
 #define LR_ORIGIN_IGP 0
@@ -2570,6 +2601,64 @@ typedef struct lr_kernel_route_t {
    */
   int32_t protocol;
 } lr_kernel_route_t;
+
+/**
+ * One GTSM configuration (RFC 5082). The struct carries the outbound
+ * TTL the kernel stamps on every segment and the minimum TTL the
+ * kernel requires on inbound segments.
+ */
+typedef struct lr_gtsm_t {
+  /**
+   * TTL set on every outbound segment. 255 for single-hop; the
+   * configured hop count for multihop. 0 when GTSM is disabled.
+   */
+  uint8_t outbound_ttl;
+  /**
+   * Minimum TTL required on inbound segments. 255 for single-hop;
+   * `255 - hops + 1` for multihop. 0 when GTSM is disabled.
+   */
+  uint8_t min_ttl;
+} lr_gtsm_t;
+
+/**
+ * One TCP-AO Master Key Tuple (RFC 5925 §3.1).
+ *
+ * The kernel consumes the raw key bytes; the FFI surface exposes
+ * `send_id`, `recv_id` and a length-prefixed key buffer so the
+ * embedder can build an MKT without copying through a Rust `Vec`.
+ */
+typedef struct lr_tcp_ao_key_t {
+  /**
+   * KeyID placed in the TCP-AO option of outgoing segments
+   * (`sndid`).
+   */
+  uint8_t send_id;
+  /**
+   * KeyID that must appear in the peer's segments to select this
+   * MKT (`rcvid`).
+   */
+  uint8_t recv_id;
+  /**
+   * Length of the raw key bytes in `key_buf` (1..=
+   * [`LR_TCP_AUTH_MAX_KEY_LEN`]).
+   */
+  uintptr_t key_len;
+  /**
+   * Raw key bytes (the first `key_len` bytes are read; the rest is
+   * zero-padded). Keeping the buffer at the maximum length avoids
+   * a heap allocation per MKT.
+   */
+  uint8_t key_buf[LR_TCP_AUTH_MAX_KEY_LEN];
+} lr_tcp_ao_key_t;
+
+/**
+ * Opaque `TcpAuth` handle. C side never touches internals.
+ */
+typedef struct OpaqueTcpAuth {
+  uint8_t _private[0];
+} OpaqueTcpAuth;
+
+typedef struct OpaqueTcpAuth *lr_tcp_auth_t;
 
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
@@ -9284,6 +9373,165 @@ int32_t lr_osroute_has_route(lr_osroute_t t, const struct lr_prefix_t *prefix);
  * [`lr_osroute_connect_stub`] and must not be used after this call.
  */
 void lr_osroute_destroy(lr_osroute_t t);
+
+/**
+ * Construct a single-hop GTSM (RFC 5082 §4.1): TTL=255 both
+ * directions. This is the standard configuration for directly
+ * connected eBGP.
+ */
+struct lr_gtsm_t lr_gtsm_single_hop(void);
+
+/**
+ * Construct a multihop GTSM (RFC 5082 §4.2). `hops` must be in
+ * `1..=254` (255 is single-hop; 0 is meaningless). Returns the
+ * zero-default struct and sets the last-error string when `hops`
+ * is out of range — callers that want to validate up front should
+ * check the returned `outbound_ttl` is non-zero.
+ */
+struct lr_gtsm_t lr_gtsm_multihop(uint8_t hops);
+
+/**
+ * Construct a disabled GTSM (no TTL enforcement). Equivalent to the
+ * default `lr_gtsm_t`.
+ */
+struct lr_gtsm_t lr_gtsm_disabled(void);
+
+/**
+ * Read the outbound TTL field. Returns 0 on a disabled GTSM.
+ */
+uint8_t lr_gtsm_outbound_ttl(struct lr_gtsm_t g);
+
+/**
+ * Read the minimum inbound TTL field. Returns 0 on a disabled GTSM.
+ */
+uint8_t lr_gtsm_min_ttl(struct lr_gtsm_t g);
+
+/**
+ * True when GTSM is effectively a no-op (both fields are zero).
+ * Returns 1 (true) or 0 (false).
+ */
+uint8_t lr_gtsm_is_disabled(struct lr_gtsm_t g);
+
+/**
+ * Categorise the GTSM as one of the `LR_GTSM_MODE_*` constants.
+ */
+int32_t lr_gtsm_mode(struct lr_gtsm_t g);
+
+/**
+ * Construct a symmetric MKT (`send_id == recv_id`, the common case).
+ * `id` is the KeyID placed in both directions; `key` points to
+ * `key_len` raw key bytes (1..=80). Returns 0 on success and writes
+ * the MKT to `*out`; returns `LR_ERR_NULL` (-1) on a null key/out
+ * pointer, `LR_ERR_OTHER` (-6) when the key length is out of range.
+ *
+ * # Safety
+ * `key` must point to `key_len` readable bytes (NULL only when
+ * `key_len == 0`). `out` must point to a writable
+ * `lr_tcp_ao_key_t`.
+ */
+int32_t lr_tcp_ao_key_symmetric(uint8_t id,
+                                const uint8_t *key,
+                                uintptr_t key_len,
+                                struct lr_tcp_ao_key_t *out);
+
+/**
+ * Construct an MKT with distinct send/receive KeyIDs. Same contract
+ * as [`lr_tcp_ao_key_symmetric`] but `send_id` and `recv_id` can
+ * differ.
+ *
+ * # Safety
+ * See [`lr_tcp_ao_key_symmetric`].
+ */
+int32_t lr_tcp_ao_key_new(uint8_t send_id,
+                          uint8_t recv_id,
+                          const uint8_t *key,
+                          uintptr_t key_len,
+                          struct lr_tcp_ao_key_t *out);
+
+/**
+ * Read the send_id / recv_id / key_len from an MKT. Returns 0 on
+ * success, `LR_ERR_NULL` on a null key/out pointer.
+ *
+ * # Safety
+ * `key` must point to a readable `lr_tcp_ao_key_t`. The three out
+ * pointers must be non-null.
+ */
+int32_t lr_tcp_ao_key_read(const struct lr_tcp_ao_key_t *key,
+                           uint8_t *out_send_id,
+                           uint8_t *out_recv_id,
+                           uintptr_t *out_key_len);
+
+/**
+ * Copy the raw key bytes from an MKT into `out_buf`. Writes at most
+ * `cap` bytes; returns the total key length (>= 0) — a return value
+ * greater than `cap` means the buffer was too small.
+ *
+ * # Safety
+ * `key` must point to a readable `lr_tcp_ao_key_t`. `out_buf` (when
+ * non-null) must point to `cap` writable bytes.
+ */
+int64_t lr_tcp_ao_key_copy(const struct lr_tcp_ao_key_t *key, uint8_t *out_buf, uintptr_t cap);
+
+/**
+ * Categorise a [`TcpAuth`] value as one of the `LR_TCP_AUTH_*`
+ * constants.
+ *
+ * # Safety
+ * `auth` must be a valid `lr_tcp_auth_t` pointer.
+ */
+int32_t lr_tcp_auth_kind(lr_tcp_auth_t auth);
+
+/**
+ * True (1) when the auth configuration is `None` (plain TCP).
+ *
+ * # Safety
+ * `auth` must be a valid `lr_tcp_auth_t` pointer.
+ */
+uint8_t lr_tcp_auth_is_none(lr_tcp_auth_t auth);
+
+/**
+ * Construct a `TcpAuth::None` (plain TCP, no authentication). The
+ * returned handle is owned by the caller; free with
+ * [`lr_tcp_auth_free`].
+ */
+lr_tcp_auth_t lr_tcp_auth_new_none(void);
+
+/**
+ * Construct a `TcpAuth::Md5` (RFC 2385) with one shared secret.
+ * `key` points to `key_len` raw key bytes (1..=80). Returns NULL on
+ * error (the last-error string is set).
+ *
+ * # Safety
+ * `key` must point to `key_len` readable bytes (NULL only when
+ * `key_len == 0`).
+ */
+lr_tcp_auth_t lr_tcp_auth_new_md5(const uint8_t *key, uintptr_t key_len);
+
+/**
+ * Construct a `TcpAuth::Ao` (RFC 5925). `keys` is an array of
+ * `lr_tcp_ao_key_t` (at least one entry required). `algorithm` is
+ * one of the `LR_TCP_AO_ALG_*` constants. `mac_len` is the MAC
+ * length in bytes (0 selects the algorithm default). Returns NULL
+ * on error.
+ *
+ * # Safety
+ * `keys` must point to `keys_count` readable `lr_tcp_ao_key_t`
+ * values. The caller retains ownership of the array; the FFI copies
+ * the values into a Rust `Vec<TcpAoKey>`.
+ */
+lr_tcp_auth_t lr_tcp_auth_new_ao(const struct lr_tcp_ao_key_t *keys,
+                                 uintptr_t keys_count,
+                                 int32_t algorithm,
+                                 uint8_t mac_len);
+
+/**
+ * Drop a boxed `TcpAuth`. Safe to call with NULL.
+ *
+ * # Safety
+ * `auth` must have been produced by `lr_tcp_auth_new_*` and not
+ * already freed.
+ */
+void lr_tcp_auth_free(lr_tcp_auth_t auth);
 
 /**
  * Install one redistribution pipe on the router.

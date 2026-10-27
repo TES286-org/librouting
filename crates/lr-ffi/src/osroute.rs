@@ -41,6 +41,8 @@ use lr_core::addr::IpAddr;
 use lr_core::rib::Protocol;
 use lr_osroute::stub::StubRouteTable;
 use lr_osroute::{KernelRoute, OsRouteTable, SystemRouteTable};
+use lr_osroute::gtsm::Gtsm;
+use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
@@ -600,6 +602,546 @@ unsafe fn decode_next_hop(p: *const u8, len: usize) -> Option<IpAddr> {
     }
 }
 
+// ===========================================================================
+// GTSM (RFC 5082) — Generalized TTL Security Mechanism.
+//
+// Pure data type — the kernel socket operations are platform-specific
+// and live behind `arm_listener_gtsm` / `connect_gtsm` re-exports in
+// lr_osroute. The FFI surface below exposes the constructors + readers
+// so an embedder can build a Gtsm value programmatically and pass it
+// to a daemon or another consumer of the lr-osroute API.
+// ===========================================================================
+
+/// `LR_GTSM_MODE_*` constants — discriminant for [`lr_gtsm_mode`].
+pub const LR_GTSM_MODE_DISABLED: i32 = 0;
+pub const LR_GTSM_MODE_SINGLE_HOP: i32 = 1;
+pub const LR_GTSM_MODE_MULTIHOP: i32 = 2;
+
+/// One GTSM configuration (RFC 5082). The struct carries the outbound
+/// TTL the kernel stamps on every segment and the minimum TTL the
+/// kernel requires on inbound segments.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_gtsm_t {
+    /// TTL set on every outbound segment. 255 for single-hop; the
+    /// configured hop count for multihop. 0 when GTSM is disabled.
+    pub outbound_ttl: u8,
+    /// Minimum TTL required on inbound segments. 255 for single-hop;
+    /// `255 - hops + 1` for multihop. 0 when GTSM is disabled.
+    pub min_ttl: u8,
+}
+
+impl From<Gtsm> for lr_gtsm_t {
+    fn from(g: Gtsm) -> Self {
+        Self {
+            outbound_ttl: g.outbound_ttl,
+            min_ttl: g.min_ttl,
+        }
+    }
+}
+
+impl From<lr_gtsm_t> for Gtsm {
+    fn from(c: lr_gtsm_t) -> Self {
+        Gtsm {
+            outbound_ttl: c.outbound_ttl,
+            min_ttl: c.min_ttl,
+        }
+    }
+}
+
+/// Construct a single-hop GTSM (RFC 5082 §4.1): TTL=255 both
+/// directions. This is the standard configuration for directly
+/// connected eBGP.
+#[no_mangle]
+pub extern "C" fn lr_gtsm_single_hop() -> lr_gtsm_t {
+    guarded(
+        || lr_gtsm_t::from(Gtsm::single_hop()),
+        lr_gtsm_t::default(),
+    )
+}
+
+/// Construct a multihop GTSM (RFC 5082 §4.2). `hops` must be in
+/// `1..=254` (255 is single-hop; 0 is meaningless). Returns the
+/// zero-default struct and sets the last-error string when `hops`
+/// is out of range — callers that want to validate up front should
+/// check the returned `outbound_ttl` is non-zero.
+#[no_mangle]
+pub extern "C" fn lr_gtsm_multihop(hops: u8) -> lr_gtsm_t {
+    guarded(
+        || {
+            // Gtsm::multihop panics on out-of-range — clamp here so the
+            // FFI entry point never panics across the C boundary.
+            if !(1..=254).contains(&hops) {
+                set_last_error(format!(
+                    "multihop TTL must be 1..=254 (got {hops})"
+                ));
+                return lr_gtsm_t::default();
+            }
+            lr_gtsm_t::from(Gtsm::multihop(hops))
+        },
+        lr_gtsm_t::default(),
+    )
+}
+
+/// Construct a disabled GTSM (no TTL enforcement). Equivalent to the
+/// default `lr_gtsm_t`.
+#[no_mangle]
+pub extern "C" fn lr_gtsm_disabled() -> lr_gtsm_t {
+    guarded(lr_gtsm_t::default, lr_gtsm_t::default())
+}
+
+/// Read the outbound TTL field. Returns 0 on a disabled GTSM.
+#[no_mangle]
+pub extern "C" fn lr_gtsm_outbound_ttl(g: lr_gtsm_t) -> u8 {
+    g.outbound_ttl
+}
+
+/// Read the minimum inbound TTL field. Returns 0 on a disabled GTSM.
+#[no_mangle]
+pub extern "C" fn lr_gtsm_min_ttl(g: lr_gtsm_t) -> u8 {
+    g.min_ttl
+}
+
+/// True when GTSM is effectively a no-op (both fields are zero).
+/// Returns 1 (true) or 0 (false).
+#[no_mangle]
+pub extern "C" fn lr_gtsm_is_disabled(g: lr_gtsm_t) -> u8 {
+    Gtsm::from(g).is_disabled() as u8
+}
+
+/// Categorise the GTSM as one of the `LR_GTSM_MODE_*` constants.
+#[no_mangle]
+pub extern "C" fn lr_gtsm_mode(g: lr_gtsm_t) -> i32 {
+    let inner = Gtsm::from(g);
+    if inner.is_disabled() {
+        LR_GTSM_MODE_DISABLED
+    } else if inner.outbound_ttl == 255 && inner.min_ttl == 255 {
+        LR_GTSM_MODE_SINGLE_HOP
+    } else {
+        LR_GTSM_MODE_MULTIHOP
+    }
+}
+
+// ===========================================================================
+// TCP authentication (RFC 2385 TCP-MD5 / RFC 5925 TCP-AO).
+//
+// Pure data type — the kernel socket operations live behind
+// `arm_listener` / `connect_auth` in lr_osroute. The FFI surface
+// exposes the constructors + readers so an embedder can build a
+// TcpAuth value programmatically.
+// ===========================================================================
+
+/// `LR_TCP_AUTH_*` constants — discriminant for [`lr_tcp_auth_kind`].
+pub const LR_TCP_AUTH_NONE: i32 = 0;
+pub const LR_TCP_AUTH_MD5: i32 = 1;
+pub const LR_TCP_AUTH_AO: i32 = 2;
+
+/// `LR_TCP_AO_ALG_*` constants — mirrors [`TcpAoAlgorithm`].
+pub const LR_TCP_AO_ALG_HMAC_SHA1: i32 = 0;
+pub const LR_TCP_AO_ALG_CMAC_AES128: i32 = 1;
+
+/// Maximum key length accepted by [`lr_tcp_ao_key_new`] (RFC 5925
+/// §2 / RFC 5926: 80 octets).
+pub const LR_TCP_AUTH_MAX_KEY_LEN: usize = 80;
+
+/// One TCP-AO Master Key Tuple (RFC 5925 §3.1).
+///
+/// The kernel consumes the raw key bytes; the FFI surface exposes
+/// `send_id`, `recv_id` and a length-prefixed key buffer so the
+/// embedder can build an MKT without copying through a Rust `Vec`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct lr_tcp_ao_key_t {
+    /// KeyID placed in the TCP-AO option of outgoing segments
+    /// (`sndid`).
+    pub send_id: u8,
+    /// KeyID that must appear in the peer's segments to select this
+    /// MKT (`rcvid`).
+    pub recv_id: u8,
+    /// Length of the raw key bytes in `key_buf` (1..=
+    /// [`LR_TCP_AUTH_MAX_KEY_LEN`]).
+    pub key_len: usize,
+    /// Raw key bytes (the first `key_len` bytes are read; the rest is
+    /// zero-padded). Keeping the buffer at the maximum length avoids
+    /// a heap allocation per MKT.
+    pub key_buf: [u8; LR_TCP_AUTH_MAX_KEY_LEN],
+}
+
+impl Default for lr_tcp_ao_key_t {
+    fn default() -> Self {
+        Self {
+            send_id: 0,
+            recv_id: 0,
+            key_len: 0,
+            key_buf: [0; LR_TCP_AUTH_MAX_KEY_LEN],
+        }
+    }
+}
+
+impl TryFrom<lr_tcp_ao_key_t> for TcpAoKey {
+    type Error = &'static str;
+    fn try_from(c: lr_tcp_ao_key_t) -> Result<Self, Self::Error> {
+        if c.key_len == 0 || c.key_len > LR_TCP_AUTH_MAX_KEY_LEN {
+            return Err("key length out of range");
+        }
+        Ok(TcpAoKey {
+            send_id: c.send_id,
+            recv_id: c.recv_id,
+            key: c.key_buf[..c.key_len].to_vec(),
+        })
+    }
+}
+
+/// Construct a symmetric MKT (`send_id == recv_id`, the common case).
+/// `id` is the KeyID placed in both directions; `key` points to
+/// `key_len` raw key bytes (1..=80). Returns 0 on success and writes
+/// the MKT to `*out`; returns `LR_ERR_NULL` (-1) on a null key/out
+/// pointer, `LR_ERR_OTHER` (-6) when the key length is out of range.
+///
+/// # Safety
+/// `key` must point to `key_len` readable bytes (NULL only when
+/// `key_len == 0`). `out` must point to a writable
+/// `lr_tcp_ao_key_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_ao_key_symmetric(
+    id: u8,
+    key: *const u8,
+    key_len: usize,
+    out: *mut lr_tcp_ao_key_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            if key.is_null() && key_len != 0 {
+                return LR_ERR_NULL;
+            }
+            if key_len == 0 || key_len > LR_TCP_AUTH_MAX_KEY_LEN {
+                set_last_error(format!(
+                    "key length {key_len} out of range (1..={})",
+                    LR_TCP_AUTH_MAX_KEY_LEN
+                ));
+                return LR_ERR_OTHER;
+            }
+            let mut c = lr_tcp_ao_key_t {
+                send_id: id,
+                recv_id: id,
+                key_len,
+                key_buf: [0; LR_TCP_AUTH_MAX_KEY_LEN],
+            };
+            if !key.is_null() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(key, c.key_buf.as_mut_ptr(), key_len);
+                }
+            }
+            unsafe { *out = c };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Construct an MKT with distinct send/receive KeyIDs. Same contract
+/// as [`lr_tcp_ao_key_symmetric`] but `send_id` and `recv_id` can
+/// differ.
+///
+/// # Safety
+/// See [`lr_tcp_ao_key_symmetric`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_ao_key_new(
+    send_id: u8,
+    recv_id: u8,
+    key: *const u8,
+    key_len: usize,
+    out: *mut lr_tcp_ao_key_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            if key.is_null() && key_len != 0 {
+                return LR_ERR_NULL;
+            }
+            if key_len == 0 || key_len > LR_TCP_AUTH_MAX_KEY_LEN {
+                set_last_error(format!(
+                    "key length {key_len} out of range (1..={})",
+                    LR_TCP_AUTH_MAX_KEY_LEN
+                ));
+                return LR_ERR_OTHER;
+            }
+            let mut c = lr_tcp_ao_key_t {
+                send_id,
+                recv_id,
+                key_len,
+                key_buf: [0; LR_TCP_AUTH_MAX_KEY_LEN],
+            };
+            if !key.is_null() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(key, c.key_buf.as_mut_ptr(), key_len);
+                }
+            }
+            unsafe { *out = c };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read the send_id / recv_id / key_len from an MKT. Returns 0 on
+/// success, `LR_ERR_NULL` on a null key/out pointer.
+///
+/// # Safety
+/// `key` must point to a readable `lr_tcp_ao_key_t`. The three out
+/// pointers must be non-null.
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_ao_key_read(
+    key: *const lr_tcp_ao_key_t,
+    out_send_id: *mut u8,
+    out_recv_id: *mut u8,
+    out_key_len: *mut usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if key.is_null() || out_send_id.is_null() || out_recv_id.is_null() || out_key_len.is_null() {
+                return LR_ERR_NULL;
+            }
+            let k = unsafe { &*key };
+            unsafe {
+                *out_send_id = k.send_id;
+                *out_recv_id = k.recv_id;
+                *out_key_len = k.key_len;
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Copy the raw key bytes from an MKT into `out_buf`. Writes at most
+/// `cap` bytes; returns the total key length (>= 0) — a return value
+/// greater than `cap` means the buffer was too small.
+///
+/// # Safety
+/// `key` must point to a readable `lr_tcp_ao_key_t`. `out_buf` (when
+/// non-null) must point to `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_ao_key_copy(
+    key: *const lr_tcp_ao_key_t,
+    out_buf: *mut u8,
+    cap: usize,
+) -> i64 {
+    guarded(
+        || unsafe {
+            if key.is_null() {
+                return LR_ERR_NULL as i64;
+            }
+            let k = unsafe { &*key };
+            let n = k.key_len;
+            if !out_buf.is_null() && cap > 0 {
+                let to_write = n.min(cap);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        k.key_buf.as_ptr(),
+                        out_buf,
+                        to_write,
+                    );
+                }
+            }
+            n as i64
+        },
+        LR_ERR_PANIC as i64,
+    )
+}
+
+/// Categorise a [`TcpAuth`] value as one of the `LR_TCP_AUTH_*`
+/// constants.
+///
+/// # Safety
+/// `auth` must be a valid `lr_tcp_auth_t` pointer.
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_auth_kind(auth: lr_tcp_auth_t) -> i32 {
+    guarded(
+        || unsafe {
+            if auth.is_null() {
+                return LR_ERR_NULL;
+            }
+            let inner: &lr_tcp_auth_t_inner = unsafe { &*(auth as *const lr_tcp_auth_t_inner) };
+            match &inner.inner {
+                TcpAuth::None => LR_TCP_AUTH_NONE,
+                TcpAuth::Md5 { .. } => LR_TCP_AUTH_MD5,
+                TcpAuth::Ao { .. } => LR_TCP_AUTH_AO,
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// True (1) when the auth configuration is `None` (plain TCP).
+///
+/// # Safety
+/// `auth` must be a valid `lr_tcp_auth_t` pointer.
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_auth_is_none(auth: lr_tcp_auth_t) -> u8 {
+    guarded(
+        || unsafe {
+            if auth.is_null() {
+                return 0;
+            }
+            let inner: &lr_tcp_auth_t_inner = unsafe { &*(auth as *const lr_tcp_auth_t_inner) };
+            match &inner.inner {
+                TcpAuth::None => 1,
+                _ => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// Construct a `TcpAuth::None` (plain TCP, no authentication). The
+/// returned handle is owned by the caller; free with
+/// [`lr_tcp_auth_free`].
+#[no_mangle]
+pub extern "C" fn lr_tcp_auth_new_none() -> lr_tcp_auth_t {
+    guarded(|| box_tcp_auth(TcpAuth::None), std::ptr::null_mut())
+}
+
+/// Construct a `TcpAuth::Md5` (RFC 2385) with one shared secret.
+/// `key` points to `key_len` raw key bytes (1..=80). Returns NULL on
+/// error (the last-error string is set).
+///
+/// # Safety
+/// `key` must point to `key_len` readable bytes (NULL only when
+/// `key_len == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_auth_new_md5(
+    key: *const u8,
+    key_len: usize,
+) -> lr_tcp_auth_t {
+    guarded(
+        || unsafe {
+            if key.is_null() && key_len != 0 {
+                set_last_error("null key with non-zero length".into());
+                return std::ptr::null_mut();
+            }
+            let key_vec = if key.is_null() {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(key, key_len).to_vec() }
+            };
+            match TcpAuth::md5(key_vec) {
+                Ok(a) => box_tcp_auth(a),
+                Err(e) => {
+                    set_last_error(e.to_string());
+                    std::ptr::null_mut()
+                }
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Construct a `TcpAuth::Ao` (RFC 5925). `keys` is an array of
+/// `lr_tcp_ao_key_t` (at least one entry required). `algorithm` is
+/// one of the `LR_TCP_AO_ALG_*` constants. `mac_len` is the MAC
+/// length in bytes (0 selects the algorithm default). Returns NULL
+/// on error.
+///
+/// # Safety
+/// `keys` must point to `keys_count` readable `lr_tcp_ao_key_t`
+/// values. The caller retains ownership of the array; the FFI copies
+/// the values into a Rust `Vec<TcpAoKey>`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_auth_new_ao(
+    keys: *const lr_tcp_ao_key_t,
+    keys_count: usize,
+    algorithm: i32,
+    mac_len: u8,
+) -> lr_tcp_auth_t {
+    guarded(
+        || unsafe {
+            if keys.is_null() && keys_count != 0 {
+                set_last_error("null keys array with non-zero count".into());
+                return std::ptr::null_mut();
+            }
+            let alg = match algorithm {
+                LR_TCP_AO_ALG_HMAC_SHA1 => TcpAoAlgorithm::HmacSha1,
+                LR_TCP_AO_ALG_CMAC_AES128 => TcpAoAlgorithm::CmacAes128,
+                _ => {
+                    set_last_error(format!("unknown TCP-AO algorithm id {algorithm}"));
+                    return std::ptr::null_mut();
+                }
+            };
+            let mut key_vec = Vec::with_capacity(keys_count);
+            if !keys.is_null() {
+                for i in 0..keys_count {
+                    let c = unsafe { *keys.add(i) };
+                    match TcpAoKey::try_from(c) {
+                        Ok(k) => key_vec.push(k),
+                        Err(e) => {
+                            set_last_error(format!("key {i}: {e}"));
+                            return std::ptr::null_mut();
+                        }
+                    }
+                }
+            }
+            match TcpAuth::tcp_ao(key_vec, alg, mac_len) {
+                Ok(a) => box_tcp_auth(a),
+                Err(e) => {
+                    set_last_error(e.to_string());
+                    std::ptr::null_mut()
+                }
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Drop a boxed `TcpAuth`. Safe to call with NULL.
+///
+/// # Safety
+/// `auth` must have been produced by `lr_tcp_auth_new_*` and not
+/// already freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_tcp_auth_free(auth: lr_tcp_auth_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_tcp_auth(auth));
+        },
+        (),
+    )
+}
+
+/// Opaque `TcpAuth` handle. C side never touches internals.
+#[repr(C)]
+pub struct OpaqueTcpAuth {
+    _private: [u8; 0],
+}
+
+pub type lr_tcp_auth_t = *mut OpaqueTcpAuth;
+
+/// Boxed `TcpAuth` shape — owns the inner `TcpAuth` value.
+struct lr_tcp_auth_t_inner {
+    inner: TcpAuth,
+}
+
+fn box_tcp_auth(a: TcpAuth) -> lr_tcp_auth_t {
+    Box::into_raw(Box::new(lr_tcp_auth_t_inner { inner: a })) as lr_tcp_auth_t
+}
+
+/// Reclaim a `TcpAuth` handle back into its boxed form.
+///
+/// # Safety
+/// `a` must have been produced by [`box_tcp_auth`] and not already
+/// freed.
+unsafe fn unbox_tcp_auth(a: lr_tcp_auth_t) -> Option<Box<lr_tcp_auth_t_inner>> {
+    if a.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(a as *mut lr_tcp_auth_t_inner) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,5 +1356,216 @@ mod tests {
         // Unknown id returns None.
         assert!(i32_to_protocol(9999).is_none());
         assert!(i32_to_protocol(-1).is_none());
+    }
+
+    // ---- GTSM tests ----
+
+    #[test]
+    fn ffi_gtsm_single_hop() {
+        let g = lr_gtsm_single_hop();
+        assert_eq!(g.outbound_ttl, 255);
+        assert_eq!(g.min_ttl, 255);
+        assert_eq!(lr_gtsm_is_disabled(g), 0);
+        assert_eq!(lr_gtsm_mode(g), LR_GTSM_MODE_SINGLE_HOP);
+    }
+
+    #[test]
+    fn ffi_gtsm_multihop() {
+        let g = lr_gtsm_multihop(5);
+        assert_eq!(g.outbound_ttl, 5);
+        // min_ttl = 255 - 5 + 1 = 251.
+        assert_eq!(g.min_ttl, 251);
+        assert_eq!(lr_gtsm_is_disabled(g), 0);
+        assert_eq!(lr_gtsm_mode(g), LR_GTSM_MODE_MULTIHOP);
+    }
+
+    #[test]
+    fn ffi_gtsm_multihop_rejects_out_of_range() {
+        // 0 is invalid — returns the disabled struct.
+        let g = lr_gtsm_multihop(0);
+        assert_eq!(g.outbound_ttl, 0);
+        assert_eq!(lr_gtsm_is_disabled(g), 1);
+        assert_eq!(lr_gtsm_mode(g), LR_GTSM_MODE_DISABLED);
+
+        // 255 is single-hop, not multihop — also returns disabled.
+        let g = lr_gtsm_multihop(255);
+        assert_eq!(g.outbound_ttl, 0);
+        assert_eq!(lr_gtsm_is_disabled(g), 1);
+    }
+
+    #[test]
+    fn ffi_gtsm_disabled() {
+        let g = lr_gtsm_disabled();
+        assert_eq!(g.outbound_ttl, 0);
+        assert_eq!(g.min_ttl, 0);
+        assert_eq!(lr_gtsm_is_disabled(g), 1);
+        assert_eq!(lr_gtsm_mode(g), LR_GTSM_MODE_DISABLED);
+    }
+
+    #[test]
+    fn ffi_gtsm_outbound_and_min_ttl_readers() {
+        let g = lr_gtsm_multihop(10);
+        assert_eq!(lr_gtsm_outbound_ttl(g), 10);
+        // min_ttl = 255 - 10 + 1 = 246.
+        assert_eq!(lr_gtsm_min_ttl(g), 246);
+    }
+
+    // ---- TCP-AO key tests ----
+
+    #[test]
+    fn ffi_tcp_ao_key_symmetric_round_trip() {
+        let key = [0u8; 20]; // 20-byte HMAC-SHA1 key
+        let mut out = lr_tcp_ao_key_t::default();
+        let rc = unsafe { lr_tcp_ao_key_symmetric(42, key.as_ptr(), 20, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert_eq!(out.send_id, 42);
+        assert_eq!(out.recv_id, 42);
+        assert_eq!(out.key_len, 20);
+
+        // Read back.
+        let mut send_id = 0u8;
+        let mut recv_id = 0u8;
+        let mut key_len = 0usize;
+        let rc = unsafe {
+            lr_tcp_ao_key_read(&raw const out, &raw mut send_id, &raw mut recv_id, &raw mut key_len)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(send_id, 42);
+        assert_eq!(recv_id, 42);
+        assert_eq!(key_len, 20);
+
+        // Copy the key bytes back.
+        let mut buf = [0u8; 20];
+        let n = unsafe { lr_tcp_ao_key_copy(&raw const out, buf.as_mut_ptr(), 20) };
+        assert_eq!(n, 20);
+        assert_eq!(buf, key);
+    }
+
+    #[test]
+    fn ffi_tcp_ao_key_new_with_distinct_ids() {
+        let key = [1u8, 2, 3, 4];
+        let mut out = lr_tcp_ao_key_t::default();
+        let rc = unsafe { lr_tcp_ao_key_new(10, 20, key.as_ptr(), 4, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert_eq!(out.send_id, 10);
+        assert_eq!(out.recv_id, 20);
+        assert_eq!(out.key_len, 4);
+    }
+
+    #[test]
+    fn ffi_tcp_ao_key_rejects_zero_length() {
+        let mut out = lr_tcp_ao_key_t::default();
+        let rc = unsafe { lr_tcp_ao_key_symmetric(1, std::ptr::null(), 0, &raw mut out) };
+        assert_eq!(rc, LR_ERR_OTHER);
+    }
+
+    #[test]
+    fn ffi_tcp_ao_key_rejects_oversize() {
+        let key = [0u8; 81]; // > MAX_KEY_LEN (80)
+        let mut out = lr_tcp_ao_key_t::default();
+        let rc = unsafe { lr_tcp_ao_key_symmetric(1, key.as_ptr(), 81, &raw mut out) };
+        assert_eq!(rc, LR_ERR_OTHER);
+    }
+
+    #[test]
+    fn ffi_tcp_ao_key_read_handles_null() {
+        let mut send_id = 0u8;
+        let mut recv_id = 0u8;
+        let mut key_len = 0usize;
+        let rc = unsafe {
+            lr_tcp_ao_key_read(
+                std::ptr::null(),
+                &raw mut send_id,
+                &raw mut recv_id,
+                &raw mut key_len,
+            )
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    #[test]
+    fn ffi_tcp_ao_key_copy_handles_null() {
+        let n = unsafe { lr_tcp_ao_key_copy(std::ptr::null(), std::ptr::null_mut(), 0) };
+        assert_eq!(n, LR_ERR_NULL as i64);
+    }
+
+    // ---- TcpAuth tests ----
+
+    #[test]
+    fn ffi_tcp_auth_none_round_trip() {
+        let a = lr_tcp_auth_new_none();
+        assert!(!a.is_null());
+        assert_eq!(unsafe { lr_tcp_auth_kind(a) }, LR_TCP_AUTH_NONE);
+        assert_eq!(unsafe { lr_tcp_auth_is_none(a) }, 1);
+        unsafe { lr_tcp_auth_free(a) };
+    }
+
+    #[test]
+    fn ffi_tcp_auth_md5_round_trip() {
+        let key = [0u8; 16]; // 16-byte MD5 key
+        let a = unsafe { lr_tcp_auth_new_md5(key.as_ptr(), 16) };
+        assert!(!a.is_null());
+        assert_eq!(unsafe { lr_tcp_auth_kind(a) }, LR_TCP_AUTH_MD5);
+        assert_eq!(unsafe { lr_tcp_auth_is_none(a) }, 0);
+        unsafe { lr_tcp_auth_free(a) };
+    }
+
+    #[test]
+    fn ffi_tcp_auth_md5_rejects_zero_length() {
+        let a = unsafe { lr_tcp_auth_new_md5(std::ptr::null(), 0) };
+        assert!(a.is_null());
+    }
+
+    #[test]
+    fn ffi_tcp_auth_ao_round_trip() {
+        // Build one MKT.
+        let key = [0u8; 20];
+        let mut mkt = lr_tcp_ao_key_t::default();
+        unsafe { lr_tcp_ao_key_symmetric(1, key.as_ptr(), 20, &raw mut mkt) };
+        let mkts = [mkt];
+        let a = unsafe {
+            lr_tcp_auth_new_ao(
+                mkts.as_ptr(),
+                1,
+                LR_TCP_AO_ALG_HMAC_SHA1,
+                0, // default mac_len
+            )
+        };
+        assert!(!a.is_null());
+        assert_eq!(unsafe { lr_tcp_auth_kind(a) }, LR_TCP_AUTH_AO);
+        assert_eq!(unsafe { lr_tcp_auth_is_none(a) }, 0);
+        unsafe { lr_tcp_auth_free(a) };
+    }
+
+    #[test]
+    fn ffi_tcp_auth_ao_rejects_empty_keys() {
+        let a = unsafe {
+            lr_tcp_auth_new_ao(std::ptr::null(), 0, LR_TCP_AO_ALG_HMAC_SHA1, 0)
+        };
+        assert!(a.is_null());
+    }
+
+    #[test]
+    fn ffi_tcp_auth_ao_rejects_unknown_algorithm() {
+        let key = [0u8; 20];
+        let mut mkt = lr_tcp_ao_key_t::default();
+        unsafe { lr_tcp_ao_key_symmetric(1, key.as_ptr(), 20, &raw mut mkt) };
+        let mkts = [mkt];
+        let a = unsafe { lr_tcp_auth_new_ao(mkts.as_ptr(), 1, 999, 0) };
+        assert!(a.is_null());
+    }
+
+    #[test]
+    fn ffi_tcp_auth_kind_handles_null() {
+        assert_eq!(
+            unsafe { lr_tcp_auth_kind(std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
+        assert_eq!(unsafe { lr_tcp_auth_is_none(std::ptr::null_mut()) }, 0);
+    }
+
+    #[test]
+    fn ffi_tcp_auth_free_handles_null_safely() {
+        unsafe { lr_tcp_auth_free(std::ptr::null_mut()) };
     }
 }
