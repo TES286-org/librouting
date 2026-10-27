@@ -124,4 +124,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ospf_retransmit.rs");
     println!("cargo:rerun-if-changed=src/role_topology.rs");
     println!("cargo:rerun-if-changed=src/bfd_session.rs");
+    println!("cargo:rerun-if-changed=src/ospf_interface.rs");
 }

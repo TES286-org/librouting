@@ -48,6 +48,7 @@ pub mod mrt;
 pub mod ospf;
 pub mod ospf_db_exchange;
 pub mod ospf_lsdb;
+pub mod ospf_interface;
 pub mod ospf_neighbor;
 pub mod ospf_retransmit;
 pub mod ospf_spf;
