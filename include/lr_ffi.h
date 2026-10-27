@@ -9064,6 +9064,65 @@ lr_ospf_lsa_hdr_box_t lr_ospf_lsa_header_new(uint16_t ls_age,
 void lr_ospf_lsa_header_free(lr_ospf_lsa_hdr_box_t h);
 
 /**
+ * Returns the LSAs whose `ls_sequence_number` is due for refresh
+ * (RFC 2328 §14.1 — `LSRefreshTime`, 30 minutes by default). The
+ * embedder re-originates each LSA (bumping the sequence, zeroing
+ * the age) and re-installs it via [`lr_ospf_lsdb_install`].
+ *
+ * `advertising_router` is the router-id whose self-originated LSAs
+ * to refresh (RFC 2328 §14.1 only refreshes LSAs originated by
+ * this router). Pass 0 to match all LSAs (useful for tests).
+ *
+ * Writes a freshly-allocated `lr_ospf_lsa_box_t*` array to `*out`
+ * and the count to `*out_count`. The caller owns the array and each
+ * LSA handle inside it; free the array via
+ * [`lr_ospf_lsa_array_free`] (which also frees each LSA handle).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a null handle / null
+ * out pointer, `LR_ERR_PANIC` (-4) on a panic.
+ *
+ * # Safety
+ * `r` must be a valid LSDB handle. `out` and `out_count` must point
+ * to writable memory.
+ */
+int32_t lr_ospf_lsdb_refresh_due(lr_ospf_lsdb_t r,
+                                 uint32_t advertising_router,
+                                 uint64_t now_ms,
+                                 lr_ospf_lsa_box_t **out,
+                                 uintptr_t *out_count);
+
+/**
+ * Ages out LSAs that have reached `MaxAge` (RFC 2328 §14 — MaxAge
+ * is 3600 seconds). Returns the LSAs that were purged from the
+ * LSDB; the embedder re-floods them as MaxAge LSAs to flush them
+ * from neighbors' LSDBs.
+ *
+ * Writes a freshly-allocated `lr_ospf_lsa_box_t*` array to `*out`
+ * and the count to `*out_count`. The caller owns the array and each
+ * LSA handle inside it; free via [`lr_ospf_lsa_array_free`].
+ *
+ * # Safety
+ * `r` must be a valid LSDB handle. `out` and `out_count` must point
+ * to writable memory.
+ */
+int32_t lr_ospf_lsdb_age_out(lr_ospf_lsdb_t r,
+                             uint64_t now_ms,
+                             lr_ospf_lsa_box_t **out,
+                             uintptr_t *out_count);
+
+/**
+ * Free an LSA handle array returned by [`lr_ospf_lsdb_refresh_due`]
+ * or [`lr_ospf_lsdb_age_out`]. Also frees each LSA handle inside the
+ * array. Safe to call with NULL / count=0.
+ *
+ * # Safety
+ * `ptr` must have been produced by `lr_ospf_lsdb_refresh_due` or
+ * `lr_ospf_lsdb_age_out`, and `count` must be the value written to
+ * `*out_count` by that call. Double-free is undefined behaviour.
+ */
+void lr_ospf_lsa_array_free(lr_ospf_lsa_box_t *ptr, uintptr_t count);
+
+/**
  * Construct an `OspfNeighbor` for the given router-id (RFC 2328
  * §10.1 — the neighbor starts in Down state).
  */

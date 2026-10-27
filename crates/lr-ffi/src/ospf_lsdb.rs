@@ -656,6 +656,137 @@ pub unsafe extern "C" fn lr_ospf_lsa_header_free(h: lr_ospf_lsa_hdr_box_t) {
     )
 }
 
+// ---- LSA-array surface (refresh_due / age_out) ----
+//
+// `Lsdb::refresh_due` and `Lsdb::age_out` return `Vec<Lsa>` — the
+// embedder owns the LSAs and must re-flood them. The FFI returns a
+// heap-allocated array of `lr_ospf_lsa_box_t` handles (one per LSA),
+// plus a matching free function.
+
+/// Returns the LSAs whose `ls_sequence_number` is due for refresh
+/// (RFC 2328 §14.1 — `LSRefreshTime`, 30 minutes by default). The
+/// embedder re-originates each LSA (bumping the sequence, zeroing
+/// the age) and re-installs it via [`lr_ospf_lsdb_install`].
+///
+/// `advertising_router` is the router-id whose self-originated LSAs
+/// to refresh (RFC 2328 §14.1 only refreshes LSAs originated by
+/// this router). Pass 0 to match all LSAs (useful for tests).
+///
+/// Writes a freshly-allocated `lr_ospf_lsa_box_t*` array to `*out`
+/// and the count to `*out_count`. The caller owns the array and each
+/// LSA handle inside it; free the array via
+/// [`lr_ospf_lsa_array_free`] (which also frees each LSA handle).
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a null handle / null
+/// out pointer, `LR_ERR_PANIC` (-4) on a panic.
+///
+/// # Safety
+/// `r` must be a valid LSDB handle. `out` and `out_count` must point
+/// to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_refresh_due(
+    r: lr_ospf_lsdb_t,
+    advertising_router: u32,
+    now_ms: u64,
+    out: *mut *mut lr_ospf_lsa_box_t,
+    out_count: *mut usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() || out_count.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(lsdb) = borrow_lsdb_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let lsas: Vec<Lsa> = lsdb.refresh_due(advertising_router, now_ms);
+            let handles: Vec<lr_ospf_lsa_box_t> = lsas.into_iter().map(box_lsa).collect();
+            let count = handles.len();
+            let mut boxed = handles.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+            unsafe {
+                *out = ptr;
+                *out_count = count;
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Ages out LSAs that have reached `MaxAge` (RFC 2328 §14 — MaxAge
+/// is 3600 seconds). Returns the LSAs that were purged from the
+/// LSDB; the embedder re-floods them as MaxAge LSAs to flush them
+/// from neighbors' LSDBs.
+///
+/// Writes a freshly-allocated `lr_ospf_lsa_box_t*` array to `*out`
+/// and the count to `*out_count`. The caller owns the array and each
+/// LSA handle inside it; free via [`lr_ospf_lsa_array_free`].
+///
+/// # Safety
+/// `r` must be a valid LSDB handle. `out` and `out_count` must point
+/// to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsdb_age_out(
+    r: lr_ospf_lsdb_t,
+    now_ms: u64,
+    out: *mut *mut lr_ospf_lsa_box_t,
+    out_count: *mut usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() || out_count.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(lsdb) = borrow_lsdb_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let lsas: Vec<Lsa> = lsdb.age_out(now_ms);
+            let handles: Vec<lr_ospf_lsa_box_t> = lsas.into_iter().map(box_lsa).collect();
+            let count = handles.len();
+            let mut boxed = handles.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+            unsafe {
+                *out = ptr;
+                *out_count = count;
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Free an LSA handle array returned by [`lr_ospf_lsdb_refresh_due`]
+/// or [`lr_ospf_lsdb_age_out`]. Also frees each LSA handle inside the
+/// array. Safe to call with NULL / count=0.
+///
+/// # Safety
+/// `ptr` must have been produced by `lr_ospf_lsdb_refresh_due` or
+/// `lr_ospf_lsdb_age_out`, and `count` must be the value written to
+/// `*out_count` by that call. Double-free is undefined behaviour.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_array_free(ptr: *mut lr_ospf_lsa_box_t, count: usize) {
+    guarded(
+        || unsafe {
+            if ptr.is_null() || count == 0 {
+                return;
+            }
+            let slice = unsafe { std::slice::from_raw_parts_mut(ptr, count) };
+            // Free each LSA handle inside the array.
+            for handle in slice.iter() {
+                if !handle.is_null() {
+                    drop(unbox_lsa(*handle));
+                }
+            }
+            // Free the array itself.
+            let _ = unsafe { Box::from_raw(slice as *mut [lr_ospf_lsa_box_t]) };
+        },
+        (),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,5 +961,157 @@ mod tests {
         assert_eq!(ls_id, 0x0a0b0c0d);
         assert_eq!(adv, 0x01020304);
         unsafe { lr_ospf_lsa_free(lsa) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_refresh_due_returns_empty_on_fresh_lsdb() {
+        let lsdb = lr_ospf_lsdb_new();
+        let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe { lr_ospf_lsdb_refresh_due(lsdb, 0x01020304, 0, &raw mut ptr, &raw mut count) };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 0, "fresh LSDB has no LSAs due for refresh");
+        // Free the (empty) array — safe even when count == 0.
+        unsafe { lr_ospf_lsa_array_free(ptr, count) };
+        unsafe { lr_ospf_lsdb_free(lsdb) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_refresh_due_returns_lsas_past_ls_refresh_time() {
+        let lsdb = lr_ospf_lsdb_new();
+        // Install one LSA with ls_age=0 at now_ms=0. The refresh_due
+        // gate is `now_ms - installed_ms + ls_age*1000 >= 1800*1000`.
+        // With now_ms=0, installed_ms=0, ls_age=0 → 0 < 1800000 → not due.
+        let lsa = box_lsa_for_test(sample_lsa(0x80000001));
+        let rc = unsafe { lr_ospf_lsdb_install(lsdb, lsa, 0) };
+        assert_eq!(rc, 1);
+
+        // refresh_due at now_ms=0 → not due.
+        let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe {
+            lr_ospf_lsdb_refresh_due(lsdb, 0x01020304, 0, &raw mut ptr, &raw mut count)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 0, "LSA installed at t=0 is not due at t=0");
+        unsafe { lr_ospf_lsa_array_free(ptr, count) };
+
+        // refresh_due at now_ms=1_800_000 (30 min) → due.
+        let rc = unsafe {
+            lr_ospf_lsdb_refresh_due(
+                lsdb,
+                0x01020304,
+                1_800_000,
+                &raw mut ptr,
+                &raw mut count,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 1, "LSA is due at LSRefreshTime");
+        assert!(!ptr.is_null());
+        // Free the array + each LSA handle inside it.
+        unsafe { lr_ospf_lsa_array_free(ptr, count) };
+        unsafe { lr_ospf_lsdb_free(lsdb) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_refresh_due_filters_by_advertising_router() {
+        let lsdb = lr_ospf_lsdb_new();
+        // Install an LSA with advertising_router = 0x01020304.
+        let lsa = box_lsa_for_test(sample_lsa(0x80000001));
+        unsafe { lr_ospf_lsdb_install(lsdb, lsa, 0) };
+
+        // refresh_due for a different advertising_router → no LSAs.
+        let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe {
+            lr_ospf_lsdb_refresh_due(
+                lsdb,
+                0x99999999, // different router-id
+                1_800_000,
+                &raw mut ptr,
+                &raw mut count,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 0, "different advertising_router → no LSAs");
+        unsafe { lr_ospf_lsa_array_free(ptr, count) };
+        unsafe { lr_ospf_lsdb_free(lsdb) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_age_out_returns_empty_on_fresh_lsdb() {
+        let lsdb = lr_ospf_lsdb_new();
+        let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe { lr_ospf_lsdb_age_out(lsdb, 0, &raw mut ptr, &raw mut count) };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 0, "fresh LSDB has no LSAs to age out");
+        unsafe { lr_ospf_lsa_array_free(ptr, count) };
+        unsafe { lr_ospf_lsdb_free(lsdb) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_age_out_returns_lsas_at_max_age() {
+        let lsdb = lr_ospf_lsdb_new();
+        // Install one LSA with ls_age=1 at now_ms=0.
+        let lsa = box_lsa_for_test(sample_lsa(0x80000001));
+        unsafe { lr_ospf_lsdb_install(lsdb, lsa, 0) };
+        assert_eq!(unsafe { lr_ospf_lsdb_len(lsdb) }, 1);
+
+        // age_out at now_ms=0 → nothing aged out (ls_age=1, installed at 0,
+        // effective age = 1s << MaxAge 3600s).
+        let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe { lr_ospf_lsdb_age_out(lsdb, 0, &raw mut ptr, &raw mut count) };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 0, "LSA at age 1s is not at MaxAge");
+        assert_eq!(unsafe { lr_ospf_lsdb_len(lsdb) }, 1, "LSA still in LSDB");
+        unsafe { lr_ospf_lsa_array_free(ptr, count) };
+
+        // age_out at now_ms = 3_600_000 (1 hour) → LSA reaches MaxAge.
+        let rc = unsafe {
+            lr_ospf_lsdb_age_out(lsdb, 3_600_000, &raw mut ptr, &raw mut count)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 1, "LSA reached MaxAge");
+        assert_eq!(
+            unsafe { lr_ospf_lsdb_len(lsdb) },
+            0,
+            "aged-out LSA removed from LSDB"
+        );
+        unsafe { lr_ospf_lsa_array_free(ptr, count) };
+        unsafe { lr_ospf_lsdb_free(lsdb) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsa_array_free_handles_null_safely() {
+        unsafe { lr_ospf_lsa_array_free(std::ptr::null_mut(), 0) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_refresh_due_null_handle_returns_lr_err_null() {
+        let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe {
+            lr_ospf_lsdb_refresh_due(
+                std::ptr::null_mut(),
+                0,
+                0,
+                &raw mut ptr,
+                &raw mut count,
+            )
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    #[test]
+    fn ffi_ospf_lsdb_age_out_null_handle_returns_lr_err_null() {
+        let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        let rc = unsafe {
+            lr_ospf_lsdb_age_out(std::ptr::null_mut(), 0, &raw mut ptr, &raw mut count)
+        };
+        assert_eq!(rc, LR_ERR_NULL);
     }
 }
