@@ -728,6 +728,292 @@
  */
 #define LR_OSPF_NSSA_N_P_BIT 8
 
+/**
+ * OSPFv2 Router-LSA (RFC 2328 §A.4.2).
+ */
+#define LR_OSPF_LSA_TYPE_V2_ROUTER 1
+
+/**
+ * OSPFv2 Network-LSA (RFC 2328 §A.4.3).
+ */
+#define LR_OSPF_LSA_TYPE_V2_NETWORK 2
+
+/**
+ * OSPFv2 Summary-IP LSA (RFC 2328 §A.4.4 — type-3 summary).
+ */
+#define LR_OSPF_LSA_TYPE_V2_SUMMARY_IP 3
+
+/**
+ * OSPFv2 Summary-ASBR LSA (RFC 2328 §A.4.5 — type-4 summary).
+ */
+#define LR_OSPF_LSA_TYPE_V2_SUMMARY_ASBR 4
+
+/**
+ * OSPFv2 AS-External LSA (RFC 2328 §A.4.5 — type-5).
+ */
+#define LR_OSPF_LSA_TYPE_V2_AS_EXTERNAL 5
+
+/**
+ * OSPFv2 NSSA-External LSA (RFC 3101 §2.3 — type-7).
+ */
+#define LR_OSPF_LSA_TYPE_V2_NSSA_EXTERNAL 7
+
+/**
+ * OSPFv2 Opaque-Link LSA (RFC 5250 §3 — type 9).
+ */
+#define LR_OSPF_LSA_TYPE_V2_OPAQUE_LINK 9
+
+/**
+ * OSPFv2 Opaque-Area LSA (RFC 5250 §3 — type 10).
+ */
+#define LR_OSPF_LSA_TYPE_V2_OPAQUE_AREA 10
+
+/**
+ * OSPFv2 Opaque-AS LSA (RFC 5250 §3 — type 11).
+ */
+#define LR_OSPF_LSA_TYPE_V2_OPAQUE_AS 11
+
+/**
+ * OSPFv3 Router-LSA (RFC 5340 §A.4.2 — 0x2001).
+ */
+#define LR_OSPF_LSA_TYPE_V3_ROUTER 8193
+
+/**
+ * OSPFv3 Network-LSA (RFC 5340 §A.4.3 — 0x2002).
+ */
+#define LR_OSPF_LSA_TYPE_V3_NETWORK 8194
+
+/**
+ * OSPFv3 Inter-Area-Prefix LSA (RFC 5340 §A.4.4 — 0x2003).
+ */
+#define LR_OSPF_LSA_TYPE_V3_INTER_PREFIX 8195
+
+/**
+ * OSPFv3 Inter-Area-Router LSA (RFC 5340 §A.4.5 — 0x2004).
+ */
+#define LR_OSPF_LSA_TYPE_V3_INTER_ROUTER 8196
+
+/**
+ * OSPFv3 AS-External LSA (RFC 5340 §A.4.7 — 0x4005).
+ */
+#define LR_OSPF_LSA_TYPE_V3_AS_EXTERNAL 16389
+
+/**
+ * OSPFv3 NSSA-External LSA (RFC 5340 §A.4.7 / RFC 3101 — 0x2007).
+ */
+#define LR_OSPF_LSA_TYPE_V3_NSSA 8199
+
+/**
+ * OSPFv3 Link LSA (RFC 5340 §A.4.6 — 0x0008).
+ */
+#define LR_OSPF_LSA_TYPE_V3_LINK 8
+
+/**
+ * OSPFv3 Intra-Area-Prefix LSA (RFC 5340 §A.4.10 — 0x2009).
+ */
+#define LR_OSPF_LSA_TYPE_V3_INTRA_PREFIX 8201
+
+#define LR_OSPF_LSA_TYPE_E_ROUTER 40993
+
+#define LR_OSPF_LSA_TYPE_E_NETWORK 40994
+
+#define LR_OSPF_LSA_TYPE_E_INTER_PREFIX 40995
+
+#define LR_OSPF_LSA_TYPE_E_INTER_ROUTER 40996
+
+#define LR_OSPF_LSA_TYPE_E_AS_EXTERNAL 49189
+
+#define LR_OSPF_LSA_TYPE_E_TYPE_7 40999
+
+#define LR_OSPF_LSA_TYPE_E_LINK 32808
+
+#define LR_OSPF_LSA_TYPE_E_INTRA_PREFIX 41001
+
+/**
+ * V bit — endpoint of an active virtual link.
+ */
+#define LR_OSPF_ROUTER_LSA_FLAG_V 4
+
+/**
+ * E bit — AS boundary router (originates type-5 LSAs).
+ */
+#define LR_OSPF_ROUTER_LSA_FLAG_E 2
+
+/**
+ * B bit — area border router.
+ */
+#define LR_OSPF_ROUTER_LSA_FLAG_B 1
+
+/**
+ * v3 Router-LSA B bit (border router, RFC 5340 §A.4.2).
+ */
+#define LR_OSPF_V3_ROUTER_BIT_B 1
+
+/**
+ * v3 Router-LSA E bit (ASBR).
+ */
+#define LR_OSPF_V3_ROUTER_BIT_E 2
+
+/**
+ * v3 Router-LSA V6 bit (router is IPv6-capable).
+ */
+#define LR_OSPF_V3_ROUTER_BIT_V6 4
+
+#define LR_OSPF_LINK_TYPE_POINT_TO_POINT 1
+
+#define LR_OSPF_LINK_TYPE_TRANSIT_NETWORK 2
+
+#define LR_OSPF_LINK_TYPE_STUB_NETWORK 3
+
+#define LR_OSPF_LINK_TYPE_VIRTUAL_LINK 4
+
+/**
+ * v3 Router-LSA link type: point-to-point (RFC 5340 §A.4.2).
+ */
+#define LR_OSPF_V3_LINK_TYPE_POINTTOPOINT 1
+
+/**
+ * v3 Router-LSA link type: transit network.
+ */
+#define LR_OSPF_V3_LINK_TYPE_TRANSIT 2
+
+/**
+ * v3 Router-LSA link type: virtual.
+ */
+#define LR_OSPF_V3_LINK_TYPE_VIRTUAL 4
+
+#define LR_OSPF_PREFIX_OPT_NU 1
+
+#define LR_OSPF_PREFIX_OPT_LA 2
+
+#define LR_OSPF_PREFIX_OPT_MC 4
+
+#define LR_OSPF_PREFIX_OPT_P 8
+
+#define LR_OSPF_AS_EXT_BIT_E 67108864
+
+#define LR_OSPF_AS_EXT_BIT_F 33554432
+
+#define LR_OSPF_AS_EXT_BIT_T 16777216
+
+#define LR_OSPF_AS_EXT_METRIC_MASK 16777215
+
+/**
+ * First sequence number of a newly-originated LSA.
+ */
+#define LR_OSPF_INITIAL_SEQUENCE_NUMBER 2147483649
+
+/**
+ * Largest sequence number an LSA may carry (the next is MaxSequenceNumber + 1 = 0x80000000, the flush).
+ */
+#define LR_OSPF_MAX_SEQUENCE_NUMBER 2147483647
+
+/**
+ * LSInfinity — the largest age (RFC 2328 §14.1).
+ */
+#define LR_OSPF_MAX_AGE_SECS 3600
+
+/**
+ * LSRefreshTime — refresh interval (RFC 2328 §14.1).
+ */
+#define LR_OSPF_LS_REFRESH_TIME_SECS 1800
+
+#define LR_OSPF_OPAQUE_TYPE_GRACE 3
+
+#define LR_OSPF_LS_TYPE_GRACE_V3 11
+
+#define LR_OSPF_OPTIONS_O_BIT 64
+
+#define LR_OSPF_OPAQUE_TYPE_EXT_PREFIX 7
+
+#define LR_OSPF_OPAQUE_TYPE_RI 4
+
+#define LR_OSPF_OPAQUE_TYPE_EXT_LINK 8
+
+#define LR_OSPF_TLV_EXT_PREFIX 1
+
+#define LR_OSPF_TLV_EXT_PREFIX_RANGE 2
+
+#define LR_OSPF_TLV_EXT_LINK 1
+
+#define LR_OSPF_SUBTLV_PREFIX_SID 2
+
+#define LR_OSPF_TLV_SR_ALGORITHM 8
+
+#define LR_OSPF_TLV_SRGB 9
+
+#define LR_OSPF_SUBTLV_SID_LABEL 1
+
+#define LR_OSPF_SUBTLV_ADJ_SID 2
+
+#define LR_OSPF_SUBTLV_LAN_ADJ_SID 3
+
+#define LR_OSPF_LS_TYPE_V3_ROUTER_INFORMATION 40972
+
+#define LR_OSPF_LS_TYPE_SRV6_LOCATOR 41002
+
+#define LR_OSPF_RI_TLV_SRV6_CAPABILITIES 20
+
+#define LR_OSPF_RI_TLV_NODE_MSD 12
+
+#define LR_OSPF_RI_TLV_SR_ALGORITHM 8
+
+#define LR_OSPF_SRV6_CAP_O_FLAG 2
+
+#define LR_OSPF_LOCATOR_TLV_SRV6_LOCATOR 1
+
+#define LR_OSPF_LOCATOR_SUBTLV_END_SID 1
+
+#define LR_OSPF_LOCATOR_SUBTLV_IPV6_FWD_ADDR 2
+
+#define LR_OSPF_LOCATOR_SUBTLV_ROUTE_TAG 3
+
+#define LR_OSPF_LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID 4
+
+#define LR_OSPF_LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR 5
+
+#define LR_OSPF_LOCATOR_SUBTLV_SID_STRUCTURE 10
+
+#define LR_OSPF_EXT_SUBTLV_SID_STRUCTURE 30
+
+#define LR_OSPF_PREFIX_OPT_AC 128
+
+#define LR_OSPF_END_X_FLAG_B 128
+
+#define LR_OSPF_END_X_FLAG_S 64
+
+#define LR_OSPF_END_X_FLAG_P 32
+
+#define LR_OSPF_EXT_SUBTLV_END_X_SID 31
+
+#define LR_OSPF_EXT_SUBTLV_LAN_END_X_SID 32
+
+#define LR_OSPF_TLV_ROUTER_LINK 1
+
+#define LR_OSPF_TLV_ATTACHED_ROUTERS 2
+
+#define LR_OSPF_TLV_INTER_AREA_PREFIX 3
+
+#define LR_OSPF_TLV_INTER_AREA_ROUTER 4
+
+#define LR_OSPF_TLV_EXTERNAL_PREFIX 5
+
+#define LR_OSPF_TLV_INTRA_AREA_PREFIX 6
+
+#define LR_OSPF_TLV_IPV6_LINK_LOCAL 7
+
+#define LR_OSPF_TLV_IPV4_LINK_LOCAL 8
+
+#define LR_OSPF_SUBTLV_IPV6_FWD_ADDR 1
+
+#define LR_OSPF_SUBTLV_IPV4_FWD_ADDR 2
+
+#define LR_OSPF_SUBTLV_ROUTE_TAG 3
+
+#define LR_OSPF_EXT_PREFIX_BIT_E 67108864
+
+#define LR_OSPF_EXT_PREFIX_METRIC_MASK 16777215
+
 #define LR_OSPF_PHASE_EX_START 1
 
 #define LR_OSPF_PHASE_EXCHANGE 2
@@ -793,16 +1079,6 @@
 #define LR_OSPF_ROUTER_LSA_LINK_TRANSIT 2
 
 #define LR_OSPF_ROUTER_LSA_LINK_RAW 3
-
-/**
- * Router-LSA body flag bits (RFC 2328 §A.4.2) — `V` (virtual link
- * endpoint), `E` (ASBR), `B` (ABR).
- */
-#define LR_OSPF_ROUTER_LSA_FLAG_V 4
-
-#define LR_OSPF_ROUTER_LSA_FLAG_E 2
-
-#define LR_OSPF_ROUTER_LSA_FLAG_B 1
 
 /**
  * ORIGIN values (RFC 4271 §5.1.1).

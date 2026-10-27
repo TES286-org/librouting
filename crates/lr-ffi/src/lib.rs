@@ -53,6 +53,7 @@ pub mod mrt;
 pub mod ospf;
 pub mod ospf_abr_nssa;
 pub mod ospf_body;
+pub mod ospf_constants;
 pub mod ospf_db_exchange;
 pub mod ospf_external;
 pub mod ospf_interface;
