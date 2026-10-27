@@ -296,6 +296,136 @@
 
 #define LR_BGP_CEASE_HARD_RESET 9
 
+/**
+ * Node Flag Bits (RFC 7752 §3.3.1.1). 1-byte value.
+ */
+#define LR_BGP_LS_TLV_NODE_FLAG_BITS 1024
+
+/**
+ * Opaque Node Attribute (RFC 7752 §3.3.1.5). Variable-length.
+ */
+#define LR_BGP_LS_TLV_OPAQUE_NODE_ATTRIBUTE 1025
+
+/**
+ * Node Name (RFC 7752 §3.3.1.3). Variable-length UTF-8.
+ */
+#define LR_BGP_LS_TLV_NODE_NAME 1026
+
+/**
+ * IS-IS Area Identifier (RFC 7752 §3.3.1.2). Variable-length.
+ */
+#define LR_BGP_LS_TLV_ISIS_AREA_IDENTIFIER 1027
+
+/**
+ * IPv4 Router-ID of Local Node (RFC 5305 §4.3). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_IPV4_ROUTER_ID_LOCAL 1028
+
+/**
+ * IPv6 Router-ID of Local Node (RFC 6119 §4.1). 16-byte value.
+ */
+#define LR_BGP_LS_TLV_IPV6_ROUTER_ID_LOCAL 1029
+
+/**
+ * SRv6 Capabilities (RFC 9514 §3.1). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_SRV6_CAPABILITIES 1038
+
+/**
+ * Admin Group / Color (RFC 7752 §3.3.2.1). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_ADMIN_GROUP 1088
+
+/**
+ * Maximum Link Bandwidth (RFC 7752 §3.3.2.2). 4-byte IEEE float.
+ */
+#define LR_BGP_LS_TLV_MAX_LINK_BANDWIDTH 1089
+
+/**
+ * Max Reservable Link Bandwidth (RFC 7752 §3.3.2.2). 4-byte IEEE float.
+ */
+#define LR_BGP_LS_TLV_MAX_RESERVABLE_LINK_BANDWIDTH 1090
+
+/**
+ * Unreserved Link Bandwidth (RFC 7752 §3.3.2.2). 8 × 4-byte IEEE floats.
+ */
+#define LR_BGP_LS_TLV_UNRESERVED_LINK_BANDWIDTH 1091
+
+/**
+ * TED Metric (RFC 7752 §3.3.2.3 / RFC 3630 §2.5.5). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_TE_DEFAULT_METRIC 1092
+
+/**
+ * Link Protection Type (RFC 7752 §3.3.2.4). 2-byte value.
+ */
+#define LR_BGP_LS_TLV_LINK_PROTECTION_TYPE 1093
+
+/**
+ * MPLS Mask (RFC 7752 §3.3.2.5). 1-byte value.
+ */
+#define LR_BGP_LS_TLV_MPLS_MASK 1094
+
+/**
+ * IGP Metric (RFC 7752 §3.3.2.6). Variable-length.
+ */
+#define LR_BGP_LS_TLV_IGP_METRIC 1095
+
+/**
+ * IPv4 Router-ID of Remote Node (RFC 5305 §4.3). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_IPV4_ROUTER_ID_REMOTE 1030
+
+/**
+ * IPv6 Router-ID of Remote Node (RFC 6119 §4.1). 16-byte value.
+ */
+#define LR_BGP_LS_TLV_IPV6_ROUTER_ID_REMOTE 1031
+
+/**
+ * Prefix Metric (RFC 7752 §3.3.3.1). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_PREFIX_METRIC 1155
+
+/**
+ * Prefix Flag Bits (RFC 7752 §3.3.3.2). 1-byte value.
+ */
+#define LR_BGP_LS_TLV_PREFIX_FLAG_BITS 1156
+
+/**
+ * Source Router-ID (RFC 7752 §3.3.3.4). 4-byte or 8-byte value.
+ */
+#define LR_BGP_LS_TLV_SOURCE_ROUTER_ID 1170
+
+/**
+ * SRv6 Endpoint Behavior (RFC 9514 §7.1). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_SRV6_ENDPOINT_BEHAVIOR 1250
+
+/**
+ * SRv6 BGP Peering SID (RFC 9514 §7.2). Variable-length.
+ */
+#define LR_BGP_LS_TLV_SRV6_BGP_PEERING_SID 1251
+
+/**
+ * SRv6 SID Structure (RFC 9514 §7.3). 4-byte value.
+ */
+#define LR_BGP_LS_TLV_SRV6_SID_STRUCTURE 1252
+
+/**
+ * BGP-LS path attribute type code (RFC 7752 §13 — value 29 in the
+ * BGP Path Attributes sub-registry).
+ */
+#define LR_BGP_ATTR_TYPE_BGP_LS 29
+
+/**
+ * AFI / SAFI for BGP-LS (RFC 7752 §13).
+ */
+#define LR_BGP_LS_AFI 16388
+
+#define LR_BGP_LS_SAFI 71
+
+#define LR_BGP_LS_SAFI_VPN 72
+
 #define LR_BGP_STATE_IDLE 1
 
 #define LR_BGP_STATE_CONNECT 2
@@ -902,6 +1032,24 @@ typedef struct OpaqueBgpExtCommunity {
 } OpaqueBgpExtCommunity;
 
 typedef struct OpaqueBgpExtCommunity *lr_bgp_ext_community_t;
+
+/**
+ * Opaque `Tlv` handle.
+ */
+typedef struct OpaqueBgpLsTlv {
+  uint8_t _private[0];
+} OpaqueBgpLsTlv;
+
+typedef struct OpaqueBgpLsTlv *lr_bgp_ls_tlv_t;
+
+/**
+ * Opaque `Vec<Tlv>` handle (the decoded TLV stream).
+ */
+typedef struct OpaqueBgpLsTlvVec {
+  uint8_t _private[0];
+} OpaqueBgpLsTlvVec;
+
+typedef struct OpaqueBgpLsTlvVec *lr_bgp_ls_tlv_vec_t;
 
 /**
  * Opaque `AsPath` handle.
@@ -2924,6 +3072,96 @@ int32_t lr_bgp_ext_community_decode_set(const uint8_t *data,
                                         uintptr_t len,
                                         struct lr_bytes_t *out_values,
                                         uintptr_t *out_count);
+
+/**
+ * Construct a TLV from `(type, value_bytes)`.
+ *
+ * # Safety
+ * `value` must point to `value_len` readable bytes.
+ */
+lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(uint16_t tlv_type, const uint8_t *value, uintptr_t value_len);
+
+/**
+ * Read the 16-bit TLV type.
+ *
+ * # Safety
+ * `t` must be a valid handle.
+ */
+uint16_t lr_bgp_ls_tlv_type(lr_bgp_ls_tlv_t t);
+
+/**
+ * Read the value length.
+ *
+ * # Safety
+ * `t` must be a valid handle.
+ */
+uintptr_t lr_bgp_ls_tlv_value_len(lr_bgp_ls_tlv_t t);
+
+/**
+ * Copy the TLV value bytes into `out` (caller-allocated buffer of
+ * at least `lr_bgp_ls_tlv_value_len` bytes). Returns the number of
+ * bytes copied (clamped to `cap`).
+ *
+ * # Safety
+ * `t` must be a valid handle; `out` must point to writable memory of
+ * at least `cap` bytes.
+ */
+int32_t lr_bgp_ls_tlv_value(lr_bgp_ls_tlv_t t, uint8_t *out, uintptr_t cap);
+
+/**
+ * Drop a boxed `Tlv`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `t` must have been produced by [`lr_bgp_ls_tlv_new`] and not
+ * already freed.
+ */
+void lr_bgp_ls_tlv_free(lr_bgp_ls_tlv_t t);
+
+/**
+ * Decode a TLV stream (RFC 7752 §3.1 — concatenation of 4-byte-header
+ * TLVs). Returns a freshly-allocated `lr_bgp_ls_tlv_vec_t`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes; `out` must point to
+ * writable `lr_bgp_ls_tlv_vec_t`.
+ */
+int32_t lr_bgp_ls_decode_tlv_stream(const uint8_t *data, uintptr_t len, lr_bgp_ls_tlv_vec_t *out);
+
+/**
+ * Encode a TLV stream back to wire bytes (RFC 7752 §3.1). The
+ * caller frees `*out` with [`crate::bytes::lr_bytes_free`].
+ *
+ * # Safety
+ * `vec` must be a valid handle; `out` must point to writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bgp_ls_encode_tlv_stream(lr_bgp_ls_tlv_vec_t vec, struct lr_bytes_t *out);
+
+/**
+ * Number of TLVs in a decoded stream.
+ *
+ * # Safety
+ * `vec` must be a valid handle.
+ */
+uintptr_t lr_bgp_ls_tlv_vec_len(lr_bgp_ls_tlv_vec_t vec);
+
+/**
+ * Borrow one TLV by index. The returned handle is borrowed (do NOT
+ * free it); it is invalid after `lr_bgp_ls_tlv_vec_free` runs.
+ *
+ * # Safety
+ * `vec` must be a valid handle; `index` must be in range.
+ */
+lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
+
+/**
+ * Drop a boxed `Vec<Tlv>`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `vec` must have been produced by [`lr_bgp_ls_decode_tlv_stream`]
+ * and not already freed.
+ */
+void lr_bgp_ls_tlv_vec_free(lr_bgp_ls_tlv_vec_t vec);
 
 /**
  * Translate an `AttrType` value to its RFC 4271 §5 wire code (1..).
