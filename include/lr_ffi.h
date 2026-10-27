@@ -1210,6 +1210,68 @@ typedef struct OpaqueOspfNeighbor {
 
 typedef struct OpaqueOspfNeighbor *lr_ospf_neighbor_t;
 
+typedef struct OpaqueOspfSpfResult {
+  uint8_t _private[0];
+} OpaqueOspfSpfResult;
+
+typedef struct OpaqueOspfSpfResult *lr_ospf_spf_result_t;
+
+/**
+ * One SPF route projection. Used by `lr_ospf_spf_route_at`,
+ * `_summary_at`, `_v3_route_at` to surface one route to C. The
+ * `next_hop` field carries v4 in the low 4 bytes (is_ipv6=0) or all
+ * 16 bytes (is_ipv6=1); `has_next_hop` is 0 when the route has no
+ * resolved next hop (Loc-RIB will install it blackhole-style).
+ */
+typedef struct lr_ospf_spf_route_t {
+  /**
+   * Network prefix address (v4 in low 4 bytes, zero-padded to 16).
+   */
+  uint8_t prefix_addr[16];
+  /**
+   * 0 = IPv4, 1 = IPv6.
+   */
+  uint8_t prefix_is_ipv6;
+  /**
+   * Prefix length (0..=32 v4, 0..=128 v6).
+   */
+  uint8_t prefix_len;
+  /**
+   * SPF distance to this prefix (RFC 2328 §16.1).
+   */
+  uint64_t metric;
+  /**
+   * Next-hop address bytes (v4 in low 4 bytes when is_ipv6=0).
+   */
+  uint8_t next_hop[16];
+  /**
+   * 0 = IPv4 next hop, 1 = IPv6 next hop.
+   */
+  uint8_t next_hop_is_ipv6;
+  /**
+   * 1 when `next_hop` carries a value, 0 when the route has no
+   * resolved next hop.
+   */
+  uint8_t has_next_hop;
+  /**
+   * For inter-area routes derived from summary-LSAs: the
+   * advertising router (ABR) that originated the summary. 0 for
+   * intra-area routes.
+   */
+  uint32_t border_router;
+  /**
+   * For inter-area routes derived from summary-LSAs: the
+   * advertising router of the LSA. 0 for intra-area routes.
+   */
+  uint32_t advertising_router;
+} lr_ospf_spf_route_t;
+
+typedef struct OpaqueOspfSpfResultV3 {
+  uint8_t _private[0];
+} OpaqueOspfSpfResultV3;
+
+typedef struct OpaqueOspfSpfResultV3 *lr_ospf_spf_v3_result_t;
+
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
@@ -4247,6 +4309,166 @@ int32_t lr_ospf_neighbor_step_adj_ok(lr_ospf_neighbor_t r, uint8_t proceed);
  * See [`lr_ospf_neighbor_step_hello_seen`].
  */
 int32_t lr_ospf_neighbor_step_kill(lr_ospf_neighbor_t r);
+
+/**
+ * Run the RFC 2328 §16.1 intra-area SPF on `lsdb` rooted at
+ * `router_id`. Returns a new `lr_ospf_spf_result_t` on success, NULL
+ * on a NULL LSDB.
+ *
+ * # Safety
+ * `lsdb` must be a valid LSDB handle.
+ */
+lr_ospf_spf_result_t lr_ospf_spf_run(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+
+/**
+ * Drop a boxed `SpfResult`. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_ospf_spf_run` and not already
+ * freed.
+ */
+void lr_ospf_spf_result_free(lr_ospf_spf_result_t r);
+
+/**
+ * Total route count in a v2 `SpfResult` — stub networks plus transit
+ * networks. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid SpfResult handle.
+ */
+uintptr_t lr_ospf_spf_route_count(lr_ospf_spf_result_t r);
+
+/**
+ * Read one route by index. Indices 0..stub_count are stub networks;
+ * the rest are transit networks. Writes the route's fields to
+ * `*out`. Returns 0 on success, `LR_ERR_NULL` on a NULL result,
+ * `LR_ERR_INVALID_HANDLE` (-2) on out-of-range.
+ *
+ * # Safety
+ * `r` must be a valid SpfResult handle. `out` must point to a
+ * writable `lr_ospf_spf_route_t`.
+ */
+int32_t lr_ospf_spf_route_at(lr_ospf_spf_result_t r,
+                             uintptr_t index,
+                             struct lr_ospf_spf_route_t *out);
+
+/**
+ * Number of inter-area summary routes derived from summary-LSAs
+ * (RFC 2328 §16.2 — computed on top of an intra-area SPF result).
+ * Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid SpfResult handle.
+ */
+uintptr_t lr_ospf_spf_summary_count(lr_ospf_lsdb_t lsdb, lr_ospf_spf_result_t r);
+
+/**
+ * Read one inter-area summary route by index. Computes
+ * `summary_routes(lsdb, result)` and indexes into it. Returns 0 on
+ * success, `LR_ERR_NULL` on a NULL LSDB or result,
+ * `LR_ERR_INVALID_HANDLE` (-2) on out-of-range.
+ *
+ * # Safety
+ * `lsdb` and `r` must be valid handles. `out` must point to a
+ * writable `lr_ospf_spf_route_t`.
+ */
+int32_t lr_ospf_spf_summary_at(lr_ospf_lsdb_t lsdb,
+                               lr_ospf_spf_result_t r,
+                               uintptr_t index,
+                               struct lr_ospf_spf_route_t *out);
+
+/**
+ * Run the RFC 5340 §4.8 intra-area SPF on a v3 LSDB rooted at
+ * `router_id`. Returns a new `lr_ospf_spf_v3_result_t` on success,
+ * NULL on a NULL LSDB.
+ *
+ * # Safety
+ * `lsdb` must be a valid LSDB handle.
+ */
+lr_ospf_spf_v3_result_t lr_ospf_spf_v3_run(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+
+/**
+ * Run the RFC 8362 Extended-LSA form of the v3 SPF (RFC 8362 §4).
+ *
+ * # Safety
+ * See [`lr_ospf_spf_v3_run`].
+ */
+lr_ospf_spf_v3_result_t lr_ospf_spf_v3_extended_run(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+
+/**
+ * Drop a boxed v3 `SpfResultV3`. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_ospf_spf_v3_run` /
+ * `_v3_extended_run` and not already freed.
+ */
+void lr_ospf_spf_v3_result_free(lr_ospf_spf_v3_result_t r);
+
+/**
+ * Total route count in a v3 `SpfResultV3`. Returns 0 on a NULL
+ * handle.
+ *
+ * # Safety
+ * `r` must be a valid SpfResultV3 handle.
+ */
+uintptr_t lr_ospf_spf_v3_route_count(lr_ospf_spf_v3_result_t r);
+
+/**
+ * Read one v3 route by index.
+ *
+ * # Safety
+ * `r` must be a valid SpfResultV3 handle. `out` must point to a
+ * writable `lr_ospf_spf_route_t`.
+ */
+int32_t lr_ospf_spf_v3_route_at(lr_ospf_spf_v3_result_t r,
+                                uintptr_t index,
+                                struct lr_ospf_spf_route_t *out);
+
+/**
+ * Number of inter-area summary routes on a v3 result (RFC 5340
+ * §4.8 — computed on top of an intra-area v3 SPF result).
+ *
+ * # Safety
+ * `lsdb` and `r` must be valid handles.
+ */
+uintptr_t lr_ospf_spf_v3_summary_count(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t r);
+
+/**
+ * Read one v3 inter-area summary route by index.
+ *
+ * # Safety
+ * See [`lr_ospf_spf_v3_summary_count`]. `out` must point to a
+ * writable `lr_ospf_spf_route_t`.
+ */
+int32_t lr_ospf_spf_v3_summary_at(lr_ospf_lsdb_t lsdb,
+                                  lr_ospf_spf_v3_result_t r,
+                                  uintptr_t index,
+                                  struct lr_ospf_spf_route_t *out);
+
+/**
+ * Number of SRv6 locator routes on a v3 result (RFC 9513 §5 —
+ * locator routes projected from the LSDB alongside the regular
+ * intra-area SPF).
+ *
+ * # Safety
+ * `r` must be a valid SpfResultV3 handle.
+ */
+uintptr_t lr_ospf_spf_v3_locator_count(lr_ospf_spf_v3_result_t r);
+
+/**
+ * Read one v3 SRv6 locator route by index. The route carries the
+ * locator prefix + the algorithm + the metric + the next hop + the
+ * advertising router (RFC 9513 §5.1). The locator route is exposed
+ * through the same `lr_ospf_spf_route_t` shape, with `metric` and
+ * `next_hop` populated from the locator projection.
+ *
+ * # Safety
+ * `r` must be a valid SpfResultV3 handle. `out` must point to a
+ * writable `lr_ospf_spf_route_t`.
+ */
+int32_t lr_ospf_spf_v3_locator_at(lr_ospf_spf_v3_result_t r,
+                                  uintptr_t index,
+                                  struct lr_ospf_spf_route_t *out);
 
 /**
  * Install one redistribution pipe on the router.

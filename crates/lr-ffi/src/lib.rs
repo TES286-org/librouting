@@ -45,6 +45,7 @@ pub mod mrt;
 pub mod ospf;
 pub mod ospf_lsdb;
 pub mod ospf_neighbor;
+pub mod ospf_spf;
 pub mod policy;
 pub mod policy_objects;
 pub mod policy_safety;

@@ -104,13 +104,13 @@ impl From<&LsaHeader> for lr_ospf_lsa_hdr_t {
 fn box_lsdb(d: Lsdb) -> lr_ospf_lsdb_t {
     Box::into_raw(Box::new(d)) as lr_ospf_lsdb_t
 }
-unsafe fn borrow_lsdb(r: lr_ospf_lsdb_t) -> Option<&'static Lsdb> {
+pub(crate) unsafe fn borrow_lsdb(r: lr_ospf_lsdb_t) -> Option<&'static Lsdb> {
     if r.is_null() {
         return None;
     }
     Some(unsafe { &*(r as *const Lsdb) })
 }
-unsafe fn borrow_lsdb_mut(r: lr_ospf_lsdb_t) -> Option<&'static mut Lsdb> {
+pub(crate) unsafe fn borrow_lsdb_mut(r: lr_ospf_lsdb_t) -> Option<&'static mut Lsdb> {
     if r.is_null() {
         return None;
     }

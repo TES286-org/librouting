@@ -116,4 +116,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/capabilities.rs");
     println!("cargo:rerun-if-changed=src/bgp_path.rs");
     println!("cargo:rerun-if-changed=src/roa_table.rs");
+    println!("cargo:rerun-if-changed=src/ospf_spf.rs");
 }
