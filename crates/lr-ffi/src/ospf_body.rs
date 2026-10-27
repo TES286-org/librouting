@@ -321,9 +321,9 @@ pub unsafe extern "C" fn lr_ospf_ls_update_lsa_len(p: lr_ospf_packet_t) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lr_core::buf::ReadBuf;
     use lr_ospf::codec::OspfCodec;
     use lr_ospf::packet::*;
-    use lr_core::buf::ReadBuf;
 
     fn make_hello_packet() -> lr_ospf_packet_t {
         let hello = HelloBody {

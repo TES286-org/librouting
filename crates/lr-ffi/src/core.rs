@@ -664,9 +664,7 @@ unsafe fn borrow_queue(q: lr_timer_queue_t) -> Option<&'static lr_core::timer::T
     Some(unsafe { &*(q as *const lr_core::timer::TimerQueue) })
 }
 
-unsafe fn borrow_queue_mut(
-    q: lr_timer_queue_t,
-) -> Option<&'static mut lr_core::timer::TimerQueue> {
+unsafe fn borrow_queue_mut(q: lr_timer_queue_t) -> Option<&'static mut lr_core::timer::TimerQueue> {
     if q.is_null() {
         return None;
     }
@@ -703,7 +701,11 @@ pub unsafe extern "C" fn lr_timer_queue_arm(
             let Some(queue) = borrow_queue_mut(q) else {
                 return LR_ERR_NULL;
             };
-            queue.arm(lr_core::time::Instant(now_ms), lr_core::fsm::TimerId(id), spec.into());
+            queue.arm(
+                lr_core::time::Instant(now_ms),
+                lr_core::fsm::TimerId(id),
+                spec.into(),
+            );
             0
         },
         LR_ERR_PANIC,
@@ -1066,10 +1068,16 @@ mod tests {
 
         let mut array: *mut lr_timer_id_t = std::ptr::null_mut();
         let mut count: usize = 0;
-        assert_eq!(unsafe { lr_timer_queue_tick(q, 99, &raw mut array, &raw mut count) }, 0);
+        assert_eq!(
+            unsafe { lr_timer_queue_tick(q, 99, &raw mut array, &raw mut count) },
+            0
+        );
         assert_eq!(count, 0);
 
-        assert_eq!(unsafe { lr_timer_queue_tick(q, 100, &raw mut array, &raw mut count) }, 0);
+        assert_eq!(
+            unsafe { lr_timer_queue_tick(q, 100, &raw mut array, &raw mut count) },
+            0
+        );
         assert_eq!(count, 1);
         assert_eq!(unsafe { *array.add(0) }, 7);
         assert_eq!(unsafe { lr_timer_queue_is_empty(q) }, 1);
@@ -1101,16 +1109,25 @@ mod tests {
             assert_eq!(lr_timer_queue_arm(q, 0, 5, spec), 0);
             let mut array: *mut lr_timer_id_t = std::ptr::null_mut();
             let mut count: usize = 0;
-            assert_eq!(lr_timer_queue_tick(q, 100, &raw mut array, &raw mut count), 0);
+            assert_eq!(
+                lr_timer_queue_tick(q, 100, &raw mut array, &raw mut count),
+                0
+            );
             assert_eq!(count, 1);
             lr_timer_queue_drain_free(array, count);
 
             let mut array2: *mut lr_timer_id_t = std::ptr::null_mut();
             let mut count2: usize = 0;
-            assert_eq!(lr_timer_queue_tick(q, 199, &raw mut array2, &raw mut count2), 0);
+            assert_eq!(
+                lr_timer_queue_tick(q, 199, &raw mut array2, &raw mut count2),
+                0
+            );
             assert_eq!(count2, 0);
 
-            assert_eq!(lr_timer_queue_tick(q, 200, &raw mut array2, &raw mut count2), 0);
+            assert_eq!(
+                lr_timer_queue_tick(q, 200, &raw mut array2, &raw mut count2),
+                0
+            );
             assert_eq!(count2, 1);
             lr_timer_queue_drain_free(array2, count2);
         }
@@ -1120,7 +1137,10 @@ mod tests {
     #[test]
     fn ffi_timer_queue_null_safety() {
         let spec = lr_timer_spec_once(100);
-        assert_eq!(unsafe { lr_timer_queue_arm(std::ptr::null_mut(), 0, 1, spec) }, LR_ERR_NULL);
+        assert_eq!(
+            unsafe { lr_timer_queue_arm(std::ptr::null_mut(), 0, 1, spec) },
+            LR_ERR_NULL
+        );
         unsafe { lr_timer_queue_free(std::ptr::null_mut()) };
         unsafe { lr_timer_queue_drain_free(std::ptr::null_mut(), 0) };
     }

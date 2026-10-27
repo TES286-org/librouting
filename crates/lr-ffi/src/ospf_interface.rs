@@ -155,18 +155,12 @@ pub unsafe extern "C" fn lr_ospf_interface_dead_interval(i: lr_ospf_interface_t)
 
 #[no_mangle]
 pub unsafe extern "C" fn lr_ospf_interface_dr(i: lr_ospf_interface_t) -> u32 {
-    guarded(
-        || unsafe { borrow_iface(i).map(|i| i.dr).unwrap_or(0) },
-        0,
-    )
+    guarded(|| unsafe { borrow_iface(i).map(|i| i.dr).unwrap_or(0) }, 0)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn lr_ospf_interface_bdr(i: lr_ospf_interface_t) -> u32 {
-    guarded(
-        || unsafe { borrow_iface(i).map(|i| i.bdr).unwrap_or(0) },
-        0,
-    )
+    guarded(|| unsafe { borrow_iface(i).map(|i| i.bdr).unwrap_or(0) }, 0)
 }
 
 #[no_mangle]
@@ -187,14 +181,14 @@ pub unsafe extern "C" fn lr_ospf_interface_router_id(i: lr_ospf_interface_t) -> 
 
 #[no_mangle]
 pub unsafe extern "C" fn lr_ospf_interface_ip(i: lr_ospf_interface_t) -> u32 {
-    guarded(
-        || unsafe { borrow_iface(i).map(|i| i.ip).unwrap_or(0) },
-        0,
-    )
+    guarded(|| unsafe { borrow_iface(i).map(|i| i.ip).unwrap_or(0) }, 0)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lr_ospf_interface_set_priority(i: lr_ospf_interface_t, priority: u8) -> i32 {
+pub unsafe extern "C" fn lr_ospf_interface_set_priority(
+    i: lr_ospf_interface_t,
+    priority: u8,
+) -> i32 {
     guarded(
         || unsafe {
             let Some(iface) = borrow_iface_mut(i) else {
@@ -462,7 +456,9 @@ pub unsafe extern "C" fn lr_ospf_interface_action_peer_state_name(
                 return LR_ERR_NULL;
             }
             match action {
-                Action::EmitEvent(lr_core::event::Event::PeerStateChange { peer_state, .. }) => {
+                Action::EmitEvent(lr_core::event::Event::PeerStateChange {
+                    peer_state, ..
+                }) => {
                     let bytes = peer_state.as_bytes();
                     let n = bytes.len().min(cap - 1);
                     unsafe {
@@ -663,7 +659,10 @@ mod tests {
         );
         let name_str = std::str::from_utf8(&name[..7]).unwrap_or("");
         assert_eq!(name_str, "Waiting");
-        assert_eq!(unsafe { lr_ospf_interface_state(i) }, LR_OSPF_IF_STATE_WAITING);
+        assert_eq!(
+            unsafe { lr_ospf_interface_state(i) },
+            LR_OSPF_IF_STATE_WAITING
+        );
         unsafe {
             lr_ospf_interface_action_array_free(array, count);
             lr_ospf_interface_free(i);
@@ -676,7 +675,10 @@ mod tests {
         let mut array: *mut lr_ospf_if_action_t = std::ptr::null_mut();
         let mut count: usize = 0;
         unsafe {
-            assert_eq!(lr_ospf_interface_step_interface_up(i, &raw mut array, &raw mut count), 0);
+            assert_eq!(
+                lr_ospf_interface_step_interface_up(i, &raw mut array, &raw mut count),
+                0
+            );
             lr_ospf_interface_action_array_free(array, count);
         }
         let mut array2: *mut lr_ospf_if_action_t = std::ptr::null_mut();
@@ -685,7 +687,10 @@ mod tests {
             unsafe { lr_ospf_interface_step_wait_timer(i, &raw mut array2, &raw mut count2) },
             0
         );
-        assert_eq!(unsafe { lr_ospf_interface_state(i) }, LR_OSPF_IF_STATE_DR_OTHER);
+        assert_eq!(
+            unsafe { lr_ospf_interface_state(i) },
+            LR_OSPF_IF_STATE_DR_OTHER
+        );
         unsafe {
             lr_ospf_interface_action_array_free(array2, count2);
             lr_ospf_interface_free(i);

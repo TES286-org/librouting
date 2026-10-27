@@ -7,7 +7,7 @@
 #![allow(unused_imports)]
 
 use lr_bgp::role::{
-    ConfederationConfig, ClusterId, Otc, OtcRole, PeerRole, PeerTopology, RouteReflectorConfig,
+    ClusterId, ConfederationConfig, Otc, OtcRole, PeerRole, PeerTopology, RouteReflectorConfig,
     RouteServerConfig,
 };
 
@@ -29,7 +29,11 @@ pub const LR_OTC_ROLE_RS_CLIENT: u8 = 5;
 #[no_mangle]
 pub extern "C" fn lr_bgp_otc_role_from_u8(v: u8) -> u8 {
     guarded(
-        || OtcRole::from_u8(v).map(|r| r.to_u8()).unwrap_or(LR_OTC_ROLE_UNSET),
+        || {
+            OtcRole::from_u8(v)
+                .map(|r| r.to_u8())
+                .unwrap_or(LR_OTC_ROLE_UNSET)
+        },
         LR_OTC_ROLE_UNSET,
     )
 }
@@ -37,7 +41,11 @@ pub extern "C" fn lr_bgp_otc_role_from_u8(v: u8) -> u8 {
 #[no_mangle]
 pub extern "C" fn lr_bgp_otc_role_to_u8(role: u8) -> u8 {
     guarded(
-        || OtcRole::from_u8(role).map(|r| r.to_u8()).unwrap_or(LR_OTC_ROLE_UNSET),
+        || {
+            OtcRole::from_u8(role)
+                .map(|r| r.to_u8())
+                .unwrap_or(LR_OTC_ROLE_UNSET)
+        },
         LR_OTC_ROLE_UNSET,
     )
 }
@@ -45,7 +53,11 @@ pub extern "C" fn lr_bgp_otc_role_to_u8(role: u8) -> u8 {
 #[no_mangle]
 pub extern "C" fn lr_bgp_otc_role_is_upstream(role: u8) -> u8 {
     guarded(
-        || OtcRole::from_u8(role).map(|r| r.is_upstream() as u8).unwrap_or(0),
+        || {
+            OtcRole::from_u8(role)
+                .map(|r| r.is_upstream() as u8)
+                .unwrap_or(0)
+        },
         0,
     )
 }
@@ -53,7 +65,11 @@ pub extern "C" fn lr_bgp_otc_role_is_upstream(role: u8) -> u8 {
 #[no_mangle]
 pub extern "C" fn lr_bgp_otc_role_is_route_server(role: u8) -> u8 {
     guarded(
-        || OtcRole::from_u8(role).map(|r| r.is_route_server() as u8).unwrap_or(0),
+        || {
+            OtcRole::from_u8(role)
+                .map(|r| r.is_route_server() as u8)
+                .unwrap_or(0)
+        },
         0,
     )
 }
@@ -125,10 +141,7 @@ pub unsafe extern "C" fn lr_bgp_otc_encode(otc: lr_bgp_otc_t, out: *mut u8) -> i
 
 #[no_mangle]
 pub unsafe extern "C" fn lr_bgp_otc_value(otc: lr_bgp_otc_t) -> u32 {
-    guarded(
-        || unsafe { borrow_otc(otc).map(|o| o.0).unwrap_or(0) },
-        0,
-    )
+    guarded(|| unsafe { borrow_otc(otc).map(|o| o.0).unwrap_or(0) }, 0)
 }
 
 #[no_mangle]
@@ -204,7 +217,11 @@ pub unsafe extern "C" fn lr_bgp_peer_role_from_asns(
 #[no_mangle]
 pub extern "C" fn lr_bgp_peer_role_is_internal(role: u8) -> u8 {
     guarded(
-        || peer_role_from_u8(role).map(|r| r.is_internal() as u8).unwrap_or(0),
+        || {
+            peer_role_from_u8(role)
+                .map(|r| r.is_internal() as u8)
+                .unwrap_or(0)
+        },
         0,
     )
 }
@@ -212,7 +229,11 @@ pub extern "C" fn lr_bgp_peer_role_is_internal(role: u8) -> u8 {
 #[no_mangle]
 pub extern "C" fn lr_bgp_peer_role_is_external(role: u8) -> u8 {
     guarded(
-        || peer_role_from_u8(role).map(|r| r.is_external() as u8).unwrap_or(0),
+        || {
+            peer_role_from_u8(role)
+                .map(|r| r.is_external() as u8)
+                .unwrap_or(0)
+        },
         0,
     )
 }
@@ -220,7 +241,11 @@ pub extern "C" fn lr_bgp_peer_role_is_external(role: u8) -> u8 {
 #[no_mangle]
 pub extern "C" fn lr_bgp_peer_role_prepends_as_path(role: u8) -> u8 {
     guarded(
-        || peer_role_from_u8(role).map(|r| r.prepends_as_path() as u8).unwrap_or(0),
+        || {
+            peer_role_from_u8(role)
+                .map(|r| r.prepends_as_path() as u8)
+                .unwrap_or(0)
+        },
         0,
     )
 }
@@ -228,7 +253,11 @@ pub extern "C" fn lr_bgp_peer_role_prepends_as_path(role: u8) -> u8 {
 #[no_mangle]
 pub extern "C" fn lr_bgp_peer_role_rewrites_next_hop(role: u8) -> u8 {
     guarded(
-        || peer_role_from_u8(role).map(|r| r.rewrites_next_hop() as u8).unwrap_or(0),
+        || {
+            peer_role_from_u8(role)
+                .map(|r| r.rewrites_next_hop() as u8)
+                .unwrap_or(0)
+        },
         0,
     )
 }
@@ -522,11 +551,7 @@ pub unsafe extern "C" fn lr_bgp_confed_config_contains(c: lr_bgp_confed_config_t
 #[no_mangle]
 pub unsafe extern "C" fn lr_bgp_confed_config_external_as(c: lr_bgp_confed_config_t) -> u32 {
     guarded(
-        || unsafe {
-            borrow_confed(c)
-                .and_then(|c| c.external_as())
-                .unwrap_or(0)
-        },
+        || unsafe { borrow_confed(c).and_then(|c| c.external_as()).unwrap_or(0) },
         0,
     )
 }
@@ -623,20 +648,13 @@ pub unsafe extern "C" fn lr_bgp_rs_config_client(c: lr_bgp_rs_config_t) -> u8 {
 #[no_mangle]
 pub unsafe extern "C" fn lr_bgp_rs_config_strip_count(c: lr_bgp_rs_config_t) -> usize {
     guarded(
-        || unsafe {
-            borrow_rs(c)
-                .map(|c| c.strip_communities.len())
-                .unwrap_or(0)
-        },
+        || unsafe { borrow_rs(c).map(|c| c.strip_communities.len()).unwrap_or(0) },
         0,
     )
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lr_bgp_rs_config_strip_at(
-    c: lr_bgp_rs_config_t,
-    index: usize,
-) -> u32 {
+pub unsafe extern "C" fn lr_bgp_rs_config_strip_at(c: lr_bgp_rs_config_t, index: usize) -> u32 {
     guarded(
         || unsafe {
             borrow_rs(c)
@@ -650,11 +668,7 @@ pub unsafe extern "C" fn lr_bgp_rs_config_strip_at(
 #[no_mangle]
 pub unsafe extern "C" fn lr_bgp_rs_config_add_count(c: lr_bgp_rs_config_t) -> usize {
     guarded(
-        || unsafe {
-            borrow_rs(c)
-                .map(|c| c.add_communities.len())
-                .unwrap_or(0)
-        },
+        || unsafe { borrow_rs(c).map(|c| c.add_communities.len()).unwrap_or(0) },
         0,
     )
 }
@@ -747,9 +761,8 @@ mod tests {
             LR_PEER_ROLE_EBGP
         );
         let members = [64512u32, 64513, 64514];
-        let role = unsafe {
-            lr_bgp_peer_role_from_asns(64512, 64513, members.as_ptr(), members.len())
-        };
+        let role =
+            unsafe { lr_bgp_peer_role_from_asns(64512, 64513, members.as_ptr(), members.len()) };
         assert_eq!(role, LR_PEER_ROLE_CONFED_EXTERNAL);
     }
 
@@ -769,7 +782,10 @@ mod tests {
         assert_eq!(unsafe { lr_bgp_peer_topology_role(t) }, LR_PEER_ROLE_IBGP);
         assert_eq!(unsafe { lr_bgp_peer_topology_rr_client(t) }, 1);
         assert_eq!(unsafe { lr_bgp_peer_topology_rs_client(t) }, 0);
-        assert_eq!(unsafe { lr_bgp_peer_topology_otc_role(t) }, LR_OTC_ROLE_UNSET);
+        assert_eq!(
+            unsafe { lr_bgp_peer_topology_otc_role(t) },
+            LR_OTC_ROLE_UNSET
+        );
         unsafe { lr_bgp_peer_topology_free(t) };
     }
 

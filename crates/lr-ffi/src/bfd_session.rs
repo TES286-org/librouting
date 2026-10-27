@@ -13,8 +13,8 @@ use lr_core::time::Instant;
 use crate::bfd::{
     LR_BFD_DIAG_ADMIN_DOWN, LR_BFD_DIAG_CTRL_EXPIRED, LR_BFD_DIAG_ECHO_FAILED,
     LR_BFD_DIAG_FWD_RESET, LR_BFD_DIAG_MISCONN_DEFECT, LR_BFD_DIAG_NEIGHBOR_SIGNALLED,
-    LR_BFD_DIAG_NONE, LR_BFD_DIAG_PATH_DOWN, LR_BFD_DIAG_REV_PATH_DOWN,
-    LR_BFD_STATE_ADMIN_DOWN, LR_BFD_STATE_DOWN, LR_BFD_STATE_INIT, LR_BFD_STATE_UP,
+    LR_BFD_DIAG_NONE, LR_BFD_DIAG_PATH_DOWN, LR_BFD_DIAG_REV_PATH_DOWN, LR_BFD_STATE_ADMIN_DOWN,
+    LR_BFD_STATE_DOWN, LR_BFD_STATE_INIT, LR_BFD_STATE_UP,
 };
 use crate::error::{LrError, LR_ERR_PANIC};
 use crate::guarded;
@@ -259,11 +259,7 @@ pub unsafe extern "C" fn lr_bfd_session_is_up(s: lr_bfd_session_t) -> u8 {
 #[no_mangle]
 pub unsafe extern "C" fn lr_bfd_session_my_discriminator(s: lr_bfd_session_t) -> u32 {
     guarded(
-        || unsafe {
-            borrow_session(s)
-                .map(|s| s.my_discriminator())
-                .unwrap_or(0)
-        },
+        || unsafe { borrow_session(s).map(|s| s.my_discriminator()).unwrap_or(0) },
         0,
     )
 }
@@ -619,7 +615,10 @@ mod tests {
         let mut array: *mut lr_bfd_session_event_t = std::ptr::null_mut();
         let mut count: usize = 0;
         unsafe {
-            assert_eq!(lr_bfd_session_start(s, 0, &raw mut array, &raw mut count), 0);
+            assert_eq!(
+                lr_bfd_session_start(s, 0, &raw mut array, &raw mut count),
+                0
+            );
             lr_bfd_session_event_array_free(array, count);
         }
         let mut array2: *mut lr_bfd_session_event_t = std::ptr::null_mut();
@@ -674,7 +673,12 @@ mod tests {
         let mut diag = 0u8;
         assert_eq!(
             unsafe {
-                lr_bfd_session_event_state_change_fields(e, &raw mut from, &raw mut to, &raw mut diag)
+                lr_bfd_session_event_state_change_fields(
+                    e,
+                    &raw mut from,
+                    &raw mut to,
+                    &raw mut diag,
+                )
             },
             LR_ERR_INVALID_HANDLE
         );

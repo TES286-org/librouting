@@ -109,9 +109,7 @@ pub unsafe extern "C" fn lr_ospf_retransmit_contains(
                 link_state_id: ls_id,
                 advertising_router: adv_router,
             };
-            borrow_list(r)
-                .map(|l| l.contains(&key) as u8)
-                .unwrap_or(0)
+            borrow_list(r).map(|l| l.contains(&key) as u8).unwrap_or(0)
         },
         0,
     )
