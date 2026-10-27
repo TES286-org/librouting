@@ -114,7 +114,7 @@ pub struct lr_prefix_t {
 }
 
 impl lr_prefix_t {
-    fn to_prefix(self) -> Option<Prefix> {
+    pub(crate) fn to_prefix(self) -> Option<Prefix> {
         if self.is_ipv6 == 0 {
             if self.prefix_len > 32 {
                 return None;

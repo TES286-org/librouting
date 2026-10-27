@@ -826,6 +826,40 @@ typedef struct OpaqueBgpPeer {
 typedef struct OpaqueBgpPeer *lr_bgp_peer_t;
 
 /**
+ * One IPv4/IPv6 prefix (embedder-side). IPv4 addresses go in the
+ * first four bytes of `addr` with `is_ipv6 = 0`; IPv6 uses all
+ * sixteen bytes with `is_ipv6 = 1` — the same convention as
+ * `lr_roa_entry_t`.
+ */
+typedef struct lr_prefix_t {
+  uint8_t addr[16];
+  uint8_t is_ipv6;
+  uint8_t prefix_len;
+} lr_prefix_t;
+
+/**
+ * One peer's message counters (RFC 4271 §6 — open / keepalive /
+ * notification / update counters). Mirrors
+ * `lr_bgp::fsm::PeerMessageStats` field-for-field. Each counter is
+ * the cumulative number of messages of that kind sent / received
+ * since the peer was constructed (the counters are not reset on
+ * session reset — they reflect the lifetime of the
+ * `BgpPeer` handle).
+ */
+typedef struct lr_bgp_peer_message_stats_t {
+  uint64_t open_sent;
+  uint64_t open_received;
+  uint64_t keepalive_sent;
+  uint64_t keepalive_received;
+  uint64_t notification_sent;
+  uint64_t notification_received;
+  uint64_t update_sent;
+  uint64_t update_received;
+  uint64_t route_refresh_sent;
+  uint64_t route_refresh_received;
+} lr_bgp_peer_message_stats_t;
+
+/**
  * Opaque `BmpMessage` handle.
  */
 typedef struct OpaqueBmpMessage {
@@ -871,18 +905,6 @@ typedef struct OpaqueBgpCapability {
 } OpaqueBgpCapability;
 
 typedef struct OpaqueBgpCapability *lr_bgp_capability_t;
-
-/**
- * One IPv4/IPv6 prefix (embedder-side). IPv4 addresses go in the
- * first four bytes of `addr` with `is_ipv6 = 0`; IPv6 uses all
- * sixteen bytes with `is_ipv6 = 1` — the same convention as
- * `lr_roa_entry_t`.
- */
-typedef struct lr_prefix_t {
-  uint8_t addr[16];
-  uint8_t is_ipv6;
-  uint8_t prefix_len;
-} lr_prefix_t;
 
 /**
  * Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
@@ -2968,6 +2990,136 @@ int32_t lr_bgp_peer_step_timer_keepalive(lr_bgp_peer_t r);
  * See [`lr_bgp_peer_step_manual_start`].
  */
 int32_t lr_bgp_peer_step_timer_idle_hold(lr_bgp_peer_t r);
+
+/**
+ * Advertise a route to this peer (RFC 4271 §9.2). Returns 1 when
+ * the route was queued for transmission, 0 when the peer refused
+ * the route (not Established, iBGP split-horizon, OTC egress
+ * rule, LLGR_STALE to a non-LLGR peer, etc.). Returns
+ * `LR_ERR_NULL` (-1) on a NULL handle.
+ *
+ * The route handle is **borrowed** — the caller retains ownership
+ * and must still free it via `lr_route_free`.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `route` must be a valid
+ * Route handle (NULL is rejected with `LR_ERR_NULL`).
+ */
+int32_t lr_bgp_peer_advertise(lr_bgp_peer_t r, lr_route_t route);
+
+/**
+ * Withdraw a list of IPv4/IPv6 prefixes (RFC 4271 §9.3). The peer
+ * must be Established — the call is a silent no-op otherwise (RFC
+ * 4271 §8).
+ *
+ * `prefixes` points to `count` `lr_prefix_t` entries; `family_afi`
+ * / `family_safi` select the AFI/SAFI (1/1 = IPv4 unicast, 2/1 =
+ * IPv6 unicast, etc.). Returns `LR_ERR_NULL` (-1) on a NULL handle
+ * or a NULL `prefixes` with non-zero `count`.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `prefixes` (when `count > 0`)
+ * must point to `count` readable `lr_prefix_t` entries.
+ */
+int32_t lr_bgp_peer_withdraw(lr_bgp_peer_t r,
+                             const struct lr_prefix_t *prefixes,
+                             uintptr_t count,
+                             uint16_t family_afi,
+                             uint8_t family_safi);
+
+/**
+ * Send an End-of-RIB marker to this peer (RFC 4724 §4.2). For
+ * IPv4 unicast this is an empty UPDATE; for other families it is
+ * an `MpUnreach` with an empty NLRI list. The peer must be
+ * Established — the call is a silent no-op otherwise.
+ *
+ * `family_afi` / `family_safi` select the AFI/SAFI.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+int32_t lr_bgp_peer_send_end_of_rib(lr_bgp_peer_t r, uint16_t family_afi, uint8_t family_safi);
+
+/**
+ * Read the peer's cumulative message counters (RFC 4271 §6). The
+ * struct is written to `*out`. Returns `LR_ERR_NULL` (-1) on a
+ * NULL peer or NULL `out`.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `out` must point to writable
+ * memory the size of `lr_bgp_peer_message_stats_t`.
+ */
+int32_t lr_bgp_peer_message_stats(lr_bgp_peer_t r, struct lr_bgp_peer_message_stats_t *out);
+
+/**
+ * Read the configured hold time (RFC 4271 §4.2, seconds).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint16_t lr_bgp_peer_hold_time(lr_bgp_peer_t r);
+
+/**
+ * Read the configured keepalive interval (RFC 4271 §4.3, seconds).
+ * 0 means "use hold_time / 3" (the RFC 4271 default).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint16_t lr_bgp_peer_keepalive(lr_bgp_peer_t r);
+
+/**
+ * Read the local AS (RFC 4271 §4.2). For RFC 6793 four-octet-AS
+ * peers this is the full 32-bit value; the wire form unwraps to
+ * AS_TRANS (23456) when above 16 bits.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint32_t lr_bgp_peer_local_as(lr_bgp_peer_t r);
+
+/**
+ * 1 when the peer has RFC 6793 four-octet-AS support enabled.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_asn4(lr_bgp_peer_t r);
+
+/**
+ * 1 when IPv4 unicast is active for this peer (RFC 4271 §8 —
+ * "bgp default ipv4-unicast" knob; FRR `no bgp default ipv4-unicast`).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_ipv4_unicast_active(lr_bgp_peer_t r);
+
+/**
+ * 1 when this peer is a route-reflector client (RFC 4456 §9).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_is_rr_client(lr_bgp_peer_t r);
+
+/**
+ * 1 when this peer is a route-server client (RFC 7947 §2.1).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_is_rs_client(lr_bgp_peer_t r);
+
+/**
+ * Peer role (RFC 9234 §3.1): 0 = eBGP, 1 = iBGP, 2 =
+ * ConfederationExternal, 3 = ConfederationInternal. Mirrors
+ * `lr_bgp::role::PeerRole`.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+int32_t lr_bgp_peer_role(lr_bgp_peer_t r);
 
 /**
  * Decode one BMP message from `data`. On success, writes a freshly-
