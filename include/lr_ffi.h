@@ -592,6 +592,12 @@
 
 #define LR_OSPF_BODY_RAW 6
 
+/**
+ * NSSA P-bit (RFC 3101 §2.4) — set on type-7 LSAs that ask border
+ * routers to translate them into type-5s.
+ */
+#define LR_OSPF_NSSA_N_P_BIT 8
+
 #define LR_OSPF_PHASE_EX_START 1
 
 #define LR_OSPF_PHASE_EXCHANGE 2
@@ -644,6 +650,29 @@
 #define LR_OSPF_NEIGHBOR_STATE_LOADING 7
 
 #define LR_OSPF_NEIGHBOR_STATE_FULL 8
+
+/**
+ * Link kind constants — mirror `RouterLsaLink::*` (the four
+ * variants). Used by [`lr_ospf_router_lsa_link_new`] to select the
+ * variant.
+ */
+#define LR_OSPF_ROUTER_LSA_LINK_STUB 0
+
+#define LR_OSPF_ROUTER_LSA_LINK_POINT_TO_POINT 1
+
+#define LR_OSPF_ROUTER_LSA_LINK_TRANSIT 2
+
+#define LR_OSPF_ROUTER_LSA_LINK_RAW 3
+
+/**
+ * Router-LSA body flag bits (RFC 2328 §A.4.2) — `V` (virtual link
+ * endpoint), `E` (ASBR), `B` (ABR).
+ */
+#define LR_OSPF_ROUTER_LSA_FLAG_V 4
+
+#define LR_OSPF_ROUTER_LSA_FLAG_E 2
+
+#define LR_OSPF_ROUTER_LSA_FLAG_B 1
 
 /**
  * ORIGIN values (RFC 4271 §5.1.1).
@@ -1546,6 +1575,107 @@ typedef struct OpaqueOspfPacket {
 typedef struct OpaqueOspfPacket *lr_ospf_packet_t;
 
 /**
+ * Opaque `SummaryDestination` handle.
+ */
+typedef struct OpaqueOspfSummaryDest {
+  uint8_t _private[0];
+} OpaqueOspfSummaryDest;
+
+typedef struct OpaqueOspfSummaryDest *lr_ospf_summary_dest_t;
+
+typedef struct OpaqueOspfLsaBox {
+  uint8_t _private[0];
+} OpaqueOspfLsaBox;
+
+/**
+ * Opaque boxed-LSA handle. The C-side LSA *projection* is
+ * `lr_ospf_lsa_hdr_t` (a struct the caller can read fields from);
+ * this is the boxed owned-LSA handle the embedder passes back to
+ * `lr_ospf_lsa_*` functions.
+ */
+typedef struct OpaqueOspfLsaBox *lr_ospf_lsa_box_t;
+
+/**
+ * Opaque `NssaDefault` handle.
+ */
+typedef struct OpaqueOspfNssaDefault {
+  uint8_t _private[0];
+} OpaqueOspfNssaDefault;
+
+typedef struct OpaqueOspfNssaDefault *lr_ospf_nssa_default_t;
+
+/**
+ * Opaque `ExternalDestination` handle (origination input).
+ */
+typedef struct OpaqueOspfExternalDest {
+  uint8_t _private[0];
+} OpaqueOspfExternalDest;
+
+typedef struct OpaqueOspfExternalDest *lr_ospf_external_dest_t;
+
+typedef struct OpaqueOspfLsdb {
+  uint8_t _private[0];
+} OpaqueOspfLsdb;
+
+typedef struct OpaqueOspfLsdb *lr_ospf_lsdb_t;
+
+/**
+ * Opaque `Vec<ExternalRoute>` handle (the §16.4 calculation output).
+ */
+typedef struct OpaqueOspfExternalRouteVec {
+  uint8_t _private[0];
+} OpaqueOspfExternalRouteVec;
+
+typedef struct OpaqueOspfExternalRouteVec *lr_ospf_external_route_vec_t;
+
+/**
+ * Opaque `Vec<ExternalRoute>` handle (the §16.4 NSSA calculation
+ * output). Reuses the v2 external-route vec type — NSSA routes are
+ * ExternalRoute values, just computed from type-7 LSAs instead of
+ * type-5s.
+ */
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+
+typedef struct OpaqueOspfSpfResult {
+  uint8_t _private[0];
+} OpaqueOspfSpfResult;
+
+typedef struct OpaqueOspfSpfResult *lr_ospf_spf_result_t;
+
+/**
+ * NSSA translator-mode calculation options — mirrors
+ * `NssaCalcOpts`.
+ */
+typedef struct lr_ospf_nssa_calc_opts_t {
+  /**
+   * 1 = the calculating router is a border router of the NSSA
+   * (§2.5 step (3): skip type-7 defaults the border router would
+   * not install).
+   */
+  uint8_t border_router;
+  /**
+   * 1 = the NSSA suppresses type-3 summary import ("no-summary"
+   * mode). Border routers then ignore type-7 defaults entirely.
+   */
+  uint8_t summaries_suppressed;
+} lr_ospf_nssa_calc_opts_t;
+
+/**
+ * Opaque `Vec<ExternalRouteV3>` handle.
+ */
+typedef struct OpaqueOspfExternalRouteV3Vec {
+  uint8_t _private[0];
+} OpaqueOspfExternalRouteV3Vec;
+
+typedef struct OpaqueOspfExternalRouteV3Vec *lr_ospf_external_route_v3_vec_t;
+
+typedef struct OpaqueOspfSpfResultV3 {
+  uint8_t _private[0];
+} OpaqueOspfSpfResultV3;
+
+typedef struct OpaqueOspfSpfResultV3 *lr_ospf_spf_v3_result_t;
+
+/**
  * Fixed-layout projection of one LSA header (RFC 2328 §A.4.1).
  * Mirrors the header fields of `lr_ospf::lsa::LsaHeader` without
  * the body bytes (use `lr_ospf_lsa_body` to read the body).
@@ -1595,15 +1725,6 @@ typedef struct OpaqueOspfDbExchange {
 typedef struct OpaqueOspfDbExchange *lr_ospf_db_exchange_t;
 
 /**
- * Opaque `ExternalDestination` handle (origination input).
- */
-typedef struct OpaqueOspfExternalDest {
-  uint8_t _private[0];
-} OpaqueOspfExternalDest;
-
-typedef struct OpaqueOspfExternalDest *lr_ospf_external_dest_t;
-
-/**
  * Opaque `AsbrDestination` handle (type-4 origination input).
  */
 typedef struct OpaqueOspfAsbrDest {
@@ -1611,39 +1732,6 @@ typedef struct OpaqueOspfAsbrDest {
 } OpaqueOspfAsbrDest;
 
 typedef struct OpaqueOspfAsbrDest *lr_ospf_asbr_dest_t;
-
-typedef struct OpaqueOspfLsaBox {
-  uint8_t _private[0];
-} OpaqueOspfLsaBox;
-
-/**
- * Opaque boxed-LSA handle. The C-side LSA *projection* is
- * `lr_ospf_lsa_hdr_t` (a struct the caller can read fields from);
- * this is the boxed owned-LSA handle the embedder passes back to
- * `lr_ospf_lsa_*` functions.
- */
-typedef struct OpaqueOspfLsaBox *lr_ospf_lsa_box_t;
-
-/**
- * Opaque `Vec<ExternalRoute>` handle (the §16.4 calculation output).
- */
-typedef struct OpaqueOspfExternalRouteVec {
-  uint8_t _private[0];
-} OpaqueOspfExternalRouteVec;
-
-typedef struct OpaqueOspfExternalRouteVec *lr_ospf_external_route_vec_t;
-
-typedef struct OpaqueOspfLsdb {
-  uint8_t _private[0];
-} OpaqueOspfLsdb;
-
-typedef struct OpaqueOspfLsdb *lr_ospf_lsdb_t;
-
-typedef struct OpaqueOspfSpfResult {
-  uint8_t _private[0];
-} OpaqueOspfSpfResult;
-
-typedef struct OpaqueOspfSpfResult *lr_ospf_spf_result_t;
 
 /**
  * Opaque `ExternalRoute` handle (one §16.4 candidate).
@@ -1653,21 +1741,6 @@ typedef struct OpaqueOspfExternalRoute {
 } OpaqueOspfExternalRoute;
 
 typedef struct OpaqueOspfExternalRoute *lr_ospf_external_route_t;
-
-/**
- * Opaque `Vec<ExternalRouteV3>` handle.
- */
-typedef struct OpaqueOspfExternalRouteV3Vec {
-  uint8_t _private[0];
-} OpaqueOspfExternalRouteV3Vec;
-
-typedef struct OpaqueOspfExternalRouteV3Vec *lr_ospf_external_route_v3_vec_t;
-
-typedef struct OpaqueOspfSpfResultV3 {
-  uint8_t _private[0];
-} OpaqueOspfSpfResultV3;
-
-typedef struct OpaqueOspfSpfResultV3 *lr_ospf_spf_v3_result_t;
 
 /**
  * Opaque `ExternalRouteV3` handle (one v3 §4.8.5 candidate).
@@ -1720,6 +1793,15 @@ typedef struct OpaqueOspfNeighbor {
 } OpaqueOspfNeighbor;
 
 typedef struct OpaqueOspfNeighbor *lr_ospf_neighbor_t;
+
+/**
+ * Opaque `RouterLsaLink` handle.
+ */
+typedef struct OpaqueOspfRouterLsaLink {
+  uint8_t _private[0];
+} OpaqueOspfRouterLsaLink;
+
+typedef struct OpaqueOspfRouterLsaLink *lr_ospf_router_lsa_link_t;
 
 typedef struct OpaqueOspfRetransmitList {
   uint8_t _private[0];
@@ -5686,6 +5768,212 @@ uintptr_t lr_ospf_finalize_v3_stream(uint8_t *bytes,
                                      const uint8_t *dst);
 
 /**
+ * Construct a `SummaryDestination` (RFC 2328 §12.4.3) for type-3
+ * summary-LSA origination. The `prefix_v4` / `prefix_v6` slots follow
+ * the same convention as the rest of the FFI: pass exactly one.
+ *
+ * # Safety
+ * `prefix_v4` must point to 4 readable bytes when v4; `prefix_v6`
+ * must point to 16 readable bytes when v6.
+ */
+lr_ospf_summary_dest_t lr_ospf_summary_dest_new(const uint8_t *prefix_v4,
+                                                const uint8_t *prefix_v6,
+                                                uint8_t prefix_len,
+                                                uint32_t metric);
+
+/**
+ * Read the metric (capped at LSInfinity - 1).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+uint32_t lr_ospf_summary_dest_metric(lr_ospf_summary_dest_t d);
+
+/**
+ * Read the prefix as `(is_ipv6, octets_out[16], prefix_len_out)`.
+ *
+ * # Safety
+ * `d` must be a valid handle; `octets_out` must point to 16 writable
+ * bytes; `prefix_len_out` must point to a writable `uint8_t`.
+ */
+int32_t lr_ospf_summary_dest_prefix(lr_ospf_summary_dest_t d,
+                                    uint8_t *octets_out,
+                                    uint8_t *prefix_len_out);
+
+/**
+ * Drop a boxed `SummaryDestination`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `d` must have been produced by [`lr_ospf_summary_dest_new`] and not
+ * already freed.
+ */
+void lr_ospf_summary_dest_free(lr_ospf_summary_dest_t d);
+
+/**
+ * Compute the 32-bit Link State ID for a summary-LSA summarizing
+ * `prefix`, applying the RFC 2328 Appendix E collision-remapping
+ * algorithm. `existing_ls_ids` is a flat array of `(ls_id, prefix_len)`
+ * pairs packed as `ls_id_lo | (ls_id_hi << 8) | (prefix_len << 16)`
+ * (use the helper inline; each pair occupies one `u32`). Returns 1 +
+ * the LS-ID written to `*out` on success (1 so 0 can be a NULL
+ * indicator), 0 when the collision is unsolvable.
+ *
+ * Actually, simpler shape: write the LS-ID to `*out` and return 1
+ * on success, 0 on unsolvable / non-IPv4 prefix.
+ *
+ * # Safety
+ * `existing` must point to `count` readable `uint32_t` values; `out`
+ * must point to writable `uint32_t`.
+ */
+int32_t lr_ospf_summary_lsa_id_for(const uint8_t *prefix_v4,
+                                   const uint8_t *prefix_v6,
+                                   uint8_t prefix_len,
+                                   const uint32_t *existing,
+                                   uintptr_t count,
+                                   uint32_t *out);
+
+/**
+ * Originate a type-3 summary-LSA (RFC 2328 §12.4.3). The `dest`
+ * carries the prefix and metric; `prev_seq` is the previous
+ * instance's sequence number (`NULL` to start fresh).
+ *
+ * # Safety
+ * `dest` must be a valid handle; `out` must point to writable
+ * `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_summary_lsa(uint32_t router_id,
+                                      lr_ospf_summary_dest_t dest,
+                                      const uint32_t *prev_seq,
+                                      lr_ospf_lsa_box_t *out);
+
+/**
+ * MaxAge-flush an existing summary-LSA (RFC 2328 §14.1).
+ *
+ * # Safety
+ * `existing` must be a valid `lr_ospf_lsa_box_t` handle (borrowed);
+ * `out` must point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_flush_summary_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t *out);
+
+/**
+ * Originate an OSPFv3 inter-area-prefix-LSA (RFC 5340 §4.4.3).
+ *
+ * # Safety
+ * `dest` must be a valid `SummaryDestination` handle; `out` must
+ * point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_v3_inter_area_prefix_lsa(uint32_t router_id,
+                                                   uint32_t ls_id,
+                                                   lr_ospf_summary_dest_t dest,
+                                                   const uint32_t *prev_seq,
+                                                   lr_ospf_lsa_box_t *out);
+
+/**
+ * Construct a `NssaDefault` (RFC 3101 §2.4 default summary) for
+ * `originate_nssa_default_lsa`. The `metric` is the only field —
+ * the type-7 default always carries the E-bit (RFC 3101 §2.4).
+ *
+ * # Safety
+ * None — the inputs are by value.
+ */
+lr_ospf_nssa_default_t lr_ospf_nssa_default_new(uint32_t metric);
+
+/**
+ * Drop a boxed `NssaDefault`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `d` must have been produced by [`lr_ospf_nssa_default_new`] and
+ * not already freed.
+ */
+void lr_ospf_nssa_default_free(lr_ospf_nssa_default_t d);
+
+/**
+ * Originate a type-7 NSSA-LSA (RFC 3101 §2.4) for the given
+ * `ExternalDestination`. The `p_bit` is taken from the dest (set
+ * with `lr_ospf_external_dest_set_p_bit`).
+ *
+ * # Safety
+ * `dest` must be a valid `ExternalDestination` handle; `out` must
+ * point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_nssa_lsa(uint32_t router_id,
+                                   lr_ospf_external_dest_t dest,
+                                   const uint32_t *prev_seq,
+                                   lr_ospf_lsa_box_t *out);
+
+/**
+ * MaxAge-flush an existing type-7 NSSA-LSA.
+ *
+ * # Safety
+ * `existing` must be a valid `lr_ospf_lsa_box_t` handle (borrowed);
+ * `out` must point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_flush_nssa_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t *out);
+
+/**
+ * Originate a type-7 default NSSA-LSA (RFC 3101 §2.4 default
+ * summary).
+ *
+ * # Safety
+ * `default_dest` must be a valid `NssaDefault` handle; `out` must
+ * point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_nssa_default_lsa(uint32_t router_id,
+                                           lr_ospf_nssa_default_t default_dest,
+                                           const uint32_t *prev_seq,
+                                           lr_ospf_lsa_box_t *out);
+
+/**
+ * True when the local `router_id` is elected as the type-7→type-5
+ * translator for the area whose LSDB is `lsdb` (RFC 3101 §2.5 step
+ * (2)). Returns 0 (false) on a NULL handle.
+ *
+ * # Safety
+ * `lsdb` must be a valid handle.
+ */
+uint8_t lr_ospf_is_elected_translator(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+
+/**
+ * True when the LSA's P-bit (RFC 3101 §2.4) is set. Returns 0 on a
+ * NULL handle.
+ *
+ * # Safety
+ * `lsa` must be a valid handle.
+ */
+uint8_t lr_ospf_nssa_p_bit_set(lr_ospf_lsa_box_t lsa);
+
+/**
+ * Compute the §16.4 NSSA route candidates for one area (RFC 3101
+ * §2.4 + RFC 2328 §16.4). Returns a freshly-allocated vec handle.
+ *
+ * # Safety
+ * `lsdb` and `spf_result` must be valid handles.
+ */
+lr_ospf_nssa_route_vec_t lr_ospf_nssa_routes(lr_ospf_lsdb_t lsdb,
+                                             lr_ospf_spf_result_t spf_result,
+                                             struct lr_ospf_nssa_calc_opts_t opts);
+
+/**
+ * v3 form of [`lr_ospf_nssa_routes`] (RFC 5340 §4.4.3.6).
+ *
+ * # Safety
+ * `lsdb` and `spf_result` must be valid handles.
+ */
+lr_ospf_external_route_v3_vec_t lr_ospf_nssa_routes_v3(lr_ospf_lsdb_t lsdb,
+                                                       lr_ospf_spf_v3_result_t spf_result,
+                                                       struct lr_ospf_nssa_calc_opts_t opts);
+
+/**
+ * Extended-LSA mode of [`lr_ospf_nssa_routes_v3`] (RFC 8362 §6.1).
+ *
+ * # Safety
+ * `lsdb` and `spf_result` must be valid handles.
+ */
+lr_ospf_external_route_v3_vec_t lr_ospf_nssa_routes_v3_extended(lr_ospf_lsdb_t lsdb,
+                                                                lr_ospf_spf_v3_result_t spf_result,
+                                                                struct lr_ospf_nssa_calc_opts_t opts);
+
+/**
  * Read the Hello body's `network_mask` (v2) / Interface ID (v3).
  * Returns `LR_ERR_INVALID_HANDLE` (-2) when the packet body is not
  * a Hello.
@@ -6614,6 +6902,86 @@ int32_t lr_ospf_neighbor_step_adj_ok(lr_ospf_neighbor_t r, uint8_t proceed);
  * See [`lr_ospf_neighbor_step_hello_seen`].
  */
 int32_t lr_ospf_neighbor_step_kill(lr_ospf_neighbor_t r);
+
+/**
+ * Construct one Router-LSA link entry (RFC 2328 §A.4.2). The
+ * `link_kind` selects the variant; the field slots are then
+ * interpreted per the variant:
+ *
+ * - `LR_OSPF_ROUTER_LSA_LINK_STUB`: `field1` = network address,
+ *   `field2` = network mask, `metric` = interface cost.
+ * - `LR_OSPF_ROUTER_LSA_LINK_POINT_TO_POINT`: `field1` = neighbor
+ *   router-id, `field2` = our interface address, `metric` = cost.
+ * - `LR_OSPF_ROUTER_LSA_LINK_TRANSIT`: `field1` = DR's IP interface
+ *   address, `field2` = our interface address, `metric` = cost.
+ * - `LR_OSPF_ROUTER_LSA_LINK_RAW`: `field1` = link_id, `field2` =
+ *   link_data, `metric` = cost (no interpretation; used for virtual
+ *   links). `field3` carries the link type byte (1=ptp, 2=transit,
+ *   3=stub, 4=virtual).
+ *
+ * Returns `NULL` for an unknown `link_kind`.
+ */
+lr_ospf_router_lsa_link_t lr_ospf_router_lsa_link_new(int32_t link_kind,
+                                                      uint32_t field1,
+                                                      uint32_t field2,
+                                                      uint8_t field3,
+                                                      uint16_t metric);
+
+/**
+ * Drop a boxed `RouterLsaLink`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `l` must have been produced by [`lr_ospf_router_lsa_link_new`] and
+ * not already freed.
+ */
+void lr_ospf_router_lsa_link_free(lr_ospf_router_lsa_link_t l);
+
+/**
+ * Originate the router's own Router-LSA for an area (RFC 2328
+ * §12.4.1). The `flags_byte` carries the V/E/B bits (use the
+ * `LR_OSPF_ROUTER_LSA_FLAG_*` constants, OR'd together). `links` is
+ * a flat array of `RouterLsaLink` handles; `count` is the link
+ * count.
+ *
+ * `prev_seq` is the previous instance's sequence number (`NULL` to
+ * start fresh at `INITIAL_SEQUENCE_NUMBER`).
+ *
+ * Writes a freshly-allocated `lr_ospf_lsa_box_t` to `*out` on success.
+ * Returns 0 on success, `LR_ERR_OTHER` (-6) when the sequence space
+ * is exhausted.
+ *
+ * # Safety
+ * `links` must point to `count` valid `lr_ospf_router_lsa_link_t`
+ * handles (they are borrowed, not consumed); `out` must point to
+ * writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_router_lsa(uint32_t router_id,
+                                     uint8_t flags_byte,
+                                     const lr_ospf_router_lsa_link_t *links,
+                                     uintptr_t count,
+                                     const uint32_t *prev_seq,
+                                     lr_ospf_lsa_box_t *out);
+
+/**
+ * Originate a Network-LSA for a transit broadcast/NBMA segment where
+ * this router is the DR (RFC 2328 §12.4.2). `dr_router_id` is the
+ * DR's OSPF router ID (the LSA's Advertising Router); `dr_addr` is
+ * the DR's IP interface address on the segment (the Link State ID);
+ * `mask` is the network's address mask; `attached_routers` is the
+ * list of router-IDs of every router fully adjacent to the DR,
+ * **including the DR itself**.
+ *
+ * # Safety
+ * `attached_routers` must point to `count` readable `uint32_t`
+ * values; `out` must point to writable `lr_ospf_lsa_box_t`.
+ */
+int32_t lr_ospf_originate_network_lsa(uint32_t dr_router_id,
+                                      uint32_t dr_addr,
+                                      uint32_t mask,
+                                      const uint32_t *attached_routers,
+                                      uintptr_t count,
+                                      const uint32_t *prev_seq,
+                                      lr_ospf_lsa_box_t *out);
 
 lr_ospf_retransmit_t lr_ospf_retransmit_new(void);
 

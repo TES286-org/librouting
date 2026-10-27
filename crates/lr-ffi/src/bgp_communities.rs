@@ -848,14 +848,7 @@ mod tests {
     fn ffi_ext_community_encode_decode_roundtrip() {
         // Two extended communities, each as (kind_subtype_combined, global, local).
         // (0x00 << 8 | 0x02, 64512, 100) and (0x01 << 8 | 0x03, 0xdeadbeef, 0xbeef).
-        let specs: [u32; 6] = [
-            0x0002,
-            64512,
-            100,
-            0x0103,
-            0xdeadbeef,
-            0xbeef,
-        ];
+        let specs: [u32; 6] = [0x0002, 64512, 100, 0x0103, 0xdeadbeef, 0xbeef];
         let mut out = lr_bytes_t {
             ptr: std::ptr::null_mut(),
             len: 0,

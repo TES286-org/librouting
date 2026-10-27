@@ -113,11 +113,21 @@ pub type lr_ospf_external_route_v3_vec_t = *mut OpaqueOspfExternalRouteV3Vec;
 fn box_dest(d: ExternalDestination) -> lr_ospf_external_dest_t {
     Box::into_raw(Box::new(d)) as lr_ospf_external_dest_t
 }
-unsafe fn borrow_dest(d: lr_ospf_external_dest_t) -> Option<&'static ExternalDestination> {
+pub(crate) unsafe fn borrow_dest(
+    d: lr_ospf_external_dest_t,
+) -> Option<&'static ExternalDestination> {
     if d.is_null() {
         return None;
     }
     Some(unsafe { &*(d as *const ExternalDestination) })
+}
+
+/// Public alias so other FFI modules (e.g. ospf_abr_nssa) can borrow
+/// an ExternalDestination handle without re-implementing the cast.
+pub(crate) unsafe fn borrow_dest_pub(
+    d: lr_ospf_external_dest_t,
+) -> Option<&'static ExternalDestination> {
+    unsafe { borrow_dest(d) }
 }
 unsafe fn unbox_dest(d: lr_ospf_external_dest_t) -> Option<Box<ExternalDestination>> {
     if d.is_null() {

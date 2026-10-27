@@ -127,4 +127,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ospf_interface.rs");
     println!("cargo:rerun-if-changed=src/bgp_communities.rs");
     println!("cargo:rerun-if-changed=src/ospf_external.rs");
+    println!("cargo:rerun-if-changed=src/ospf_origination.rs");
+    println!("cargo:rerun-if-changed=src/ospf_abr_nssa.rs");
 }
