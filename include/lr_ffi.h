@@ -3914,6 +3914,52 @@ uint8_t lr_bgp_as_path_type_to_u8(uint8_t v);
 const char *lr_bgp_as_path_type_name(uint8_t v);
 
 /**
+ * Origin kind constants (RFC 4271 §5.1.2 — ORIGIN attribute):
+ * - 0 = Igp
+ * - 1 = Egp
+ * - 2 = Incomplete
+ *
+ * Unknown values round-trip as 0xff (the Rust enum is non-exhaustive).
+ */
+uint8_t lr_bgp_origin_kind_from_u8(uint8_t v);
+
+uint8_t lr_bgp_origin_kind_to_u8(uint8_t v);
+
+const char *lr_bgp_origin_kind_name(uint8_t v);
+
+/**
+ * Community kind constants (RFC 1997 §4 well-known communities +
+ * RFC 8326 §4 GRACEFUL_SHUTDOWN + RFC 9494 §3.2/§3.3 LLGR_STALE /
+ * NO_LLGR):
+ * - 0 = NoExport
+ * - 1 = NoAdvertise
+ * - 2 = NoExportSubconfed
+ * - 3 = NoPeer
+ * - 4 = GracefulShutdown
+ * - 5 = LlgrStale
+ * - 6 = NoLlgr
+ * - 7 = Custom
+ */
+uint8_t lr_bgp_community_kind_from_u8(uint8_t v);
+
+uint8_t lr_bgp_community_kind_to_u8(uint8_t v);
+
+const char *lr_bgp_community_kind_name(uint8_t v);
+
+/**
+ * Route-refresh subtype constants (RFC 2918 + RFC 7313 §3):
+ * - 0 = Normal
+ * - 1 = BeginOfRib (BoRR)
+ * - 2 = EndOfRib (EoRR)
+ * - 0xff = Unknown — RFC 7313 §3.2 mandates silent ignore.
+ */
+uint8_t lr_bgp_route_refresh_subtype_from_u8(uint8_t v);
+
+uint8_t lr_bgp_route_refresh_subtype_to_u8(uint8_t v);
+
+const char *lr_bgp_route_refresh_subtype_name(uint8_t v);
+
+/**
  * Construct a TLV from `(type, value_bytes)`.
  *
  * # Safety
@@ -4541,6 +4587,280 @@ uint8_t lr_bgp_path_attrs_mp_unreach(lr_bgp_path_attrs_t a,
                                      uint16_t *out_family_afi,
                                      uint8_t *out_family_safi,
                                      struct lr_bytes_t *out_nlri_bytes);
+
+/**
+ * Attach the OSPF type-2 external metric (RFC 2328 §16.4) under the
+ * private `LrOspfMetric2` tag. The tag is never transmitted on the
+ * wire — it carries the type-2 external metric through the Loc-RIB
+ * so the filter DSL's `ospf.metric2` field can surface it. `metric`
+ * is masked to the 24-bit OSPF external-metric width.
+ *
+ * # Safety
+ * `a` must be a valid PathAttributes handle.
+ */
+int32_t lr_bgp_path_attrs_set_ospf_metric2(lr_bgp_path_attrs_t a, uint32_t metric);
+
+/**
+ * Read back the OSPF type-2 external metric. Returns 1 and writes
+ * `*out_metric` when the attribute is present; returns 0 otherwise.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_metric` must point to a writable
+ * `uint32_t`.
+ */
+uint8_t lr_bgp_path_attrs_ospf_metric2(lr_bgp_path_attrs_t a, uint32_t *out_metric);
+
+/**
+ * True when an OSPF type-2 metric tag is physically present.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_ospf_metric2`].
+ */
+uint8_t lr_bgp_path_attrs_has_ospf_metric2(lr_bgp_path_attrs_t a);
+
+/**
+ * Attach the OSPF Advertising Router ID (RFC 2328 §A.4.1) under the
+ * private `LrOspfRouterId` tag. Never transmitted on the wire; the
+ * tag carries the OSPF route's advertising router through the
+ * Loc-RIB so the filter DSL's `ospf.router_id` field can surface it.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_set_ospf_metric2`].
+ */
+int32_t lr_bgp_path_attrs_set_ospf_router_id(lr_bgp_path_attrs_t a, uint32_t router_id);
+
+/**
+ * Read back the OSPF advertising router ID. Returns 1 and writes
+ * `*out_router_id` when the tag is present; returns 0 otherwise.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_router_id` must point to a
+ * writable `uint32_t`.
+ */
+uint8_t lr_bgp_path_attrs_ospf_router_id(lr_bgp_path_attrs_t a, uint32_t *out_router_id);
+
+/**
+ * True when an OSPF router-id tag is physically present.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_ospf_router_id`].
+ */
+uint8_t lr_bgp_path_attrs_has_ospf_router_id(lr_bgp_path_attrs_t a);
+
+/**
+ * Attach the Babel sequence number (RFC 8966 §3.2) under the private
+ * `LrBabelSeqno` tag. Carries the source route's sequence number
+ * through the Loc-RIB so the filter DSL's `babel.seqno` field can
+ * surface it.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_set_ospf_metric2`].
+ */
+int32_t lr_bgp_path_attrs_set_babel_seqno(lr_bgp_path_attrs_t a, uint16_t seqno);
+
+/**
+ * Read back the Babel sequence number. Returns 1 and writes
+ * `*out_seqno` when the tag is present; returns 0 otherwise.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_seqno` must point to a writable
+ * `uint16_t`.
+ */
+uint8_t lr_bgp_path_attrs_babel_seqno(lr_bgp_path_attrs_t a, uint16_t *out_seqno);
+
+/**
+ * True when a Babel seqno tag is physically present.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_babel_seqno`].
+ */
+uint8_t lr_bgp_path_attrs_has_babel_seqno(lr_bgp_path_attrs_t a);
+
+/**
+ * Attach the Babel router-id (RFC 8966 §3.1 — the 8-byte EUI-64
+ * originator of the source route) under the private
+ * `LrBabelRouterId` tag. Surfaces through the filter DSL's
+ * `babel.router_id` field.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_set_ospf_metric2`].
+ */
+int32_t lr_bgp_path_attrs_set_babel_router_id(lr_bgp_path_attrs_t a, uint64_t router_id);
+
+/**
+ * Read back the Babel router-id. Returns 1 and writes `*out_router_id`
+ * when the tag is present; returns 0 otherwise.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_router_id` must point to a
+ * writable `uint64_t`.
+ */
+uint8_t lr_bgp_path_attrs_babel_router_id(lr_bgp_path_attrs_t a, uint64_t *out_router_id);
+
+/**
+ * True when a Babel router-id tag is physically present.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_babel_router_id`].
+ */
+uint8_t lr_bgp_path_attrs_has_babel_router_id(lr_bgp_path_attrs_t a);
+
+/**
+ * Attach the IGP metric (RFC 4271 §9.1.2.2 step (g) — the IGP cost
+ * to the BGP NEXT_HOP) under the private `LrIgpMetric` tag. Used by
+ * the best-path step-7 comparison; the daemon computes it from the
+ * OSPF / Babel SPF result, but an FFI embedder building routes by
+ * hand can supply it directly.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_set_ospf_metric2`].
+ */
+int32_t lr_bgp_path_attrs_set_igp_metric(lr_bgp_path_attrs_t a, uint32_t metric);
+
+/**
+ * Read back the IGP metric. Returns 1 and writes `*out_metric` when
+ * the tag is present; returns 0 otherwise.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_metric` must point to a writable
+ * `uint32_t`.
+ */
+uint8_t lr_bgp_path_attrs_igp_metric(lr_bgp_path_attrs_t a, uint32_t *out_metric);
+
+/**
+ * True when an IGP metric tag is physically present.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_igp_metric`].
+ */
+uint8_t lr_bgp_path_attrs_has_igp_metric(lr_bgp_path_attrs_t a);
+
+/**
+ * Attach the peer-source-address tag (RFC 4271 §9.1.2.2 step (h)).
+ * The tag carries the BGP peer's transport address through the
+ * Loc-RIB so the best-path step-8 comparison can prefer routes
+ * whose NEXT_HOP equals the peer's source address.
+ *
+ * `is_ipv6` selects the address family; `addr` points to 4 bytes
+ * (v4) or 16 bytes (v6).
+ *
+ * # Safety
+ * `a` must be a valid handle. `addr` must point to 4 (v4) or 16 (v6)
+ * readable bytes.
+ */
+int32_t lr_bgp_path_attrs_set_peer_source_address(lr_bgp_path_attrs_t a,
+                                                  const uint8_t *addr,
+                                                  uint8_t is_ipv6);
+
+/**
+ * Read back the peer source address. Writes `*out_is_ipv6` (1 for
+ * v6, 0 for v4) and 4 or 16 bytes to `out_addr`. Returns 1 when
+ * the tag is present, 0 otherwise.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_addr` must point to at least 16
+ * writable bytes (the function writes 4 for v4, 16 for v6).
+ * `out_is_ipv6` must point to a writable `uint8_t`.
+ */
+uint8_t lr_bgp_path_attrs_peer_source_address(lr_bgp_path_attrs_t a,
+                                              uint8_t *out_addr,
+                                              uint8_t *out_is_ipv6);
+
+/**
+ * True when a peer-source-address tag is physically present.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_peer_source_address`].
+ */
+uint8_t lr_bgp_path_attrs_has_peer_source_address(lr_bgp_path_attrs_t a);
+
+/**
+ * True when the COMMUNITIES attribute contains `community` (RFC 1997
+ * §4 — `asn << 16 | value`). Returns 0 on a NULL attrs handle.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint8_t lr_bgp_path_attrs_has_community(lr_bgp_path_attrs_t a, uint32_t community);
+
+/**
+ * Attach a LARGE_COMMUNITY (RFC 8092 §2) to the attribute set,
+ * idempotent. The community is appended to the existing set when
+ * not already present.
+ *
+ * # Safety
+ * `a` must be a valid handle. `c` must be a valid LargeCommunity
+ * handle.
+ */
+int32_t lr_bgp_path_attrs_insert_large_community(lr_bgp_path_attrs_t a, lr_bgp_large_community_t c);
+
+/**
+ * Remove every attribute whose type code matches `attr_type`. Returns
+ * 1 when an attribute was removed, 0 when no attribute of that type
+ * was present.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint8_t lr_bgp_path_attrs_remove(lr_bgp_path_attrs_t a, uint8_t attr_type);
+
+/**
+ * Get one attribute by type code. Writes a flat `(flags, type, value)`
+ * triple to the out-pointers; the value bytes are returned as a
+ * freshly-allocated `lr_bytes_t` (caller frees via `lr_bytes_free`).
+ * Returns 1 when the attribute is present, 0 otherwise.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_flags` and `out_type` must point
+ * to writable `uint8_t`. `out_value` must point to a writable
+ * `lr_bytes_t`.
+ */
+uint8_t lr_bgp_path_attrs_get(lr_bgp_path_attrs_t a,
+                              uint8_t attr_type,
+                              uint8_t *out_flags,
+                              uint8_t *out_type,
+                              struct lr_bytes_t *out_value);
+
+/**
+ * Insert a raw `PathAttribute` (RFC 4271 §5). Replaces any
+ * existing attribute with the same type code. `flags` is the raw
+ * flags byte (RFC 4271 §5.1: Optional / Transitive / Partial /
+ * Extended Length). `attr_type` is the type code (1..255). `value`
+ * points to `value_len` bytes of attribute value.
+ *
+ * # Safety
+ * `a` must be a valid handle. `value` must point to `value_len`
+ * readable bytes (NULL only when `value_len` is 0).
+ */
+int32_t lr_bgp_path_attrs_insert_raw(lr_bgp_path_attrs_t a,
+                                     uint8_t flags,
+                                     uint8_t attr_type,
+                                     const uint8_t *value,
+                                     uintptr_t value_len);
+
+/**
+ * Number of attributes in the set (mirrors `PathAttributes::len`).
+ * Re-exposed as a free function for callers that received a handle
+ * without going through `lr_bgp_path_attrs_new`.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uintptr_t lr_bgp_path_attrs_count(lr_bgp_path_attrs_t a);
+
+/**
+ * Read one attribute by index (in insertion order). Writes the
+ * `(flags, type, value)` triple like [`lr_bgp_path_attrs_get`].
+ * Returns 1 when the index is in range, 0 otherwise.
+ *
+ * # Safety
+ * See [`lr_bgp_path_attrs_get`].
+ */
+uint8_t lr_bgp_path_attrs_at(lr_bgp_path_attrs_t a,
+                             uintptr_t index,
+                             uint8_t *out_flags,
+                             uint8_t *out_type,
+                             struct lr_bytes_t *out_value);
 
 /**
  * Construct a `BgpPeer` from the BGP-4 mandatory parameters (RFC
@@ -8221,6 +8541,60 @@ int32_t lr_ospf_lsa_to_wire(lr_ospf_lsa_box_t lsa, struct lr_bytes_t *out);
 void lr_ospf_lsa_free(lr_ospf_lsa_box_t lsa);
 
 /**
+ * Compute and store the LSA's Fletcher-16 checksum (RFC 2328 §C.4)
+ * and the length field, in place. Subsequent `lr_ospf_lsa_to_wire`
+ * calls produce a wire form that round-trips through
+ * `lr_ospf_lsa_checksum_ok`. Returns 0 on success, `LR_ERR_NULL`
+ * on a NULL handle.
+ *
+ * # Safety
+ * `lsa` must be a valid LSA handle.
+ */
+int32_t lr_ospf_lsa_finalize(lr_ospf_lsa_box_t lsa);
+
+/**
+ * Verify the LSA's Fletcher-16 checksum (RFC 2328 §C.4). Returns 1
+ * when the checksum is valid, 0 otherwise (including on a NULL
+ * handle).
+ *
+ * This is the LSA-handle variant; the raw-bytes variant
+ * `lr_ospf_lsa_checksum_ok` in `core_extras.rs` operates on a flat
+ * byte buffer without going through an LSA handle.
+ *
+ * # Safety
+ * `lsa` must be a valid LSA handle.
+ */
+uint8_t lr_ospf_lsa_handle_checksum_ok(lr_ospf_lsa_box_t lsa);
+
+/**
+ * Build a MaxAge-flush copy of the LSA (RFC 2328 §14: ls_age =
+ * MaxAge, sequence number bumped). Writes a new LSA handle to
+ * `*out` (caller frees with `lr_ospf_lsa_free`). Returns 1 when a
+ * flush was produced, 0 when the LSA cannot be flushed (e.g. it is
+ * already MaxAge) or the input handle is NULL.
+ *
+ * # Safety
+ * `lsa` must be a valid LSA handle. `out` must point to a writable
+ * `lr_ospf_lsa_box_t`.
+ */
+uint8_t lr_ospf_lsa_maxage_flush(lr_ospf_lsa_box_t lsa, lr_ospf_lsa_box_t *out);
+
+/**
+ * Compute the LSA's key (RFC 2328 §12.1 — `(ls_type, link_state_id,
+ * advertising_router)`). Writes the three fields to the out-pointers.
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * `lsa` must be a valid LSA handle. `out_ls_type`, `out_link_state_id`
+ * and `out_advertising_router` must point to writable `uint16_t` /
+ * `uint32_t` / `uint32_t`.
+ */
+int32_t lr_ospf_lsa_key(lr_ospf_lsa_box_t lsa,
+                        uint16_t *out_ls_type,
+                        uint32_t *out_link_state_id,
+                        uint32_t *out_advertising_router);
+
+/**
  * Construct an LSA header from the 8 fields (RFC 2328 §A.4.1).
  */
 lr_ospf_lsa_hdr_box_t lr_ospf_lsa_header_new(uint16_t ls_age,
@@ -10747,5 +11121,87 @@ uint8_t lr_srv6_locator_contains_sid(lr_srv6_locator_t loc, lr_srv6_sid_t sid);
  * `loc` must be a valid handle. `tail` must point to 16 readable bytes.
  */
 lr_srv6_sid_t lr_srv6_locator_sid_with_tail(lr_srv6_locator_t loc, const uint8_t *tail);
+
+/**
+ * Construct a locator from a SID and a block-bits count (RFC 8754
+ * §3.1). Returns NULL on a NULL `sid` handle or when the SID cannot
+ * host a locator of the requested width.
+ *
+ * # Safety
+ * `sid` must be a valid handle.
+ */
+lr_srv6_locator_t lr_srv6_locator_from_sid(lr_srv6_sid_t sid, uint8_t block_bits);
+
+/**
+ * The locator's block byte width (block_bits / 8, rounded up).
+ * Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `loc` must be a valid handle.
+ */
+uintptr_t lr_srv6_locator_block_bytes(lr_srv6_locator_t loc);
+
+/**
+ * Build a SID by combining this locator with a 32-bit function
+ * index (RFC 8754 §3.2). The index is placed in the function-bits
+ * portion of the SID. Returns NULL when the locator cannot host
+ * the index (e.g. the locator's block width leaves no room).
+ *
+ * # Safety
+ * `loc` must be a valid handle.
+ */
+lr_srv6_sid_t lr_srv6_locator_sid_with_index(lr_srv6_locator_t loc, uint32_t function_index);
+
+/**
+ * Compute the (offset, length) byte range of the locator inside a
+ * SID, given the locator's block-bits count. Writes the offset and
+ * length to `*out_offset` and `*out_len`. Returns 1 on success, 0
+ * when the locator block-bits value is invalid for this SID.
+ *
+ * # Safety
+ * `sid` must be a valid handle. `out_offset` and `out_len` must
+ * point to writable `uintptr_t`.
+ */
+uint8_t lr_srv6_sid_locator_slice(lr_srv6_sid_t sid,
+                                  uint8_t locator_block_bits,
+                                  uintptr_t *out_offset,
+                                  uintptr_t *out_len);
+
+/**
+ * Build a SID by concatenating a locator byte string and a tail
+ * byte string, given the locator's block-bits count. Returns NULL
+ * when the widths are inconsistent.
+ *
+ * # Safety
+ * `locator` and `tail` must each point to 16 readable bytes.
+ */
+lr_srv6_sid_t lr_srv6_sid_from_locator_tail(const uint8_t *locator,
+                                            const uint8_t *tail,
+                                            uint8_t locator_block_bits);
+
+/**
+ * True when the SID lives inside the locator byte string of width
+ * `locator_block_bits`. The `locator` pointer must point to
+ * `block_bits / 8` readable bytes (NOT 16). Returns 0 on a NULL sid
+ * handle or an invalid block-bits value.
+ *
+ * # Safety
+ * `sid` must be a valid handle. `locator` must point to
+ * `block_bits / 8` readable bytes.
+ */
+uint8_t lr_srv6_sid_is_inside_locator(lr_srv6_sid_t sid,
+                                      const uint8_t *locator,
+                                      uint8_t locator_block_bits);
+
+/**
+ * Read the SID's byte slice as a `*const uint8_t` pointer (16 bytes
+ * readable). The pointer is valid as long as the SID handle is alive.
+ * Returns NULL on a NULL sid handle.
+ *
+ * # Safety
+ * `sid` must be a valid handle. The caller must not free the returned
+ * pointer (it borrows from the SID handle).
+ */
+const uint8_t *lr_srv6_sid_as_ptr(lr_srv6_sid_t sid);
 
 #endif  /* LR_FFI_H */
