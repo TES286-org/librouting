@@ -1245,6 +1245,12 @@ typedef struct OpaqueOspfNeighbor {
 
 typedef struct OpaqueOspfNeighbor *lr_ospf_neighbor_t;
 
+typedef struct OpaqueOspfRetransmitList {
+  uint8_t _private[0];
+} OpaqueOspfRetransmitList;
+
+typedef struct OpaqueOspfRetransmitList *lr_ospf_retransmit_t;
+
 typedef struct OpaqueOspfSpfResult {
   uint8_t _private[0];
 } OpaqueOspfSpfResult;
@@ -4737,6 +4743,30 @@ int32_t lr_ospf_neighbor_step_adj_ok(lr_ospf_neighbor_t r, uint8_t proceed);
  * See [`lr_ospf_neighbor_step_hello_seen`].
  */
 int32_t lr_ospf_neighbor_step_kill(lr_ospf_neighbor_t r);
+
+lr_ospf_retransmit_t lr_ospf_retransmit_new(void);
+
+void lr_ospf_retransmit_free(lr_ospf_retransmit_t r);
+
+uintptr_t lr_ospf_retransmit_len(lr_ospf_retransmit_t r);
+
+uint8_t lr_ospf_retransmit_is_empty(lr_ospf_retransmit_t r);
+
+uint8_t lr_ospf_retransmit_contains(lr_ospf_retransmit_t r,
+                                    uint16_t ls_type,
+                                    uint32_t ls_id,
+                                    uint32_t adv_router);
+
+int32_t lr_ospf_retransmit_record_flood(lr_ospf_retransmit_t r,
+                                        lr_ospf_lsa_box_t lsa,
+                                        uint64_t now_ms);
+
+uint8_t lr_ospf_retransmit_remove(lr_ospf_retransmit_t r,
+                                  uint16_t ls_type,
+                                  uint32_t ls_id,
+                                  uint32_t adv_router);
+
+void lr_ospf_retransmit_clear(lr_ospf_retransmit_t r);
 
 /**
  * Run the RFC 2328 §16.1 intra-area SPF on `lsdb` rooted at
