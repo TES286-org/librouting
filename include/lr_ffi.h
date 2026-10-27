@@ -749,6 +749,19 @@ typedef struct lr_router_id_t {
   uint32_t value;
 } lr_router_id_t;
 
+typedef struct OpaqueTimerQueue {
+  uint8_t _private[0];
+} OpaqueTimerQueue;
+
+typedef struct OpaqueTimerQueue *lr_timer_queue_t;
+
+typedef uint32_t lr_timer_id_t;
+
+typedef struct lr_timer_spec_t {
+  uint64_t after_ms;
+  uint64_t periodic_ms;
+} lr_timer_spec_t;
+
 /**
  * Opaque router handle. C side never touches internals.
  */
@@ -3441,6 +3454,58 @@ uintptr_t lr_protocol_bird_name(uint8_t proto, char *out_name, uintptr_t name_ca
  * constant (e.g. 20 for BGP eBGP, 110 for OSPF).
  */
 uint32_t lr_protocol_default_admin_distance(uint8_t proto);
+
+uint64_t lr_instant_from_millis(uint64_t millis);
+
+uint64_t lr_instant_from_secs(uint64_t secs);
+
+uint64_t lr_instant_as_millis(uint64_t instant);
+
+uint64_t lr_instant_as_secs(uint64_t instant);
+
+uint64_t lr_instant_saturating_sub(uint64_t earlier, uint64_t later);
+
+uint64_t lr_instant_checked_add(uint64_t instant, uint64_t duration_ms);
+
+uint64_t lr_duration_from_millis(uint64_t millis);
+
+uint64_t lr_duration_from_secs(uint64_t secs);
+
+uint64_t lr_duration_as_millis(uint64_t duration_ms);
+
+uint64_t lr_duration_as_secs(uint64_t duration_ms);
+
+uint64_t lr_duration_checked_add(uint64_t a, uint64_t b);
+
+lr_timer_queue_t lr_timer_queue_new(void);
+
+void lr_timer_queue_free(lr_timer_queue_t q);
+
+int32_t lr_timer_queue_arm(lr_timer_queue_t q,
+                           uint64_t now_ms,
+                           lr_timer_id_t id,
+                           struct lr_timer_spec_t spec);
+
+int32_t lr_timer_queue_cancel(lr_timer_queue_t q, lr_timer_id_t id);
+
+int32_t lr_timer_queue_cancel_all(lr_timer_queue_t q);
+
+int32_t lr_timer_queue_tick(lr_timer_queue_t q,
+                            uint64_t now_ms,
+                            lr_timer_id_t **out_array,
+                            uintptr_t *out_count);
+
+uint8_t lr_timer_queue_is_empty(lr_timer_queue_t q);
+
+uintptr_t lr_timer_queue_len(lr_timer_queue_t q);
+
+uint64_t lr_timer_queue_next_fire_ms(lr_timer_queue_t q);
+
+void lr_timer_queue_drain_free(lr_timer_id_t *array, uintptr_t count);
+
+struct lr_timer_spec_t lr_timer_spec_once(uint64_t after_ms);
+
+struct lr_timer_spec_t lr_timer_spec_periodic(uint64_t after_ms, uint64_t periodic_ms);
 
 /**
  * Get the last error message. Returned string is NUL-terminated UTF-8.

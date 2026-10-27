@@ -562,6 +562,288 @@ impl From<lr_route_origin_t> for RouteOrigin {
     }
 }
 
+// ---- Instant / Duration (RFC 5905 §3.2 logical millisecond clock) ----
+
+#[no_mangle]
+pub extern "C" fn lr_instant_from_millis(millis: u64) -> u64 {
+    guarded(|| millis, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_instant_from_secs(secs: u64) -> u64 {
+    guarded(|| secs.saturating_mul(1000), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_instant_as_millis(instant: u64) -> u64 {
+    guarded(|| instant, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_instant_as_secs(instant: u64) -> u64 {
+    guarded(|| instant / 1000, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_instant_saturating_sub(earlier: u64, later: u64) -> u64 {
+    guarded(|| later.saturating_sub(earlier), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_instant_checked_add(instant: u64, duration_ms: u64) -> u64 {
+    guarded(|| instant.saturating_add(duration_ms), u64::MAX)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_duration_from_millis(millis: u64) -> u64 {
+    guarded(|| millis, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_duration_from_secs(secs: u64) -> u64 {
+    guarded(|| secs.saturating_mul(1000), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_duration_as_millis(duration_ms: u64) -> u64 {
+    guarded(|| duration_ms, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_duration_as_secs(duration_ms: u64) -> u64 {
+    guarded(|| duration_ms / 1000, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn lr_duration_checked_add(a: u64, b: u64) -> u64 {
+    guarded(|| a.saturating_add(b), u64::MAX)
+}
+
+// ---- TimerQueue ----
+
+#[repr(C)]
+pub struct OpaqueTimerQueue {
+    _private: [u8; 0],
+}
+pub type lr_timer_queue_t = *mut OpaqueTimerQueue;
+
+pub type lr_timer_id_t = u32;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_timer_spec_t {
+    pub after_ms: u64,
+    pub periodic_ms: u64,
+}
+
+impl From<lr_timer_spec_t> for lr_core::fsm::TimerSpec {
+    fn from(s: lr_timer_spec_t) -> Self {
+        if s.periodic_ms == 0 {
+            lr_core::fsm::TimerSpec::once(s.after_ms)
+        } else {
+            lr_core::fsm::TimerSpec::periodic(s.after_ms, s.periodic_ms)
+        }
+    }
+}
+
+fn box_queue(q: lr_core::timer::TimerQueue) -> lr_timer_queue_t {
+    Box::into_raw(Box::new(q)) as lr_timer_queue_t
+}
+
+unsafe fn unbox_queue(q: lr_timer_queue_t) -> Option<Box<lr_core::timer::TimerQueue>> {
+    if q.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(q as *mut lr_core::timer::TimerQueue) })
+}
+
+unsafe fn borrow_queue(q: lr_timer_queue_t) -> Option<&'static lr_core::timer::TimerQueue> {
+    if q.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(q as *const lr_core::timer::TimerQueue) })
+}
+
+unsafe fn borrow_queue_mut(
+    q: lr_timer_queue_t,
+) -> Option<&'static mut lr_core::timer::TimerQueue> {
+    if q.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(q as *mut lr_core::timer::TimerQueue) })
+}
+
+#[no_mangle]
+pub extern "C" fn lr_timer_queue_new() -> lr_timer_queue_t {
+    guarded(
+        || box_queue(lr_core::timer::TimerQueue::new()),
+        std::ptr::null_mut(),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_free(q: lr_timer_queue_t) {
+    guarded(
+        || unsafe {
+            drop(unbox_queue(q));
+        },
+        (),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_arm(
+    q: lr_timer_queue_t,
+    now_ms: u64,
+    id: lr_timer_id_t,
+    spec: lr_timer_spec_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(queue) = borrow_queue_mut(q) else {
+                return LR_ERR_NULL;
+            };
+            queue.arm(lr_core::time::Instant(now_ms), lr_core::fsm::TimerId(id), spec.into());
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_cancel(q: lr_timer_queue_t, id: lr_timer_id_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(queue) = borrow_queue_mut(q) else {
+                return LR_ERR_NULL;
+            };
+            queue.cancel(lr_core::fsm::TimerId(id));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_cancel_all(q: lr_timer_queue_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(queue) = borrow_queue_mut(q) else {
+                return LR_ERR_NULL;
+            };
+            queue.cancel_all();
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_tick(
+    q: lr_timer_queue_t,
+    now_ms: u64,
+    out_array: *mut *mut lr_timer_id_t,
+    out_count: *mut usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(queue) = borrow_queue_mut(q) else {
+                return LR_ERR_NULL;
+            };
+            if out_array.is_null() || out_count.is_null() {
+                return LR_ERR_NULL;
+            }
+            let fired = queue.tick(lr_core::time::Instant(now_ms));
+            let n = fired.len();
+            if n == 0 {
+                unsafe {
+                    *out_array = std::ptr::null_mut();
+                    *out_count = 0;
+                }
+                return 0;
+            }
+            let ids: Vec<u32> = fired.into_iter().map(|t| t.0).collect();
+            let mut boxed = ids.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+            unsafe {
+                *out_array = ptr;
+                *out_count = n;
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_is_empty(q: lr_timer_queue_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_queue(q)
+                .map(|queue| queue.is_empty() as u8)
+                .unwrap_or(1)
+        },
+        1,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_len(q: lr_timer_queue_t) -> usize {
+    guarded(
+        || unsafe { borrow_queue(q).map(|queue| queue.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_next_fire_ms(q: lr_timer_queue_t) -> u64 {
+    guarded(
+        || unsafe {
+            borrow_queue(q)
+                .and_then(|queue| queue.next_fire())
+                .map(|i| i.0)
+                .unwrap_or(u64::MAX)
+        },
+        u64::MAX,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_timer_queue_drain_free(array: *mut lr_timer_id_t, count: usize) {
+    guarded(
+        || unsafe {
+            if array.is_null() || count == 0 {
+                return;
+            }
+            let _ = unsafe { Vec::from_raw_parts(array, count, count) };
+        },
+        (),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn lr_timer_spec_once(after_ms: u64) -> lr_timer_spec_t {
+    guarded(
+        || lr_timer_spec_t {
+            after_ms,
+            periodic_ms: 0,
+        },
+        lr_timer_spec_t::default(),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn lr_timer_spec_periodic(after_ms: u64, periodic_ms: u64) -> lr_timer_spec_t {
+    guarded(
+        || lr_timer_spec_t {
+            after_ms,
+            periodic_ms,
+        },
+        lr_timer_spec_t::default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,5 +1022,116 @@ mod tests {
         let c2: lr_route_origin_t = r.into();
         assert_eq!(c.protocol, c2.protocol);
         assert_eq!(c.peer, c2.peer);
+    }
+
+    // ---- Instant / Duration / TimerQueue ----
+
+    #[test]
+    fn ffi_instant_round_trip() {
+        assert_eq!(lr_instant_from_millis(12345), 12345);
+        assert_eq!(lr_instant_as_millis(12345), 12345);
+        assert_eq!(lr_instant_as_secs(12345), 12);
+        assert_eq!(lr_instant_from_secs(10), 10_000);
+        assert_eq!(lr_instant_saturating_sub(100, 200), 100);
+        assert_eq!(lr_instant_saturating_sub(200, 100), 0);
+        assert_eq!(lr_instant_checked_add(100, 200), 300);
+        assert_eq!(lr_instant_checked_add(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn ffi_duration_round_trip() {
+        assert_eq!(lr_duration_from_millis(5000), 5000);
+        assert_eq!(lr_duration_as_secs(5000), 5);
+        assert_eq!(lr_duration_from_secs(7), 7000);
+        assert_eq!(lr_duration_checked_add(100, 200), 300);
+        assert_eq!(lr_duration_checked_add(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn ffi_timer_queue_new_is_empty() {
+        let q = lr_timer_queue_new();
+        assert_eq!(unsafe { lr_timer_queue_is_empty(q) }, 1);
+        assert_eq!(unsafe { lr_timer_queue_len(q) }, 0);
+        assert_eq!(unsafe { lr_timer_queue_next_fire_ms(q) }, u64::MAX);
+        unsafe { lr_timer_queue_free(q) };
+    }
+
+    #[test]
+    fn ffi_timer_queue_arm_tick_fires() {
+        let q = lr_timer_queue_new();
+        let spec = lr_timer_spec_once(100);
+        assert_eq!(unsafe { lr_timer_queue_arm(q, 0, 7, spec) }, 0);
+        assert_eq!(unsafe { lr_timer_queue_len(q) }, 1);
+        assert_eq!(unsafe { lr_timer_queue_next_fire_ms(q) }, 100);
+
+        let mut array: *mut lr_timer_id_t = std::ptr::null_mut();
+        let mut count: usize = 0;
+        assert_eq!(unsafe { lr_timer_queue_tick(q, 99, &raw mut array, &raw mut count) }, 0);
+        assert_eq!(count, 0);
+
+        assert_eq!(unsafe { lr_timer_queue_tick(q, 100, &raw mut array, &raw mut count) }, 0);
+        assert_eq!(count, 1);
+        assert_eq!(unsafe { *array.add(0) }, 7);
+        assert_eq!(unsafe { lr_timer_queue_is_empty(q) }, 1);
+        unsafe { lr_timer_queue_drain_free(array, count) };
+        unsafe { lr_timer_queue_free(q) };
+    }
+
+    #[test]
+    fn ffi_timer_queue_cancel() {
+        let q = lr_timer_queue_new();
+        let spec = lr_timer_spec_once(100);
+        unsafe {
+            assert_eq!(lr_timer_queue_arm(q, 0, 1, spec), 0);
+            assert_eq!(lr_timer_queue_arm(q, 0, 2, spec), 0);
+            assert_eq!(lr_timer_queue_len(q), 2);
+            assert_eq!(lr_timer_queue_cancel(q, 1), 0);
+            assert_eq!(lr_timer_queue_len(q), 1);
+            assert_eq!(lr_timer_queue_cancel_all(q), 0);
+            assert_eq!(lr_timer_queue_is_empty(q), 1);
+        }
+        unsafe { lr_timer_queue_free(q) };
+    }
+
+    #[test]
+    fn ffi_timer_queue_periodic_fires_repeatedly() {
+        let q = lr_timer_queue_new();
+        let spec = lr_timer_spec_periodic(100, 100);
+        unsafe {
+            assert_eq!(lr_timer_queue_arm(q, 0, 5, spec), 0);
+            let mut array: *mut lr_timer_id_t = std::ptr::null_mut();
+            let mut count: usize = 0;
+            assert_eq!(lr_timer_queue_tick(q, 100, &raw mut array, &raw mut count), 0);
+            assert_eq!(count, 1);
+            lr_timer_queue_drain_free(array, count);
+
+            let mut array2: *mut lr_timer_id_t = std::ptr::null_mut();
+            let mut count2: usize = 0;
+            assert_eq!(lr_timer_queue_tick(q, 199, &raw mut array2, &raw mut count2), 0);
+            assert_eq!(count2, 0);
+
+            assert_eq!(lr_timer_queue_tick(q, 200, &raw mut array2, &raw mut count2), 0);
+            assert_eq!(count2, 1);
+            lr_timer_queue_drain_free(array2, count2);
+        }
+        unsafe { lr_timer_queue_free(q) };
+    }
+
+    #[test]
+    fn ffi_timer_queue_null_safety() {
+        let spec = lr_timer_spec_once(100);
+        assert_eq!(unsafe { lr_timer_queue_arm(std::ptr::null_mut(), 0, 1, spec) }, LR_ERR_NULL);
+        unsafe { lr_timer_queue_free(std::ptr::null_mut()) };
+        unsafe { lr_timer_queue_drain_free(std::ptr::null_mut(), 0) };
+    }
+
+    #[test]
+    fn ffi_timer_spec_constructors() {
+        let once = lr_timer_spec_once(100);
+        assert_eq!(once.after_ms, 100);
+        assert_eq!(once.periodic_ms, 0);
+        let per = lr_timer_spec_periodic(100, 1000);
+        assert_eq!(per.after_ms, 100);
+        assert_eq!(per.periodic_ms, 1000);
     }
 }
