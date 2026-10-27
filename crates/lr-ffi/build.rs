@@ -135,4 +135,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ldp_tlv.rs");
     println!("cargo:rerun-if-changed=src/damping.rs");
     println!("cargo:rerun-if-changed=src/osroute.rs");
+    println!("cargo:rerun-if-changed=src/attributes.rs");
 }

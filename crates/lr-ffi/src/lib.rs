@@ -22,6 +22,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::drop_non_drop)]
 
+pub mod attributes;
 pub mod babel;
 pub mod babel_codec;
 pub mod babel_messages;

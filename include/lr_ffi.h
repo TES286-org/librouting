@@ -1307,6 +1307,15 @@
 #define LR_OSPF_V3 3
 
 /**
+ * Opaque `Attributes` handle. C side never touches internals.
+ */
+typedef struct OpaqueAttributes {
+  uint8_t _private[0];
+} OpaqueAttributes;
+
+typedef struct OpaqueAttributes *lr_attributes_t;
+
+/**
  * Opaque `BabelFrame` handle.
  */
 typedef struct OpaqueBabelFrame {
@@ -2987,6 +2996,129 @@ typedef struct OpaqueSrv6Locator {
 } OpaqueSrv6Locator;
 
 typedef struct OpaqueSrv6Locator *lr_srv6_locator_t;
+
+/**
+ * Construct an empty `Attributes`.
+ */
+lr_attributes_t lr_attributes_new(void);
+
+/**
+ * Insert / replace one attribute by tag. `value` points to
+ * `value_len` raw bytes (NULL only when `value_len == 0`).
+ *
+ * # Safety
+ * `a` must be a valid handle. `value` (when non-null) must point to
+ * `value_len` readable bytes.
+ */
+int32_t lr_attributes_insert(lr_attributes_t a,
+                             uint8_t tag,
+                             uint8_t flags,
+                             const uint8_t *value,
+                             uintptr_t value_len);
+
+/**
+ * Read one attribute by tag. On success writes `flags` to
+ * `*out_flags`, the raw value bytes to `out_value` (caller-allocated,
+ * at most `cap` bytes), and returns the total value length (>= 0).
+ * A return value of -1 (`LR_ERR_NULL`) means a null handle / null
+ * out pointer; a return value of -2 means the tag is not present.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_flags` must point to a writable
+ * `uint8_t`. `out_value` (when non-null) must point to `cap`
+ * writable bytes.
+ */
+int64_t lr_attributes_get(lr_attributes_t a,
+                          uint8_t tag,
+                          uint8_t *out_flags,
+                          uint8_t *out_value,
+                          uintptr_t cap);
+
+/**
+ * Read a 4-byte big-endian unsigned integer attribute. Returns 0
+ * when the tag is absent or the value is not exactly 4 bytes long
+ * (the caller cannot distinguish "absent" from "value is 0" — use
+ * [`lr_attributes_get`] when the distinction matters).
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint32_t lr_attributes_get_u32_be(lr_attributes_t a, uint8_t tag);
+
+/**
+ * Read an 8-byte big-endian unsigned integer attribute. Returns 0
+ * when the tag is absent or the value is not exactly 8 bytes long.
+ *
+ * # Safety
+ * See [`lr_attributes_get_u32_be`].
+ */
+uint64_t lr_attributes_get_u64_be(lr_attributes_t a, uint8_t tag);
+
+/**
+ * Read a 1-byte unsigned integer attribute. Returns 0 when the tag
+ * is absent.
+ *
+ * # Safety
+ * See [`lr_attributes_get_u32_be`].
+ */
+uint8_t lr_attributes_get_u8(lr_attributes_t a, uint8_t tag);
+
+/**
+ * Remove one attribute by tag. Returns 1 when the attribute was
+ * present (and is now removed), 0 when it was not in the set.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+int32_t lr_attributes_remove(lr_attributes_t a, uint8_t tag);
+
+/**
+ * Number of attributes in the set. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uintptr_t lr_attributes_len(lr_attributes_t a);
+
+/**
+ * True (1) when the set holds no attributes, false (0) otherwise.
+ * Returns 1 (true) on a NULL handle (the safe default for "no
+ * attributes to read").
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint8_t lr_attributes_is_empty(lr_attributes_t a);
+
+/**
+ * Read one attribute by index. On success writes `tag` and `flags`
+ * to `*out_tag` and `*out_flags`, the raw value bytes to `out_value`
+ * (caller-allocated, at most `cap` bytes), and returns the total
+ * value length (>= 0). A return value greater than `cap` means the
+ * buffer was too small. Returns -1 (`LR_ERR_NULL`) on a null handle /
+ * null out pointer, -2 (`LR_ERR_INVALID_HANDLE`) when the index is
+ * out of range.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out_tag` and `out_flags` must point
+ * to writable `uint8_t` values. `out_value` (when non-null) must
+ * point to `cap` writable bytes.
+ */
+int64_t lr_attributes_at(lr_attributes_t a,
+                         uintptr_t index,
+                         uint8_t *out_tag,
+                         uint8_t *out_flags,
+                         uint8_t *out_value,
+                         uintptr_t cap);
+
+/**
+ * Drop a boxed `Attributes`. Safe to call with NULL.
+ *
+ * # Safety
+ * `a` must have been produced by [`lr_attributes_new`] and must not
+ * be used after this call. Double-free is undefined behaviour.
+ */
+void lr_attributes_free(lr_attributes_t a);
 
 /**
  * Decode one Babel frame from `data`. On success, writes a freshly-
