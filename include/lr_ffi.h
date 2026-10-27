@@ -694,6 +694,46 @@
 
 #define LR_LDP_SESSION_STATE_OPERATIONAL 5
 
+/**
+ * Well-known Generic Label constants — mirror
+ * `GenericLabel::*` (RFC 3032 §2.1 reserved labels).
+ */
+#define LR_LDP_LABEL_IPV4_EXPLICIT_NULL 0
+
+#define LR_LDP_LABEL_ROUTER_ALERT 1
+
+#define LR_LDP_LABEL_IPV6_EXPLICIT_NULL 2
+
+#define LR_LDP_LABEL_IMPLICIT_NULL 3
+
+#define LR_LDP_STATUS_UNKNOWN_FEC 2147483660
+
+#define LR_LDP_STATUS_NO_ROUTE 2147483661
+
+#define LR_LDP_STATUS_NO_LABEL_RESOURCE 2147483662
+
+#define LR_LDP_STATUS_LABEL_RESOURCE_AVAILABLE 2147483663
+
+#define LR_LDP_STATUS_SESSION_REJECTED 2147483664
+
+#define LR_LDP_STATUS_LABEL_WITHDRAW 40
+
+#define LR_LDP_MSG_KEEP_ALIVE 513
+
+#define LR_LDP_MSG_ADDRESS_MESSAGE 768
+
+#define LR_LDP_TLV_COMMON_HELLO_PARAMS 1024
+
+#define LR_LDP_TLV_IPV4_TRANSPORT_ADDR 1025
+
+#define LR_LDP_TLV_CONFIG_SEQ_NUMBER 1026
+
+#define LR_LDP_TLV_IPV6_TRANSPORT_ADDR 1027
+
+#define LR_LDP_TLV_DUAL_STACK_CAPABILITY 1028
+
+#define LR_LDP_TLV_COMMON_SESSION_PARAMS 1280
+
 #define LR_MRT_RECORD_PEER_INDEX_TABLE 1
 
 #define LR_MRT_RECORD_RIB 2
@@ -1964,6 +2004,24 @@ typedef struct OpaqueLdpSession {
 } OpaqueLdpSession;
 
 typedef struct OpaqueLdpSession *lr_ldp_session_t;
+
+/**
+ * Opaque `GenericLabel` handle.
+ */
+typedef struct OpaqueLdpGenericLabel {
+  uint8_t _private[0];
+} OpaqueLdpGenericLabel;
+
+typedef struct OpaqueLdpGenericLabel *lr_ldp_label_t;
+
+/**
+ * Opaque `Fec` handle.
+ */
+typedef struct OpaqueLdpFec {
+  uint8_t _private[0];
+} OpaqueLdpFec;
+
+typedef struct OpaqueLdpFec *lr_ldp_fec_t;
 
 /**
  * Opaque `TransitAllocator` handle.
@@ -5910,6 +5968,101 @@ int32_t lr_ldp_session_start(lr_ldp_session_t r, uint64_t now_ms);
  * writable memory.
  */
 int32_t lr_ldp_session_drain_outgoing(lr_ldp_session_t r, struct lr_bytes_t *out);
+
+/**
+ * Construct a `GenericLabel` (RFC 5036 §3.4.2.1) from the 20-bit
+ * label value.
+ */
+lr_ldp_label_t lr_ldp_label_new(uint32_t value);
+
+/**
+ * Read the 20-bit label value.
+ *
+ * # Safety
+ * `l` must be a valid handle.
+ */
+uint32_t lr_ldp_label_value(lr_ldp_label_t l);
+
+/**
+ * True when the value fits the 20-bit label field.
+ *
+ * # Safety
+ * `l` must be a valid handle.
+ */
+uint8_t lr_ldp_label_is_valid(lr_ldp_label_t l);
+
+/**
+ * Drop a boxed `GenericLabel`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `l` must have been produced by [`lr_ldp_label_new`] and not already
+ * freed.
+ */
+void lr_ldp_label_free(lr_ldp_label_t l);
+
+/**
+ * Construct a wildcard `Fec` (RFC 5036 §3.4.1).
+ */
+lr_ldp_fec_t lr_ldp_fec_new_wildcard(void);
+
+/**
+ * Construct a single-prefix `Fec` (RFC 5036 §3.4.1).
+ *
+ * # Safety
+ * `prefix_v4` must point to 4 readable bytes when v4; `prefix_v6`
+ * must point to 16 readable bytes when v6.
+ */
+lr_ldp_fec_t lr_ldp_fec_new_prefix(const uint8_t *prefix_v4,
+                                   const uint8_t *prefix_v6,
+                                   uint8_t prefix_len);
+
+/**
+ * True when the FEC is the wildcard element.
+ *
+ * # Safety
+ * `f` must be a valid handle.
+ */
+uint8_t lr_ldp_fec_is_wildcard(lr_ldp_fec_t f);
+
+/**
+ * Read the single prefix as `(is_ipv6, octets_out[16], prefix_len_out,
+ * present_out)`. Writes 1 to `*present` when the FEC carries a single
+ * prefix, 0 otherwise (wildcard or multi-element).
+ *
+ * # Safety
+ * `f` must be a valid handle; `octets_out`, `prefix_len_out` and
+ * `present_out` must point to writable memory.
+ */
+int32_t lr_ldp_fec_single_prefix(lr_ldp_fec_t f,
+                                 uint8_t *octets_out,
+                                 uint8_t *prefix_len_out,
+                                 uint8_t *present_out);
+
+/**
+ * Drop a boxed `Fec`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `f` must have been produced by [`lr_ldp_fec_new_wildcard`] or
+ * [`lr_ldp_fec_new_prefix`] and not already freed.
+ */
+void lr_ldp_fec_free(lr_ldp_fec_t f);
+
+/**
+ * Construct a `StatusCode` from a raw 32-bit status code (RFC 5036
+ * §3.4.6.1 — high 31 bits carry the status, low bit is unused).
+ */
+uint32_t lr_ldp_status_code_new(uint32_t code);
+
+/**
+ * True when the status code is fatal (RFC 5036 §3.4.6.1 — bit 31).
+ */
+uint8_t lr_ldp_status_code_is_fatal(uint32_t code);
+
+/**
+ * True when the status code carries the Forward bit (RFC 5036 §3.4.6.1
+ * — bit 30).
+ */
+uint8_t lr_ldp_status_code_is_forward(uint32_t code);
 
 /**
  * Construct a `TransitAllocator` over `[label_min, label_max]`,
