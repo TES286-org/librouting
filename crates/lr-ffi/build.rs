@@ -131,4 +131,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ospf_abr_nssa.rs");
     println!("cargo:rerun-if-changed=src/bgp_ls.rs");
     println!("cargo:rerun-if-changed=src/ospf_constants.rs");
+    println!("cargo:rerun-if-changed=src/babel_messages.rs");
 }

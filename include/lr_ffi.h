@@ -95,6 +95,14 @@
 
 #define LR_BABEL_TLV_CHALLENGE_REPLY 19
 
+#define LR_BABEL_TLV_SOURCE_PREFIX_SUBTLV 128
+
+#define LR_BABEL_HELLO_UNICAST 32768
+
+#define LR_BABEL_SOURCE_PREFIX_SUBTLV 128
+
+#define LR_BABEL_TIMESTAMP_SUBTLV 3
+
 /**
  * State: AdminDown (RFC 5880 §6.1).
  */
@@ -1215,6 +1223,60 @@ typedef struct lr_bytes_t {
   uintptr_t len;
   uintptr_t cap;
 } lr_bytes_t;
+
+/**
+ * Opaque `Hello` handle (RFC 8966 §4.6.5).
+ */
+typedef struct OpaqueBabelHello {
+  uint8_t _private[0];
+} OpaqueBabelHello;
+
+typedef struct OpaqueBabelHello *lr_babel_hello_t;
+
+/**
+ * Opaque `Ihu` handle (RFC 8966 §4.6.6).
+ */
+typedef struct OpaqueBabelIhu {
+  uint8_t _private[0];
+} OpaqueBabelIhu;
+
+typedef struct OpaqueBabelIhu *lr_babel_ihu_t;
+
+/**
+ * Opaque `RouterId` handle (RFC 8966 §4.6.7).
+ */
+typedef struct OpaqueBabelRouterId {
+  uint8_t _private[0];
+} OpaqueBabelRouterId;
+
+typedef struct OpaqueBabelRouterId *lr_babel_router_id_t;
+
+/**
+ * Opaque `AckReq` handle (RFC 8966 §4.6.10).
+ */
+typedef struct OpaqueBabelAckReq {
+  uint8_t _private[0];
+} OpaqueBabelAckReq;
+
+typedef struct OpaqueBabelAckReq *lr_babel_ack_req_t;
+
+/**
+ * Opaque `RouteRequest` handle (RFC 8966 §4.6.8).
+ */
+typedef struct OpaqueBabelRouteRequest {
+  uint8_t _private[0];
+} OpaqueBabelRouteRequest;
+
+typedef struct OpaqueBabelRouteRequest *lr_babel_route_request_t;
+
+/**
+ * Opaque `SeqnoRequest` handle (RFC 8966 §4.6.9).
+ */
+typedef struct OpaqueBabelSeqnoRequest {
+  uint8_t _private[0];
+} OpaqueBabelSeqnoRequest;
+
+typedef struct OpaqueBabelSeqnoRequest *lr_babel_seqno_request_t;
 
 typedef struct OpaqueBabelNeighbor {
   uint8_t _private[0];
@@ -2693,6 +2755,222 @@ uintptr_t lr_babel_frame_tlv_value_at(lr_babel_frame_t frame,
  * and must not be used after this call.
  */
 void lr_babel_frame_free(lr_babel_frame_t frame);
+
+/**
+ * Construct a `Hello` (RFC 8966 §4.6.5).
+ */
+lr_babel_hello_t lr_babel_hello_new(uint16_t seqno, uint16_t interval_cs);
+
+/**
+ * Set the Unicast flag (RFC 8966 §4.6.5 — `Hello::UNICAST`).
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+int32_t lr_babel_hello_set_unicast(lr_babel_hello_t h, uint8_t on);
+
+/**
+ * Read the seqno.
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint16_t lr_babel_hello_seqno(lr_babel_hello_t h);
+
+/**
+ * Read the interval (centiseconds).
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint16_t lr_babel_hello_interval_cs(lr_babel_hello_t h);
+
+/**
+ * Read the flags word (Unicast is bit 0x8000).
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint16_t lr_babel_hello_flags(lr_babel_hello_t h);
+
+/**
+ * Read the timestamp (BABEL-RTT). Writes 1 to `*present` and the
+ * value to `*ts_us`, or 0 to `*present` when no timestamp is set.
+ *
+ * # Safety
+ * `h` must be a valid handle; `present` and `ts_us` must point to
+ * writable memory.
+ */
+int32_t lr_babel_hello_timestamp(lr_babel_hello_t h, uint8_t *present, uint32_t *ts_us);
+
+/**
+ * Encode the Hello body (RFC 8966 §4.6.5). The caller frees `*out`
+ * with [`crate::bytes::lr_bytes_free`].
+ *
+ * # Safety
+ * `h` must be a valid handle; `out` must point to writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_babel_hello_encode(lr_babel_hello_t h, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `Hello`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `h` must have been produced by [`lr_babel_hello_new`] and not
+ * already freed.
+ */
+void lr_babel_hello_free(lr_babel_hello_t h);
+
+/**
+ * Construct an `Ihu` (RFC 8966 §4.6.6).
+ */
+lr_babel_ihu_t lr_babel_ihu_new(uint16_t rxcost, uint16_t interval_cs);
+
+/**
+ * Read the rxcost.
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint16_t lr_babel_ihu_rxcost(lr_babel_ihu_t h);
+
+/**
+ * Read the interval (centiseconds).
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint16_t lr_babel_ihu_interval_cs(lr_babel_ihu_t h);
+
+/**
+ * Read the AE (Address Encoding).
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint8_t lr_babel_ihu_ae(lr_babel_ihu_t h);
+
+/**
+ * Read the address as `(is_ipv6, octets_out[16], present_out)`.
+ * Writes 1 to `*present` when an address is set, 0 otherwise.
+ *
+ * # Safety
+ * `h` must be a valid handle; `octets_out` and `present_out` must
+ * point to writable memory.
+ */
+int32_t lr_babel_ihu_address(lr_babel_ihu_t h, uint8_t *octets_out, uint8_t *present_out);
+
+/**
+ * Encode the Ihu body (RFC 8966 §4.6.6).
+ *
+ * # Safety
+ * `h` must be a valid handle; `out` must point to writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_babel_ihu_encode(lr_babel_ihu_t h, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `Ihu`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `h` must have been produced by [`lr_babel_ihu_new`] and not
+ * already freed.
+ */
+void lr_babel_ihu_free(lr_babel_ihu_t h);
+
+/**
+ * Construct a `RouterId` (RFC 8966 §4.6.7) from the 8-octet value.
+ *
+ * # Safety
+ * `bytes` must point to 8 readable bytes.
+ */
+lr_babel_router_id_t lr_babel_router_id_new(const uint8_t *bytes);
+
+/**
+ * Read the 8-octet Router-ID into `*out` (must point to 8 writable
+ * bytes).
+ *
+ * # Safety
+ * `r` must be a valid handle; `out` must point to 8 writable bytes.
+ */
+int32_t lr_babel_router_id_bytes(lr_babel_router_id_t r, uint8_t *out);
+
+/**
+ * Drop a boxed `RouterId`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `r` must have been produced by [`lr_babel_router_id_new`] and not
+ * already freed.
+ */
+void lr_babel_router_id_free(lr_babel_router_id_t r);
+
+/**
+ * Construct an `AckReq` (RFC 8966 §4.6.10).
+ */
+lr_babel_ack_req_t lr_babel_ack_req_new(uint16_t nonce, uint16_t interval_cs);
+
+/**
+ * Read the nonce.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint16_t lr_babel_ack_req_nonce(lr_babel_ack_req_t a);
+
+/**
+ * Read the interval (centiseconds).
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint16_t lr_babel_ack_req_interval_cs(lr_babel_ack_req_t a);
+
+/**
+ * Drop a boxed `AckReq`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `a` must have been produced by [`lr_babel_ack_req_new`] and not
+ * already freed.
+ */
+void lr_babel_ack_req_free(lr_babel_ack_req_t a);
+
+/**
+ * Construct a wildcard `RouteRequest` (RFC 8966 §4.6.8 — AE=0
+ * requests the whole routing table).
+ */
+lr_babel_route_request_t lr_babel_route_request_new_wildcard(void);
+
+/**
+ * Drop a boxed `RouteRequest`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `r` must have been produced by [`lr_babel_route_request_new_wildcard`]
+ * and not already freed.
+ */
+void lr_babel_route_request_free(lr_babel_route_request_t r);
+
+/**
+ * Construct a `SeqnoRequest` (RFC 8966 §4.6.9).
+ *
+ * # Safety
+ * `router_id` must point to 8 readable bytes.
+ */
+lr_babel_seqno_request_t lr_babel_seqno_request_new(const uint8_t *prefix_v4,
+                                                    const uint8_t *prefix_v6,
+                                                    uint8_t prefix_len,
+                                                    uint16_t seqno,
+                                                    const uint8_t *router_id,
+                                                    uint8_t hop_count);
+
+/**
+ * Drop a boxed `SeqnoRequest`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `r` must have been produced by [`lr_babel_seqno_request_new`] and
+ * not already freed.
+ */
+void lr_babel_seqno_request_free(lr_babel_seqno_request_t r);
 
 /**
  * Construct a `BabelNeighbor` for the given remote address (RFC

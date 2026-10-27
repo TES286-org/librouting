@@ -23,6 +23,7 @@
 #![allow(clippy::drop_non_drop)]
 
 pub mod babel;
+pub mod babel_messages;
 pub mod babel_neighbor;
 pub mod best_path;
 pub mod bfd;
