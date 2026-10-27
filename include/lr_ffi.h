@@ -1408,6 +1408,46 @@ typedef struct OpaqueOspfPacket {
 typedef struct OpaqueOspfPacket *lr_ospf_packet_t;
 
 /**
+ * Fixed-layout projection of one LSA header (RFC 2328 §A.4.1).
+ * Mirrors the header fields of `lr_ospf::lsa::LsaHeader` without
+ * the body bytes (use `lr_ospf_lsa_body` to read the body).
+ */
+typedef struct lr_ospf_lsa_hdr_t {
+  /**
+   * Age in seconds (top 2 bits are DoNotAge per RFC 4136).
+   */
+  uint16_t ls_age;
+  /**
+   * OSPFv2 options byte. OSPFv3 keeps this 0.
+   */
+  uint8_t options;
+  /**
+   * LSA type: OSPFv2 8-bit type (1..=11) or OSPFv3 16-bit type.
+   */
+  uint16_t ls_type;
+  /**
+   * Link State ID (RFC 2328 §A.4.1).
+   */
+  uint32_t link_state_id;
+  /**
+   * Advertising router (RFC 2328 §A.4.1).
+   */
+  uint32_t advertising_router;
+  /**
+   * LSA sequence number (RFC 2328 §A.4.1 — uses 0x80000001 floor).
+   */
+  uint32_t ls_sequence_number;
+  /**
+   * Fletcher-16 checksum over the LSA body (RFC 2328 §A.4.1).
+   */
+  uint16_t ls_checksum;
+  /**
+   * Total LSA length, header included, in bytes.
+   */
+  uint16_t length;
+} lr_ospf_lsa_hdr_t;
+
+/**
  * Opaque `DbExchange` handle.
  */
 typedef struct OpaqueOspfDbExchange {
@@ -1460,46 +1500,6 @@ typedef struct OpaqueOspfLsaBox {
  * `lr_ospf_lsa_*` functions.
  */
 typedef struct OpaqueOspfLsaBox *lr_ospf_lsa_box_t;
-
-/**
- * Fixed-layout projection of one LSA header (RFC 2328 §A.4.1).
- * Mirrors the header fields of `lr_ospf::lsa::LsaHeader` without
- * the body bytes (use `lr_ospf_lsa_body` to read the body).
- */
-typedef struct lr_ospf_lsa_hdr_t {
-  /**
-   * Age in seconds (top 2 bits are DoNotAge per RFC 4136).
-   */
-  uint16_t ls_age;
-  /**
-   * OSPFv2 options byte. OSPFv3 keeps this 0.
-   */
-  uint8_t options;
-  /**
-   * LSA type: OSPFv2 8-bit type (1..=11) or OSPFv3 16-bit type.
-   */
-  uint16_t ls_type;
-  /**
-   * Link State ID (RFC 2328 §A.4.1).
-   */
-  uint32_t link_state_id;
-  /**
-   * Advertising router (RFC 2328 §A.4.1).
-   */
-  uint32_t advertising_router;
-  /**
-   * LSA sequence number (RFC 2328 §A.4.1 — uses 0x80000001 floor).
-   */
-  uint32_t ls_sequence_number;
-  /**
-   * Fletcher-16 checksum over the LSA body (RFC 2328 §A.4.1).
-   */
-  uint16_t ls_checksum;
-  /**
-   * Total LSA length, header included, in bytes.
-   */
-  uint16_t length;
-} lr_ospf_lsa_hdr_t;
 
 typedef struct OpaqueOspfLsaHdrBox {
   uint8_t _private[0];
@@ -4794,6 +4794,60 @@ uint8_t lr_ospf_packet_body_kind(lr_ospf_packet_t packet);
  * and must not be used after this call.
  */
 void lr_ospf_packet_free(lr_ospf_packet_t packet);
+
+/**
+ * Read the Hello body's `network_mask` (v2) / Interface ID (v3).
+ * Returns `LR_ERR_INVALID_HANDLE` (-2) when the packet body is not
+ * a Hello.
+ *
+ * # Safety
+ * `p` must be a valid handle.
+ */
+uint32_t lr_ospf_hello_network_mask(lr_ospf_packet_t p);
+
+uint16_t lr_ospf_hello_interval(lr_ospf_packet_t p);
+
+uint32_t lr_ospf_hello_options(lr_ospf_packet_t p);
+
+uint8_t lr_ospf_hello_priority(lr_ospf_packet_t p);
+
+uint32_t lr_ospf_hello_dead_interval(lr_ospf_packet_t p);
+
+uint32_t lr_ospf_hello_dr(lr_ospf_packet_t p);
+
+uint32_t lr_ospf_hello_bdr(lr_ospf_packet_t p);
+
+uintptr_t lr_ospf_hello_neighbor_count(lr_ospf_packet_t p);
+
+uint32_t lr_ospf_hello_neighbor_at(lr_ospf_packet_t p, uintptr_t index);
+
+uint16_t lr_ospf_db_desc_mtu(lr_ospf_packet_t p);
+
+uint32_t lr_ospf_db_desc_options(lr_ospf_packet_t p);
+
+uint8_t lr_ospf_db_desc_flags(lr_ospf_packet_t p);
+
+uint32_t lr_ospf_db_desc_seq(lr_ospf_packet_t p);
+
+uintptr_t lr_ospf_db_desc_lsa_header_count(lr_ospf_packet_t p);
+
+/**
+ * Read one LSA header from a DbDesc body at `index`. Writes the
+ * header fields to `*out`. Returns 0 on success,
+ * `LR_ERR_INVALID_HANDLE` when the body is not a DbDesc or the
+ * index is out of range.
+ *
+ * # Safety
+ * `p` must be a valid handle. `out` must point to a writable
+ * `lr_ospf_lsa_hdr_t`.
+ */
+int32_t lr_ospf_db_desc_lsa_header_at(lr_ospf_packet_t p,
+                                      uintptr_t index,
+                                      struct lr_ospf_lsa_hdr_t *out);
+
+uint32_t lr_ospf_ls_update_lsa_count(lr_ospf_packet_t p);
+
+uintptr_t lr_ospf_ls_update_lsa_len(lr_ospf_packet_t p);
 
 /**
  * Construct a `DbExchange` for v2 (RFC 2328 §10.3). The driver

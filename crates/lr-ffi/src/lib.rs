@@ -49,6 +49,7 @@ pub mod ldp_transit;
 pub mod mpls;
 pub mod mrt;
 pub mod ospf;
+pub mod ospf_body;
 pub mod ospf_db_exchange;
 pub mod ospf_interface;
 pub mod ospf_lsdb;
