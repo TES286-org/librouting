@@ -31,6 +31,7 @@ pub mod bgp_errors;
 pub mod bgp_path;
 pub mod bgp_peer;
 pub mod bmp;
+pub mod bmp_constants;
 pub mod bytes;
 pub mod capabilities;
 pub mod codec;
