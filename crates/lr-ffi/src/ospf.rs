@@ -288,6 +288,140 @@ pub unsafe extern "C" fn lr_ospf_packet_free(packet: lr_ospf_packet_t) {
     )
 }
 
+// ---- OSPF packet finalize / checksum (RFC 2328 §A.1, RFC 5340 §A.1) ----
+//
+// `lr_ospf::origination` exposes the v2 / v3 packet-finalize helpers
+// (compute + write the OSPF checksum into a pre-encoded packet) and
+// the v2 checksum verifier. These are essential for an embedder that
+// builds OSPF packets by hand — without them the packet the codec
+// produces is checksum-zero, and a conformant peer rejects it.
+
+/// Finalize an OSPFv2 packet's checksum in place (RFC 2328 §A.1).
+/// Writes the 16-bit checksum into the OSPF header (offset 12) of
+/// `bytes` and returns 1 on success, 0 on a too-short buffer (the
+/// OSPFv2 header is 24 bytes; `bytes.len()` must be at least that).
+///
+/// # Safety
+/// `bytes` must point to `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_finalize_v2_packet(bytes: *mut u8, len: usize) -> u8 {
+    guarded(
+        || unsafe {
+            if bytes.is_null() || len < 24 {
+                return 0;
+            }
+            let slice = unsafe { core::slice::from_raw_parts_mut(bytes, len) };
+            lr_ospf::origination::finalize_v2_packet(slice) as u8
+        },
+        0,
+    )
+}
+
+/// Finalize an OSPFv2 stream (a sequence of back-to-back OSPF packets
+/// in one buffer, e.g. a multicast frame carrying multiple packets).
+/// Writes the checksum into each packet header and returns the number
+/// of bytes consumed (the position where the next packet would start).
+/// Returns 0 on a too-short buffer or NULL pointer.
+///
+/// # Safety
+/// `bytes` must point to `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_finalize_v2_stream(bytes: *mut u8, len: usize) -> usize {
+    guarded(
+        || unsafe {
+            if bytes.is_null() || len == 0 {
+                return 0;
+            }
+            let slice = unsafe { core::slice::from_raw_parts_mut(bytes, len) };
+            lr_ospf::origination::finalize_v2_stream(slice)
+        },
+        0,
+    )
+}
+
+/// Verify an OSPFv2 packet's checksum (RFC 2328 §A.1). Returns 1 when
+/// the checksum is correct, 0 on a bad checksum or a too-short buffer.
+///
+/// # Safety
+/// `bytes` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_v2_packet_checksum_ok(bytes: *const u8, len: usize) -> u8 {
+    guarded(
+        || unsafe {
+            if bytes.is_null() || len < 24 {
+                return 0;
+            }
+            let slice = unsafe { core::slice::from_raw_parts(bytes, len) };
+            lr_ospf::origination::v2_packet_checksum_ok(slice) as u8
+        },
+        0,
+    )
+}
+
+/// Finalize an OSPFv3 packet's checksum in place (RFC 5340 §A.1 —
+/// uses the IPv6 pseudo-header carrying `src` + `dst`). Writes the
+/// 16-bit checksum into the OSPFv3 header (offset 12) and returns 1
+/// on success, 0 on a too-short buffer (OSPFv3 header is 16 bytes).
+///
+/// # Safety
+/// `bytes` must point to `len` writable bytes. `src` / `dst` must
+/// each point to 16 readable bytes (IPv6 source / destination
+/// address).
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_finalize_v3_packet(
+    bytes: *mut u8,
+    len: usize,
+    src: *const u8,
+    dst: *const u8,
+) -> u8 {
+    guarded(
+        || unsafe {
+            if bytes.is_null() || len < 16 || src.is_null() || dst.is_null() {
+                return 0;
+            }
+            let slice = unsafe { core::slice::from_raw_parts_mut(bytes, len) };
+            let mut src_arr = [0u8; 16];
+            let mut dst_arr = [0u8; 16];
+            unsafe {
+                src_arr.copy_from_slice(core::slice::from_raw_parts(src, 16));
+                dst_arr.copy_from_slice(core::slice::from_raw_parts(dst, 16));
+            }
+            lr_ospf::origination::finalize_v3_packet(slice, &src_arr, &dst_arr) as u8
+        },
+        0,
+    )
+}
+
+/// Finalize an OSPFv3 stream (a sequence of back-to-back OSPFv3
+/// packets in one buffer). Returns the number of bytes consumed.
+///
+/// # Safety
+/// See [`lr_ospf_finalize_v3_packet`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_finalize_v3_stream(
+    bytes: *mut u8,
+    len: usize,
+    src: *const u8,
+    dst: *const u8,
+) -> usize {
+    guarded(
+        || unsafe {
+            if bytes.is_null() || len == 0 || src.is_null() || dst.is_null() {
+                return 0;
+            }
+            let slice = unsafe { core::slice::from_raw_parts_mut(bytes, len) };
+            let mut src_arr = [0u8; 16];
+            let mut dst_arr = [0u8; 16];
+            unsafe {
+                src_arr.copy_from_slice(core::slice::from_raw_parts(src, 16));
+                dst_arr.copy_from_slice(core::slice::from_raw_parts(dst, 16));
+            }
+            lr_ospf::origination::finalize_v3_stream(slice, &src_arr, &dst_arr)
+        },
+        0,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +538,158 @@ mod tests {
         assert_eq!(LR_OSPF_PACKET_LS_REQUEST, 3);
         assert_eq!(LR_OSPF_PACKET_LS_UPDATE, 4);
         assert_eq!(LR_OSPF_PACKET_LS_ACK, 5);
+    }
+
+    // ---- OSPF packet finalize / checksum (RFC 2328 §A.1, RFC 5340 §A.1) ----
+
+    #[test]
+    fn ffi_finalize_v2_packet_writes_checksum() {
+        // Build a minimal OSPFv2 Hello via the codec, finalize it,
+        // then verify the checksum is non-zero and validates.
+        use lr_ospf::codec::OspfCodec;
+        use lr_ospf::packet::{HelloBody, OspfHeader, OspfPacket, OspfPacketType};
+        let pkt = OspfPacket {
+            header: OspfHeader {
+                version: 2,
+                kind: OspfPacketType::Hello as u8,
+                length: 0,
+                router_id: 0x01020304,
+                area_id: 0,
+                checksum: 0,
+                au_type_or_instance: 0,
+                auth_data: 0,
+            },
+            body: OspfBody::Hello(HelloBody {
+                network_mask: 0xffff_ff00,
+                hello_interval: 10,
+                options: 0x02,
+                priority: 1,
+                dead_interval: 40,
+                dr: 0,
+                bdr: 0,
+                neighbors: Vec::new(),
+            }),
+        };
+        let mut bytes = OspfCodec::v2().encode_vec(&pkt).expect("encode");
+        // The header.length field is set during encode — patch it
+        // first if needed (the codec sets it for us).
+        let len = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&len.to_be_bytes());
+        // Finalize the checksum in place.
+        let rc = unsafe { lr_ospf_finalize_v2_packet(bytes.as_mut_ptr(), bytes.len()) };
+        assert_eq!(rc, 1);
+        // The checksum at offset 12-13 should now be non-zero.
+        let checksum = u16::from_be_bytes([bytes[12], bytes[13]]);
+        assert_ne!(checksum, 0);
+        // Verify the checksum is valid.
+        let rc = unsafe { lr_ospf_v2_packet_checksum_ok(bytes.as_ptr(), bytes.len()) };
+        assert_eq!(rc, 1, "finalized checksum must validate");
+    }
+
+    #[test]
+    fn ffi_finalize_v2_packet_rejects_too_short() {
+        // 23 bytes < 24-byte header → returns 0.
+        let mut bytes = [0u8; 23];
+        let rc = unsafe { lr_ospf_finalize_v2_packet(bytes.as_mut_ptr(), 23) };
+        assert_eq!(rc, 0);
+        // NULL pointer → 0.
+        let rc = unsafe { lr_ospf_finalize_v2_packet(std::ptr::null_mut(), 24) };
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn ffi_v2_packet_checksum_ok_returns_zero_on_bad_input() {
+        // A too-short buffer returns 0.
+        let bytes = [0u8; 23];
+        let rc = unsafe { lr_ospf_v2_packet_checksum_ok(bytes.as_ptr(), 23) };
+        assert_eq!(rc, 0);
+        // NULL pointer → 0.
+        let rc = unsafe { lr_ospf_v2_packet_checksum_ok(std::ptr::null(), 24) };
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn ffi_finalize_v2_stream_returns_packets_consumed() {
+        // Build a minimal OSPFv2 Hello via the codec.
+        use lr_ospf::codec::OspfCodec;
+        use lr_ospf::packet::{HelloBody, OspfBody, OspfHeader, OspfPacket, OspfPacketType};
+        let pkt = OspfPacket {
+            header: OspfHeader {
+                version: 2,
+                kind: OspfPacketType::Hello as u8,
+                length: 0,
+                router_id: 0x01020304,
+                area_id: 0,
+                checksum: 0,
+                au_type_or_instance: 0,
+                auth_data: 0,
+            },
+            body: OspfBody::Hello(HelloBody {
+                network_mask: 0xffff_ff00,
+                hello_interval: 10,
+                options: 0x02,
+                priority: 1,
+                dead_interval: 40,
+                dr: 0,
+                bdr: 0,
+                neighbors: Vec::new(),
+            }),
+        };
+        let mut bytes = OspfCodec::v2().encode_vec(&pkt).expect("encode");
+        let len = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&len.to_be_bytes());
+        // finalize_v2_stream returns the number of finalized packets
+        // (one per OSPF packet in the stream). For a single-packet
+        // stream that is 1.
+        let consumed = unsafe { lr_ospf_finalize_v2_stream(bytes.as_mut_ptr(), bytes.len()) };
+        assert_eq!(consumed, 1);
+        // NULL pointer → 0.
+        let consumed = unsafe { lr_ospf_finalize_v2_stream(std::ptr::null_mut(), 24) };
+        assert_eq!(consumed, 0);
+    }
+
+    #[test]
+    fn ffi_finalize_v3_packet_rejects_null_or_short() {
+        let mut bytes = [0u8; 16];
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        // NULL bytes → 0.
+        let rc = unsafe {
+            lr_ospf_finalize_v3_packet(std::ptr::null_mut(), 16, src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(rc, 0);
+        // Too-short buffer (15 < 16) → 0.
+        let mut short = [0u8; 15];
+        let rc = unsafe {
+            lr_ospf_finalize_v3_packet(short.as_mut_ptr(), 15, src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(rc, 0);
+        // NULL src → 0.
+        let rc = unsafe {
+            lr_ospf_finalize_v3_packet(bytes.as_mut_ptr(), 16, std::ptr::null(), dst.as_ptr())
+        };
+        assert_eq!(rc, 0);
+        // NULL dst → 0.
+        let rc = unsafe {
+            lr_ospf_finalize_v3_packet(bytes.as_mut_ptr(), 16, src.as_ptr(), std::ptr::null())
+        };
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn ffi_finalize_v3_stream_handles_null_safely() {
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        // NULL bytes → 0.
+        let consumed = unsafe {
+            lr_ospf_finalize_v3_stream(std::ptr::null_mut(), 16, src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(consumed, 0);
+        // NULL src → 0.
+        let mut bytes = [0u8; 16];
+        let consumed = unsafe {
+            lr_ospf_finalize_v3_stream(bytes.as_mut_ptr(), 16, std::ptr::null(), dst.as_ptr())
+        };
+        assert_eq!(consumed, 0);
     }
 }

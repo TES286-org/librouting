@@ -5254,6 +5254,66 @@ uint8_t lr_ospf_packet_body_kind(lr_ospf_packet_t packet);
 void lr_ospf_packet_free(lr_ospf_packet_t packet);
 
 /**
+ * Finalize an OSPFv2 packet's checksum in place (RFC 2328 §A.1).
+ * Writes the 16-bit checksum into the OSPF header (offset 12) of
+ * `bytes` and returns 1 on success, 0 on a too-short buffer (the
+ * OSPFv2 header is 24 bytes; `bytes.len()` must be at least that).
+ *
+ * # Safety
+ * `bytes` must point to `len` writable bytes.
+ */
+uint8_t lr_ospf_finalize_v2_packet(uint8_t *bytes, uintptr_t len);
+
+/**
+ * Finalize an OSPFv2 stream (a sequence of back-to-back OSPF packets
+ * in one buffer, e.g. a multicast frame carrying multiple packets).
+ * Writes the checksum into each packet header and returns the number
+ * of bytes consumed (the position where the next packet would start).
+ * Returns 0 on a too-short buffer or NULL pointer.
+ *
+ * # Safety
+ * `bytes` must point to `len` writable bytes.
+ */
+uintptr_t lr_ospf_finalize_v2_stream(uint8_t *bytes, uintptr_t len);
+
+/**
+ * Verify an OSPFv2 packet's checksum (RFC 2328 §A.1). Returns 1 when
+ * the checksum is correct, 0 on a bad checksum or a too-short buffer.
+ *
+ * # Safety
+ * `bytes` must point to `len` readable bytes.
+ */
+uint8_t lr_ospf_v2_packet_checksum_ok(const uint8_t *bytes, uintptr_t len);
+
+/**
+ * Finalize an OSPFv3 packet's checksum in place (RFC 5340 §A.1 —
+ * uses the IPv6 pseudo-header carrying `src` + `dst`). Writes the
+ * 16-bit checksum into the OSPFv3 header (offset 12) and returns 1
+ * on success, 0 on a too-short buffer (OSPFv3 header is 16 bytes).
+ *
+ * # Safety
+ * `bytes` must point to `len` writable bytes. `src` / `dst` must
+ * each point to 16 readable bytes (IPv6 source / destination
+ * address).
+ */
+uint8_t lr_ospf_finalize_v3_packet(uint8_t *bytes,
+                                   uintptr_t len,
+                                   const uint8_t *src,
+                                   const uint8_t *dst);
+
+/**
+ * Finalize an OSPFv3 stream (a sequence of back-to-back OSPFv3
+ * packets in one buffer). Returns the number of bytes consumed.
+ *
+ * # Safety
+ * See [`lr_ospf_finalize_v3_packet`].
+ */
+uintptr_t lr_ospf_finalize_v3_stream(uint8_t *bytes,
+                                     uintptr_t len,
+                                     const uint8_t *src,
+                                     const uint8_t *dst);
+
+/**
  * Read the Hello body's `network_mask` (v2) / Interface ID (v3).
  * Returns `LR_ERR_INVALID_HANDLE` (-2) when the packet body is not
  * a Hello.
@@ -6817,7 +6877,7 @@ int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
  * clones the underlying `Route` value).
  *
  * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL LocRib / NULL
- * routes / NULL key.
+ * routes / NULL key, `LR_ERR_OTHER` (-6) on a malformed key.
  *
  * # Safety
  * `r` must be a valid LocRib handle. `routes` (when `count > 0`)
