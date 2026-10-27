@@ -134,6 +134,12 @@ pub(crate) unsafe fn borrow_lsa(r: lr_ospf_lsa_box_t) -> Option<&'static Lsa> {
     }
     Some(unsafe { &*(r as *const Lsa) })
 }
+pub(crate) unsafe fn borrow_lsa_mut(r: lr_ospf_lsa_box_t) -> Option<&'static mut Lsa> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut Lsa) })
+}
 unsafe fn unbox_lsa(r: lr_ospf_lsa_box_t) -> Option<Box<Lsa>> {
     if r.is_null() {
         return None;
@@ -492,6 +498,118 @@ pub unsafe extern "C" fn lr_ospf_lsa_free(lsa: lr_ospf_lsa_box_t) {
     )
 }
 
+/// Compute and store the LSA's Fletcher-16 checksum (RFC 2328 §C.4)
+/// and the length field, in place. Subsequent `lr_ospf_lsa_to_wire`
+/// calls produce a wire form that round-trips through
+/// `lr_ospf_lsa_checksum_ok`. Returns 0 on success, `LR_ERR_NULL`
+/// on a NULL handle.
+///
+/// # Safety
+/// `lsa` must be a valid LSA handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_finalize(lsa: lr_ospf_lsa_box_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(l) = borrow_lsa_mut(lsa) else {
+                return LR_ERR_NULL;
+            };
+            l.finalize();
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Verify the LSA's Fletcher-16 checksum (RFC 2328 §C.4). Returns 1
+/// when the checksum is valid, 0 otherwise (including on a NULL
+/// handle).
+///
+/// This is the LSA-handle variant; the raw-bytes variant
+/// `lr_ospf_lsa_checksum_ok` in `core_extras.rs` operates on a flat
+/// byte buffer without going through an LSA handle.
+///
+/// # Safety
+/// `lsa` must be a valid LSA handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_handle_checksum_ok(lsa: lr_ospf_lsa_box_t) -> u8 {
+    guarded(
+        || unsafe { borrow_lsa(lsa).map(|l| l.checksum_ok() as u8).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Build a MaxAge-flush copy of the LSA (RFC 2328 §14: ls_age =
+/// MaxAge, sequence number bumped). Writes a new LSA handle to
+/// `*out` (caller frees with `lr_ospf_lsa_free`). Returns 1 when a
+/// flush was produced, 0 when the LSA cannot be flushed (e.g. it is
+/// already MaxAge) or the input handle is NULL.
+///
+/// # Safety
+/// `lsa` must be a valid LSA handle. `out` must point to a writable
+/// `lr_ospf_lsa_box_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_maxage_flush(
+    lsa: lr_ospf_lsa_box_t,
+    out: *mut lr_ospf_lsa_box_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return 0;
+            }
+            let Some(l) = borrow_lsa(lsa) else {
+                return 0;
+            };
+            match l.maxage_flush() {
+                Some(flushed) => {
+                    unsafe { *out = box_lsa(flushed) }
+                    1
+                }
+                None => 0,
+            }
+        },
+        0,
+    )
+}
+
+/// Compute the LSA's key (RFC 2328 §12.1 — `(ls_type, link_state_id,
+/// advertising_router)`). Writes the three fields to the out-pointers.
+/// Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+///
+/// # Safety
+/// `lsa` must be a valid LSA handle. `out_ls_type`, `out_link_state_id`
+/// and `out_advertising_router` must point to writable `uint16_t` /
+/// `uint32_t` / `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_lsa_key(
+    lsa: lr_ospf_lsa_box_t,
+    out_ls_type: *mut u16,
+    out_link_state_id: *mut u32,
+    out_advertising_router: *mut u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(l) = borrow_lsa(lsa) else {
+                return LR_ERR_NULL;
+            };
+            if out_ls_type.is_null()
+                || out_link_state_id.is_null()
+                || out_advertising_router.is_null()
+            {
+                return LR_ERR_NULL;
+            }
+            let key = l.key();
+            unsafe {
+                *out_ls_type = key.ls_type;
+                *out_link_state_id = key.link_state_id;
+                *out_advertising_router = key.advertising_router;
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 // ---- LSA header surface ----
 
 /// Construct an LSA header from the 8 fields (RFC 2328 §A.4.1).
@@ -674,5 +792,43 @@ mod tests {
         unsafe { lr_ospf_lsdb_free(std::ptr::null_mut()) };
         unsafe { lr_ospf_lsa_free(std::ptr::null_mut()) };
         unsafe { lr_ospf_lsa_header_free(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsa_finalize_and_checksum_ok_round_trip() {
+        // `lr_ospf_lsa_new` consumes the header handle (unbox_lsa_header
+        // takes ownership), so we do NOT free it separately.
+        let hdr = lr_ospf_lsa_header_new(1, 0, 1, 0x01020304, 0x01020304, 0x80000001, 0, 0);
+        let body = [0u8; 4]; // 4 bytes body.
+        let lsa = unsafe { lr_ospf_lsa_new(hdr, body.as_ptr(), body.len()) };
+        assert!(!lsa.is_null());
+        // Before finalize, checksum is zero → checksum_ok returns false.
+        assert_eq!(unsafe { lr_ospf_lsa_handle_checksum_ok(lsa) }, 0);
+        // Finalize computes the checksum and length in place.
+        assert_eq!(unsafe { lr_ospf_lsa_finalize(lsa) }, 0);
+        // After finalize, checksum_ok returns true.
+        assert_eq!(unsafe { lr_ospf_lsa_handle_checksum_ok(lsa) }, 1);
+        unsafe { lr_ospf_lsa_free(lsa) };
+    }
+
+    #[test]
+    fn ffi_ospf_lsa_key_round_trip() {
+        let hdr = lr_ospf_lsa_header_new(
+            1, 0, 0x2003, // OSPFv3 Inter-Area-Prefix.
+            0x0a0b0c0d, 0x01020304, 0x80000001, 0, 0,
+        );
+        let body = [0u8; 4];
+        let lsa = unsafe { lr_ospf_lsa_new(hdr, body.as_ptr(), body.len()) };
+        let mut ls_type = 0u16;
+        let mut ls_id = 0u32;
+        let mut adv = 0u32;
+        assert_eq!(
+            unsafe { lr_ospf_lsa_key(lsa, &raw mut ls_type, &raw mut ls_id, &raw mut adv) },
+            0
+        );
+        assert_eq!(ls_type, 0x2003);
+        assert_eq!(ls_id, 0x0a0b0c0d);
+        assert_eq!(adv, 0x01020304);
+        unsafe { lr_ospf_lsa_free(lsa) };
     }
 }
