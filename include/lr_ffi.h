@@ -165,6 +165,20 @@
  */
 #define LR_BFD_DIAG_MISCONN_DEFECT 9
 
+#define LR_BFD_ROLE_ACTIVE 0
+
+#define LR_BFD_ROLE_PASSIVE 1
+
+#define LR_BFD_EVENT_STATE_CHANGED 1
+
+#define LR_BFD_EVENT_PEER_DIAGNOSTIC 2
+
+#define LR_BFD_EVENT_TIMEOUT 3
+
+#define LR_BFD_EVENT_AUTH_FAILED 4
+
+#define LR_BFD_EVENT_OUTBOUND_QUEUED 5
+
 #define LR_BGP_STATE_IDLE 1
 
 #define LR_BGP_STATE_CONNECT 2
@@ -588,6 +602,24 @@ typedef struct OpaqueBfdPacket {
 } OpaqueBfdPacket;
 
 typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
+
+typedef struct OpaqueBfdConfig {
+  uint8_t _private[0];
+} OpaqueBfdConfig;
+
+typedef struct OpaqueBfdConfig *lr_bfd_config_t;
+
+typedef struct OpaqueBfdSession {
+  uint8_t _private[0];
+} OpaqueBfdSession;
+
+typedef struct OpaqueBfdSession *lr_bfd_session_t;
+
+typedef struct OpaqueBfdSessionEvent {
+  uint8_t _private[0];
+} OpaqueBfdSessionEvent;
+
+typedef struct OpaqueBfdSessionEvent *lr_bfd_session_event_t;
 
 /**
  * Opaque `AsPath` handle.
@@ -2071,6 +2103,72 @@ int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uin
  * and must not be used after this call.
  */
 void lr_bfd_packet_free(lr_bfd_packet_t packet);
+
+lr_bfd_config_t lr_bfd_config_new(uint8_t detect_mult,
+                                  uint32_t desired_min_tx_interval_us,
+                                  uint32_t required_min_rx_interval_us,
+                                  uint32_t required_min_echo_interval_us,
+                                  uint8_t role);
+
+void lr_bfd_config_free(lr_bfd_config_t c);
+
+uint8_t lr_bfd_config_detect_mult(lr_bfd_config_t c);
+
+uint8_t lr_bfd_config_role(lr_bfd_config_t c);
+
+lr_bfd_session_t lr_bfd_session_new(lr_bfd_config_t cfg, uint32_t my_disc);
+
+void lr_bfd_session_free(lr_bfd_session_t s);
+
+uint8_t lr_bfd_session_state(lr_bfd_session_t s);
+
+uint8_t lr_bfd_session_is_up(lr_bfd_session_t s);
+
+uint32_t lr_bfd_session_my_discriminator(lr_bfd_session_t s);
+
+uint32_t lr_bfd_session_remote_discriminator(lr_bfd_session_t s);
+
+uint8_t lr_bfd_session_local_diag(lr_bfd_session_t s);
+
+uint8_t lr_bfd_session_remote_state(lr_bfd_session_t s);
+
+uint32_t lr_bfd_session_tx_interval_us(lr_bfd_session_t s);
+
+uint64_t lr_bfd_session_detection_time_us(lr_bfd_session_t s);
+
+int32_t lr_bfd_session_drain_outgoing(lr_bfd_session_t s, struct lr_bytes_t *out);
+
+int32_t lr_bfd_session_feed_bytes(lr_bfd_session_t s,
+                                  uint64_t now_ms,
+                                  const uint8_t *data,
+                                  uintptr_t len,
+                                  lr_bfd_session_event_t **out_array,
+                                  uintptr_t *out_count);
+
+int32_t lr_bfd_session_tick(lr_bfd_session_t s,
+                            uint64_t now_ms,
+                            lr_bfd_session_event_t **out_array,
+                            uintptr_t *out_count);
+
+int32_t lr_bfd_session_start(lr_bfd_session_t s,
+                             uint64_t now_ms,
+                             lr_bfd_session_event_t **out_array,
+                             uintptr_t *out_count);
+
+int32_t lr_bfd_session_admin_down(lr_bfd_session_t s,
+                                  lr_bfd_session_event_t **out_array,
+                                  uintptr_t *out_count);
+
+uint8_t lr_bfd_session_event_kind(lr_bfd_session_event_t e);
+
+int32_t lr_bfd_session_event_state_change_fields(lr_bfd_session_event_t e,
+                                                 uint8_t *out_from,
+                                                 uint8_t *out_to,
+                                                 uint8_t *out_diag);
+
+void lr_bfd_session_event_free(lr_bfd_session_event_t e);
+
+void lr_bfd_session_event_array_free(lr_bfd_session_event_t *array, uintptr_t count);
 
 /**
  * Translate an `AttrType` value to its RFC 4271 §5 wire code (1..).
