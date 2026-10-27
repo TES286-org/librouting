@@ -23,22 +23,27 @@
 #![allow(clippy::drop_non_drop)]
 
 pub mod babel;
+pub mod babel_codec;
 pub mod babel_messages;
 pub mod babel_neighbor;
 pub mod best_path;
 pub mod bfd;
 pub mod bfd_session;
+pub mod bgp_codec;
 pub mod bgp_communities;
+pub mod bgp_enums;
 pub mod bgp_errors;
 pub mod bgp_ls;
 pub mod bgp_path;
 pub mod bgp_peer;
 pub mod bmp;
+pub mod bmp_codec;
 pub mod bmp_constants;
 pub mod bytes;
 pub mod capabilities;
 pub mod codec;
 pub mod core;
+pub mod core_extras;
 pub mod error;
 pub mod events;
 pub mod filters;
@@ -52,6 +57,7 @@ pub mod ldp_tlv;
 pub mod ldp_transit;
 pub mod mpls;
 pub mod mrt;
+pub mod mrt_reader;
 pub mod ospf;
 pub mod ospf_abr_nssa;
 pub mod ospf_body;

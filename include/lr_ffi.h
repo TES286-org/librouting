@@ -1264,6 +1264,12 @@ typedef struct lr_bytes_t {
   uintptr_t cap;
 } lr_bytes_t;
 
+typedef struct OpaqueBabelCodec {
+  uint8_t _private[0];
+} OpaqueBabelCodec;
+
+typedef struct OpaqueBabelCodec *lr_babel_codec_t;
+
 /**
  * Opaque `Hello` handle (RFC 8966 §4.6.5).
  */
@@ -1383,6 +1389,29 @@ typedef struct OpaqueBfdSessionEvent {
 } OpaqueBfdSessionEvent;
 
 typedef struct OpaqueBfdSessionEvent *lr_bfd_session_event_t;
+
+typedef struct OpaqueBgpCodec {
+  uint8_t _private[0];
+} OpaqueBgpCodec;
+
+typedef struct OpaqueBgpCodec *lr_bgp_codec_t;
+
+/**
+ * One AFI/SAFI pair — the FFI view of `lr_core::nlri::NlriFamily`.
+ */
+typedef struct lr_afi_safi_t {
+  uint16_t afi;
+  uint8_t safi;
+} lr_afi_safi_t;
+
+/**
+ * Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
+ */
+typedef struct OpaqueBgpMessage {
+  uint8_t _private[0];
+} OpaqueBgpMessage;
+
+typedef struct OpaqueBgpMessage *lr_bgp_message_t;
 
 /**
  * Opaque BGP-standard-community handle (RFC 1997).
@@ -1556,6 +1585,12 @@ typedef struct lr_bmp_tlv_t {
   uintptr_t value_len;
 } lr_bmp_tlv_t;
 
+typedef struct OpaqueBmpCodec {
+  uint8_t _private[0];
+} OpaqueBmpCodec;
+
+typedef struct OpaqueBmpCodec *lr_bmp_codec_t;
+
 /**
  * Opaque `Capability` handle.
  */
@@ -1585,15 +1620,6 @@ typedef struct lr_bgp_ext_next_hop_tuple_t {
    */
   uint16_t nexthop_afi;
 } lr_bgp_ext_next_hop_tuple_t;
-
-/**
- * Opaque BGP-message handle. Boxes a real `lr_bgp::BgpMessage`.
- */
-typedef struct OpaqueBgpMessage {
-  uint8_t _private[0];
-} OpaqueBgpMessage;
-
-typedef struct OpaqueBgpMessage *lr_bgp_message_t;
 
 /**
  * Repr-C IpAddr. Carries a `is_ipv6` flag plus 16 bytes (IPv4 occupies
@@ -2108,6 +2134,12 @@ typedef struct OpaqueMrtRibDump {
 } OpaqueMrtRibDump;
 
 typedef struct OpaqueMrtRibDump *lr_mrt_rib_dump_t;
+
+typedef struct OpaqueMrtReader {
+  uint8_t _private[0];
+} OpaqueMrtReader;
+
+typedef struct OpaqueMrtReader *lr_mrt_reader_t;
 
 /**
  * Opaque `OspfPacket` handle.
@@ -2814,6 +2846,19 @@ uintptr_t lr_babel_frame_tlv_value_at(lr_babel_frame_t frame,
  */
 void lr_babel_frame_free(lr_babel_frame_t frame);
 
+lr_babel_codec_t lr_babel_codec_new(void);
+
+int32_t lr_babel_codec_decode_slice(lr_babel_codec_t c,
+                                    const uint8_t *data,
+                                    uintptr_t len,
+                                    lr_babel_frame_t *out);
+
+int32_t lr_babel_codec_encode_vec(lr_babel_codec_t c,
+                                  lr_babel_frame_t frame,
+                                  struct lr_bytes_t *out);
+
+void lr_babel_codec_free(lr_babel_codec_t c);
+
 /**
  * Construct a `Hello` (RFC 8966 §4.6.5).
  */
@@ -3168,6 +3213,58 @@ struct lr_best_path_config_t lr_best_path_config_new(uint8_t always_compare_med,
 int32_t lr_best_path_compare(lr_route_t a, lr_route_t b, struct lr_best_path_config_t cfg);
 
 /**
+ * Select the single best route from a slice. Returns the chosen
+ * route handle (a pointer into `routes`, NOT a fresh allocation —
+ * the caller must NOT free it separately), or NULL when `routes` is
+ * NULL or empty.
+ *
+ * # Safety
+ * `routes` must point to `count` readable `lr_route_t` handles,
+ * each non-NULL and produced by `lr_route_new_v4` / `_v6`.
+ */
+lr_route_t lr_best_path_select(const lr_route_t *routes,
+                               uintptr_t count,
+                               struct lr_best_path_config_t cfg);
+
+/**
+ * Rank the routes best-first. Returns a freshly-allocated array of
+ * `lr_route_t` handles (a permutation of the input — same pointers,
+ * different order) packed as `lr_bytes_t` (caller frees with
+ * `lr_bytes_free`).
+ *
+ * # Safety
+ * `routes` must point to `count` readable `lr_route_t` handles.
+ */
+int32_t lr_best_path_rank(const lr_route_t *routes,
+                          uintptr_t count,
+                          struct lr_best_path_config_t cfg,
+                          struct lr_bytes_t *out);
+
+/**
+ * Extract the equal-cost multipath set from `routes`. Returns 0 on
+ * success and writes a freshly-allocated `lr_bytes_t` to `*out`.
+ * `*out` is NULL with `len = 0` when there is no multipath set
+ * (only a single best path).
+ *
+ * # Safety
+ * See [`lr_best_path_rank`].
+ */
+int32_t lr_best_path_multipath(const lr_route_t *routes,
+                               uintptr_t count,
+                               struct lr_best_path_config_t cfg,
+                               struct lr_bytes_t *out);
+
+/**
+ * Compare two routes under the multipath-equality rules (RFC 7911).
+ *
+ * # Safety
+ * See [`lr_best_path_compare`].
+ */
+int32_t lr_best_path_compare_multipath(lr_route_t a,
+                                       lr_route_t b,
+                                       struct lr_best_path_config_t cfg);
+
+/**
  * Decode one BFD Control packet from `data`. On success, writes a
  * freshly-allocated `lr_bfd_packet_t` to `*out`. Returns 0 on success,
  * negative on error.
@@ -3441,6 +3538,83 @@ void lr_bfd_session_event_free(lr_bfd_session_event_t e);
 void lr_bfd_session_event_array_free(lr_bfd_session_event_t *array, uintptr_t count);
 
 /**
+ * Construct a BGP-4 message codec (RFC 4271). Defaults to `asn4 = false`
+ * and `add_path = (empty, empty)`.
+ */
+lr_bgp_codec_t lr_bgp_codec_new(void);
+
+/**
+ * Construct a BGP-4 codec with explicit `asn4` (RFC 6793) flag.
+ */
+lr_bgp_codec_t lr_bgp_codec_with_asn4(uint8_t asn4);
+
+/**
+ * Set the codec's `asn4` flag in place (RFC 6793). Returns
+ * `LR_ERR_NULL` (-1) on a NULL codec.
+ *
+ * # Safety
+ * `c` must have been produced by [`lr_bgp_codec_new`] and not freed.
+ */
+int32_t lr_bgp_codec_set_asn4(lr_bgp_codec_t c, uint8_t asn4);
+
+/**
+ * Read the codec's `asn4` flag. Returns 1 when 4-byte AS is in use,
+ * 0 otherwise (and 0 on a NULL codec).
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+uint8_t lr_bgp_codec_asn4_active(lr_bgp_codec_t c);
+
+/**
+ * Configure Add-Path (RFC 7911) TX/RX families in place.
+ *
+ * # Safety
+ * `c` must be a valid handle. `tx`/`rx` must each point to `tx_count`
+ * / `rx_count` readable `lr_afi_safi_t` records (NULL only when the
+ * corresponding count is 0).
+ */
+int32_t lr_bgp_codec_set_add_path(lr_bgp_codec_t c,
+                                  const struct lr_afi_safi_t *tx,
+                                  uintptr_t tx_count,
+                                  const struct lr_afi_safi_t *rx,
+                                  uintptr_t rx_count);
+
+/**
+ * Decode one BGP message from `data`. Returns 0 on success and writes
+ * a freshly-allocated `lr_bgp_message_t` to `*out`. `Ok(None)` from the
+ * Rust codec (incomplete frame) returns `LR_ERR_NULL` (-1) with the
+ * last-error string set to "truncated". Decode errors return
+ * `LR_ERR_CODEC` (-5).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_bgp_message_t`.
+ */
+int32_t lr_bgp_codec_decode_slice(lr_bgp_codec_t c,
+                                  const uint8_t *data,
+                                  uintptr_t len,
+                                  lr_bgp_message_t *out);
+
+/**
+ * Encode one BGP message to wire bytes. Returns 0 on success and
+ * writes a freshly-allocated `lr_bytes_t` to `*out`.
+ *
+ * # Safety
+ * `c` must be a valid codec handle. `msg` must be a valid
+ * `lr_bgp_message_t`. `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_codec_encode_vec(lr_bgp_codec_t c, lr_bgp_message_t msg, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `BgpCodec`. Safe to call with NULL.
+ *
+ * # Safety
+ * `c` must have been produced by [`lr_bgp_codec_new`] and not freed.
+ */
+void lr_bgp_codec_free(lr_bgp_codec_t c);
+
+/**
  * Construct a `Community` from `(asn, value)` (RFC 1997 §2:
  * `asn << 16 | value`).
  */
@@ -3684,6 +3858,60 @@ int32_t lr_bgp_ext_community_decode_set(const uint8_t *data,
                                         uintptr_t len,
                                         struct lr_bytes_t *out_values,
                                         uintptr_t *out_count);
+
+uint8_t lr_bgp_error_code_from_u8(uint8_t v);
+
+uint8_t lr_bgp_error_code_to_u8(uint8_t v);
+
+const char *lr_bgp_error_code_name(uint8_t v);
+
+uint8_t lr_bgp_open_error_subcode_from_u8(uint8_t v);
+
+uint8_t lr_bgp_open_error_subcode_to_u8(uint8_t v);
+
+const char *lr_bgp_open_error_subcode_name(uint8_t v);
+
+uint8_t lr_bgp_update_error_subcode_from_u8(uint8_t v);
+
+uint8_t lr_bgp_update_error_subcode_to_u8(uint8_t v);
+
+const char *lr_bgp_update_error_subcode_name(uint8_t v);
+
+uint8_t lr_bgp_header_error_subcode_from_u8(uint8_t v);
+
+uint8_t lr_bgp_header_error_subcode_to_u8(uint8_t v);
+
+const char *lr_bgp_header_error_subcode_name(uint8_t v);
+
+uint8_t lr_bgp_cease_subcode_from_u8(uint8_t v);
+
+uint8_t lr_bgp_cease_subcode_to_u8(uint8_t v);
+
+const char *lr_bgp_cease_subcode_name(uint8_t v);
+
+uint8_t lr_bgp_message_type_from_u8(uint8_t v);
+
+uint8_t lr_bgp_message_type_to_u8(uint8_t v);
+
+const char *lr_bgp_message_type_name(uint8_t v);
+
+uint8_t lr_bgp_capability_code_from_u8(uint8_t v);
+
+uint8_t lr_bgp_capability_code_to_u8(uint8_t v);
+
+const char *lr_bgp_capability_code_name(uint8_t v);
+
+uint16_t lr_bgp_ls_nlri_type_from_u16(uint16_t v);
+
+uint16_t lr_bgp_ls_nlri_type_to_u16(uint16_t v);
+
+const char *lr_bgp_ls_nlri_type_name(uint16_t v);
+
+uint8_t lr_bgp_as_path_type_from_u8(uint8_t v);
+
+uint8_t lr_bgp_as_path_type_to_u8(uint8_t v);
+
+const char *lr_bgp_as_path_type_name(uint8_t v);
 
 /**
  * Construct a TLV from `(type, value_bytes)`.
@@ -4759,6 +4987,21 @@ int32_t lr_bmp_message_payload(lr_bmp_message_t message, struct lr_bytes_t *out)
  */
 void lr_bmp_message_free(lr_bmp_message_t message);
 
+lr_bmp_codec_t lr_bmp_codec_new(void);
+
+int32_t lr_bmp_codec_decode_slice(lr_bmp_codec_t c,
+                                  const uint8_t *data,
+                                  uintptr_t len,
+                                  lr_bmp_message_t *out);
+
+int32_t lr_bmp_codec_feed(lr_bmp_codec_t c, const uint8_t *data, uintptr_t len);
+
+int32_t lr_bmp_codec_next_message(lr_bmp_codec_t c, lr_bmp_message_t *out);
+
+int32_t lr_bmp_codec_encode_vec(lr_bmp_codec_t c, lr_bmp_message_t m, struct lr_bytes_t *out);
+
+void lr_bmp_codec_free(lr_bmp_codec_t c);
+
 /**
  * Free an `lr_bytes_t` previously returned from any `lr_*` function. Safe to
  * call with a NULL pointer.
@@ -5475,6 +5718,199 @@ void lr_timer_queue_drain_free(lr_timer_id_t *array, uintptr_t count);
 struct lr_timer_spec_t lr_timer_spec_once(uint64_t after_ms);
 
 struct lr_timer_spec_t lr_timer_spec_periodic(uint64_t after_ms, uint64_t periodic_ms);
+
+/**
+ * Construct an `IpAddr::V4` from 4 bytes. Returns NULL on a NULL pointer.
+ *
+ * # Safety
+ * `bytes` must point to 4 readable bytes.
+ */
+IpAddr *lr_ip_addr_from_v4_bytes(const uint8_t *bytes);
+
+/**
+ * Construct an `IpAddr::V6` from 16 bytes.
+ *
+ * # Safety
+ * `bytes` must point to 16 readable bytes.
+ */
+IpAddr *lr_ip_addr_from_v6_bytes(const uint8_t *bytes);
+
+/**
+ * Construct an `IpAddr` from a variable-length byte slice. Returns
+ * NULL on a NULL pointer, or when the length is not 4 or 16.
+ *
+ * # Safety
+ * `bytes` must point to `len` readable bytes.
+ */
+IpAddr *lr_ip_addr_from_bytes(const uint8_t *bytes, uintptr_t len);
+
+/**
+ * Drop a boxed `IpAddr`. Safe to call with NULL.
+ *
+ * # Safety
+ * `a` must have been produced by [`lr_ip_addr_from_v4_bytes`] /
+ * [`lr_ip_addr_from_v6_bytes`] / [`lr_ip_addr_from_bytes`] and not
+ * already freed.
+ */
+void lr_ip_addr_free(IpAddr *a);
+
+/**
+ * True when `a` is an IPv4-mapped IPv6 address (RFC 4291 §2.5.5.2):
+ * `::ffff:a.b.c.d`. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint8_t lr_ip_addr_is_ipv4_mapped_ipv6(const IpAddr *a);
+
+/**
+ * Convert an IPv4 address to its IPv4-mapped IPv6 form
+ * (RFC 4291 §2.5.5.2: `::ffff:a.b.c.d`). The Rust API is named
+ * `IpAddr::to_ipv4_mapped` and only converts V4 → V6-mapped.
+ *
+ * Returns a freshly-allocated `IpAddr` (V6 form) when the input is
+ * V4; returns NULL when the input is already V6 (the conversion is
+ * a no-op, so no fresh allocation is needed), and on a NULL handle.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+IpAddr *lr_ip_addr_to_ipv4_mapped(const IpAddr *a);
+
+/**
+ * Read the 32-bit AS value.
+ */
+uint32_t lr_asn_as_u32(uint32_t asn);
+
+/**
+ * Read the 16-bit AS value, or 0 when the value does not fit in 16
+ * bits (RFC 4893 AS_TRANS upgrade path).
+ */
+uint16_t lr_asn_as_u16(uint32_t asn);
+
+/**
+ * `NlriFamily::IPV4_UNICAST` = (afi=1, safi=1).
+ */
+lr_nlri_family_t lr_nlri_family_ipv4_unicast(void);
+
+/**
+ * `NlriFamily::IPV6_UNICAST` = (afi=2, safi=1).
+ */
+lr_nlri_family_t lr_nlri_family_ipv6_unicast(void);
+
+/**
+ * `NlriFamily::IPV4_MULTICAST` = (afi=1, safi=2).
+ */
+lr_nlri_family_t lr_nlri_family_ipv4_multicast(void);
+
+/**
+ * `NlriFamily::IPV4_MPLS_VPN` = (afi=1, safi=128).
+ */
+lr_nlri_family_t lr_nlri_family_ipv4_mpls_vpn(void);
+
+/**
+ * `NlriFamily::IPV6_MPLS_VPN` = (afi=2, safi=128).
+ */
+lr_nlri_family_t lr_nlri_family_ipv6_mpls_vpn(void);
+
+/**
+ * `NlriFamily::IPV4_LABELED_UNICAST` = (afi=1, safi=4) (RFC 8277).
+ */
+lr_nlri_family_t lr_nlri_family_ipv4_labeled_unicast(void);
+
+/**
+ * `NlriFamily::IPV6_LABELED_UNICAST` = (afi=2, safi=4) (RFC 8277).
+ */
+lr_nlri_family_t lr_nlri_family_ipv6_labeled_unicast(void);
+
+/**
+ * `NlriFamily::BGP_LS` = (afi=16388, safi=71) (RFC 7752).
+ */
+lr_nlri_family_t lr_nlri_family_bgp_ls(void);
+
+/**
+ * `NlriFamily::BGP_LS_VPN` = (afi=16388, safi=72) (RFC 7752 §3).
+ */
+lr_nlri_family_t lr_nlri_family_bgp_ls_vpn(void);
+
+/**
+ * True when the family is IPv4 (afi=1).
+ */
+uint8_t lr_nlri_family_is_ipv4(lr_nlri_family_t f);
+
+/**
+ * True when the family is IPv6 (afi=2).
+ */
+uint8_t lr_nlri_family_is_ipv6(lr_nlri_family_t f);
+
+/**
+ * True when the family is labeled unicast (RFC 8277).
+ */
+uint8_t lr_nlri_family_is_labeled_unicast(lr_nlri_family_t f);
+
+/**
+ * True when the family is BGP-LS (RFC 7752).
+ */
+uint8_t lr_nlri_family_is_bgp_ls(lr_nlri_family_t f);
+
+/**
+ * True when the family is BGP-LS VPN (RFC 7752 §3).
+ */
+uint8_t lr_nlri_family_is_bgp_ls_vpn(lr_nlri_family_t f);
+
+/**
+ * Derive the `NlriFamily` for an `IpAddr` — V4 → (1, 1), V6 → (2, 1).
+ *
+ * # Safety
+ * `addr` must be a valid `*mut IpAddr`. `out` must be writable.
+ */
+int32_t lr_nlri_family_from_addr(const IpAddr *addr, lr_nlri_family_t *out);
+
+/**
+ * CRC-16/ARC (RFC 1952) over `bytes`. Returns the 16-bit checksum.
+ *
+ * # Safety
+ * `bytes` must point to `len` readable bytes.
+ */
+uint16_t lr_crc16_arc(const uint8_t *bytes, uintptr_t len);
+
+/**
+ * CRC-32C / Castagnoli (RFC 3748) over `bytes`. Returns the 32-bit
+ * checksum.
+ *
+ * # Safety
+ * See [`lr_crc16_arc`].
+ */
+uint32_t lr_crc32c(const uint8_t *bytes, uintptr_t len);
+
+/**
+ * RFC 2328 §C.4 LSA checksum (Fletcher-16 over the LSA body, with
+ * the two checksum bytes at offsets 16-17 of the LSA zeroed during
+ * computation). Returns the 16-bit checksum value that would be
+ * stored at offset 16-17.
+ *
+ * # Safety
+ * `lsa` must point to `len` readable bytes. The LSA must be at least
+ * 20 bytes long (the LSA header); shorter inputs return 0.
+ */
+uint16_t lr_ospf_lsa_checksum(const uint8_t *lsa, uintptr_t len);
+
+/**
+ * True when the LSA's embedded checksum (offset 16-17) matches the
+ * computed Fletcher-16 over the body.
+ *
+ * # Safety
+ * See [`lr_ospf_lsa_checksum`].
+ */
+uint8_t lr_ospf_lsa_checksum_ok(const uint8_t *lsa, uintptr_t len);
+
+/**
+ * Generic Fletcher-32 over `bytes` (RFC 2328 §C.4 / RFC 905 §A.3).
+ *
+ * # Safety
+ * See [`lr_crc16_arc`].
+ */
+uint32_t lr_fletcher32(const uint8_t *bytes, uintptr_t len);
 
 /**
  * Get the last error message. Returned string is NUL-terminated UTF-8.
@@ -6573,6 +7009,19 @@ lr_mrt_record_t lr_mrt_record_bgp4mp_state_change(uint32_t peer_as,
                                                   uintptr_t local_addr_len,
                                                   uint16_t old_state,
                                                   uint16_t new_state);
+
+lr_mrt_reader_t lr_mrt_reader_new(void);
+
+int32_t lr_mrt_reader_decode_slice(lr_mrt_reader_t r,
+                                   const uint8_t *data,
+                                   uintptr_t len,
+                                   lr_mrt_record_t *out);
+
+int32_t lr_mrt_reader_feed(lr_mrt_reader_t r, const uint8_t *data, uintptr_t len);
+
+int32_t lr_mrt_reader_next_record(lr_mrt_reader_t r, lr_mrt_record_t *out);
+
+void lr_mrt_reader_free(lr_mrt_reader_t r);
 
 /**
  * Decode one OSPFv2 packet from `data`. On success, writes a freshly-
