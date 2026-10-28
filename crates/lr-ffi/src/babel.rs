@@ -51,7 +51,7 @@ unsafe fn unbox_frame(f: lr_babel_frame_t) -> Option<Box<BabelFrame>> {
 /// # Safety
 /// `f` must have been produced by [`box_frame`] and not be freed while
 /// the returned reference is live.
-unsafe fn borrow_frame(f: lr_babel_frame_t) -> Option<&'static BabelFrame> {
+pub(crate) unsafe fn borrow_frame(f: lr_babel_frame_t) -> Option<&'static BabelFrame> {
     if f.is_null() {
         return None;
     }

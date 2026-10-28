@@ -2,6 +2,7 @@
 //! `lr_router_add_session`, `lr_router_feed_input`, `lr_router_drain_output`,
 //! `lr_router_poll_events`.
 
+#![allow(unused_unsafe)]
 use lr_core::addr::{Asn, RouterId};
 use lr_core::time::Instant;
 use lr_router::{
@@ -305,6 +306,231 @@ pub extern "C" fn lr_router_start_session(r: lr_router_t, session: u64) -> i32 {
             }
         },
         LR_ERR_PANIC,
+    )
+}
+
+// ---- close/shutdown_session + remove_redistribution_pipe + adj_rib_in_snapshot + ospf_set_area_type + SR/SRv6/E-LSA toggles ----
+
+#[no_mangle]
+pub extern "C" fn lr_router_close_session(r: lr_router_t, session: u64) -> i32 {
+    guarded(
+        || {
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.close_session(SessionHandle(session));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn lr_router_shutdown_session(r: lr_router_t, session: u64) -> i32 {
+    guarded(
+        || {
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.shutdown_session(SessionHandle(session));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_remove_redistribution_pipe(
+    r: lr_router_t,
+    source: i32,
+    target: i32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(src) = crate::policy::LrProtocol::from_i32(source) else {
+                set_last_error(format!("unknown source protocol id {source}"));
+                return -3;
+            };
+            let Some(dst) = crate::policy::LrProtocol::from_i32(target) else {
+                set_last_error(format!("unknown target protocol id {target}"));
+                return -3;
+            };
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.remove_redistribution_pipe(src.to_protocol(), dst.to_protocol()) as i32
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_adj_rib_in_snapshot(
+    r: lr_router_t,
+    session: u64,
+    out: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return -1;
+            }
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let snap = router.adj_rib_in_snapshot(SessionHandle(session));
+            let mut json = String::from("[");
+            for (i, route) in snap.iter().enumerate() {
+                if i > 0 {
+                    json.push(',');
+                }
+                json.push_str(&format!(
+                    "{{\"prefix\":\"{:?}\",\"protocol\":\"{:?}\"}}",
+                    route.key.prefix, route.protocol
+                ));
+            }
+            json.push(']');
+            unsafe { *out = lr_bytes_t::from_vec(json.into_bytes()) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+pub const LR_AREA_NORMAL: i32 = 0;
+pub const LR_AREA_STUB: i32 = 1;
+pub const LR_AREA_STUB_NO_SUMMARY: i32 = 2;
+pub const LR_AREA_NSSA: i32 = 3;
+pub const LR_AREA_NSSA_NO_SUMMARY: i32 = 4;
+
+fn area_kind_from_i32(v: i32) -> Option<OspfAreaType> {
+    match v {
+        LR_AREA_NORMAL => Some(OspfAreaType::Normal),
+        LR_AREA_STUB => Some(OspfAreaType::Stub {
+            default_metric: 0,
+            no_summary: false,
+        }),
+        LR_AREA_STUB_NO_SUMMARY => Some(OspfAreaType::Stub {
+            default_metric: 0,
+            no_summary: true,
+        }),
+        LR_AREA_NSSA => Some(OspfAreaType::Nssa {
+            default_metric: 0,
+            no_summary: false,
+        }),
+        LR_AREA_NSSA_NO_SUMMARY => Some(OspfAreaType::Nssa {
+            default_metric: 0,
+            no_summary: true,
+        }),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_ospf_set_area_type(
+    r: lr_router_t,
+    area_id: u32,
+    kind: i32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(area_kind) = area_kind_from_i32(kind) else {
+                set_last_error(format!("unknown OSPF area kind id {kind}"));
+                return -3;
+            };
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.ospf_set_area_type(area_id, area_kind) as i32
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn lr_router_set_ospf_sr_receive(r: lr_router_t, on: u8) -> i32 {
+    guarded(
+        || {
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.set_ospf_sr_receive(on != 0);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+#[no_mangle]
+pub extern "C" fn lr_router_ospf_sr_receive(r: lr_router_t) -> u8 {
+    guarded(
+        || {
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return 0,
+            };
+            router.ospf_sr_receive() as u8
+        },
+        0,
+    )
+}
+#[no_mangle]
+pub extern "C" fn lr_router_set_ospf_srv6_receive(r: lr_router_t, on: u8) -> i32 {
+    guarded(
+        || {
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.set_ospf_srv6_receive(on != 0);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+#[no_mangle]
+pub extern "C" fn lr_router_ospf_srv6_receive(r: lr_router_t) -> u8 {
+    guarded(
+        || {
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return 0,
+            };
+            router.ospf_srv6_receive() as u8
+        },
+        0,
+    )
+}
+#[no_mangle]
+pub extern "C" fn lr_router_set_ospf_v3_extended_lsas(r: lr_router_t, on: u8) -> i32 {
+    guarded(
+        || {
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.set_ospf_v3_extended_lsas(on != 0);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+#[no_mangle]
+pub extern "C" fn lr_router_ospf_v3_extended_lsas(r: lr_router_t) -> u8 {
+    guarded(
+        || {
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return 0,
+            };
+            router.ospf_v3_extended_lsas() as u8
+        },
+        0,
     )
 }
 

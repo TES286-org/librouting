@@ -968,7 +968,8 @@ mod tests {
         let lsdb = lr_ospf_lsdb_new();
         let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
         let mut count: usize = 0;
-        let rc = unsafe { lr_ospf_lsdb_refresh_due(lsdb, 0x01020304, 0, &raw mut ptr, &raw mut count) };
+        let rc =
+            unsafe { lr_ospf_lsdb_refresh_due(lsdb, 0x01020304, 0, &raw mut ptr, &raw mut count) };
         assert_eq!(rc, 0);
         assert_eq!(count, 0, "fresh LSDB has no LSAs due for refresh");
         // Free the (empty) array — safe even when count == 0.
@@ -989,22 +990,15 @@ mod tests {
         // refresh_due at now_ms=0 → not due.
         let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
         let mut count: usize = 0;
-        let rc = unsafe {
-            lr_ospf_lsdb_refresh_due(lsdb, 0x01020304, 0, &raw mut ptr, &raw mut count)
-        };
+        let rc =
+            unsafe { lr_ospf_lsdb_refresh_due(lsdb, 0x01020304, 0, &raw mut ptr, &raw mut count) };
         assert_eq!(rc, 0);
         assert_eq!(count, 0, "LSA installed at t=0 is not due at t=0");
         unsafe { lr_ospf_lsa_array_free(ptr, count) };
 
         // refresh_due at now_ms=1_800_000 (30 min) → due.
         let rc = unsafe {
-            lr_ospf_lsdb_refresh_due(
-                lsdb,
-                0x01020304,
-                1_800_000,
-                &raw mut ptr,
-                &raw mut count,
-            )
+            lr_ospf_lsdb_refresh_due(lsdb, 0x01020304, 1_800_000, &raw mut ptr, &raw mut count)
         };
         assert_eq!(rc, 0);
         assert_eq!(count, 1, "LSA is due at LSRefreshTime");
@@ -1070,9 +1064,7 @@ mod tests {
         unsafe { lr_ospf_lsa_array_free(ptr, count) };
 
         // age_out at now_ms = 3_600_000 (1 hour) → LSA reaches MaxAge.
-        let rc = unsafe {
-            lr_ospf_lsdb_age_out(lsdb, 3_600_000, &raw mut ptr, &raw mut count)
-        };
+        let rc = unsafe { lr_ospf_lsdb_age_out(lsdb, 3_600_000, &raw mut ptr, &raw mut count) };
         assert_eq!(rc, 0);
         assert_eq!(count, 1, "LSA reached MaxAge");
         assert_eq!(
@@ -1094,13 +1086,7 @@ mod tests {
         let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
         let mut count: usize = 0;
         let rc = unsafe {
-            lr_ospf_lsdb_refresh_due(
-                std::ptr::null_mut(),
-                0,
-                0,
-                &raw mut ptr,
-                &raw mut count,
-            )
+            lr_ospf_lsdb_refresh_due(std::ptr::null_mut(), 0, 0, &raw mut ptr, &raw mut count)
         };
         assert_eq!(rc, LR_ERR_NULL);
     }
@@ -1109,9 +1095,8 @@ mod tests {
     fn ffi_ospf_lsdb_age_out_null_handle_returns_lr_err_null() {
         let mut ptr: *mut lr_ospf_lsa_box_t = std::ptr::null_mut();
         let mut count: usize = 0;
-        let rc = unsafe {
-            lr_ospf_lsdb_age_out(std::ptr::null_mut(), 0, &raw mut ptr, &raw mut count)
-        };
+        let rc =
+            unsafe { lr_ospf_lsdb_age_out(std::ptr::null_mut(), 0, &raw mut ptr, &raw mut count) };
         assert_eq!(rc, LR_ERR_NULL);
     }
 }

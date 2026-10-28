@@ -35,7 +35,7 @@
 // the crate's `-D warnings` clippy gate.
 #![allow(unused_unsafe)]
 
-use lr_core::attr::{Attribute, AttrTag, Attributes};
+use lr_core::attr::{AttrTag, Attribute, Attributes};
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
@@ -275,11 +275,7 @@ pub unsafe extern "C" fn lr_attributes_len(a: lr_attributes_t) -> usize {
 #[no_mangle]
 pub unsafe extern "C" fn lr_attributes_is_empty(a: lr_attributes_t) -> u8 {
     guarded(
-        || unsafe {
-            borrow_attrs(a)
-                .map(|a| a.is_empty() as u8)
-                .unwrap_or(1)
-        },
+        || unsafe { borrow_attrs(a).map(|a| a.is_empty() as u8).unwrap_or(1) },
         1,
     )
 }
@@ -455,9 +451,8 @@ mod tests {
         let mut tag = 0u8;
         let mut flags = 0u8;
         let mut out = [0u8; 4];
-        let n = unsafe {
-            lr_attributes_at(a, 1, &raw mut tag, &raw mut flags, out.as_mut_ptr(), 4)
-        };
+        let n =
+            unsafe { lr_attributes_at(a, 1, &raw mut tag, &raw mut flags, out.as_mut_ptr(), 4) };
         assert_eq!(n, 4);
         // BTreeMap ordering: tag 5 before tag 7 — index 1 is tag 7.
         assert_eq!(tag, 7);
@@ -465,9 +460,8 @@ mod tests {
         assert_eq!(out, v2);
 
         // Out of range.
-        let n = unsafe {
-            lr_attributes_at(a, 99, &raw mut tag, &raw mut flags, out.as_mut_ptr(), 4)
-        };
+        let n =
+            unsafe { lr_attributes_at(a, 99, &raw mut tag, &raw mut flags, out.as_mut_ptr(), 4) };
         assert_eq!(n, LR_ERR_INVALID_HANDLE as i64);
 
         unsafe { lr_attributes_free(a) };
@@ -477,7 +471,13 @@ mod tests {
     fn ffi_attributes_null_handle_returns_lr_err_null() {
         let mut flags = 0u8;
         let n = unsafe {
-            lr_attributes_get(std::ptr::null_mut(), 5, &raw mut flags, std::ptr::null_mut(), 0)
+            lr_attributes_get(
+                std::ptr::null_mut(),
+                5,
+                &raw mut flags,
+                std::ptr::null_mut(),
+                0,
+            )
         };
         assert_eq!(n, LR_ERR_NULL as i64);
         assert_eq!(unsafe { lr_attributes_len(std::ptr::null_mut()) }, 0);

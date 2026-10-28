@@ -61,6 +61,15 @@ unsafe fn build_prefix(addr: *const u8, is_ipv6: u8, prefix_len: u8) -> Prefix {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_ldp_prefix_t {
+    pub addr_v4: [u8; 16],
+    pub addr_v6: [u8; 16],
+    pub is_ipv6: u8,
+    pub prefix_len: u8,
+}
+
 // ---- LabelMappingStore surface ----
 
 /// Construct an empty `LabelMappingStore`.
@@ -195,6 +204,104 @@ pub unsafe extern "C" fn lr_ldp_label_store_label_from(
                 }
                 None => 0,
             }
+        },
+        0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_label_store_unlearn_peer(
+    s: lr_ldp_label_store_t,
+    peer_lsr_id: u32,
+    peer_label_space: u16,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(store) = borrow_store_mut(s) else {
+                return 0;
+            };
+            store.unlearn_peer(LdpId::new(peer_lsr_id.to_be_bytes(), peer_label_space))
+        },
+        0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_label_store_unlearn_by_label(
+    s: lr_ldp_label_store_t,
+    peer_lsr_id: u32,
+    peer_label_space: u16,
+    label: u32,
+    out_prefixes: *mut lr_ldp_prefix_t,
+    cap: usize,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(store) = borrow_store_mut(s) else {
+                return 0;
+            };
+            let removed = store.unlearn_by_label(
+                LdpId::new(peer_lsr_id.to_be_bytes(), peer_label_space),
+                GenericLabel(label),
+            );
+            let n = removed.len().min(cap);
+            if !out_prefixes.is_null() && n > 0 {
+                for (i, key) in removed.iter().take(n).enumerate() {
+                    let p = key.prefix;
+                    let dst = unsafe { &mut *out_prefixes.add(i) };
+                    match p.addr {
+                        lr_core::addr::IpAddr::V4(b) => {
+                            dst.addr_v4[..4].copy_from_slice(&b);
+                            dst.is_ipv6 = 0;
+                        }
+                        lr_core::addr::IpAddr::V6(b) => {
+                            dst.addr_v6 = b;
+                            dst.is_ipv6 = 1;
+                        }
+                    }
+                    dst.prefix_len = p.prefix_len;
+                }
+            }
+            n
+        },
+        0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_label_store_unlearn_all_from(
+    s: lr_ldp_label_store_t,
+    peer_lsr_id: u32,
+    peer_label_space: u16,
+    out_prefixes: *mut lr_ldp_prefix_t,
+    cap: usize,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(store) = borrow_store_mut(s) else {
+                return 0;
+            };
+            let removed =
+                store.unlearn_all_from(LdpId::new(peer_lsr_id.to_be_bytes(), peer_label_space));
+            let n = removed.len().min(cap);
+            if !out_prefixes.is_null() && n > 0 {
+                for (i, key) in removed.iter().take(n).enumerate() {
+                    let p = key.prefix;
+                    let dst = unsafe { &mut *out_prefixes.add(i) };
+                    match p.addr {
+                        lr_core::addr::IpAddr::V4(b) => {
+                            dst.addr_v4[..4].copy_from_slice(&b);
+                            dst.is_ipv6 = 0;
+                        }
+                        lr_core::addr::IpAddr::V6(b) => {
+                            dst.addr_v6 = b;
+                            dst.is_ipv6 = 1;
+                        }
+                    }
+                    dst.prefix_len = p.prefix_len;
+                }
+            }
+            n
         },
         0,
     )

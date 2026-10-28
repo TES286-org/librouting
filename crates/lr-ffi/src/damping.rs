@@ -145,6 +145,28 @@ pub extern "C" fn lr_damping_table_new(cfg: *const lr_damping_config_t) -> lr_da
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn lr_damping_table_config(
+    t: lr_damping_table_t,
+    out: *mut lr_damping_config_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(table) = borrow_table(t) else {
+                return -1;
+            };
+            if out.is_null() {
+                return -1;
+            }
+            unsafe {
+                *out = lr_damping_config_t::from_config(table.config());
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 /// Returns the default RFC 2439 §4.7 damping config (Cisco-style).
 /// Useful as a starting point for caller-side tuning before passing the
 /// struct to [`lr_damping_table_new`].
@@ -561,10 +583,19 @@ mod tests {
     fn ffi_damping_null_table_returns_lr_err_null() {
         let p = v4_prefix([10, 0, 0, 0], 8);
         unsafe {
-            assert_eq!(lr_damping_table_on_withdraw(std::ptr::null_mut(), &raw const p, 0), LR_ERR_NULL);
-            assert_eq!(lr_damping_table_is_suppressed(std::ptr::null_mut(), &raw const p), LR_ERR_NULL);
+            assert_eq!(
+                lr_damping_table_on_withdraw(std::ptr::null_mut(), &raw const p, 0),
+                LR_ERR_NULL
+            );
+            assert_eq!(
+                lr_damping_table_is_suppressed(std::ptr::null_mut(), &raw const p),
+                LR_ERR_NULL
+            );
             assert_eq!(lr_damping_table_len(std::ptr::null_mut()), 0);
-            assert_eq!(lr_damping_table_forget(std::ptr::null_mut(), &raw const p), LR_ERR_NULL);
+            assert_eq!(
+                lr_damping_table_forget(std::ptr::null_mut(), &raw const p),
+                LR_ERR_NULL
+            );
             // decay_all on NULL returns -1.
             assert_eq!(
                 lr_damping_table_decay_all(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0),
@@ -577,8 +608,14 @@ mod tests {
     fn ffi_damping_null_prefix_returns_lr_err_null() {
         let t = default_table();
         unsafe {
-            assert_eq!(lr_damping_table_on_withdraw(t, std::ptr::null(), 0), LR_ERR_NULL);
-            assert_eq!(lr_damping_table_is_suppressed(t, std::ptr::null()), LR_ERR_NULL);
+            assert_eq!(
+                lr_damping_table_on_withdraw(t, std::ptr::null(), 0),
+                LR_ERR_NULL
+            );
+            assert_eq!(
+                lr_damping_table_is_suppressed(t, std::ptr::null()),
+                LR_ERR_NULL
+            );
             assert_eq!(lr_damping_table_forget(t, std::ptr::null()), LR_ERR_NULL);
         }
         unsafe { lr_damping_table_free(t) };
@@ -589,7 +626,10 @@ mod tests {
         let t = default_table();
         let mut p = v4_prefix([10, 0, 0, 0], 200); // > 32, invalid for v4
         unsafe {
-            assert_eq!(lr_damping_table_on_withdraw(t, &raw const p, 0), LR_ERR_OTHER);
+            assert_eq!(
+                lr_damping_table_on_withdraw(t, &raw const p, 0),
+                LR_ERR_OTHER
+            );
         }
         // suppress the unused-assignment lint (the test asserts the
         // path that does not consume `p`).

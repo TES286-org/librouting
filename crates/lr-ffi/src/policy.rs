@@ -164,6 +164,19 @@ impl lr_damping_config_t {
             decay_factor_withdrawn: self.decay_factor_withdrawn,
         }
     }
+
+    /// Convert a Rust `DampingConfig` to the C repr.
+    pub fn from_config(c: &lr_damping::DampingConfig) -> Self {
+        Self {
+            additive_incr: c.additive_incr,
+            suppress_threshold: c.suppress_threshold,
+            reuse_threshold: c.reuse_threshold,
+            upper_limit: c.upper_limit,
+            decay_interval_s: c.decay_interval_s,
+            decay_factor_active: c.decay_factor_active,
+            decay_factor_withdrawn: c.decay_factor_withdrawn,
+        }
+    }
 }
 
 /// Install one redistribution pipe on the router.

@@ -241,7 +241,7 @@ fn box_pdu(p: LdpPdu) -> lr_ldp_pdu_t {
 /// # Safety
 /// `p` must have been produced by [`box_pdu`] and not be freed while
 /// the returned reference is live.
-unsafe fn borrow_pdu(p: lr_ldp_pdu_t) -> Option<&'static LdpPdu> {
+pub(crate) unsafe fn borrow_pdu(p: lr_ldp_pdu_t) -> Option<&'static LdpPdu> {
     if p.is_null() {
         return None;
     }
@@ -316,6 +316,19 @@ pub unsafe extern "C" fn lr_ldp_pdu_message_id_at(pdu: lr_ldp_pdu_t, index: usiz
                 return 0;
             };
             p.messages.get(index).map(message_id).unwrap_or(0)
+        },
+        0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_pdu_message_u_bit_at(pdu: lr_ldp_pdu_t, index: usize) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_pdu(pdu)
+                .and_then(|p| p.messages.get(index))
+                .map(|m| m.u_bit() as u8)
+                .unwrap_or(0)
         },
         0,
     )

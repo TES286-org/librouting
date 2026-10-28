@@ -102,14 +102,14 @@ unsafe fn unbox_session(s: lr_bfd_session_t) -> Option<Box<BfdSession>> {
     Some(unsafe { Box::from_raw(s as *mut BfdSession) })
 }
 
-unsafe fn borrow_session(s: lr_bfd_session_t) -> Option<&'static BfdSession> {
+pub(crate) unsafe fn borrow_session(s: lr_bfd_session_t) -> Option<&'static BfdSession> {
     if s.is_null() {
         return None;
     }
     Some(unsafe { &*(s as *const BfdSession) })
 }
 
-unsafe fn borrow_session_mut(s: lr_bfd_session_t) -> Option<&'static mut BfdSession> {
+pub(crate) unsafe fn borrow_session_mut(s: lr_bfd_session_t) -> Option<&'static mut BfdSession> {
     if s.is_null() {
         return None;
     }
@@ -341,7 +341,7 @@ pub unsafe extern "C" fn lr_bfd_session_drain_outgoing(
     )
 }
 
-unsafe fn write_event_array(
+pub(crate) unsafe fn write_event_array(
     events: Vec<BfdSessionEvent>,
     out_array: *mut *mut lr_bfd_session_event_t,
     out_count: *mut usize,

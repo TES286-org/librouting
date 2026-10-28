@@ -1,39 +1,14 @@
-//! OSPF DbExchange FFI — `lr_ospf_db_exchange_*`.
-//!
-//! Mirrors the public Rust API of `lr_ospf::exchange::DbExchange`
-//! (RFC 2328 §10.3–§10.8 — the DBD/LSR exchange driver for one
-//! neighbor) so an embedder can drive the database synchronization
-//! state machine without going through the daemon's `DefaultRouter`.
-//!
-//! The full `on_db_desc` / `on_ls_request` / `on_ls_update` receive
-//! path requires `DbDescBody` / `LsRequestBody` / `Lsa` boxed
-//! handles — those will land in a follow-up. This module covers the
-//! constructor + reader + builder + send-side surface:
-//!
-//! - `lr_ospf_db_exchange_new` / `_with_version` / `_with_rxmt_interval`.
-//! - `_phase` (ExStart / Exchange / Loading / Full).
-//! - `_is_full` / `_started`.
-//! - `_restart` (§10.9 sequence-mismatch restart).
-//! - `_initial_db_desc` (§10.3 — emits the initial I|M|MS DBD).
-//! - `_poll` (§10.8 — periodic retransmission of the pending DBD
-//!   and LS-Request at RxmtInterval).
-//! - `_take_ls_request` (Loading — build the LS-Request packet for
-//!   the current queue).
-//! - `_pending_requests` (number of LSAs still queued in Loading).
-//! - `_rxmt_interval_ms` / `_free`.
-//!
-//! Every entry point runs inside the crate's `catch_unwind` barrier
-//! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
-//! thread-local last-error string.
-
 #![allow(unused_unsafe)]
 
-use lr_ospf::exchange::{DbExchange, Phase};
-use lr_ospf::packet::OspfVersion;
+use lr_ospf::exchange::{DbExchange, ExchangeStep, Phase};
+use lr_ospf::packet::{OspfBody, OspfPacket, OspfVersion};
+use lr_ospf::{codec::OspfCodec, lsdb::Lsdb};
 
-use crate::error::{LrError, LR_ERR_PANIC};
+use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
 use crate::ospf::lr_ospf_packet_t;
+use crate::ospf_lsdb::{borrow_lsdb, lr_ospf_lsa_box_t, lr_ospf_lsdb_t};
+use crate::ospf_neighbor::{borrow_neighbor_mut, lr_ospf_neighbor_t};
 
 const LR_ERR_NULL: i32 = LrError::Null as i32;
 
@@ -410,6 +385,295 @@ pub unsafe extern "C" fn lr_ospf_db_exchange_pending_requests(e: lr_ospf_db_exch
                 .unwrap_or(0)
         },
         0,
+    )
+}
+
+// ---- Receive path: on_db_desc / on_ls_request / on_ls_update ----
+
+#[repr(C)]
+pub struct lr_ospf_exchange_step_t {
+    pub out_packets: *mut lr_ospf_packet_t,
+    pub out_packet_count: usize,
+    pub out_lsas: *mut lr_ospf_lsa_box_t,
+    pub out_lsa_count: usize,
+    pub newly_full: u8,
+}
+
+impl Default for lr_ospf_exchange_step_t {
+    fn default() -> Self {
+        Self {
+            out_packets: std::ptr::null_mut(),
+            out_packet_count: 0,
+            out_lsas: std::ptr::null_mut(),
+            out_lsa_count: 0,
+            newly_full: 0,
+        }
+    }
+}
+
+fn box_packet(p: OspfPacket) -> lr_ospf_packet_t {
+    Box::into_raw(Box::new(p)) as lr_ospf_packet_t
+}
+
+fn pack_step(step: ExchangeStep) -> Result<lr_ospf_exchange_step_t, ()> {
+    let mut out = lr_ospf_exchange_step_t {
+        newly_full: step.newly_full as u8,
+        ..lr_ospf_exchange_step_t::default()
+    };
+    if !step.outbound.is_empty() {
+        let n = step.outbound.len();
+        let layout = std::alloc::Layout::array::<lr_ospf_packet_t>(n).map_err(|_| ())?;
+        let arr = unsafe { std::alloc::alloc_zeroed(layout) as *mut lr_ospf_packet_t };
+        if arr.is_null() {
+            return Err(());
+        }
+        for (i, pkt) in step.outbound.into_iter().enumerate() {
+            unsafe { *arr.add(i) = box_packet(pkt) };
+        }
+        out.out_packets = arr;
+        out.out_packet_count = n;
+    }
+    if !step.lsas.is_empty() {
+        let n = step.lsas.len();
+        let layout = std::alloc::Layout::array::<lr_ospf_lsa_box_t>(n).map_err(|_| {
+            if !out.out_packets.is_null() {
+                unsafe {
+                    lr_ospf_db_exchange_packet_array_free(out.out_packets, out.out_packet_count);
+                }
+            }
+        })?;
+        let arr = unsafe { std::alloc::alloc_zeroed(layout) as *mut lr_ospf_lsa_box_t };
+        if arr.is_null() {
+            if !out.out_packets.is_null() {
+                unsafe {
+                    lr_ospf_db_exchange_packet_array_free(out.out_packets, out.out_packet_count);
+                }
+            }
+            return Err(());
+        }
+        for (i, lsa) in step.lsas.into_iter().enumerate() {
+            let h = Box::into_raw(Box::new(lsa)) as lr_ospf_lsa_box_t;
+            unsafe { *arr.add(i) = h };
+        }
+        out.out_lsas = arr;
+        out.out_lsa_count = n;
+    }
+    Ok(out)
+}
+
+unsafe fn decode_packet_v2(data: *const u8, len: usize) -> Result<Option<OspfPacket>, ()> {
+    if data.is_null() && len != 0 {
+        set_last_error("decode: null data".into());
+        return Err(());
+    }
+    let slice = if len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
+    let mut codec = OspfCodec::v2();
+    match codec.decode_slice(slice) {
+        Ok(Some(p)) => Ok(Some(p)),
+        Ok(None) => Ok(None),
+        Err(e) => {
+            set_last_error(format!("OSPFv2 decode: {e:?}"));
+            Err(())
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_db_exchange_on_db_desc_packet(
+    e: lr_ospf_db_exchange_t,
+    neighbor: lr_ospf_neighbor_t,
+    lsdb: lr_ospf_lsdb_t,
+    data: *const u8,
+    len: usize,
+    now_ms: u64,
+    out: *mut lr_ospf_exchange_step_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(ex) = borrow_exchange_mut(e) else {
+                return LR_ERR_NULL;
+            };
+            let Some(neighbor_ref) = borrow_neighbor_mut(neighbor) else {
+                return LR_ERR_NULL;
+            };
+            let empty_lsdb = Lsdb::new();
+            let lsdb_ref: &Lsdb = unsafe { borrow_lsdb(lsdb) }.unwrap_or(&empty_lsdb);
+            let pkt = match unsafe { decode_packet_v2(data, len) } {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    set_last_error("on_db_desc: truncated".into());
+                    return LrError::Codec as i32;
+                }
+                Err(()) => return LrError::Codec as i32,
+            };
+            let body = match pkt.body {
+                OspfBody::DbDesc(d) => d,
+                ref other => {
+                    set_last_error(format!(
+                        "expected DbDesc, got {:?}",
+                        std::mem::discriminant(other)
+                    ));
+                    return LrError::Other as i32;
+                }
+            };
+            let step = ex.on_db_desc(&body, pkt.header.router_id, lsdb_ref, neighbor_ref, now_ms);
+            match pack_step(step) {
+                Ok(packed) => {
+                    unsafe { *out = packed };
+                    0
+                }
+                Err(()) => {
+                    crate::error::set_last_error("alloc failed".into());
+                    LrError::Other as i32
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_db_exchange_on_ls_request_packet(
+    e: lr_ospf_db_exchange_t,
+    neighbor: lr_ospf_neighbor_t,
+    lsdb: lr_ospf_lsdb_t,
+    data: *const u8,
+    len: usize,
+    now_ms: u64,
+    out: *mut lr_ospf_exchange_step_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(ex) = borrow_exchange_mut(e) else {
+                return LR_ERR_NULL;
+            };
+            let Some(neighbor_ref) = borrow_neighbor_mut(neighbor) else {
+                return LR_ERR_NULL;
+            };
+            let empty_lsdb = Lsdb::new();
+            let lsdb_ref: &Lsdb = unsafe { borrow_lsdb(lsdb) }.unwrap_or(&empty_lsdb);
+            let pkt = match unsafe { decode_packet_v2(data, len) } {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    set_last_error("on_ls_request: truncated".into());
+                    return LrError::Codec as i32;
+                }
+                Err(()) => return LrError::Codec as i32,
+            };
+            let body = match pkt.body {
+                OspfBody::LsRequest(r) => r,
+                ref other => {
+                    set_last_error(format!(
+                        "expected LsRequest, got {:?}",
+                        std::mem::discriminant(other)
+                    ));
+                    return LrError::Other as i32;
+                }
+            };
+            let step = ex.on_ls_request(&body, lsdb_ref, neighbor_ref, now_ms);
+            match pack_step(step) {
+                Ok(packed) => {
+                    unsafe { *out = packed };
+                    0
+                }
+                Err(()) => {
+                    crate::error::set_last_error("alloc failed".into());
+                    LrError::Other as i32
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_db_exchange_on_ls_update_packet(
+    e: lr_ospf_db_exchange_t,
+    neighbor: lr_ospf_neighbor_t,
+    data: *const u8,
+    len: usize,
+    out: *mut lr_ospf_exchange_step_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(ex) = borrow_exchange_mut(e) else {
+                return LR_ERR_NULL;
+            };
+            let Some(neighbor_ref) = borrow_neighbor_mut(neighbor) else {
+                return LR_ERR_NULL;
+            };
+            let pkt = match unsafe { decode_packet_v2(data, len) } {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    set_last_error("on_ls_update: truncated".into());
+                    return LrError::Codec as i32;
+                }
+                Err(()) => return LrError::Codec as i32,
+            };
+            let lsas = match pkt.body {
+                OspfBody::LsUpdate(u) => u.lsas,
+                ref other => {
+                    set_last_error(format!(
+                        "expected LsUpdate, got {:?}",
+                        std::mem::discriminant(other)
+                    ));
+                    return LrError::Other as i32;
+                }
+            };
+            let step = ex.on_ls_update(&lsas, neighbor_ref);
+            match pack_step(step) {
+                Ok(packed) => {
+                    unsafe { *out = packed };
+                    0
+                }
+                Err(()) => {
+                    crate::error::set_last_error("alloc failed".into());
+                    LrError::Other as i32
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_db_exchange_step_free(step: *mut lr_ospf_exchange_step_t) {
+    guarded(
+        || unsafe {
+            if step.is_null() {
+                return;
+            }
+            let s = unsafe { &mut *step };
+            if !s.out_packets.is_null() && s.out_packet_count > 0 {
+                unsafe {
+                    lr_ospf_db_exchange_packet_array_free(s.out_packets, s.out_packet_count);
+                }
+                s.out_packets = std::ptr::null_mut();
+                s.out_packet_count = 0;
+            }
+            if !s.out_lsas.is_null() && s.out_lsa_count > 0 {
+                unsafe {
+                    crate::ospf_lsdb::lr_ospf_lsa_array_free(s.out_lsas, s.out_lsa_count);
+                }
+                s.out_lsas = std::ptr::null_mut();
+                s.out_lsa_count = 0;
+            }
+            s.newly_full = 0;
+        },
+        (),
     )
 }
 

@@ -25,14 +25,14 @@ fn box_codec(c: BabelCodec) -> lr_babel_codec_t {
     Box::into_raw(Box::new(c)) as lr_babel_codec_t
 }
 
-unsafe fn borrow_codec_mut(c: lr_babel_codec_t) -> Option<&'static mut BabelCodec> {
+pub(crate) unsafe fn borrow_codec_mut(c: lr_babel_codec_t) -> Option<&'static mut BabelCodec> {
     if c.is_null() {
         return None;
     }
     Some(unsafe { &mut *(c as *mut BabelCodec) })
 }
 
-unsafe fn borrow_codec(c: lr_babel_codec_t) -> Option<&'static BabelCodec> {
+pub(crate) unsafe fn borrow_codec(c: lr_babel_codec_t) -> Option<&'static BabelCodec> {
     if c.is_null() {
         return None;
     }

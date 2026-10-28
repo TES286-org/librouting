@@ -396,6 +396,243 @@ pub unsafe extern "C" fn lr_ldp_session_shutdown(r: lr_ldp_session_t, now_ms: u6
     )
 }
 
+// ---- feed_pdu + send_label_* + enqueue_notification ----
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_feed_pdu(
+    r: lr_ldp_session_t,
+    pdu: crate::ldp::lr_ldp_pdu_t,
+    now_ms: u64,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(p) = crate::ldp::borrow_pdu(pdu) else {
+                return LR_ERR_NULL;
+            };
+            let _ = s.feed_pdu(p, Instant(now_ms));
+            crate::ldp::lr_ldp_pdu_free(pdu);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_send_label_mapping(
+    r: lr_ldp_session_t,
+    message_id: u32,
+    fec: crate::ldp_tlv::lr_ldp_fec_t,
+    label: crate::ldp_tlv::lr_ldp_label_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(f) = crate::ldp_tlv::unbox_fec(fec) else {
+                return LR_ERR_NULL;
+            };
+            let Some(l) = crate::ldp_tlv::borrow_label(label) else {
+                return LR_ERR_NULL;
+            };
+            s.send_label_mapping(lr_ldp::message::LabelMappingMsg {
+                message_id,
+                fec: *f,
+                label: *l,
+                hop_count: None,
+                path_vector: None,
+                request_message_id: None,
+                unknown_tlvs: Vec::new(),
+            });
+            crate::ldp_tlv::lr_ldp_label_free(label);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_send_label_withdraw(
+    r: lr_ldp_session_t,
+    message_id: u32,
+    fec: crate::ldp_tlv::lr_ldp_fec_t,
+    label: crate::ldp_tlv::lr_ldp_label_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(f) = crate::ldp_tlv::unbox_fec(fec) else {
+                return LR_ERR_NULL;
+            };
+            let label_opt = if label.is_null() {
+                None
+            } else {
+                let Some(l) = crate::ldp_tlv::borrow_label(label) else {
+                    return LR_ERR_NULL;
+                };
+                Some(*l)
+            };
+            s.send_label_withdraw(lr_ldp::message::LabelWithdrawMsg {
+                message_id,
+                fec: *f,
+                label: label_opt,
+                unknown_tlvs: Vec::new(),
+            });
+            if !label.is_null() {
+                crate::ldp_tlv::lr_ldp_label_free(label);
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_send_label_request(
+    r: lr_ldp_session_t,
+    message_id: u32,
+    fec: crate::ldp_tlv::lr_ldp_fec_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(f) = crate::ldp_tlv::unbox_fec(fec) else {
+                return LR_ERR_NULL;
+            };
+            s.send_label_request(lr_ldp::message::LabelRequestMsg {
+                message_id,
+                fec: *f,
+                hop_count: None,
+                path_vector: None,
+                unknown_tlvs: Vec::new(),
+            });
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_send_label_release(
+    r: lr_ldp_session_t,
+    message_id: u32,
+    fec: crate::ldp_tlv::lr_ldp_fec_t,
+    label: crate::ldp_tlv::lr_ldp_label_t,
+    status_code: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let Some(f) = crate::ldp_tlv::unbox_fec(fec) else {
+                return LR_ERR_NULL;
+            };
+            let label_opt = if label.is_null() {
+                None
+            } else {
+                let Some(l) = crate::ldp_tlv::borrow_label(label) else {
+                    return LR_ERR_NULL;
+                };
+                Some(*l)
+            };
+            let status_opt = if status_code == 0 {
+                None
+            } else {
+                Some(lr_ldp::tlv::Status {
+                    code: lr_ldp::tlv::StatusCode(status_code),
+                    message_id: 0,
+                    message_type: 0,
+                })
+            };
+            s.send_label_release(lr_ldp::message::LabelReleaseMsg {
+                message_id,
+                fec: *f,
+                label: label_opt,
+                status: status_opt,
+                unknown_tlvs: Vec::new(),
+            });
+            if !label.is_null() {
+                crate::ldp_tlv::lr_ldp_label_free(label);
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_send_address_message(
+    r: lr_ldp_session_t,
+    addrs: *const u8,
+    count: usize,
+    is_ipv6: u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if addrs.is_null() && count != 0 {
+                return LR_ERR_NULL;
+            }
+            let entry_len = if is_ipv6 != 0 { 16 } else { 4 };
+            let total = count.checked_mul(entry_len).unwrap_or(0);
+            let slice = if total == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(addrs, total) }
+            };
+            let mut addresses = Vec::with_capacity(count);
+            for i in 0..count {
+                let off = i * entry_len;
+                if is_ipv6 != 0 {
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&slice[off..off + 16]);
+                    addresses.push(lr_core::addr::IpAddr::V6(a));
+                } else {
+                    let mut a = [0u8; 4];
+                    a.copy_from_slice(&slice[off..off + 4]);
+                    addresses.push(lr_core::addr::IpAddr::V4(a));
+                }
+            }
+            s.send_address_message(lr_ldp::tlv::AddressList { addresses });
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_ldp_session_enqueue_notification(
+    r: lr_ldp_session_t,
+    status_code: u32,
+    msg_id: u32,
+    msg_type: u16,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_session_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            s.enqueue_notification(lr_ldp::tlv::Status {
+                code: lr_ldp::tlv::StatusCode(status_code),
+                message_id: msg_id,
+                message_type: msg_type,
+            });
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,9 +711,7 @@ mod tests {
         let s = lr_ldp_session_new(0x0a000001, 0, 0x0a000002, 0, 0, 0);
         let mut keepalive: u16 = 0;
         let mut max_pdu: u16 = 0;
-        let rc = unsafe {
-            lr_ldp_session_negotiated(s, &raw mut keepalive, &raw mut max_pdu)
-        };
+        let rc = unsafe { lr_ldp_session_negotiated(s, &raw mut keepalive, &raw mut max_pdu) };
         assert_eq!(rc, 1, "fresh session has no negotiated params yet");
         unsafe { lr_ldp_session_free(s) };
     }
@@ -532,11 +767,7 @@ mod tests {
         let mut keepalive: u16 = 0;
         let mut max_pdu: u16 = 0;
         let rc = unsafe {
-            lr_ldp_session_negotiated(
-                std::ptr::null_mut(),
-                &raw mut keepalive,
-                &raw mut max_pdu,
-            )
+            lr_ldp_session_negotiated(std::ptr::null_mut(), &raw mut keepalive, &raw mut max_pdu)
         };
         assert_eq!(rc, LR_ERR_NULL);
     }

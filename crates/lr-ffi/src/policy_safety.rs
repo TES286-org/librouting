@@ -251,10 +251,7 @@ pub unsafe extern "C" fn lr_safety_net_config_set_enabled(r: lr_safety_net_t, en
 /// # Safety
 /// `r` must be a valid SafetyNet handle.
 #[no_mangle]
-pub unsafe extern "C" fn lr_safety_net_config_get_bool(
-    r: lr_safety_net_t,
-    field: i32,
-) -> i32 {
+pub unsafe extern "C" fn lr_safety_net_config_get_bool(r: lr_safety_net_t, field: i32) -> i32 {
     guarded(
         || unsafe {
             let Some(s) = borrow_safety_net(r) else {
@@ -334,10 +331,7 @@ pub unsafe extern "C" fn lr_safety_net_config_set_bool(
 /// # Safety
 /// `r` must be a valid SafetyNet handle.
 #[no_mangle]
-pub unsafe extern "C" fn lr_safety_net_config_get_u64(
-    r: lr_safety_net_t,
-    field: i32,
-) -> u64 {
+pub unsafe extern "C" fn lr_safety_net_config_get_u64(r: lr_safety_net_t, field: i32) -> u64 {
     guarded(
         || unsafe {
             let Some(s) = borrow_safety_net(r) else {
@@ -426,18 +420,14 @@ pub unsafe extern "C" fn lr_safety_net_check_violation(
                         SafetyViolation::EmptyAsPathEbgp { .. } => {
                             LR_SAFETY_VIOLATION_EMPTY_AS_PATH_EBGP
                         }
-                        SafetyViolation::InvalidOrigin { .. } => {
-                            LR_SAFETY_VIOLATION_INVALID_ORIGIN
-                        }
+                        SafetyViolation::InvalidOrigin { .. } => LR_SAFETY_VIOLATION_INVALID_ORIGIN,
                         SafetyViolation::ExcessiveAsLoop { .. } => {
                             LR_SAFETY_VIOLATION_EXCESSIVE_AS_LOOP
                         }
                         SafetyViolation::OversizedAsPath { .. } => {
                             LR_SAFETY_VIOLATION_OVERSIZED_AS_PATH
                         }
-                        SafetyViolation::MartianPrefix { .. } => {
-                            LR_SAFETY_VIOLATION_MARTIAN_PREFIX
-                        }
+                        SafetyViolation::MartianPrefix { .. } => LR_SAFETY_VIOLATION_MARTIAN_PREFIX,
                         SafetyViolation::OversizedLocalPref { .. } => {
                             LR_SAFETY_VIOLATION_OVERSIZED_LOCAL_PREF
                         }
@@ -878,8 +868,14 @@ mod tests {
         assert_eq!(rc, 0);
         assert_eq!(unsafe { lr_safety_net_config_get_bool(s, 0) }, 0);
         // Unknown field id.
-        assert_eq!(unsafe { lr_safety_net_config_get_bool(s, 99) }, LR_ERR_OTHER);
-        assert_eq!(unsafe { lr_safety_net_config_set_bool(s, 99, 1) }, LR_ERR_OTHER);
+        assert_eq!(
+            unsafe { lr_safety_net_config_get_bool(s, 99) },
+            LR_ERR_OTHER
+        );
+        assert_eq!(
+            unsafe { lr_safety_net_config_set_bool(s, 99, 1) },
+            LR_ERR_OTHER
+        );
         // NULL handle.
         assert_eq!(
             unsafe { lr_safety_net_config_get_bool(std::ptr::null_mut(), 0) },
@@ -913,7 +909,10 @@ mod tests {
             unsafe { lr_safety_net_config_get_u64(s, 99) },
             LR_ERR_OTHER as u64
         );
-        assert_eq!(unsafe { lr_safety_net_config_set_u64(s, 99, 0) }, LR_ERR_OTHER);
+        assert_eq!(
+            unsafe { lr_safety_net_config_set_u64(s, 99, 0) },
+            LR_ERR_OTHER
+        );
         // NULL handle.
         assert_eq!(
             unsafe { lr_safety_net_config_get_u64(std::ptr::null_mut(), 0) },
@@ -946,9 +945,7 @@ mod tests {
     fn ffi_resolver_list_id_returns_zero_for_unknown() {
         let r = crate::policy_objects::lr_resolver_new();
         let name = std::ffi::CString::new("no-such-list").unwrap();
-        let id = unsafe {
-            lr_resolver_list_id(r, LR_LIST_KIND_PREFIX, name.as_ptr())
-        };
+        let id = unsafe { lr_resolver_list_id(r, LR_LIST_KIND_PREFIX, name.as_ptr()) };
         assert_eq!(id, 0, "unknown list name returns 0");
         unsafe { crate::policy_objects::lr_resolver_free(r) };
     }
@@ -969,14 +966,12 @@ mod tests {
         };
         unsafe { crate::policy_objects::lr_prefix_list_add(list, &raw const p, 0, 0, 1) };
         let name = std::ffi::CString::new("PL").unwrap();
-        let added_id = unsafe {
-            crate::policy_objects::lr_resolver_add_prefix_list(
-                r,
-                name.as_ptr(),
-                list,
-            )
-        };
-        assert!(added_id >= 0, "add_prefix_list returns >= 0; got {added_id}");
+        let added_id =
+            unsafe { crate::policy_objects::lr_resolver_add_prefix_list(r, name.as_ptr(), list) };
+        assert!(
+            added_id >= 0,
+            "add_prefix_list returns >= 0; got {added_id}"
+        );
 
         // Lookup by name + kind returns the same id.
         let id = unsafe { lr_resolver_list_id(r, LR_LIST_KIND_PREFIX, name.as_ptr()) };

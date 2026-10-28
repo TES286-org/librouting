@@ -95,6 +95,10 @@
 
 #define LR_BABEL_TLV_CHALLENGE_REPLY 19
 
+#define LR_BABEL_MAC_HMAC_SHA256 1
+
+#define LR_BABEL_MAC_BLAKE2S128 2
+
 #define LR_BABEL_TLV_SOURCE_PREFIX_SUBTLV 128
 
 #define LR_BABEL_HELLO_UNICAST 32768
@@ -172,6 +176,14 @@
  * Diagnostic: Mis-Connectivity Defect.
  */
 #define LR_BFD_DIAG_MISCONN_DEFECT 9
+
+#define LR_BFD_AUTH_ALGO_KEYED_MD5 1
+
+#define LR_BFD_AUTH_ALGO_METICULOUS_KEYED_MD5 2
+
+#define LR_BFD_AUTH_ALGO_KEYED_SHA1 3
+
+#define LR_BFD_AUTH_ALGO_METICULOUS_KEYED_SHA1 4
 
 #define LR_BFD_ROLE_ACTIVE 0
 
@@ -1274,13 +1286,6 @@
 
 #define LR_PEER_ROLE_CONFED_INTERNAL 3
 
-/**
- * Area kind ids shared by `lr_router_add_ospf_session_ext`. The stub
- * and NSSA kinds carry a `default_metric` (the border-router-injected
- * default route, RFC 2328 §3.6 / RFC 3101 §2.7); the `*_NO_SUMMARY`
- * variants suppress inter-area summaries ("totally stubby / totally
- * NSSA").
- */
 #define LR_AREA_NORMAL 0
 
 #define LR_AREA_STUB 1
@@ -1332,6 +1337,30 @@ typedef struct lr_bytes_t {
   uintptr_t len;
   uintptr_t cap;
 } lr_bytes_t;
+
+typedef struct OpaqueBabelMacKey {
+  uint8_t _private[0];
+} OpaqueBabelMacKey;
+
+typedef struct OpaqueBabelMacKey *lr_babel_mac_key_t;
+
+typedef struct OpaqueBabelPseudoHeader {
+  uint8_t _private[0];
+} OpaqueBabelPseudoHeader;
+
+typedef struct OpaqueBabelPseudoHeader *lr_babel_pseudo_header_t;
+
+typedef struct OpaqueBabelPacketCounter {
+  uint8_t _private[0];
+} OpaqueBabelPacketCounter;
+
+typedef struct OpaqueBabelPacketCounter *lr_babel_packet_counter_t;
+
+typedef struct OpaqueBabelReplayProtection {
+  uint8_t _private[0];
+} OpaqueBabelReplayProtection;
+
+typedef struct OpaqueBabelReplayProtection *lr_babel_replay_protection_t;
 
 typedef struct OpaqueBabelCodec {
   uint8_t _private[0];
@@ -1441,11 +1470,11 @@ typedef struct OpaqueBfdPacket {
 
 typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
 
-typedef struct OpaqueBfdConfig {
+typedef struct OpaqueBfdKeyedAuth {
   uint8_t _private[0];
-} OpaqueBfdConfig;
+} OpaqueBfdKeyedAuth;
 
-typedef struct OpaqueBfdConfig *lr_bfd_config_t;
+typedef struct OpaqueBfdKeyedAuth *lr_bfd_keyed_auth_t;
 
 typedef struct OpaqueBfdSession {
   uint8_t _private[0];
@@ -1458,6 +1487,12 @@ typedef struct OpaqueBfdSessionEvent {
 } OpaqueBfdSessionEvent;
 
 typedef struct OpaqueBfdSessionEvent *lr_bfd_session_event_t;
+
+typedef struct OpaqueBfdConfig {
+  uint8_t _private[0];
+} OpaqueBfdConfig;
+
+typedef struct OpaqueBfdConfig *lr_bfd_config_t;
 
 typedef struct OpaqueBgpCodec {
   uint8_t _private[0];
@@ -2149,20 +2184,18 @@ typedef struct OpaqueLdpLabelStore {
 
 typedef struct OpaqueLdpLabelStore *lr_ldp_label_store_t;
 
+typedef struct lr_ldp_prefix_t {
+  uint8_t addr_v4[16];
+  uint8_t addr_v6[16];
+  uint8_t is_ipv6;
+  uint8_t prefix_len;
+} lr_ldp_prefix_t;
+
 typedef struct OpaqueLdpSession {
   uint8_t _private[0];
 } OpaqueLdpSession;
 
 typedef struct OpaqueLdpSession *lr_ldp_session_t;
-
-/**
- * Opaque `GenericLabel` handle.
- */
-typedef struct OpaqueLdpGenericLabel {
-  uint8_t _private[0];
-} OpaqueLdpGenericLabel;
-
-typedef struct OpaqueLdpGenericLabel *lr_ldp_label_t;
 
 /**
  * Opaque `Fec` handle.
@@ -2172,6 +2205,15 @@ typedef struct OpaqueLdpFec {
 } OpaqueLdpFec;
 
 typedef struct OpaqueLdpFec *lr_ldp_fec_t;
+
+/**
+ * Opaque `GenericLabel` handle.
+ */
+typedef struct OpaqueLdpGenericLabel {
+  uint8_t _private[0];
+} OpaqueLdpGenericLabel;
+
+typedef struct OpaqueLdpGenericLabel *lr_ldp_label_t;
 
 /**
  * Opaque `TransitAllocator` handle.
@@ -2247,6 +2289,18 @@ typedef struct lr_mrt_rib_entry_t {
   const uint8_t *attributes;
   uintptr_t attr_len;
 } lr_mrt_rib_entry_t;
+
+typedef struct lr_mrt_attr_summary_t {
+  uint8_t has_next_hop_v4;
+  uint8_t has_next_hop_v6;
+  uint8_t next_hop_v4[4];
+  uint8_t next_hop_v6[16];
+  uint8_t has_local_pref;
+  uint32_t local_pref;
+  uint8_t has_med;
+  uint32_t med;
+  uintptr_t raw_len;
+} lr_mrt_attr_summary_t;
 
 /**
  * Opaque `MrtRibDump` handle. Wraps a boxed `lr_mrt::MrtRibDump` so
@@ -2424,6 +2478,20 @@ typedef struct OpaqueOspfDbExchange {
 
 typedef struct OpaqueOspfDbExchange *lr_ospf_db_exchange_t;
 
+typedef struct OpaqueOspfNeighbor {
+  uint8_t _private[0];
+} OpaqueOspfNeighbor;
+
+typedef struct OpaqueOspfNeighbor *lr_ospf_neighbor_t;
+
+typedef struct lr_ospf_exchange_step_t {
+  lr_ospf_packet_t *out_packets;
+  uintptr_t out_packet_count;
+  lr_ospf_lsa_box_t *out_lsas;
+  uintptr_t out_lsa_count;
+  uint8_t newly_full;
+} lr_ospf_exchange_step_t;
+
 /**
  * Opaque `AsbrDestination` handle (type-4 origination input).
  */
@@ -2487,12 +2555,6 @@ typedef struct OpaqueOspfLsaHdrBox {
  * `lr_ospf_lsa_header_new` / `_free` constructor / destructor pair).
  */
 typedef struct OpaqueOspfLsaHdrBox *lr_ospf_lsa_hdr_box_t;
-
-typedef struct OpaqueOspfNeighbor {
-  uint8_t _private[0];
-} OpaqueOspfNeighbor;
-
-typedef struct OpaqueOspfNeighbor *lr_ospf_neighbor_t;
 
 /**
  * Opaque `RouterLsaLink` handle.
@@ -3189,6 +3251,77 @@ uintptr_t lr_babel_frame_tlv_value_at(lr_babel_frame_t frame,
  */
 void lr_babel_frame_free(lr_babel_frame_t frame);
 
+lr_babel_mac_key_t lr_babel_mac_key_new(int32_t algorithm,
+                                        const uint8_t *secret,
+                                        uintptr_t secret_len);
+
+lr_babel_mac_key_t lr_babel_mac_key_hmac_sha256(const uint8_t *secret, uintptr_t secret_len);
+
+lr_babel_mac_key_t lr_babel_mac_key_blake2s128(const uint8_t *secret, uintptr_t secret_len);
+
+int32_t lr_babel_mac_key_algorithm(lr_babel_mac_key_t k);
+
+uintptr_t lr_babel_mac_key_digest_len(lr_babel_mac_key_t k);
+
+uintptr_t lr_babel_mac_key_secret_len(lr_babel_mac_key_t k);
+
+uintptr_t lr_babel_mac_key_secret_copy(lr_babel_mac_key_t k, uint8_t *out, uintptr_t cap);
+
+void lr_babel_mac_key_free(lr_babel_mac_key_t k);
+
+lr_babel_pseudo_header_t lr_babel_pseudo_header_new_v4(const uint8_t *src_v4,
+                                                       uint16_t src_port,
+                                                       const uint8_t *dst_v4,
+                                                       uint16_t dst_port);
+
+lr_babel_pseudo_header_t lr_babel_pseudo_header_new_v6(const uint8_t *src_v6,
+                                                       uint16_t src_port,
+                                                       const uint8_t *dst_v6,
+                                                       uint16_t dst_port);
+
+int32_t lr_babel_pseudo_header_encode(lr_babel_pseudo_header_t p, struct lr_bytes_t *out);
+
+void lr_babel_pseudo_header_free(lr_babel_pseudo_header_t p);
+
+lr_babel_packet_counter_t lr_babel_packet_counter_new(const uint8_t *index,
+                                                      uintptr_t index_len,
+                                                      uint32_t initial);
+
+uint32_t lr_babel_packet_counter_peek_counter(lr_babel_packet_counter_t c);
+
+uintptr_t lr_babel_packet_counter_peek_index_len(lr_babel_packet_counter_t c);
+
+uintptr_t lr_babel_packet_counter_peek_index_copy(lr_babel_packet_counter_t c,
+                                                  uint8_t *out,
+                                                  uintptr_t cap);
+
+void lr_babel_packet_counter_free(lr_babel_packet_counter_t c);
+
+lr_babel_replay_protection_t lr_babel_replay_protection_new(void);
+
+uint8_t lr_babel_replay_protection_accept(lr_babel_replay_protection_t r,
+                                          const uint8_t *index,
+                                          uintptr_t index_len,
+                                          uint32_t counter);
+
+void lr_babel_replay_protection_free(lr_babel_replay_protection_t r);
+
+int32_t lr_babel_codec_encode_authenticated(lr_babel_codec_t codec,
+                                            lr_babel_frame_t frame,
+                                            lr_babel_pseudo_header_t pseudo_header,
+                                            lr_babel_mac_key_t key,
+                                            lr_babel_packet_counter_t counter,
+                                            struct lr_bytes_t *out);
+
+int32_t lr_babel_codec_decode_authenticated_slice(lr_babel_codec_t codec,
+                                                  const uint8_t *packet,
+                                                  uintptr_t len,
+                                                  lr_babel_pseudo_header_t pseudo_header,
+                                                  const lr_babel_mac_key_t *keys,
+                                                  uintptr_t keys_count,
+                                                  lr_babel_replay_protection_t replay,
+                                                  lr_babel_frame_t *out);
+
 lr_babel_codec_t lr_babel_codec_new(void);
 
 int32_t lr_babel_codec_decode_slice(lr_babel_codec_t c,
@@ -3813,6 +3946,46 @@ int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uin
  * and must not be used after this call.
  */
 void lr_bfd_packet_free(lr_bfd_packet_t packet);
+
+lr_bfd_keyed_auth_t lr_bfd_keyed_auth_new(int32_t algorithm,
+                                          uint8_t key_id,
+                                          const uint8_t *secret,
+                                          uintptr_t secret_len);
+
+uint8_t lr_bfd_keyed_auth_key_id(lr_bfd_keyed_auth_t a);
+
+int32_t lr_bfd_keyed_auth_algorithm(lr_bfd_keyed_auth_t a);
+
+uint8_t lr_bfd_keyed_auth_auth_type_value(lr_bfd_keyed_auth_t a);
+
+uintptr_t lr_bfd_keyed_auth_digest_len(lr_bfd_keyed_auth_t a);
+
+uint8_t lr_bfd_keyed_auth_is_meticulous(lr_bfd_keyed_auth_t a);
+
+uint32_t lr_bfd_keyed_auth_xmit_seq(lr_bfd_keyed_auth_t a);
+
+uint8_t lr_bfd_keyed_auth_rcv_auth_seq_known(lr_bfd_keyed_auth_t a);
+
+uint32_t lr_bfd_keyed_auth_rcv_auth_seq(lr_bfd_keyed_auth_t a);
+
+int32_t lr_bfd_keyed_auth_advance_xmit_seq(lr_bfd_keyed_auth_t a);
+
+void lr_bfd_keyed_auth_free(lr_bfd_keyed_auth_t a);
+
+int32_t lr_bfd_session_set_keyed_auth(lr_bfd_session_t s, lr_bfd_keyed_auth_t auth);
+
+uint8_t lr_bfd_session_keyed_auth_present(lr_bfd_session_t s);
+
+int32_t lr_bfd_session_update_timers(lr_bfd_session_t s,
+                                     uint64_t now_ms,
+                                     uint32_t desired_min_tx,
+                                     uint32_t required_min_rx,
+                                     lr_bfd_session_event_t **out_array,
+                                     uintptr_t *out_count);
+
+uint8_t lr_bfd_session_remote_detect_mult(lr_bfd_session_t s);
+
+uint8_t lr_bfd_session_poll_active(lr_bfd_session_t s);
 
 lr_bfd_config_t lr_bfd_config_new(uint8_t detect_mult,
                                   uint32_t desired_min_tx_interval_us,
@@ -5622,6 +5795,12 @@ uint8_t lr_bmp_message_peer_present(lr_bmp_message_t message);
  */
 int32_t lr_bmp_message_peer_header(lr_bmp_message_t message, struct lr_bmp_peer_header_t *out);
 
+uint8_t lr_bmp_peer_flags_is_ipv6(uint8_t peer_flags);
+
+uint8_t lr_bmp_peer_flags_is_post_policy(uint8_t peer_flags);
+
+uint8_t lr_bmp_peer_flags_is_legacy_as_path(uint8_t peer_flags);
+
 /**
  * Read the payload length (bytes). The payload bytes themselves are
  * accessed via [`lr_bmp_message_payload`].
@@ -6581,6 +6760,8 @@ uint32_t lr_fletcher32(const uint8_t *bytes, uintptr_t len);
  */
 lr_damping_table_t lr_damping_table_new(const struct lr_damping_config_t *cfg);
 
+int32_t lr_damping_table_config(lr_damping_table_t t, struct lr_damping_config_t *out);
+
 /**
  * Returns the default RFC 2439 §4.7 damping config (Cisco-style).
  * Useful as a starting point for caller-side tuning before passing the
@@ -6985,6 +7166,8 @@ uint16_t lr_ldp_pdu_message_type_at(lr_ldp_pdu_t pdu, uintptr_t index);
  */
 uint32_t lr_ldp_pdu_message_id_at(lr_ldp_pdu_t pdu, uintptr_t index);
 
+uint8_t lr_ldp_pdu_message_u_bit_at(lr_ldp_pdu_t pdu, uintptr_t index);
+
 /**
  * Drop a boxed `LdpPdu`. Safe to call with NULL.
  *
@@ -7061,6 +7244,23 @@ uint8_t lr_ldp_label_store_label_from(lr_ldp_label_store_t s,
                                       uint8_t is_ipv6,
                                       uint8_t prefix_len,
                                       uint32_t *out_label);
+
+uintptr_t lr_ldp_label_store_unlearn_peer(lr_ldp_label_store_t s,
+                                          uint32_t peer_lsr_id,
+                                          uint16_t peer_label_space);
+
+uintptr_t lr_ldp_label_store_unlearn_by_label(lr_ldp_label_store_t s,
+                                              uint32_t peer_lsr_id,
+                                              uint16_t peer_label_space,
+                                              uint32_t label,
+                                              struct lr_ldp_prefix_t *out_prefixes,
+                                              uintptr_t cap);
+
+uintptr_t lr_ldp_label_store_unlearn_all_from(lr_ldp_label_store_t s,
+                                              uint32_t peer_lsr_id,
+                                              uint16_t peer_label_space,
+                                              struct lr_ldp_prefix_t *out_prefixes,
+                                              uintptr_t cap);
 
 /**
  * Advertise a local label binding for a FEC (RFC 5036 §3.5.5).
@@ -7239,6 +7439,38 @@ int32_t lr_ldp_session_transport_closed(lr_ldp_session_t r);
  * `r` must be a valid LdpSession handle.
  */
 int32_t lr_ldp_session_shutdown(lr_ldp_session_t r, uint64_t now_ms);
+
+int32_t lr_ldp_session_feed_pdu(lr_ldp_session_t r, lr_ldp_pdu_t pdu, uint64_t now_ms);
+
+int32_t lr_ldp_session_send_label_mapping(lr_ldp_session_t r,
+                                          uint32_t message_id,
+                                          lr_ldp_fec_t fec,
+                                          lr_ldp_label_t label);
+
+int32_t lr_ldp_session_send_label_withdraw(lr_ldp_session_t r,
+                                           uint32_t message_id,
+                                           lr_ldp_fec_t fec,
+                                           lr_ldp_label_t label);
+
+int32_t lr_ldp_session_send_label_request(lr_ldp_session_t r,
+                                          uint32_t message_id,
+                                          lr_ldp_fec_t fec);
+
+int32_t lr_ldp_session_send_label_release(lr_ldp_session_t r,
+                                          uint32_t message_id,
+                                          lr_ldp_fec_t fec,
+                                          lr_ldp_label_t label,
+                                          uint32_t status_code);
+
+int32_t lr_ldp_session_send_address_message(lr_ldp_session_t r,
+                                            const uint8_t *addrs,
+                                            uintptr_t count,
+                                            uint8_t is_ipv6);
+
+int32_t lr_ldp_session_enqueue_notification(lr_ldp_session_t r,
+                                            uint32_t status_code,
+                                            uint32_t msg_id,
+                                            uint16_t msg_type);
 
 /**
  * Construct a `GenericLabel` (RFC 5036 §3.4.2.1) from the 20-bit
@@ -7674,6 +7906,15 @@ int32_t lr_mpls_label_stack_pop(lr_mpls_label_stack_t stack);
  */
 void lr_mpls_label_stack_free(lr_mpls_label_stack_t stack);
 
+int32_t lr_mpls_label_stack_decode_3octet_count(const uint8_t *data,
+                                                uintptr_t len,
+                                                uintptr_t count,
+                                                lr_mpls_label_stack_t *out);
+
+uint8_t lr_mpls_label_stack_all_reserved(lr_mpls_label_stack_t stack);
+
+uint8_t lr_mpls_label_stack_contains(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
+
 /**
  * Decode one MRT record from `data`. On success, writes a freshly-
  * allocated `lr_mrt_record_t` to `*out`. The decoder is stateful
@@ -7758,6 +7999,13 @@ int32_t lr_mrt_record_unknown_subtype(lr_mrt_record_t record,
  * and must not be used after this call.
  */
 void lr_mrt_record_free(lr_mrt_record_t record);
+
+int32_t lr_mrt_walk_attributes(const struct lr_mrt_rib_entry_t *entry,
+                               struct lr_mrt_attr_summary_t *out_summary,
+                               uint8_t *as_path_buf,
+                               uintptr_t as_path_cap,
+                               uint8_t *communities_buf,
+                               uintptr_t communities_cap);
 
 /**
  * Construct an empty MrtRibDump. The collector's BGP ID is the
@@ -8401,6 +8649,30 @@ lr_ospf_packet_t lr_ospf_db_exchange_take_ls_request(lr_ospf_db_exchange_t e, ui
  * See [`lr_ospf_db_exchange_rxmt_interval_ms`].
  */
 uintptr_t lr_ospf_db_exchange_pending_requests(lr_ospf_db_exchange_t e);
+
+int32_t lr_ospf_db_exchange_on_db_desc_packet(lr_ospf_db_exchange_t e,
+                                              lr_ospf_neighbor_t neighbor,
+                                              lr_ospf_lsdb_t lsdb,
+                                              const uint8_t *data,
+                                              uintptr_t len,
+                                              uint64_t now_ms,
+                                              struct lr_ospf_exchange_step_t *out);
+
+int32_t lr_ospf_db_exchange_on_ls_request_packet(lr_ospf_db_exchange_t e,
+                                                 lr_ospf_neighbor_t neighbor,
+                                                 lr_ospf_lsdb_t lsdb,
+                                                 const uint8_t *data,
+                                                 uintptr_t len,
+                                                 uint64_t now_ms,
+                                                 struct lr_ospf_exchange_step_t *out);
+
+int32_t lr_ospf_db_exchange_on_ls_update_packet(lr_ospf_db_exchange_t e,
+                                                lr_ospf_neighbor_t neighbor,
+                                                const uint8_t *data,
+                                                uintptr_t len,
+                                                struct lr_ospf_exchange_step_t *out);
+
+void lr_ospf_db_exchange_step_free(struct lr_ospf_exchange_step_t *step);
 
 /**
  * Construct an `ExternalDestination` for type-5 / type-7 origination
@@ -11261,6 +11533,28 @@ int32_t lr_router_tick(lr_router_t r, uint64_t now_ms);
  * ManualStart + TransportOpen). Call once the transport is connected.
  */
 int32_t lr_router_start_session(lr_router_t r, uint64_t session);
+
+int32_t lr_router_close_session(lr_router_t r, uint64_t session);
+
+int32_t lr_router_shutdown_session(lr_router_t r, uint64_t session);
+
+int32_t lr_router_remove_redistribution_pipe(lr_router_t r, int32_t source, int32_t target);
+
+int32_t lr_router_adj_rib_in_snapshot(lr_router_t r, uint64_t session, struct lr_bytes_t *out);
+
+int32_t lr_router_ospf_set_area_type(lr_router_t r, uint32_t area_id, int32_t kind);
+
+int32_t lr_router_set_ospf_sr_receive(lr_router_t r, uint8_t on);
+
+uint8_t lr_router_ospf_sr_receive(lr_router_t r);
+
+int32_t lr_router_set_ospf_srv6_receive(lr_router_t r, uint8_t on);
+
+uint8_t lr_router_ospf_srv6_receive(lr_router_t r);
+
+int32_t lr_router_set_ospf_v3_extended_lsas(lr_router_t r, uint8_t on);
+
+uint8_t lr_router_ospf_v3_extended_lsas(lr_router_t r);
 
 /**
  * Set the per-prefix RFC 4271 MRAI interval for a BGP session.

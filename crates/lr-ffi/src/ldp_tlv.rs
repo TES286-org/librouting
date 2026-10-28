@@ -36,7 +36,7 @@ pub type lr_ldp_label_t = *mut OpaqueLdpGenericLabel;
 fn box_label(l: GenericLabel) -> lr_ldp_label_t {
     Box::into_raw(Box::new(l)) as lr_ldp_label_t
 }
-unsafe fn borrow_label(l: lr_ldp_label_t) -> Option<&'static GenericLabel> {
+pub(crate) unsafe fn borrow_label(l: lr_ldp_label_t) -> Option<&'static GenericLabel> {
     if l.is_null() {
         return None;
     }
@@ -104,6 +104,20 @@ pub struct OpaqueLdpFec {
     _private: [u8; 0],
 }
 pub type lr_ldp_fec_t = *mut OpaqueLdpFec;
+
+pub(crate) unsafe fn borrow_fec(f: lr_ldp_fec_t) -> Option<&'static Fec> {
+    if f.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(f as *const Fec) })
+}
+
+pub(crate) unsafe fn unbox_fec(f: lr_ldp_fec_t) -> Option<Box<Fec>> {
+    if f.is_null() {
+        return None;
+    }
+    Some(unsafe { Box::from_raw(f as *mut Fec) })
+}
 
 /// Construct a wildcard `Fec` (RFC 5036 §3.4.1).
 #[no_mangle]

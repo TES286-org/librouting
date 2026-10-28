@@ -479,6 +479,19 @@ pub unsafe extern "C" fn lr_bmp_message_peer_header(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn lr_bmp_peer_flags_is_ipv6(peer_flags: u8) -> u8 {
+    (peer_flags & 0x80 != 0) as u8
+}
+#[no_mangle]
+pub extern "C" fn lr_bmp_peer_flags_is_post_policy(peer_flags: u8) -> u8 {
+    (peer_flags & 0x40 != 0) as u8
+}
+#[no_mangle]
+pub extern "C" fn lr_bmp_peer_flags_is_legacy_as_path(peer_flags: u8) -> u8 {
+    (peer_flags & 0x20 != 0) as u8
+}
+
 /// Read the payload length (bytes). The payload bytes themselves are
 /// accessed via [`lr_bmp_message_payload`].
 ///

@@ -39,10 +39,10 @@
 
 use lr_core::addr::IpAddr;
 use lr_core::rib::Protocol;
-use lr_osroute::stub::StubRouteTable;
-use lr_osroute::{KernelRoute, OsRouteTable, SystemRouteTable};
 use lr_osroute::gtsm::Gtsm;
+use lr_osroute::stub::StubRouteTable;
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
+use lr_osroute::{KernelRoute, OsRouteTable, SystemRouteTable};
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
@@ -177,13 +177,24 @@ impl Backend {
 
 impl OsRouteTable for Backend {
     type Error = lr_osroute::OsRouteError;
-    fn add_route(&mut self, prefix: lr_core::addr::Prefix, gw: IpAddr, if_index: u32) -> Result<(), Self::Error> {
+    fn add_route(
+        &mut self,
+        prefix: lr_core::addr::Prefix,
+        gw: IpAddr,
+        if_index: u32,
+    ) -> Result<(), Self::Error> {
         match self {
             Backend::Native(b) => b.add_route(prefix, gw, if_index),
             Backend::Stub(b) => b.add_route(prefix, gw, if_index),
         }
     }
-    fn add_route_tagged(&mut self, prefix: lr_core::addr::Prefix, gw: IpAddr, if_index: u32, proto: Protocol) -> Result<(), Self::Error> {
+    fn add_route_tagged(
+        &mut self,
+        prefix: lr_core::addr::Prefix,
+        gw: IpAddr,
+        if_index: u32,
+        proto: Protocol,
+    ) -> Result<(), Self::Error> {
         match self {
             Backend::Native(b) => b.add_route_tagged(prefix, gw, if_index, proto),
             Backend::Stub(b) => b.add_route_tagged(prefix, gw, if_index, proto),
@@ -263,7 +274,10 @@ pub extern "C" fn lr_osroute_connect() -> lr_osroute_t {
 /// the FFI surface on platforms without a kernel route table.
 #[no_mangle]
 pub extern "C" fn lr_osroute_connect_stub() -> lr_osroute_t {
-    guarded(|| box_backend(Backend::connect_stub()), std::ptr::null_mut())
+    guarded(
+        || box_backend(Backend::connect_stub()),
+        std::ptr::null_mut(),
+    )
 }
 
 /// Returns the human-readable backend name compiled in (e.g.
@@ -537,10 +551,7 @@ pub unsafe extern "C" fn lr_osroute_list_routes(
 /// `t` must be a valid handle. `prefix` must point to a readable
 /// `lr_prefix_t`.
 #[no_mangle]
-pub unsafe extern "C" fn lr_osroute_has_route(
-    t: lr_osroute_t,
-    prefix: *const lr_prefix_t,
-) -> i32 {
+pub unsafe extern "C" fn lr_osroute_has_route(t: lr_osroute_t, prefix: *const lr_prefix_t) -> i32 {
     guarded(
         || unsafe {
             let Some(table) = borrow_backend_mut(t) else {
@@ -654,10 +665,7 @@ impl From<lr_gtsm_t> for Gtsm {
 /// connected eBGP.
 #[no_mangle]
 pub extern "C" fn lr_gtsm_single_hop() -> lr_gtsm_t {
-    guarded(
-        || lr_gtsm_t::from(Gtsm::single_hop()),
-        lr_gtsm_t::default(),
-    )
+    guarded(|| lr_gtsm_t::from(Gtsm::single_hop()), lr_gtsm_t::default())
 }
 
 /// Construct a multihop GTSM (RFC 5082 §4.2). `hops` must be in
@@ -672,9 +680,7 @@ pub extern "C" fn lr_gtsm_multihop(hops: u8) -> lr_gtsm_t {
             // Gtsm::multihop panics on out-of-range — clamp here so the
             // FFI entry point never panics across the C boundary.
             if !(1..=254).contains(&hops) {
-                set_last_error(format!(
-                    "multihop TTL must be 1..=254 (got {hops})"
-                ));
+                set_last_error(format!("multihop TTL must be 1..=254 (got {hops})"));
                 return lr_gtsm_t::default();
             }
             lr_gtsm_t::from(Gtsm::multihop(hops))
@@ -904,7 +910,11 @@ pub unsafe extern "C" fn lr_tcp_ao_key_read(
 ) -> i32 {
     guarded(
         || unsafe {
-            if key.is_null() || out_send_id.is_null() || out_recv_id.is_null() || out_key_len.is_null() {
+            if key.is_null()
+                || out_send_id.is_null()
+                || out_recv_id.is_null()
+                || out_key_len.is_null()
+            {
                 return LR_ERR_NULL;
             }
             let k = unsafe { &*key };
@@ -942,11 +952,7 @@ pub unsafe extern "C" fn lr_tcp_ao_key_copy(
             if !out_buf.is_null() && cap > 0 {
                 let to_write = n.min(cap);
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        k.key_buf.as_ptr(),
-                        out_buf,
-                        to_write,
-                    );
+                    std::ptr::copy_nonoverlapping(k.key_buf.as_ptr(), out_buf, to_write);
                 }
             }
             n as i64
@@ -1015,10 +1021,7 @@ pub extern "C" fn lr_tcp_auth_new_none() -> lr_tcp_auth_t {
 /// `key` must point to `key_len` readable bytes (NULL only when
 /// `key_len == 0`).
 #[no_mangle]
-pub unsafe extern "C" fn lr_tcp_auth_new_md5(
-    key: *const u8,
-    key_len: usize,
-) -> lr_tcp_auth_t {
+pub unsafe extern "C" fn lr_tcp_auth_new_md5(key: *const u8, key_len: usize) -> lr_tcp_auth_t {
     guarded(
         || unsafe {
             if key.is_null() && key_len != 0 {
@@ -1237,14 +1240,8 @@ mod tests {
                 lr_osroute_add_route(t, std::ptr::null(), nh.as_ptr(), 4, 1),
                 LR_ERR_NULL
             );
-            assert_eq!(
-                lr_osroute_delete_route(t, std::ptr::null()),
-                LR_ERR_NULL
-            );
-            assert_eq!(
-                lr_osroute_has_route(t, std::ptr::null()),
-                LR_ERR_NULL
-            );
+            assert_eq!(lr_osroute_delete_route(t, std::ptr::null()), LR_ERR_NULL);
+            assert_eq!(lr_osroute_has_route(t, std::ptr::null()), LR_ERR_NULL);
         }
         unsafe { lr_osroute_destroy(t) };
     }
@@ -1427,7 +1424,12 @@ mod tests {
         let mut recv_id = 0u8;
         let mut key_len = 0usize;
         let rc = unsafe {
-            lr_tcp_ao_key_read(&raw const out, &raw mut send_id, &raw mut recv_id, &raw mut key_len)
+            lr_tcp_ao_key_read(
+                &raw const out,
+                &raw mut send_id,
+                &raw mut recv_id,
+                &raw mut key_len,
+            )
         };
         assert_eq!(rc, 0);
         assert_eq!(send_id, 42);
@@ -1539,9 +1541,7 @@ mod tests {
 
     #[test]
     fn ffi_tcp_auth_ao_rejects_empty_keys() {
-        let a = unsafe {
-            lr_tcp_auth_new_ao(std::ptr::null(), 0, LR_TCP_AO_ALG_HMAC_SHA1, 0)
-        };
+        let a = unsafe { lr_tcp_auth_new_ao(std::ptr::null(), 0, LR_TCP_AO_ALG_HMAC_SHA1, 0) };
         assert!(a.is_null());
     }
 

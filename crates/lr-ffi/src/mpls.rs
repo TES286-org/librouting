@@ -712,6 +712,65 @@ pub unsafe extern "C" fn lr_mpls_label_stack_free(stack: lr_mpls_label_stack_t) 
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn lr_mpls_label_stack_decode_3octet_count(
+    data: *const u8,
+    len: usize,
+    count: usize,
+    out: *mut lr_mpls_label_stack_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if data.is_null() || out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(data, len) };
+            match LabelStack::decode_3octet_count(slice, count) {
+                Ok(s) => {
+                    unsafe { *out = box_stack(s) }
+                    0
+                }
+                Err(e) => {
+                    set_last_error(e.to_string());
+                    err_code(&e)
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_mpls_label_stack_all_reserved(stack: lr_mpls_label_stack_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_stack(stack)
+                .map(|s| s.all_reserved() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_mpls_label_stack_contains(
+    stack: lr_mpls_label_stack_t,
+    label: lr_mpls_label_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(s) = borrow_stack(stack) else {
+                return 0;
+            };
+            let Some(l) = borrow_label(label) else {
+                return 0;
+            };
+            s.contains(l) as u8
+        },
+        0,
+    )
+}
+
 /// One fully-specified label `(value, tc, ttl)`. Used by
 /// [`lr_mpls_label_stack_from_labels`] to build a stack from a flat
 /// array of label specs without round-tripping through individual

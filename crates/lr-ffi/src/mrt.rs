@@ -370,6 +370,97 @@ pub unsafe extern "C" fn lr_mrt_record_free(record: lr_mrt_record_t) {
     )
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_mrt_attr_summary_t {
+    pub has_next_hop_v4: u8,
+    pub has_next_hop_v6: u8,
+    pub next_hop_v4: [u8; 4],
+    pub next_hop_v6: [u8; 16],
+    pub has_local_pref: u8,
+    pub local_pref: u32,
+    pub has_med: u8,
+    pub med: u32,
+    pub raw_len: usize,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lr_mrt_walk_attributes(
+    entry: *const lr_mrt_rib_entry_t,
+    out_summary: *mut lr_mrt_attr_summary_t,
+    as_path_buf: *mut u8,
+    as_path_cap: usize,
+    communities_buf: *mut u8,
+    communities_cap: usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if entry.is_null() || out_summary.is_null() {
+                return -1;
+            }
+            let e = unsafe { &*entry };
+            if e.attributes.is_null() && e.attr_len != 0 {
+                return -1;
+            }
+            let attr_slice = if e.attr_len == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(e.attributes, e.attr_len) }
+            };
+            let rib_entry = lr_mrt::RibEntry {
+                peer_index: e.peer_index,
+                originated_time: e.originated_time,
+                path_id: e.path_id,
+                attributes: attr_slice.to_vec(),
+            };
+            let summary = lr_mrt::walk_attributes(&rib_entry);
+            let mut out = lr_mrt_attr_summary_t {
+                raw_len: summary.raw_len,
+                ..lr_mrt_attr_summary_t::default()
+            };
+            match summary.next_hop {
+                Some(IpAddr::V4(b)) => {
+                    out.has_next_hop_v4 = 1;
+                    out.next_hop_v4 = b;
+                }
+                Some(IpAddr::V6(b)) => {
+                    out.has_next_hop_v6 = 1;
+                    out.next_hop_v6 = b;
+                }
+                None => {}
+            }
+            if let Some(lp) = summary.local_pref {
+                out.has_local_pref = 1;
+                out.local_pref = lp;
+            }
+            if let Some(med) = summary.med {
+                out.has_med = 1;
+                out.med = med;
+            }
+            if !as_path_buf.is_null() && as_path_cap > 0 {
+                let bytes = summary.as_path.as_bytes();
+                let n = bytes.len().min(as_path_cap - 1);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), as_path_buf, n);
+                    *as_path_buf.add(n) = 0;
+                }
+            }
+            if !communities_buf.is_null() && communities_cap > 0 {
+                let joined = summary.communities.join(",");
+                let bytes = joined.as_bytes();
+                let n = bytes.len().min(communities_cap - 1);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), communities_buf, n);
+                    *communities_buf.add(n) = 0;
+                }
+            }
+            unsafe { *out_summary = out };
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 // ---- Helpers ----
 
 fn decode_addr(addr: *const u8, is_ipv6: u8) -> IpAddr {

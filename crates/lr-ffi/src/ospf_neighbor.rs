@@ -71,13 +71,15 @@ pub type lr_ospf_neighbor_t = *mut OpaqueOspfNeighbor;
 fn box_neighbor(n: OspfNeighbor) -> lr_ospf_neighbor_t {
     Box::into_raw(Box::new(n)) as lr_ospf_neighbor_t
 }
-unsafe fn borrow_neighbor_mut(r: lr_ospf_neighbor_t) -> Option<&'static mut OspfNeighbor> {
+pub(crate) unsafe fn borrow_neighbor_mut(
+    r: lr_ospf_neighbor_t,
+) -> Option<&'static mut OspfNeighbor> {
     if r.is_null() {
         return None;
     }
     Some(unsafe { &mut *(r as *mut OspfNeighbor) })
 }
-unsafe fn borrow_neighbor(r: lr_ospf_neighbor_t) -> Option<&'static OspfNeighbor> {
+pub(crate) unsafe fn borrow_neighbor(r: lr_ospf_neighbor_t) -> Option<&'static OspfNeighbor> {
     if r.is_null() {
         return None;
     }
