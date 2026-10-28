@@ -2041,6 +2041,17 @@ typedef struct lr_bgp_peer_message_stats_t {
 } lr_bgp_peer_message_stats_t;
 
 /**
+ * One RFC 5549 tuple `(nlri_afi, nlri_safi, nh_afi)`. Mirrors
+ * `lr_bgp::extensions::extended_next_hop::ExtNextHopTuple` field-for-
+ * field.
+ */
+typedef struct lr_bgp_ext_next_hop_tuple_t {
+  uint16_t nlri_afi;
+  uint8_t nlri_safi;
+  uint16_t nh_afi;
+} lr_bgp_ext_next_hop_tuple_t;
+
+/**
  * Opaque `BmpMessage` handle.
  */
 typedef struct OpaqueBmpMessage {
@@ -2092,27 +2103,6 @@ typedef struct OpaqueBgpCapability {
 } OpaqueBgpCapability;
 
 typedef struct OpaqueBgpCapability *lr_bgp_capability_t;
-
-/**
- * One Extended Next-Hop tuple (RFC 5549 §4): the NLRI AFI/SAFI
- * pair and the nexthop AFI. Used by
- * [`lr_bgp_cap_extended_next_hop`] to build a capability from a
- * flat C array without round-tripping through individual handles.
- */
-typedef struct lr_bgp_ext_next_hop_tuple_t {
-  /**
-   * NLRI address family (1 = IPv4, 2 = IPv6).
-   */
-  uint16_t nlri_afi;
-  /**
-   * NLRI subsequent address family (1 = unicast, etc.).
-   */
-  uint8_t nlri_safi;
-  /**
-   * Nexthop address family (2 = IPv6, for RFC 5549 IPv4-over-IPv6).
-   */
-  uint16_t nexthop_afi;
-} lr_bgp_ext_next_hop_tuple_t;
 
 /**
  * One AddPath family tuple (RFC 7911 §4.4): `(afi, safi, send, recv)`.
@@ -6802,6 +6792,141 @@ int32_t lr_bgp_peer_enqueue_notification(lr_bgp_peer_t r, uint8_t code, uint8_t 
  * `r` must be a valid BgpPeer handle.
  */
 int32_t lr_bgp_peer_reset(lr_bgp_peer_t r);
+
+/**
+ * Compute the new ORIGINATOR_ID to insert when reflecting a route to
+ * an RR-client (RFC 4456 §9). When `existing_present` is 1, the
+ * existing ORIGINATOR_ID is preserved; otherwise the local BGP
+ * identifier becomes the new ORIGINATOR_ID. Writes the 4-byte
+ * ORIGINATOR_ID to `*out_addr` and `1` to `*out_present` when a
+ * value is to be inserted.
+ *
+ * # Safety
+ * All out-pointers must point to writable memory of the documented
+ * type; `out_addr` needs 4 bytes.
+ */
+int32_t lr_bgp_compute_originator_id(uint8_t existing_present,
+                                     const uint8_t *existing_addr,
+                                     uint32_t local_bgp_id,
+                                     uint8_t *out_addr,
+                                     uint8_t *out_present);
+
+/**
+ * True when `cluster_list` contains `local_cluster` (RFC 4456 §10
+ * loop check). `cluster_list` is a flat array of 4-byte cluster IDs;
+ * `count` is the number of entries.
+ *
+ * # Safety
+ * `cluster_list` must point to `count * 4` readable bytes.
+ */
+uint8_t lr_bgp_cluster_list_has_loop(const uint8_t *cluster_list,
+                                     uintptr_t count,
+                                     uint32_t local_cluster);
+
+/**
+ * Prepend `local_cluster` to the cluster list and write the result
+ * to `*out` as a flat array of 4-byte cluster IDs. The caller frees
+ * the result with [`lr_bytes_free`]. `cluster_list` is the existing
+ * list (NULL when empty); `count` is its entry count.
+ *
+ * # Safety
+ * `cluster_list` must point to `count * 4` readable bytes when
+ * non-NULL; `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_prepend_cluster_id(const uint8_t *cluster_list,
+                                  uintptr_t count,
+                                  uint32_t local_cluster,
+                                  struct lr_bytes_t *out);
+
+/**
+ * Apply the RFC 9234 §5 ingress rules:
+ *
+ * - Rule 1: a route that already carries OTC received from a
+ *   Customer or RS-Client is a route leak.
+ * - Rule 2: a route that carries OTC received from a Peer whose
+ *   value differs from the peer's AS is a route leak.
+ * - Rule 3: a route received from a Provider, a Peer, or an RS
+ *   without OTC MUST have OTC added with the remote AS number.
+ *
+ * `existing_present` + `existing_value` carry the route's existing
+ * OTC; `local_role` is one of the LR_OTC_ROLE_* constants; `peer_as`
+ * is the remote AS number. Writes the resulting OTC value to
+ * `*out_value` and `1` to `*out_present` on success; `0` to
+ * `*out_present` and returns LR_ERR_INVALID_HANDLE (-2) on a route
+ * leak.
+ *
+ * # Safety
+ * All out-pointers must point to writable memory of the documented
+ * type.
+ */
+int32_t lr_bgp_otc_on_receive(uint8_t existing_present,
+                              uint32_t existing_value,
+                              uint8_t local_role,
+                              uint32_t peer_as,
+                              uint32_t *out_value,
+                              uint8_t *out_present);
+
+/**
+ * True when a route with `route_otc` may be advertised to a peer
+ * with `local_role` (RFC 9234 §5 egress rule 2: a route that
+ * already carries OTC MUST NOT be propagated to Providers, Peers,
+ * or RSes; it may go to Customers and RS-clients).
+ */
+uint8_t lr_bgp_otc_can_advertise(uint32_t route_otc, uint8_t local_role);
+
+/**
+ * Walk the BgpPeer's advertised RFC 5549 tuples and write them to
+ * `*out_array` as a flat array of `lr_bgp_ext_next_hop_tuple_t`.
+ * The caller frees the array with
+ * [`lr_bgp_ext_next_hop_tuple_array_free`]. Returns the count
+ * through `*out_count`.
+ *
+ * # Safety
+ * `peer` must be a valid `lr_bgp_peer_t`. Both out-pointers must
+ * point to writable memory.
+ */
+int32_t lr_bgp_peer_advertised_tuples(lr_bgp_peer_t peer,
+                                      uintptr_t *out_count,
+                                      struct lr_bgp_ext_next_hop_tuple_t **out_array);
+
+/**
+ * Free a tuple array produced by [`lr_bgp_advertised_tuples`]. Safe
+ * on NULL.
+ *
+ * # Safety
+ * `arr` must have been produced by `lr_bgp_advertised_tuples` and not
+ * already freed; `count` must match the count returned by the
+ * advertised_tuples call.
+ */
+void lr_bgp_ext_next_hop_tuple_array_free(struct lr_bgp_ext_next_hop_tuple_t *arr, uintptr_t count);
+
+/**
+ * True when the `(nlri_afi, nlri_safi, nh_afi)` tuple is in the
+ * negotiated set (RFC 5549 — the peer advertised the tuple in its
+ * OPEN, and we negotiated Extended Next-Hop).
+ *
+ * # Safety
+ * `tuples` must point to `count` readable
+ * `lr_bgp_ext_next_hop_tuple_t` values.
+ */
+uint8_t lr_bgp_ext_next_hop_supports(const struct lr_bgp_ext_next_hop_tuple_t *tuples,
+                                     uintptr_t count,
+                                     uint16_t nlri_afi,
+                                     uint8_t nlri_safi,
+                                     uint16_t nh_afi);
+
+/**
+ * Build a one-label IPv4 NLRI with the implicit-null label (RFC
+ * 8277 §3 — the canonical 'forward the packet unlabelled' marker).
+ * `prefix_addr` is 4 bytes; writes the wire form to `*out`.
+ *
+ * # Safety
+ * `prefix_addr` must point to 4 readable bytes; `out` must point to
+ * a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_labeled_nlri_ipv4_implicit_null(const uint8_t *prefix_addr,
+                                               uint8_t prefix_len,
+                                               struct lr_bytes_t *out);
 
 /**
  * Decode one BMP message from `data`. On success, writes a freshly-
