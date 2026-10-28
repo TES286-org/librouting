@@ -99,6 +99,25 @@ pub enum RtrPduType {
 }
 
 impl RtrPduType {
+    /// Convert a wire type byte to the canonical [`RtrPduType`], or
+    /// `None` for the reserved type 5 or any type ≥ 12.
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => Self::SerialNotify,
+            1 => Self::SerialQuery,
+            2 => Self::ResetQuery,
+            3 => Self::CacheResponse,
+            4 => Self::Ipv4Prefix,
+            6 => Self::Ipv6Prefix,
+            7 => Self::EndOfData,
+            8 => Self::CacheReset,
+            9 => Self::RouterKey,
+            10 => Self::ErrorReport,
+            11 => Self::Aspa,
+            _ => return None,
+        })
+    }
+
     /// The BIRD-style display name (`str_pdu_type` parity).
     pub const fn name(self) -> &'static str {
         match self {
@@ -157,6 +176,24 @@ pub enum RtrErrorCode {
 }
 
 impl RtrErrorCode {
+    /// Convert a wire error code to the canonical
+    /// [`RtrErrorCode`], or `None` when the code is not in the
+    /// RFC §12 table.
+    pub const fn from_u16(v: u16) -> Option<Self> {
+        Some(match v {
+            0 => Self::CorruptData,
+            1 => Self::InternalError,
+            2 => Self::NoDataAvailable,
+            3 => Self::InvalidRequest,
+            4 => Self::UnsupportedProtocolVersion,
+            5 => Self::UnsupportedPduType,
+            6 => Self::WithdrawalOfUnknownRecord,
+            7 => Self::DuplicateAnnouncementReceived,
+            8 => Self::UnexpectedProtocolVersion,
+            _ => return None,
+        })
+    }
+
     /// RFC §12: everything except NoDataAvailable is fatal.
     pub const fn is_fatal(self) -> bool {
         !matches!(self, Self::NoDataAvailable)
