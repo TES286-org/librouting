@@ -64,6 +64,7 @@ pub mod mrt;
 pub mod mrt_reader;
 pub mod ospf;
 pub mod ospf_abr_nssa;
+pub mod ospf_auth;
 pub mod ospf_body;
 pub mod ospf_constants;
 pub mod ospf_db_exchange;

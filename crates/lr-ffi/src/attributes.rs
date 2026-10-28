@@ -72,7 +72,7 @@ unsafe fn unbox_attrs(a: lr_attributes_t) -> Option<Box<Attributes>> {
 /// # Safety
 /// `a` must have been produced by [`box_attrs`] and not be freed while
 /// the returned reference is live.
-unsafe fn borrow_attrs(a: lr_attributes_t) -> Option<&'static Attributes> {
+pub(crate) unsafe fn borrow_attrs(a: lr_attributes_t) -> Option<&'static Attributes> {
     if a.is_null() {
         return None;
     }

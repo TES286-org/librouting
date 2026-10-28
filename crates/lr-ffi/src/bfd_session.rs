@@ -16,7 +16,7 @@ use crate::bfd::{
     LR_BFD_DIAG_NONE, LR_BFD_DIAG_PATH_DOWN, LR_BFD_DIAG_REV_PATH_DOWN, LR_BFD_STATE_ADMIN_DOWN,
     LR_BFD_STATE_DOWN, LR_BFD_STATE_INIT, LR_BFD_STATE_UP,
 };
-use crate::error::{LrError, LR_ERR_PANIC};
+use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
 use crate::handle::lr_bytes_t;
 
@@ -134,6 +134,21 @@ unsafe fn borrow_config(c: lr_bfd_config_t) -> Option<&'static BfdConfig> {
     Some(unsafe { &*(c as *const BfdConfig) })
 }
 
+/// Borrow a `BfdConfig` handle mutably for in-place field updates.
+/// Same single-threaded mutation contract as the other `*_mut`
+/// helpers — the caller must not race the mutation with another
+/// `lr_bfd_config_*` call on the same handle.
+///
+/// # Safety
+/// `c` must have been produced by [`box_config`] and not be freed
+/// while the returned reference is live.
+unsafe fn borrow_config_mut(c: lr_bfd_config_t) -> Option<&'static mut BfdConfig> {
+    if c.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(c as *mut BfdConfig) })
+}
+
 fn box_event(e: BfdSessionEvent) -> lr_bfd_session_event_t {
     Box::into_raw(Box::new(e)) as lr_bfd_session_event_t
 }
@@ -205,6 +220,201 @@ pub unsafe extern "C" fn lr_bfd_config_role(c: lr_bfd_config_t) -> u8 {
                 .unwrap_or(LR_BFD_ROLE_ACTIVE)
         },
         LR_BFD_ROLE_ACTIVE,
+    )
+}
+
+/// Read the configured desired minimum transmit interval (microseconds).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_desired_min_tx_interval(c: lr_bfd_config_t) -> u32 {
+    guarded(
+        || unsafe {
+            borrow_config(c)
+                .map(|c| c.desired_min_tx_interval)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Read the configured required minimum receive interval (microseconds).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_required_min_rx_interval(c: lr_bfd_config_t) -> u32 {
+    guarded(
+        || unsafe {
+            borrow_config(c)
+                .map(|c| c.required_min_rx_interval)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Read the configured required minimum echo interval (microseconds).
+/// 0 = echo function disabled.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_required_min_echo_interval(c: lr_bfd_config_t) -> u32 {
+    guarded(
+        || unsafe {
+            borrow_config(c)
+                .map(|c| c.required_min_echo_interval)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Set the detect multiplier (RFC 5880 §6.8.4 — must be >= 1). Values
+/// of 0 are clamped to 1.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_set_detect_mult(c: lr_bfd_config_t, value: u8) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(cfg) = borrow_config_mut(c) else {
+                return LR_ERR_NULL;
+            };
+            cfg.detect_mult = value.max(1);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Set the desired minimum transmit interval (microseconds).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_set_desired_min_tx_interval(
+    c: lr_bfd_config_t,
+    value: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(cfg) = borrow_config_mut(c) else {
+                return LR_ERR_NULL;
+            };
+            cfg.desired_min_tx_interval = value;
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Set the required minimum receive interval (microseconds).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_set_required_min_rx_interval(
+    c: lr_bfd_config_t,
+    value: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(cfg) = borrow_config_mut(c) else {
+                return LR_ERR_NULL;
+            };
+            cfg.required_min_rx_interval = value;
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Set the required minimum echo interval (microseconds). 0 = echo
+/// function disabled.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_set_required_min_echo_interval(
+    c: lr_bfd_config_t,
+    value: u32,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(cfg) = borrow_config_mut(c) else {
+                return LR_ERR_NULL;
+            };
+            cfg.required_min_echo_interval = value;
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Set the session role (Active / Passive — `LR_BFD_ROLE_*`).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_set_role(c: lr_bfd_config_t, role: u8) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(cfg) = borrow_config_mut(c) else {
+                return LR_ERR_NULL;
+            };
+            cfg.role = role_from_u8(role);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Install a Simple Password authentication key (RFC 5880 §4.2).
+/// `password` must point to `password_len` readable bytes; the key
+/// is copied into the config. Passing `password_len == 0` clears the
+/// existing key (sets it to `None`). The maximum supported length is
+/// `LR_BFD_MAX_PASSWORD_LEN` (16 bytes per RFC 5880 §6.7).
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a null config, and
+/// `LR_ERR_OTHER` (-6) when `password_len` exceeds the maximum.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_set_auth_key(
+    c: lr_bfd_config_t,
+    password: *const u8,
+    password_len: usize,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(cfg) = borrow_config_mut(c) else {
+                return LR_ERR_NULL;
+            };
+            if password_len == 0 {
+                cfg.auth_key = None;
+                return 0;
+            }
+            if password.is_null() {
+                return LR_ERR_NULL;
+            }
+            if password_len > lr_bfd::auth::MAX_PASSWORD_LEN {
+                set_last_error(format!(
+                    "auth key length {password_len} exceeds the {}-byte maximum (RFC 5880 §6.7)",
+                    lr_bfd::auth::MAX_PASSWORD_LEN
+                ));
+                return LrError::Other as i32;
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(password, password_len) };
+            cfg.auth_key = Some(lr_bfd::auth::AuthKey::simple_password(0, bytes));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// True (1) when the config carries a Simple Password auth key, false
+/// (0) otherwise. Reads `BfdConfig::auth_key` (RFC 5880 §4.2).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_config_has_auth_key(c: lr_bfd_config_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_config(c)
+                .map(|c| c.auth_key.is_some() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Read the peer's last advertised diagnostic (RFC 5880 §4.1 diag
+/// field). Returns one of the `LR_BFD_DIAG_*` constants.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_session_remote_diag(s: lr_bfd_session_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_session(s)
+                .map(|s| diag_to_u8(s.remote_diag()))
+                .unwrap_or(LR_BFD_DIAG_NONE)
+        },
+        LR_BFD_DIAG_NONE,
     )
 }
 

@@ -56,6 +56,20 @@
 #define LR_MAX_PREFIX_TEARDOWN 1
 #define LR_MAX_PREFIX_RESTART 2
 
+/* MPLS reserved-label constants (RFC 3032 §2.1). Used by
+ * lr_mpls_label_new / lr_mpls_label_value callers to identify
+ * reserved-label semantics without memorizing integer values. */
+#define LR_MPLS_LABEL_IPV4_EXPLICIT_NULL 0
+#define LR_MPLS_LABEL_ROUTER_ALERT 1
+#define LR_MPLS_LABEL_IPV6_EXPLICIT_NULL 2
+#define LR_MPLS_LABEL_IMPLICIT_NULL 3
+#define LR_MPLS_LABEL_ELI 7
+#define LR_MPLS_LABEL_GAL 13
+#define LR_MPLS_LABEL_OAM_ALERT 14
+#define LR_MPLS_LABEL_EXTENSION 15
+#define LR_MPLS_LABEL_FIRST_NORMAL 16
+#define LR_MPLS_LABEL_MAX_VALUE 0xFFFFF
+
 
 
 
@@ -788,6 +802,21 @@
  */
 #define LR_OSPF_NSSA_N_P_BIT 8
 
+
+
+
+
+
+
+#define LR_OSPF_CRYPTO_ALG_HMAC_SHA1 1
+
+#define LR_OSPF_CRYPTO_ALG_HMAC_SHA256 2
+
+/**
+ * The OSPFv3 authentication type for HMAC trailers (RFC 7166).
+ */
+#define LR_OSPF_V3_AUTH_TYPE_HMAC V3_AUTH_TYPE_HMAC
+
 /**
  * OSPFv2 Router-LSA (RFC 2328 §A.4.2).
  */
@@ -1422,6 +1451,33 @@ typedef struct OpaqueBabelSeqnoRequest {
 
 typedef struct OpaqueBabelSeqnoRequest *lr_babel_seqno_request_t;
 
+/**
+ * Opaque `Update` handle.
+ */
+typedef struct OpaqueBabelUpdate {
+  uint8_t _private[0];
+} OpaqueBabelUpdate;
+
+typedef struct OpaqueBabelUpdate *lr_babel_update_t;
+
+/**
+ * Opaque `NextHop` handle.
+ */
+typedef struct OpaqueBabelNextHop {
+  uint8_t _private[0];
+} OpaqueBabelNextHop;
+
+typedef struct OpaqueBabelNextHop *lr_babel_next_hop_t;
+
+/**
+ * Opaque `Ack` handle.
+ */
+typedef struct OpaqueBabelAck {
+  uint8_t _private[0];
+} OpaqueBabelAck;
+
+typedef struct OpaqueBabelAck *lr_babel_ack_t;
+
 typedef struct OpaqueBabelNeighbor {
   uint8_t _private[0];
 } OpaqueBabelNeighbor;
@@ -1724,6 +1780,62 @@ typedef struct lr_bgp_ext_next_hop_tuple_t {
    */
   uint16_t nexthop_afi;
 } lr_bgp_ext_next_hop_tuple_t;
+
+/**
+ * One AddPath family tuple (RFC 7911 §4.4): `(afi, safi, send, recv)`.
+ * `send` and `recv` are `u8` (1/0) for ABI stability — the Rust
+ * side maps them to bools.
+ */
+typedef struct lr_bgp_cap_add_path_family_t {
+  uint16_t afi;
+  uint8_t safi;
+  uint8_t send;
+  uint8_t recv;
+} lr_bgp_cap_add_path_family_t;
+
+/**
+ * One Graceful-Restart family tuple (RFC 4724 §3):
+ * `(afi, safi, forwarding)`. `forwarding` is `u8` (1/0).
+ */
+typedef struct lr_bgp_cap_gr_family_t {
+  uint16_t afi;
+  uint8_t safi;
+  uint8_t forwarding;
+} lr_bgp_cap_gr_family_t;
+
+/**
+ * One Long-Lived-GR family tuple (RFC 9494 §3.1):
+ * `(afi, safi, forwarding, stale_time_secs)`.
+ */
+typedef struct lr_bgp_cap_llgr_family_t {
+  uint16_t afi;
+  uint8_t safi;
+  uint8_t forwarding;
+  uint32_t stale_time_secs;
+} lr_bgp_cap_llgr_family_t;
+
+/**
+ * Opaque handle to a heap-allocated byte buffer returned by
+ * `lr_bgp_cap_encode_set`. Owns a `Vec<u8>` so the C side can pass
+ * the bytes back to the caller without copying. Free with
+ * [`lr_bgp_cap_bytes_free`].
+ */
+typedef struct OpaqueBgpCapBytes {
+  uint8_t _private[0];
+} OpaqueBgpCapBytes;
+
+typedef struct OpaqueBgpCapBytes *lr_bytes_t_handle;
+
+/**
+ * Opaque handle to a heap-allocated array of `lr_bgp_capability_t`
+ * entries returned by `lr_bgp_cap_decode_set`. Free with
+ * [`lr_bgp_cap_array_free`].
+ */
+typedef struct OpaqueBgpCapArray {
+  uint8_t _private[0];
+} OpaqueBgpCapArray;
+
+typedef struct OpaqueBgpCapArray *lr_bgp_capability_array_t;
 
 /**
  * Repr-C IpAddr. Carries a `is_ipv6` flag plus 16 bytes (IPv4 occupies
@@ -2428,6 +2540,33 @@ typedef struct OpaqueOspfSpfResultV3 {
 } OpaqueOspfSpfResultV3;
 
 typedef struct OpaqueOspfSpfResultV3 *lr_ospf_spf_v3_result_t;
+
+/**
+ * Opaque `SimplePassword` handle.
+ */
+typedef struct OpaqueOspfSimplePassword {
+  uint8_t _private[0];
+} OpaqueOspfSimplePassword;
+
+typedef struct OpaqueOspfSimplePassword *lr_ospf_simple_password_t;
+
+/**
+ * Opaque `CryptoAuth` handle.
+ */
+typedef struct OpaqueOspfCryptoAuth {
+  uint8_t _private[0];
+} OpaqueOspfCryptoAuth;
+
+typedef struct OpaqueOspfCryptoAuth *lr_ospf_crypto_auth_t;
+
+/**
+ * Opaque `V3Auth` handle.
+ */
+typedef struct OpaqueOspfV3Auth {
+  uint8_t _private[0];
+} OpaqueOspfV3Auth;
+
+typedef struct OpaqueOspfV3Auth *lr_ospf_v3_auth_t;
 
 /**
  * Fixed-layout projection of one LSA header (RFC 2328 §A.4.1).
@@ -3552,6 +3691,230 @@ lr_babel_seqno_request_t lr_babel_seqno_request_new(const uint8_t *prefix_v4,
 void lr_babel_seqno_request_free(lr_babel_seqno_request_t r);
 
 /**
+ * Convert a wire TLV type byte (RFC 8966 §4.6 IANA registry) to its
+ * `LR_BABEL_TLV_*` constant. Unknown values are passed through as-is
+ * (matching `TlvType::from_u8` -> `TlvType::Other(v)`).
+ */
+uint8_t lr_babel_tlv_type_from_u8(uint8_t wire);
+
+/**
+ * Convert a `LR_BABEL_TLV_*` constant to its wire value. Identity —
+ * kept for ABI symmetry with `from_u8`.
+ */
+uint8_t lr_babel_tlv_type_to_u8(uint8_t value);
+
+/**
+ * Return the name of a TLV type as a NUL-terminated C string. The
+ * returned pointer is valid until the next call to any
+ * `lr_babel_tlv_type_*` function on this thread.
+ */
+const char *lr_babel_tlv_type_name(uint8_t value);
+
+/**
+ * Construct a Babel Update TLV (RFC 8966 §4.6.9) with AE=1 (IPv4),
+ * Flags=0, Omitted=0, Interval=0. The caller sets additional fields
+ * via the `lr_babel_update_set_*` accessors.
+ *
+ * `prefix` points to `prefix_len_bytes` prefix octets (the
+ * `ceil(prefix_len_bits/8)` form already truncated to the omitted
+ * octets). `seqno` is the route's sequence number; `metric` is the
+ * advertised metric (0xFFFF = infinity / retraction).
+ *
+ * # Safety
+ * `prefix` (when `prefix_len_bytes > 0`) must point to that many
+ * readable bytes.
+ */
+lr_babel_update_t lr_babel_update_new(uint8_t prefix_len_bits,
+                                      const uint8_t *prefix,
+                                      uintptr_t prefix_len_bytes,
+                                      uint16_t seqno,
+                                      uint16_t metric);
+
+/**
+ * Read the Address Encoding (AE) field (RFC 8966 §4.6.9).
+ */
+uint8_t lr_babel_update_ae(lr_babel_update_t u);
+
+/**
+ * Read the Flags field (RFC 8966 §4.6.9).
+ */
+uint8_t lr_babel_update_flags(lr_babel_update_t u);
+
+/**
+ * Read the prefix length in bits.
+ */
+uint8_t lr_babel_update_prefix_len(lr_babel_update_t u);
+
+/**
+ * Read the Omitted octets count (RFC 8966 §4.6.9 — taken from the
+ * previous Prefix-flagged Update).
+ */
+uint8_t lr_babel_update_omitted(lr_babel_update_t u);
+
+/**
+ * Read the upper bound on the update interval, centiseconds.
+ */
+uint16_t lr_babel_update_interval_cs(lr_babel_update_t u);
+
+/**
+ * Read the sequence number.
+ */
+uint16_t lr_babel_update_seqno(lr_babel_update_t u);
+
+/**
+ * Read the metric (0xFFFF = infinity / retraction).
+ */
+uint16_t lr_babel_update_metric(lr_babel_update_t u);
+
+/**
+ * Copy the prefix octets into the caller-supplied buffer. Returns the
+ * number of bytes copied (capped at `out_len`). Use a first call with
+ * `out == NULL` to size the buffer.
+ *
+ * # Safety
+ * `u` must be a valid handle. `out` (when non-NULL) must point to at
+ * least `out_len` writable bytes.
+ */
+uintptr_t lr_babel_update_prefix(lr_babel_update_t u, uint8_t *out, uintptr_t out_len);
+
+/**
+ * Length of the prefix octets in bytes.
+ */
+uintptr_t lr_babel_update_prefix_len_bytes(lr_babel_update_t u);
+
+/**
+ * Read the source-prefix length in bits (RFC 9079). 0 = not
+ * source-specific.
+ */
+uint8_t lr_babel_update_src_prefix_len(lr_babel_update_t u);
+
+/**
+ * Copy the source-prefix octets (RFC 9079) into the caller-supplied
+ * buffer. Returns the number of bytes copied (capped at `out_len`).
+ *
+ * # Safety
+ * `u` must be a valid handle. `out` (when non-NULL) must point to at
+ * least `out_len` writable bytes.
+ */
+uintptr_t lr_babel_update_src_prefix(lr_babel_update_t u, uint8_t *out, uintptr_t out_len);
+
+/**
+ * Set the AE (Address Encoding) field. Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL handle.
+ */
+int32_t lr_babel_update_set_ae(lr_babel_update_t u, uint8_t ae);
+
+/**
+ * Set the Flags field (RFC 8966 §4.6.9 — FLAG_PREFIX=0x80,
+ * FLAG_ROUTER_ID=0x40).
+ */
+int32_t lr_babel_update_set_flags(lr_babel_update_t u, uint8_t flags);
+
+/**
+ * Set the omitted-octets count (RFC 8966 §4.6.9).
+ */
+int32_t lr_babel_update_set_omitted(lr_babel_update_t u, uint8_t omitted);
+
+/**
+ * Set the update interval (centiseconds).
+ */
+int32_t lr_babel_update_set_interval_cs(lr_babel_update_t u, uint16_t interval_cs);
+
+/**
+ * Encode the Update TLV body to its wire form (RFC 8966 §4.6.9) and
+ * write a freshly-allocated `lr_bytes_t` to `*out`. The body does NOT
+ * include the TLV header (`(type:1, length:1)`) — wrap it yourself if
+ * needed.
+ *
+ * # Safety
+ * `u` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_babel_update_encode(lr_babel_update_t u, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `Update`. Safe to call with NULL.
+ */
+void lr_babel_update_free(lr_babel_update_t u);
+
+/**
+ * Construct a `NextHop` (RFC 8966 §4.6.8) from an IPv4 address.
+ * `addr` must point to 4 readable bytes. AE is set to 1 (IPv4).
+ *
+ * # Safety
+ * `addr` must point to 4 readable bytes.
+ */
+lr_babel_next_hop_t lr_babel_next_hop_new_v4(const uint8_t *addr);
+
+/**
+ * Construct a `NextHop` (RFC 8966 §4.6.8) from an IPv6 address.
+ * `addr` must point to 16 readable bytes. AE is set to 2 (IPv6).
+ *
+ * # Safety
+ * `addr` must point to 16 readable bytes.
+ */
+lr_babel_next_hop_t lr_babel_next_hop_new_v6(const uint8_t *addr);
+
+/**
+ * Read the Address Encoding (AE) field.
+ */
+uint8_t lr_babel_next_hop_ae(lr_babel_next_hop_t n);
+
+/**
+ * Copy the next-hop address into `out`. For AE=1 (IPv4) the caller
+ * must supply 4 bytes; for AE=2 (IPv6) 16 bytes. Returns the number
+ * of bytes copied (0 on a NULL handle or NULL `out`).
+ *
+ * # Safety
+ * `n` must be a valid handle. `out` must point to at least
+ * `out_len` writable bytes.
+ */
+uintptr_t lr_babel_next_hop_address(lr_babel_next_hop_t n, uint8_t *out, uintptr_t out_len);
+
+/**
+ * Encode the NextHop TLV body to its wire form (RFC 8966 §4.6.8)
+ * and write a freshly-allocated `lr_bytes_t` to `*out`.
+ *
+ * # Safety
+ * `n` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_babel_next_hop_encode(lr_babel_next_hop_t n, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `NextHop`. Safe to call with NULL.
+ */
+void lr_babel_next_hop_free(lr_babel_next_hop_t n);
+
+/**
+ * Construct an `Ack` (RFC 8966 §4.6.4) with the given opaque nonce.
+ */
+lr_babel_ack_t lr_babel_ack_new(uint16_t opaque);
+
+/**
+ * Read the opaque nonce.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+uint16_t lr_babel_ack_opaque(lr_babel_ack_t a);
+
+/**
+ * Encode the Ack TLV body to its wire form (RFC 8966 §4.6.4 —
+ * `Opaque(2)`) and write a freshly-allocated `lr_bytes_t` to `*out`.
+ *
+ * # Safety
+ * `a` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_babel_ack_encode(lr_babel_ack_t a, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `Ack`. Safe to call with NULL.
+ */
+void lr_babel_ack_free(lr_babel_ack_t a);
+
+/**
  * Construct a `BabelNeighbor` for the given remote address (RFC
  * 8966 §3.4.1). `addr_v4` is the 4-byte IPv4 address (NULL when
  * IPv6); `addr_v6` is the 16-byte IPv6 address (NULL when IPv4).
@@ -3998,6 +4361,75 @@ void lr_bfd_config_free(lr_bfd_config_t c);
 uint8_t lr_bfd_config_detect_mult(lr_bfd_config_t c);
 
 uint8_t lr_bfd_config_role(lr_bfd_config_t c);
+
+/**
+ * Read the configured desired minimum transmit interval (microseconds).
+ */
+uint32_t lr_bfd_config_desired_min_tx_interval(lr_bfd_config_t c);
+
+/**
+ * Read the configured required minimum receive interval (microseconds).
+ */
+uint32_t lr_bfd_config_required_min_rx_interval(lr_bfd_config_t c);
+
+/**
+ * Read the configured required minimum echo interval (microseconds).
+ * 0 = echo function disabled.
+ */
+uint32_t lr_bfd_config_required_min_echo_interval(lr_bfd_config_t c);
+
+/**
+ * Set the detect multiplier (RFC 5880 §6.8.4 — must be >= 1). Values
+ * of 0 are clamped to 1.
+ */
+int32_t lr_bfd_config_set_detect_mult(lr_bfd_config_t c, uint8_t value);
+
+/**
+ * Set the desired minimum transmit interval (microseconds).
+ */
+int32_t lr_bfd_config_set_desired_min_tx_interval(lr_bfd_config_t c, uint32_t value);
+
+/**
+ * Set the required minimum receive interval (microseconds).
+ */
+int32_t lr_bfd_config_set_required_min_rx_interval(lr_bfd_config_t c, uint32_t value);
+
+/**
+ * Set the required minimum echo interval (microseconds). 0 = echo
+ * function disabled.
+ */
+int32_t lr_bfd_config_set_required_min_echo_interval(lr_bfd_config_t c, uint32_t value);
+
+/**
+ * Set the session role (Active / Passive — `LR_BFD_ROLE_*`).
+ */
+int32_t lr_bfd_config_set_role(lr_bfd_config_t c, uint8_t role);
+
+/**
+ * Install a Simple Password authentication key (RFC 5880 §4.2).
+ * `password` must point to `password_len` readable bytes; the key
+ * is copied into the config. Passing `password_len == 0` clears the
+ * existing key (sets it to `None`). The maximum supported length is
+ * `LR_BFD_MAX_PASSWORD_LEN` (16 bytes per RFC 5880 §6.7).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a null config, and
+ * `LR_ERR_OTHER` (-6) when `password_len` exceeds the maximum.
+ */
+int32_t lr_bfd_config_set_auth_key(lr_bfd_config_t c,
+                                   const uint8_t *password,
+                                   uintptr_t password_len);
+
+/**
+ * True (1) when the config carries a Simple Password auth key, false
+ * (0) otherwise. Reads `BfdConfig::auth_key` (RFC 5880 §4.2).
+ */
+uint8_t lr_bfd_config_has_auth_key(lr_bfd_config_t c);
+
+/**
+ * Read the peer's last advertised diagnostic (RFC 5880 §4.1 diag
+ * field). Returns one of the `LR_BFD_DIAG_*` constants.
+ */
+uint8_t lr_bfd_session_remote_diag(lr_bfd_session_t s);
 
 lr_bfd_session_t lr_bfd_session_new(lr_bfd_config_t cfg, uint32_t my_disc);
 
@@ -5998,6 +6430,194 @@ lr_bgp_capability_t lr_bgp_cap_new(uint8_t code, const uint8_t *value, uintptr_t
 void lr_bgp_cap_free(lr_bgp_capability_t cap);
 
 /**
+ * Construct a Route Refresh capability (RFC 2918 §3, code 2). The
+ * capability carries no value.
+ */
+lr_bgp_capability_t lr_bgp_cap_route_refresh(void);
+
+/**
+ * Construct an AddPath capability (RFC 7911 §4.4). Each family tuple
+ * is one `lr_bgp_cap_add_path_family_t`. `send` / `recv` are 1/0
+ * (the C-side caller does not need Rust's `bool`).
+ *
+ * # Safety
+ * `families` (when `count > 0`) must point to `count` readable
+ * `lr_bgp_cap_add_path_family_t` entries.
+ */
+lr_bgp_capability_t lr_bgp_cap_add_path(const struct lr_bgp_cap_add_path_family_t *families,
+                                        uintptr_t count);
+
+/**
+ * For an AddPath capability, return the number of family tuples it
+ * carries. Returns 0 on a NULL handle or a non-AddPath capability.
+ */
+uintptr_t lr_bgp_cap_as_add_path_len(lr_bgp_capability_t cap);
+
+/**
+ * For an AddPath capability, copy its family tuples into the caller-
+ * supplied buffer. Each tuple occupies one `lr_bgp_cap_add_path_family_t`.
+ * Returns the number of tuples copied (capped at `cap_size`).
+ *
+ * # Safety
+ * `cap` must be a valid handle. `out` must point to at least
+ * `cap_size` writable `lr_bgp_cap_add_path_family_t` entries.
+ */
+uintptr_t lr_bgp_cap_as_add_path(lr_bgp_capability_t cap,
+                                 struct lr_bgp_cap_add_path_family_t *out,
+                                 uintptr_t cap_size);
+
+/**
+ * Construct an Enhanced Route Refresh capability (RFC 7313, code 70).
+ * Carries no value.
+ */
+lr_bgp_capability_t lr_bgp_cap_enhanced_rr(void);
+
+/**
+ * Construct a Graceful Restart capability (RFC 4724 §3).
+ * `restart_flags` is a 4-bit field (bit 0x8 = Restart State, R);
+ * `restart_time_secs` is a 12-bit field (clamped on encode).
+ * `families` lists `(afi, safi, forwarding)` tuples — a family is
+ * only listed when the speaker can preserve its state.
+ *
+ * # Safety
+ * `families` (when `count > 0`) must point to `count` readable
+ * `lr_bgp_cap_gr_family_t` entries.
+ */
+lr_bgp_capability_t lr_bgp_cap_graceful_restart(uint8_t restart_flags,
+                                                uint16_t restart_time_secs,
+                                                const struct lr_bgp_cap_gr_family_t *families,
+                                                uintptr_t count);
+
+/**
+ * For a Graceful Restart capability, write the restart flags (4 bits,
+ * bit 0x8 = R) to `*out_flags` and the restart time in seconds (12
+ * bits) to `*out_time`. Returns 1 on success, 0 on a NULL handle, NULL
+ * out-pointers, or a non-Graceful-Restart capability.
+ */
+uint8_t lr_bgp_cap_as_graceful_restart(lr_bgp_capability_t cap,
+                                       uint8_t *out_flags,
+                                       uint16_t *out_time);
+
+/**
+ * For a Graceful Restart capability, return the number of
+ * `(afi, safi, forwarding)` family tuples.
+ */
+uintptr_t lr_bgp_cap_as_graceful_restart_families_len(lr_bgp_capability_t cap);
+
+/**
+ * For a Graceful Restart capability, copy its family tuples into the
+ * caller-supplied buffer. Each tuple occupies one
+ * `lr_bgp_cap_gr_family_t`.
+ *
+ * # Safety
+ * `cap` must be a valid handle. `out` must point to at least
+ * `cap_size` writable `lr_bgp_cap_gr_family_t` entries.
+ */
+uintptr_t lr_bgp_cap_as_graceful_restart_families(lr_bgp_capability_t cap,
+                                                  struct lr_bgp_cap_gr_family_t *out,
+                                                  uintptr_t cap_size);
+
+/**
+ * Construct a Long-Lived Graceful Restart capability (RFC 9494 §3.1).
+ * Each family tuple is one `lr_bgp_cap_llgr_family_t` with the
+ * `(afi, safi, forwarding, stale_time_secs)` shape.
+ *
+ * # Safety
+ * `families` (when `count > 0`) must point to `count` readable
+ * `lr_bgp_cap_llgr_family_t` entries.
+ */
+lr_bgp_capability_t lr_bgp_cap_long_lived_gr(const struct lr_bgp_cap_llgr_family_t *families,
+                                             uintptr_t count);
+
+/**
+ * For a Long-Lived-GR capability, return the number of family tuples.
+ */
+uintptr_t lr_bgp_cap_as_long_lived_gr_len(lr_bgp_capability_t cap);
+
+/**
+ * For a Long-Lived-GR capability, copy its family tuples into the
+ * caller-supplied buffer. Each tuple occupies one
+ * `lr_bgp_cap_llgr_family_t`.
+ *
+ * # Safety
+ * `cap` must be a valid handle. `out` must point to at least
+ * `cap_size` writable `lr_bgp_cap_llgr_family_t` entries.
+ */
+uintptr_t lr_bgp_cap_as_long_lived_gr(lr_bgp_capability_t cap,
+                                      struct lr_bgp_cap_llgr_family_t *out,
+                                      uintptr_t cap_size);
+
+/**
+ * Encode a slice of capabilities as the OPEN optional-parameter
+ * value (RFC 5492 §3). Each capability is encoded as
+ * `(code:1, len:1, value:0..)`. The returned `lr_bytes_t_handle`
+ * owns a `Vec<u8>`; free it with [`lr_bgp_cap_bytes_free`].
+ *
+ * Returns 0 on success; `LR_ERR_NULL` (-1) on a null `out` or when
+ * `caps` is NULL with a non-zero `count`.
+ *
+ * # Safety
+ * `caps` (when `count > 0`) must point to `count` readable
+ * `lr_bgp_capability_t` entries. The handles are borrowed, not
+ * consumed — the caller still owns them and must free each
+ * individually with [`lr_bgp_cap_free`].
+ */
+int32_t lr_bgp_cap_encode_set(const lr_bgp_capability_t *caps,
+                              uintptr_t count,
+                              lr_bytes_t_handle *out);
+
+/**
+ * Decode an OPEN optional-parameter value (RFC 5492 §3) into a
+ * freshly-allocated array of `lr_bgp_capability_t` handles. Writes
+ * the array handle to `*out_caps` and the count to `*out_count`.
+ * Free the array with [`lr_bgp_cap_array_free`] (which frees each
+ * capability handle inside, then the array itself).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on null pointers, or
+ * `LR_ERR_PANIC` (-4) on a panic. A truncated trailing capability is
+ * silently dropped (matching the Rust `decode_set` behavior).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out_caps` and
+ * `out_count` must point to writable `lr_bgp_capability_array_t` /
+ * `uintptr_t`.
+ */
+int32_t lr_bgp_cap_decode_set(const uint8_t *data,
+                              uintptr_t len,
+                              lr_bgp_capability_array_t *out_caps,
+                              uintptr_t *out_count);
+
+/**
+ * Free a `lr_bytes_t_handle` returned by [`lr_bgp_cap_encode_set`].
+ * Safe to call with NULL.
+ */
+void lr_bgp_cap_bytes_free(lr_bytes_t_handle b);
+
+/**
+ * Read the length of a `lr_bytes_t_handle` buffer. Returns 0 on NULL.
+ */
+uintptr_t lr_bgp_cap_bytes_len(lr_bytes_t_handle b);
+
+/**
+ * Read a pointer to the underlying bytes of a `lr_bytes_t_handle`.
+ * Returns NULL on a NULL handle. The pointer is valid until the
+ * handle is freed.
+ */
+const uint8_t *lr_bgp_cap_bytes_ptr(lr_bytes_t_handle b);
+
+/**
+ * Free a `lr_bgp_capability_array_t` returned by
+ * [`lr_bgp_cap_decode_set`]. Frees each capability handle inside
+ * first, then the array itself. Safe to call with NULL.
+ *
+ * # Safety
+ * `arr` must have been produced by [`box_cap_array`] and not freed.
+ * `count` must be the count returned alongside the array; passing a
+ * smaller count leaks the trailing capabilities.
+ */
+void lr_bgp_cap_array_free(lr_bgp_capability_array_t arr, uintptr_t count);
+
+/**
  * Decode one BGP message from `data`. Returns 0 on success (and writes a
  * `lr_bytes_t` containing the message type byte at offset 0 + body to
  * `out`). Negative on error.
@@ -6768,6 +7388,51 @@ int32_t lr_damping_table_config(lr_damping_table_t t, struct lr_damping_config_t
  * struct to [`lr_damping_table_new`].
  */
 int32_t lr_damping_default_config(struct lr_damping_config_t *out);
+
+/**
+ * Build a custom damping config from caller-supplied tunables.
+ * Mirrors `lr_damping::DampingConfig { ... }` field-by-field. The
+ * values are not validated here beyond the structural constraints
+ * documented in the field doc-comments; the underlying
+ * `DampingConfig::to_config` round-trips them unchanged.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a null `out` pointer.
+ */
+int32_t lr_damping_config_new(uint32_t additive_incr,
+                              uint32_t suppress_threshold,
+                              uint32_t reuse_threshold,
+                              uint32_t upper_limit,
+                              uint64_t decay_interval_s,
+                              double decay_factor_active,
+                              double decay_factor_withdrawn,
+                              struct lr_damping_config_t *out);
+
+/**
+ * Validate the relationships between damping thresholds (RFC 2439
+ * §4.7). Returns 0 when the config is internally consistent;
+ * `LR_ERR_OTHER` (-6) and sets the last-error string when:
+ * - `reuse_threshold >= suppress_threshold` (the suppress curve
+ *   would be inverted),
+ * - `upper_limit < suppress_threshold` (the ceiling is below the
+ *   suppress entry),
+ * - `decay_factor_active` or `decay_factor_withdrawn` is outside
+ *   the `(0.0, 1.0]` half-open interval (the decay would not
+ *   converge),
+ * - `decay_interval_s` is 0 (decay never fires).
+ *
+ * Useful as a pre-flight before passing the config to
+ * [`lr_damping_table_new`].
+ */
+int32_t lr_damping_config_validate(const struct lr_damping_config_t *cfg);
+
+/**
+ * No-op: `lr_damping_config_t` is a plain `#[repr(C)]` struct, not a
+ * boxed handle, so freeing it is the caller's responsibility (stack
+ * allocation or `free()` for heap). Provided so the C surface mirrors
+ * the other `_free` entry points and an embedder can write generic
+ * cleanup code. Calling this is always safe.
+ */
+void lr_damping_config_free(struct lr_damping_config_t _cfg);
 
 /**
  * Record a withdrawal. Returns 1 if the route should be suppressed
@@ -8093,6 +8758,103 @@ lr_mrt_record_t lr_mrt_record_bgp4mp_state_change(uint32_t peer_as,
                                                   uint16_t old_state,
                                                   uint16_t new_state);
 
+/**
+ * Read a `PeerIndexTable` from a decoded record. Writes the
+ * collector BGP-ID, view-name length, and peer-entry count to
+ * `*out_collector_bgp_id`, `*out_view_name_len`, `*out_peer_count`.
+ * Returns 1 when the record is a `PeerIndexTable` variant, 0 on a
+ * NULL handle or non-PeerIndexTable record.
+ *
+ * # Safety
+ * `record` must be a valid handle. The three out-pointers must
+ * point to writable `uint32_t` / `uintptr_t` / `uintptr_t`.
+ */
+uint8_t lr_mrt_record_peer_index_table_summary(lr_mrt_record_t record,
+                                               uint32_t *out_collector_bgp_id,
+                                               uintptr_t *out_view_name_len,
+                                               uintptr_t *out_peer_count);
+
+/**
+ * Copy the view name into `out`. Returns the number of bytes copied
+ * (capped at `out_len`). Use a first call with `out == NULL` to size
+ * the buffer (or use `lr_mrt_record_peer_index_table_summary` to get
+ * the length).
+ *
+ * # Safety
+ * `record` must be a valid PeerIndexTable handle. `out` (when
+ * non-NULL) must point to at least `out_len` writable bytes.
+ */
+uintptr_t lr_mrt_record_peer_index_table_view_name(lr_mrt_record_t record,
+                                                   uint8_t *out,
+                                                   uintptr_t out_len);
+
+/**
+ * Read one peer entry by index. Writes the bgp_id, is_ipv6, ip[16]
+ * (the address bytes; for IPv4 only the first 4 are meaningful and
+ * `is_ipv6 == 0`), and the 32-bit ASN to `*out`. Returns 1 on
+ * success, 0 on a NULL handle, NULL `out`, non-PeerIndexTable
+ * record, or out-of-range index.
+ *
+ * The `ip_addr` field of the existing `lr_mrt_peer_entry_t` struct
+ * is a borrowed `*const u8` pointing at internal storage of the
+ * decoded record. The pointer is valid until the record handle is
+ * freed — do NOT free it.
+ *
+ * # Safety
+ * `record` must be a valid PeerIndexTable handle. `out` must point
+ * to a writable `lr_mrt_peer_entry_t`.
+ */
+uint8_t lr_mrt_record_peer_index_table_peer_at(lr_mrt_record_t record,
+                                               uintptr_t index,
+                                               struct lr_mrt_peer_entry_t *out);
+
+/**
+ * Read a `RibTable` summary from a decoded record. Writes the
+ * sequence number, prefix (into `lr_prefix_t` form), the add-path
+ * flag, and the entry count. Returns 1 on success, 0 on a NULL
+ * handle or non-RibTable record.
+ *
+ * # Safety
+ * `record` must be a valid handle. `out_sequence`, `out_prefix`,
+ * `out_add_path`, `out_entry_count` must be writable pointers of
+ * the matching type.
+ */
+uint8_t lr_mrt_record_rib_table_summary(lr_mrt_record_t record,
+                                        uint32_t *out_sequence,
+                                        struct lr_prefix_t *out_prefix,
+                                        uint8_t *out_add_path,
+                                        uintptr_t *out_entry_count);
+
+/**
+ * Read one RIB entry by index. Writes `peer_index`,
+ * `originated_time`, `path_id`, and the attribute byte count to
+ * `*out`. Returns 1 on success, 0 on a NULL handle, NULL `out`,
+ * non-RibTable record, or out-of-range index.
+ *
+ * Use `lr_mrt_record_rib_table_entry_attributes_at` to copy the
+ * raw attribute bytes.
+ *
+ * # Safety
+ * `record` must be a valid RibTable handle. `out` must point to a
+ * writable `lr_mrt_rib_entry_t` (the FFI struct shape — see
+ * `lr_mrt_walk_attributes`).
+ */
+uint8_t lr_mrt_record_rib_table_entry_at(lr_mrt_record_t record,
+                                         uintptr_t index,
+                                         struct lr_mrt_rib_entry_t *out);
+
+/**
+ * Encode an `lr_core::attr::Attributes` to the MRT wire form (the
+ * `flags | type | len | value` TLV stream that lives in each RIB
+ * entry's attributes field). The returned `lr_bytes_t` owns the
+ * encoded bytes; the caller frees with `lr_bytes_free`.
+ *
+ * # Safety
+ * `attrs` must be a valid `lr_attributes_t` handle. `out` must
+ * point to a writable `lr_bytes_t`.
+ */
+int32_t lr_mrt_encode_attributes(lr_attributes_t attrs, struct lr_bytes_t *out);
+
 lr_mrt_reader_t lr_mrt_reader_new(void);
 
 int32_t lr_mrt_reader_decode_slice(lr_mrt_reader_t r,
@@ -8449,6 +9211,209 @@ lr_ospf_external_route_v3_vec_t lr_ospf_nssa_routes_v3(lr_ospf_lsdb_t lsdb,
 lr_ospf_external_route_v3_vec_t lr_ospf_nssa_routes_v3_extended(lr_ospf_lsdb_t lsdb,
                                                                 lr_ospf_spf_v3_result_t spf_result,
                                                                 struct lr_ospf_nssa_calc_opts_t opts);
+
+/**
+ * Convert a wire `AuType` value (RFC 2328 §D.1) to its
+ * `LR_OSPF_AU_TYPE_*` constant. Unknown values map to NULL (0) —
+ * matching the Rust `AuType::from_u16` behavior.
+ */
+uint16_t lr_ospf_au_type_from_u16(uint16_t wire);
+
+/**
+ * Convert a `LR_OSPF_AU_TYPE_*` constant back to its wire value.
+ * (Identity — kept for ABI symmetry with `from_u16`.)
+ */
+uint16_t lr_ospf_au_type_to_u16(uint16_t value);
+
+/**
+ * Return the name of an `AuType` value ("null", "simple-password",
+ * "md5") as a NUL-terminated C string. The returned pointer is valid
+ * until the next call to any `lr_ospf_*` function on this thread.
+ */
+const char *lr_ospf_au_type_name(uint16_t value);
+
+/**
+ * Construct a Simple Password auth config (RFC 2328 §D.2). `password`
+ * points to up to 8 bytes; bytes beyond `password_len` are zero-padded
+ * to fill the 8-byte auth_data field. Passing `password_len == 0`
+ * produces an all-zero password.
+ *
+ * # Safety
+ * `password` (when `password_len > 0`) must point to `password_len`
+ * readable bytes. `password_len` must be <= 8.
+ */
+lr_ospf_simple_password_t lr_ospf_simple_password_new(const uint8_t *password,
+                                                      uintptr_t password_len);
+
+/**
+ * Read the password bytes (always 8 bytes per RFC 2328 §D.2).
+ * Returns 0 on a NULL handle and writes nothing to `out`.
+ *
+ * # Safety
+ * `p` must be a valid handle. `out` must point to at least 8 writable
+ * bytes.
+ */
+uintptr_t lr_ospf_simple_password_password(lr_ospf_simple_password_t p, uint8_t *out);
+
+/**
+ * Drop a boxed `SimplePassword`. Safe to call with NULL.
+ */
+void lr_ospf_simple_password_free(lr_ospf_simple_password_t p);
+
+/**
+ * Convert a `LR_OSPF_CRYPTO_ALG_*` constant to its wire value.
+ */
+uint8_t lr_ospf_crypto_algorithm_to_u8(uint8_t value);
+
+/**
+ * Convert a wire algorithm value to its `LR_OSPF_CRYPTO_ALG_*`
+ * constant. Unknown values map to 0 (NULL) — the Rust enum has only
+ * two variants.
+ */
+uint8_t lr_ospf_crypto_algorithm_from_u8(uint8_t value);
+
+/**
+ * Return the name of a `CryptoAlgorithm` value ("hmac-sha1",
+ * "hmac-sha256") as a NUL-terminated C string. The returned pointer is
+ * valid until the next call to any `lr_ospf_*` function on this
+ * thread.
+ */
+const char *lr_ospf_crypto_algorithm_name(uint8_t value);
+
+/**
+ * Return the digest length of a `CryptoAlgorithm` (RFC 5709 §2):
+ * 20 for HMAC-SHA-1, 32 for HMAC-SHA-256.
+ */
+uintptr_t lr_ospf_crypto_algorithm_digest_len(uint8_t value);
+
+/**
+ * Return the trailer length a `CryptoAlgorithm` produces (RFC 5709):
+ * 6 bytes of overhead (Key ID + Auth Data Len + Crypto Seq Number) +
+ * the digest.
+ */
+uintptr_t lr_ospf_crypto_algorithm_trailer_len(uint8_t value);
+
+/**
+ * Construct a `CryptoAuth` with HMAC-SHA-256 (the RFC 5709 default).
+ * `key_id` is the 0..=255 Key ID; `key` points to `key_len` bytes of
+ * shared secret (RFC 5709 §3.3).
+ *
+ * # Safety
+ * `key` (when `key_len > 0`) must point to `key_len` readable bytes.
+ */
+lr_ospf_crypto_auth_t lr_ospf_crypto_auth_new(uint8_t key_id,
+                                              const uint8_t *key,
+                                              uintptr_t key_len);
+
+/**
+ * Switch a `CryptoAuth` to HMAC-SHA-1 (RFC 5709 §2.1). Returns 0 on
+ * success, `LR_ERR_NULL` on a NULL handle.
+ */
+int32_t lr_ospf_crypto_auth_with_sha1(lr_ospf_crypto_auth_t c);
+
+/**
+ * Read the Key ID (0..=255, RFC 2328 §D.3).
+ */
+uint8_t lr_ospf_crypto_auth_key_id(lr_ospf_crypto_auth_t c);
+
+/**
+ * Read the algorithm constant (`LR_OSPF_CRYPTO_ALG_*`).
+ */
+uint8_t lr_ospf_crypto_auth_algorithm(lr_ospf_crypto_auth_t c);
+
+/**
+ * Read the monotonic cryptographic sequence number (RFC 2328 §D.3.2).
+ */
+uint32_t lr_ospf_crypto_auth_crypto_seq(lr_ospf_crypto_auth_t c);
+
+/**
+ * Advance the crypto sequence number by 1. Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL handle. Per RFC 2328 §D.3.2, the embedder
+ * MUST call this on every outbound packet.
+ */
+int32_t lr_ospf_crypto_auth_advance_seq(lr_ospf_crypto_auth_t c);
+
+/**
+ * Copy the shared secret bytes into the caller-supplied buffer.
+ * Returns the number of bytes copied (capped at `out_len`). Use a
+ * first call with `out == NULL` to size the buffer.
+ *
+ * # Safety
+ * `c` must be a valid handle. `out` (when non-NULL) must point to at
+ * least `out_len` writable bytes.
+ */
+uintptr_t lr_ospf_crypto_auth_key(lr_ospf_crypto_auth_t c, uint8_t *out, uintptr_t out_len);
+
+/**
+ * Length of the shared secret in bytes. Returns 0 on a NULL handle.
+ */
+uintptr_t lr_ospf_crypto_auth_key_len(lr_ospf_crypto_auth_t c);
+
+/**
+ * Drop a boxed `CryptoAuth`. Safe to call with NULL.
+ */
+void lr_ospf_crypto_auth_free(lr_ospf_crypto_auth_t c);
+
+/**
+ * Construct a `V3Auth` with HMAC-SHA-256 (the RFC 7166 default) and
+ * the given Security Association ID + shared secret.
+ *
+ * # Safety
+ * `key` (when `key_len > 0`) must point to `key_len` readable bytes.
+ */
+lr_ospf_v3_auth_t lr_ospf_v3_auth_new(uint16_t sa_id, const uint8_t *key, uintptr_t key_len);
+
+/**
+ * Switch a `V3Auth` to HMAC-SHA-1 (RFC 5709 §2.1). Returns 0 on
+ * success, `LR_ERR_NULL` on a NULL handle.
+ */
+int32_t lr_ospf_v3_auth_with_sha1(lr_ospf_v3_auth_t v);
+
+/**
+ * Set the source IPv6 address (the LLS data block source). The
+ * caller passes 16 bytes. Returns 0 on success, `LR_ERR_NULL` on a
+ * NULL handle or NULL `source`.
+ *
+ * # Safety
+ * `v` must be a valid handle. `source` must point to 16 readable bytes.
+ */
+int32_t lr_ospf_v3_auth_with_source(lr_ospf_v3_auth_t v, const uint8_t *source);
+
+/**
+ * Read the Security Association ID (RFC 7166).
+ */
+uint16_t lr_ospf_v3_auth_sa_id(lr_ospf_v3_auth_t v);
+
+/**
+ * Read the algorithm constant (`LR_OSPF_CRYPTO_ALG_*`).
+ */
+uint8_t lr_ospf_v3_auth_algorithm(lr_ospf_v3_auth_t v);
+
+/**
+ * Read the length of the auth trailer this `V3Auth` produces.
+ */
+uintptr_t lr_ospf_v3_auth_trailer_len(lr_ospf_v3_auth_t v);
+
+/**
+ * Copy the shared secret bytes into the caller-supplied buffer.
+ * Returns the number of bytes copied (capped at `out_len`). Use a
+ * first call with `out == NULL` to size the buffer.
+ *
+ * # Safety
+ * `v` must be a valid handle. `out` (when non-NULL) must point to at
+ * least `out_len` writable bytes.
+ */
+uintptr_t lr_ospf_v3_auth_key(lr_ospf_v3_auth_t v, uint8_t *out, uintptr_t out_len);
+
+/**
+ * Length of the shared secret in bytes. Returns 0 on a NULL handle.
+ */
+uintptr_t lr_ospf_v3_auth_key_len(lr_ospf_v3_auth_t v);
+
+/**
+ * Drop a boxed `V3Auth`. Safe to call with NULL.
+ */
+void lr_ospf_v3_auth_free(lr_ospf_v3_auth_t v);
 
 /**
  * Read the Hello body's `network_mask` (v2) / Interface ID (v3).

@@ -13,7 +13,10 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-use lr_babel::message::{Ack, AckReq, Hello, Ihu, NextHop, RouteRequest, RouterId, SeqnoRequest};
+use lr_babel::message::{
+    Ack, AckReq, Hello, Ihu, NextHop, RouteRequest, RouterId, SeqnoRequest, Update,
+};
+use lr_core::addr::IpAddr;
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
@@ -636,6 +639,606 @@ pub const LR_BABEL_HELLO_UNICAST: u16 = 0x8000;
 pub const LR_BABEL_SOURCE_PREFIX_SUBTLV: u8 = 128;
 pub const LR_BABEL_TIMESTAMP_SUBTLV: u8 = 3;
 
+// ---- TlvType enum helpers (RFC 8966 §4.6) ----
+
+use lr_babel::tlv::TlvType;
+
+/// Convert a wire TLV type byte (RFC 8966 §4.6 IANA registry) to its
+/// `LR_BABEL_TLV_*` constant. Unknown values are passed through as-is
+/// (matching `TlvType::from_u8` -> `TlvType::Other(v)`).
+#[no_mangle]
+pub extern "C" fn lr_babel_tlv_type_from_u8(wire: u8) -> u8 {
+    guarded(|| TlvType::from_u8(wire).to_u8(), 0)
+}
+
+/// Convert a `LR_BABEL_TLV_*` constant to its wire value. Identity —
+/// kept for ABI symmetry with `from_u8`.
+#[no_mangle]
+pub extern "C" fn lr_babel_tlv_type_to_u8(value: u8) -> u8 {
+    guarded(|| value, 0)
+}
+
+/// Return the name of a TLV type as a NUL-terminated C string. The
+/// returned pointer is valid until the next call to any
+/// `lr_babel_tlv_type_*` function on this thread.
+#[no_mangle]
+pub extern "C" fn lr_babel_tlv_type_name(value: u8) -> *const std::os::raw::c_char {
+    use std::cell::RefCell;
+    thread_local! {
+        static BUF: RefCell<std::ffi::CString> = RefCell::new(std::ffi::CString::new("").unwrap());
+    }
+    guarded(
+        || {
+            let kind = TlvType::from_u8(value);
+            let name: &'static str = match kind {
+                TlvType::Pad1 => "pad1",
+                TlvType::PadN => "padn",
+                TlvType::AckReq => "ack-req",
+                TlvType::Ack => "ack",
+                TlvType::Hello => "hello",
+                TlvType::Ihu => "ihu",
+                TlvType::RouterId => "router-id",
+                TlvType::NextHop => "next-hop",
+                TlvType::Update => "update",
+                TlvType::RouteRequest => "route-request",
+                TlvType::SeqnoRequest => "seqno-request",
+                TlvType::TsPc => "ts-pc",
+                TlvType::Hmac => "hmac",
+                TlvType::Mac => "mac",
+                TlvType::Pc => "pc",
+                TlvType::ChallengeRequest => "challenge-request",
+                TlvType::ChallengeReply => "challenge-reply",
+                TlvType::SourcePrefixSubTlv => "source-prefix-sub-tlv",
+                TlvType::Other(_) => "other",
+            };
+            BUF.with(|b| {
+                *b.borrow_mut() = std::ffi::CString::new(name).unwrap();
+                b.borrow().as_ptr()
+            })
+        },
+        std::ptr::null(),
+    )
+}
+
+// ---- Update TLV body (RFC 8966 §4.6.9) ----
+
+/// Opaque `Update` handle.
+#[repr(C)]
+pub struct OpaqueBabelUpdate {
+    _private: [u8; 0],
+}
+pub type lr_babel_update_t = *mut OpaqueBabelUpdate;
+
+fn box_update(u: Update) -> lr_babel_update_t {
+    Box::into_raw(Box::new(u)) as lr_babel_update_t
+}
+
+/// Borrow an `Update` handle for read-only access.
+///
+/// # Safety
+/// `u` must be a valid handle and not freed while the reference is live.
+unsafe fn borrow_update(u: lr_babel_update_t) -> Option<&'static Update> {
+    if u.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(u as *const Update) })
+}
+
+/// Borrow an `Update` handle mutably for in-place field updates.
+///
+/// # Safety
+/// `u` must be a valid handle; the caller must not race the mutation.
+unsafe fn borrow_update_mut(u: lr_babel_update_t) -> Option<&'static mut Update> {
+    if u.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(u as *mut Update) })
+}
+
+/// Construct a Babel Update TLV (RFC 8966 §4.6.9) with AE=1 (IPv4),
+/// Flags=0, Omitted=0, Interval=0. The caller sets additional fields
+/// via the `lr_babel_update_set_*` accessors.
+///
+/// `prefix` points to `prefix_len_bytes` prefix octets (the
+/// `ceil(prefix_len_bits/8)` form already truncated to the omitted
+/// octets). `seqno` is the route's sequence number; `metric` is the
+/// advertised metric (0xFFFF = infinity / retraction).
+///
+/// # Safety
+/// `prefix` (when `prefix_len_bytes > 0`) must point to that many
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_new(
+    prefix_len_bits: u8,
+    prefix: *const u8,
+    prefix_len_bytes: usize,
+    seqno: u16,
+    metric: u16,
+) -> lr_babel_update_t {
+    guarded(
+        || unsafe {
+            let prefix_vec = if prefix_len_bytes == 0 || prefix.is_null() {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(prefix, prefix_len_bytes).to_vec() }
+            };
+            box_update(Update::new(prefix_len_bits, prefix_vec, seqno, metric))
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Read the Address Encoding (AE) field (RFC 8966 §4.6.9).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_ae(u: lr_babel_update_t) -> u8 {
+    guarded(|| unsafe { borrow_update(u).map(|u| u.ae).unwrap_or(0) }, 0)
+}
+
+/// Read the Flags field (RFC 8966 §4.6.9).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_flags(u: lr_babel_update_t) -> u8 {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.flags).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read the prefix length in bits.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_prefix_len(u: lr_babel_update_t) -> u8 {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.prefix_len).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read the Omitted octets count (RFC 8966 §4.6.9 — taken from the
+/// previous Prefix-flagged Update).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_omitted(u: lr_babel_update_t) -> u8 {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.omitted).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read the upper bound on the update interval, centiseconds.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_interval_cs(u: lr_babel_update_t) -> u16 {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.interval_cs).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read the sequence number.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_seqno(u: lr_babel_update_t) -> u16 {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.seqno).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read the metric (0xFFFF = infinity / retraction).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_metric(u: lr_babel_update_t) -> u16 {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.metric).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Copy the prefix octets into the caller-supplied buffer. Returns the
+/// number of bytes copied (capped at `out_len`). Use a first call with
+/// `out == NULL` to size the buffer.
+///
+/// # Safety
+/// `u` must be a valid handle. `out` (when non-NULL) must point to at
+/// least `out_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_prefix(
+    u: lr_babel_update_t,
+    out: *mut u8,
+    out_len: usize,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(u) = borrow_update(u) else {
+                return 0;
+            };
+            if out.is_null() || out_len == 0 {
+                return u.prefix.len();
+            }
+            let take = u.prefix.len().min(out_len);
+            unsafe {
+                std::ptr::copy_nonoverlapping(u.prefix.as_ptr(), out, take);
+            }
+            take
+        },
+        0,
+    )
+}
+
+/// Length of the prefix octets in bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_prefix_len_bytes(u: lr_babel_update_t) -> usize {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.prefix.len()).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read the source-prefix length in bits (RFC 9079). 0 = not
+/// source-specific.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_src_prefix_len(u: lr_babel_update_t) -> u8 {
+    guarded(
+        || unsafe { borrow_update(u).map(|u| u.src_prefix_len).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Copy the source-prefix octets (RFC 9079) into the caller-supplied
+/// buffer. Returns the number of bytes copied (capped at `out_len`).
+///
+/// # Safety
+/// `u` must be a valid handle. `out` (when non-NULL) must point to at
+/// least `out_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_src_prefix(
+    u: lr_babel_update_t,
+    out: *mut u8,
+    out_len: usize,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(u) = borrow_update(u) else {
+                return 0;
+            };
+            if out.is_null() || out_len == 0 {
+                return u.src_prefix.len();
+            }
+            let take = u.src_prefix.len().min(out_len);
+            unsafe {
+                std::ptr::copy_nonoverlapping(u.src_prefix.as_ptr(), out, take);
+            }
+            take
+        },
+        0,
+    )
+}
+
+/// Set the AE (Address Encoding) field. Returns 0 on success,
+/// `LR_ERR_NULL` on a NULL handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_set_ae(u: lr_babel_update_t, ae: u8) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(u) = borrow_update_mut(u) else {
+                return LR_ERR_NULL;
+            };
+            u.ae = ae;
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Set the Flags field (RFC 8966 §4.6.9 — FLAG_PREFIX=0x80,
+/// FLAG_ROUTER_ID=0x40).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_set_flags(u: lr_babel_update_t, flags: u8) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(u) = borrow_update_mut(u) else {
+                return LR_ERR_NULL;
+            };
+            u.flags = flags;
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Set the omitted-octets count (RFC 8966 §4.6.9).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_set_omitted(u: lr_babel_update_t, omitted: u8) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(u) = borrow_update_mut(u) else {
+                return LR_ERR_NULL;
+            };
+            u.omitted = omitted;
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Set the update interval (centiseconds).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_set_interval_cs(
+    u: lr_babel_update_t,
+    interval_cs: u16,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(u) = borrow_update_mut(u) else {
+                return LR_ERR_NULL;
+            };
+            u.interval_cs = interval_cs;
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Encode the Update TLV body to its wire form (RFC 8966 §4.6.9) and
+/// write a freshly-allocated `lr_bytes_t` to `*out`. The body does NOT
+/// include the TLV header (`(type:1, length:1)`) — wrap it yourself if
+/// needed.
+///
+/// # Safety
+/// `u` must be a valid handle. `out` must point to a writable
+/// `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_encode(u: lr_babel_update_t, out: *mut lr_bytes_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(u) = borrow_update(u) else {
+                return LR_ERR_NULL;
+            };
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let bytes = u.encode();
+            unsafe { *out = lr_bytes_t::from_vec(bytes) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Drop a boxed `Update`. Safe to call with NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_update_free(u: lr_babel_update_t) {
+    guarded(
+        || unsafe {
+            if u.is_null() {
+                return;
+            }
+            drop(unsafe { Box::from_raw(u as *mut Update) });
+        },
+        (),
+    )
+}
+
+// ---- NextHop TLV body (RFC 8966 §4.6.8) ----
+
+/// Opaque `NextHop` handle.
+#[repr(C)]
+pub struct OpaqueBabelNextHop {
+    _private: [u8; 0],
+}
+pub type lr_babel_next_hop_t = *mut OpaqueBabelNextHop;
+
+fn box_next_hop(n: NextHop) -> lr_babel_next_hop_t {
+    Box::into_raw(Box::new(n)) as lr_babel_next_hop_t
+}
+
+/// Borrow a `NextHop` handle for read-only access.
+///
+/// # Safety
+/// `n` must be a valid handle and not freed while the reference is live.
+unsafe fn borrow_next_hop(n: lr_babel_next_hop_t) -> Option<&'static NextHop> {
+    if n.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(n as *const NextHop) })
+}
+
+/// Construct a `NextHop` (RFC 8966 §4.6.8) from an IPv4 address.
+/// `addr` must point to 4 readable bytes. AE is set to 1 (IPv4).
+///
+/// # Safety
+/// `addr` must point to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_next_hop_new_v4(addr: *const u8) -> lr_babel_next_hop_t {
+    guarded(
+        || unsafe {
+            if addr.is_null() {
+                return std::ptr::null_mut();
+            }
+            let mut a = [0u8; 4];
+            a.copy_from_slice(unsafe { std::slice::from_raw_parts(addr, 4) });
+            box_next_hop(NextHop {
+                ae: 1,
+                address: IpAddr::V4(a),
+            })
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Construct a `NextHop` (RFC 8966 §4.6.8) from an IPv6 address.
+/// `addr` must point to 16 readable bytes. AE is set to 2 (IPv6).
+///
+/// # Safety
+/// `addr` must point to 16 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_next_hop_new_v6(addr: *const u8) -> lr_babel_next_hop_t {
+    guarded(
+        || unsafe {
+            if addr.is_null() {
+                return std::ptr::null_mut();
+            }
+            let mut a = [0u8; 16];
+            a.copy_from_slice(unsafe { std::slice::from_raw_parts(addr, 16) });
+            box_next_hop(NextHop {
+                ae: 2,
+                address: IpAddr::V6(a),
+            })
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Read the Address Encoding (AE) field.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_next_hop_ae(n: lr_babel_next_hop_t) -> u8 {
+    guarded(
+        || unsafe { borrow_next_hop(n).map(|n| n.ae).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Copy the next-hop address into `out`. For AE=1 (IPv4) the caller
+/// must supply 4 bytes; for AE=2 (IPv6) 16 bytes. Returns the number
+/// of bytes copied (0 on a NULL handle or NULL `out`).
+///
+/// # Safety
+/// `n` must be a valid handle. `out` must point to at least
+/// `out_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_next_hop_address(
+    n: lr_babel_next_hop_t,
+    out: *mut u8,
+    out_len: usize,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(n) = borrow_next_hop(n) else {
+                return 0;
+            };
+            if out.is_null() || out_len == 0 {
+                return 0;
+            }
+            let (bytes, take): (&[u8], usize) = match &n.address {
+                IpAddr::V4(b) => (b, 4.min(out_len)),
+                IpAddr::V6(b) => (b, 16.min(out_len)),
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, take);
+            }
+            take
+        },
+        0,
+    )
+}
+
+/// Encode the NextHop TLV body to its wire form (RFC 8966 §4.6.8)
+/// and write a freshly-allocated `lr_bytes_t` to `*out`.
+///
+/// # Safety
+/// `n` must be a valid handle. `out` must point to a writable
+/// `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_next_hop_encode(
+    n: lr_babel_next_hop_t,
+    out: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(n) = borrow_next_hop(n) else {
+                return LR_ERR_NULL;
+            };
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let bytes = n.encode();
+            unsafe { *out = lr_bytes_t::from_vec(bytes) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Drop a boxed `NextHop`. Safe to call with NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_next_hop_free(n: lr_babel_next_hop_t) {
+    guarded(
+        || unsafe {
+            if n.is_null() {
+                return;
+            }
+            drop(unsafe { Box::from_raw(n as *mut NextHop) });
+        },
+        (),
+    )
+}
+
+// ---- Ack TLV body (RFC 8966 §4.6.4) ----
+
+/// Opaque `Ack` handle.
+#[repr(C)]
+pub struct OpaqueBabelAck {
+    _private: [u8; 0],
+}
+pub type lr_babel_ack_t = *mut OpaqueBabelAck;
+
+/// Construct an `Ack` (RFC 8966 §4.6.4) with the given opaque nonce.
+#[no_mangle]
+pub extern "C" fn lr_babel_ack_new(opaque: u16) -> lr_babel_ack_t {
+    guarded(
+        || Box::into_raw(Box::new(Ack { opaque })) as lr_babel_ack_t,
+        std::ptr::null_mut(),
+    )
+}
+
+/// Read the opaque nonce.
+///
+/// # Safety
+/// `a` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_ack_opaque(a: lr_babel_ack_t) -> u16 {
+    guarded(
+        || unsafe {
+            if a.is_null() {
+                return 0;
+            }
+            let ack: &Ack = unsafe { &*(a as *const Ack) };
+            ack.opaque
+        },
+        0,
+    )
+}
+
+/// Encode the Ack TLV body to its wire form (RFC 8966 §4.6.4 —
+/// `Opaque(2)`) and write a freshly-allocated `lr_bytes_t` to `*out`.
+///
+/// # Safety
+/// `a` must be a valid handle. `out` must point to a writable
+/// `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_ack_encode(a: lr_babel_ack_t, out: *mut lr_bytes_t) -> i32 {
+    guarded(
+        || unsafe {
+            if a.is_null() || out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let ack: &Ack = unsafe { &*(a as *const Ack) };
+            let bytes = ack.encode();
+            unsafe { *out = lr_bytes_t::from_vec(bytes.to_vec()) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Drop a boxed `Ack`. Safe to call with NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_ack_free(a: lr_babel_ack_t) {
+    guarded(
+        || unsafe {
+            if a.is_null() {
+                return;
+            }
+            drop(unsafe { Box::from_raw(a as *mut Ack) });
+        },
+        (),
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +1402,9 @@ mod tests {
             lr_babel_ack_req_free(std::ptr::null_mut());
             lr_babel_route_request_free(std::ptr::null_mut());
             lr_babel_seqno_request_free(std::ptr::null_mut());
+            lr_babel_update_free(std::ptr::null_mut());
+            lr_babel_next_hop_free(std::ptr::null_mut());
+            lr_babel_ack_free(std::ptr::null_mut());
         }
     }
 }

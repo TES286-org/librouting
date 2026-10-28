@@ -822,6 +822,277 @@ unsafe fn build_bgp4mp_common(
     }
 }
 
+// ---- PeerIndexTable variant accessor + peer-entry readers ----
+
+/// Read a `PeerIndexTable` from a decoded record. Writes the
+/// collector BGP-ID, view-name length, and peer-entry count to
+/// `*out_collector_bgp_id`, `*out_view_name_len`, `*out_peer_count`.
+/// Returns 1 when the record is a `PeerIndexTable` variant, 0 on a
+/// NULL handle or non-PeerIndexTable record.
+///
+/// # Safety
+/// `record` must be a valid handle. The three out-pointers must
+/// point to writable `uint32_t` / `uintptr_t` / `uintptr_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_mrt_record_peer_index_table_summary(
+    record: lr_mrt_record_t,
+    out_collector_bgp_id: *mut u32,
+    out_view_name_len: *mut usize,
+    out_peer_count: *mut usize,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(r) = borrow_record(record) else {
+                return 0;
+            };
+            if out_collector_bgp_id.is_null()
+                || out_view_name_len.is_null()
+                || out_peer_count.is_null()
+            {
+                return 0;
+            }
+            let pit = match r {
+                MrtRecord::PeerIndexTable(pit) => pit,
+                _ => return 0,
+            };
+            unsafe {
+                *out_collector_bgp_id = pit.collector_bgp_id;
+                *out_view_name_len = pit.view_name.len();
+                *out_peer_count = pit.peers.len();
+            }
+            1
+        },
+        0,
+    )
+}
+
+/// Copy the view name into `out`. Returns the number of bytes copied
+/// (capped at `out_len`). Use a first call with `out == NULL` to size
+/// the buffer (or use `lr_mrt_record_peer_index_table_summary` to get
+/// the length).
+///
+/// # Safety
+/// `record` must be a valid PeerIndexTable handle. `out` (when
+/// non-NULL) must point to at least `out_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_mrt_record_peer_index_table_view_name(
+    record: lr_mrt_record_t,
+    out: *mut u8,
+    out_len: usize,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(r) = borrow_record(record) else {
+                return 0;
+            };
+            let pit = match r {
+                MrtRecord::PeerIndexTable(pit) => pit,
+                _ => return 0,
+            };
+            if out.is_null() || out_len == 0 {
+                return pit.view_name.len();
+            }
+            let take = pit.view_name.len().min(out_len);
+            unsafe {
+                std::ptr::copy_nonoverlapping(pit.view_name.as_ptr(), out, take);
+            }
+            take
+        },
+        0,
+    )
+}
+
+/// Read one peer entry by index. Writes the bgp_id, is_ipv6, ip[16]
+/// (the address bytes; for IPv4 only the first 4 are meaningful and
+/// `is_ipv6 == 0`), and the 32-bit ASN to `*out`. Returns 1 on
+/// success, 0 on a NULL handle, NULL `out`, non-PeerIndexTable
+/// record, or out-of-range index.
+///
+/// The `ip_addr` field of the existing `lr_mrt_peer_entry_t` struct
+/// is a borrowed `*const u8` pointing at internal storage of the
+/// decoded record. The pointer is valid until the record handle is
+/// freed — do NOT free it.
+///
+/// # Safety
+/// `record` must be a valid PeerIndexTable handle. `out` must point
+/// to a writable `lr_mrt_peer_entry_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_mrt_record_peer_index_table_peer_at(
+    record: lr_mrt_record_t,
+    index: usize,
+    out: *mut lr_mrt_peer_entry_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(r) = borrow_record(record) else {
+                return 0;
+            };
+            if out.is_null() {
+                return 0;
+            }
+            let pit = match r {
+                MrtRecord::PeerIndexTable(pit) => pit,
+                _ => return 0,
+            };
+            let Some(peer) = pit.peers.get(index) else {
+                return 0;
+            };
+            let (ip_ptr, is_ipv6) = match &peer.ip {
+                IpAddr::V4(b) => (b.as_ptr(), 0u8),
+                IpAddr::V6(b) => (b.as_ptr(), 1u8),
+            };
+            unsafe {
+                *out = lr_mrt_peer_entry_t {
+                    bgp_id: peer.bgp_id,
+                    ip_addr: ip_ptr,
+                    is_ipv6,
+                    asn: peer.asn.as_u32(),
+                };
+            }
+            1
+        },
+        0,
+    )
+}
+
+// ---- RibTable variant accessor ----
+
+/// Read a `RibTable` summary from a decoded record. Writes the
+/// sequence number, prefix (into `lr_prefix_t` form), the add-path
+/// flag, and the entry count. Returns 1 on success, 0 on a NULL
+/// handle or non-RibTable record.
+///
+/// # Safety
+/// `record` must be a valid handle. `out_sequence`, `out_prefix`,
+/// `out_add_path`, `out_entry_count` must be writable pointers of
+/// the matching type.
+#[no_mangle]
+pub unsafe extern "C" fn lr_mrt_record_rib_table_summary(
+    record: lr_mrt_record_t,
+    out_sequence: *mut u32,
+    out_prefix: *mut crate::policy::lr_prefix_t,
+    out_add_path: *mut u8,
+    out_entry_count: *mut usize,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(r) = borrow_record(record) else {
+                return 0;
+            };
+            if out_sequence.is_null()
+                || out_prefix.is_null()
+                || out_add_path.is_null()
+                || out_entry_count.is_null()
+            {
+                return 0;
+            }
+            let rt = match r {
+                MrtRecord::Rib(rt) => rt,
+                _ => return 0,
+            };
+            let (addr, is_ipv6) = match rt.prefix.addr {
+                IpAddr::V4(b) => {
+                    let mut buf = [0u8; 16];
+                    buf[..4].copy_from_slice(&b);
+                    (buf, 0u8)
+                }
+                IpAddr::V6(b) => (b, 1u8),
+            };
+            unsafe {
+                *out_sequence = rt.sequence;
+                *out_prefix = crate::policy::lr_prefix_t {
+                    addr,
+                    is_ipv6,
+                    prefix_len: rt.prefix.prefix_len,
+                };
+                *out_add_path = rt.add_path as u8;
+                *out_entry_count = rt.entries.len();
+            }
+            1
+        },
+        0,
+    )
+}
+
+/// Read one RIB entry by index. Writes `peer_index`,
+/// `originated_time`, `path_id`, and the attribute byte count to
+/// `*out`. Returns 1 on success, 0 on a NULL handle, NULL `out`,
+/// non-RibTable record, or out-of-range index.
+///
+/// Use `lr_mrt_record_rib_table_entry_attributes_at` to copy the
+/// raw attribute bytes.
+///
+/// # Safety
+/// `record` must be a valid RibTable handle. `out` must point to a
+/// writable `lr_mrt_rib_entry_t` (the FFI struct shape — see
+/// `lr_mrt_walk_attributes`).
+#[no_mangle]
+pub unsafe extern "C" fn lr_mrt_record_rib_table_entry_at(
+    record: lr_mrt_record_t,
+    index: usize,
+    out: *mut lr_mrt_rib_entry_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(r) = borrow_record(record) else {
+                return 0;
+            };
+            if out.is_null() {
+                return 0;
+            }
+            let rt = match r {
+                MrtRecord::Rib(rt) => rt,
+                _ => return 0,
+            };
+            let Some(entry) = rt.entries.get(index) else {
+                return 0;
+            };
+            unsafe {
+                *out = lr_mrt_rib_entry_t {
+                    peer_index: entry.peer_index,
+                    originated_time: entry.originated_time,
+                    path_id: entry.path_id,
+                    attributes: entry.attributes.as_ptr(),
+                    attr_len: entry.attributes.len(),
+                };
+            }
+            1
+        },
+        0,
+    )
+}
+
+/// Encode an `lr_core::attr::Attributes` to the MRT wire form (the
+/// `flags | type | len | value` TLV stream that lives in each RIB
+/// entry's attributes field). The returned `lr_bytes_t` owns the
+/// encoded bytes; the caller frees with `lr_bytes_free`.
+///
+/// # Safety
+/// `attrs` must be a valid `lr_attributes_t` handle. `out` must
+/// point to a writable `lr_bytes_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_mrt_encode_attributes(
+    attrs: crate::attributes::lr_attributes_t,
+    out: *mut lr_bytes_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(a) = crate::attributes::borrow_attrs(attrs) else {
+                return LR_ERR_NULL;
+            };
+            // The MRT encoder borrows the Attributes immutably — no
+            // cloning needed.
+            let bytes = lr_mrt::encode_attributes(a);
+            unsafe { *out = lr_bytes_t::from_vec(bytes) }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

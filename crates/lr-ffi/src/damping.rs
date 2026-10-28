@@ -195,6 +195,116 @@ pub extern "C" fn lr_damping_default_config(out: *mut lr_damping_config_t) -> i3
     )
 }
 
+/// Build a custom damping config from caller-supplied tunables.
+/// Mirrors `lr_damping::DampingConfig { ... }` field-by-field. The
+/// values are not validated here beyond the structural constraints
+/// documented in the field doc-comments; the underlying
+/// `DampingConfig::to_config` round-trips them unchanged.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a null `out` pointer.
+#[no_mangle]
+pub extern "C" fn lr_damping_config_new(
+    additive_incr: u32,
+    suppress_threshold: u32,
+    reuse_threshold: u32,
+    upper_limit: u32,
+    decay_interval_s: u64,
+    decay_factor_active: f64,
+    decay_factor_withdrawn: f64,
+    out: *mut lr_damping_config_t,
+) -> i32 {
+    guarded(
+        || {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            unsafe {
+                *out = lr_damping_config_t {
+                    additive_incr,
+                    suppress_threshold,
+                    reuse_threshold,
+                    upper_limit,
+                    decay_interval_s,
+                    decay_factor_active,
+                    decay_factor_withdrawn,
+                };
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Validate the relationships between damping thresholds (RFC 2439
+/// §4.7). Returns 0 when the config is internally consistent;
+/// `LR_ERR_OTHER` (-6) and sets the last-error string when:
+/// - `reuse_threshold >= suppress_threshold` (the suppress curve
+///   would be inverted),
+/// - `upper_limit < suppress_threshold` (the ceiling is below the
+///   suppress entry),
+/// - `decay_factor_active` or `decay_factor_withdrawn` is outside
+///   the `(0.0, 1.0]` half-open interval (the decay would not
+///   converge),
+/// - `decay_interval_s` is 0 (decay never fires).
+///
+/// Useful as a pre-flight before passing the config to
+/// [`lr_damping_table_new`].
+#[no_mangle]
+pub extern "C" fn lr_damping_config_validate(cfg: *const lr_damping_config_t) -> i32 {
+    guarded(
+        || {
+            if cfg.is_null() {
+                return LR_ERR_NULL;
+            }
+            let c = unsafe { &*cfg };
+            if c.reuse_threshold >= c.suppress_threshold {
+                set_last_error(format!(
+                    "damping: reuse_threshold ({}) must be < suppress_threshold ({})",
+                    c.reuse_threshold, c.suppress_threshold
+                ));
+                return LR_ERR_OTHER;
+            }
+            if c.upper_limit < c.suppress_threshold {
+                set_last_error(format!(
+                    "damping: upper_limit ({}) must be >= suppress_threshold ({})",
+                    c.upper_limit, c.suppress_threshold
+                ));
+                return LR_ERR_OTHER;
+            }
+            if !(0.0 < c.decay_factor_active && c.decay_factor_active <= 1.0) {
+                set_last_error(format!(
+                    "damping: decay_factor_active ({}) must be in (0.0, 1.0]",
+                    c.decay_factor_active
+                ));
+                return LR_ERR_OTHER;
+            }
+            if !(0.0 < c.decay_factor_withdrawn && c.decay_factor_withdrawn <= 1.0) {
+                set_last_error(format!(
+                    "damping: decay_factor_withdrawn ({}) must be in (0.0, 1.0]",
+                    c.decay_factor_withdrawn
+                ));
+                return LR_ERR_OTHER;
+            }
+            if c.decay_interval_s == 0 {
+                set_last_error("damping: decay_interval_s must be > 0".into());
+                return LR_ERR_OTHER;
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// No-op: `lr_damping_config_t` is a plain `#[repr(C)]` struct, not a
+/// boxed handle, so freeing it is the caller's responsibility (stack
+/// allocation or `free()` for heap). Provided so the C surface mirrors
+/// the other `_free` entry points and an embedder can write generic
+/// cleanup code. Calling this is always safe.
+#[no_mangle]
+pub extern "C" fn lr_damping_config_free(_cfg: lr_damping_config_t) {
+    // Intentionally empty — the struct is repr(C), the caller owns it.
+}
+
 /// Record a withdrawal. Returns 1 if the route should be suppressed
 /// (dropped from the Loc-RIB) as a result, 0 otherwise. Returns
 /// `LR_ERR_NULL` (-1) on a null table or a null prefix.

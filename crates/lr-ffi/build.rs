@@ -78,6 +78,20 @@ fn main() {
 #define LR_MAX_PREFIX_WARN 0
 #define LR_MAX_PREFIX_TEARDOWN 1
 #define LR_MAX_PREFIX_RESTART 2
+
+/* MPLS reserved-label constants (RFC 3032 §2.1). Used by
+ * lr_mpls_label_new / lr_mpls_label_value callers to identify
+ * reserved-label semantics without memorizing integer values. */
+#define LR_MPLS_LABEL_IPV4_EXPLICIT_NULL 0
+#define LR_MPLS_LABEL_ROUTER_ALERT 1
+#define LR_MPLS_LABEL_IPV6_EXPLICIT_NULL 2
+#define LR_MPLS_LABEL_IMPLICIT_NULL 3
+#define LR_MPLS_LABEL_ELI 7
+#define LR_MPLS_LABEL_GAL 13
+#define LR_MPLS_LABEL_OAM_ALERT 14
+#define LR_MPLS_LABEL_EXTENSION 15
+#define LR_MPLS_LABEL_FIRST_NORMAL 16
+#define LR_MPLS_LABEL_MAX_VALUE 0xFFFFF
 "#.to_string(),
         ),
         ..Default::default()
@@ -137,4 +151,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/osroute.rs");
     println!("cargo:rerun-if-changed=src/attributes.rs");
     println!("cargo:rerun-if-changed=src/ospf_lsdb.rs");
+    println!("cargo:rerun-if-changed=src/ospf_auth.rs");
 }
