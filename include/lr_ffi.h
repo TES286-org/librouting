@@ -1907,6 +1907,22 @@ typedef struct OpaqueBgpMessage {
 typedef struct OpaqueBgpMessage *lr_bgp_message_t;
 
 /**
+ * One BGP-LS TLV (RFC 7752 §3.2). The value bytes are owned by the
+ * array — the caller must not free `value_ptr` directly; free the
+ * whole array with [`lr_bgp_ls_tlv_array_free`].
+ */
+typedef struct lr_bgp_ls_tlv_t {
+  uint16_t tlv_type;
+  uintptr_t value_offset;
+  uint16_t value_len;
+  uint8_t *value_ptr;
+  /**
+   * Reserved for future per-entry ownership; currently unused.
+   */
+  void *_owned;
+} lr_bgp_ls_tlv_t;
+
+/**
  * Opaque BGP-standard-community handle (RFC 1997).
  */
 typedef struct OpaqueBgpCommunity {
@@ -1932,15 +1948,6 @@ typedef struct OpaqueBgpExtCommunity {
 } OpaqueBgpExtCommunity;
 
 typedef struct OpaqueBgpExtCommunity *lr_bgp_ext_community_t;
-
-/**
- * Opaque `Tlv` handle.
- */
-typedef struct OpaqueBgpLsTlv {
-  uint8_t _private[0];
-} OpaqueBgpLsTlv;
-
-typedef struct OpaqueBgpLsTlv *lr_bgp_ls_tlv_t;
 
 /**
  * Opaque `Vec<Tlv>` handle (the decoded TLV stream).
@@ -5102,6 +5109,86 @@ int32_t lr_bgp_codec_encode_vec(lr_bgp_codec_t c, lr_bgp_message_t msg, struct l
 void lr_bgp_codec_free(lr_bgp_codec_t c);
 
 /**
+ * Reconcile a 2-byte AS_PATH (`wire`) with an optional 4-byte
+ * AS4_PATH (`as4`) per RFC 6793 §4.2. `wire_present` and
+ * `as4_present` flag whether each path was carried in the UPDATE;
+ * the wire bytes for each path are passed through `wire_data` /
+ * `as4_data` (the AS_PATH attribute value, decoded at the
+ * negotiated width). The reconciled 4-byte AS_PATH is written to
+ * `*out` as the encoded attribute value bytes.
+ *
+ * # Safety
+ * Both data pointers must point to the documented length of readable
+ * bytes when their `*_present` flag is 1; `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_reconcile_as4(uint8_t wire_present,
+                             const uint8_t *wire_data,
+                             uintptr_t wire_len,
+                             uint8_t as4_present,
+                             const uint8_t *as4_data,
+                             uintptr_t as4_len,
+                             struct lr_bytes_t *out);
+
+/**
+ * Decode a BGP-LS TLV stream (RFC 7752 §3.2 — the body of a BGP-LS
+ * NLRI or attribute). Writes one `lr_bgp_ls_tlv_t` per decoded TLV
+ * to `*out_array`; the caller frees the array with
+ * [`lr_bgp_ls_tlv_array_free`]. Returns the count through
+ * `*out_count`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes; both out-pointers must
+ * point to writable memory.
+ */
+int32_t lr_bgp_decode_tlv_stream(const uint8_t *data,
+                                 uintptr_t len,
+                                 uintptr_t *out_count,
+                                 struct lr_bgp_ls_tlv_t **out_array);
+
+/**
+ * Encode a slice of BGP-LS TLVs (RFC 7752 §3.2). `tlvs` is a flat
+ * array of `lr_bgp_ls_tlv_t` (the same shape
+ * [`lr_bgp_decode_tlv_stream`] produces); the encode walk reads
+ * `value_len` bytes from each `value_ptr`. Writes the wire bytes to
+ * `*out`.
+ *
+ * # Safety
+ * `tlvs` must point to `count` readable `lr_bgp_ls_tlv_t` entries;
+ * each `value_ptr` must point to `value_len` readable bytes; `out`
+ * must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_encode_tlv_stream(const struct lr_bgp_ls_tlv_t *tlvs,
+                                 uintptr_t count,
+                                 struct lr_bytes_t *out);
+
+/**
+ * Free a BGP-LS TLV array produced by
+ * [`lr_bgp_decode_tlv_stream`]. Safe on NULL.
+ *
+ * # Safety
+ * `arr` must have been produced by `lr_bgp_decode_tlv_stream` and not
+ * already freed; `count` must match the count returned by the decode
+ * call.
+ */
+void lr_bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_t *arr, uintptr_t count);
+
+/**
+ * Encode a list of RFC 8277 labelled NLRI entries as the NLRI bytes
+ * of an MP_REACH / MP_UNREACH attribute value. The caller supplies
+ * the entries as a flat byte buffer produced by encoding each entry
+ * (single-entry form: 1 length byte + label bytes + prefix bytes).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes; `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_labeled_nlri_encode_list(const uint8_t *data,
+                                        uintptr_t len,
+                                        uint8_t add_path,
+                                        struct lr_bytes_t *out);
+
+/**
  * Construct a `Community` from `(asn, value)` (RFC 1997 §2:
  * `asn << 16 | value`).
  */
@@ -5452,7 +5539,9 @@ const char *lr_bgp_route_refresh_subtype_name(uint8_t v);
  * # Safety
  * `value` must point to `value_len` readable bytes.
  */
-lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(uint16_t tlv_type, const uint8_t *value, uintptr_t value_len);
+struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(uint16_t tlv_type,
+                                         const uint8_t *value,
+                                         uintptr_t value_len);
 
 /**
  * Read the 16-bit TLV type.
@@ -5460,7 +5549,7 @@ lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(uint16_t tlv_type, const uint8_t *value, uintp
  * # Safety
  * `t` must be a valid handle.
  */
-uint16_t lr_bgp_ls_tlv_type(lr_bgp_ls_tlv_t t);
+uint16_t lr_bgp_ls_tlv_type(struct lr_bgp_ls_tlv_t t);
 
 /**
  * Read the value length.
@@ -5468,7 +5557,7 @@ uint16_t lr_bgp_ls_tlv_type(lr_bgp_ls_tlv_t t);
  * # Safety
  * `t` must be a valid handle.
  */
-uintptr_t lr_bgp_ls_tlv_value_len(lr_bgp_ls_tlv_t t);
+uintptr_t lr_bgp_ls_tlv_value_len(struct lr_bgp_ls_tlv_t t);
 
 /**
  * Copy the TLV value bytes into `out` (caller-allocated buffer of
@@ -5479,7 +5568,7 @@ uintptr_t lr_bgp_ls_tlv_value_len(lr_bgp_ls_tlv_t t);
  * `t` must be a valid handle; `out` must point to writable memory of
  * at least `cap` bytes.
  */
-int32_t lr_bgp_ls_tlv_value(lr_bgp_ls_tlv_t t, uint8_t *out, uintptr_t cap);
+int32_t lr_bgp_ls_tlv_value(struct lr_bgp_ls_tlv_t t, uint8_t *out, uintptr_t cap);
 
 /**
  * Drop a boxed `Tlv`. Safe to call with `NULL`.
@@ -5488,7 +5577,7 @@ int32_t lr_bgp_ls_tlv_value(lr_bgp_ls_tlv_t t, uint8_t *out, uintptr_t cap);
  * `t` must have been produced by [`lr_bgp_ls_tlv_new`] and not
  * already freed.
  */
-void lr_bgp_ls_tlv_free(lr_bgp_ls_tlv_t t);
+void lr_bgp_ls_tlv_free(struct lr_bgp_ls_tlv_t t);
 
 /**
  * Decode a TLV stream (RFC 7752 §3.1 — concatenation of 4-byte-header
@@ -5525,7 +5614,7 @@ uintptr_t lr_bgp_ls_tlv_vec_len(lr_bgp_ls_tlv_vec_t vec);
  * # Safety
  * `vec` must be a valid handle; `index` must be in range.
  */
-lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
+struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
 
 /**
  * Drop a boxed `Vec<Tlv>`. Safe to call with `NULL`.

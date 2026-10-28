@@ -33,6 +33,7 @@ pub mod bfd;
 pub mod bfd_auth;
 pub mod bfd_session;
 pub mod bgp_codec;
+pub mod bgp_codec_helpers;
 pub mod bgp_communities;
 pub mod bgp_enums;
 pub mod bgp_errors;
