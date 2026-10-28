@@ -4115,6 +4115,12 @@ typedef struct OpaqueSrv6Locator {
 
 typedef struct OpaqueSrv6Locator *lr_srv6_locator_t;
 
+typedef struct OpaqueSrv6Srh {
+  uint8_t _private[0];
+} OpaqueSrv6Srh;
+
+typedef struct OpaqueSrv6Srh *lr_srv6_srh_t;
+
 /**
  * Construct an empty `Attributes`.
  */
@@ -16639,5 +16645,198 @@ int32_t lr_srv6_srh_err_code(void);
  * call `lr_last_error`.
  */
 int32_t lr_srv6_srh_last_err_code(void);
+
+/**
+ * Construct an SRH from a flat array of SID bytes. Each SID is 16
+ * bytes; `data` must be `count * 16` bytes long. `segments_left`
+ * defaults to `count - 1` (RFC 8754 §4.2 — the sender's view).
+ *
+ * Returns NULL on a panic or on an SRH construction error (empty
+ * segment list, too many segments, segments_left out of range).
+ *
+ * # Safety
+ * `data` must point to `count * 16` readable bytes.
+ */
+lr_srv6_srh_t lr_srv6_srh_new(const uint8_t *data, uintptr_t count);
+
+/**
+ * Construct an SRH with an explicit `segments_left` (RFC 8754 §4.2).
+ * `segments_left_present = 0` defaults to `count - 1`.
+ *
+ * # Safety
+ * See [`lr_srv6_srh_new`].
+ */
+lr_srv6_srh_t lr_srv6_srh_new_with_segments_left(const uint8_t *data,
+                                                 uintptr_t count,
+                                                 uint8_t segments_left,
+                                                 uint8_t segments_left_present);
+
+/**
+ * Set the Next Header field (RFC 8200 §2). Builder-style — returns
+ * 0 on success. The handle is modified in place.
+ *
+ * # Safety
+ * `srh` must be a valid handle.
+ */
+int32_t lr_srv6_srh_set_next_header(lr_srv6_srh_t srh, uint8_t next_header);
+
+/**
+ * Set the SRH flags byte (RFC 8754 §2.1 — currently only OAM/HMAC
+ * bits are defined).
+ *
+ * # Safety
+ * `srh` must be a valid handle.
+ */
+int32_t lr_srv6_srh_set_flags(lr_srv6_srh_t srh, uint8_t flags);
+
+/**
+ * Set the SRH tag field (RFC 8754 §2.4 — opaque to the data plane).
+ *
+ * # Safety
+ * `srh` must be a valid handle.
+ */
+int32_t lr_srv6_srh_set_tag(lr_srv6_srh_t srh, uint16_t tag);
+
+/**
+ * Set the SRH TLVs (RFC 8754 §2.5 — variable-length TLV bytes
+ * appended after the segment list).
+ *
+ * # Safety
+ * `srh` must be a valid handle. `tlvs` must point to `tlvs_len`
+ * readable bytes (NULL with `tlvs_len == 0` clears the TLVs).
+ */
+int32_t lr_srv6_srh_set_tlvs(lr_srv6_srh_t srh, const uint8_t *tlvs, uintptr_t tlvs_len);
+
+/**
+ * Read the Next Header field. Returns 0 on a NULL handle.
+ */
+uint8_t lr_srv6_srh_next_header(lr_srv6_srh_t srh);
+
+/**
+ * Read the segments_left field (RFC 8754 §2.3 — index of the
+ * current destination in the segment list). Returns 0 on a NULL
+ * handle.
+ */
+uint8_t lr_srv6_srh_segments_left(lr_srv6_srh_t srh);
+
+/**
+ * Read the last_entry field (RFC 8754 §2.3 — index of the last
+ * segment in the list). Returns 0 on a NULL handle.
+ */
+uint8_t lr_srv6_srh_last_entry(lr_srv6_srh_t srh);
+
+/**
+ * Read the flags byte. Returns 0 on a NULL handle.
+ */
+uint8_t lr_srv6_srh_flags(lr_srv6_srh_t srh);
+
+/**
+ * Read the tag field. Returns 0 on a NULL handle.
+ */
+uint16_t lr_srv6_srh_tag(lr_srv6_srh_t srh);
+
+/**
+ * Read the segment count. Returns 0 on a NULL handle.
+ */
+uintptr_t lr_srv6_srh_segment_count(lr_srv6_srh_t srh);
+
+/**
+ * Read one segment by index into `*out` (16 bytes). Returns 0 on
+ * success, `LR_ERR_NULL` (-1) on a NULL handle or NULL `out`,
+ * `LR_ERR_INVALID_HANDLE` (-2) when the index is out of range.
+ *
+ * # Safety
+ * `srh` must be a valid handle. `out` must point to 16 writable bytes.
+ */
+int32_t lr_srv6_srh_segment_at(lr_srv6_srh_t srh, uintptr_t index, uint8_t *out);
+
+/**
+ * Read the TLV bytes into a freshly-allocated `lr_bytes_t`. The
+ * caller owns the bytes and must free them via `lr_bytes_free`.
+ *
+ * # Safety
+ * `srh` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_srv6_srh_tlvs(lr_srv6_srh_t srh, struct lr_bytes_t *out);
+
+/**
+ * Read the first segment (the destination address at the sender per
+ * RFC 8754 §4.2) into `*out` (16 bytes). Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL handle or NULL `out`, `LR_ERR_INVALID_HANDLE`
+ * when the SRH has no segments.
+ *
+ * # Safety
+ * `srh` must be a valid handle. `out` must point to 16 writable bytes.
+ */
+int32_t lr_srv6_srh_first_segment(lr_srv6_srh_t srh, uint8_t *out);
+
+/**
+ * Encode the SRH into a freshly-allocated `lr_bytes_t` (RFC 8754
+ * §2 wire form — 8-octet fixed header + segment list + TLVs). The
+ * caller owns the bytes and must free them via `lr_bytes_free`.
+ *
+ * # Safety
+ * `srh` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_srv6_srh_encode(lr_srv6_srh_t srh, struct lr_bytes_t *out);
+
+/**
+ * Drop an SRH handle. Safe to call with NULL.
+ *
+ * # Safety
+ * `srh` must have been produced by `lr_srv6_srh_new` and not already
+ * freed.
+ */
+void lr_srv6_srh_free(lr_srv6_srh_t srh);
+
+/**
+ * Parse a NUL-terminated IPv6 address string (RFC 4291 §2.2 textual
+ * form) into a `Sid` (16-byte octet array). Returns 0 on success
+ * and writes the 16 bytes to `out`; returns `LR_ERR_NULL` on a
+ * NULL pointer; returns `LR_ERR_BAD_UTF8` (-3) on a parse error.
+ *
+ * # Safety
+ * `s` must point to a NUL-terminated UTF-8 string. `out` must point
+ * to 16 writable bytes.
+ */
+int32_t lr_srv6_sid_from_str(const char *s, uint8_t *out);
+
+/**
+ * Format a `Sid` (16 raw bytes) as an IPv6 address string. Returns
+ * a pointer to a thread-local NUL-terminated buffer (valid until
+ * the next call to `lr_srv6_sid_to_str` / `lr_srv6_locator_to_str`
+ * on this thread). Returns NULL on a NULL `sid` pointer.
+ *
+ * # Safety
+ * `sid` must point to 16 readable bytes.
+ */
+const char *lr_srv6_sid_to_str(const uint8_t *sid);
+
+/**
+ * Parse a NUL-terminated `<addr>/<block_bits>` string (RFC 4291 +
+ * RFC 8754 §3.1 textual form) into a `Locator`. Writes the 16-byte
+ * address to `out_addr` and the block_bits to `*out_block_bits`.
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL pointer,
+ * `LR_ERR_BAD_UTF8` on a parse error.
+ *
+ * # Safety
+ * `s` must point to a NUL-terminated UTF-8 string. `out_addr` must
+ * point to 16 writable bytes and `out_block_bits` to a writable
+ * `uint8_t`.
+ */
+int32_t lr_srv6_locator_from_str(const char *s, uint8_t *out_addr, uint8_t *out_block_bits);
+
+/**
+ * Format a `Locator` (16 raw address bytes + block_bits) as an
+ * `<addr>/<bits>` string. Returns a thread-local pointer (valid
+ * until the next call to `lr_srv6_sid_to_str` / `lr_srv6_locator_to_str`
+ * on this thread).
+ *
+ * # Safety
+ * `addr` must point to 16 readable bytes.
+ */
+const char *lr_srv6_locator_to_str(const uint8_t *addr, uint8_t block_bits);
 
 #endif  /* LR_FFI_H */

@@ -104,6 +104,7 @@ pub mod rtr_client;
 pub mod sessions;
 pub mod srv6;
 pub mod srv6_constants;
+pub mod srv6_srh;
 
 use crate::error::set_last_error;
 
