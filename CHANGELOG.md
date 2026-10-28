@@ -758,7 +758,8 @@ semver drift on `Event` is documented in `CHANGELOG.md` rc.3 / 1.0.0
 next minor); the variants are additive for embedders whose `match`
 includes a `_ => ...` arm.
 
-### `lr-ospf` / `lr-router`: OSPF LSA retransmission list (RFC 2328 §13.5 / §13.6 / §13.7, issue #92)
+### `lr-ospf` / `lr-router`: OSPF LSA retransmission list (RFC 2328
+§13.5 / §13.6 / §13.7, issue #92)
 
 The OSPF flood path (`DefaultRouter::ospf_flood`) and the
 `OspfBody::LsAck` handler in `crates/lr-router/src/instance/ospf.rs`

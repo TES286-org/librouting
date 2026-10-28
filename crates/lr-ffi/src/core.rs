@@ -498,8 +498,14 @@ pub unsafe extern "C" fn lr_protocol_bird_name(
             let bytes = name.as_bytes();
             let take = bytes.len().min(name_cap - 1);
             unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_name as *mut u8, take);
-                *out_name.add(take) = 0;
+                // `out_name` is `*mut c_char`; on platforms where c_char
+                // is signed (x86_64, aarch64) the cast to `*mut u8`
+                // changes the pointee type; on platforms where it is
+                // unsigned (riscv64, powerpc64, s390x) it is a no-op
+                // (and clippy::unnecessary_cast fires). Use `.cast()`
+                // so the same source compiles on both without lint.
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_name.cast::<u8>(), take);
+                *out_name.cast::<u8>().add(take) = 0;
             }
             take
         },
