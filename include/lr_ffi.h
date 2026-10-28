@@ -1003,13 +1003,19 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_LDP_STATUS_KEEP_ALIVE_MISSED 15
 
+/**
+ * Link Hello (RFC 5036 §3.5.2 — multicast on a shared segment).
+ */
+#define LR_LDP_DISCOVERY_KIND_LINK 0
+
+/**
+ * Targeted Hello (extended discovery, unicast).
+ */
+#define LR_LDP_DISCOVERY_KIND_TARGETED 1
+
 #define LR_LDP_ADVERTISEMENT_DOWNSTREAM_UNSOLICITED 1
 
 #define LR_LDP_ADVERTISEMENT_DOWNSTREAM_ON_DEMAND 2
-
-#define LR_LDP_DISCOVERY_KIND_LINK 1
-
-#define LR_LDP_DISCOVERY_KIND_TARGETED 2
 
 #define LR_LDP_SESSION_STATE_NON_EXISTENT 1
 
@@ -2875,6 +2881,80 @@ typedef struct OpaqueLdpPdu {
 } OpaqueLdpPdu;
 
 typedef struct OpaqueLdpPdu *lr_ldp_pdu_t;
+
+typedef struct OpaqueLdpDiscoveryConfig {
+  uint8_t _private[0];
+} OpaqueLdpDiscoveryConfig;
+
+typedef struct OpaqueLdpDiscoveryConfig *lr_ldp_discovery_config_t;
+
+typedef struct OpaqueLdpDiscovery {
+  uint8_t _private[0];
+} OpaqueLdpDiscovery;
+
+typedef struct OpaqueLdpDiscovery *lr_ldp_discovery_t;
+
+/**
+ * One Hello adjacency projected to C. Mirrors
+ * `lr_ldp::discovery::HelloAdjacency`. The transport_addr fields
+ * are 16 bytes each (IPv4 in the low 4 + 12 zero pad) so a single
+ * struct layout covers both families — call `is_ipv6` to know which
+ * half to read.
+ */
+typedef struct lr_ldp_hello_adjacency_t {
+  /**
+   * LSR ID (4 bytes, big-endian) — first half of LdpId.
+   */
+  uint32_t peer_lsr_id;
+  /**
+   * Label space (2 bytes) — second half of LdpId.
+   */
+  uint16_t peer_label_space;
+  /**
+   * One of `LR_LDP_DISCOVERY_KIND_*`.
+   */
+  uint8_t kind;
+  /**
+   * 1 when `source` is IPv6, 0 for IPv4.
+   */
+  uint8_t source_is_ipv6;
+  /**
+   * 16-byte source address (IPv4 in low 4 + zero pad).
+   */
+  uint8_t source[16];
+  /**
+   * 1 when `transport_addr` is IPv6.
+   */
+  uint8_t transport_is_ipv6;
+  /**
+   * 16-byte transport address.
+   */
+  uint8_t transport_addr[16];
+  /**
+   * Negotiated hold time, milliseconds.
+   */
+  uint64_t hold_time_ms;
+  /**
+   * Most recent Hello `now_ms`.
+   */
+  uint64_t last_seen_ms;
+  /**
+   * 1 when `config_seq` carries a value, 0 otherwise.
+   */
+  uint8_t config_seq_present;
+  /**
+   * Peer's Configuration Sequence Number (when present).
+   */
+  uint32_t config_seq;
+  /**
+   * 1 when `dual_stack` carries a value, 0 otherwise.
+   */
+  uint8_t dual_stack_present;
+  /**
+   * Dual-Stack preference (when present): 0 = IPv4, 1 = IPv6.
+   */
+  uint8_t dual_stack_prefer_ipv6;
+} lr_ldp_hello_adjacency_t;
 
 typedef struct OpaqueLdpEngineConfig {
   uint8_t _private[0];
@@ -9419,6 +9499,146 @@ uint8_t lr_ldp_pdu_message_u_bit_at(lr_ldp_pdu_t pdu, uintptr_t index);
  * used after this call.
  */
 void lr_ldp_pdu_free(lr_ldp_pdu_t pdu);
+
+/**
+ * Construct a default LdpDiscoveryConfig. The local_id is set from
+ * `local_lsr_id` + `local_label_space`; transport_addr defaults to
+ * `0.0.0.0` (the embedder MUST set it via
+ * [`lr_ldp_discovery_config_set_transport_v4`] before the config is
+ * useful). Returns NULL on a panic.
+ */
+lr_ldp_discovery_config_t lr_ldp_discovery_config_new(uint32_t local_lsr_id,
+                                                      uint16_t local_label_space);
+
+/**
+ * Set the IPv4 transport address (the TCP endpoint advertised in
+ * IPv4 Hellos).
+ *
+ * # Safety
+ * `addr` must point to 4 readable bytes. `cfg` must be a valid handle.
+ */
+int32_t lr_ldp_discovery_config_set_transport_v4(lr_ldp_discovery_config_t cfg,
+                                                 const uint8_t *addr);
+
+/**
+ * Set the IPv6 transport address. Pass `addr = NULL` to clear the
+ * IPv6 transport (single-stack IPv4 speaker).
+ *
+ * # Safety
+ * `addr` must point to 16 readable bytes (or be NULL).
+ */
+int32_t lr_ldp_discovery_config_set_transport_v6(lr_ldp_discovery_config_t cfg,
+                                                 const uint8_t *addr);
+
+/**
+ * Set the Link Hello hold time (seconds, 0 → 15 s default).
+ */
+int32_t lr_ldp_discovery_config_set_link_hello_hold(lr_ldp_discovery_config_t cfg, uint16_t hold);
+
+/**
+ * Set the Targeted Hello hold time (seconds, 0 → 45 s default).
+ */
+int32_t lr_ldp_discovery_config_set_targeted_hello_hold(lr_ldp_discovery_config_t cfg,
+                                                        uint16_t hold);
+
+/**
+ * Set the dual-stack preference (`prefer_ipv6 != 0` → prefer
+ * LDPoIPv6 per RFC 7552 §6.1.1 default).
+ */
+int32_t lr_ldp_discovery_config_set_prefer_ipv6(lr_ldp_discovery_config_t cfg, uint8_t prefer_ipv6);
+
+/**
+ * Set the `accept_targeted` flag (1 = accept + answer targeted
+ * Hellos; 0 = drop them).
+ */
+int32_t lr_ldp_discovery_config_set_accept_targeted(lr_ldp_discovery_config_t cfg, uint8_t accept);
+
+/**
+ * Drop a config handle. Safe to call with NULL.
+ *
+ * # Safety
+ * `cfg` must have been produced by `lr_ldp_discovery_config_new` and
+ * not already freed.
+ */
+void lr_ldp_discovery_config_free(lr_ldp_discovery_config_t cfg);
+
+/**
+ * Construct a discovery state machine from a config handle. The
+ * handle is borrowed (not consumed). Returns NULL on a NULL config
+ * or a panic.
+ *
+ * # Safety
+ * `cfg` must be a valid handle returned by
+ * `lr_ldp_discovery_config_new`.
+ */
+lr_ldp_discovery_t lr_ldp_discovery_new(lr_ldp_discovery_config_t cfg);
+
+/**
+ * Number of live adjacencies. Returns 0 on a NULL handle.
+ */
+uintptr_t lr_ldp_discovery_adjacency_count(lr_ldp_discovery_t d);
+
+/**
+ * Read one adjacency by index into `*out`. Returns 0 on success,
+ * `LR_ERR_NULL` (-1) on a NULL handle or NULL `out`, and
+ * `LR_ERR_INVALID_HANDLE` (-2) when the index is out of range.
+ *
+ * # Safety
+ * `d` must be a valid handle. `out` must point to a writable
+ * `lr_ldp_hello_adjacency_t`.
+ */
+int32_t lr_ldp_discovery_adjacency_at(lr_ldp_discovery_t d,
+                                      uintptr_t index,
+                                      struct lr_ldp_hello_adjacency_t *out);
+
+/**
+ * Find an adjacency by peer LdpId. Returns 0 on success and writes
+ * the adjacency into `*out`; returns `LR_ERR_INVALID_HANDLE` (-2)
+ * when no adjacency binds the peer; returns `LR_ERR_NULL` (-1) on
+ * NULL handle / NULL out.
+ *
+ * # Safety
+ * `d` must be a valid handle. `out` must point to a writable
+ * `lr_ldp_hello_adjacency_t`.
+ */
+int32_t lr_ldp_discovery_adjacency_for_peer(lr_ldp_discovery_t d,
+                                            uint32_t peer_lsr_id,
+                                            uint16_t peer_label_space,
+                                            struct lr_ldp_hello_adjacency_t *out);
+
+/**
+ * Forget every adjacency bound to a peer label space (session
+ * teardown companion). Returns 0 on success, `LR_ERR_NULL` on a
+ * NULL handle.
+ */
+int32_t lr_ldp_discovery_remove_adjacencies_for_peer(lr_ldp_discovery_t d,
+                                                     uint32_t peer_lsr_id,
+                                                     uint16_t peer_label_space);
+
+/**
+ * Advance timers: expire adjacencies whose hold timer ran out and
+ * schedule due outbound Hellos. Returns the number of
+ * `DiscoveryEvent`s produced (the events themselves are not
+ * surfaced across the C ABI — the embedder observes state changes
+ * via `adjacency_at` / `adjacency_count` before/after the call).
+ */
+uintptr_t lr_ldp_discovery_tick(lr_ldp_discovery_t d, uint64_t now_ms);
+
+/**
+ * Number of outbound Hellos queued (drained via the engine's
+ * `lr_ldp_engine_drain_udp` — the discovery surface exposes only
+ * the count + the next destination reader).
+ */
+uintptr_t lr_ldp_discovery_outgoing_count(lr_ldp_discovery_t d);
+
+/**
+ * Drop a discovery handle. Safe to call with NULL.
+ *
+ * # Safety
+ * `d` must have been produced by `lr_ldp_discovery_new` and not
+ * already freed.
+ */
+void lr_ldp_discovery_free(lr_ldp_discovery_t d);
 
 /**
  * Drop a config. Safe on NULL.
