@@ -21,6 +21,10 @@ bgp = []
 ospf = []
 babel = []
 srv6 = []
+# Pass-through to lr-policy::exchange-plane (gates the LRXP route-attr
+# accessors in route_attrs.rs). When this feature is off the LRXP
+# accessors are absent from the build.
+exchange-plane = ["lr-policy/exchange-plane"]
 
 [dependencies]
 lr-core = { workspace = true }

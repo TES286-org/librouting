@@ -3151,6 +3151,55 @@ typedef struct lr_ospf_v3_elector_t {
   uint32_t stated_bdr;
 } lr_ospf_v3_elector_t;
 
+/**
+ * One Router-LSA link entry (RFC 2328 §A.4.2). Mirrors
+ * `lr_ospf::spf::RouterLink` field-for-field.
+ */
+typedef struct lr_ospf_router_link_t {
+  /**
+   * Link ID — semantics depend on `link_type` (§A.4.2).
+   */
+  uint32_t link_id;
+  /**
+   * Link Data — semantics depend on `link_type`.
+   */
+  uint32_t link_data;
+  /**
+   * Router-Link type (1 = p2p, 2 = transit, 3 = stub, 4 = virtual).
+   */
+  uint8_t link_type;
+  /**
+   * Number of TOS entries (always 0 in modern deployments).
+   */
+  uint8_t tos_count;
+  /**
+   * Link metric (the cost of traversing this link).
+   */
+  uint16_t metric;
+} lr_ospf_router_link_t;
+
+/**
+ * One Extended-LSA TLV descriptor (RFC 8362 §3). The `value_offset`
+ * is the offset of the TLV's value bytes inside the original body
+ * slice; the embedder re-decodes from `(data + value_offset,
+ * length)`.
+ */
+typedef struct lr_ospf_e_lsa_tlv_t {
+  /**
+   * TLV type (RFC 8362 §3 / RFC 5613).
+   */
+  uint16_t tlv_type;
+  /**
+   * Value length, in bytes.
+   */
+  uint16_t length;
+  /**
+   * Offset of the value bytes inside the body slice passed to
+   * `lr_ospf_walk_e_lsa_tlvs`.
+   */
+  uintptr_t value_offset;
+} lr_ospf_e_lsa_tlv_t;
+
 typedef struct OpaqueOspfLsaHdrBox {
   uint8_t _private[0];
 } OpaqueOspfLsaHdrBox;
@@ -11253,6 +11302,239 @@ int32_t lr_ospf_elect_v3(const struct lr_ospf_v3_elector_t *electors,
                          uint32_t *out_bdr);
 
 /**
+ * Clamp a configured grace period into the RFC 3623 §2.1 window
+ * (1..=1800 seconds). Returns the clamped value.
+ */
+uint32_t lr_ospf_clamp_grace_period(uint32_t secs);
+
+/**
+ * Convert a 32-bit network mask to a prefix length (RFC 2328 §A.4 —
+ * the contiguous-1 count of `mask`). Returns 0xFFFFFFFF (u32::MAX)
+ * when `mask` is not a contiguous-1 mask — the FFI sentinel for
+ * "invalid mask"; the Rust API returns `u8` so we widen on the
+ * boundary.
+ */
+uint32_t lr_ospf_mask_to_prefix_len(uint32_t mask);
+
+/**
+ * Convert a prefix length to a 32-bit network mask (RFC 2328 §A.4).
+ */
+uint32_t lr_ospf_prefix_len_to_mask(uint8_t len);
+
+/**
+ * The OSPFv2 link-state type for a Grace-LSA (RFC 3623 §2.1: opaque
+ * area LSA, opaque type 3).
+ */
+uint16_t lr_ospf_grace_lsa_type(void);
+
+/**
+ * Pack an opaque-type / opaque-id pair into a 32-bit Link State ID
+ * (RFC 5250 §3.1: high 8 bits = opaque type, low 24 bits = opaque ID).
+ */
+uint32_t lr_ospf_opaque_lsa_id(uint8_t opaque_type, uint32_t opaque_id);
+
+/**
+ * Unpack a 32-bit Link State ID into `(opaque_type, opaque_id)`
+ * (RFC 5250 §3.1). Writes the type to `*out_type` and the id to
+ * `*out_id`.
+ *
+ * # Safety
+ * Both out-pointers must point to writable `uint8_t` / `uint32_t`.
+ */
+int32_t lr_ospf_unpack_opaque_lsa_id(uint32_t link_state_id, uint8_t *out_type, uint32_t *out_id);
+
+/**
+ * Set the GR-capable bit (DC bit, RFC 3623 §2.2) in an OSPF options
+ * byte.
+ */
+uint8_t lr_ospf_with_grace_restart_capable(uint8_t options);
+
+/**
+ * True when the options byte carries the GR-capable bit.
+ */
+uint8_t lr_ospf_is_grace_restart_capable(uint8_t options);
+
+/**
+ * The IPv4 / IPv6 interface address TLV payload for a Grace-LSA.
+ * Writes `1` to `*out_v4_present` and 4 bytes to `*out_v4` when the
+ * v4 form is taken; `1` to `*out_v6_present` and 16 bytes to
+ * `*out_v6` when the v6 form is taken.
+ *
+ * # Safety
+ * `out_v4` must point to 4 writable bytes; `out_v6` to 16. Both
+ * present flags must point to writable `uint8_t`.
+ */
+int32_t lr_ospf_interface_address_tlv(uint8_t is_v6,
+                                      const uint8_t *addr,
+                                      uint8_t *out_v4_present,
+                                      uint8_t *out_v4,
+                                      uint8_t *out_v6_present,
+                                      uint8_t *out_v6);
+
+/**
+ * Encode a Summary-LSA (Type-3) body (RFC 2328 §A.4.5). Writes the
+ * 8-byte body (`network_mask | tos0_metric`) to `*out`. Returns 0 on
+ * success.
+ *
+ * # Safety
+ * `out` must point to 8 writable bytes (the fixed Summary-LSA body
+ * length).
+ */
+int32_t lr_ospf_encode_summary_lsa_body(uint32_t network_mask,
+                                        uint32_t metric,
+                                        struct lr_bytes_t *out);
+
+/**
+ * Decode a Summary-LSA (Type-3) body (RFC 2328 §A.4.5). Writes the
+ * network mask to `*out_mask` and the metric to `*out_metric`.
+ * Returns `LR_ERR_INVALID_HANDLE` (-2) when the body is malformed.
+ *
+ * # Safety
+ * Both out-pointers must point to writable `uint32_t`.
+ */
+int32_t lr_ospf_decode_summary_lsa_body(const uint8_t *data,
+                                        uintptr_t len,
+                                        uint32_t *out_mask,
+                                        uint32_t *out_metric);
+
+/**
+ * Encode an AS-External-LSA (Type-5) body (RFC 2328 §A.4.5). The
+ * `entry` struct mirrors the Rust `AsExternalEntry`. Writes the 12-
+ * byte body to `*out`.
+ *
+ * # Safety
+ * `entry` must point to a valid `lr_ospf_as_external_entry_t`.
+ */
+int32_t lr_ospf_encode_as_external_body(uint32_t network_mask,
+                                        uint32_t metric,
+                                        uint8_t external_type2,
+                                        const uint8_t *forwarding_addr_v4,
+                                        uint32_t external_route_tag,
+                                        struct lr_bytes_t *out);
+
+/**
+ * Decode an AS-External-LSA (Type-5) body (RFC 2328 §A.4.5). Returns
+ * `LR_ERR_INVALID_HANDLE` (-2) when the body is malformed.
+ *
+ * # Safety
+ * All out-pointers must point to writable memory of the documented
+ * type.
+ */
+int32_t lr_ospf_decode_as_external_body(const uint8_t *data,
+                                        uintptr_t len,
+                                        uint32_t *out_mask,
+                                        uint32_t *out_metric,
+                                        uint8_t *out_external_type2,
+                                        uint8_t *out_forwarding_addr_v4,
+                                        uint32_t *out_external_route_tag);
+
+/**
+ * Decode a Router-LSA (Type-1) body into a flat list of Router-Link
+ * entries (RFC 2328 §A.4.2). Writes the count to `*out_count` and
+ * returns a freshly-allocated array through `*out_array` (an
+ * `lr_ospf_router_link_t*`). The caller frees the array with
+ * [`lr_ospf_router_link_array_free`].
+ *
+ * # Safety
+ * `out_count` must point to a writable `uintptr_t`; `out_array` must
+ * point to a writable `lr_ospf_router_link_t*`.
+ */
+int32_t lr_ospf_decode_router_links(const uint8_t *data,
+                                    uintptr_t len,
+                                    uintptr_t *out_count,
+                                    struct lr_ospf_router_link_t **out_array);
+
+/**
+ * Free a Router-Link array produced by
+ * [`lr_ospf_decode_router_links`]. Safe on NULL.
+ *
+ * # Safety
+ * `arr` must have been produced by `lr_ospf_decode_router_links` and
+ * not already freed; `count` must match the count returned by the
+ * decode call.
+ */
+void lr_ospf_router_link_array_free(struct lr_ospf_router_link_t *arr, uintptr_t count);
+
+/**
+ * Read the Router-LSA flags byte (RFC 2328 §A.4.2: B/E/V bits)
+ * from a Router-LSA body. Returns `LR_ERR_INVALID_HANDLE` (-2) when
+ * the body is too short.
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_ospf_router_lsa_flags_byte(const uint8_t *data, uintptr_t len, uint8_t *out);
+
+/**
+ * Encode an OSPFv3 inter-area-prefix LSA body (RFC 5340 §A.4.6).
+ * `prefix_addr` is 4 (v4) or 16 (v6) bytes; `prefix_len` is the
+ * prefix length in bits; `metric` is the cost to advertise.
+ *
+ * # Safety
+ * `prefix_addr` must point to `prefix_addr_len` readable bytes (4 or
+ * 16). `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_ospf_encode_v3_inter_area_prefix_body(uint8_t is_v6,
+                                                 const uint8_t *prefix_addr,
+                                                 uint8_t prefix_len,
+                                                 uint32_t metric,
+                                                 struct lr_bytes_t *out);
+
+/**
+ * Decode an OSPFv3 inter-area-prefix LSA body (RFC 5340 §A.4.6).
+ * Writes the prefix length to `*out_prefix_len`, the metric to
+ * `*out_metric`, and the prefix address (16 bytes — v4-mapped for an
+ * IPv4 prefix) to `*out_prefix_addr`. Returns `LR_ERR_INVALID_HANDLE`
+ * (-2) on a malformed body.
+ *
+ * # Safety
+ * All out-pointers must point to writable memory of the documented
+ * type; `out_prefix_addr` must point to 16 writable bytes.
+ */
+int32_t lr_ospf_decode_v3_inter_area_prefix_body(const uint8_t *data,
+                                                 uintptr_t len,
+                                                 uint8_t *out_prefix_len,
+                                                 uint32_t *out_metric,
+                                                 uint8_t *out_prefix_addr);
+
+/**
+ * True when `ls_type` is an Extended-LSA type (RFC 8362 §3 — the
+ * 0x8xxx / 0xAxxx / 0xCxxx shapes).
+ */
+uint8_t lr_ospf_is_e_lsa_type(uint16_t ls_type);
+
+/**
+ * Walk the TLVs of an Extended-LSA body (RFC 8362 §3 / RFC 5613).
+ * Returns the count of TLVs through `*out_count` and a freshly-
+ * allocated array of `(type, length, value_offset)` triples through
+ * `*out_array`. The caller frees the array with
+ * [`lr_ospf_e_lsa_tlv_array_free`].
+ *
+ * # Safety
+ * `out_count` and `out_array` must point to writable memory.
+ */
+int32_t lr_ospf_walk_e_lsa_tlvs(const uint8_t *data,
+                                uintptr_t len,
+                                uintptr_t *out_count,
+                                struct lr_ospf_e_lsa_tlv_t **out_array);
+
+/**
+ * Free a TLV array produced by [`lr_ospf_walk_e_lsa_tlvs`]. Safe on
+ * NULL.
+ *
+ * # Safety
+ * `arr` must have been produced by `lr_ospf_walk_e_lsa_tlvs` and not
+ * already freed; `count` must match the count returned by the walk.
+ */
+void lr_ospf_e_lsa_tlv_array_free(struct lr_ospf_e_lsa_tlv_t *arr, uintptr_t count);
+
+/**
+ * True when `behavior` is a valid SRv6 End SID behavior (RFC 9513 §3
+ * — the `End*` family, excluding decap / cross-connect shapes).
+ */
+uint8_t lr_ospf_srv6_behavior_valid_for_end_sid(uint16_t behavior);
+
+/**
  * Construct an empty LSDB (RFC 2328 §12).
  */
 lr_ospf_lsdb_t lr_ospf_lsdb_new(void);
@@ -13605,6 +13887,328 @@ uint32_t lr_bgp_rs_config_strip_at(lr_bgp_rs_config_t c, uintptr_t index);
 uintptr_t lr_bgp_rs_config_add_count(lr_bgp_rs_config_t c);
 
 uint32_t lr_bgp_rs_config_add_at(lr_bgp_rs_config_t c, uintptr_t index);
+
+/**
+ * True when the route carries an ATOMIC_AGGREGATE attribute (RFC 4271
+ * §5.1.6). Writes `1` to `*out` when present, `0` when absent. Returns
+ * `LR_ERR_NULL` (-1) on a NULL handle.
+ *
+ * # Safety
+ * `route` must be a valid handle; `out` must point to writable `uint8_t`.
+ */
+int32_t lr_route_atomic_aggregate(lr_route_t route, uint8_t *out);
+
+/**
+ * The route's ORIGINATOR_ID (RFC 4456 §8) — writes the 4-byte IPv4
+ * address to `*out_addr` and `1` to `*out_present` when the attribute
+ * is present; `0` to `*out_present` when absent.
+ *
+ * # Safety
+ * `route` must be a valid handle; `out_addr` must point to 4 writable
+ * bytes; `out_present` must point to a writable `uint8_t`.
+ */
+int32_t lr_route_originator_id(lr_route_t route, uint8_t *out_addr, uint8_t *out_present);
+
+/**
+ * True when the route carries a CLUSTER_LIST attribute (RFC 4456 §8).
+ * Writes `1` to `*out` when present, `0` when absent.
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_has_cluster_list(lr_route_t route, uint8_t *out);
+
+/**
+ * The CLUSTER_LIST length (number of Cluster-ID entries). `0` when
+ * the attribute is absent.
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_cluster_list_len(lr_route_t route, uintptr_t *out);
+
+/**
+ * Read one Cluster-ID at `index`. Writes the 4-byte IPv4 address to
+ * `*out_addr`. Returns `LR_ERR_NULL` (-1) on a NULL handle, and
+ * `LR_ERR_INVALID_HANDLE` (-2) when the index is out of range.
+ *
+ * # Safety
+ * `route` must be a valid handle; `out_addr` must point to 4 writable
+ * bytes.
+ */
+int32_t lr_route_cluster_list_at(lr_route_t route, uintptr_t index, uint8_t *out_addr);
+
+/**
+ * True when the route carries an OTC (Only To Customer) attribute
+ * (RFC 9231 §4).
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_has_otc(lr_route_t route, uint8_t *out);
+
+/**
+ * The OTC value (RFC 9231 §4). Writes the 4-byte value to `*out` and
+ * `1` to `*out_present` when present; `0` to `*out_present` when
+ * absent.
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_otc(lr_route_t route, uint32_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries an AIGP attribute (RFC 7311).
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_has_aigp(lr_route_t route, uint8_t *out);
+
+/**
+ * The AIGP value (RFC 7311). Writes the 8-byte value to `*out` and
+ * `1` to `*out_present` when present; `0` to `*out_present` when
+ * absent.
+ *
+ * # Safety
+ * `out` must point to a writable `uint64_t`.
+ */
+int32_t lr_route_aigp(lr_route_t route, uint64_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries an AGGREGATOR attribute (RFC 4271
+ * §5.1.7 / RFC 6793 §4).
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_has_aggregator(lr_route_t route, uint8_t *out);
+
+/**
+ * The AGGREGATOR AS number (RFC 4271 §5.1.7 / RFC 6793 §4). Writes the
+ * 4-byte value to `*out` and `1` to `*out_present` when present; `0`
+ * to `*out_present` when absent.
+ *
+ * # Safety
+ * See [`lr_route_otc`].
+ */
+int32_t lr_route_aggregator_asn(lr_route_t route, uint32_t *out, uint8_t *out_present);
+
+/**
+ * The AGGREGATOR speaker IPv4 address (RFC 4271 §5.1.7 / RFC 6793
+ * §4). Writes the 4 bytes to `*out_addr` and `1` to `*out_present`
+ * when present; `0` to `*out_present` when absent.
+ *
+ * # Safety
+ * `out_addr` must point to 4 writable bytes.
+ */
+int32_t lr_route_aggregator_speaker(lr_route_t route, uint8_t *out_addr, uint8_t *out_present);
+
+/**
+ * True when the route carries a PMSI_TUNNEL attribute (RFC 6514 §5).
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_has_pmsi_tunnel(lr_route_t route, uint8_t *out);
+
+/**
+ * The PMSI_TUNNEL flags (RFC 6514 §5). Writes the 1-byte value to
+ * `*out_flags` and `1` to `*out_present` when present; `0` to
+ * `*out_present` when absent.
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_pmsi_tunnel_flags(lr_route_t route, uint8_t *out_flags, uint8_t *out_present);
+
+/**
+ * The flat AS sequence length (sets flattened in order).
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_as_sequence_len(lr_route_t route, uintptr_t *out);
+
+/**
+ * Read one AS from the flat AS sequence at `index`. Returns
+ * `LR_ERR_INVALID_HANDLE` (-2) when the index is out of range.
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_as_sequence_at(lr_route_t route, uintptr_t index, uint32_t *out);
+
+/**
+ * Replace the route's AS_PATH with a flat AS_SEQUENCE of the given
+ * ASNs (RFC 4271 §5.1.2). The previous AS_PATH is overwritten.
+ *
+ * # Safety
+ * `asns` must point to `count` readable `uint32_t` values.
+ */
+int32_t lr_route_set_as_sequence(lr_route_t route, const uint32_t *asns, uintptr_t count);
+
+/**
+ * Prepend `asn` to the route's AS_PATH (RFC 4271 §5.1.2 — the
+ * standard eBGP AS_PATH prepend action). Creates an AS_PATH if absent.
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_prepend_as(lr_route_t route, uint32_t asn);
+
+/**
+ * Remove `community` from the route's COMMUNITIES attribute (RFC 1997
+ * §4). No-op when the route carries no COMMUNITIES or the community
+ * is not present.
+ *
+ * # Safety
+ * See [`lr_route_atomic_aggregate`].
+ */
+int32_t lr_route_remove_community(lr_route_t route, uint32_t asn, uint16_t value);
+
+/**
+ * True when the route carries a Babel metric attribute.
+ */
+int32_t lr_route_has_babel_metric(lr_route_t route, uint8_t *out);
+
+/**
+ * The Babel primary metric (RFC 8966 §3.2 + §3.4.3).
+ */
+int32_t lr_route_babel_metric(lr_route_t route, uint32_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries a Babel sequence number attribute.
+ */
+int32_t lr_route_has_babel_seqno(lr_route_t route, uint8_t *out);
+
+/**
+ * The Babel sequence number (RFC 8966 §3.2 + §4.6.9).
+ */
+int32_t lr_route_babel_seqno(lr_route_t route, uint16_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries a Babel router-id attribute.
+ */
+int32_t lr_route_has_babel_router_id(lr_route_t route, uint8_t *out);
+
+/**
+ * The Babel router-id (RFC 8966 §3.2 + §4.6.9) — 8 bytes, written
+ * through `*out_router_id` (which must point to 8 writable bytes).
+ */
+int32_t lr_route_babel_router_id(lr_route_t route, uint8_t *out_router_id, uint8_t *out_present);
+
+/**
+ * True when the route carries an OSPF metric1 attribute.
+ */
+int32_t lr_route_has_ospf_metric1(lr_route_t route, uint8_t *out);
+
+/**
+ * The OSPF primary metric (RFC 2328 §16 / RFC 5340 §4.1).
+ */
+int32_t lr_route_ospf_metric1(lr_route_t route, uint32_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries an OSPF metric2 attribute.
+ */
+int32_t lr_route_has_ospf_metric2(lr_route_t route, uint8_t *out);
+
+/**
+ * The OSPF type-2 external metric (RFC 2328 §16.4 / RFC 5340 §4.8.5).
+ */
+int32_t lr_route_ospf_metric2(lr_route_t route, uint32_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries an OSPF tag attribute.
+ */
+int32_t lr_route_has_ospf_tag(lr_route_t route, uint8_t *out);
+
+/**
+ * The OSPF external route tag (RFC 2328 §A.4.5 bullet h / RFC 3101
+ * §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix
+ * sub-TLV 3).
+ */
+int32_t lr_route_ospf_tag(lr_route_t route, uint32_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries an OSPF router-id attribute.
+ */
+int32_t lr_route_has_ospf_router_id(lr_route_t route, uint8_t *out);
+
+/**
+ * The OSPF advertising router (RFC 2328 §A.4 / RFC 5340 §A.4).
+ */
+int32_t lr_route_ospf_router_id(lr_route_t route, uint32_t *out, uint8_t *out_present);
+
+/**
+ * The LRXP store kind tag (0 = absent, 1 = verified, 2 =
+ * partial-raw). Writes `0` to `*out` when the route carries no
+ * LRXP attribute (the fallback case).
+ */
+int32_t lr_route_lrxp_store_kind(lr_route_t route, uint8_t *out, uint8_t *out_present);
+
+/**
+ * True when the route carries a verified LRXP record set.
+ */
+int32_t lr_route_lrxp_verified(lr_route_t route, uint8_t *out);
+
+/**
+ * True when the route carries partial-transit LRXP forwarding
+ * material.
+ */
+int32_t lr_route_lrxp_partial_transit(lr_route_t route, uint8_t *out);
+
+/**
+ * The sender's best-path rank for this path among its alternates
+ * (design §5.1: 1 = the path the sender itself uses). `0` when
+ * the route carries no verified hint record.
+ */
+int32_t lr_route_lrxp_hint_rank(lr_route_t route, uint8_t *out);
+
+/**
+ * The sender's route-flap figure of merit for the prefix (design
+ * §5.1: 0 when damping is off). `0` when the route carries no
+ * verified hint record.
+ */
+int32_t lr_route_lrxp_hint_damp_fom(lr_route_t route, uint16_t *out);
+
+/**
+ * The sender's IGP cost from its decision point to this path's
+ * next hop (design §5.1). `0` when the route carries no verified
+ * hint record.
+ */
+int32_t lr_route_lrxp_hint_igp_cost(lr_route_t route, uint32_t *out);
+
+/**
+ * The sender's RFC 9234 role claim for this session (design
+ * §5.2: 0 = provider, 1 = customer, 2 = RS, 3 = RS-client, 4 =
+ * peer, 255 = unspecified; advisory — the receiver cross-checks
+ * against its own configured role). `255` (unspecified) when the
+ * route carries no verified policy record.
+ */
+int32_t lr_route_lrxp_policy_role(lr_route_t route, uint8_t *out);
+
+/**
+ * The origin AS the attestation authorises for this announcement
+ * set (design §5.3). `0` when the route carries no verified origin
+ * record.
+ */
+int32_t lr_route_lrxp_origin_as(lr_route_t route, uint32_t *out);
+
+/**
+ * The maximum prefix length the origin authorises for this
+ * announcement set (design §5.3: the ROA maxLength idea, RFC 6811
+ * §3, without the PKI). `0` when the route carries no verified
+ * origin record.
+ */
+int32_t lr_route_lrxp_origin_max_valid_len(lr_route_t route, uint8_t *out);
+
+/**
+ * The absolute timestamp after which downstream speakers stop
+ * trusting the record (design §5.3). `0` when the route carries
+ * no verified origin record.
+ */
+int32_t lr_route_lrxp_origin_expiry(lr_route_t route, uint32_t *out);
 
 /**
  * Create a new router instance.
