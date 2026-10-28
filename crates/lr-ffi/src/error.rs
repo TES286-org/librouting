@@ -43,6 +43,15 @@ pub fn set_last_error(s: String) {
     LAST_ERROR.with(|c| *c.borrow_mut() = s);
 }
 
+/// Peek the last-error string without copying it across the FFI
+/// boundary. Used by in-crate helpers (e.g. `srv6_constants`'s
+/// `lr_srv6_srh_last_err_code`) to re-parse an error's discriminant
+/// from its Display form. Returns an owned `String` so the caller can
+/// match on substrings without holding the thread-local lock.
+pub(crate) fn last_error_string() -> String {
+    LAST_ERROR.with(|c| c.borrow().clone())
+}
+
 /// Get the last error message. Returned string is NUL-terminated UTF-8.
 ///
 /// # Safety
