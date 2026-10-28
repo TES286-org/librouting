@@ -24,6 +24,8 @@
 //! Entry/delta arrays passed to `replace_static` / `apply_deltas` are
 //! borrowed for the duration of the call only.
 
+#![allow(unused_unsafe)]
+
 use crate::error::{set_last_error, LrError};
 use crate::guarded;
 use crate::handle::{box_roa_store, lr_roa_store_t, unbox_roa_store};
@@ -342,6 +344,215 @@ unsafe fn lock_roa_store(s: lr_roa_store_t) -> Option<&'static lr_bgp::RoaStore>
     Some(unsafe { &*(s as *const lr_bgp::RoaStore) })
 }
 
+/// Add a single static ROA entry (RFC 6482). Returns 1 when the
+/// entry was newly inserted, 0 when it was already present (no
+/// change). Returns `LR_ERR_INVALID_HANDLE` (-2) on a NULL store
+/// and `LR_ERR_OTHER` (-6) on a malformed entry (the last-error
+/// string is set).
+///
+/// # Safety
+/// `s` must be a live store handle. `entry` must point to a readable
+/// `lr_roa_entry_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_roa_store_add_static(
+    s: lr_roa_store_t,
+    entry: *const lr_roa_entry_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(store) = lock_roa_store(s) else {
+                set_last_error("lr_roa_store_add_static: bad handle".to_string());
+                return LrError::InvalidHandle as i32;
+            };
+            if entry.is_null() {
+                return LrError::Null as i32;
+            }
+            let e = unsafe { &*entry };
+            let parsed = match e.parse() {
+                Ok(p) => p,
+                Err(msg) => {
+                    set_last_error(msg);
+                    return LrError::Other as i32;
+                }
+            };
+            // SAFETY: RoaStore is Send+Sync; the lock_roa_store borrow
+            // pattern transmutes &'static, but the embedder's destroy
+            // contract forbids racing with lr_roa_store_free.
+            let s_mut: &'static mut lr_bgp::RoaStore =
+                unsafe { &mut *(store as *const lr_bgp::RoaStore as *mut lr_bgp::RoaStore) };
+            s_mut.add_static(parsed) as i32
+        },
+        LrError::Panic as i32,
+    )
+}
+
+/// Remove a single static ROA entry. Returns 1 when the entry was
+/// present and removed, 0 when it was absent.
+///
+/// # Safety
+/// See [`lr_roa_store_add_static`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_roa_store_remove_static(
+    s: lr_roa_store_t,
+    entry: *const lr_roa_entry_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(store) = lock_roa_store(s) else {
+                set_last_error("lr_roa_store_remove_static: bad handle".to_string());
+                return LrError::InvalidHandle as i32;
+            };
+            if entry.is_null() {
+                return LrError::Null as i32;
+            }
+            let e = unsafe { &*entry };
+            let parsed = match e.parse() {
+                Ok(p) => p,
+                Err(msg) => {
+                    set_last_error(msg);
+                    return LrError::Other as i32;
+                }
+            };
+            let s_mut: &'static mut lr_bgp::RoaStore =
+                unsafe { &mut *(store as *const lr_bgp::RoaStore as *mut lr_bgp::RoaStore) };
+            s_mut.remove_static(&parsed) as i32
+        },
+        LrError::Panic as i32,
+    )
+}
+
+/// Static-layer entry count (for status lines / diagnostics). 0 on
+/// a NULL / panic.
+///
+/// # Safety
+/// `s` must be NULL or a live store handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_roa_store_static_len(s: lr_roa_store_t) -> usize {
+    guarded(
+        || match unsafe { lock_roa_store(s) } {
+            Some(store) => store.static_len(),
+            None => 0,
+        },
+        0,
+    )
+}
+
+/// RTR-layer entry count. 0 on a NULL / panic.
+///
+/// # Safety
+/// See [`lr_roa_store_static_len`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_roa_store_rtr_len(s: lr_roa_store_t) -> usize {
+    guarded(
+        || match unsafe { lock_roa_store(s) } {
+            Some(store) => store.rtr_len(),
+            None => 0,
+        },
+        0,
+    )
+}
+
+/// Per-entry provenance tag for one ROA entry. Writes one of
+/// `LR_ROA_PROVENANCE_STATIC` / `_RTR` / `_BOTH` to `*out`. Returns
+/// `LR_ERR_INVALID_HANDLE` (-2) on a NULL store and `LR_ERR_OTHER`
+/// (-6) on a malformed entry. The unchecked form (Rust's
+/// `provenance_of`) returns `RoaProvenance::Static` for orphan
+/// entries — use [`lr_roa_store_provenance_of_checked`] for the
+/// variant that returns `LR_ROA_PROVENANCE_NONE` instead.
+pub const LR_ROA_PROVENANCE_STATIC: u8 = 0;
+pub const LR_ROA_PROVENANCE_RTR: u8 = 1;
+pub const LR_ROA_PROVENANCE_BOTH: u8 = 2;
+pub const LR_ROA_PROVENANCE_NONE: u8 = 3;
+
+/// Unchecked provenance lookup — orphans return
+/// `LR_ROA_PROVENANCE_STATIC` (the historical fallback).
+///
+/// # Safety
+/// `s` must be a live store handle. `entry` must point to a readable
+/// `lr_roa_entry_t`. `out` must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_roa_store_provenance_of(
+    s: lr_roa_store_t,
+    entry: *const lr_roa_entry_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(store) = lock_roa_store(s) else {
+                set_last_error("lr_roa_store_provenance_of: bad handle".to_string());
+                return LrError::InvalidHandle as i32;
+            };
+            if entry.is_null() || out.is_null() {
+                return LrError::Null as i32;
+            }
+            let e = unsafe { &*entry };
+            let parsed = match e.parse() {
+                Ok(p) => p,
+                Err(msg) => {
+                    set_last_error(msg);
+                    return LrError::Other as i32;
+                }
+            };
+            let p = store.provenance_of(&parsed);
+            let tag = match p {
+                lr_bgp::RoaProvenance::Static => LR_ROA_PROVENANCE_STATIC,
+                lr_bgp::RoaProvenance::Rtr => LR_ROA_PROVENANCE_RTR,
+                lr_bgp::RoaProvenance::Both => LR_ROA_PROVENANCE_BOTH,
+            };
+            unsafe { *out = tag }
+            LrError::Ok as i32
+        },
+        LrError::Panic as i32,
+    )
+}
+
+/// Checked provenance lookup — orphans return
+/// `LR_ROA_PROVENANCE_NONE`. Returns 1 (without writing `*out`)
+/// when the entry is in neither layer, 0 on a successful match
+/// (the tag is written), and negative on error.
+///
+/// # Safety
+/// See [`lr_roa_store_provenance_of`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_roa_store_provenance_of_checked(
+    s: lr_roa_store_t,
+    entry: *const lr_roa_entry_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(store) = lock_roa_store(s) else {
+                set_last_error("lr_roa_store_provenance_of_checked: bad handle".to_string());
+                return LrError::InvalidHandle as i32;
+            };
+            if entry.is_null() || out.is_null() {
+                return LrError::Null as i32;
+            }
+            let e = unsafe { &*entry };
+            let parsed = match e.parse() {
+                Ok(p) => p,
+                Err(msg) => {
+                    set_last_error(msg);
+                    return LrError::Other as i32;
+                }
+            };
+            match store.provenance_of_checked(&parsed) {
+                Some(p) => {
+                    let tag = match p {
+                        lr_bgp::RoaProvenance::Static => LR_ROA_PROVENANCE_STATIC,
+                        lr_bgp::RoaProvenance::Rtr => LR_ROA_PROVENANCE_RTR,
+                        lr_bgp::RoaProvenance::Both => LR_ROA_PROVENANCE_BOTH,
+                    };
+                    unsafe { *out = tag }
+                    LrError::Ok as i32
+                }
+                None => 1, // orphan entry — no provenance
+            }
+        },
+        LrError::Panic as i32,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,5 +733,86 @@ mod tests {
         unsafe { lr_roa_store_free(s) };
         // Freeing NULL is a no-op.
         unsafe { lr_roa_store_free(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn add_static_then_remove() {
+        let s = lr_roa_store_new();
+        assert_eq!(unsafe { lr_roa_store_static_len(s) }, 0);
+
+        let e = make_entry([203, 0, 113, 0], 24, 24, 64512);
+        let rc = unsafe { lr_roa_store_add_static(s, &e) };
+        assert_eq!(rc, 1, "add_static: new entry returns 1");
+        assert_eq!(unsafe { lr_roa_store_static_len(s) }, 1);
+
+        // Adding the same entry again returns 0 (no change).
+        let rc = unsafe { lr_roa_store_add_static(s, &e) };
+        assert_eq!(rc, 0, "add_static: duplicate returns 0");
+        assert_eq!(unsafe { lr_roa_store_static_len(s) }, 1);
+
+        // Remove it.
+        let rc = unsafe { lr_roa_store_remove_static(s, &e) };
+        assert_eq!(rc, 1, "remove_static: present returns 1");
+        assert_eq!(unsafe { lr_roa_store_static_len(s) }, 0);
+
+        // Remove an absent entry returns 0.
+        let rc = unsafe { lr_roa_store_remove_static(s, &e) };
+        assert_eq!(rc, 0, "remove_static: absent returns 0");
+
+        unsafe { lr_roa_store_free(s) };
+    }
+
+    #[test]
+    fn provenance_of_static_and_orphan() {
+        let s = lr_roa_store_new();
+        let e = make_entry([203, 0, 113, 0], 24, 24, 64512);
+        unsafe { lr_roa_store_add_static(s, &e) };
+
+        // The entry is in the static layer.
+        let mut tag = 99u8;
+        let rc = unsafe { lr_roa_store_provenance_of(s, &e, &raw mut tag) };
+        assert_eq!(rc, LrError::Ok as i32);
+        assert_eq!(tag, LR_ROA_PROVENANCE_STATIC);
+
+        // Checked form returns the same.
+        let mut tag2 = 99u8;
+        let rc = unsafe { lr_roa_store_provenance_of_checked(s, &e, &raw mut tag2) };
+        assert_eq!(rc, LrError::Ok as i32);
+        assert_eq!(tag2, LR_ROA_PROVENANCE_STATIC);
+
+        // An orphan entry: not in any layer.
+        let orphan = make_entry([198, 51, 100, 0], 24, 24, 64513);
+        let mut tag3 = 99u8;
+        let rc = unsafe { lr_roa_store_provenance_of_checked(s, &orphan, &raw mut tag3) };
+        assert_eq!(rc, 1, "checked: orphan returns 1 (None)");
+        // Unchecked form fires a debug_assert! on an orphan entry and
+        // the catch_unwind barrier turns the panic into LR_ERR_PANIC
+        // (-4). The historical `Static` fallback only survives in
+        // release builds; the test asserts the panic path so the
+        // embedder's contract (use the checked form for unknown
+        // entries) is enforced.
+        let rc = unsafe { lr_roa_store_provenance_of(s, &orphan, &raw mut tag3) };
+        assert_eq!(
+            rc,
+            LrError::Panic as i32,
+            "unchecked orphan panics in debug"
+        );
+
+        unsafe { lr_roa_store_free(s) };
+    }
+
+    #[test]
+    fn add_static_rejects_malformed_entry() {
+        let s = lr_roa_store_new();
+        let mut bad = make_entry([10, 0, 0, 0], 8, 4, 64512); // max < prefix
+        bad.max_length = 4;
+        let rc = unsafe { lr_roa_store_add_static(s, &bad) };
+        assert_eq!(rc, LrError::Other as i32);
+        assert!(
+            last_error().contains("max_length"),
+            "last: {}",
+            last_error()
+        );
+        unsafe { lr_roa_store_free(s) };
     }
 }
