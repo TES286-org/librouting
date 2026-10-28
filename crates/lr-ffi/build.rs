@@ -152,4 +152,9 @@ fn main() {
     println!("cargo:rerun-if-changed=src/attributes.rs");
     println!("cargo:rerun-if-changed=src/ospf_lsdb.rs");
     println!("cargo:rerun-if-changed=src/ospf_auth.rs");
+    println!("cargo:rerun-if-changed=src/mrt_constants.rs");
+    println!("cargo:rerun-if-changed=src/srv6_constants.rs");
+    println!("cargo:rerun-if-changed=src/mpls_constants.rs");
+    println!("cargo:rerun-if-changed=src/damping_constants.rs");
+    println!("cargo:rerun-if-changed=src/ospf_enums.rs");
 }

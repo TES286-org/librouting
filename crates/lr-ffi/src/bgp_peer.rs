@@ -843,6 +843,384 @@ pub unsafe extern "C" fn lr_bgp_peer_role(r: lr_bgp_peer_t) -> i32 {
     )
 }
 
+// ---- Negotiated-capability queries (RFC 2918 / RFC 4724 / RFC 7313 /
+// RFC 7911 / RFC 5549 / RFC 9494). Pure getters — safe to call on a
+// peer in any FSM state (returns 0 / -1 when not yet negotiated). ----
+
+/// `BgpPeer::route_refresh_negotiated` (RFC 2918 §2) — 1 when the
+/// peer advertised the Route Refresh capability, 0 otherwise. Returns
+/// 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_route_refresh_negotiated(r: lr_bgp_peer_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| p.route_refresh_negotiated() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::enhanced_route_refresh_negotiated` (RFC 7313 §2) — 1
+/// when the peer advertised the Enhanced Route Refresh capability
+/// (BoR/EoR markers), 0 otherwise. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_enhanced_route_refresh_negotiated(r: lr_bgp_peer_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| p.enhanced_route_refresh_negotiated() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::add_path_negotiated` (RFC 7911) — 1 when AddPath was
+/// negotiated in either direction, 0 otherwise. Returns 0 on a NULL
+/// handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_add_path_negotiated(r: lr_bgp_peer_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| p.add_path_negotiated() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::add_path_tx_for(family)` (RFC 7911) — 1 when AddPath TX
+/// is negotiated for `family`, 0 otherwise. Returns 0 on a NULL
+/// handle or for an unknown family.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_add_path_tx_for(
+    r: lr_bgp_peer_t,
+    family: crate::core_extras::lr_nlri_family_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| {
+                    p.add_path_tx_for(lr_core::nlri::NlriFamily {
+                        afi: family.afi,
+                        safi: family.safi,
+                    }) as u8
+                })
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::add_path_rx_for(family)` (RFC 7911) — 1 when AddPath RX
+/// is negotiated for `family`, 0 otherwise. Returns 0 on a NULL
+/// handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_add_path_rx_for(
+    r: lr_bgp_peer_t,
+    family: crate::core_extras::lr_nlri_family_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| {
+                    p.add_path_rx_for(lr_core::nlri::NlriFamily {
+                        afi: family.afi,
+                        safi: family.safi,
+                    }) as u8
+                })
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::extended_next_hop_for(nlri_afi, nlri_safi, nexthop_afi)`
+/// (RFC 5549 §3) — 1 when the (nlri_afi, nlri_safi, nexthop_afi)
+/// tuple is in the negotiated extended-next-hop set, 0 otherwise.
+/// Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_extended_next_hop_for(
+    r: lr_bgp_peer_t,
+    nlri_afi: u16,
+    nlri_safi: u8,
+    nexthop_afi: u16,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| p.extended_next_hop_for(nlri_afi, nlri_safi, nexthop_afi) as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::negotiated_graceful_restart_time` (RFC 4724 §4) —
+/// returns the peer's advertised graceful-restart time (seconds), or
+/// -1 when the peer did not advertise the GR capability. Returns -1
+/// on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_negotiated_graceful_restart_time(r: lr_bgp_peer_t) -> i32 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .and_then(|p| p.negotiated_graceful_restart_time().map(|v| v as i32))
+                .unwrap_or(-1)
+        },
+        -1,
+    )
+}
+
+/// `BgpPeer::llgr_negotiated` (RFC 9494 §4) — 1 when the peer
+/// advertised the Long-Lived Graceful Restart capability, 0
+/// otherwise. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_llgr_negotiated(r: lr_bgp_peer_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| p.llgr_negotiated() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::negotiated_llgr_stale_time(family)` (RFC 9494 §4.2) —
+/// returns the peer's advertised LLGR stale time for `family`
+/// (seconds), or 0 when the peer did not advertise LLGR for that
+/// family. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_negotiated_llgr_stale_time(
+    r: lr_bgp_peer_t,
+    family: crate::core_extras::lr_nlri_family_t,
+) -> u32 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .and_then(|p| {
+                    p.negotiated_llgr_stale_time(lr_core::nlri::NlriFamily {
+                        afi: family.afi,
+                        safi: family.safi,
+                    })
+                })
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::received_cease_collision` (RFC 4271 §6.8 + RFC 9494
+/// §4.1) — 1 when the peer sent a CEASE NOTIFICATION that we recorded
+/// as a collision event. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_received_cease_collision(r: lr_bgp_peer_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| p.received_cease_collision() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::notification_received` (RFC 4271 §6) — 1 when the peer
+/// sent any NOTIFICATION message. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_notification_received(r: lr_bgp_peer_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer(r)
+                .map(|p| p.notification_received() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+// ---- Write paths: request_route_refresh / begin_/end_enhanced_rr /
+// enqueue_notification / reset. ----
+
+/// `BgpPeer::request_route_refresh(family)` (RFC 2918 §2) — emit a
+/// ROUTE_REFRESH for `family` if the peer advertised the capability.
+/// Returns 1 when the request was queued, 0 otherwise. Returns 0 on
+/// a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_request_route_refresh(
+    r: lr_bgp_peer_t,
+    family: crate::core_extras::lr_nlri_family_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer_mut(r)
+                .map(|p| {
+                    p.request_route_refresh(lr_core::nlri::NlriFamily {
+                        afi: family.afi,
+                        safi: family.safi,
+                    }) as u8
+                })
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::begin_enhanced_route_refresh(family)` (RFC 7313 §2) —
+/// emit a BoR (Beginning-of-RIB) marker for `family` if the peer
+/// advertised the Enhanced Route Refresh capability. Returns 1 when
+/// the marker was queued, 0 otherwise. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_begin_enhanced_route_refresh(
+    r: lr_bgp_peer_t,
+    family: crate::core_extras::lr_nlri_family_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer_mut(r)
+                .map(|p| {
+                    p.begin_enhanced_route_refresh(lr_core::nlri::NlriFamily {
+                        afi: family.afi,
+                        safi: family.safi,
+                    }) as u8
+                })
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::end_enhanced_route_refresh(family)` (RFC 7313 §2) —
+/// emit an EoR (End-of-RIB) marker for `family` if the peer
+/// advertised the Enhanced Route Refresh capability. Returns 1 when
+/// the marker was queued, 0 otherwise. Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_end_enhanced_route_refresh(
+    r: lr_bgp_peer_t,
+    family: crate::core_extras::lr_nlri_family_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_peer_mut(r)
+                .map(|p| {
+                    p.end_enhanced_route_refresh(lr_core::nlri::NlriFamily {
+                        afi: family.afi,
+                        safi: family.safi,
+                    }) as u8
+                })
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// `BgpPeer::enqueue_notification(code, subcode)` (RFC 4271 §6) —
+/// queue a NOTIFICATION for transmission on the next drain. The peer
+/// is not torn down here — the embedder still needs to call
+/// `lr_bgp_peer_step_transport_close` (or wait for the peer's TCP
+/// close). Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL handle.
+///
+/// `code` is the raw BGP error-code byte (1=Header, 2=Open, 3=Update,
+/// 4=HoldTimerExpired, 5=FsmError, 6=Cease, 7=RouteRefresh). Unknown
+/// codes map to Cease (RFC 4271 §6.6 — safest fallback).
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_enqueue_notification(
+    r: lr_bgp_peer_t,
+    code: u8,
+    subcode: u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(p) = borrow_peer_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            let typed_code = match code {
+                1 => lr_bgp::error::BgpErrorCode::Header,
+                2 => lr_bgp::error::BgpErrorCode::Open,
+                3 => lr_bgp::error::BgpErrorCode::Update,
+                4 => lr_bgp::error::BgpErrorCode::HoldTimerExpired,
+                5 => lr_bgp::error::BgpErrorCode::FsmError,
+                6 => lr_bgp::error::BgpErrorCode::Cease,
+                7 => lr_bgp::error::BgpErrorCode::RouteRefresh,
+                _ => lr_bgp::error::BgpErrorCode::Cease,
+            };
+            p.enqueue_notification(typed_code, subcode);
+            0
+        },
+        LR_ERR_NULL,
+    )
+}
+
+/// `BgpPeer::reset()` (RFC 4271 §8.2) — tear the FSM back to Idle
+/// without freeing the handle. The peer's state is reset so a
+/// subsequent `lr_bgp_peer_step_manual_start` re-opens the session.
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL handle.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_reset(r: lr_bgp_peer_t) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(p) = borrow_peer_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            p.reset();
+            0
+        },
+        LR_ERR_NULL,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,5 +1401,175 @@ mod tests {
         assert_eq!(unsafe { lr_bgp_peer_is_rr_client(std::ptr::null_mut()) }, 0);
         assert_eq!(unsafe { lr_bgp_peer_is_rs_client(std::ptr::null_mut()) }, 0);
         assert_eq!(unsafe { lr_bgp_peer_role(std::ptr::null_mut()) }, -1);
+    }
+
+    #[test]
+    fn ffi_bgp_peer_capability_queries_default_to_unset() {
+        // A fresh peer has not negotiated any capabilities yet — all
+        // the negotiated-capability queries return 0 / -1.
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        assert_eq!(unsafe { lr_bgp_peer_route_refresh_negotiated(p) }, 0);
+        assert_eq!(
+            unsafe { lr_bgp_peer_enhanced_route_refresh_negotiated(p) },
+            0
+        );
+        assert_eq!(unsafe { lr_bgp_peer_add_path_negotiated(p) }, 0);
+        assert_eq!(
+            unsafe { lr_bgp_peer_negotiated_graceful_restart_time(p) },
+            -1
+        );
+        assert_eq!(unsafe { lr_bgp_peer_llgr_negotiated(p) }, 0);
+        assert_eq!(unsafe { lr_bgp_peer_received_cease_collision(p) }, 0);
+        assert_eq!(unsafe { lr_bgp_peer_notification_received(p) }, 0);
+        unsafe { lr_bgp_peer_free(p) };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_capability_queries_handle_null_safely() {
+        assert_eq!(
+            unsafe { lr_bgp_peer_route_refresh_negotiated(std::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_enhanced_route_refresh_negotiated(std::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_add_path_negotiated(std::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_negotiated_graceful_restart_time(std::ptr::null_mut()) },
+            -1
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_llgr_negotiated(std::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_received_cease_collision(std::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_notification_received(std::ptr::null_mut()) },
+            0
+        );
+    }
+
+    #[test]
+    fn ffi_bgp_peer_add_path_tx_for_handles_null_and_unnegotiated() {
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        let ipv4 = crate::core_extras::lr_nlri_family_ipv4_unicast();
+        // AddPath is not negotiated → 0.
+        assert_eq!(unsafe { lr_bgp_peer_add_path_tx_for(p, ipv4) }, 0);
+        assert_eq!(unsafe { lr_bgp_peer_add_path_rx_for(p, ipv4) }, 0);
+        // NULL handle → 0.
+        assert_eq!(
+            unsafe { lr_bgp_peer_add_path_tx_for(std::ptr::null_mut(), ipv4) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_add_path_rx_for(std::ptr::null_mut(), ipv4) },
+            0
+        );
+        unsafe { lr_bgp_peer_free(p) };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_extended_next_hop_for_handles_null() {
+        // NULL handle → 0.
+        assert_eq!(
+            unsafe { lr_bgp_peer_extended_next_hop_for(std::ptr::null_mut(), 1, 1, 2) },
+            0
+        );
+    }
+
+    #[test]
+    fn ffi_bgp_peer_negotiated_llgr_stale_time_handles_null_and_unnegotiated() {
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        let ipv4 = crate::core_extras::lr_nlri_family_ipv4_unicast();
+        // LLGR is not negotiated → 0.
+        assert_eq!(
+            unsafe { lr_bgp_peer_negotiated_llgr_stale_time(p, ipv4) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_negotiated_llgr_stale_time(std::ptr::null_mut(), ipv4) },
+            0
+        );
+        unsafe { lr_bgp_peer_free(p) };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_request_route_refresh_returns_zero_unnegotiated() {
+        // A fresh peer has not negotiated Route Refresh → request returns 0.
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        let ipv4 = crate::core_extras::lr_nlri_family_ipv4_unicast();
+        assert_eq!(unsafe { lr_bgp_peer_request_route_refresh(p, ipv4) }, 0);
+        // NULL handle → 0.
+        assert_eq!(
+            unsafe { lr_bgp_peer_request_route_refresh(std::ptr::null_mut(), ipv4) },
+            0
+        );
+        unsafe { lr_bgp_peer_free(p) };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_begin_end_enhanced_route_refresh_return_zero_unnegotiated() {
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        let ipv4 = crate::core_extras::lr_nlri_family_ipv4_unicast();
+        assert_eq!(
+            unsafe { lr_bgp_peer_begin_enhanced_route_refresh(p, ipv4) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_bgp_peer_end_enhanced_route_refresh(p, ipv4) },
+            0
+        );
+        unsafe { lr_bgp_peer_free(p) };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_enqueue_notification_returns_null_on_null_handle() {
+        // NULL handle → LR_ERR_NULL.
+        assert_eq!(
+            unsafe { lr_bgp_peer_enqueue_notification(std::ptr::null_mut(), 6, 0) },
+            LR_ERR_NULL
+        );
+    }
+
+    #[test]
+    fn ffi_bgp_peer_enqueue_notification_unknown_code_maps_to_cease() {
+        // An unknown error code maps to Cease (RFC 4271 §6.6) — the call
+        // succeeds and the peer state is unaltered (no panic).
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        // code=99 is unknown — maps to Cease (6); call returns 0.
+        assert_eq!(unsafe { lr_bgp_peer_enqueue_notification(p, 99, 0) }, 0);
+        // Standard Cease code (6) also returns 0.
+        assert_eq!(unsafe { lr_bgp_peer_enqueue_notification(p, 6, 1) }, 0);
+        unsafe { lr_bgp_peer_free(p) };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_reset_returns_null_on_null_handle() {
+        // NULL handle → LR_ERR_NULL.
+        assert_eq!(
+            unsafe { lr_bgp_peer_reset(std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
+    }
+
+    #[test]
+    fn ffi_bgp_peer_reset_resets_fsm_to_idle() {
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        // Fresh peer is Idle (state 1).
+        assert_eq!(unsafe { lr_bgp_peer_state(p) }, LR_BGP_STATE_IDLE);
+        // Manual start transitions to Connect (state 2).
+        unsafe { lr_bgp_peer_step_manual_start(p) };
+        assert_eq!(unsafe { lr_bgp_peer_state(p) }, LR_BGP_STATE_CONNECT);
+        // Reset transitions back to Idle.
+        assert_eq!(unsafe { lr_bgp_peer_reset(p) }, 0);
+        assert_eq!(unsafe { lr_bgp_peer_state(p) }, LR_BGP_STATE_IDLE);
+        unsafe { lr_bgp_peer_free(p) };
     }
 }

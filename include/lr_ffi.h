@@ -572,6 +572,45 @@
 
 #define LR_PROTOCOL_OTHER 6
 
+/**
+ * Default additive increment per flap (RFC 2439 §4.8.1).
+ */
+#define LR_DAMPING_DEFAULT_ADDITIVE_INCR 1000
+
+/**
+ * Default suppress threshold above which a route is dampened (RFC
+ * 2439 §4.8.1).
+ */
+#define LR_DAMPING_DEFAULT_SUPPRESS_THRESHOLD 2000
+
+/**
+ * Default reuse threshold below which a dampened route is unsuppressed
+ * (RFC 2439 §4.8.1).
+ */
+#define LR_DAMPING_DEFAULT_REUSE_THRESHOLD 750
+
+/**
+ * Default upper limit on the figure of merit (RFC 2439 §4.8.1 — a
+ * ceiling on the penalty so a flapping route cannot accumulate
+ * unbounded dampening).
+ */
+#define LR_DAMPING_DEFAULT_UPPER_LIMIT 60000
+
+/**
+ * Default decay interval in seconds (RFC 2439 §4.8.2).
+ */
+#define LR_DAMPING_DEFAULT_DECAY_INTERVAL_S 30
+
+/**
+ * Default decay factor applied while the route is active (announced).
+ */
+#define LR_DAMPING_DEFAULT_DECAY_FACTOR_ACTIVE 0.97
+
+/**
+ * Default decay factor applied while the route is withdrawn.
+ */
+#define LR_DAMPING_DEFAULT_DECAY_FACTOR_WITHDRAWN 0.5
+
 
 
 /**
@@ -760,6 +799,82 @@
 
 #define LR_LDP_TLV_COMMON_SESSION_PARAMS 1280
 
+/**
+ * Maximum legal label value (20-bit range, RFC 3032 §2.1).
+ */
+#define LR_MPLS_LABEL_MAX_VALUE ((1 << 20) - 1)
+
+/**
+ * First label value outside the reserved range 0–15 (RFC 3032 §2.1).
+ */
+#define LR_MPLS_LABEL_FIRST_NORMAL 16
+
+/**
+ * IPv4 Explicit NULL (label 0, RFC 3032 §2.1).
+ */
+#define LR_MPLS_LABEL_IPV4_EXPLICIT_NULL 0
+
+/**
+ * Router Alert Label (label 1, RFC 3032 §2.1).
+ */
+#define LR_MPLS_LABEL_ROUTER_ALERT 1
+
+/**
+ * IPv6 Explicit NULL (label 2, RFC 3032 §2.1).
+ */
+#define LR_MPLS_LABEL_IPV6_EXPLICIT_NULL 2
+
+/**
+ * Implicit NULL (label 3, RFC 3032 §2.1). Never appears on the wire —
+ * only in label-distribution signaling (LDP, RSVP-TE, BGP-LU).
+ */
+#define LR_MPLS_LABEL_IMPLICIT_NULL 3
+
+/**
+ * Entropy LSE Indicator (label 7, RFC 6790).
+ */
+#define LR_MPLS_LABEL_ELI 7
+
+/**
+ * Generic Associated Channel Label (label 13, RFC 5586).
+ */
+#define LR_MPLS_LABEL_GAL 13
+
+/**
+ * OAM Alert Label (label 14, RFC 3429).
+ */
+#define LR_MPLS_LABEL_OAM_ALERT 14
+
+/**
+ * Extension Label (label 15, RFC 7274).
+ */
+#define LR_MPLS_LABEL_EXTENSION 15
+
+/**
+ * `LabelStackError::TooShort`.
+ */
+#define LR_MPLS_STACK_ERR_TOO_SHORT 0
+
+/**
+ * `LabelStackError::UnevenLength`.
+ */
+#define LR_MPLS_STACK_ERR_UNEVEN_LENGTH 1
+
+/**
+ * `LabelStackError::MidStackBottom`.
+ */
+#define LR_MPLS_STACK_ERR_MID_STACK_BOTTOM 2
+
+/**
+ * `LabelStackError::ValueOutOfRange`.
+ */
+#define LR_MPLS_STACK_ERR_VALUE_OUT_OF_RANGE 3
+
+/**
+ * Unknown `LabelStackError` variant (forward-compat sentinel).
+ */
+#define LR_MPLS_STACK_ERR_UNKNOWN -1
+
 #define LR_MRT_RECORD_PEER_INDEX_TABLE 1
 
 #define LR_MRT_RECORD_RIB 2
@@ -769,6 +884,79 @@
 #define LR_MRT_RECORD_BGP4MP_MESSAGE 4
 
 #define LR_MRT_RECORD_UNKNOWN 5
+
+/**
+ * Legacy TABLE_DUMP (v1) — superseded by `TABLE_DUMP_V2`. Decodes as
+ * `MrtRecord::Unknown`.
+ */
+#define LR_MRT_MSG_TYPE_TABLE_DUMP 12
+
+/**
+ * TABLE_DUMP_V2 — peer index tables and per-prefix RIB records.
+ */
+#define LR_MRT_MSG_TYPE_TABLE_DUMP_V2 13
+
+/**
+ * BGP4MP — BGP message and state-change log (2-byte AS).
+ */
+#define LR_MRT_MSG_TYPE_BGP4MP 16
+
+/**
+ * BGP4MP with microsecond timestamps.
+ */
+#define LR_MRT_MSG_TYPE_BGP4MP_ET 17
+
+#define LR_MRT_TDV2_PEER_INDEX_TABLE 1
+
+#define LR_MRT_TDV2_RIB_IPV4_UNICAST 2
+
+#define LR_MRT_TDV2_RIB_IPV4_MULTICAST 3
+
+#define LR_MRT_TDV2_RIB_IPV6_UNICAST 4
+
+#define LR_MRT_TDV2_RIB_IPV6_MULTICAST 5
+
+#define LR_MRT_TDV2_RIB_GENERIC 6
+
+#define LR_MRT_TDV2_RIB_IPV4_UNICAST_ADDPATH 7
+
+#define LR_MRT_TDV2_RIB_IPV4_MULTICAST_ADDPATH 8
+
+#define LR_MRT_TDV2_RIB_IPV6_UNICAST_ADDPATH 9
+
+#define LR_MRT_TDV2_RIB_IPV6_MULTICAST_ADDPATH 10
+
+#define LR_MRT_TDV2_RIB_GENERIC_ADDPATH 11
+
+#define LR_MRT_BGP4MP_STATE_CHANGE 0
+
+#define LR_MRT_BGP4MP_MESSAGE 1
+
+/**
+ * Deprecated pre-publication layout (Zebra `BGP4MP_ENTRY`) — decodes
+ * as `MrtRecord::Unknown`.
+ */
+#define LR_MRT_BGP4MP_ENTRY 2
+
+/**
+ * Deprecated pre-publication layout (Zebra `BGP4MP_SNAPSHOT`) —
+ * decodes as `MrtRecord::Unknown`.
+ */
+#define LR_MRT_BGP4MP_SNAPSHOT 3
+
+#define LR_MRT_BGP4MP_MESSAGE_AS4 4
+
+#define LR_MRT_BGP4MP_STATE_CHANGE_AS4 5
+
+/**
+ * Deprecated — decodes as `MrtRecord::Unknown`.
+ */
+#define LR_MRT_BGP4MP_MESSAGE_LOCAL 6
+
+/**
+ * Deprecated — decodes as `MrtRecord::Unknown`.
+ */
+#define LR_MRT_BGP4MP_MESSAGE_AS4_LOCAL 7
 
 
 
@@ -1112,6 +1300,14 @@
 #define LR_OSPF_PHASE_FULL 4
 
 /**
+ * Sentinel returned by `lr_ospf_*_from_u8` / `_from_u16` when the
+ * wire value does not map to a known enum variant. Negative so a C
+ * embedder can switch on it without colliding with the (always
+ * non-negative) valid variant values.
+ */
+#define LR_OSPF_ENUM_UNKNOWN -1
+
+/**
  * Metric type constants — mirror `ExternalMetricType::*`.
  */
 #define LR_OSPF_METRIC_TYPE_1 0
@@ -1339,6 +1535,114 @@
 #define LR_OSPF_V2 2
 
 #define LR_OSPF_V3 3
+
+/**
+ * Routing Type field value for the SRH in the IPv6 Routing header
+ * (RFC 8754 §2).
+ */
+#define LR_SRV6_ROUTING_TYPE_SRH 4
+
+/**
+ * OAM flag (RFC 8754 §2.1 — deployed in the Linux uapi).
+ */
+#define LR_SRV6_FLAG_OAM 32
+
+/**
+ * HMAC flag (RFC 8754 §2.1 — deployed in the Linux uapi).
+ */
+#define LR_SRV6_FLAG_HMAC 8
+
+/**
+ * Alert flag (RFC 8754 §2.1 — deployed in the Linux uapi).
+ */
+#define LR_SRV6_FLAG_ALERT 16
+
+/**
+ * Protected flag (RFC 8754 §2.1 — deployed in the Linux uapi).
+ */
+#define LR_SRV6_FLAG_PROTECTED 64
+
+/**
+ * Fixed-header length of an SRH (8 octets: next-header / hdr-ext-len
+ * / routing-type / segments-left / last-entry / flags / tag /
+ * 2 reserved octets — the segment list follows).
+ */
+#define LR_SRV6_SRH_FIXED_LEN 8
+
+/**
+ * Per-segment length of an SRH (16 octets — one IPv6 SID).
+ */
+#define LR_SRV6_SRH_SEGMENT_LEN 16
+
+/**
+ * Pad1 TLV (RFC 8754 §2.3 — 1 octet, value 0; inserted for alignment).
+ */
+#define LR_SRV6_TLV_PAD1 0
+
+/**
+ * PadN TLV (RFC 8754 §2.3 — 1 type octet + 1 length octet + N
+ * zero octets; inserted for alignment).
+ */
+#define LR_SRV6_TLV_PADN 1
+
+/**
+ * Maximum number of segments an SRH can carry (RFC 8754 §2 — `Hdr
+ * Ext Len` is a single octet, so the segment list cannot exceed 127
+ * entries, fitting in `(255 - 1) / 2 = 127` 16-octet segments).
+ */
+#define LR_SRV6_MAX_SEGMENTS 127
+
+/**
+ * Maximum block-bit width supported by `Locator::new` (RFC 8754 §3.1
+ * — the locator block is the leading portion of an SRv6 SID; librouting
+ * supports up to 128 bits).
+ */
+#define LR_SRV6_MAX_BLOCK_BITS 128
+
+/**
+ * `SrhError::TooShort`.
+ */
+#define LR_SRV6_SRH_ERR_TOO_SHORT 0
+
+/**
+ * `SrhError::LengthMismatch`.
+ */
+#define LR_SRV6_SRH_ERR_LENGTH_MISMATCH 1
+
+/**
+ * `SrhError::EmptySegmentList`.
+ */
+#define LR_SRV6_SRH_ERR_EMPTY_SEGMENT_LIST 2
+
+/**
+ * `SrhError::TooManySegments`.
+ */
+#define LR_SRV6_SRH_ERR_TOO_MANY_SEGMENTS 3
+
+/**
+ * `SrhError::LastEntryOutOfRange`.
+ */
+#define LR_SRV6_SRH_ERR_LAST_ENTRY_OUT_OF_RANGE 4
+
+/**
+ * `SrhError::SegmentsLeftOutOfRange`.
+ */
+#define LR_SRV6_SRH_ERR_SEGMENTS_LEFT_OUT_OF_RANGE 5
+
+/**
+ * `SrhError::WrongRoutingType`.
+ */
+#define LR_SRV6_SRH_ERR_WRONG_ROUTING_TYPE 6
+
+/**
+ * `SrhError::ReservedFlagBits`.
+ */
+#define LR_SRV6_SRH_ERR_RESERVED_FLAG_BITS 7
+
+/**
+ * Unknown SrhError variant (forward-compat sentinel).
+ */
+#define LR_SRV6_SRH_ERR_UNKNOWN -1
 
 /**
  * Opaque `Attributes` handle. C side never touches internals.
@@ -6114,6 +6418,181 @@ uint8_t lr_bgp_peer_is_rs_client(lr_bgp_peer_t r);
 int32_t lr_bgp_peer_role(lr_bgp_peer_t r);
 
 /**
+ * `BgpPeer::route_refresh_negotiated` (RFC 2918 §2) — 1 when the
+ * peer advertised the Route Refresh capability, 0 otherwise. Returns
+ * 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_route_refresh_negotiated(lr_bgp_peer_t r);
+
+/**
+ * `BgpPeer::enhanced_route_refresh_negotiated` (RFC 7313 §2) — 1
+ * when the peer advertised the Enhanced Route Refresh capability
+ * (BoR/EoR markers), 0 otherwise. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_enhanced_route_refresh_negotiated(lr_bgp_peer_t r);
+
+/**
+ * `BgpPeer::add_path_negotiated` (RFC 7911) — 1 when AddPath was
+ * negotiated in either direction, 0 otherwise. Returns 0 on a NULL
+ * handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_add_path_negotiated(lr_bgp_peer_t r);
+
+/**
+ * `BgpPeer::add_path_tx_for(family)` (RFC 7911) — 1 when AddPath TX
+ * is negotiated for `family`, 0 otherwise. Returns 0 on a NULL
+ * handle or for an unknown family.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_add_path_tx_for(lr_bgp_peer_t r, lr_nlri_family_t family);
+
+/**
+ * `BgpPeer::add_path_rx_for(family)` (RFC 7911) — 1 when AddPath RX
+ * is negotiated for `family`, 0 otherwise. Returns 0 on a NULL
+ * handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_add_path_rx_for(lr_bgp_peer_t r, lr_nlri_family_t family);
+
+/**
+ * `BgpPeer::extended_next_hop_for(nlri_afi, nlri_safi, nexthop_afi)`
+ * (RFC 5549 §3) — 1 when the (nlri_afi, nlri_safi, nexthop_afi)
+ * tuple is in the negotiated extended-next-hop set, 0 otherwise.
+ * Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_extended_next_hop_for(lr_bgp_peer_t r,
+                                          uint16_t nlri_afi,
+                                          uint8_t nlri_safi,
+                                          uint16_t nexthop_afi);
+
+/**
+ * `BgpPeer::negotiated_graceful_restart_time` (RFC 4724 §4) —
+ * returns the peer's advertised graceful-restart time (seconds), or
+ * -1 when the peer did not advertise the GR capability. Returns -1
+ * on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+int32_t lr_bgp_peer_negotiated_graceful_restart_time(lr_bgp_peer_t r);
+
+/**
+ * `BgpPeer::llgr_negotiated` (RFC 9494 §4) — 1 when the peer
+ * advertised the Long-Lived Graceful Restart capability, 0
+ * otherwise. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_llgr_negotiated(lr_bgp_peer_t r);
+
+/**
+ * `BgpPeer::negotiated_llgr_stale_time(family)` (RFC 9494 §4.2) —
+ * returns the peer's advertised LLGR stale time for `family`
+ * (seconds), or 0 when the peer did not advertise LLGR for that
+ * family. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint32_t lr_bgp_peer_negotiated_llgr_stale_time(lr_bgp_peer_t r, lr_nlri_family_t family);
+
+/**
+ * `BgpPeer::received_cease_collision` (RFC 4271 §6.8 + RFC 9494
+ * §4.1) — 1 when the peer sent a CEASE NOTIFICATION that we recorded
+ * as a collision event. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_received_cease_collision(lr_bgp_peer_t r);
+
+/**
+ * `BgpPeer::notification_received` (RFC 4271 §6) — 1 when the peer
+ * sent any NOTIFICATION message. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_notification_received(lr_bgp_peer_t r);
+
+/**
+ * `BgpPeer::request_route_refresh(family)` (RFC 2918 §2) — emit a
+ * ROUTE_REFRESH for `family` if the peer advertised the capability.
+ * Returns 1 when the request was queued, 0 otherwise. Returns 0 on
+ * a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_request_route_refresh(lr_bgp_peer_t r, lr_nlri_family_t family);
+
+/**
+ * `BgpPeer::begin_enhanced_route_refresh(family)` (RFC 7313 §2) —
+ * emit a BoR (Beginning-of-RIB) marker for `family` if the peer
+ * advertised the Enhanced Route Refresh capability. Returns 1 when
+ * the marker was queued, 0 otherwise. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_begin_enhanced_route_refresh(lr_bgp_peer_t r, lr_nlri_family_t family);
+
+/**
+ * `BgpPeer::end_enhanced_route_refresh(family)` (RFC 7313 §2) —
+ * emit an EoR (End-of-RIB) marker for `family` if the peer
+ * advertised the Enhanced Route Refresh capability. Returns 1 when
+ * the marker was queued, 0 otherwise. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+uint8_t lr_bgp_peer_end_enhanced_route_refresh(lr_bgp_peer_t r, lr_nlri_family_t family);
+
+/**
+ * `BgpPeer::enqueue_notification(code, subcode)` (RFC 4271 §6) —
+ * queue a NOTIFICATION for transmission on the next drain. The peer
+ * is not torn down here — the embedder still needs to call
+ * `lr_bgp_peer_step_transport_close` (or wait for the peer's TCP
+ * close). Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL handle.
+ *
+ * `code` is the raw BGP error-code byte (1=Header, 2=Open, 3=Update,
+ * 4=HoldTimerExpired, 5=FsmError, 6=Cease, 7=RouteRefresh). Unknown
+ * codes map to Cease (RFC 4271 §6.6 — safest fallback).
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+int32_t lr_bgp_peer_enqueue_notification(lr_bgp_peer_t r, uint8_t code, uint8_t subcode);
+
+/**
+ * `BgpPeer::reset()` (RFC 4271 §8.2) — tear the FSM back to Idle
+ * without freeing the handle. The peer's state is reset so a
+ * subsequent `lr_bgp_peer_step_manual_start` re-opens the session.
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle.
+ */
+int32_t lr_bgp_peer_reset(lr_bgp_peer_t r);
+
+/**
  * Decode one BMP message from `data`. On success, writes a freshly-
  * allocated `lr_bmp_message_t` to `*out`.
  *
@@ -8581,6 +9060,14 @@ uint8_t lr_mpls_label_stack_all_reserved(lr_mpls_label_stack_t stack);
 uint8_t lr_mpls_label_stack_contains(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
 
 /**
+ * `lr_mpls_stack_last_err_code` — return the discriminant of the
+ * last label-stack decode error stored in the thread-local
+ * last-error string. Returns `LR_MPLS_STACK_ERR_UNKNOWN` (-1) when
+ * no stack error is recorded.
+ */
+int32_t lr_mpls_stack_last_err_code(void);
+
+/**
  * Decode one MRT record from `data`. On success, writes a freshly-
  * allocated `lr_mrt_record_t` to `*out`. The decoder is stateful
  * (carryover survives across calls when bytes are partial); this FFI
@@ -9638,6 +10125,116 @@ int32_t lr_ospf_db_exchange_on_ls_update_packet(lr_ospf_db_exchange_t e,
                                                 struct lr_ospf_exchange_step_t *out);
 
 void lr_ospf_db_exchange_step_free(struct lr_ospf_exchange_step_t *step);
+
+/**
+ * `OspfPacketType::from_u8` — returns one of the `LR_OSPF_PACKET_*`
+ * constants, or `LR_OSPF_ENUM_UNKNOWN` when `v` is not a known packet
+ * type.
+ */
+int32_t lr_ospf_packet_type_from_u8(uint8_t v);
+
+/**
+ * `OspfPacketType::name` — returns a NUL-terminated ASCII name
+ * (`"Hello"` / `"DBDesc"` / `"LS-Request"` / `"LS-Update"` /
+ * `"LS-Ack"`) or `NULL` when `v` is not a known packet type.
+ *
+ * The name is borrowed from a per-call `CString` allocated in a
+ * thread-local buffer — the pointer is valid only until the next
+ * `lr_ospf_packet_type_name` call on this thread.
+ */
+const char *lr_ospf_packet_type_name(uint8_t v);
+
+/**
+ * `OspfVersion::from_u8` — returns 2 (OSPFv2) or 3 (OSPFv3), or
+ * `LR_OSPF_ENUM_UNKNOWN` when `v` is not a supported version.
+ */
+int32_t lr_ospf_version_from_u8(uint8_t v);
+
+/**
+ * `NeighborState::name` — returns a NUL-terminated ASCII name
+ * (`"Down"` / `"Attempt"` / `"Init"` / `"2-Way"` / `"ExStart"` /
+ * `"Exchange"` / `"Loading"` / `"Full"`). Returns `NULL` when `state`
+ * is outside the 1..=8 variant range.
+ *
+ * The name is borrowed from a per-call `CString` allocated in a
+ * thread-local buffer — the pointer is valid only until the next
+ * `lr_ospf_neighbor_state_name` call on this thread.
+ */
+const char *lr_ospf_neighbor_state_name(uint8_t state);
+
+/**
+ * `IfState::name` — returns a NUL-terminated ASCII name
+ * (`"Down"` / `"Loopback"` / `"Waiting"` / `"Point-to-Point"` /
+ * `"DR-Other"` / `"Backup"` / `"DR"`). Returns `NULL` when `state`
+ * is outside the 1..=7 variant range.
+ *
+ * The name is borrowed from a per-call `CString` allocated in a
+ * thread-local buffer — the pointer is valid only until the next
+ * `lr_ospf_if_state_name` call on this thread.
+ */
+const char *lr_ospf_if_state_name(uint8_t state);
+
+/**
+ * `Phase::name` — returns a NUL-terminated ASCII name
+ * (`"ExStart"` / `"Exchange"` / `"Loading"` / `"Full"`). The Phase
+ * enum is internal-only (not `repr(u8)`), so `phase` here is the
+ * 0..=3 index used by the FFI to identify the variant.
+ *
+ * The name is borrowed from a per-call `CString` allocated in a
+ * thread-local buffer — the pointer is valid only until the next
+ * `lr_ospf_db_exchange_phase_name` call on this thread.
+ */
+const char *lr_ospf_db_exchange_phase_name(uint8_t phase);
+
+/**
+ * `ExternalMetricType::e_bit` — returns 1 when `t == Type2` (the
+ * E-bit must be set in the AS-External LSA body), 0 otherwise.
+ * `t` is the numeric variant: 0 = Type1, 1 = Type2 (matching the
+ * `#[repr(u8)]` order in `lr_ospf::external::ExternalMetricType`).
+ */
+uint8_t lr_ospf_external_metric_type_e_bit(uint8_t t);
+
+/**
+ * `ExternalMetricType::from_e_bit` — returns 0 (Type1) when `e_bit`
+ * is 0, 1 (Type2) when `e_bit` is non-zero. The numeric encoding
+ * matches the `#[repr(u8)]` order so C consumers can switch on the
+ * integer directly.
+ */
+uint8_t lr_ospf_external_metric_type_from_e_bit(uint8_t e_bit);
+
+/**
+ * `GraceTlvType::from_u16` — returns one of the
+ * `LR_OSPF_GRACE_TLV_*` constants (1 = grace period, 2 = reason,
+ * 3 = IPv4 address, 4 = IPv6 address), or `LR_OSPF_ENUM_UNKNOWN` for
+ * an unknown TLV type.
+ */
+int32_t lr_ospf_grace_tlv_type_from_u16(uint16_t v);
+
+/**
+ * `GraceReason::from_u8` — returns one of the
+ * `LR_OSPF_GRACE_REASON_*` constants (0 = unspecified, 1 = software
+ * restart, 2 = software reload/upgrade, 3 = control-plane switchover).
+ */
+int32_t lr_ospf_grace_reason_from_u8(uint8_t v);
+
+/**
+ * `RouterLsaFlags::to_word` — pack the V/E/B bits into the 2-byte
+ * flags word that opens the Router-LSA body (the bits live in the
+ * FIRST byte; the second byte is always zero on transmit).
+ */
+uint16_t lr_ospf_router_lsa_flags_to_word(uint8_t virtual_link, uint8_t asbr, uint8_t border);
+
+/**
+ * `RouterLsaFlags::from_word` — decode the 2-byte flags word into
+ * its three component bits. Writes 1 to `*out_v` when the V bit is
+ * set, 0 otherwise; same for `*out_e` and `*out_b`.
+ *
+ * Returns `LR_ERR_NULL` (-1) when any of the out-pointers is NULL.
+ */
+int32_t lr_ospf_router_lsa_flags_from_word(uint16_t word,
+                                           uint8_t *out_v,
+                                           uint8_t *out_e,
+                                           uint8_t *out_b);
 
 /**
  * Construct an `ExternalDestination` for type-5 / type-7 origination
@@ -13462,5 +14059,29 @@ uint8_t lr_srv6_sid_is_inside_locator(lr_srv6_sid_t sid,
  * pointer (it borrows from the SID handle).
  */
 const uint8_t *lr_srv6_sid_as_ptr(lr_srv6_sid_t sid);
+
+/**
+ * `lr_srv6_srh_err_code` — return the discriminant of the most recent
+ * `SrhError` produced by `lr_srv6_encode_srh` / `lr_srv6_decode_srh`.
+ * Mirrors the substring-match logic of `lr_srv6_srh_last_err_code`,
+ * kept as a separate entry point so a future typed-error-pointer
+ * surface can call into `srh_err_code` directly without going through
+ * the thread-local string. Returns `LR_SRV6_SRH_ERR_UNKNOWN` (-1)
+ * when no SRH error is recorded.
+ */
+int32_t lr_srv6_srh_err_code(void);
+
+/**
+ * `lr_srv6_srh_last_err_code` — return the discriminant of the last
+ * SRH encode/decode error stored in the thread-local last-error
+ * string. Returns `LR_SRV6_SRH_ERR_UNKNOWN` (-1) when no SRH error
+ * is recorded (e.g. the last FFI call succeeded or stored a non-SRH
+ * error).
+ *
+ * This is a peek-only helper: it does not clear the last-error
+ * string. Callers that need the human-readable message should still
+ * call `lr_last_error`.
+ */
+int32_t lr_srv6_srh_last_err_code(void);
 
 #endif  /* LR_FFI_H */
