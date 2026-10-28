@@ -1288,6 +1288,239 @@ pub unsafe extern "C" fn lr_loc_rib_diff_since(
     )
 }
 
+/// Walk every path (every multipath entry, not just the best) in the
+/// Loc-RIB. The caller provides a callback that receives one route
+/// handle per iteration (the handle is borrowed — the caller must NOT
+/// free it). Returns the number of routes visited, or `LR_ERR_NULL`
+/// (-1) on a NULL LocRib / NULL callback.
+///
+/// Use [`lr_loc_rib_iter_best`] when only the best path per prefix is
+/// needed; use [`lr_loc_rib_iter_paths`] when multipath entries must
+/// be enumerated (RFC 4271 §9.1.2.2 step 12).
+///
+/// # Safety
+/// `r` must be a valid LocRib handle. `cb` must be a non-NULL function
+/// pointer that does not free `route` and does not call back into the
+/// FFI on the same LocRib handle (re-entrancy is undefined).
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_iter_paths(
+    r: lr_loc_rib_t,
+    cb: Option<unsafe extern "C" fn(route: lr_route_t, user: *mut core::ffi::c_void)>,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib(r) else {
+                return -1;
+            };
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let mut count: i64 = 0;
+            for route in rib.iter_paths() {
+                let h: lr_route_t = route as *const Route as *mut OpaqueRoute;
+                unsafe { cb_fn(h, user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
+/// Walk every `(RouteKey, paths)` set in the Loc-RIB. The caller
+/// provides a callback that receives the prefix (as a flat
+/// `(is_ipv6 u8, prefix_len u8, addr 16 bytes)` tuple via the
+/// `prefix_out` pointer) plus the number of paths in that set. Returns
+/// the number of sets visited, or `LR_ERR_NULL` (-1) on a NULL LocRib
+/// / NULL callback / NULL prefix_out.
+///
+/// # Safety
+/// `r` must be a valid LocRib handle. `cb` must be a non-NULL function
+/// pointer. `prefix_out` must point to at least 18 writable bytes per
+/// call (the FFI writes the first 4 for IPv4, all 16 for IPv6).
+#[no_mangle]
+pub unsafe extern "C" fn lr_loc_rib_iter_sets(
+    r: lr_loc_rib_t,
+    cb: Option<
+        unsafe extern "C" fn(
+            prefix_out: *mut u8,
+            prefix_len: u8,
+            is_ipv6: u8,
+            path_count: usize,
+            user: *mut core::ffi::c_void,
+        ),
+    >,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_loc_rib(r) else {
+                return -1;
+            };
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let mut count: i64 = 0;
+            for (key, paths) in rib.iter_sets() {
+                let (is_ipv6, mut addr_buf) = match key.prefix.addr {
+                    lr_core::addr::IpAddr::V4(b) => {
+                        let mut buf = [0u8; 16];
+                        buf[..4].copy_from_slice(&b);
+                        (0u8, buf)
+                    }
+                    lr_core::addr::IpAddr::V6(b) => (1u8, b),
+                };
+                unsafe {
+                    cb_fn(
+                        addr_buf.as_mut_ptr(),
+                        key.prefix.prefix_len,
+                        is_ipv6,
+                        paths.len(),
+                        user,
+                    );
+                }
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
+/// Walk every route in the Adj-RIB-In, regardless of origin. The
+/// caller provides a callback that receives one route handle per
+/// iteration (borrowed — do not free). Returns the number of routes
+/// visited, or `LR_ERR_NULL` (-1) on a NULL AdjRibIn / NULL callback.
+///
+/// # Safety
+/// `r` must be a valid AdjRibIn handle. `cb` must be a non-NULL
+/// function pointer that does not free `route` and does not call back
+/// into the FFI on the same AdjRibIn handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_in_iter_all(
+    r: lr_adj_rib_in_t,
+    cb: Option<unsafe extern "C" fn(route: lr_route_t, user: *mut core::ffi::c_void)>,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_adj_rib_in(r) else {
+                return -1;
+            };
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let mut count: i64 = 0;
+            for route in rib.iter_all() {
+                let h: lr_route_t = route as *const Route as *mut OpaqueRoute;
+                unsafe { cb_fn(h, user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
+/// Walk every route in the Adj-RIB-In that originated from the given
+/// peer/protocol origin. `origin_peer` is the session handle,
+/// `origin_proto` is one of the `LR_PROTO_*` constants. Returns the
+/// number of routes visited, or `LR_ERR_NULL` (-1) on a NULL AdjRibIn
+/// / NULL callback.
+///
+/// # Safety
+/// See [`lr_adj_rib_in_iter_all`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_in_iter_origin(
+    r: lr_adj_rib_in_t,
+    origin_peer: u64,
+    origin_proto: i32,
+    cb: Option<unsafe extern "C" fn(route: lr_route_t, user: *mut core::ffi::c_void)>,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_adj_rib_in(r) else {
+                return -1;
+            };
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let proto = crate::policy::LrProtocol::from_i32(origin_proto)
+                .ok_or_else(|| {
+                    crate::error::set_last_error(format!("unknown protocol id {origin_proto}"));
+                })
+                .map(|p| p.to_proto_u32())
+                .unwrap_or(u32::MAX);
+            if proto == u32::MAX {
+                return -2;
+            }
+            let origin = RouteOrigin {
+                peer: origin_peer,
+                proto,
+            };
+            let mut count: i64 = 0;
+            for route in rib.iter_origin(origin) {
+                let h: lr_route_t = route as *const Route as *mut OpaqueRoute;
+                unsafe { cb_fn(h, user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
+/// Walk every route advertised to a given destination in the
+/// Adj-RIB-Out. `origin_peer` is the destination session handle,
+/// `origin_proto` is one of the `LR_PROTO_*` constants. Returns the
+/// number of routes visited, or `LR_ERR_NULL` (-1) on a NULL
+/// AdjRibOut / NULL callback.
+///
+/// # Safety
+/// See [`lr_adj_rib_in_iter_all`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_iter_for(
+    r: lr_adj_rib_out_t,
+    origin_peer: u64,
+    origin_proto: i32,
+    cb: Option<unsafe extern "C" fn(route: lr_route_t, user: *mut core::ffi::c_void)>,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(rib) = borrow_adj_rib_out(r) else {
+                return -1;
+            };
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let proto = crate::policy::LrProtocol::from_i32(origin_proto)
+                .ok_or_else(|| {
+                    crate::error::set_last_error(format!("unknown protocol id {origin_proto}"));
+                })
+                .map(|p| p.to_proto_u32())
+                .unwrap_or(u32::MAX);
+            if proto == u32::MAX {
+                return -2;
+            }
+            let origin = RouteOrigin {
+                peer: origin_peer,
+                proto,
+            };
+            let mut count: i64 = 0;
+            for route in rib.iter_for(origin) {
+                let h: lr_route_t = route as *const Route as *mut OpaqueRoute;
+                unsafe { cb_fn(h, user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1648,5 +1881,129 @@ mod tests {
         };
         assert_eq!(rc, -1);
         unsafe { lr_loc_rib_free(rib) };
+    }
+
+    #[test]
+    fn loc_rib_iter_paths_walks_multipath_entries() {
+        let rib = lr_loc_rib_new();
+        // Install one route.
+        let r1 = build_route([10, 0, 0, 0], 24, 100);
+        unsafe { lr_loc_rib_install(rib, r1) };
+        // Install_set with two paths for the same prefix → multipath.
+        let r2 = build_route_with_metric([10, 0, 1, 0], 24, 50);
+        let r3 = build_route_with_metric([10, 0, 1, 0], 24, 60);
+        let key = build_key_v4([10, 0, 1, 0], 24);
+        let routes = [r2, r3];
+        unsafe { lr_loc_rib_install_set(rib, &key, routes.as_ptr(), routes.len()) };
+        // iter_paths walks every installed path (1 + 2 = 3).
+        extern "C" fn counter(_route: lr_route_t, user: *mut core::ffi::c_void) {
+            unsafe {
+                let c: *mut i64 = user as *mut i64;
+                *c += 1;
+            }
+        }
+        let mut count: i64 = 0;
+        unsafe {
+            count =
+                lr_loc_rib_iter_paths(rib, Some(counter), &raw mut count as *mut core::ffi::c_void);
+        }
+        assert_eq!(count, 3, "iter_paths visited {count} routes, expected 3");
+        unsafe { lr_loc_rib_free(rib) };
+    }
+
+    #[test]
+    fn loc_rib_iter_paths_rejects_null_handle_and_null_cb() {
+        extern "C" fn noop(_route: lr_route_t, _user: *mut core::ffi::c_void) {}
+        // NULL handle → -1.
+        let rc = unsafe {
+            lr_loc_rib_iter_paths(std::ptr::null_mut(), Some(noop), std::ptr::null_mut())
+        };
+        assert_eq!(rc, -1);
+        // NULL cb → -1.
+        let rib = lr_loc_rib_new();
+        let rc = unsafe { lr_loc_rib_iter_paths(rib, None, std::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+        unsafe { lr_loc_rib_free(rib) };
+    }
+
+    #[test]
+    fn loc_rib_iter_sets_walks_keys() {
+        let rib = lr_loc_rib_new();
+        let r1 = build_route([10, 0, 0, 0], 24, 100);
+        unsafe { lr_loc_rib_install(rib, r1) };
+        let r2 = build_route([10, 0, 1, 0], 24, 100);
+        unsafe { lr_loc_rib_install(rib, r2) };
+        // iter_sets walks every (key, paths) pair → 2 sets.
+        extern "C" fn counter(
+            _prefix: *mut u8,
+            _prefix_len: u8,
+            _is_ipv6: u8,
+            _path_count: usize,
+            user: *mut core::ffi::c_void,
+        ) {
+            unsafe {
+                let c: *mut i64 = user as *mut i64;
+                *c += 1;
+            }
+        }
+        let mut seen: i64 = 0;
+        unsafe {
+            seen =
+                lr_loc_rib_iter_sets(rib, Some(counter), &raw mut seen as *mut core::ffi::c_void);
+        }
+        assert_eq!(seen, 2, "iter_sets visited {seen} sets, expected 2");
+        unsafe { lr_loc_rib_free(rib) };
+    }
+
+    #[test]
+    fn adj_rib_in_iter_all_walks_every_route() {
+        extern "C" fn noop(_route: lr_route_t, _user: *mut core::ffi::c_void) {}
+        extern "C" fn counter(_route: lr_route_t, user: *mut core::ffi::c_void) {
+            unsafe {
+                let c: *mut i64 = user as *mut i64;
+                *c += 1;
+            }
+        }
+        let rib = lr_adj_rib_in_new();
+        // NULL handle → -1.
+        let rc = unsafe {
+            lr_adj_rib_in_iter_all(std::ptr::null_mut(), Some(noop), std::ptr::null_mut())
+        };
+        assert_eq!(rc, -1);
+        // NULL cb → -1.
+        let rc = unsafe { lr_adj_rib_in_iter_all(rib, None, std::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+        // Empty rib → 0 routes.
+        let mut count: i64 = 0;
+        unsafe {
+            count = lr_adj_rib_in_iter_all(
+                rib,
+                Some(counter),
+                &raw mut count as *mut core::ffi::c_void,
+            );
+        }
+        assert_eq!(
+            count, 0,
+            "iter_all on empty AdjRibIn visited {count} routes, expected 0"
+        );
+        unsafe { lr_adj_rib_in_free(rib) };
+    }
+
+    #[test]
+    fn adj_rib_out_iter_for_rejects_null_handle_and_bad_proto() {
+        extern "C" fn noop(_route: lr_route_t, _user: *mut core::ffi::c_void) {}
+        // NULL handle → -1.
+        let rc = unsafe {
+            lr_adj_rib_out_iter_for(std::ptr::null_mut(), 0, 0, Some(noop), std::ptr::null_mut())
+        };
+        assert_eq!(rc, -1);
+        let rib = lr_adj_rib_out_new();
+        // NULL cb → -1.
+        let rc = unsafe { lr_adj_rib_out_iter_for(rib, 0, 0, None, std::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+        // Bad protocol id → -2.
+        let rc = unsafe { lr_adj_rib_out_iter_for(rib, 0, 99, Some(noop), std::ptr::null_mut()) };
+        assert_eq!(rc, -2);
+        unsafe { lr_adj_rib_out_free(rib) };
     }
 }
