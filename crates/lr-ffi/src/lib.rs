@@ -47,6 +47,7 @@ pub mod bmp_constants;
 pub mod bytes;
 pub mod capabilities;
 pub mod codec;
+pub mod constants_batch;
 pub mod core;
 pub mod core_extras;
 pub mod damping;

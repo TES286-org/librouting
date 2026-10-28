@@ -569,6 +569,247 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_BGP_RR_SUBTYPE_EORR 2
 
 /**
+ * Body offset inside a Babel frame — magic + version + body length (2).
+ */
+#define LR_BABEL_BODY_OFFSET 4
+
+/**
+ * RTT EWMA decay constant (RFC 8966 §3.4.2 — IRTT calc).
+ */
+#define LR_BABEL_RTT_DECAY 42
+
+/**
+ * RTT validity window (RFC 8966 §3.4.2) — 180 s in ms.
+ */
+#define LR_BABEL_RTT_VALIDITY_MS 180000
+
+/**
+ * Hello timestamp freshness window — 1 s in ms (RFC 8966 §3.4.3).
+ */
+#define LR_BABEL_RTT_ECHO_FRESHNESS_MS 1000
+
+/**
+ * Sanity upper bound on RTT — 600 s in microseconds (RFC 8966 §A.2.2).
+ */
+#define LR_BABEL_RTT_SANITY_US 600000000
+
+#define LR_BABEL_SUBTLV_SOURCE_PREFIX 128
+
+#define LR_BABEL_SUBTLV_TIMESTAMP 3
+
+#define LR_BABEL_HELLO_FLAG_UNICAST 32768
+
+#define LR_BABEL_UPDATE_FLAG_PREFIX 128
+
+#define LR_BABEL_UPDATE_FLAG_ROUTER_ID 64
+
+/**
+ * BFD packet version (RFC 5880 §4.1).
+ */
+#define LR_BFD_VERSION 1
+
+/**
+ * Minimum BFD control packet length (RFC 5880 §4.1 — 24 bytes).
+ */
+#define LR_BFD_PACKET_MIN_LEN 24
+
+/**
+ * Maximum Simple Password auth data length (RFC 5880 §4.2).
+ */
+#define LR_BFD_MAX_PASSWORD_LEN 16
+
+/**
+ * BMP header length (RFC 7854 §4.1 — 6 bytes).
+ */
+#define LR_BMP_HEADER_LEN 6
+
+/**
+ * Maximum BMP message size (RFC 7854 §4.1 — 65535 bytes).
+ */
+#define LR_BMP_MAX_MESSAGE 65535
+
+/**
+ * Node Descriptor TLV (RFC 7752 §3.3.1) — appears under a Node NLRI.
+ */
+#define LR_BGP_LS_TLV_LOCAL_NODE_DESCRIPTOR 256
+
+/**
+ * Remote Node Descriptor TLV (RFC 7752 §3.3.2) — appears under a Link NLRI.
+ */
+#define LR_BGP_LS_TLV_REMOTE_NODE_DESCRIPTOR 257
+
+/**
+ * Link Local/Remote Identifier TLV (RFC 7752 §3.3.2).
+ */
+#define LR_BGP_LS_TLV_LINK_LOCAL_REMOTE_ID 258
+
+/**
+ * IPv4 Interface Address TLV (RFC 7752 §3.3.2).
+ */
+#define LR_BGP_LS_TLV_IPV4_INTERFACE_ADDRESS 259
+
+/**
+ * IPv4 Neighbor Address TLV (RFC 7752 §3.3.2).
+ */
+#define LR_BGP_LS_TLV_IPV4_NEIGHBOR_ADDRESS 260
+
+/**
+ * IPv6 Interface Address TLV (RFC 7752 §3.3.2).
+ */
+#define LR_BGP_LS_TLV_IPV6_INTERFACE_ADDRESS 261
+
+/**
+ * IPv6 Neighbor Address TLV (RFC 7752 §3.3.2).
+ */
+#define LR_BGP_LS_TLV_IPV6_NEIGHBOR_ADDRESS 262
+
+/**
+ * Multi-Topology ID TLV (RFC 7752 §3.3.2 + RFC 4915).
+ */
+#define LR_BGP_LS_TLV_MULTI_TOPOLOGY_ID 263
+
+/**
+ * OSPF Route Type TLV (RFC 7752 §3.3.3).
+ */
+#define LR_BGP_LS_TLV_OSPF_ROUTE_TYPE 264
+
+/**
+ * IP Reachability Information TLV (RFC 7752 §3.3.3).
+ */
+#define LR_BGP_LS_TLV_IP_REACHABILITY_INFO 265
+
+/**
+ * Autonomous System TLV (RFC 7752 §3.3.1).
+ */
+#define LR_BGP_LS_TLV_AUTONOMOUS_SYSTEM 512
+
+/**
+ * BGP-LS Identifier TLV (RFC 7752 §3.3.1).
+ */
+#define LR_BGP_LS_TLV_BGP_LS_IDENTIFIER 513
+
+/**
+ * OSPF Area ID TLV (RFC 7752 §3.3.1).
+ */
+#define LR_BGP_LS_TLV_OSPF_AREA_ID 514
+
+/**
+ * IGP Router Identifier TLV (RFC 7752 §3.3.1).
+ */
+#define LR_BGP_LS_TLV_IGP_ROUTER_ID 515
+
+/**
+ * BGP Router Identifier TLV (RFC 7752 §3.3.1 — BGP-LS extension).
+ */
+#define LR_BGP_LS_TLV_BGP_ROUTER_ID 516
+
+/**
+ * BGP Confederation Member TLV (RFC 7752 §3.3.1 — BGP-LS extension).
+ */
+#define LR_BGP_LS_TLV_BGP_CONFEDERATION_MEMBER 517
+
+/**
+ * SRv6 SID Information TLV (RFC 9552 §4 — SRv6 SID extension).
+ */
+#define LR_BGP_LS_TLV_SRV6_SID_INFORMATION 518
+
+/**
+ * RTR protocol version 0 (RFC 6810).
+ */
+#define LR_RTR_VERSION_0 0
+
+/**
+ * RTR protocol version 1 (RFC 8210).
+ */
+#define LR_RTR_VERSION_1 1
+
+/**
+ * RTR protocol version 2 (RFC 8210 §6 — future use).
+ */
+#define LR_RTR_VERSION_2 2
+
+/**
+ * Highest RTR protocol version supported.
+ */
+#define LR_RTR_VERSION_MAX 2
+
+/**
+ * RTR PDU fixed header length (RFC 8210 §5).
+ */
+#define LR_RTR_HEADER_LEN 8
+
+/**
+ * Maximum RTR PDU length (RFC 8210 §5).
+ */
+#define LR_RTR_PDU_MAX_LEN 65536
+
+/**
+ * RTR IPv4/IPv6 Prefix PDU Announce flag bit (RFC 8210 §5.5/§5.6).
+ */
+#define LR_RTR_FLAG_ANNOUNCE 1
+
+/**
+ * Default RTR refresh interval (RFC 8210 §6 — 1 hour, seconds).
+ */
+#define LR_RTR_DEFAULT_REFRESH_INTERVAL 3600
+
+/**
+ * Default RTR retry interval (RFC 8210 §6 — 10 minutes, seconds).
+ */
+#define LR_RTR_DEFAULT_RETRY_INTERVAL 600
+
+/**
+ * Default RTR expire interval (RFC 8210 §6 — 2 hours, seconds).
+ */
+#define LR_RTR_DEFAULT_EXPIRE_INTERVAL 7200
+
+/**
+ * OSPF AllSPFRouters IPv4 multicast (RFC 2328 §A.1 — 224.0.0.5).
+ */
+#define LR_OSPF_ALL_SPF_ROUTERS_V4_OCTET_0 224
+
+#define LR_OSPF_ALL_SPF_ROUTERS_V4_OCTET_1 0
+
+#define LR_OSPF_ALL_SPF_ROUTERS_V4_OCTET_2 0
+
+#define LR_OSPF_ALL_SPF_ROUTERS_V4_OCTET_3 5
+
+/**
+ * OSPF AllDRouters IPv4 multicast (RFC 2328 §A.1 — 224.0.0.6).
+ */
+#define LR_OSPF_ALL_D_ROUTERS_V4_OCTET_3 6
+
+/**
+ * IPv6 hop limit for OSPFv3 multicast (RFC 5340 §A.1 — 1, link-local).
+ */
+#define LR_OSPF_V3_MULTICAST_HOP_LIMIT 1
+
+/**
+ * IP protocol number for OSPF (RFC 2328 §A.1 — 89).
+ */
+#define LR_IPPROTO_OSPF 89
+
+/**
+ * BFD Control port (RFC 5881 §4 — single-hop, 3784).
+ */
+#define LR_BFD_CONTROL_PORT 3784
+
+/**
+ * BFD Multihop Control port (RFC 5881 §4 — multihop, 4784).
+ */
+#define LR_BFD_MULTIHOP_PORT 4784
+
+/**
+ * BFD source port range minimum (RFC 5881 §4 — 49152).
+ */
+#define LR_BFD_SOURCE_PORT_MIN 49152
+
+/**
+ * BFD source port range maximum (RFC 5881 §4 — 65535).
+ */
+#define LR_BFD_SOURCE_PORT_MAX 65535
+
+/**
  * Repr-C Protocol constants (mirrors `lr_core::rib::Protocol`).
  */
 #define LR_PROTOCOL_BGP 0

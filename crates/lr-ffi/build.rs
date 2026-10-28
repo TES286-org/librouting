@@ -151,6 +151,7 @@ typedef struct OpaqueIpAddr IpAddr;
     println!("cargo:rerun-if-changed=src/ospf_retransmit.rs");
     println!("cargo:rerun-if-changed=src/role_topology.rs");
     println!("cargo:rerun-if-changed=src/bfd_session.rs");
+    println!("cargo:rerun-if-changed=src/constants_batch.rs");
     println!("cargo:rerun-if-changed=src/ospf_interface.rs");
     println!("cargo:rerun-if-changed=src/bgp_communities.rs");
     println!("cargo:rerun-if-changed=src/ospf_external.rs");
