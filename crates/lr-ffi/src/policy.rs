@@ -135,6 +135,35 @@ impl lr_prefix_t {
     }
 }
 
+/// Build a `Prefix` from the C ABI's (prefix_v4, prefix_v6, prefix_len)
+/// triple. Exactly one of `prefix_v4` and `prefix_v6` must be
+/// non-NULL: `prefix_v4` points to 4 readable bytes for an IPv4
+/// prefix, `prefix_v6` points to 16 readable bytes for an IPv6
+/// prefix. Returns `None` when both are NULL or both are non-NULL.
+///
+/// Public so other FFI modules can reuse the same translation.
+pub fn make_prefix(prefix_v4: *const u8, prefix_v6: *const u8, prefix_len: u8) -> Option<Prefix> {
+    match (prefix_v4.is_null(), prefix_v6.is_null()) {
+        (false, true) => {
+            if prefix_len > 32 {
+                return None;
+            }
+            let mut a = [0u8; 4];
+            unsafe { a.copy_from_slice(std::slice::from_raw_parts(prefix_v4, 4)) };
+            Some(Prefix::new_v4(a, prefix_len))
+        }
+        (true, false) => {
+            if prefix_len > 128 {
+                return None;
+            }
+            let mut a = [0u8; 16];
+            unsafe { a.copy_from_slice(std::slice::from_raw_parts(prefix_v6, 16)) };
+            Some(Prefix::new_v6(a, prefix_len))
+        }
+        _ => None,
+    }
+}
+
 /// RFC 2439 §4.7 damping tunables. Mirrors
 /// `lr_damping::DampingConfig` field-for-field.
 #[repr(C)]

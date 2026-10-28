@@ -1851,6 +1851,23 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_ROA_INVALID 2
 
+/**
+ * Per-entry provenance tag for one ROA entry. Writes one of
+ * `LR_ROA_PROVENANCE_STATIC` / `_RTR` / `_BOTH` to `*out`. Returns
+ * `LR_ERR_INVALID_HANDLE` (-2) on a NULL store and `LR_ERR_OTHER`
+ * (-6) on a malformed entry. The unchecked form (Rust's
+ * `provenance_of`) returns `RoaProvenance::Static` for orphan
+ * entries — use [`lr_roa_store_provenance_of_checked`] for the
+ * variant that returns `LR_ROA_PROVENANCE_NONE` instead.
+ */
+#define LR_ROA_PROVENANCE_STATIC 0
+
+#define LR_ROA_PROVENANCE_RTR 1
+
+#define LR_ROA_PROVENANCE_BOTH 2
+
+#define LR_ROA_PROVENANCE_NONE 3
+
 #define LR_OTC_ROLE_UNSET 0
 
 #define LR_OTC_ROLE_PROVIDER 1
@@ -2566,6 +2583,25 @@ typedef struct lr_timer_spec_t {
 } lr_timer_spec_t;
 
 /**
+ * Opaque owned `ReadBuf` handle. The underlying buffer is owned by
+ * the handle so the lifetime is `'static` from the C side.
+ */
+typedef struct OpaqueReadBuf {
+  uint8_t _private[0];
+} OpaqueReadBuf;
+
+typedef struct OpaqueReadBuf *lr_read_buf_t;
+
+/**
+ * Opaque owned `WriteBuf` handle.
+ */
+typedef struct OpaqueWriteBuf {
+  uint8_t _private[0];
+} OpaqueWriteBuf;
+
+typedef struct OpaqueWriteBuf *lr_write_buf_t;
+
+/**
  * Opaque standalone `DampingTable` handle. C side never touches internals.
  */
 typedef struct OpaqueDampingTable {
@@ -3223,6 +3259,15 @@ typedef struct OpaqueLdpTransit {
 typedef struct OpaqueLdpTransit *lr_ldp_transit_t;
 
 /**
+ * Opaque `MemoryConn` handle. C side never touches internals.
+ */
+typedef struct OpaqueMemoryConn {
+  uint8_t _private[0];
+} OpaqueMemoryConn;
+
+typedef struct OpaqueMemoryConn *lr_memory_conn_t;
+
+/**
  * Opaque `Label` handle. C side never touches internals.
  */
 typedef struct OpaqueMplsLabel {
@@ -3696,6 +3741,24 @@ typedef struct lr_ospf_spf_route_t {
 } lr_ospf_spf_route_t;
 
 /**
+ * Opaque `SrDatabase` handle.
+ */
+typedef struct OpaqueOspfSrDb {
+  uint8_t _private[0];
+} OpaqueOspfSrDb;
+
+typedef struct OpaqueOspfSrDb *lr_ospf_sr_db_t;
+
+/**
+ * Opaque `Srv6Database` handle.
+ */
+typedef struct OpaqueOspfSrv6Db {
+  uint8_t _private[0];
+} OpaqueOspfSrv6Db;
+
+typedef struct OpaqueOspfSrv6Db *lr_ospf_srv6_db_t;
+
+/**
  * Opaque route-table handle. C side never touches internals.
  */
 typedef struct OpaqueOsRouteTable {
@@ -4160,6 +4223,15 @@ typedef struct lr_rtr_client_step_t {
    */
   uintptr_t log_count;
 } lr_rtr_client_step_t;
+
+/**
+ * Opaque `RtrPdu` handle. C side never touches internals.
+ */
+typedef struct OpaqueRtrPdu {
+  uint8_t _private[0];
+} OpaqueRtrPdu;
+
+typedef struct OpaqueRtrPdu *lr_rtr_pdu_t;
 
 /**
  * Opaque `Sid` handle.
@@ -8854,6 +8926,189 @@ struct lr_timer_spec_t lr_timer_spec_once(uint64_t after_ms);
 struct lr_timer_spec_t lr_timer_spec_periodic(uint64_t after_ms, uint64_t periodic_ms);
 
 /**
+ * Construct a `ReadBuf` from `data` (a copy is made). Returns NULL
+ * on a NULL pointer or panic.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes (NULL only when
+ * `len == 0`).
+ */
+lr_read_buf_t lr_read_buf_new(const uint8_t *data, uintptr_t len);
+
+/**
+ * Drop a boxed `ReadBuf`. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by [`lr_read_buf_new`] and must not
+ * be used after this call.
+ */
+void lr_read_buf_free(lr_read_buf_t r);
+
+/**
+ * Number of bytes remaining in the buffer at the current position.
+ *
+ * # Safety
+ * `r` must be a live handle.
+ */
+uintptr_t lr_read_buf_remaining(lr_read_buf_t r);
+
+/**
+ * Current read position.
+ *
+ * # Safety
+ * See [`lr_read_buf_remaining`].
+ */
+uintptr_t lr_read_buf_position(lr_read_buf_t r);
+
+/**
+ * Advance the read position by `n` bytes. Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL handle, `LR_ERR_OTHER` on overflow.
+ *
+ * # Safety
+ * `r` must be a live handle.
+ */
+int32_t lr_read_buf_advance(lr_read_buf_t r, uintptr_t n);
+
+/**
+ * Peek the next byte without advancing the position. Returns 0 on
+ * success and writes the byte to `*out`, 1 when the buffer is
+ * empty, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a live handle. `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_read_buf_peek_u8(lr_read_buf_t r, uint8_t *out);
+
+/**
+ * Read the next byte and advance the position. Returns 0 on success
+ * and writes the byte to `*out`, 1 when the buffer is empty,
+ * `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_read_buf_peek_u8`].
+ */
+int32_t lr_read_buf_get_u8(lr_read_buf_t r, uint8_t *out);
+
+/**
+ * Read the next 2 bytes big-endian and advance by 2. Returns 0 on
+ * success, 1 when the buffer is too short, `LR_ERR_NULL` on a NULL
+ * handle.
+ *
+ * # Safety
+ * `r` must be a live handle. `out` must point to a writable `uint16_t`.
+ */
+int32_t lr_read_buf_get_u16_be(lr_read_buf_t r, uint16_t *out);
+
+/**
+ * Read the next 4 bytes big-endian and advance by 4.
+ *
+ * # Safety
+ * `r` must be a live handle. `out` must point to a writable `uint32_t`.
+ */
+int32_t lr_read_buf_get_u32_be(lr_read_buf_t r, uint32_t *out);
+
+/**
+ * Read the next 8 bytes big-endian and advance by 8.
+ *
+ * # Safety
+ * `r` must be a live handle. `out` must point to a writable `uint64_t`.
+ */
+int32_t lr_read_buf_get_u64_be(lr_read_buf_t r, uint64_t *out);
+
+/**
+ * Read `n` bytes and write them to a freshly-allocated `lr_bytes_t`.
+ * Returns 0 on success, 1 when the buffer is too short, `LR_ERR_NULL`
+ * on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a live handle. `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_read_buf_get_bytes(lr_read_buf_t r, uintptr_t n, struct lr_bytes_t *out);
+
+/**
+ * Construct an empty `WriteBuf` with capacity `cap`.
+ */
+lr_write_buf_t lr_write_buf_new(uintptr_t cap);
+
+/**
+ * Drop a boxed `WriteBuf`. Safe to call with NULL.
+ *
+ * # Safety
+ * `w` must have been produced by [`lr_write_buf_new`] and must not
+ * be used after this call.
+ */
+void lr_write_buf_free(lr_write_buf_t w);
+
+/**
+ * Current write position (= number of bytes written so far).
+ *
+ * # Safety
+ * `w` must be a live handle.
+ */
+uintptr_t lr_write_buf_position(lr_write_buf_t w);
+
+/**
+ * Remaining capacity (= `cap - position`). On a growable buffer this
+ * is the headroom before a reallocation; the embedder should treat
+ * it as advisory.
+ *
+ * # Safety
+ * See [`lr_write_buf_position`].
+ */
+uintptr_t lr_write_buf_remaining_mut(lr_write_buf_t w);
+
+/**
+ * Push one byte. Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * `w` must be a live handle.
+ */
+int32_t lr_write_buf_put_u8(lr_write_buf_t w, uint8_t v);
+
+/**
+ * Push `b` bytes. Returns 0 on success, `LR_ERR_NULL` on a NULL
+ * handle or pointer.
+ *
+ * # Safety
+ * `w` must be a live handle. `b` must point to `len` readable bytes
+ * (NULL only when `len == 0`).
+ */
+int32_t lr_write_buf_put_bytes(lr_write_buf_t w, const uint8_t *b, uintptr_t len);
+
+/**
+ * Push a 2-byte big-endian value.
+ *
+ * # Safety
+ * See [`lr_write_buf_put_u8`].
+ */
+int32_t lr_write_buf_put_u16_be(lr_write_buf_t w, uint16_t v);
+
+/**
+ * Push a 4-byte big-endian value.
+ *
+ * # Safety
+ * See [`lr_write_buf_put_u8`].
+ */
+int32_t lr_write_buf_put_u32_be(lr_write_buf_t w, uint32_t v);
+
+/**
+ * Push an 8-byte big-endian value.
+ *
+ * # Safety
+ * See [`lr_write_buf_put_u8`].
+ */
+int32_t lr_write_buf_put_u64_be(lr_write_buf_t w, uint64_t v);
+
+/**
+ * Take the written bytes out of the buffer as a freshly-allocated
+ * `lr_bytes_t`. The WriteBuf is reset to empty after this call.
+ *
+ * # Safety
+ * `w` must be a live handle. `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_write_buf_take_bytes(lr_write_buf_t w, struct lr_bytes_t *out);
+
+/**
  * Construct an `IpAddr::V4` from 4 bytes. Returns NULL on a NULL pointer.
  *
  * # Safety
@@ -10481,6 +10736,70 @@ uint8_t lr_ldp_transit_release(lr_ldp_transit_t a,
                                uint8_t is_ipv6,
                                uint8_t prefix_len,
                                uint32_t *out_label);
+
+/**
+ * Construct an empty MemoryConn.
+ */
+lr_memory_conn_t lr_memory_conn_new(void);
+
+/**
+ * Make a paired pair of MemoryConns. Bytes drained from one are
+ * pushed into the other when the embedder wires them together (the
+ * `MemoryConn::pair` Rust constructor returns two new empty conns;
+ * the loopback wiring is the embedder's job).
+ *
+ * # Safety
+ * `out_a` and `out_b` must point to writable `lr_memory_conn_t`.
+ */
+int32_t lr_memory_conn_pair(lr_memory_conn_t *out_a, lr_memory_conn_t *out_b);
+
+/**
+ * Append `bytes` to the inbound queue (the bytes the peer sent to
+ * us). Returns 0 on success, `LR_ERR_NULL` on a NULL handle or
+ * pointer.
+ *
+ * # Safety
+ * `c` must be a live handle. `bytes` must point to `len` readable
+ * bytes (NULL only when `len == 0`).
+ */
+int32_t lr_memory_conn_push_input(lr_memory_conn_t c, const uint8_t *bytes, uintptr_t len);
+
+/**
+ * Drain the inbound queue into a freshly-allocated `lr_bytes_t`. The
+ * queue is empty after this call.
+ *
+ * # Safety
+ * `c` must be a live handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_memory_conn_take_input(lr_memory_conn_t c, struct lr_bytes_t *out);
+
+/**
+ * Append `bytes` to the outbound queue (the bytes we prepared for
+ * the peer).
+ *
+ * # Safety
+ * See [`lr_memory_conn_push_input`].
+ */
+int32_t lr_memory_conn_put_output(lr_memory_conn_t c, const uint8_t *bytes, uintptr_t len);
+
+/**
+ * Drain the outbound queue into a freshly-allocated `lr_bytes_t`.
+ * The queue is empty after this call.
+ *
+ * # Safety
+ * See [`lr_memory_conn_take_input`].
+ */
+int32_t lr_memory_conn_drain_output(lr_memory_conn_t c, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed MemoryConn. Safe to call with NULL.
+ *
+ * # Safety
+ * `c` must have been produced by [`lr_memory_conn_new`] or
+ * [`lr_memory_conn_pair`] and must not be used after this call.
+ */
+void lr_memory_conn_free(lr_memory_conn_t c);
 
 /**
  * Compute the link cost from a peer's RX cost (RFC 8966 §3.4.2).
@@ -13424,6 +13743,42 @@ int32_t lr_ospf_spf_v3_locator_at(lr_ospf_spf_v3_result_t r,
                                   struct lr_ospf_spf_route_t *out);
 
 /**
+ * Construct an `SrDatabase` by projecting from `lsdb`. The LSDB is
+ * borrowed for the duration of the call only — the projection is
+ * deep (the database owns its own copy of the relevant LSAs).
+ *
+ * # Safety
+ * `lsdb` must be a live `lr_ospf_lsdb_t` handle.
+ */
+lr_ospf_sr_db_t lr_ospf_sr_db_new(lr_ospf_lsdb_t lsdb);
+
+/**
+ * Drop a boxed `SrDatabase`. Safe to call with NULL.
+ *
+ * # Safety
+ * `db` must have been produced by [`lr_ospf_sr_db_new`] and must not
+ * be used after this call.
+ */
+void lr_ospf_sr_db_free(lr_ospf_sr_db_t db);
+
+/**
+ * Construct an `Srv6Database` by projecting from `lsdb`.
+ *
+ * # Safety
+ * `lsdb` must be a live `lr_ospf_lsdb_t` handle.
+ */
+lr_ospf_srv6_db_t lr_ospf_srv6_db_new(lr_ospf_lsdb_t lsdb);
+
+/**
+ * Drop a boxed `Srv6Database`. Safe to call with NULL.
+ *
+ * # Safety
+ * `db` must have been produced by [`lr_ospf_srv6_db_new`] and must
+ * not be used after this call.
+ */
+void lr_ospf_srv6_db_free(lr_ospf_srv6_db_t db);
+
+/**
  * Open the platform's native route-table backend.
  *
  * On Linux this opens a `NETLINK_ROUTE` socket; on the BSDs/macOS a
@@ -15206,6 +15561,70 @@ int32_t lr_roa_store_validate(lr_roa_store_t s,
                               uint8_t *out_state);
 
 /**
+ * Add a single static ROA entry (RFC 6482). Returns 1 when the
+ * entry was newly inserted, 0 when it was already present (no
+ * change). Returns `LR_ERR_INVALID_HANDLE` (-2) on a NULL store
+ * and `LR_ERR_OTHER` (-6) on a malformed entry (the last-error
+ * string is set).
+ *
+ * # Safety
+ * `s` must be a live store handle. `entry` must point to a readable
+ * `lr_roa_entry_t`.
+ */
+int32_t lr_roa_store_add_static(lr_roa_store_t s, const struct lr_roa_entry_t *entry);
+
+/**
+ * Remove a single static ROA entry. Returns 1 when the entry was
+ * present and removed, 0 when it was absent.
+ *
+ * # Safety
+ * See [`lr_roa_store_add_static`].
+ */
+int32_t lr_roa_store_remove_static(lr_roa_store_t s, const struct lr_roa_entry_t *entry);
+
+/**
+ * Static-layer entry count (for status lines / diagnostics). 0 on
+ * a NULL / panic.
+ *
+ * # Safety
+ * `s` must be NULL or a live store handle.
+ */
+uintptr_t lr_roa_store_static_len(lr_roa_store_t s);
+
+/**
+ * RTR-layer entry count. 0 on a NULL / panic.
+ *
+ * # Safety
+ * See [`lr_roa_store_static_len`].
+ */
+uintptr_t lr_roa_store_rtr_len(lr_roa_store_t s);
+
+/**
+ * Unchecked provenance lookup — orphans return
+ * `LR_ROA_PROVENANCE_STATIC` (the historical fallback).
+ *
+ * # Safety
+ * `s` must be a live store handle. `entry` must point to a readable
+ * `lr_roa_entry_t`. `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_roa_store_provenance_of(lr_roa_store_t s,
+                                   const struct lr_roa_entry_t *entry,
+                                   uint8_t *out);
+
+/**
+ * Checked provenance lookup — orphans return
+ * `LR_ROA_PROVENANCE_NONE`. Returns 1 (without writing `*out`)
+ * when the entry is in neither layer, 0 on a successful match
+ * (the tag is written), and negative on error.
+ *
+ * # Safety
+ * See [`lr_roa_store_provenance_of`].
+ */
+int32_t lr_roa_store_provenance_of_checked(lr_roa_store_t s,
+                                           const struct lr_roa_entry_t *entry,
+                                           uint8_t *out);
+
+/**
  * Construct an empty `RoaTableBuilder` (RFC 6482 — add entries via
  * `lr_roa_table_builder_add` / `_add_entry`, then call
  * `lr_roa_table_builder_build` to finalize).
@@ -16445,6 +16864,384 @@ uintptr_t lr_rtr_client_snapshot(lr_rtr_client_t c,
                                  uintptr_t cap);
 
 /**
+ * Encode `pdu` at protocol `version` and write the wire bytes to
+ * `*out`. The version must satisfy `RtrPdu::min_version` — otherwise
+ * the wire form would be a cache-side protocol violation and the
+ * function returns `LR_ERR_OTHER`.
+ *
+ * # Safety
+ * `pdu` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_rtr_pdu_encode(lr_rtr_pdu_t pdu, uint8_t version, struct lr_bytes_t *out);
+
+/**
+ * Convenience encoder returning a fresh `lr_bytes_t`. Same contract
+ * as [`lr_rtr_pdu_encode`].
+ *
+ * # Safety
+ * `pdu` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_rtr_pdu_encode_vec(lr_rtr_pdu_t pdu, uint8_t version, struct lr_bytes_t *out);
+
+/**
+ * Decode one PDU from `data`. On success writes a freshly-allocated
+ * `lr_rtr_pdu_t` to `*out_pdu`, the protocol version to `*out_version`
+ * and the bytes consumed to `*out_consumed`. Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL pointer, `LR_ERR_OTHER` on a decode error
+ * (the last-error string is set), and 1 when the buffer is
+ * incomplete (more bytes needed — the caller should read more and
+ * retry).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. The three out-pointers
+ * must point to writable memory of the right type.
+ */
+int32_t lr_rtr_pdu_decode(const uint8_t *data,
+                          uintptr_t len,
+                          lr_rtr_pdu_t *out_pdu,
+                          uint8_t *out_version,
+                          uintptr_t *out_consumed);
+
+/**
+ * Drop a boxed `RtrPdu`. Safe to call with NULL.
+ *
+ * # Safety
+ * `pdu` must have been produced by a `lr_rtr_pdu_*` constructor and
+ * must not be used after this call.
+ */
+void lr_rtr_pdu_free(lr_rtr_pdu_t pdu);
+
+/**
+ * Write the PDU's RFC §5.1.2 type code to `*out`. Returns 0 on
+ * success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * `pdu` must be a valid handle. `out` must point to writable `uint8_t`.
+ */
+int32_t lr_rtr_pdu_type(lr_rtr_pdu_t pdu, uint8_t *out);
+
+/**
+ * Write the PDU's minimum required protocol version to `*out`.
+ *
+ * # Safety
+ * See [`lr_rtr_pdu_type`].
+ */
+int32_t lr_rtr_pdu_min_version(lr_rtr_pdu_t pdu, uint8_t *out);
+
+/**
+ * Build a Serial Notify PDU (RFC 8210 §5.2).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_serial_notify(uint16_t session_id, uint32_t serial);
+
+/**
+ * Build a Serial Query PDU (RFC 8210 §5.3).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_serial_query(uint16_t session_id, uint32_t serial);
+
+/**
+ * Build a Reset Query PDU (RFC 8210 §5.4).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_reset_query(void);
+
+/**
+ * Build a Cache Response PDU (RFC 8210 §5.5).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_cache_response(uint16_t session_id);
+
+/**
+ * Build a Cache Reset PDU (RFC 8210 §5.9).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_cache_reset(void);
+
+/**
+ * Build an IPv4 Prefix PDU (RFC 8210 §5.6). `prefix_v4` points to 4
+ * readable bytes; `prefix_len` and `max_length` are the prefix and
+ * ROA max lengths. Pass `announce = 1` for an announcement, `0` for
+ * a withdrawal.
+ *
+ * # Safety
+ * `prefix_v4` must point to 4 readable bytes (NULL only when
+ * `prefix_len == 0` is desired — but the codec requires a real
+ * prefix, so NULL is rejected).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_ipv4_prefix(uint8_t announce,
+                                    const uint8_t *prefix_v4,
+                                    uint8_t prefix_len,
+                                    uint8_t max_length,
+                                    uint32_t asn);
+
+/**
+ * Build an IPv6 Prefix PDU (RFC 8210 §5.7). `prefix_v6` points to 16
+ * readable bytes.
+ *
+ * # Safety
+ * `prefix_v6` must point to 16 readable bytes.
+ */
+lr_rtr_pdu_t lr_rtr_pdu_ipv6_prefix(uint8_t announce,
+                                    const uint8_t *prefix_v6,
+                                    uint8_t prefix_len,
+                                    uint8_t max_length,
+                                    uint32_t asn);
+
+/**
+ * Build an End-of-Data PDU (RFC 8210 §5.8). The timing intervals are
+ * optional per §5.8 — pass 0 to omit (the v0 wire form omits them;
+ * v1+ always carries them and 0 means "use the configured default").
+ */
+lr_rtr_pdu_t lr_rtr_pdu_end_of_data(uint16_t session_id,
+                                    uint32_t serial,
+                                    uint32_t refresh_interval,
+                                    uint32_t retry_interval,
+                                    uint32_t expire_interval);
+
+/**
+ * Build a Router Key PDU (RFC 8210 §5.10, v1+). `ski` points to 20
+ * readable bytes; `spki` points to `spki_len` readable bytes (the
+ * full DER subjectPublicKeyInfo).
+ *
+ * # Safety
+ * `ski` must point to 20 readable bytes; `spki` must point to
+ * `spki_len` readable bytes (NULL only when `spki_len == 0`).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_router_key(uint8_t announce,
+                                   const uint8_t *ski,
+                                   uint32_t asn,
+                                   const uint8_t *spki,
+                                   uintptr_t spki_len);
+
+/**
+ * Build an Error Report PDU (RFC 8210 §5.11). `erroneous_pdu` points
+ * to `erroneous_pdu_len` readable bytes (NULL when `len == 0`);
+ * `error_text` is a NUL-terminated UTF-8 string (NULL when absent).
+ *
+ * # Safety
+ * `erroneous_pdu` must point to `erroneous_pdu_len` readable bytes
+ * (NULL only when `erroneous_pdu_len == 0`). `error_text` must be a
+ * NUL-terminated UTF-8 string or NULL.
+ */
+lr_rtr_pdu_t lr_rtr_pdu_error_report(uint16_t error_code,
+                                     const uint8_t *erroneous_pdu,
+                                     uintptr_t erroneous_pdu_len,
+                                     const char *error_text);
+
+/**
+ * Build an ASPA PDU (v2+, SIDROPS ASPA profile). `providers` points
+ * to `providers_count` readable `uint32_t` values.
+ *
+ * # Safety
+ * `providers` must point to `providers_count` readable `uint32_t`
+ * values (NULL only when `providers_count == 0`).
+ */
+lr_rtr_pdu_t lr_rtr_pdu_aspa(uint8_t announce,
+                             uint32_t customer_asn,
+                             const uint32_t *providers,
+                             uintptr_t providers_count);
+
+/**
+ * Read the session_id of a Serial Notify / Serial Query / Cache
+ * Response / End-of-Data PDU. Returns 0 on a NULL handle or a
+ * non-matching variant (the caller can check the type first via
+ * [`lr_rtr_pdu_type`]).
+ *
+ * # Safety
+ * `pdu` must be a valid handle. `out` must point to writable `uint16_t`.
+ */
+int32_t lr_rtr_pdu_session_id(lr_rtr_pdu_t pdu, uint16_t *out);
+
+/**
+ * Read the serial number of a Serial Notify / Serial Query / End-of-
+ * Data PDU.
+ *
+ * # Safety
+ * See [`lr_rtr_pdu_session_id`].
+ */
+int32_t lr_rtr_pdu_serial(lr_rtr_pdu_t pdu, uint32_t *out);
+
+/**
+ * Read the announce flag of an IPv4 Prefix / IPv6 Prefix / Router
+ * Key / ASPA PDU. Writes 1 for announcement, 0 for withdrawal.
+ *
+ * # Safety
+ * See [`lr_rtr_pdu_session_id`].
+ */
+int32_t lr_rtr_pdu_announce(lr_rtr_pdu_t pdu, uint8_t *out);
+
+/**
+ * Read the prefix of an IPv4 Prefix PDU. Writes 4 bytes of prefix
+ * address to `out_prefix_v4` and the prefix length to
+ * `*out_prefix_len`.
+ *
+ * # Safety
+ * `out_prefix_v4` must point to 4 writable bytes; `out_prefix_len`
+ * must point to a writable `uint8_t`.
+ */
+int32_t lr_rtr_pdu_ipv4_prefix_fields(lr_rtr_pdu_t pdu,
+                                      uint8_t *out_prefix_v4,
+                                      uint8_t *out_prefix_len,
+                                      uint8_t *out_max_length,
+                                      uint32_t *out_asn);
+
+/**
+ * Read the prefix of an IPv6 Prefix PDU. Writes 16 bytes of prefix
+ * address to `out_prefix_v6`.
+ *
+ * # Safety
+ * `out_prefix_v6` must point to 16 writable bytes; the other three
+ * out-pointers must point to writable memory of the right type.
+ */
+int32_t lr_rtr_pdu_ipv6_prefix_fields(lr_rtr_pdu_t pdu,
+                                      uint8_t *out_prefix_v6,
+                                      uint8_t *out_prefix_len,
+                                      uint8_t *out_max_length,
+                                      uint32_t *out_asn);
+
+/**
+ * Read the End-of-Data timing intervals. Writes 1 to
+ * `*out_present` when the intervals are present (v1+), 0 when
+ * absent (v0). When present, the three interval values are written
+ * to the matching out-pointers; when absent the out-pointers are
+ * left untouched.
+ *
+ * # Safety
+ * All four out-pointers must point to writable memory of the right
+ * type.
+ */
+int32_t lr_rtr_pdu_end_of_data_intervals(lr_rtr_pdu_t pdu,
+                                         uint8_t *out_present,
+                                         uint32_t *out_refresh,
+                                         uint32_t *out_retry,
+                                         uint32_t *out_expire);
+
+/**
+ * Read the Router Key PDU's SKI (20 bytes) and ASN. `out_ski` must
+ * point to 20 writable bytes.
+ *
+ * # Safety
+ * `out_ski` must point to 20 writable bytes; `out_asn` must point
+ * to a writable `uint32_t`. The SPKI bytes are returned via
+ * `out_spki` as a `lr_bytes_t` (caller frees with `lr_bytes_free`).
+ */
+int32_t lr_rtr_pdu_router_key_fields(lr_rtr_pdu_t pdu,
+                                     uint8_t *out_ski,
+                                     uint32_t *out_asn,
+                                     struct lr_bytes_t *out_spki);
+
+/**
+ * Read the Error Report PDU's error code (RFC 8210 §12).
+ *
+ * # Safety
+ * `out` must point to a writable `uint16_t`.
+ */
+int32_t lr_rtr_pdu_error_code(lr_rtr_pdu_t pdu, uint16_t *out);
+
+/**
+ * Read the Error Report PDU's erroneous-PDU bytes (caller frees with
+ * `lr_bytes_free`).
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_rtr_pdu_erroneous_pdu(lr_rtr_pdu_t pdu, struct lr_bytes_t *out);
+
+/**
+ * Read the Error Report PDU's error text. Writes a freshly-allocated
+ * `lr_bytes_t` to `*out` carrying the UTF-8 text (without trailing
+ * NUL) when present, or sets `out->ptr = NULL` when absent.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_rtr_pdu_error_text(lr_rtr_pdu_t pdu, struct lr_bytes_t *out);
+
+/**
+ * Read the ASPA PDU's customer ASN.
+ *
+ * # Safety
+ * `out` must point to a writable `uint32_t`.
+ */
+int32_t lr_rtr_pdu_customer_asn(lr_rtr_pdu_t pdu, uint32_t *out);
+
+/**
+ * Read the ASPA PDU's provider ASNs as a flat `uint32_t` array
+ * (caller-supplied buffer). Writes the count to `*out_count` and
+ * returns 0 on success. If the buffer is too small, writes the
+ * required count to `*out_count` and returns `LR_ERR_OTHER` (the
+ * last-error string is set).
+ *
+ * # Safety
+ * `out_providers` must point to `cap` writable `uint32_t` values
+ * (NULL is allowed only when `cap == 0`, in which case the function
+ * only reports the count). `out_count` must point to a writable
+ * `uintptr_t`.
+ */
+int32_t lr_rtr_pdu_providers(lr_rtr_pdu_t pdu,
+                             uint32_t *out_providers,
+                             uintptr_t cap,
+                             uintptr_t *out_count);
+
+/**
+ * Write the BIRD-style display name for PDU type `ty` to
+ * `*out_name`. The pointer is valid until the next FFI call on this
+ * thread. Returns 0 on success, `LR_ERR_NULL` on a NULL out-pointer,
+ * `LR_ERR_INVALID_HANDLE` when `ty` is not a known type code.
+ *
+ * # Safety
+ * `out_name` must point to a writable `const char*`.
+ */
+int32_t lr_rtr_pdu_type_name(uint8_t ty, const char **out_name);
+
+/**
+ * Write the minimum PDU length for type `ty` to `*out`. Returns 0 on
+ * success, `LR_ERR_INVALID_HANDLE` when `ty` is unknown.
+ *
+ * # Safety
+ * `out` must point to a writable `uintptr_t`.
+ */
+int32_t lr_rtr_pdu_type_min_len(uint8_t ty, uintptr_t *out);
+
+/**
+ * Convert a wire type byte to the canonical RtrPduType tag, or
+ * return `LR_ERR_INVALID_HANDLE` when the type is unknown. Writes
+ * the type code back to `*out` (so a caller passing a reserved type
+ * like 5 still gets the same byte back, but the call errors).
+ *
+ * Useful for a C consumer that wants to validate the type before
+ * dispatching on it.
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_rtr_pdu_type_from_u8(uint8_t ty, uint8_t *out);
+
+/**
+ * Write the BIRD-style diagnostic name for error code `code` to
+ * `*out_name`. The pointer is valid until the next FFI call on this
+ * thread. Returns 0 on success, `LR_ERR_INVALID_HANDLE` when `code`
+ * is unknown.
+ *
+ * # Safety
+ * `out_name` must point to a writable `const char*`.
+ */
+int32_t lr_rtr_error_code_name(uint16_t code, const char **out_name);
+
+/**
+ * Write 1 to `*out` when `code` is a fatal error (everything except
+ * No Data Available per RFC §12), 0 otherwise.
+ *
+ * # Safety
+ * `out` must point to a writable `uint8_t`.
+ */
+int32_t lr_rtr_error_code_is_fatal(uint16_t code, uint8_t *out);
+
+/**
+ * Validate that `code` is a known RTR error code. Returns 0 on
+ * success, `LR_ERR_INVALID_HANDLE` when unknown.
+ */
+int32_t lr_rtr_error_code_from_u16(uint16_t code);
+
+/**
  * Add an OSPFv2 session with the library defaults: MTU 1500,
  * point-to-point network type, Normal (non-stub) area. Returns 0 with
  * the handle written to `out_handle`, `-1` on a null out pointer,
@@ -17015,5 +17812,230 @@ int32_t lr_srv6_locator_from_str(const char *s, uint8_t *out_addr, uint8_t *out_
  * `addr` must point to 16 readable bytes.
  */
 const char *lr_srv6_locator_to_str(const uint8_t *addr, uint8_t block_bits);
+
+/**
+ * Decode an ORIGIN attribute (RFC 4271 §5.1.2). `data` is the
+ * attribute value (1 byte: 0=IGP, 1=EGP, 2=INCOMPLETE). Writes the
+ * origin kind (0/1/2) to `*out`. Returns 0 on success, `LR_ERR_NULL`
+ * on a NULL pointer, `LR_ERR_OTHER` on a decode failure.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `uint8_t`.
+ */
+int32_t lr_bgp_well_known_origin_decode(const uint8_t *data, uintptr_t len, uint8_t *out);
+
+/**
+ * Encode an ORIGIN attribute. `kind` is 0 (IGP), 1 (EGP) or 2
+ * (INCOMPLETE). Writes 1 byte to `*out`.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_origin_encode(uint8_t kind, struct lr_bytes_t *out);
+
+/**
+ * Decode a NEXT_HOP attribute (RFC 4271 §5.1.3). `data` is the
+ * attribute value: 4 bytes (IPv4) or 16 bytes (IPv6 for IPv4 NLRI
+ * under RFC 5549). Writes 1 to `*out_is_ipv6` when the next-hop is
+ * IPv6 (or IPv4-over-IPv6), 0 when it is IPv4. The address bytes
+ * are written to `*out_addr` (4 bytes for v4, 16 for v6).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out_is_ipv6` must
+ * point to a writable `uint8_t`. `out_addr` must point to 16
+ * writable bytes (the function always writes 16, with the trailing
+ * 12 bytes zeroed for a v4 next-hop).
+ */
+int32_t lr_bgp_well_known_next_hop_decode(const uint8_t *data,
+                                          uintptr_t len,
+                                          uint8_t *out_is_ipv6,
+                                          uint8_t *out_addr);
+
+/**
+ * Encode a NEXT_HOP attribute. `is_ipv6 = 0` writes 4 bytes (IPv4),
+ * `is_ipv6 = 1` writes 16 bytes (IPv6). `addr` must point to 4 or
+ * 16 readable bytes accordingly.
+ *
+ * # Safety
+ * `addr` must point to 4 readable bytes when `is_ipv6 == 0`, or 16
+ * readable bytes when `is_ipv6 == 1`. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_next_hop_encode(uint8_t is_ipv6,
+                                          const uint8_t *addr,
+                                          struct lr_bytes_t *out);
+
+/**
+ * Decode a MULTI_EXIT_DISC attribute (RFC 4271 §5.1.4). `data` is
+ * 4 bytes (big-endian u32). Writes the metric to `*out`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `uint32_t`.
+ */
+int32_t lr_bgp_well_known_med_decode(const uint8_t *data, uintptr_t len, uint32_t *out);
+
+/**
+ * Encode a MULTI_EXIT_DISC attribute. Writes 4 bytes (big-endian u32).
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_med_encode(uint32_t value, struct lr_bytes_t *out);
+
+/**
+ * Decode a LOCAL_PREF attribute (RFC 4271 §5.1.5). `data` is 4 bytes.
+ *
+ * # Safety
+ * See [`lr_bgp_well_known_med_decode`].
+ */
+int32_t lr_bgp_well_known_local_pref_decode(const uint8_t *data, uintptr_t len, uint32_t *out);
+
+/**
+ * Encode a LOCAL_PREF attribute. Writes 4 bytes.
+ *
+ * # Safety
+ * See [`lr_bgp_well_known_med_encode`].
+ */
+int32_t lr_bgp_well_known_local_pref_encode(uint32_t value, struct lr_bytes_t *out);
+
+/**
+ * Decode an AGGREGATOR attribute (RFC 4271 §5.1.7 / RFC 6793). The
+ * `data` argument is 6 bytes (2-octet AS + 4-octet speaker) or 8
+ * bytes (4-octet AS + 4-octet speaker). Writes the ASN to `*out_asn`
+ * and the 4-byte speaker BGP identifier to `out_speaker`.
+ *
+ * # Safety
+ *
+ * `data` must point to `len` readable bytes. `out_asn` must point
+ * to a writable `uint32_t`. `out_speaker` must point to 4 writable
+ * bytes.
+ */
+int32_t lr_bgp_well_known_aggregator_decode(const uint8_t *data,
+                                            uintptr_t len,
+                                            uint32_t *out_asn,
+                                            uint8_t *out_speaker);
+
+/**
+ * Encode an AGGREGATOR attribute in the 4-octet-AS form (RFC 6793).
+ * Writes 8 bytes.
+ *
+ * # Safety
+ * `speaker` must point to 4 readable bytes. `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_aggregator_encode_4(uint32_t asn,
+                                              const uint8_t *speaker,
+                                              struct lr_bytes_t *out);
+
+/**
+ * Decode an ORIGINATOR_ID attribute (RFC 4456 §8). `data` is 4 bytes
+ * (BGP Identifier). Writes the identifier to `*out_bgp_id`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out_bgp_id` must
+ * point to a writable `uint32_t`.
+ */
+int32_t lr_bgp_well_known_originator_id_decode(const uint8_t *data,
+                                               uintptr_t len,
+                                               uint32_t *out_bgp_id);
+
+/**
+ * Encode an ORIGINATOR_ID attribute. Writes 4 bytes.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_originator_id_encode(uint32_t bgp_id, struct lr_bytes_t *out);
+
+/**
+ * Decode a CLUSTER_LIST attribute (RFC 4456 §8). `data` is a
+ * sequence of 4-byte cluster IDs. Writes the cluster IDs as a flat
+ * `uint32_t` array into a caller-supplied buffer; writes the count
+ * to `*out_count`. If the buffer is too small, writes the required
+ * count and returns `LR_ERR_OTHER`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out_clusters` must
+ * point to `cap` writable `uint32_t` values (NULL is allowed only
+ * when `cap == 0`, in which case the function only reports the
+ * count). `out_count` must point to a writable `uintptr_t`.
+ */
+int32_t lr_bgp_well_known_cluster_list_decode(const uint8_t *data,
+                                              uintptr_t len,
+                                              uint32_t *out_clusters,
+                                              uintptr_t cap,
+                                              uintptr_t *out_count);
+
+/**
+ * Encode a CLUSTER_LIST attribute from a flat `uint32_t` array of
+ * cluster IDs. Writes `count * 4` bytes.
+ *
+ * # Safety
+ * `clusters` must point to `count` readable `uint32_t` values (NULL
+ * is allowed only when `count == 0`). `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_cluster_list_encode(const uint32_t *clusters,
+                                              uintptr_t count,
+                                              struct lr_bytes_t *out);
+
+/**
+ * Decode an AIGP attribute (RFC 7311). `data` is the TLV form: a
+ * single TLV with type 1 (AIGP) and a 64-bit accumulated metric.
+ * Writes the metric to `*out_metric`.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out_metric` must
+ * point to a writable `uint64_t`.
+ */
+int32_t lr_bgp_well_known_aigp_decode(const uint8_t *data, uintptr_t len, uint64_t *out_metric);
+
+/**
+ * Encode an AIGP attribute. Writes the TLV form (12 bytes: 2-byte
+ * type + 2-byte length + 8-byte metric).
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_aigp_encode(uint64_t metric, struct lr_bytes_t *out);
+
+/**
+ * Decode a PMSI Tunnel attribute (RFC 6514 §5). `data` is the
+ * attribute value: 1 byte flags + 1 byte tunnel type + 1 byte
+ * label length (always 3) + 3-byte label + tunnel-id bytes. Writes
+ * the flags, tunnel type, label, and tunnel-id length to the
+ * out-pointers; the tunnel-id bytes are returned via `out_tunnel_id`
+ * as a `lr_bytes_t` (caller frees with `lr_bytes_free`).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. The four scalar
+ * out-pointers must point to writable memory of the right type.
+ * `out_tunnel_id` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_pmsi_tunnel_decode(const uint8_t *data,
+                                             uintptr_t len,
+                                             uint8_t *out_flags,
+                                             uint8_t *out_tunnel_type,
+                                             uint32_t *out_label,
+                                             struct lr_bytes_t *out_tunnel_id);
+
+/**
+ * Encode a PMSI Tunnel attribute. `label` is a 20-bit MPLS label
+ * packed into the low 20 bits of a `uint32_t`. `tunnel_id` is the
+ * tunnel-id bytes (NULL only when `tunnel_id_len == 0`).
+ *
+ * # Safety
+ * `tunnel_id` must point to `tunnel_id_len` readable bytes (NULL
+ * only when `tunnel_id_len == 0`). `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bgp_well_known_pmsi_tunnel_encode(uint8_t flags,
+                                             uint8_t tunnel_type,
+                                             uint32_t label,
+                                             const uint8_t *tunnel_id,
+                                             uintptr_t tunnel_id_len,
+                                             struct lr_bytes_t *out);
 
 #endif  /* LR_FFI_H */
