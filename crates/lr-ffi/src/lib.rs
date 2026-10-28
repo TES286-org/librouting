@@ -25,6 +25,7 @@
 pub mod attributes;
 pub mod babel;
 pub mod babel_auth;
+pub mod babel_batch;
 pub mod babel_codec;
 pub mod babel_messages;
 pub mod babel_neighbor;

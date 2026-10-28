@@ -1971,6 +1971,35 @@ typedef struct OpaqueBabelCodec {
 
 typedef struct OpaqueBabelCodec *lr_babel_codec_t;
 
+typedef struct OpaqueBabelTlv {
+  uint8_t _private[0];
+} OpaqueBabelTlv;
+
+typedef struct OpaqueBabelTlv *lr_babel_tlv_t;
+
+typedef struct OpaqueBabelRouteKey {
+  uint8_t _private[0];
+} OpaqueBabelRouteKey;
+
+typedef struct OpaqueBabelRouteKey *lr_babel_route_key_t;
+
+typedef struct OpaqueBabelRoute {
+  uint8_t _private[0];
+} OpaqueBabelRoute;
+
+typedef struct OpaqueBabelRoute *lr_babel_route_t;
+
+/**
+ * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
+ * and route-map evaluation run against the same data model the
+ * library uses internally.
+ */
+typedef struct OpaqueRoute {
+  uint8_t _private[0];
+} OpaqueRoute;
+
+typedef struct OpaqueRoute *lr_route_t;
+
 /**
  * Opaque `Hello` handle (RFC 8966 §4.6.5).
  */
@@ -2079,17 +2108,6 @@ typedef struct lr_best_path_config_t {
   uint8_t compare_igp_metric;
   uint8_t prefer_next_hop_self;
 } lr_best_path_config_t;
-
-/**
- * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
- * and route-map evaluation run against the same data model the
- * library uses internally.
- */
-typedef struct OpaqueRoute {
-  uint8_t _private[0];
-} OpaqueRoute;
-
-typedef struct OpaqueRoute *lr_route_t;
 
 /**
  * Opaque `BfdPacket` handle.
@@ -4247,6 +4265,208 @@ int32_t lr_babel_codec_decode_authenticated_slice(lr_babel_codec_t codec,
                                                   uintptr_t keys_count,
                                                   lr_babel_replay_protection_t replay,
                                                   lr_babel_frame_t *out);
+
+/**
+ * Construct an empty Babel frame (RFC 8966 §4.1). Useful as a builder
+ * starting point — call [`lr_babel_frame_push_tlv`] to add TLVs.
+ */
+lr_babel_frame_t lr_babel_frame_new_empty(void);
+
+/**
+ * Construct a Babel frame from a flat array of TLV handles. The
+ * frame takes ownership of the TLV handles — they are consumed and
+ * must not be reused. The `tlvs` array itself is borrowed (the
+ * caller owns the buffer).
+ *
+ * Returns NULL on a NULL `tlvs` pointer with non-zero `count`, or on
+ * a panic. An empty `tlvs` array produces an empty frame (same as
+ * [`lr_babel_frame_new_empty`]).
+ *
+ * # Safety
+ * `tlvs` must point to `count` readable `lr_babel_tlv_t` values.
+ * Each TLV handle must have been produced by `lr_babel_tlv_new` /
+ * `_pad1` / `_pad_n` and must not be reused after this call.
+ */
+lr_babel_frame_t lr_babel_frame_new_from_tlvs(const lr_babel_tlv_t *tlvs, uintptr_t count);
+
+/**
+ * Push one TLV onto the frame's body. The TLV handle is consumed
+ * and freed. Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL
+ * frame or TLV handle.
+ *
+ * # Safety
+ * `frame` must be a valid handle. `tlv` must be a valid handle and
+ * is invalid after this call.
+ */
+int32_t lr_babel_frame_push_tlv(lr_babel_frame_t frame, lr_babel_tlv_t tlv);
+
+/**
+ * Construct a TLV with a kind and a value (RFC 8966 §4.4). `kind`
+ * is a `LR_BABEL_TLV_*` constant. Returns NULL on a panic.
+ */
+lr_babel_tlv_t lr_babel_tlv_new(uint8_t kind, const uint8_t *value, uintptr_t value_len);
+
+/**
+ * Construct a Pad1 TLV (RFC 8966 §4.4.1 — single-byte pad, no
+ * value field).
+ */
+lr_babel_tlv_t lr_babel_tlv_pad1(void);
+
+/**
+ * Construct a PadN TLV (RFC 8966 §4.4.2 — N bytes of zero padding).
+ */
+lr_babel_tlv_t lr_babel_tlv_pad_n(uintptr_t n);
+
+/**
+ * Read the TLV's kind code (`LR_BABEL_TLV_*`). Returns 0 on a NULL
+ * handle.
+ *
+ * # Safety
+ * `t` must be a valid handle.
+ */
+uint8_t lr_babel_tlv_kind(lr_babel_tlv_t t);
+
+/**
+ * Read the TLV's value bytes into a freshly-allocated
+ * `lr_bytes_t`. The caller owns the bytes and must free them via
+ * `lr_bytes_free`.
+ *
+ * # Safety
+ * `t` must be a valid handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_babel_tlv_value(lr_babel_tlv_t t, struct lr_bytes_t *out);
+
+/**
+ * Drop a TLV. Safe to call with NULL.
+ *
+ * # Safety
+ * `t` must have been produced by `lr_babel_tlv_new` / `_pad1` /
+ * `_pad_n` and not already freed.
+ */
+void lr_babel_tlv_free(lr_babel_tlv_t t);
+
+/**
+ * Construct a RouteKey for a destination prefix (RFC 8966 §3.2).
+ * `router_id` is the 8-byte Babel router identifier of the source.
+ *
+ * Returns NULL on a panic. The optional `source_prefix` arguments
+ * build a source-specific RouteKey; pass `source_present = 0` for a
+ * plain (non-source-specific) route.
+ *
+ * # Safety
+ * `dest_addr` and `source_addr` must point to readable bytes of the
+ * right length for the address family.
+ */
+lr_babel_route_key_t lr_babel_route_key_new(uint8_t dest_is_ipv6,
+                                            const uint8_t *dest_addr,
+                                            uint8_t dest_prefix_len,
+                                            uint8_t source_present,
+                                            uint8_t source_is_ipv6,
+                                            const uint8_t *source_addr,
+                                            uint8_t source_prefix_len,
+                                            const uint8_t *router_id);
+
+/**
+ * Drop a RouteKey. Safe to call with NULL.
+ *
+ * # Safety
+ * `k` must have been produced by `lr_babel_route_key_new` and not
+ * already freed.
+ */
+void lr_babel_route_key_free(lr_babel_route_key_t k);
+
+/**
+ * Construct a BabelRoute. `next_hop` is the IPv4 or IPv6 next hop
+ * (16 bytes for IPv6, 4 for IPv4). `feasible` and `installed` are
+ * initial state flags (typically 0 / 0).
+ *
+ * # Safety
+ * `next_hop` must point to 4 (IPv4) or 16 (IPv6) readable bytes.
+ */
+lr_babel_route_t lr_babel_route_new(lr_babel_route_key_t key,
+                                    uint16_t seqno,
+                                    uint32_t metric,
+                                    uint8_t next_hop_is_ipv6,
+                                    const uint8_t *next_hop,
+                                    uint8_t feasible,
+                                    uint8_t installed);
+
+/**
+ * Drop a BabelRoute. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_babel_route_new` and not
+ * already freed.
+ */
+void lr_babel_route_free(lr_babel_route_t r);
+
+/**
+ * Insert a route into the table. The route is cloned (the caller
+ * retains ownership of the handle). Returns 0 on success,
+ * `LR_ERR_NULL` (-1) on a NULL table or route handle.
+ *
+ * Mirrors `BabelRouteTable::insert`. Routes are kept in a `BTreeMap`
+ * keyed by `RouteKey` so duplicate inserts update in place.
+ *
+ * # Safety
+ * `table` must be a valid handle returned by `lr_babel_route_table_new`.
+ * `route` must be a valid handle.
+ */
+int32_t lr_babel_route_table_insert(lr_route_t table, lr_babel_route_t route);
+
+/**
+ * Insert a route together with its reception time and the interval
+ * its Update announced (RFC 8966 §3.2.5). An exact re-announcement
+ * of the same claim (same source, same seqno, same metric) is a
+ * refresh — it must not re-enter the feasibility machinery but it
+ * does push the expiry deadline out.
+ *
+ * # Safety
+ * See [`lr_babel_route_table_insert`].
+ */
+int32_t lr_babel_route_table_insert_timed(lr_route_t table,
+                                          lr_babel_route_t route,
+                                          uint16_t interval_cs,
+                                          uint64_t now_ms);
+
+/**
+ * Withdraw a route by key. Returns 0 on success, `LR_ERR_NULL` (-1)
+ * on a NULL table or key handle.
+ *
+ * # Safety
+ * `table` and `key` must be valid handles.
+ */
+int32_t lr_babel_route_table_withdraw(lr_route_t table, lr_babel_route_key_t key);
+
+/**
+ * Expire the routes whose re-announcement hold time lapsed
+ * (RFC 8966 §3.2.5). Returns the number of routes withdrawn. The
+ * caller can then walk the table to discover which keys are gone.
+ *
+ * # Safety
+ * `table` must be a valid handle.
+ */
+uintptr_t lr_babel_route_table_expire(lr_route_t table, uint64_t now_ms);
+
+/**
+ * True when the table holds a route for the given key.
+ *
+ * # Safety
+ * `table` and `key` must be valid handles.
+ */
+uint8_t lr_babel_route_table_contains(lr_route_t table, lr_babel_route_key_t key);
+
+/**
+ * Number of best (lowest-metric, feasible) routes per destination.
+ * Mirrors `BabelRouteTable::best_routes().len()`. Useful for
+ * diagnostics — the full routes themselves are not enumerated via
+ * this entry point.
+ *
+ * # Safety
+ * `table` must be a valid handle.
+ */
+uintptr_t lr_babel_route_table_best_routes_count(lr_route_t table);
 
 lr_babel_codec_t lr_babel_codec_new(void);
 

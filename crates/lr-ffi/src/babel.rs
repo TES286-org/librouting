@@ -39,7 +39,7 @@ pub(crate) fn box_frame(f: BabelFrame) -> lr_babel_frame_t {
 ///
 /// # Safety
 /// `f` must have been produced by [`box_frame`] and not freed.
-unsafe fn unbox_frame(f: lr_babel_frame_t) -> Option<Box<BabelFrame>> {
+pub(crate) unsafe fn unbox_frame(f: lr_babel_frame_t) -> Option<Box<BabelFrame>> {
     if f.is_null() {
         return None;
     }
