@@ -92,6 +92,19 @@ fn main() {
 #define LR_MPLS_LABEL_EXTENSION 15
 #define LR_MPLS_LABEL_FIRST_NORMAL 16
 #define LR_MPLS_LABEL_MAX_VALUE 0xFFFFF
+
+/* lr_nlri_family_t is a `pub use` alias for lr_afi_safi_t in Rust
+ * (crates/lr-ffi/src/core_extras.rs); cbindgen does not emit a C
+ * typedef for `pub use` aliases, so we add one here. The two types
+ * carry the same repr(C) layout. */
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+
+/* lr_core::addr::IpAddr is a Rust enum that cbindgen cannot emit as a
+ * C type. The C ABI surfaces it as an opaque handle (the functions
+ * lr_ip_addr_from_v4_bytes / _from_v6_bytes / _from_bytes / _free own
+ * the lifetime). Define `IpAddr` as an opaque struct so the header
+ * compiles cleanly. */
+typedef struct OpaqueIpAddr IpAddr;
 "#.to_string(),
         ),
         ..Default::default()
@@ -157,4 +170,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/mpls_constants.rs");
     println!("cargo:rerun-if-changed=src/damping_constants.rs");
     println!("cargo:rerun-if-changed=src/ospf_enums.rs");
+    println!("cargo:rerun-if-changed=src/ldp_engine.rs");
 }

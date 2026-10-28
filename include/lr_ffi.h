@@ -70,6 +70,19 @@
 #define LR_MPLS_LABEL_FIRST_NORMAL 16
 #define LR_MPLS_LABEL_MAX_VALUE 0xFFFFF
 
+/* lr_nlri_family_t is a `pub use` alias for lr_afi_safi_t in Rust
+ * (crates/lr-ffi/src/core_extras.rs); cbindgen does not emit a C
+ * typedef for `pub use` aliases, so we add one here. The two types
+ * carry the same repr(C) layout. */
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+
+/* lr_core::addr::IpAddr is a Rust enum that cbindgen cannot emit as a
+ * C type. The C ABI surfaces it as an opaque handle (the functions
+ * lr_ip_addr_from_v4_bytes / _from_v6_bytes / _from_bytes / _free own
+ * the lifetime). Define `IpAddr` as an opaque struct so the header
+ * compiles cleanly. */
+typedef struct OpaqueIpAddr IpAddr;
+
 
 
 
@@ -749,6 +762,14 @@
 
 #define LR_LDP_STATUS_KEEP_ALIVE_MISSED 15
 
+#define LR_LDP_ADVERTISEMENT_DOWNSTREAM_UNSOLICITED 1
+
+#define LR_LDP_ADVERTISEMENT_DOWNSTREAM_ON_DEMAND 2
+
+#define LR_LDP_DISCOVERY_KIND_LINK 1
+
+#define LR_LDP_DISCOVERY_KIND_TARGETED 2
+
 #define LR_LDP_SESSION_STATE_NON_EXISTENT 1
 
 #define LR_LDP_SESSION_STATE_INITIALIZED 2
@@ -758,6 +779,14 @@
 #define LR_LDP_SESSION_STATE_OPEN_SENT 4
 
 #define LR_LDP_SESSION_STATE_OPERATIONAL 5
+
+/**
+ * Maximum text length carried in one event (peer-state names, log
+ * lines, protocol-error messages, prefixes, reasons). Longer
+ * strings are truncated to `LR_LDP_ENGINE_EVENT_TEXT_MAX - 1`
+ * bytes plus the NUL terminator.
+ */
+#define LR_LDP_ENGINE_EVENT_TEXT_MAX 128
 
 /**
  * Well-known Generic Label constants — mirror
@@ -2590,6 +2619,139 @@ typedef struct OpaqueLdpPdu {
 } OpaqueLdpPdu;
 
 typedef struct OpaqueLdpPdu *lr_ldp_pdu_t;
+
+typedef struct OpaqueLdpEngineConfig {
+  uint8_t _private[0];
+} OpaqueLdpEngineConfig;
+
+typedef struct OpaqueLdpEngineConfig *lr_ldp_engine_config_t;
+
+typedef struct OpaqueLdpEngine {
+  uint8_t _private[0];
+} OpaqueLdpEngine;
+
+typedef struct OpaqueLdpEngine *lr_ldp_engine_t;
+
+/**
+ * One serialized engine event. Only the fields meaningful for
+ * `kind` are populated; the rest are zero. The variable-length
+ * lists (`prefixes` for MappingWithdrawn / LabelAbortReceived /
+ * TransitSwap*, `addresses` for AddressReceived /
+ * AddressWithdrawn) are passed via `lr_bytes_t`-owned scratch
+ * buffers the caller frees with `lr_bytes_free`.
+ */
+typedef struct lr_ldp_engine_event_t {
+  /**
+   * One of the `lr_ldp_engine_event_kind_t` constants.
+   */
+  int32_t kind;
+  uint32_t peer_lsr;
+  uint16_t peer_label_space;
+  /**
+   * Discovery kind (AdjacencyUp / AdjacencyDown).
+   */
+  int32_t discovery_kind;
+  /**
+   * 1 when `source_addr` carries IPv6, 0 for IPv4.
+   */
+  uint8_t source_is_ipv6;
+  uint8_t source_addr[16];
+  /**
+   * 1 when `transport_addr` carries IPv6, 0 for IPv4.
+   */
+  uint8_t transport_is_ipv6;
+  uint8_t transport_addr[16];
+  /**
+   * Connection id (SessionUp / SessionDown / CloseConnection).
+   */
+  uint64_t conn;
+  /**
+   * Negotiated keepalive time (SessionUp).
+   */
+  uint16_t negotiated_keepalive_time;
+  /**
+   * Negotiated max PDU length (SessionUp).
+   */
+  uint16_t negotiated_max_pdu_len;
+  /**
+   * Session-down reason (SessionDown):
+   * 0 = PeerNotification, 1 = KeepAliveExpired, 2 = TransportClosed,
+   * 3 = ProtocolError, 4 = ParameterMismatch, 5 = LocalShutdown.
+   */
+  int32_t session_down_reason;
+  /**
+   * Status code (NotificationReceived / SessionDown with reason 0).
+   */
+  uint32_t status_code;
+  /**
+   * 1 when the status is fatal (NotificationReceived).
+   */
+  uint8_t status_is_fatal;
+  /**
+   * 1 when the session-down event was graceful (RFC 3478 §3.3
+   * stale retention applies).
+   */
+  uint8_t graceful;
+  /**
+   * Prefix (MappingLearned / MappingReleased / TransitSwap* /
+   * LoopDetected / TransitLabelExhausted).
+   */
+  uint8_t prefix_is_ipv6;
+  uint8_t prefix_len;
+  uint8_t prefix_addr[16];
+  /**
+   * Label value (MappingLearned / TransitSwap*).
+   */
+  uint32_t label;
+  /**
+   * Transit in-label (TransitSwapChanged / _Removed).
+   */
+  uint32_t in_label;
+  /**
+   * Transit out-label (TransitSwapChanged).
+   */
+  uint32_t out_label;
+  /**
+   * Transit next-hop (TransitSwapChanged):
+   * 1 when `transit_next_hop_addr` carries IPv6, 0 for IPv4.
+   */
+  uint8_t transit_next_hop_is_ipv6;
+  uint8_t transit_next_hop_addr[16];
+  /**
+   * Engine message id (LabelAbortReceived).
+   */
+  uint32_t message_id;
+  /**
+   * Engine message id of the original Label Request
+   * (LabelAbortReceived).
+   */
+  uint32_t request_message_id;
+  /**
+   * Variable-length prefix list (MappingWithdrawn /
+   * LabelAbortReceived). Each entry is `(is_ipv6 u8, prefix_len u8,
+   * 16 bytes addr)`. Caller frees with `lr_bytes_free`.
+   */
+  struct lr_bytes_t prefixes;
+  /**
+   * Number of entries in `prefixes`.
+   */
+  uint32_t prefix_count;
+  /**
+   * Variable-length address list (AddressReceived /
+   * AddressWithdrawn). Each entry is `(is_ipv6 u8, 16 bytes addr)`.
+   * Caller frees with `lr_bytes_free`.
+   */
+  struct lr_bytes_t addresses;
+  /**
+   * Number of entries in `addresses`.
+   */
+  uint32_t address_count;
+  /**
+   * Free-form text (HelloDiscarded reason / UnknownMessage type /
+   * LoopDetected reason). NUL-terminated.
+   */
+  uint8_t text[LR_LDP_ENGINE_EVENT_TEXT_MAX];
+} lr_ldp_engine_event_t;
 
 /**
  * Opaque `LabelMappingStore` handle.
@@ -8005,6 +8167,94 @@ int32_t lr_damping_table_at(lr_damping_table_t t, uintptr_t index, struct lr_dam
  */
 void lr_damping_table_free(lr_damping_table_t t);
 
+uint8_t lr_bfd_auth_type_from_u8(uint8_t v);
+
+uint8_t lr_bfd_auth_type_to_u8(uint8_t v);
+
+const char *lr_bfd_auth_type_name(uint8_t v);
+
+uint8_t lr_bfd_diagnostic_from_u8(uint8_t v);
+
+uint8_t lr_bfd_diagnostic_to_u8(uint8_t v);
+
+const char *lr_bfd_diagnostic_name(uint8_t v);
+
+uint8_t lr_bfd_state_from_u8(uint8_t v);
+
+uint8_t lr_bfd_state_to_u8(uint8_t v);
+
+const char *lr_bfd_state_name(uint8_t v);
+
+uint8_t lr_bfd_keyed_auth_algorithm_from_u8(uint8_t v);
+
+uint8_t lr_bfd_keyed_auth_algorithm_to_u8(uint8_t v);
+
+const char *lr_bfd_keyed_auth_algorithm_name(uint8_t v);
+
+uint8_t lr_bmp_msg_type_from_u8(uint8_t v);
+
+uint8_t lr_bmp_msg_type_to_u8(uint8_t v);
+
+const char *lr_bmp_msg_type_name(uint8_t v);
+
+uint8_t lr_bmp_peer_type_from_u8(uint8_t v);
+
+uint8_t lr_bmp_peer_type_to_u8(uint8_t v);
+
+const char *lr_bmp_peer_type_name(uint8_t v);
+
+uint8_t lr_bmp_peer_down_reason_from_u8(uint8_t v);
+
+uint8_t lr_bmp_peer_down_reason_to_u8(uint8_t v);
+
+const char *lr_bmp_peer_down_reason_name(uint8_t v);
+
+uint8_t lr_ospf_lsa_type_v2_from_u8(uint8_t v);
+
+uint8_t lr_ospf_lsa_type_v2_to_u8(uint8_t v);
+
+const char *lr_ospf_lsa_type_v2_name(uint8_t v);
+
+uint16_t lr_ospf_lsa_type_v3_from_u16(uint16_t v);
+
+uint16_t lr_ospf_lsa_type_v3_to_u16(uint16_t v);
+
+const char *lr_ospf_lsa_type_v3_name(uint16_t v);
+
+uint8_t lr_ospf_router_link_type_from_u8(uint8_t v);
+
+uint8_t lr_ospf_router_link_type_to_u8(uint8_t v);
+
+const char *lr_ospf_router_link_type_name(uint8_t v);
+
+uint16_t lr_ldp_message_type_from_u16(uint16_t v);
+
+uint16_t lr_ldp_message_type_to_u16(uint16_t v);
+
+const char *lr_ldp_message_type_name(uint16_t v);
+
+uint16_t lr_ldp_tlv_type_from_u16(uint16_t v);
+
+uint16_t lr_ldp_tlv_type_to_u16(uint16_t v);
+
+const char *lr_ldp_tlv_type_name(uint16_t v);
+
+uint8_t lr_ldp_advertisement_mode_from_u8(uint8_t v);
+
+uint8_t lr_ldp_advertisement_mode_to_u8(uint8_t v);
+
+const char *lr_ldp_advertisement_mode_name(uint8_t v);
+
+const char *lr_router_ospf_network_type_name(int32_t v);
+
+const char *lr_router_session_error_kind_name(int32_t v);
+
+const char *lr_srv6_sid_parse_error_name(int32_t v);
+
+const char *lr_srv6_locator_parse_error_name(int32_t v);
+
+const char *lr_mpls_label_stack_error_name(int32_t v);
+
 /**
  * Get the last error message. Returned string is NUL-terminated UTF-8.
  *
@@ -8320,6 +8570,265 @@ uint8_t lr_ldp_pdu_message_u_bit_at(lr_ldp_pdu_t pdu, uintptr_t index);
  * used after this call.
  */
 void lr_ldp_pdu_free(lr_ldp_pdu_t pdu);
+
+/**
+ * Drop a config. Safe on NULL.
+ *
+ * # Safety
+ * `c` must have been produced by `lr_ldp_engine_config_new` and must
+ * not be used after this call.
+ */
+void lr_ldp_engine_config_free(lr_ldp_engine_config_t c);
+
+/**
+ * Set the IPv6 transport address (RFC 7552 §6.1 rule 5: a global
+ * unicast address). Pass `transport_addr_v6 = NULL` to clear.
+ *
+ * # Safety
+ * `transport_addr_v6` must point to 16 readable bytes when non-NULL.
+ */
+int32_t lr_ldp_engine_config_set_transport_addr_v6(lr_ldp_engine_config_t c,
+                                                   const uint8_t *transport_addr_v6);
+
+/**
+ * Set the §6.1.1 transport-connection preference (`1` for IPv6,
+ * `0` for IPv4). The RFC default is LDPoIPv6.
+ */
+int32_t lr_ldp_engine_config_set_prefer_ipv6(lr_ldp_engine_config_t c, uint8_t prefer_ipv6);
+
+/**
+ * Set the proposed KeepAlive Time (RFC 5036 §3.5.3). 0 means
+ * the local default (180 s).
+ */
+int32_t lr_ldp_engine_config_set_keepalive_time(lr_ldp_engine_config_t c, uint16_t keepalive_time);
+
+/**
+ * Set the proposed Max PDU Length. 0 means the 4096 default.
+ */
+int32_t lr_ldp_engine_config_set_max_pdu_len(lr_ldp_engine_config_t c, uint16_t max_pdu_len);
+
+/**
+ * Set the advertisement discipline (one of the
+ * `LR_LDP_ADVERTISEMENT_*` constants).
+ */
+int32_t lr_ldp_engine_config_set_advertisement(lr_ldp_engine_config_t c, int32_t advertisement);
+
+/**
+ * Set the proposed Link Hello hold time (0 → 15 s default).
+ */
+int32_t lr_ldp_engine_config_set_link_hello_hold(lr_ldp_engine_config_t c, uint16_t hold);
+
+/**
+ * Set the proposed Targeted Hello hold time (0 → 45 s default).
+ */
+int32_t lr_ldp_engine_config_set_targeted_hello_hold(lr_ldp_engine_config_t c, uint16_t hold);
+
+/**
+ * Set whether targeted Hellos from peers are accepted (and answered
+ * when they carry R=1).
+ */
+int32_t lr_ldp_engine_config_set_accept_targeted(lr_ldp_engine_config_t c, uint8_t accept);
+
+/**
+ * Set whether Loop Detection is enabled (RFC 5036 §3.4.5.1).
+ * `path_vector_limit` MUST be 0 when loop detection is off.
+ */
+int32_t lr_ldp_engine_config_set_loop_detection(lr_ldp_engine_config_t c,
+                                                uint8_t enabled,
+                                                uint8_t path_vector_limit);
+
+/**
+ * Set the local transit label allocation range. Labels in
+ * `[label_min, label_max]` are eligible for transit allocation.
+ * RFC 3032 §2.1 reserves labels 0..=15; the FFI does not enforce
+ * this (the daemon's runtime check does).
+ */
+int32_t lr_ldp_engine_config_set_label_range(lr_ldp_engine_config_t c,
+                                             uint32_t label_min,
+                                             uint32_t label_max);
+
+/**
+ * Append a reserved label that must not be allocated as a transit
+ * label (RFC 3032 §2.1 reserves 0..=15; the operator may reserve
+ * additional labels).
+ */
+int32_t lr_ldp_engine_config_add_reserved_label(lr_ldp_engine_config_t c, uint32_t label);
+
+/**
+ * Construct an `LdpEngine` from a config. Consumes the config
+ * handle (the caller must not use it after this call).
+ *
+ * # Safety
+ * `c` must have been produced by `lr_ldp_engine_config_new` (or
+ * any of the `_set_*` / `_add_*` calls) and not already consumed.
+ */
+lr_ldp_engine_t lr_ldp_engine_new(lr_ldp_engine_config_t c);
+
+/**
+ * Drop an engine. Safe on NULL.
+ *
+ * # Safety
+ * `e` must have been produced by `lr_ldp_engine_new` and not already
+ * freed.
+ */
+void lr_ldp_engine_free(lr_ldp_engine_t e);
+
+/**
+ * Notify the engine that an active-role TCP connection succeeded.
+ * `conn` is the embedder's connection id (opaque to the library).
+ *
+ * # Safety
+ * `peer_lsr` is the 4-byte LSR Id of the peer.
+ */
+int32_t lr_ldp_engine_on_connected(lr_ldp_engine_t e,
+                                   uint64_t now_ms,
+                                   uint64_t conn,
+                                   uint32_t peer_lsr,
+                                   uint16_t peer_label_space);
+
+/**
+ * Notify the engine that an active-role TCP connection attempt
+ * failed. The peer returns to "awaiting transport"; the next Hello
+ * re-runs the §2.5.2 role decision.
+ */
+int32_t lr_ldp_engine_on_connect_failed(lr_ldp_engine_t e,
+                                        uint32_t peer_lsr,
+                                        uint16_t peer_label_space);
+
+/**
+ * Feed TCP stream bytes received on a connection.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes.
+ */
+int32_t lr_ldp_engine_feed_tcp(lr_ldp_engine_t e,
+                               uint64_t now_ms,
+                               uint64_t conn,
+                               const uint8_t *data,
+                               uintptr_t len);
+
+/**
+ * Notify the engine that a connection was closed (peer FIN/RST).
+ */
+int32_t lr_ldp_engine_on_closed(lr_ldp_engine_t e, uint64_t now_ms, uint64_t conn);
+
+/**
+ * Drive timers. The embedder calls this on every tick of its poll
+ * loop with the current wall-clock time.
+ */
+int32_t lr_ldp_engine_tick(lr_ldp_engine_t e, uint64_t now_ms);
+
+/**
+ * Gracefully shut down one peer (RFC 5036 §3.5.1.2). The engine
+ * emits a Shutdown Notification and tears down the session.
+ */
+int32_t lr_ldp_engine_shutdown_peer(lr_ldp_engine_t e,
+                                    uint64_t now_ms,
+                                    uint32_t peer_lsr,
+                                    uint16_t peer_label_space);
+
+/**
+ * Drain queued UDP datagrams. Each datagram is paired with its
+ * destination address. The returned `lr_bytes_t` carries the full
+ * list of `(dest_addr_v4_or_v6, datagram_bytes)` records as a flat
+ * sequence — use [`lr_ldp_engine_udp_drain_count`] / `_at` to
+ * enumerate them.
+ *
+ * # Safety
+ * `out` must point to writable memory. The caller owns the
+ * `lr_bytes_t` and must free it via `lr_bytes_free`.
+ */
+int32_t lr_ldp_engine_drain_udp(lr_ldp_engine_t e, struct lr_bytes_t *out);
+
+/**
+ * Drain queued bytes for one connection.
+ *
+ * # Safety
+ * `out` must point to writable memory.
+ */
+int32_t lr_ldp_engine_drain_tcp(lr_ldp_engine_t e, uint64_t conn, struct lr_bytes_t *out);
+
+/**
+ * Drain queued bytes for every connection (paired
+ * `(conn_id, bytes)`). The returned `lr_bytes_t` carries the flat
+ * list — use [`lr_ldp_engine_tcp_drain_count`] / `_at` to
+ * enumerate them.
+ *
+ * # Safety
+ * `out` must point to writable memory.
+ */
+int32_t lr_ldp_engine_drain_tcp_all(lr_ldp_engine_t e, struct lr_bytes_t *out);
+
+/**
+ * Number of FECs currently holding a transit label.
+ */
+uintptr_t lr_ldp_engine_transit_label_count(lr_ldp_engine_t e);
+
+/**
+ * Number of live adjacencies.
+ */
+uintptr_t lr_ldp_engine_adjacency_count(lr_ldp_engine_t e);
+
+/**
+ * Read one adjacency by index. Writes the peer LSR Id (4 bytes) +
+ * label space (2 bytes) + discovery kind (one of the
+ * `LR_LDP_DISCOVERY_KIND_*` constants) + transport address family
+ * flag + transport address bytes (4 for IPv4, 16 for IPv6) + hold
+ * time (seconds, u32) + last-seen timestamp (ms, u64) + config-seq
+ * (0 when absent) + dual-stack-present flag (1 when the peer
+ * advertised the Dual-Stack capability) + dual-stack preference (1
+ * for IPv6, 0 for IPv4, valid when `dual_stack_present == 1`).
+ *
+ * Returns 0 on success, `LR_ERR_INVALID_HANDLE` (-2) when the index
+ * is out of range.
+ *
+ * # Safety
+ * All out-pointers must point to writable memory. `transport_addr`
+ * must point to at least 16 writable bytes (the FFI writes the
+ * first 4 for IPv4, all 16 for IPv6).
+ */
+int32_t lr_ldp_engine_adjacency_at(lr_ldp_engine_t e,
+                                   uintptr_t index,
+                                   uint32_t *out_peer_lsr,
+                                   uint16_t *out_peer_label_space,
+                                   int32_t *out_kind,
+                                   uint8_t *out_source_is_ipv6,
+                                   uint8_t *source_addr,
+                                   uint8_t *out_transport_is_ipv6,
+                                   uint8_t *transport_addr,
+                                   uint32_t *out_hold_time_secs,
+                                   uint64_t *out_last_seen_ms,
+                                   uint8_t *out_config_seq_present,
+                                   uint32_t *out_config_seq,
+                                   uint8_t *out_dual_stack_present,
+                                   uint8_t *out_dual_stack_prefer_ipv6);
+
+/**
+ * Read one peer's session state (one of the
+ * `LR_LDP_SESSION_STATE_*` constants). Returns 0 (NonExistent) on
+ * a NULL handle or an unknown peer.
+ */
+int32_t lr_ldp_engine_session_state(lr_ldp_engine_t e,
+                                    uint32_t peer_lsr,
+                                    uint16_t peer_label_space);
+
+/**
+ * Drain queued engine events into a caller-provided buffer. Returns
+ * the number of events written. Events that do not fit are requeued
+ * (front of the queue, order preserved), so polling with a
+ * too-small buffer loses nothing.
+ *
+ * Each event's `prefixes` and `addresses` fields carry owned
+ * `lr_bytes_t` scratch buffers that the caller MUST free via
+ * `lr_bytes_free` after reading (otherwise the buffers leak).
+ *
+ * # Safety
+ * `out` must point to `cap` writable `lr_ldp_engine_event_t`
+ * structs.
+ */
+uintptr_t lr_ldp_engine_take_events(lr_ldp_engine_t e,
+                                    struct lr_ldp_engine_event_t *out,
+                                    uintptr_t cap);
 
 /**
  * Construct an empty `LabelMappingStore`.
@@ -12706,6 +13215,90 @@ int32_t lr_loc_rib_diff_since(lr_loc_rib_t r,
                               uintptr_t *out_added,
                               uintptr_t *out_modified,
                               uintptr_t *out_removed);
+
+/**
+ * Walk every path (every multipath entry, not just the best) in the
+ * Loc-RIB. The caller provides a callback that receives one route
+ * handle per iteration (the handle is borrowed — the caller must NOT
+ * free it). Returns the number of routes visited, or `LR_ERR_NULL`
+ * (-1) on a NULL LocRib / NULL callback.
+ *
+ * Use [`lr_loc_rib_iter_best`] when only the best path per prefix is
+ * needed; use [`lr_loc_rib_iter_paths`] when multipath entries must
+ * be enumerated (RFC 4271 §9.1.2.2 step 12).
+ *
+ * # Safety
+ * `r` must be a valid LocRib handle. `cb` must be a non-NULL function
+ * pointer that does not free `route` and does not call back into the
+ * FFI on the same LocRib handle (re-entrancy is undefined).
+ */
+int64_t lr_loc_rib_iter_paths(lr_loc_rib_t r, void (*cb)(lr_route_t route, void *user), void *user);
+
+/**
+ * Walk every `(RouteKey, paths)` set in the Loc-RIB. The caller
+ * provides a callback that receives the prefix (as a flat
+ * `(is_ipv6 u8, prefix_len u8, addr 16 bytes)` tuple via the
+ * `prefix_out` pointer) plus the number of paths in that set. Returns
+ * the number of sets visited, or `LR_ERR_NULL` (-1) on a NULL LocRib
+ * / NULL callback / NULL prefix_out.
+ *
+ * # Safety
+ * `r` must be a valid LocRib handle. `cb` must be a non-NULL function
+ * pointer. `prefix_out` must point to at least 18 writable bytes per
+ * call (the FFI writes the first 4 for IPv4, all 16 for IPv6).
+ */
+int64_t lr_loc_rib_iter_sets(lr_loc_rib_t r, void (*cb)(uint8_t *prefix_out,
+                                                        uint8_t prefix_len,
+                                                        uint8_t is_ipv6,
+                                                        uintptr_t path_count,
+                                                        void *user), void *user);
+
+/**
+ * Walk every route in the Adj-RIB-In, regardless of origin. The
+ * caller provides a callback that receives one route handle per
+ * iteration (borrowed — do not free). Returns the number of routes
+ * visited, or `LR_ERR_NULL` (-1) on a NULL AdjRibIn / NULL callback.
+ *
+ * # Safety
+ * `r` must be a valid AdjRibIn handle. `cb` must be a non-NULL
+ * function pointer that does not free `route` and does not call back
+ * into the FFI on the same AdjRibIn handle.
+ */
+int64_t lr_adj_rib_in_iter_all(lr_adj_rib_in_t r,
+                               void (*cb)(lr_route_t route, void *user),
+                               void *user);
+
+/**
+ * Walk every route in the Adj-RIB-In that originated from the given
+ * peer/protocol origin. `origin_peer` is the session handle,
+ * `origin_proto` is one of the `LR_PROTO_*` constants. Returns the
+ * number of routes visited, or `LR_ERR_NULL` (-1) on a NULL AdjRibIn
+ * / NULL callback.
+ *
+ * # Safety
+ * See [`lr_adj_rib_in_iter_all`].
+ */
+int64_t lr_adj_rib_in_iter_origin(lr_adj_rib_in_t r,
+                                  uint64_t origin_peer,
+                                  int32_t origin_proto,
+                                  void (*cb)(lr_route_t route, void *user),
+                                  void *user);
+
+/**
+ * Walk every route advertised to a given destination in the
+ * Adj-RIB-Out. `origin_peer` is the destination session handle,
+ * `origin_proto` is one of the `LR_PROTO_*` constants. Returns the
+ * number of routes visited, or `LR_ERR_NULL` (-1) on a NULL
+ * AdjRibOut / NULL callback.
+ *
+ * # Safety
+ * See [`lr_adj_rib_in_iter_all`].
+ */
+int64_t lr_adj_rib_out_iter_for(lr_adj_rib_out_t r,
+                                uint64_t origin_peer,
+                                int32_t origin_proto,
+                                void (*cb)(lr_route_t route, void *user),
+                                void *user);
 
 /**
  * Create an empty ROA store. NULL on panic (last-error set).
