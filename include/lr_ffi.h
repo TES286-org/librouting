@@ -1705,6 +1705,58 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_TCP_AUTH_MAX_KEY_LEN 80
 
 /**
+ * The route-map chain accepted the route (RFC 4271 §9.1.2.2 step 9).
+ */
+#define LR_POLICY_VERDICT_ACCEPT 0
+
+/**
+ * The route-map chain rejected the route.
+ */
+#define LR_POLICY_VERDICT_REJECT 1
+
+/**
+ * The route-map chain fell through with no match — the caller
+ * should consult the next policy in line.
+ */
+#define LR_POLICY_VERDICT_CONTINUE 2
+
+/**
+ * The SetAction was applied successfully.
+ */
+#define LR_APPLY_SET_ERROR_OK 0
+
+/**
+ * SetLocalPref cannot apply when the bgp feature is disabled.
+ */
+#define LR_APPLY_SET_ERROR_LOCAL_PREF_NO_BGP 1
+
+/**
+ * SetMed cannot apply when the bgp feature is disabled.
+ */
+#define LR_APPLY_SET_ERROR_MED_NO_BGP 2
+
+/**
+ * PrependAs cannot apply when the bgp feature is disabled.
+ */
+#define LR_APPLY_SET_ERROR_PREPEND_AS_NO_BGP 3
+
+/**
+ * AddCommunity cannot apply when the bgp feature is disabled.
+ */
+#define LR_APPLY_SET_ERROR_ADD_COMMUNITY_NO_BGP 4
+
+/**
+ * The SetAction variant is not yet wired into the route's attribute
+ * set (a future extension).
+ */
+#define LR_APPLY_SET_ERROR_NOT_WIRED 5
+
+/**
+ * Unknown SetAction variant.
+ */
+#define LR_APPLY_SET_ERROR_UNKNOWN 6
+
+/**
  * ORIGIN values (RFC 4271 §5.1.1).
  */
 #define LR_ORIGIN_IGP 0
@@ -3797,14 +3849,11 @@ typedef struct OpaqueDamping {
 
 typedef struct OpaqueDamping *lr_damping_t;
 
-/**
- * Opaque prefix-list handle (`lr_policy::PrefixList`).
- */
-typedef struct OpaquePrefixList {
+typedef struct OpaquePolicyChain {
   uint8_t _private[0];
-} OpaquePrefixList;
+} OpaquePolicyChain;
 
-typedef struct OpaquePrefixList *lr_prefix_list_t;
+typedef struct OpaquePolicyChain *lr_policy_chain_t;
 
 /**
  * Opaque route-map handle (`lr_policy::RouteMap`).
@@ -3814,6 +3863,32 @@ typedef struct OpaqueRouteMap {
 } OpaqueRouteMap;
 
 typedef struct OpaqueRouteMap *lr_route_map_t;
+
+/**
+ * Opaque policy resolver handle (`lr_policy::PolicySet`): the named
+ * registry of prefix-lists / AS-path filters / community lists that
+ * route-map match conditions resolve against.
+ */
+typedef struct OpaqueResolver {
+  uint8_t _private[0];
+} OpaqueResolver;
+
+typedef struct OpaqueResolver *lr_resolver_t;
+
+typedef struct OpaquePolicy {
+  uint8_t _private[0];
+} OpaquePolicy;
+
+typedef struct OpaquePolicy *lr_policy_t;
+
+/**
+ * Opaque prefix-list handle (`lr_policy::PrefixList`).
+ */
+typedef struct OpaquePrefixList {
+  uint8_t _private[0];
+} OpaquePrefixList;
+
+typedef struct OpaquePrefixList *lr_prefix_list_t;
 
 /**
  * One route-map match condition.
@@ -3860,17 +3935,6 @@ typedef struct lr_set_t {
    */
   uint16_t value2;
 } lr_set_t;
-
-/**
- * Opaque policy resolver handle (`lr_policy::PolicySet`): the named
- * registry of prefix-lists / AS-path filters / community lists that
- * route-map match conditions resolve against.
- */
-typedef struct OpaqueResolver {
-  uint8_t _private[0];
-} OpaqueResolver;
-
-typedef struct OpaqueResolver *lr_resolver_t;
 
 /**
  * One FRR-dialect AS-path access-list filter.
@@ -13866,6 +13930,119 @@ int32_t lr_damping_decay(struct OpaqueDamping *d, uint64_t now_s);
  * that has not been destroyed yet, and must not be used afterwards.
  */
 void lr_damping_destroy(struct OpaqueDamping *d);
+
+/**
+ * Construct an empty PolicyChain. Returns NULL on a panic.
+ */
+lr_policy_chain_t lr_policy_chain_new(void);
+
+/**
+ * Push a route-map onto the chain. The route-map handle is
+ * borrowed — the caller retains ownership. Returns 0 on success,
+ * `LR_ERR_NULL` (-1) on a NULL chain or NULL map handle.
+ *
+ * # Safety
+ * `chain` must be a valid handle. `map` must be a valid
+ * `lr_route_map_t` handle.
+ */
+int32_t lr_policy_chain_push(lr_policy_chain_t chain, lr_route_map_t map);
+
+/**
+ * Evaluate the chain against a route. The route handle is borrowed
+ * — mutations from `SetAction` entries persist on the route. The
+ * resolver handle is also borrowed (use `lr_resolver_new` to build
+ * one). Returns one of `LR_POLICY_VERDICT_*`, or
+ * `LR_POLICY_VERDICT_CONTINUE` (2) when the chain fell through.
+ *
+ * # Safety
+ * `chain` must be a valid handle. `route` must be a valid
+ * `lr_route_t` handle. `resolver` must be a valid `lr_resolver_t`
+ * handle.
+ */
+uint8_t lr_policy_chain_evaluate(lr_policy_chain_t chain, lr_route_t route, lr_resolver_t resolver);
+
+/**
+ * Number of route-maps in the chain.
+ *
+ * # Safety
+ * `chain` must be a valid handle.
+ */
+uintptr_t lr_policy_chain_len(lr_policy_chain_t chain);
+
+/**
+ * Drop a PolicyChain handle. Safe to call with NULL.
+ *
+ * # Safety
+ * `chain` must have been produced by `lr_policy_chain_new` and not
+ * already freed.
+ */
+void lr_policy_chain_free(lr_policy_chain_t chain);
+
+/**
+ * Construct a named Policy with an empty chain. `name` is a
+ * NUL-terminated UTF-8 string. Returns NULL on a NULL name or a
+ * panic.
+ *
+ * # Safety
+ * `name` must point to a NUL-terminated UTF-8 string.
+ */
+lr_policy_t lr_policy_new(const char *name);
+
+/**
+ * Read the policy's name into a thread-local NUL-terminated buffer.
+ * The pointer is valid until the next call to `lr_policy_name` on
+ * this thread.
+ *
+ * # Safety
+ * `p` must be a valid handle.
+ */
+const char *lr_policy_name(lr_policy_t p);
+
+/**
+ * Borrow the policy's chain for evaluation. The returned handle is
+ * NOT owned — do not free it. Returns NULL on a NULL policy.
+ *
+ * # Safety
+ * `p` must be a valid handle.
+ */
+lr_policy_chain_t lr_policy_chain(lr_policy_t p);
+
+/**
+ * Drop a Policy handle. Safe to call with NULL.
+ *
+ * # Safety
+ * `p` must have been produced by `lr_policy_new` and not already
+ * freed.
+ */
+void lr_policy_free(lr_policy_t p);
+
+/**
+ * Look up the discriminant of an `ApplySetError` produced by
+ * `apply_set_checked`. Returns one of `LR_APPLY_SET_ERROR_*`. The
+ * caller passes the `SetAction` kind + the route handle — the FFI
+ * applies the action via `apply_set_checked` and returns the
+ * resulting error code (or `LR_APPLY_SET_ERROR_OK` = 0 when the
+ * action succeeded).
+ *
+ * `set_kind` is one of `LR_SET_*` (e.g. `LR_SET_LOCAL_PREF`,
+ * `LR_SET_MED`, `LR_SET_PREPEND_AS`, `LR_SET_ADD_COMMUNITY`). The
+ * per-action arguments are passed via the `arg1` / `arg2` / `arg3`
+ * triple — see each `LR_SET_*` for the per-kind argument shape.
+ *
+ * # Safety
+ * `route` must be a valid `lr_route_t` handle.
+ */
+uint8_t lr_apply_set_checked(lr_route_t route,
+                             uint8_t set_kind,
+                             uint32_t arg1,
+                             uint32_t arg2,
+                             uint32_t arg3);
+
+/**
+ * Look up the `ApplySetError` discriminant name. Returns a
+ * thread-local pointer to a NUL-terminated string.
+ */
+const char *lr_apply_set_error_name(uint8_t code);
 
 /**
  * Create a route handle for an IPv4 prefix. `protocol` is an

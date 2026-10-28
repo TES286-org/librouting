@@ -24,6 +24,16 @@ impl PolicyChain {
         self.maps.push(m);
     }
 
+    /// Number of route-maps in the chain.
+    pub fn len(&self) -> usize {
+        self.maps.len()
+    }
+
+    /// True when the chain holds no route-maps.
+    pub fn is_empty(&self) -> bool {
+        self.maps.is_empty()
+    }
+
     pub fn evaluate(&self, route: &mut Route, resolver: &dyn MatchResolver) -> PolicyVerdict {
         for m in &self.maps {
             match m.evaluate(route, resolver) {

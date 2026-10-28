@@ -92,6 +92,7 @@ pub mod ospf_spf;
 pub mod osroute;
 pub mod osroute_helpers;
 pub mod policy;
+pub mod policy_batch;
 pub mod policy_objects;
 pub mod policy_safety;
 pub mod rib;
