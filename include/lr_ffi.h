@@ -3376,6 +3376,40 @@ typedef struct OpaqueTcpAuth {
 typedef struct OpaqueTcpAuth *lr_tcp_auth_t;
 
 /**
+ * One IPv4 interface address (RFC 2328 §A.3.2 — addr + prefix_len).
+ */
+typedef struct lr_osroute_interface_v4_addr_t {
+  uint8_t addr[4];
+  uint8_t prefix_len;
+} lr_osroute_interface_v4_addr_t;
+
+/**
+ * One IPv4 interface address (RFC 2328 §A.3.2 — addr + prefix_len).
+ * Defined here (in the non-Linux stub module) so the type is
+ * always present in the header — the Linux impl re-exports the
+ * same shape.
+ */
+typedef struct lr_osroute_interface_v4_addr_t {
+  uint8_t addr[4];
+  uint8_t prefix_len;
+} lr_osroute_interface_v4_addr_t;
+
+/**
+ * One IPv6 interface address.
+ */
+typedef struct lr_osroute_interface_v6_addr_t {
+  uint8_t addr[16];
+  uint8_t prefix_len;
+  uint32_t scope_id;
+} lr_osroute_interface_v6_addr_t;
+
+typedef struct lr_osroute_interface_v6_addr_t {
+  uint8_t addr[16];
+  uint8_t prefix_len;
+  uint32_t scope_id;
+} lr_osroute_interface_v6_addr_t;
+
+/**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
  */
@@ -12540,6 +12574,146 @@ lr_tcp_auth_t lr_tcp_auth_new_ao(const struct lr_tcp_ao_key_t *keys,
  * already freed.
  */
 void lr_tcp_auth_free(lr_tcp_auth_t auth);
+
+/**
+ * The dotted-quad mask for a prefix length (RFC 2328 §A.4 — invalid
+ * lengths saturate: >32 becomes /32, the wire encoder rejects them
+ * earlier anyway).
+ */
+uint32_t lr_osroute_prefix_mask(uint8_t prefix_len);
+
+/**
+ * Ask the kernel what source address it would use for an outbound
+ * connection to `peer`, and compare it with the configured `local`
+ * (RFC 7552 §6.1 — the LDP transport-address sanity check). The
+ * result is written to `*out_kind`:
+ *
+ * - 0 = `Ok` (the configured `local` is usable)
+ * - 1 = `Mismatch` (the kernel would source from a different address)
+ * - 2 = `BindFails` (the configured `local` is not on any interface)
+ * - 3 = `NoRoute` (the kernel has no route to `peer`)
+ *
+ * On platforms that do not implement the diagnostic (Linux today),
+ * the result is `Ok` (0) — same as the Rust API.
+ *
+ * # Safety
+ * `local` must point to 4 (v4) or 16 (v6) readable bytes; `peer`
+ * likewise. `out_kind` must point to a writable `uint8_t`.
+ */
+int32_t lr_osroute_check_source_compatibility(uint8_t local_is_v6,
+                                              const uint8_t *local,
+                                              uint8_t peer_is_v6,
+                                              const uint8_t *peer,
+                                              uint8_t *out_kind);
+
+/**
+ * Resolve an interface name to its kernel index. Returns 0 when
+ * the interface is not found.
+ *
+ * # Safety
+ * `interface` must be a NUL-terminated UTF-8 C string.
+ */
+uint32_t lr_osroute_ifindex_of(const char *interface);
+
+/**
+ * Resolve an interface name to its IPv6 scope id (RFC 4291 — the
+ * sin6_scope_id, may differ from the ifindex on Windows). Returns
+ * 0 when the interface is not found.
+ *
+ * # Safety
+ * `interface` must be a NUL-terminated UTF-8 C string.
+ */
+uint32_t lr_osroute_ipv6_ifindex_of(const char *interface);
+
+/**
+ * Enumerate every IPv4 address on `interface`. Writes the count
+ * to `*out_count` and a freshly-allocated array of
+ * `lr_osroute_interface_v4_addr_t` to `*out_array`. The caller
+ * frees the array with
+ * [`lr_osroute_interface_v4_addr_array_free`].
+ *
+ * # Safety
+ * `interface` must be a NUL-terminated UTF-8 C string. Both
+ * out-pointers must point to writable memory.
+ */
+int32_t lr_osroute_interface_v4_addrs(const char *interface,
+                                      uintptr_t *out_count,
+                                      struct lr_osroute_interface_v4_addr_t **out_array);
+
+/**
+ * Free a v4 address array produced by
+ * [`lr_osroute_interface_v4_addrs`]. Safe on NULL.
+ *
+ * # Safety
+ * `arr` must have been produced by `lr_osroute_interface_v4_addrs`
+ * and not already freed; `count` must match the count returned by
+ * the enumeration call.
+ */
+void lr_osroute_interface_v4_addr_array_free(struct lr_osroute_interface_v4_addr_t *arr,
+                                             uintptr_t count);
+
+/**
+ * Enumerate every IPv6 address on `interface`. Same shape as the
+ * v4 helper but the address is 16 bytes and the struct carries a
+ * `scope_id` (RFC 4291 — non-zero for link-local).
+ *
+ * # Safety
+ * See [`lr_osroute_interface_v4_addrs`].
+ */
+int32_t lr_osroute_interface_v6_addrs(const char *interface,
+                                      uintptr_t *out_count,
+                                      struct lr_osroute_interface_v6_addr_t **out_array);
+
+/**
+ * Free a v6 address array produced by
+ * [`lr_osroute_interface_v6_addrs`]. Safe on NULL.
+ *
+ * # Safety
+ * See [`lr_osroute_interface_v4_addr_array_free`].
+ */
+void lr_osroute_interface_v6_addr_array_free(struct lr_osroute_interface_v6_addr_t *arr,
+                                             uintptr_t count);
+
+/**
+ * True when the kernel has MPLS routing enabled
+ * (`/proc/sys/net/mpls/platform_labels` is non-zero).
+ */
+uint8_t lr_osroute_mpls_enabled(void);
+
+/**
+ * True when the kernel has SRv6 (segment routing) enabled.
+ */
+uint8_t lr_osroute_seg6_enabled(void);
+
+/**
+ * True when the BFD receive-side TTL check is enforced by the
+ * platform (RFC 5881 §5 — Linux yes, BSD/macOS/Windows no).
+ */
+uint8_t lr_osroute_ttl_check_enforced(void);
+
+uint32_t lr_osroute_ifindex_of(const char *_interface);
+
+uint32_t lr_osroute_ipv6_ifindex_of(const char *_interface);
+
+int32_t lr_osroute_interface_v4_addrs(const char *_interface,
+                                      uintptr_t *out_count,
+                                      struct lr_osroute_interface_v4_addr_t **out_array);
+
+void lr_osroute_interface_v4_addr_array_free(struct lr_osroute_interface_v4_addr_t *_arr,
+                                             uintptr_t _count);
+
+int32_t lr_osroute_interface_v6_addrs(const char *_interface,
+                                      uintptr_t *out_count,
+                                      struct lr_osroute_interface_v6_addr_t **out_array);
+
+void lr_osroute_interface_v6_addr_array_free(struct lr_osroute_interface_v6_addr_t *_arr,
+                                             uintptr_t _count);
+
+uint8_t lr_osroute_mpls_enabled(void);
+
+uint8_t lr_osroute_seg6_enabled(void);
+
+uint8_t lr_osroute_ttl_check_enforced(void);
 
 /**
  * Install one redistribution pipe on the router.
