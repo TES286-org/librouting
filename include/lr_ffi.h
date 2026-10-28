@@ -5867,6 +5867,97 @@ struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t i
 void lr_bgp_ls_tlv_vec_free(lr_bgp_ls_tlv_vec_t vec);
 
 /**
+ * Construct an OPEN message (RFC 4271 §4.2). `version` is forced to
+ * 4 per RFC 4271 §4.2; an `as4` flag of 1 attaches the RFC 6793
+ * four-octet-AS capability (code 65) with the full 32-bit AS — an
+ * AS above 65535 then travels as AS_TRANS (23456) in the 16-bit
+ * field per RFC 4893 §7. Returns NULL on a panic.
+ *
+ * Hold time 0 (use the negotiated default) or >= 3 per RFC 4271
+ * §4.2; the illegal 1-2 second values are rejected with
+ * `LR_ERR_OTHER` (-6) and a last-error string.
+ */
+lr_bgp_message_t lr_bgp_message_new_open(uint32_t my_as,
+                                         uint16_t hold_time,
+                                         uint32_t bgp_id,
+                                         uint8_t as4);
+
+/**
+ * Construct an empty UPDATE message (RFC 4271 §4.3). Use
+ * [`lr_bgp_message_update_with_withdrawn`] /
+ * [`lr_bgp_message_update_with_nlri`] / the path-attribute helpers
+ * on a `PathAttributes` handle to populate it. Returns NULL on a
+ * panic.
+ *
+ * Note: this is a bare Update — no attributes, no NLRI. A C
+ * embedder typically builds the path attributes separately and
+ * then calls this constructor as the starting point; the final
+ * message is what gets handed to `lr_bgp_codec_encode_vec`.
+ */
+lr_bgp_message_t lr_bgp_message_new_update(void);
+
+/**
+ * Construct a NOTIFICATION message (RFC 4271 §4.5): the error code,
+ * the subcode and the optional data payload (NULL when `data_len` is
+ * 0). Returns NULL on a panic.
+ */
+lr_bgp_message_t lr_bgp_message_new_notification(uint8_t error_code,
+                                                 uint8_t error_subcode,
+                                                 const uint8_t *data,
+                                                 uintptr_t data_len);
+
+/**
+ * Construct a NOTIFICATION message from a typed error code (RFC 4271
+ * §6). Maps the enum to its u8 form and forwards to
+ * [`lr_bgp_message_new_notification`]. The `error_code` argument
+ * must be a value returned by `lr_bgp_error_code_to_u8` (or the raw
+ * RFC 4271 value). Returns NULL on a panic.
+ */
+lr_bgp_message_t lr_bgp_message_new_notification_from_code(uint8_t error_code,
+                                                           uint8_t error_subcode,
+                                                           const uint8_t *data,
+                                                           uintptr_t data_len);
+
+/**
+ * Construct a KEEPALIVE message (RFC 4271 §4.4). The unit struct
+ * has no body — returns a handle whose only useful reader is
+ * `lr_bgp_message_type` (which returns `LR_BGP_MSG_KEEPALIVE`).
+ */
+lr_bgp_message_t lr_bgp_message_new_keepalive(void);
+
+/**
+ * Construct a ROUTE-REFRESH message (RFC 2918 / RFC 7313). `afi`
+ * and `safi` select the address family; `subtype` is one of
+ * `LR_BGP_RR_SUBTYPE_*` (0 = normal, 1 = BoRR, 2 = EoRR). Returns
+ * NULL on a panic.
+ */
+lr_bgp_message_t lr_bgp_message_new_route_refresh(uint16_t afi, uint8_t safi, uint8_t subtype);
+
+/**
+ * Construct a BoRR (Beginning-of-RIB Route Refresh) message (RFC 7313
+ * §3.2). Shorthand for `lr_bgp_message_new_route_refresh(afi, safi, 1)`.
+ */
+lr_bgp_message_t lr_bgp_message_new_begin_of_rib(uint16_t afi, uint8_t safi);
+
+/**
+ * Construct an EoRR (End-of-RIB Route Refresh) message (RFC 7313
+ * §3.2). Shorthand for `lr_bgp_message_new_route_refresh(afi, safi, 2)`.
+ */
+lr_bgp_message_t lr_bgp_message_new_end_of_rib(uint16_t afi, uint8_t safi);
+
+/**
+ * Construct an OPEN message and attach the four-octet-AS capability
+ * (RFC 6793) only when `my_as > 0xffff`. Convenience wrapper around
+ * [`lr_bgp_message_new_open`] so the embedder does not have to track
+ * the `as4` flag manually. Returns NULL on a panic or on the
+ * illegal hold-time / AS-range cases documented on
+ * [`lr_bgp_message_new_open`].
+ */
+lr_bgp_message_t lr_bgp_message_new_open_auto_as4(uint32_t my_as,
+                                                  uint16_t hold_time,
+                                                  uint32_t bgp_id);
+
+/**
  * Translate an `AttrType` value to its RFC 4271 §5 wire code (1..).
  * Returns 0 for `Other(u8)` values whose wire code is 0 (unreachable
  * in practice — `AttrType::Other(v)` always carries `v != 0`).

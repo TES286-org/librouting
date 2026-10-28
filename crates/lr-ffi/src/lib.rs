@@ -38,6 +38,7 @@ pub mod bgp_communities;
 pub mod bgp_enums;
 pub mod bgp_errors;
 pub mod bgp_ls;
+pub mod bgp_message_constructors;
 pub mod bgp_path;
 pub mod bgp_peer;
 pub mod bgp_role_helpers;
