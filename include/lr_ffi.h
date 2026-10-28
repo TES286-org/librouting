@@ -1567,6 +1567,38 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_OSPF_EXT_PREFIX_METRIC_MASK 16777215
 
+/**
+ * DBD Initial bit (RFC 2328 §A.3.3 — Imms byte bit 2).
+ */
+#define LR_OSPF_DD_I 4
+
+/**
+ * DBD More bit (RFC 2328 §A.3.3 — Imms byte bit 1).
+ */
+#define LR_OSPF_DD_M 2
+
+/**
+ * DBD Master/Slave bit (RFC 2328 §A.3.3 — Imms byte bit 0).
+ */
+#define LR_OSPF_DD_MS 1
+
+/**
+ * v2 DBD overhead per packet (RFC 2328 §A.3.1 + §A.3.3 — IPv4(20)
+ * + OSPFv2 header(24) + DBD fixed body(8) = 52 bytes).
+ */
+#define LR_OSPF_DD_OVERHEAD_V2 52
+
+/**
+ * v3 DBD overhead per packet (RFC 5340 §A.3.1 + §A.3.3 — IPv6(40)
+ * + OSPFv3 header(16) + DBD fixed body(12) = 68 bytes).
+ */
+#define LR_OSPF_DD_OVERHEAD_V3 68
+
+/**
+ * Default RxmtInterval (RFC 2328 Appendix B — 5 s, BIRD/FRR default).
+ */
+#define LR_OSPF_RXMT_INTERVAL_MS 5000
+
 #define LR_OSPF_PHASE_EX_START 1
 
 #define LR_OSPF_PHASE_EXCHANGE 2
@@ -13116,6 +13148,50 @@ uint8_t lr_ospf_retransmit_remove(lr_ospf_retransmit_t r,
                                   uint32_t adv_router);
 
 void lr_ospf_retransmit_clear(lr_ospf_retransmit_t r);
+
+/**
+ * Apply one LS-Acknowledgment packet (RFC 2328 §13.7) to the
+ * retransmission list: for every header in `acks`, the matching
+ * entry is removed. Returns the number of entries actually
+ * removed — useful for diagnostics when an ack references LSAs we
+ * never flooded (a stray / duplicate ack per §13.7 step 5).
+ *
+ * Matching is by LSA identity (type / LS-ID / advertising router),
+ * NOT by sequence number or checksum, per §13.7 step 5: the
+ * receiver may acknowledge an older instance, which still clears
+ * the entry because the receiver is signaling "I have a more
+ * recent instance than the one you sent".
+ *
+ * `acks` is a flat array of `lr_ospf_lsa_hdr_t` structs (the
+ * same C struct used by `lr_ospf_lsa_header_*`); `count` is the
+ * number of headers.
+ *
+ * # Safety
+ * `r` must be a valid handle. `acks` must point to `count` readable
+ * `lr_ospf_lsa_hdr_t` entries (or be NULL when `count == 0`).
+ */
+uintptr_t lr_ospf_retransmit_apply_acks(lr_ospf_retransmit_t r,
+                                        const struct lr_ospf_lsa_hdr_t *acks,
+                                        uintptr_t count);
+
+/**
+ * Walk the list and return the LSAs whose `now_ms - last_sent_ms >=
+ * rxmt_interval` (RFC 2328 §13.6). The returned LSAs are NOT
+ * removed from the list; their `last_sent_ms` is bumped to `now_ms`
+ * so the next retransmit cycle waits another full `rxmt_interval`.
+ * The caller owns the returned `lr_ospf_lsa_box_t*` array and must
+ * free it via [`lr_ospf_lsa_array_free`].
+ *
+ * # Safety
+ * `r` must be a valid handle. `out` must point to a writable
+ * `lr_ospf_lsa_box_t*` (initialized to NULL); `out_count` must
+ * point to a writable `usize` (initialized to 0).
+ */
+int32_t lr_ospf_retransmit_poll(lr_ospf_retransmit_t r,
+                                uint64_t now_ms,
+                                uint64_t rxmt_interval_ms,
+                                lr_ospf_lsa_box_t **out,
+                                uintptr_t *out_count);
 
 /**
  * Run the RFC 2328 §16.1 intra-area SPF on `lsdb` rooted at

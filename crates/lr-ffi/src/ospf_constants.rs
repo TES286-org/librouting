@@ -189,6 +189,27 @@ pub const LR_OSPF_SUBTLV_ROUTE_TAG: u16 = 3;
 pub const LR_OSPF_EXT_PREFIX_BIT_E: u32 = 0x0400_0000;
 pub const LR_OSPF_EXT_PREFIX_METRIC_MASK: u32 = 0x00ff_ffff;
 
+// ---- Exchange driver constants (RFC 2328 §10.3 / §10.6 / §10.8) ----
+// Mirrors lr_ospf::exchange::{DD_I, DD_M, DD_MS, DD_OVERHEAD_V2,
+// DD_OVERHEAD_V3, RXMT_INTERVAL_MS}.
+
+/// DBD Initial bit (RFC 2328 §A.3.3 — Imms byte bit 2).
+pub const LR_OSPF_DD_I: u8 = 0x04;
+/// DBD More bit (RFC 2328 §A.3.3 — Imms byte bit 1).
+pub const LR_OSPF_DD_M: u8 = 0x02;
+/// DBD Master/Slave bit (RFC 2328 §A.3.3 — Imms byte bit 0).
+pub const LR_OSPF_DD_MS: u8 = 0x01;
+
+/// v2 DBD overhead per packet (RFC 2328 §A.3.1 + §A.3.3 — IPv4(20)
+/// + OSPFv2 header(24) + DBD fixed body(8) = 52 bytes).
+pub const LR_OSPF_DD_OVERHEAD_V2: usize = 52;
+/// v3 DBD overhead per packet (RFC 5340 §A.3.1 + §A.3.3 — IPv6(40)
+/// + OSPFv3 header(16) + DBD fixed body(12) = 68 bytes).
+pub const LR_OSPF_DD_OVERHEAD_V3: usize = 68;
+
+/// Default RxmtInterval (RFC 2328 Appendix B — 5 s, BIRD/FRR default).
+pub const LR_OSPF_RXMT_INTERVAL_MS: u64 = 5_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +296,16 @@ mod tests {
         );
 
         assert_eq!(LR_OSPF_NSSA_N_P_BIT, lr_ospf::nssa::N_P_BIT);
+
+        // Exchange driver constants (RFC 2328 §10.3 / §10.6 / §10.8).
+        assert_eq!(LR_OSPF_DD_I, lr_ospf::exchange::DD_I);
+        assert_eq!(LR_OSPF_DD_M, lr_ospf::exchange::DD_M);
+        assert_eq!(LR_OSPF_DD_MS, lr_ospf::exchange::DD_MS);
+        assert_eq!(LR_OSPF_DD_OVERHEAD_V2, lr_ospf::exchange::DD_OVERHEAD_V2);
+        assert_eq!(LR_OSPF_DD_OVERHEAD_V3, lr_ospf::exchange::DD_OVERHEAD_V3);
+        assert_eq!(
+            LR_OSPF_RXMT_INTERVAL_MS,
+            lr_ospf::exchange::RXMT_INTERVAL_MS
+        );
     }
 }
