@@ -9609,6 +9609,129 @@ uint8_t lr_ldp_transit_release(lr_ldp_transit_t a,
                                uint32_t *out_label);
 
 /**
+ * Compute the link cost from a peer's RX cost (RFC 8966 §3.4.2).
+ */
+uint32_t lr_babel_link_cost(uint16_t rxcost);
+
+/**
+ * The RTT-based extra link cost (RFC 8966 §A.2.4, BABEL-RTT): a
+ * linear ramp from 0 at `rtt_min_us` to `max_penalty` at
+ * `rtt_max_us`, clamped at `max_penalty` above it.
+ * `max_penalty == 0` disables the feature.
+ */
+uint16_t lr_babel_rtt_penalty(uint32_t rtt_us,
+                              uint32_t rtt_min_us,
+                              uint32_t rtt_max_us,
+                              uint16_t max_penalty);
+
+/**
+ * Compute the total route metric: sum of link costs (RFC 8966 §3.1).
+ *
+ * # Safety
+ * `link_metrics` must point to `count` readable `uint32_t` values.
+ */
+uint32_t lr_babel_route_metric(const uint32_t *link_metrics, uintptr_t count);
+
+/**
+ * Feasibility condition (RFC 8966 §3.2.2): a route is feasible iff
+ * its (seqno, metric) pair is strictly better than the current
+ * best-known feasible metric for the same source. Returns 1 when
+ * feasible, 0 when not.
+ */
+uint8_t lr_babel_feasible(uint16_t route_seqno,
+                          uint32_t route_metric,
+                          uint16_t feasible_seqno,
+                          uint32_t feasible_metric);
+
+/**
+ * Compare two transport addresses per RFC 5036 §2.5.2. Returns:
+ * - `-1` when `a < b`
+ * - `0` when `a == b`
+ * - `1` when `a > b`
+ * - `-2` (`LR_ERR_OTHER`) when the addresses are in different
+ *   families (incomparable — no session can be established).
+ *
+ * # Safety
+ * `a` must point to 4 (v4) or 16 (v6) readable bytes; `b` likewise.
+ */
+int32_t lr_ldp_compare_transport_addrs(uint8_t a_is_v6,
+                                       const uint8_t *a,
+                                       uint8_t b_is_v6,
+                                       const uint8_t *b);
+
+/**
+ * The §2.5.2 role decision: the LSR with the higher transport
+ * address plays the active role (RFC 5036 §2.5.2). Returns:
+ * - `0` = Active (local > remote)
+ * - `1` = Passive (local <= remote)
+ * - `-1` = None (different families — no session)
+ *
+ * # Safety
+ * See [`lr_ldp_compare_transport_addrs`].
+ */
+int32_t lr_ldp_role_for(uint8_t local_is_v6,
+                        const uint8_t *local,
+                        uint8_t remote_is_v6,
+                        const uint8_t *remote);
+
+/**
+ * Compute the MPLS label a remote node's SRGB maps a SID index to
+ * (RFC 8665 §5 / RFC 8402 §3.1.1). Returns the label, or 0 with
+ * `*out_present = 0` when the index falls outside the originator's
+ * advertised range or the SID carries the V/L flags (absolute/local
+ * — the global mapping does not apply).
+ *
+ * `srgb_base` and `srgb_range` are the originator's SRGB; `sid` is
+ * the SID index; `flags` are the Prefix-SID flags (bit 0 = V, bit 1
+ * = L, per RFC 8665 §5).
+ *
+ * # Safety
+ * `out` and `out_present` must point to writable `uint32_t` / `uint8_t`.
+ */
+int32_t lr_ospf_sr_remote_label(uint32_t srgb_base,
+                                uint32_t srgb_range,
+                                uint32_t sid,
+                                uint8_t flags,
+                                uint32_t *out,
+                                uint8_t *out_present);
+
+/**
+ * Encode an RI-SR LSA body (RFC 8665 §3: the SRGB descriptor TLV).
+ * Returns the wire bytes through `*out`. Returns `LR_ERR_OTHER`
+ * when the SRGB range is zero (no SRGB to advertise).
+ *
+ * # Safety
+ * `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_ospf_sr_encode_ri_lsa_body(uint32_t srgb_base,
+                                      uint32_t srgb_range,
+                                      struct lr_bytes_t *out);
+
+/**
+ * Decode an RI-SR LSA body (RFC 8665 §3). Writes the SRGB base to
+ * `*out_srgb_base`, the SRGB range to `*out_srgb_range`, and `1`
+ * to `*out_present` when the body carries a valid SRGB; `0` to
+ * `*out_present` when the body is well-formed but carries no SRGB
+ * block. Returns `LR_ERR_INVALID_HANDLE` (-2) on a malformed body.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes; all out-pointers must
+ * point to writable memory of the documented type.
+ */
+int32_t lr_ospf_sr_decode_ri_lsa_body(const uint8_t *data,
+                                      uintptr_t len,
+                                      uint32_t *out_srgb_base,
+                                      uint32_t *out_srgb_range,
+                                      uint8_t *out_present);
+
+/**
+ * Extract the Opaque Type from an Opaque LSA's Link State ID (RFC
+ * 5250 §3.1: the high 8 bits of the LS-ID). Takes the raw 32-bit
+ * `link_state_id` field (not a full LSA handle).
+ */
+uint8_t lr_ospf_sr_opaque_type_from_lsid(uint32_t link_state_id);
+
+/**
  * Construct a `Label` with default TC=0 and TTL=64 (RFC 3032 §2.1).
  * Infallible — the value is masked to 20 bits on encode. Returns
  * `NULL` only on a panic.

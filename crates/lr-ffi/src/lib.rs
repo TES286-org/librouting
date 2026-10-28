@@ -64,6 +64,7 @@ pub mod ldp_label_store;
 pub mod ldp_session;
 pub mod ldp_tlv;
 pub mod ldp_transit;
+pub mod misc_helpers;
 pub mod mpls;
 pub mod mpls_constants;
 pub mod mrt;
