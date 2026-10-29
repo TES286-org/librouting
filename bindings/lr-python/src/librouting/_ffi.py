@@ -242,6 +242,132 @@ typedef struct lr_ospf_grace_event_t {
     uint8_t purged;
 } lr_ospf_grace_event_t;
 
+/* OSPF structured-type opaque handles (issue #92 — mirror lr_ospf
+ * crate's pub modules: retransmit / lsdb / lsa / external). */
+typedef struct OpaqueOspfRetransmitList OpaqueOspfRetransmitList;
+typedef struct OpaqueOspfRetransmitList *lr_ospf_retransmit_t;
+typedef struct OpaqueOspfLsdb OpaqueOspfLsdb;
+typedef struct OpaqueOspfLsdb *lr_ospf_lsdb_t;
+typedef struct OpaqueOspfLsaBox OpaqueOspfLsaBox;
+typedef struct OpaqueOspfLsaBox *lr_ospf_lsa_box_t;
+typedef struct OpaqueOspfLsaHdrBox OpaqueOspfLsaHdrBox;
+typedef struct OpaqueOspfLsaHdrBox *lr_ospf_lsa_hdr_box_t;
+typedef struct OpaqueOspfExternalDest OpaqueOspfExternalDest;
+typedef struct OpaqueOspfExternalDest *lr_ospf_external_dest_t;
+
+/* OSPF LSA header — fixed-layout 20-byte struct (RFC 2328 §A.4.1). */
+typedef struct lr_ospf_lsa_hdr_t {
+    uint16_t ls_age;
+    uint8_t options;
+    uint16_t ls_type;
+    uint32_t link_state_id;
+    uint32_t advertising_router;
+    uint32_t ls_sequence_number;
+    uint16_t ls_checksum;
+    uint16_t length;
+} lr_ospf_lsa_hdr_t;
+
+/* OSPF retransmit list surface (RFC 2328 §13.5/§13.6/§13.7). */
+lr_ospf_retransmit_t lr_ospf_retransmit_new(void);
+void lr_ospf_retransmit_free(lr_ospf_retransmit_t r);
+uintptr_t lr_ospf_retransmit_len(lr_ospf_retransmit_t r);
+uint8_t lr_ospf_retransmit_is_empty(lr_ospf_retransmit_t r);
+uint8_t lr_ospf_retransmit_contains(lr_ospf_retransmit_t r,
+                                    uint16_t ls_type,
+                                    uint32_t link_state_id,
+                                    uint32_t advertising_router);
+int32_t lr_ospf_retransmit_record_flood(lr_ospf_retransmit_t r,
+                                        lr_ospf_lsa_box_t lsa,
+                                        uint64_t now_ms);
+uint8_t lr_ospf_retransmit_remove(lr_ospf_retransmit_t r,
+                                  uint16_t ls_type,
+                                  uint32_t link_state_id,
+                                  uint32_t advertising_router);
+void lr_ospf_retransmit_clear(lr_ospf_retransmit_t r);
+uintptr_t lr_ospf_retransmit_apply_acks(lr_ospf_retransmit_t r,
+                                       const lr_ospf_lsa_hdr_t *acks,
+                                       uintptr_t count);
+int32_t lr_ospf_retransmit_poll(lr_ospf_retransmit_t r,
+                                uint64_t now_ms,
+                                uint64_t rxmt_interval_ms,
+                                lr_ospf_lsa_box_t **out,
+                                uintptr_t *out_count);
+
+/* OSPF LSDB surface (RFC 2328 §12). */
+lr_ospf_lsdb_t lr_ospf_lsdb_new(void);
+void lr_ospf_lsdb_free(lr_ospf_lsdb_t r);
+int32_t lr_ospf_lsdb_install(lr_ospf_lsdb_t r,
+                              lr_ospf_lsa_box_t lsa,
+                              uint64_t now_ms);
+int32_t lr_ospf_lsdb_remove(lr_ospf_lsdb_t r,
+                             uint16_t ls_type,
+                             uint32_t link_state_id,
+                             uint32_t advertising_router);
+int32_t lr_ospf_lsdb_get(lr_ospf_lsdb_t r,
+                         uint16_t ls_type,
+                         uint32_t link_state_id,
+                         uint32_t advertising_router,
+                         lr_ospf_lsa_box_t *out);
+uintptr_t lr_ospf_lsdb_len(lr_ospf_lsdb_t r);
+uint8_t lr_ospf_lsdb_is_empty(lr_ospf_lsdb_t r);
+int32_t lr_ospf_lsdb_headers(lr_ospf_lsdb_t r,
+                             lr_ospf_lsa_hdr_t **out,
+                             uintptr_t *out_count);
+void lr_ospf_lsa_hdr_array_free(lr_ospf_lsa_hdr_t *ptr, uintptr_t count);
+int32_t lr_ospf_lsdb_refresh_due(lr_ospf_lsdb_t r,
+                                 uint32_t advertising_router,
+                                 uint64_t now_ms,
+                                 lr_ospf_lsa_box_t **out,
+                                 uintptr_t *out_count);
+int32_t lr_ospf_lsdb_age_out(lr_ospf_lsdb_t r,
+                             uint64_t now_ms,
+                             lr_ospf_lsa_box_t **out,
+                             uintptr_t *out_count);
+
+/* OSPF LSA handle surface (lr_ospf::lsa::Lsa + LsaHeader). */
+lr_ospf_lsa_hdr_box_t lr_ospf_lsa_header_new(uint16_t ls_age,
+                                             uint8_t options,
+                                             uint16_t ls_type,
+                                             uint32_t link_state_id,
+                                             uint32_t advertising_router,
+                                             uint32_t ls_sequence_number,
+                                             uint16_t ls_checksum,
+                                             uint16_t length);
+lr_ospf_lsa_box_t lr_ospf_lsa_new(lr_ospf_lsa_hdr_box_t header,
+                                  const uint8_t *body,
+                                  uintptr_t body_len);
+void lr_ospf_lsa_free(lr_ospf_lsa_box_t lsa);
+int32_t lr_ospf_lsa_header_get(lr_ospf_lsa_box_t lsa,
+                               lr_ospf_lsa_hdr_t *out);
+int32_t lr_ospf_lsa_body(lr_ospf_lsa_box_t lsa, lr_bytes_t *out);
+int32_t lr_ospf_lsa_to_wire(lr_ospf_lsa_box_t lsa, lr_bytes_t *out);
+int32_t lr_ospf_lsa_finalize(lr_ospf_lsa_box_t lsa);
+uint8_t lr_ospf_lsa_handle_checksum_ok(lr_ospf_lsa_box_t lsa);
+int32_t lr_ospf_lsa_key(lr_ospf_lsa_box_t lsa,
+                        uint16_t *out_ls_type,
+                        uint32_t *out_link_state_id,
+                        uint32_t *out_advertising_router);
+void lr_ospf_lsa_array_free(lr_ospf_lsa_box_t *ptr, uintptr_t count);
+
+/* OSPF external-LSA origination surface (lr_ospf::external). */
+lr_ospf_external_dest_t lr_ospf_external_dest_new(const uint8_t *prefix_v4,
+                                                  const uint8_t *prefix_v6,
+                                                  uint8_t prefix_len,
+                                                  uint32_t metric,
+                                                  int32_t metric_type);
+void lr_ospf_external_dest_free(lr_ospf_external_dest_t d);
+int32_t lr_ospf_external_dest_set_forwarding_addr(lr_ospf_external_dest_t d,
+                                                  uint32_t forwarding_addr);
+int32_t lr_ospf_external_dest_set_route_tag(lr_ospf_external_dest_t d,
+                                            uint32_t tag);
+int32_t lr_ospf_external_dest_set_p_bit(lr_ospf_external_dest_t d,
+                                        uint8_t p);
+uint32_t lr_ospf_external_dest_metric(lr_ospf_external_dest_t d);
+int32_t lr_ospf_external_dest_metric_type(lr_ospf_external_dest_t d);
+uint32_t lr_ospf_external_dest_forwarding_addr(lr_ospf_external_dest_t d);
+uint32_t lr_ospf_external_dest_route_tag(lr_ospf_external_dest_t d);
+uint8_t lr_ospf_external_dest_p_bit(lr_ospf_external_dest_t d);
+
 uintptr_t lr_router_session_count(lr_router_t r);
 int32_t lr_router_session_summary_at(lr_router_t r,
                                      uintptr_t index,

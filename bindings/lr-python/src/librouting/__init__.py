@@ -130,6 +130,17 @@ from .srv6 import (
     Srh,
     SrhError,
 )
+from .ospf import (
+    EXTERNAL_METRIC_TYPE1,
+    EXTERNAL_METRIC_TYPE2,
+    OspfExternalDest,
+    OspfLsa,
+    OspfLsaArray,
+    OspfLsaHeader,
+    OspfLsaKey,
+    OspfLsdb,
+    OspfRetransmitList,
+)
 
 __all__ = [
     "Router",
@@ -248,6 +259,16 @@ __all__ = [
     "SRH_ERR_WRONG_ROUTING_TYPE",
     "SRH_ERR_RESERVED_FLAG_BITS",
     "SRH_ERR_UNKNOWN",
+    # OSPF structured types (RFC 2328 §13 / §13.5 / §13.6 / §13.7).
+    "OspfLsaHeader",
+    "OspfLsaKey",
+    "OspfLsa",
+    "OspfLsaArray",
+    "OspfLsdb",
+    "OspfRetransmitList",
+    "OspfExternalDest",
+    "EXTERNAL_METRIC_TYPE1",
+    "EXTERNAL_METRIC_TYPE2",
 ]
 
 # The single source of truth for the package version: pyproject.toml reads
