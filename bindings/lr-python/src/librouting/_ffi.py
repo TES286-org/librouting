@@ -610,6 +610,105 @@ int32_t lr_bfd_packet_set_desired_min_tx_interval(lr_bfd_packet_t packet, uint32
 int32_t lr_bfd_packet_set_required_min_rx_interval(lr_bfd_packet_t packet, uint32_t interval);
 int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uint32_t interval);
 void lr_bfd_packet_free(lr_bfd_packet_t packet);
+
+/* ----- SRv6 structured types (RFC 8754 / RFC 8986) -----
+ * Mirrors lr_srv6::{Sid, Locator, Srh, Behavior}. Each type is exposed
+ * as an opaque handle that owns its heap allocation; the Python wrapper
+ * (bindings/lr-python/src/librouting/srv6.py) provides the idiomatic
+ * class surface on top. */
+typedef struct OpaqueSrv6Sid OpaqueSrv6Sid;
+typedef struct OpaqueSrv6Sid *lr_srv6_sid_t;
+typedef struct OpaqueSrv6Locator OpaqueSrv6Locator;
+typedef struct OpaqueSrv6Locator *lr_srv6_locator_t;
+typedef struct OpaqueSrv6Srh OpaqueSrv6Srh;
+typedef struct OpaqueSrv6Srh *lr_srv6_srh_t;
+
+/* Sid — 128-bit SRv6 Segment Identifier (RFC 8754 §3). */
+lr_srv6_sid_t lr_srv6_sid_new(const uint8_t *octets);
+int32_t lr_srv6_sid_octets(lr_srv6_sid_t sid, uint8_t *out_octets);
+uint8_t lr_srv6_sid_is_unspecified(lr_srv6_sid_t sid);
+const uint8_t *lr_srv6_sid_as_ptr(lr_srv6_sid_t sid);
+uint8_t lr_srv6_sid_locator_slice(lr_srv6_sid_t sid,
+                                   uint8_t locator_block_bits,
+                                   uintptr_t *out_offset,
+                                   uintptr_t *out_len);
+lr_srv6_sid_t lr_srv6_sid_from_locator_tail(const uint8_t *locator,
+                                             uintptr_t locator_len,
+                                             const uint8_t *tail,
+                                             uintptr_t tail_len,
+                                             uint8_t locator_block_bits);
+uint8_t lr_srv6_sid_is_inside_locator(lr_srv6_sid_t sid,
+                                       const uint8_t *locator,
+                                       uintptr_t locator_len,
+                                       uint8_t locator_block_bits);
+void lr_srv6_sid_free(lr_srv6_sid_t sid);
+
+/* Sid text round-trip (RFC 5952 §4 canonical form). */
+int32_t lr_srv6_sid_from_str(const char *s, uint8_t *out);
+const char *lr_srv6_sid_to_str(const uint8_t *sid);
+const char *lr_srv6_sid_parse_error_name(int32_t v);
+
+/* Locator — IPv6 prefix that owns a SID block (RFC 8754 §3.1). */
+lr_srv6_locator_t lr_srv6_locator_new(const uint8_t *addr, uint8_t block_bits);
+void lr_srv6_locator_free(lr_srv6_locator_t loc);
+int32_t lr_srv6_locator_addr(lr_srv6_locator_t loc, uint8_t *out_addr);
+uint8_t lr_srv6_locator_block_bits(lr_srv6_locator_t loc);
+uintptr_t lr_srv6_locator_block_bytes(lr_srv6_locator_t loc);
+uint8_t lr_srv6_locator_contains_sid(lr_srv6_locator_t loc, lr_srv6_sid_t sid);
+lr_srv6_sid_t lr_srv6_locator_sid_with_tail(lr_srv6_locator_t loc, const uint8_t *tail);
+lr_srv6_locator_t lr_srv6_locator_from_sid(lr_srv6_sid_t sid, uint8_t block_bits);
+lr_srv6_sid_t lr_srv6_locator_sid_with_index(lr_srv6_locator_t loc, uint32_t function_index);
+
+int32_t lr_srv6_locator_from_str(const char *s,
+                                  uint8_t *out_addr,
+                                  uint8_t *out_block_bits);
+const char *lr_srv6_locator_to_str(const uint8_t *addr, uint8_t block_bits);
+const char *lr_srv6_locator_parse_error_name(int32_t v);
+
+/* Srh — Segment Routing Header (RFC 8754 §2). */
+lr_srv6_srh_t lr_srv6_srh_new(const uint8_t *data, uintptr_t count);
+lr_srv6_srh_t lr_srv6_srh_new_with_segments_left(const uint8_t *data,
+                                                  uintptr_t count,
+                                                  uint8_t segments_left);
+int32_t lr_srv6_srh_set_next_header(lr_srv6_srh_t srh, uint8_t next_header);
+int32_t lr_srv6_srh_set_flags(lr_srv6_srh_t srh, uint8_t flags);
+int32_t lr_srv6_srh_set_tag(lr_srv6_srh_t srh, uint16_t tag);
+int32_t lr_srv6_srh_set_tlvs(lr_srv6_srh_t srh,
+                              const uint8_t *tlvs,
+                              uintptr_t tlvs_len);
+uint8_t lr_srv6_srh_next_header(lr_srv6_srh_t srh);
+uint8_t lr_srv6_srh_segments_left(lr_srv6_srh_t srh);
+uint8_t lr_srv6_srh_last_entry(lr_srv6_srh_t srh);
+uint8_t lr_srv6_srh_flags(lr_srv6_srh_t srh);
+uint16_t lr_srv6_srh_tag(lr_srv6_srh_t srh);
+uintptr_t lr_srv6_srh_segment_count(lr_srv6_srh_t srh);
+int32_t lr_srv6_srh_segment_at(lr_srv6_srh_t srh, uintptr_t index, uint8_t *out);
+int32_t lr_srv6_srh_tlvs(lr_srv6_srh_t srh, lr_bytes_t *out);
+int32_t lr_srv6_srh_first_segment(lr_srv6_srh_t srh, uint8_t *out);
+int32_t lr_srv6_srh_current_destination(lr_srv6_srh_t srh, uint8_t *out);
+int32_t lr_srv6_srh_encode(lr_srv6_srh_t srh, lr_bytes_t *out);
+uintptr_t lr_srv6_srh_len(lr_srv6_srh_t srh);
+uint8_t lr_srv6_srh_is_empty(lr_srv6_srh_t srh);
+uint8_t lr_srv6_srh_hdr_ext_len(lr_srv6_srh_t srh);
+void lr_srv6_srh_free(lr_srv6_srh_t srh);
+
+/* SrhError discriminant (mirrors lr_srv6::SrhError). */
+int32_t lr_srv6_srh_err_code(void);
+int32_t lr_srv6_srh_last_err_code(void);
+
+/* Behavior — RFC 8986 endpoint behavior registry. */
+uint8_t lr_srv6_behavior_from_wire(uint16_t wire,
+                                    uint16_t *out_value,
+                                    char *out_name,
+                                    uintptr_t name_cap);
+uint16_t lr_srv6_behavior_wire_value(uint16_t wire);
+uint8_t lr_srv6_behavior_is_psp(uint16_t wire);
+uint8_t lr_srv6_behavior_is_usp(uint16_t wire);
+uint8_t lr_srv6_behavior_is_usd(uint16_t wire);
+uint8_t lr_srv6_behavior_is_decap(uint16_t wire);
+uint8_t lr_srv6_behavior_is_cross_connect(uint16_t wire);
+uint8_t lr_srv6_behavior_is_table_lookup(uint16_t wire);
+uintptr_t lr_srv6_behavior_name(uint16_t wire, char *out_name, uintptr_t name_cap);
 """
 
 
