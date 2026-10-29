@@ -2346,6 +2346,15 @@ typedef struct OpaqueBgpLsTlvVec {
 typedef struct OpaqueBgpLsTlvVec *lr_bgp_ls_tlv_vec_t;
 
 /**
+ * Opaque `BgpLsAttr` handle. C side never touches internals.
+ */
+typedef struct OpaqueBgpLsAttr {
+  uint8_t _private[0];
+} OpaqueBgpLsAttr;
+
+typedef struct OpaqueBgpLsAttr *lr_bgp_ls_attr_t;
+
+/**
  * Opaque `AsPath` handle.
  */
 typedef struct OpaqueBgpAsPath {
@@ -2623,6 +2632,30 @@ typedef struct OpaqueWriteBuf {
 typedef struct OpaqueWriteBuf *lr_write_buf_t;
 
 /**
+ * Repr-C RouteKey. Mirrors `lr_core::rib::RouteKey`.
+ */
+typedef struct lr_route_key_t {
+  struct lr_core_prefix_t prefix;
+  /**
+   * AFI/SAFI packed as `afi << 8 | safi`. See lr_core::nlri::NlriFamily.
+   */
+  uint16_t afi_safi;
+  /**
+   * 1 when `source_prefix` carries a value, 0 otherwise.
+   */
+  uint8_t has_source;
+  struct lr_core_prefix_t source_prefix;
+} lr_route_key_t;
+
+/**
+ * Repr-C `Preference` mirror.
+ */
+typedef struct lr_preference_t {
+  uint32_t admin_distance;
+  uint32_t metric;
+} lr_preference_t;
+
+/**
  * Opaque standalone `DampingTable` handle. C side never touches internals.
  */
 typedef struct OpaqueDampingTable {
@@ -2840,6 +2873,47 @@ typedef struct lr_filter_context_t {
                                   const struct lr_ext_comm_t *items,
                                   uintptr_t count);
 } lr_filter_context_t;
+
+/**
+ * Opaque `PeerConfig` handle. C side never touches internals.
+ */
+typedef struct OpaquePeerConfig {
+  uint8_t _private[0];
+} OpaquePeerConfig;
+
+typedef struct OpaquePeerConfig *lr_bgp_peer_config_t;
+
+typedef struct OpaqueSrv6Srh {
+  uint8_t _private[0];
+} OpaqueSrv6Srh;
+
+typedef struct OpaqueSrv6Srh *lr_srv6_srh_t;
+
+typedef struct OpaqueAdjRibIn {
+  uint8_t _private[0];
+} OpaqueAdjRibIn;
+
+typedef struct OpaqueAdjRibIn *lr_adj_rib_in_t;
+
+/**
+ * Repr-C RouteOrigin. Mirrors `lr_core::rib::RouteOrigin`.
+ */
+typedef struct lr_route_origin_t {
+  /**
+   * `LR_PROTOCOL_*` constant.
+   */
+  uint8_t protocol;
+  /**
+   * Per-peer session handle (0 for locally originated routes).
+   */
+  uint64_t peer;
+} lr_route_origin_t;
+
+typedef struct OpaqueAdjRibOut {
+  uint8_t _private[0];
+} OpaqueAdjRibOut;
+
+typedef struct OpaqueAdjRibOut *lr_adj_rib_out_t;
 
 /**
  * Opaque HelperEntry handle.
@@ -4093,39 +4167,11 @@ typedef struct OpaqueLocRib {
 
 typedef struct OpaqueLocRib *lr_loc_rib_t;
 
-typedef struct OpaqueAdjRibIn {
-  uint8_t _private[0];
-} OpaqueAdjRibIn;
-
-typedef struct OpaqueAdjRibIn *lr_adj_rib_in_t;
-
-typedef struct OpaqueAdjRibOut {
-  uint8_t _private[0];
-} OpaqueAdjRibOut;
-
-typedef struct OpaqueAdjRibOut *lr_adj_rib_out_t;
-
 typedef struct OpaqueRibMux {
   uint8_t _private[0];
 } OpaqueRibMux;
 
 typedef struct OpaqueRibMux *lr_rib_mux_t;
-
-/**
- * Repr-C RouteKey. Mirrors `lr_core::rib::RouteKey`.
- */
-typedef struct lr_route_key_t {
-  struct lr_core_prefix_t prefix;
-  /**
-   * AFI/SAFI packed as `afi << 8 | safi`. See lr_core::nlri::NlriFamily.
-   */
-  uint16_t afi_safi;
-  /**
-   * 1 when `source_prefix` carries a value, 0 otherwise.
-   */
-  uint8_t has_source;
-  struct lr_core_prefix_t source_prefix;
-} lr_route_key_t;
 
 /**
  * Opaque ROA store handle. C side never touches internals.
@@ -4301,12 +4347,6 @@ typedef struct OpaqueSrv6Locator {
 } OpaqueSrv6Locator;
 
 typedef struct OpaqueSrv6Locator *lr_srv6_locator_t;
-
-typedef struct OpaqueSrv6Srh {
-  uint8_t _private[0];
-} OpaqueSrv6Srh;
-
-typedef struct OpaqueSrv6Srh *lr_srv6_srh_t;
 
 /**
  * Construct an empty `Attributes`.
@@ -6390,6 +6430,82 @@ struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t i
  * and not already freed.
  */
 void lr_bgp_ls_tlv_vec_free(lr_bgp_ls_tlv_vec_t vec);
+
+/**
+ * Construct an empty `BgpLsAttr` (no TLVs).
+ */
+lr_bgp_ls_attr_t lr_bgp_ls_attr_new(void);
+
+/**
+ * Drop a boxed `BgpLsAttr`. Safe to call with NULL.
+ *
+ * # Safety
+ * `a` must have been produced by a `lr_bgp_ls_attr_*` constructor and
+ * must not be used after this call.
+ */
+void lr_bgp_ls_attr_free(lr_bgp_ls_attr_t a);
+
+/**
+ * Number of TLVs in the attribute.
+ *
+ * # Safety
+ * `a` must be a live handle.
+ */
+uintptr_t lr_bgp_ls_attr_len(lr_bgp_ls_attr_t a);
+
+/**
+ * True when no TLVs are present. Returns 1 on a NULL handle (the
+ * safe default for "nothing to encode").
+ *
+ * # Safety
+ * See [`lr_bgp_ls_attr_len`].
+ */
+uint8_t lr_bgp_ls_attr_is_empty(lr_bgp_ls_attr_t a);
+
+/**
+ * Wire length of the attribute value (concatenation of all TLVs,
+ * excluding the BGP path attribute header).
+ *
+ * # Safety
+ * See [`lr_bgp_ls_attr_len`].
+ */
+uintptr_t lr_bgp_ls_attr_value_len(lr_bgp_ls_attr_t a);
+
+/**
+ * Encode the attribute value (the TLV stream) into a freshly
+ * allocated `lr_bytes_t`. The caller frees it via `lr_bytes_free`.
+ *
+ * # Safety
+ * `a` must be a live handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_bgp_ls_attr_encode(lr_bgp_ls_attr_t a, struct lr_bytes_t *out);
+
+/**
+ * Decode the attribute value (a TLV stream) from `data`. On success
+ * writes a freshly-allocated `lr_bgp_ls_attr_t` to `*out`. Returns 0
+ * on success, `LR_ERR_NULL` on a NULL pointer, `LR_ERR_OTHER` on a
+ * parse error (the last-error string carries the detail).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `out` must point to a
+ * writable `lr_bgp_ls_attr_t`.
+ */
+int32_t lr_bgp_ls_attr_decode(const uint8_t *data, uintptr_t len, lr_bgp_ls_attr_t *out);
+
+/**
+ * Find the first TLV of a given `ty`. Returns 1 when one was found
+ * (and writes the index to `*out_index`), 0 when the type is
+ * absent, `LR_ERR_NULL` on a NULL handle.
+ *
+ * The C side reads the TLV via `lr_bgp_ls_tlv_vec_at` with the
+ * returned index — the `BgpLsAttrTlv` itself is not re-boxed here.
+ *
+ * # Safety
+ * `a` must be a live handle. `out_index` must point to a writable
+ * `uintptr_t`.
+ */
+int32_t lr_bgp_ls_attr_find(lr_bgp_ls_attr_t a, uint16_t ty, uintptr_t *out_index);
 
 /**
  * Construct an OPEN message (RFC 4271 §4.2). `version` is forced to
@@ -9353,6 +9469,91 @@ uint8_t lr_ospf_lsa_checksum_ok(const uint8_t *lsa, uintptr_t len);
 uint32_t lr_fletcher32(const uint8_t *bytes, uintptr_t len);
 
 /**
+ * Back-patch `len` bytes at offset `at` with `data`. The WriteBuf
+ * must already contain at least `at + len` bytes (write ahead, patch
+ * behind — the standard pattern for back-filling a length field after
+ * the body is encoded). Returns 0 on success, `LR_ERR_NULL` on a
+ * NULL handle / pointer, `LR_ERR_OTHER` when `at + len` overflows the
+ * written-so-far range.
+ *
+ * # Safety
+ * `w` must be a live handle. `data` must point to `len` readable bytes.
+ */
+int32_t lr_write_buf_patch(lr_write_buf_t w, uintptr_t at, const uint8_t *data, uintptr_t len);
+
+/**
+ * Reserve at least `additional` more bytes of capacity. On the
+ * growable FFI buffer this is a no-op when capacity already exceeds
+ * the request; otherwise it triggers a Vec reallocation. Returns 0 on
+ * success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * `w` must be a live handle.
+ */
+int32_t lr_write_buf_reserve(lr_write_buf_t w, uintptr_t additional);
+
+/**
+ * Total capacity (allocated bytes; may grow). Returns 0 on a NULL
+ * handle.
+ *
+ * # Safety
+ * `w` must be a live handle.
+ */
+uintptr_t lr_write_buf_capacity(lr_write_buf_t w);
+
+/**
+ * Take the bytes written so far as a freshly-allocated
+ * `lr_bytes_t` WITHOUT resetting the buffer (a snapshot). Use
+ * [`lr_write_buf_take_bytes`] for the consuming variant.
+ *
+ * # Safety
+ * `w` must be a live handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_write_buf_written(lr_write_buf_t w, struct lr_bytes_t *out);
+
+/**
+ * Borrow the remaining bytes as a freshly-allocated `lr_bytes_t`
+ * snapshot (does not advance the position). Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL handle / pointer.
+ *
+ * # Safety
+ * `r` must be a live handle. `out` must point to a writable
+ * `lr_bytes_t`.
+ */
+int32_t lr_read_buf_chunk(lr_read_buf_t r, struct lr_bytes_t *out);
+
+/**
+ * Construct a `RouteKey` from a prefix + AFI/SAFI packed as
+ * `afi << 8 | safi`. Writes the result to `*out`.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_route_key_t`.
+ */
+int32_t lr_route_key_new(struct lr_core_prefix_t prefix,
+                         uint16_t afi_safi,
+                         struct lr_route_key_t *out);
+
+/**
+ * Construct a `RouteKey` with an explicit source prefix (RFC 8966
+ * §3.1 source-specific routing). Writes the result to `*out`.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_route_key_t`.
+ */
+int32_t lr_route_key_with_source(struct lr_core_prefix_t prefix,
+                                 uint16_t afi_safi,
+                                 struct lr_core_prefix_t source,
+                                 struct lr_route_key_t *out);
+
+/**
+ * Construct a `Preference` (admin_distance + metric). Returns the
+ * value by value (a 64-bit repr-C struct — small enough to return in
+ * registers on most ABIs).
+ */
+struct lr_preference_t lr_preference_new(uint32_t admin_distance, uint32_t metric);
+
+/**
  * Construct a `DampingTable` from a config. Pass `cfg = NULL` to use
  * the RFC 2439 defaults (see [`lr_damping_default_config`]).
  */
@@ -9676,6 +9877,284 @@ int32_t lr_filter_evaluate(lr_filter_t filter,
                            const struct lr_filter_context_t *ctx,
                            int32_t *out_verdict,
                            struct lr_bytes_t *out_reason);
+
+/**
+ * Construct a `PeerConfig` with default hold_time=90, asn4=true,
+ * route_refresh=true, enhanced_rr=true, default_ipv4_unicast=true.
+ *
+ * # Safety
+ * `local_bgp_id` must point to 4 readable bytes (the BGP identifier
+ * in network byte order).
+ */
+lr_bgp_peer_config_t lr_bgp_peer_config_new(uint32_t local_as,
+                                            uint32_t peer_as,
+                                            const uint8_t *local_bgp_id);
+
+/**
+ * Drop a boxed `PeerConfig`. Safe to call with NULL.
+ *
+ * # Safety
+ * `c` must have been produced by a `lr_bgp_peer_config_*` constructor
+ * and must not be used after this call.
+ */
+void lr_bgp_peer_config_free(lr_bgp_peer_config_t c);
+
+/**
+ * Read the local AS.
+ */
+uint32_t lr_bgp_peer_config_local_as(lr_bgp_peer_config_t c);
+
+/**
+ * Read the peer AS.
+ */
+uint32_t lr_bgp_peer_config_peer_as(lr_bgp_peer_config_t c);
+
+/**
+ * Read the local BGP identifier as a 32-bit value (network byte
+ * order — write `*out`'s bytes back to a `RouterId::from_v4` to
+ * reconstruct).
+ */
+int32_t lr_bgp_peer_config_local_bgp_id(lr_bgp_peer_config_t c, uint32_t *out);
+
+/**
+ * Read the proposed hold time (seconds). 0 = use peer's value.
+ */
+uint16_t lr_bgp_peer_config_hold_time(lr_bgp_peer_config_t c);
+
+/**
+ * Read the keepalive interval (seconds). 0 = hold_time / 3.
+ */
+uint16_t lr_bgp_peer_config_keepalive(lr_bgp_peer_config_t c);
+
+/**
+ * True when 4-byte AS capability is enabled.
+ */
+uint8_t lr_bgp_peer_config_asn4(lr_bgp_peer_config_t c);
+
+/**
+ * True when route-refresh (RFC 2918) is enabled.
+ */
+uint8_t lr_bgp_peer_config_route_refresh(lr_bgp_peer_config_t c);
+
+/**
+ * True when enhanced route-refresh (RFC 7313) is enabled.
+ */
+uint8_t lr_bgp_peer_config_enhanced_rr(lr_bgp_peer_config_t c);
+
+/**
+ * True when graceful restart (RFC 4724) is enabled.
+ */
+uint8_t lr_bgp_peer_config_graceful_restart(lr_bgp_peer_config_t c);
+
+/**
+ * Read the graceful-restart time (seconds).
+ */
+uint16_t lr_bgp_peer_config_graceful_restart_time(lr_bgp_peer_config_t c);
+
+/**
+ * True when long-lived graceful restart (RFC 9494) is enabled.
+ */
+uint8_t lr_bgp_peer_config_long_lived(lr_bgp_peer_config_t c);
+
+/**
+ * Read the LLGR stale time (seconds).
+ */
+uint32_t lr_bgp_peer_config_long_lived_stale_time(lr_bgp_peer_config_t c);
+
+/**
+ * True when this is a route-reflector client.
+ */
+uint8_t lr_bgp_peer_config_is_rr_client(lr_bgp_peer_config_t c);
+
+/**
+ * True when this is a route-server client.
+ */
+uint8_t lr_bgp_peer_config_is_rs_client(lr_bgp_peer_config_t c);
+
+/**
+ * True when default IPv4 unicast is active.
+ */
+uint8_t lr_bgp_peer_config_default_ipv4_unicast(lr_bgp_peer_config_t c);
+
+/**
+ * True when AddPath (RFC 7911) is enabled.
+ */
+uint8_t lr_bgp_peer_config_add_path(lr_bgp_peer_config_t c);
+
+/**
+ * True when this is an eBGP session (peer in a different AS).
+ */
+uint8_t lr_bgp_peer_config_is_ebgp(lr_bgp_peer_config_t c);
+
+/**
+ * Read the keepalive interval derived from hold_time (RFC 4271
+ * §10 — `hold_time / 3` when `keepalive == 0`).
+ */
+uint16_t lr_bgp_peer_config_keepalive_interval(lr_bgp_peer_config_t c);
+
+/**
+ * True when IPv4 unicast is active (either explicit MP family or the
+ * implicit default).
+ */
+uint8_t lr_bgp_peer_config_ipv4_unicast_active(lr_bgp_peer_config_t c);
+
+/**
+ * Read the peer role (one of `LR_PEER_ROLE_*` constants). Returns 255
+ * on a NULL handle (no valid role).
+ */
+uint8_t lr_bgp_peer_config_peer_role(lr_bgp_peer_config_t c);
+
+/**
+ * Set the hold time (seconds). 0 = use peer's value.
+ *
+ * # Safety
+ * `c` must be a live handle.
+ */
+int32_t lr_bgp_peer_config_set_hold_time(lr_bgp_peer_config_t c, uint16_t hold_time);
+
+/**
+ * Set the keepalive interval (seconds). 0 = hold_time / 3.
+ *
+ * # Safety
+ * `c` must be a live handle.
+ */
+int32_t lr_bgp_peer_config_set_keepalive(lr_bgp_peer_config_t c, uint16_t keepalive);
+
+/**
+ * Enable or disable 4-byte AS capability.
+ *
+ * # Safety
+ * `c` must be a live handle.
+ */
+int32_t lr_bgp_peer_config_set_asn4(lr_bgp_peer_config_t c, uint8_t asn4);
+
+/**
+ * Enable or disable the route-reflector-client flag.
+ *
+ * # Safety
+ * `c` must be a live handle.
+ */
+int32_t lr_bgp_peer_config_set_rr_client(lr_bgp_peer_config_t c, uint8_t enabled);
+
+/**
+ * Enable or disable graceful restart.
+ *
+ * # Safety
+ * `c` must be a live handle.
+ */
+int32_t lr_bgp_peer_config_set_graceful_restart(lr_bgp_peer_config_t c, uint8_t enabled);
+
+/**
+ * Read the SRH's `current_destination` — the SID at
+ * `segments_left` (the destination the packet is currently
+ * forwarded to). Writes the 16-byte SID to `*out`. Returns 0 on
+ * success, 1 when the SRH has no segments, `LR_ERR_NULL` on a NULL
+ * handle / pointer.
+ *
+ * # Safety
+ * `srh` must be a live handle. `out` must point to 16 writable bytes.
+ */
+int32_t lr_srv6_srh_current_destination(lr_srv6_srh_t srh, uint8_t *out);
+
+/**
+ * Wire length of the SRH (8 fixed + 16 per segment). Returns 0 on a
+ * NULL handle (the safe default).
+ */
+uintptr_t lr_srv6_srh_len(lr_srv6_srh_t srh);
+
+/**
+ * True when the SRH carries no segments. Returns 1 on a NULL handle
+ * (the safe default).
+ */
+uint8_t lr_srv6_srh_is_empty(lr_srv6_srh_t srh);
+
+/**
+ * `Hdr Ext Len` field (RFC 8754 §2.1 — the routing extension
+ * header's length in 8-octet units, excluding the first 8 octets).
+ */
+uint8_t lr_srv6_srh_hdr_ext_len(lr_srv6_srh_t srh);
+
+/**
+ * Look up a route by `(origin, key, path_id)`. Returns 1 when found
+ * (and writes a copy of the route's bytes to `*out_route` —
+ * embedder frees with `lr_route_free`), 0 when absent, `LR_ERR_NULL`
+ * on a NULL handle / pointer.
+ *
+ * # Safety
+ * `r` must be a live AdjRibIn handle. `key` must point to a readable
+ * `lr_route_key_t`. `out_route` must point to a writable
+ * `lr_route_t`.
+ */
+int32_t lr_adj_rib_in_get(lr_adj_rib_in_t r,
+                          struct lr_route_origin_t origin,
+                          const struct lr_route_key_t *key,
+                          uint32_t path_id,
+                          lr_route_t *out_route);
+
+/**
+ * Count the origins that have a route for `key`. Returns the count,
+ * or `LR_ERR_NULL` (-1) on a NULL handle / pointer.
+ *
+ * # Safety
+ * `r` must be a live AdjRibIn handle. `key` must point to a readable
+ * `lr_route_key_t`. `out_origins` must point to a writable array of
+ * `lr_route_origin_t` with capacity `cap`. The actual count is
+ * written to `*out_count`.
+ */
+int32_t lr_adj_rib_in_origins_for(lr_adj_rib_in_t r,
+                                  const struct lr_route_key_t *key,
+                                  struct lr_route_origin_t *out_origins,
+                                  uintptr_t cap,
+                                  uintptr_t *out_count);
+
+/**
+ * Drop every route from every origin. The RIB becomes empty.
+ *
+ * # Safety
+ * `r` must be a live AdjRibIn handle.
+ */
+int32_t lr_adj_rib_in_clear(lr_adj_rib_in_t r);
+
+/**
+ * Drop every route from one origin.
+ *
+ * # Safety
+ * `r` must be a live AdjRibIn handle.
+ */
+int32_t lr_adj_rib_in_clear_for(lr_adj_rib_in_t r, struct lr_route_origin_t origin);
+
+/**
+ * Read the TX path IDs advertised to `dest` for `key`. Writes up to
+ * `cap` IDs to `*out_path_ids` and the actual count to
+ * `*out_count`.
+ *
+ * # Safety
+ * `r` must be a live AdjRibOut handle. `key` must point to a
+ * readable `lr_route_key_t`. `out_path_ids` must point to a
+ * writable array of `uint32_t` with capacity `cap`.
+ */
+int32_t lr_adj_rib_out_tx_path_ids(lr_adj_rib_out_t r,
+                                   struct lr_route_origin_t dest,
+                                   const struct lr_route_key_t *key,
+                                   uint32_t *out_path_ids,
+                                   uintptr_t cap,
+                                   uintptr_t *out_count);
+
+/**
+ * Drop every advertised route. The RIB becomes empty.
+ *
+ * # Safety
+ * `r` must be a live AdjRibOut handle.
+ */
+int32_t lr_adj_rib_out_clear(lr_adj_rib_out_t r);
+
+/**
+ * Drop every advertised route for one destination.
+ *
+ * # Safety
+ * `r` must be a live AdjRibOut handle.
+ */
+int32_t lr_adj_rib_out_clear_for(lr_adj_rib_out_t r, struct lr_route_origin_t dest);
 
 /**
  * Construct a Label with just the value (TC=0, TTL=0). Used for the

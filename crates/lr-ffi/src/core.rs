@@ -22,7 +22,8 @@
 #![allow(unused_unsafe)]
 
 use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
-use lr_core::rib::{Protocol, RouteOrigin};
+use lr_core::nlri::NlriFamily;
+use lr_core::rib::{Protocol, RouteKey, RouteOrigin};
 
 use crate::error::LR_ERR_PANIC;
 use crate::guarded;
@@ -565,6 +566,24 @@ impl From<lr_route_origin_t> for RouteOrigin {
             proto: c.protocol as u32,
             peer: c.peer,
         }
+    }
+}
+
+/// `pub(crate)` helper so other FFI modules can convert a C-side
+/// `lr_route_key_t` back to a Rust `RouteKey` without re-implementing
+/// the field-by-field translation. Mirrors the `lr_core_prefix_t -> Prefix`
+/// `From` impl on the prefix slot.
+pub(crate) fn route_key_from_c(c: &lr_route_key_t) -> RouteKey {
+    let prefix: Prefix = c.prefix.into();
+    let family = NlriFamily {
+        afi: c.afi_safi >> 8,
+        safi: (c.afi_safi & 0xff) as u8,
+    };
+    if c.has_source != 0 {
+        let source: Prefix = c.source_prefix.into();
+        RouteKey::with_source(prefix, family, source)
+    } else {
+        RouteKey::new(prefix, family)
     }
 }
 

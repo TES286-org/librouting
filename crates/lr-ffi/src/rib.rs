@@ -117,7 +117,21 @@ unsafe fn borrow_adj_rib_in_mut(r: lr_adj_rib_in_t) -> Option<&'static mut AdjRi
     }
     Some(unsafe { &mut *(r as *mut AdjRibIn) })
 }
+pub(crate) unsafe fn borrow_adj_rib_in_mut_pub(
+    r: lr_adj_rib_in_t,
+) -> Option<&'static mut AdjRibIn> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut AdjRibIn) })
+}
 unsafe fn borrow_adj_rib_in(r: lr_adj_rib_in_t) -> Option<&'static AdjRibIn> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const AdjRibIn) })
+}
+pub(crate) unsafe fn borrow_adj_rib_in_pub(r: lr_adj_rib_in_t) -> Option<&'static AdjRibIn> {
     if r.is_null() {
         return None;
     }
@@ -139,7 +153,21 @@ unsafe fn borrow_adj_rib_out_mut(r: lr_adj_rib_out_t) -> Option<&'static mut Adj
     }
     Some(unsafe { &mut *(r as *mut AdjRibOut) })
 }
+pub(crate) unsafe fn borrow_adj_rib_out_mut_pub(
+    r: lr_adj_rib_out_t,
+) -> Option<&'static mut AdjRibOut> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut AdjRibOut) })
+}
 unsafe fn borrow_adj_rib_out(r: lr_adj_rib_out_t) -> Option<&'static AdjRibOut> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(r as *const AdjRibOut) })
+}
+pub(crate) unsafe fn borrow_adj_rib_out_pub(r: lr_adj_rib_out_t) -> Option<&'static AdjRibOut> {
     if r.is_null() {
         return None;
     }

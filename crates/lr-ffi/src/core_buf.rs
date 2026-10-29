@@ -41,9 +41,9 @@ pub type lr_read_buf_t = *mut OpaqueReadBuf;
 /// it. The `ReadBuf` borrows from the buffer for the lifetime of
 /// the storage, which is `'static` from the FFI's perspective because
 /// the box pins both.
-struct ReadBufStorage {
-    buf: Vec<u8>,
-    pos: usize,
+pub(crate) struct ReadBufStorage {
+    pub(crate) buf: Vec<u8>,
+    pub(crate) pos: usize,
 }
 
 impl ReadBufStorage {
@@ -54,12 +54,26 @@ impl ReadBufStorage {
     fn as_read_buf(&mut self) -> ReadBuf<'_> {
         ReadBuf::new(&self.buf[self.pos..])
     }
+
+    /// Remaining bytes from the current position (used by
+    /// `lr_read_buf_chunk` in `core_extras_2.rs`).
+    pub(crate) fn remaining_slice(&self) -> &[u8] {
+        &self.buf[self.pos..]
+    }
 }
 
 fn box_read_buf(r: ReadBufStorage) -> lr_read_buf_t {
     Box::into_raw(Box::new(r)) as lr_read_buf_t
 }
 unsafe fn borrow_read_buf_mut(r: lr_read_buf_t) -> Option<&'static mut ReadBufStorage> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut ReadBufStorage) })
+}
+pub(crate) unsafe fn borrow_read_buf_mut_pub(
+    r: lr_read_buf_t,
+) -> Option<&'static mut ReadBufStorage> {
     if r.is_null() {
         return None;
     }
@@ -82,8 +96,8 @@ pub type lr_write_buf_t = *mut OpaqueWriteBuf;
 /// Internal storage: an owned growable `Vec<u8>`. The `WriteBuf` Rust
 /// type borrows a `&mut [u8]` slice; the FFI surface grows the Vec
 /// on demand so callers do not need to pre-size the buffer.
-struct WriteBufStorage {
-    buf: Vec<u8>,
+pub(crate) struct WriteBufStorage {
+    pub(crate) buf: Vec<u8>,
 }
 
 impl WriteBufStorage {
@@ -91,6 +105,23 @@ impl WriteBufStorage {
         Self {
             buf: Vec::with_capacity(cap),
         }
+    }
+
+    /// Borrow the bytes written so far (used by `lr_write_buf_written`
+    /// in `core_extras_2.rs`).
+    pub(crate) fn written_slice(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Patch `len` bytes at offset `at`. Returns `Err(())` when
+    /// `at + len` overflows the written-so-far range. Used by
+    /// `lr_write_buf_patch` in `core_extras_2.rs`.
+    pub(crate) fn patch(&mut self, at: usize, data: &[u8]) -> Result<(), ()> {
+        if at + data.len() > self.buf.len() {
+            return Err(());
+        }
+        self.buf[at..at + data.len()].copy_from_slice(data);
+        Ok(())
     }
 
     /// Push `b` to the end of the buffer.
@@ -124,6 +155,14 @@ fn box_write_buf(w: WriteBufStorage) -> lr_write_buf_t {
     Box::into_raw(Box::new(w)) as lr_write_buf_t
 }
 unsafe fn borrow_write_buf_mut(w: lr_write_buf_t) -> Option<&'static mut WriteBufStorage> {
+    if w.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(w as *mut WriteBufStorage) })
+}
+pub(crate) unsafe fn borrow_write_buf_mut_pub(
+    w: lr_write_buf_t,
+) -> Option<&'static mut WriteBufStorage> {
     if w.is_null() {
         return None;
     }

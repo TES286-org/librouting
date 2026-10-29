@@ -1257,7 +1257,7 @@ mod tests {
         // Or has precedence 1 (lowest). And has precedence 2.
         assert_eq!(lr_policy_binary_op_precedence(2), 1); // Or
         assert_eq!(lr_policy_binary_op_precedence(1), 2); // And
-        // Unknown op returns 0.
+                                                          // Unknown op returns 0.
         assert_eq!(lr_policy_binary_op_precedence(99), 0);
     }
 }

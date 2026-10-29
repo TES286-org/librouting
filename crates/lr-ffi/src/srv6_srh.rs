@@ -50,6 +50,12 @@ unsafe fn borrow_srh(s: lr_srv6_srh_t) -> Option<&'static Srh> {
     }
     Some(unsafe { &*(s as *const Srh) })
 }
+pub(crate) unsafe fn borrow_srh_pub(s: lr_srv6_srh_t) -> Option<&'static Srh> {
+    if s.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(s as *const Srh) })
+}
 
 unsafe fn borrow_srh_mut(s: lr_srv6_srh_t) -> Option<&'static mut Srh> {
     if s.is_null() {
