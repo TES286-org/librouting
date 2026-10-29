@@ -66,9 +66,19 @@ pub struct OpaqueMplsLabelStack {
 
 pub type lr_mpls_label_stack_t = *mut OpaqueMplsLabelStack;
 
-/// Box a `Label` into an opaque handle.
-fn box_label(l: Label) -> lr_mpls_label_t {
+/// Box a `Label` into an opaque handle. Public to crate so the
+/// gap-fill module (`crates/lr-ffi/src/gap_fill_batch.rs`) can wrap
+/// `Label::new_value` / `Label::try_new` results in the same handle
+/// type the rest of the FFI uses.
+pub(crate) fn box_label(l: Label) -> lr_mpls_label_t {
     Box::into_raw(Box::new(l)) as lr_mpls_label_t
+}
+
+/// Box a `LabelStack` into an opaque handle. Public to crate so the
+/// gap-fill module can wrap `LabelStack::from_vec` results in the
+/// same handle type the rest of the FFI uses.
+pub(crate) fn box_label_stack(s: lr_mpls::LabelStack) -> lr_mpls_label_stack_t {
+    Box::into_raw(Box::new(s)) as lr_mpls_label_stack_t
 }
 
 /// Reclaim a `Label` handle back into its boxed `Label`.

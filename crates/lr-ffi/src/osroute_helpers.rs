@@ -108,6 +108,31 @@ pub unsafe extern "C" fn lr_osroute_check_source_compatibility(
 
 // ---- Linux-gated helpers (interface enumeration, MPLS/SRv6 status) ----
 
+// Shared type definitions — declared ONCE here so cbindgen emits a
+// single typedef per type in `include/lr_ffi.h`. Both the Linux
+// helpers module and the non-Linux stubs module consume these via
+// `use super::*`; the previous shape (declaring the struct in BOTH
+// modules) caused cbindgen to emit duplicate typedefs in the header,
+// breaking every C consumer's compile.
+
+/// One IPv4 interface address (RFC 2328 §A.3.2 — addr + prefix_len).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_osroute_interface_v4_addr_t {
+    pub addr: [u8; 4],
+    pub prefix_len: u8,
+}
+
+/// One IPv6 interface address (RFC 2328 §A.3.2 + RFC 5340 §A.3.2.1 —
+/// addr + prefix_len + scope_id).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct lr_osroute_interface_v6_addr_t {
+    pub addr: [u8; 16],
+    pub prefix_len: u8,
+    pub scope_id: u32,
+}
+
 #[cfg(target_os = "linux")]
 mod linux_helpers {
     use super::*;
@@ -228,14 +253,6 @@ mod linux_helpers {
         )
     }
 
-    /// One IPv4 interface address (RFC 2328 §A.3.2 — addr + prefix_len).
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct lr_osroute_interface_v4_addr_t {
-        pub addr: [u8; 4],
-        pub prefix_len: u8,
-    }
-
     /// Free a v4 address array produced by
     /// [`lr_osroute_interface_v4_addrs`]. Safe on NULL.
     ///
@@ -320,15 +337,6 @@ mod linux_helpers {
         )
     }
 
-    /// One IPv6 interface address.
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct lr_osroute_interface_v6_addr_t {
-        pub addr: [u8; 16],
-        pub prefix_len: u8,
-        pub scope_id: u32,
-    }
-
     /// Free a v6 address array produced by
     /// [`lr_osroute_interface_v6_addrs`]. Safe on NULL.
     ///
@@ -388,25 +396,6 @@ mod non_linux_stubs {
     #[no_mangle]
     pub unsafe extern "C" fn lr_osroute_ipv6_ifindex_of(_interface: *const c_char) -> u32 {
         0
-    }
-
-    /// One IPv4 interface address (RFC 2328 §A.3.2 — addr + prefix_len).
-    /// Defined here (in the non-Linux stub module) so the type is
-    /// always present in the header — the Linux impl re-exports the
-    /// same shape.
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct lr_osroute_interface_v4_addr_t {
-        pub addr: [u8; 4],
-        pub prefix_len: u8,
-    }
-
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct lr_osroute_interface_v6_addr_t {
-        pub addr: [u8; 16],
-        pub prefix_len: u8,
-        pub scope_id: u32,
     }
 
     #[no_mangle]

@@ -19,7 +19,6 @@
 // the crate's `-D warnings` clippy gate.
 #![allow(unused_unsafe)]
 
-use lr_core::addr::Prefix;
 use lr_core::rib::Route;
 use lr_core::time::Instant;
 
@@ -37,14 +36,21 @@ const LR_ERR_OTHER: i32 = LrError::Other as i32;
 // ===========================================================================
 
 use lr_mpls::{Label, LabelStack};
+// Re-export the opaque-handle type aliases so the gap-fill functions
+// use the same `lr_mpls_label_t` / `lr_mpls_label_stack_t` surface
+// as the rest of the FFI (see `crates/lr-ffi/src/mpls.rs`). The
+// previous shape returned `*mut Label` (the inner Rust type) — cbindgen
+// does not know how to render that and emits `Label *` in the header,
+// which has no typedef and breaks every C consumer's compile.
+use crate::mpls::{lr_mpls_label_stack_t, lr_mpls_label_t};
 
 /// Construct a Label with just the value (TC=0, TTL=0). Used for the
 /// BGP-LU 3-octet NLRI form, where TTL is absent (RFC 8277 §2.2).
 /// Infallible — the value is masked to 20 bits on encode.
 #[no_mangle]
-pub extern "C" fn lr_mpls_label_new_value(value: u32) -> *mut Label {
+pub extern "C" fn lr_mpls_label_new_value(value: u32) -> lr_mpls_label_t {
     guarded(
-        || Box::into_raw(Box::new(Label::new_value(value))),
+        || crate::mpls::box_label(Label::new_value(value)),
         std::ptr::null_mut(),
     )
 }
@@ -65,10 +71,10 @@ pub extern "C" fn lr_mpls_label_is_valid_value(value: u32) -> u8 {
 /// out-of-range). Kept as a separate symbol so a C consumer searching
 /// for `try_new` finds it.
 #[no_mangle]
-pub extern "C" fn lr_mpls_label_try_new(value: u32) -> *mut Label {
+pub extern "C" fn lr_mpls_label_try_new(value: u32) -> lr_mpls_label_t {
     guarded(
         || match Label::try_new(value) {
-            Ok(l) => Box::into_raw(Box::new(l)),
+            Ok(l) => crate::mpls::box_label(l),
             Err(e) => {
                 set_last_error(e.to_string());
                 std::ptr::null_mut()
@@ -88,9 +94,9 @@ pub extern "C" fn lr_mpls_label_try_new(value: u32) -> *mut Label {
 /// handle is consumed (freed) by this call.
 #[no_mangle]
 pub unsafe extern "C" fn lr_mpls_label_stack_from_vec(
-    labels: *const *mut Label,
+    labels: *const lr_mpls_label_t,
     count: usize,
-) -> *mut LabelStack {
+) -> lr_mpls_label_stack_t {
     guarded(
         || unsafe {
             if labels.is_null() && count != 0 {
@@ -108,10 +114,10 @@ pub unsafe extern "C" fn lr_mpls_label_stack_from_vec(
                     return std::ptr::null_mut();
                 }
                 // Reclaim the boxed Label and move it into our Vec.
-                let boxed: Box<Label> = unsafe { Box::from_raw(ptr) };
+                let boxed: Box<Label> = unsafe { Box::from_raw(ptr as *mut Label) };
                 v.push(*boxed);
             }
-            Box::into_raw(Box::new(LabelStack::from_vec(v)))
+            crate::mpls::box_label_stack(LabelStack::from_vec(v))
         },
         std::ptr::null_mut(),
     )
@@ -133,7 +139,7 @@ pub unsafe extern "C" fn lr_mpls_label_stack_from_vec(
 /// constructor. `out` must point to a writable `lr_bytes_t`.
 #[no_mangle]
 pub unsafe extern "C" fn lr_mpls_label_stack_into_vec(
-    stack: *mut LabelStack,
+    stack: lr_mpls_label_stack_t,
     out: *mut lr_bytes_t,
 ) -> i32 {
     guarded(
@@ -141,7 +147,8 @@ pub unsafe extern "C" fn lr_mpls_label_stack_into_vec(
             if stack.is_null() || out.is_null() {
                 return LR_ERR_NULL;
             }
-            let boxed: Box<LabelStack> = unsafe { Box::from_raw(stack) };
+            // Reclaim the boxed LabelStack behind the opaque handle.
+            let boxed: Box<LabelStack> = unsafe { Box::from_raw(stack as *mut LabelStack) };
             // Each Label encodes as 4 octets (label + tc + 0 + ttl); we
             // emit them with bottom=0 since the caller decides which
             // entry is the bottom of the stack.
@@ -478,7 +485,7 @@ pub unsafe extern "C" fn lr_session_config_free(c: lr_session_config_t) {
 #[no_mangle]
 pub unsafe extern "C" fn lr_session_config_with_mp_families(
     c: lr_session_config_t,
-    families: *const lr_core::nlri::NlriFamily,
+    families: *const crate::bgp_codec::lr_afi_safi_t,
     count: usize,
 ) -> lr_session_config_t {
     guarded(
@@ -491,7 +498,13 @@ pub unsafe extern "C" fn lr_session_config_with_mp_families(
             } else {
                 unsafe { std::slice::from_raw_parts(families, count) }
             };
-            cfg.mp_families = slice.to_vec();
+            cfg.mp_families = slice
+                .iter()
+                .map(|f| lr_core::nlri::NlriFamily {
+                    afi: f.afi,
+                    safi: f.safi,
+                })
+                .collect();
             c
         },
         std::ptr::null_mut(),
@@ -1050,23 +1063,31 @@ pub extern "C" fn lr_policy_route_field_is_settable(kind: i32) -> u8 {
 // lr-core gap-fill: IpAddr into_inner / is_as23456 / Instant checked_sub
 // ===========================================================================
 
-use lr_core::addr::{Asn, IpNet};
+use lr_core::addr::Asn;
 
 /// Take the inner `Prefix` out of an `IpNet`, copying it to `*out`.
 /// Returns 0 on success, `LR_ERR_NULL` on a NULL pointer.
 ///
+/// The C ABI does not expose `IpNet` as a separate opaque type — the
+/// embedder always has the inner `Prefix` already (it is what
+/// `lr_prefix_t` carries), so this function exists only as a parity
+/// stub for the Rust `IpNet::into_inner` method. It is the identity
+/// function on the prefix portion.
+///
 /// # Safety
-/// `net` must point to a valid `IpNet`. `out` must point to a
-/// writable `Prefix`.
+/// `net` must point to a valid `lr_prefix_t`. `out` must point to a
+/// writable `lr_prefix_t`.
 #[no_mangle]
-pub extern "C" fn lr_ip_net_into_inner(net: *const IpNet, out: *mut Prefix) -> i32 {
+pub extern "C" fn lr_ip_net_into_inner(
+    net: *const crate::policy::lr_prefix_t,
+    out: *mut crate::policy::lr_prefix_t,
+) -> i32 {
     guarded(
         || {
             if net.is_null() || out.is_null() {
                 return LR_ERR_NULL;
             }
-            let net_ref: &IpNet = unsafe { &*net };
-            unsafe { *out = net_ref.into_inner() };
+            unsafe { *out = *net };
             0
         },
         LR_ERR_PANIC,
@@ -1075,16 +1096,14 @@ pub extern "C" fn lr_ip_net_into_inner(net: *const IpNet, out: *mut Prefix) -> i
 
 /// True (1) when the ASN is the AS_TRANS placeholder 23456 (RFC 4893).
 ///
-/// # Safety
-/// `asn` must point to a valid `Asn`.
+/// Takes the ASN by value (`lr_asn_t`) rather than by pointer so the
+/// C ABI does not have to expose `Asn` as an opaque-handle type — the
+/// repr-C `lr_asn_t` is the canonical C view of an ASN.
 #[no_mangle]
-pub extern "C" fn lr_asn_is_as23456(asn: *const Asn) -> u8 {
+pub extern "C" fn lr_asn_is_as23456(asn: crate::core::lr_asn_t) -> u8 {
     guarded(
         || {
-            if asn.is_null() {
-                return 0;
-            }
-            let a: &Asn = unsafe { &*asn };
+            let a: Asn = asn.into();
             a.is_as23456() as u8
         },
         0,
