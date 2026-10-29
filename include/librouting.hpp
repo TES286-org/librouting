@@ -2552,4 +2552,453 @@ inline bool srv6_behavior_is_table_lookup(std::uint16_t wire) {
     return lr_srv6_behavior_is_table_lookup(wire) != 0;
 }
 
+// =========================================================================
+// ===== lr-ospf — Link State Retransmission List / LSDB / LSA / External ===
+// =========================================================================
+//
+// Mirrors the `lr_ospf` Rust crate's pub modules (RFC 2328 §13 / §13.5 /
+// §13.6 / §13.7) and the C ABI surface `lr_ospf_retransmit_*`,
+// `lr_ospf_lsdb_*`, `lr_ospf_lsa_*`, `lr_ospf_external_*` in lr_ffi.h.
+// Each RAII handle owns its underlying `Box<T>` and frees it via the
+// matching `lr_*_free` in its deleter — matches the layering the rest
+// of this header uses for BGP message / route / filter handles.
+
+namespace detail {
+
+struct OspfRetransmitListDeleter {
+    void operator()(lr_ospf_retransmit_t p) const noexcept {
+        if (p) lr_ospf_retransmit_free(p);
+    }
+};
+struct OspfLsdbDeleter {
+    void operator()(lr_ospf_lsdb_t p) const noexcept {
+        if (p) lr_ospf_lsdb_free(p);
+    }
+};
+struct OspfLsaDeleter {
+    void operator()(lr_ospf_lsa_box_t p) const noexcept {
+        if (p) lr_ospf_lsa_free(p);
+    }
+};
+struct OspfExternalDestDeleter {
+    void operator()(lr_ospf_external_dest_t p) const noexcept {
+        if (p) lr_ospf_external_dest_free(p);
+    }
+};
+
+} // namespace detail
+
+/// Fixed-layout 20-byte OSPF LSA header (RFC 2328 §A.4.1 for v2,
+/// RFC 5340 §A.4.2 for v3). Mirrors lr_ospf::lsa::LsaHeader.
+struct OspfLsaHeader {
+    std::uint16_t ls_age;
+    std::uint8_t options;
+    std::uint16_t ls_type;
+    std::uint32_t link_state_id;
+    std::uint32_t advertising_router;
+    std::uint32_t ls_sequence_number;
+    std::uint16_t ls_checksum;
+    std::uint16_t length;
+};
+
+/// LSA identity tuple used by the LSDB and the retransmission list:
+/// (ls_type, link_state_id, advertising_router). Mirrors
+/// lr_ospf::lsa::LsaKey.
+struct OspfLsaKey {
+    std::uint16_t ls_type;
+    std::uint32_t link_state_id;
+    std::uint32_t advertising_router;
+};
+
+/// RAII handle to one lr_ospf::lsa::Lsa instance (header + body).
+/// Default-constructed handles and handles returned by `OspfLsaArray::at`
+/// (a borrow) do NOT own the underlying C pointer — their destructors
+/// are no-ops. Handles constructed via `make()` or `release()`-ed from
+/// an owning handle DO own the pointer and free it on destruction.
+class OspfLsaHandle {
+public:
+    OspfLsaHandle() = default;
+    /// Owning constructor — the destructor will call lr_ospf_lsa_free.
+    explicit OspfLsaHandle(lr_ospf_lsa_box_t ptr) : ptr_(ptr), owns_(true) {}
+
+    /// Construct a new LSA from a header and a body byte vector.
+    /// Throws std::runtime_error on allocation failure.
+    static OspfLsaHandle make(const OspfLsaHeader& hdr,
+                        const unsigned char* body, std::size_t body_len) {
+        lr_ospf_lsa_hdr_box_t hdr_box = lr_ospf_lsa_header_new(
+            hdr.ls_age, hdr.options, hdr.ls_type,
+            hdr.link_state_id, hdr.advertising_router,
+            hdr.ls_sequence_number, hdr.ls_checksum, hdr.length);
+        if (!hdr_box) throw Error("lr_ospf_lsa_header_new returned null");
+        lr_ospf_lsa_box_t p = lr_ospf_lsa_new(hdr_box, body, body_len);
+        if (!p) throw Error("lr_ospf_lsa_new returned null");
+        return OspfLsaHandle(p);
+    }
+    static OspfLsaHandle make(const OspfLsaHeader& hdr) {
+        return make(hdr, nullptr, 0);
+    }
+
+    /// True when this handle owns the underlying C pointer (will free
+    /// it on destruction). Borrowing handles return false.
+    bool owns() const noexcept { return owns_; }
+
+    /// Release ownership (the C side owns the handle after this call).
+    /// After release(), owns() returns false and the destructor is a
+    /// no-op. Calling release() on a non-owning handle returns nullptr
+    /// and is a no-op.
+    lr_ospf_lsa_box_t release() noexcept {
+        auto p = ptr_;
+        owns_ = false;
+        ptr_ = nullptr;
+        return p;
+    }
+
+    /// Read the LSA header.
+    OspfLsaHeader header() const {
+        lr_ospf_lsa_hdr_t c{};
+        int rc = lr_ospf_lsa_header_get(ptr_, &c);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsa_header_get: ") + lr_last_error());
+        return OspfLsaHeader{c.ls_age, c.options, c.ls_type, c.link_state_id,
+                             c.advertising_router, c.ls_sequence_number,
+                             c.ls_checksum, c.length};
+    }
+    /// Read the body bytes into a std::vector.
+    std::vector<unsigned char> body() const {
+        lr_bytes_t b{};
+        int rc = lr_ospf_lsa_body(ptr_, &b);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsa_body: ") + lr_last_error());
+        std::vector<unsigned char> out;
+        if (b.len > 0) {
+            out.assign(b.ptr, b.ptr + b.len);
+            lr_bytes_free(&b);
+        }
+        return out;
+    }
+    /// Encode the LSA as 20-byte header + body (RFC 2328 §A.4 wire form).
+    std::vector<unsigned char> to_wire() const {
+        lr_bytes_t b{};
+        int rc = lr_ospf_lsa_to_wire(ptr_, &b);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsa_to_wire: ") + lr_last_error());
+        std::vector<unsigned char> out;
+        if (b.len > 0) {
+            out.assign(b.ptr, b.ptr + b.len);
+            lr_bytes_free(&b);
+        }
+        return out;
+    }
+    /// Compute and store the LSA checksum and length in place
+    /// (RFC 2328 §12.1).
+    void finalize() {
+        int rc = lr_ospf_lsa_finalize(ptr_);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsa_finalize: ") + lr_last_error());
+    }
+    /// True when the LSA's checksum field validates against the body.
+    bool checksum_ok() const {
+        return lr_ospf_lsa_handle_checksum_ok(ptr_) != 0;
+    }
+    /// Read the LSA identity tuple.
+    OspfLsaKey key() const {
+        std::uint16_t ls_type = 0;
+        std::uint32_t ls_id = 0, adv = 0;
+        int rc = lr_ospf_lsa_key(ptr_, &ls_type, &ls_id, &adv);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsa_key: ") + lr_last_error());
+        return OspfLsaKey{ls_type, ls_id, adv};
+    }
+
+    /// Underlying C pointer (raw, no transfer of ownership).
+    lr_ospf_lsa_box_t raw() const noexcept { return ptr_; }
+
+    ~OspfLsaHandle() {
+        if (ptr_ && owns_) {
+            lr_ospf_lsa_free(ptr_);
+        }
+    }
+
+    OspfLsaHandle(const OspfLsaHandle&) = delete;
+    OspfLsaHandle& operator=(const OspfLsaHandle&) = delete;
+    OspfLsaHandle(OspfLsaHandle&& other) noexcept
+        : ptr_(other.ptr_), owns_(other.owns_) {
+        other.ptr_ = nullptr;
+        other.owns_ = false;
+    }
+    OspfLsaHandle& operator=(OspfLsaHandle&& other) noexcept {
+        if (this != &other) {
+            if (ptr_ && owns_) lr_ospf_lsa_free(ptr_);
+            ptr_ = other.ptr_;
+            owns_ = other.owns_;
+            other.ptr_ = nullptr;
+            other.owns_ = false;
+        }
+        return *this;
+    }
+
+private:
+    lr_ospf_lsa_box_t ptr_ = nullptr;
+    bool owns_ = false;
+
+    /// Internal borrow constructor — used by OspfLsaArray::at() to alias
+    /// array storage without claiming ownership. The destructor is a
+    /// no-op because owns_ stays false.
+    struct BorrowTag {};
+    OspfLsaHandle(lr_ospf_lsa_box_t ptr, BorrowTag)
+        : ptr_(ptr), owns_(false) {}
+
+    friend class OspfLsaArray;
+};
+
+/// RAII handle to a flat C array of LSA handles returned by poll /
+/// refresh_due / age_out. Frees the array AND every contained LSA on
+/// destruction (lr_ospf_lsa_array_free does both). Use at() to borrow
+/// individual LSAs — borrowed LSAs alias the array storage and must
+/// NOT be freed separately.
+class OspfLsaArray {
+public:
+    OspfLsaArray() = default;
+    OspfLsaArray(lr_ospf_lsa_box_t* ptr, std::size_t count)
+        : ptr_(ptr), count_(count) {}
+
+    ~OspfLsaArray() { reset(); }
+
+    OspfLsaArray(const OspfLsaArray&) = delete;
+    OspfLsaArray& operator=(const OspfLsaArray&) = delete;
+    OspfLsaArray(OspfLsaArray&& other) noexcept
+        : ptr_(other.ptr_), count_(other.count_) {
+        other.ptr_ = nullptr;
+        other.count_ = 0;
+    }
+    OspfLsaArray& operator=(OspfLsaArray&& other) noexcept {
+        if (this != &other) {
+            reset();
+            ptr_ = other.ptr_;
+            count_ = other.count_;
+            other.ptr_ = nullptr;
+            other.count_ = 0;
+        }
+        return *this;
+    }
+
+    std::size_t size() const noexcept { return count_; }
+    bool empty() const noexcept { return count_ == 0; }
+
+    /// Borrow the LSA at index i (no allocation, no transfer of
+    /// ownership). The returned OspfLsaHandle aliases the array storage —
+    /// the caller must NOT call release() or otherwise transfer
+    /// ownership of the borrowed handle. Out-of-bounds indices
+    /// return a default-constructed (empty) OspfLsaHandle. The
+    /// destructor of the returned handle is a no-op (owns()==false).
+    OspfLsaHandle at(std::size_t i) const {
+        if (i >= count_ || !ptr_) return OspfLsaHandle{};
+        return OspfLsaHandle(ptr_[i], OspfLsaHandle::BorrowTag{});
+    }
+
+    /// Release ownership without freeing (advanced use).
+    lr_ospf_lsa_box_t* release() noexcept {
+        auto p = ptr_;
+        ptr_ = nullptr;
+        count_ = 0;
+        return p;
+    }
+
+private:
+    void reset() noexcept {
+        if (ptr_) {
+            lr_ospf_lsa_array_free(ptr_, count_);
+            ptr_ = nullptr;
+            count_ = 0;
+        }
+    }
+
+    lr_ospf_lsa_box_t* ptr_ = nullptr;
+    std::size_t count_ = 0;
+};
+
+/// RAII handle to one lr_ospf::lsdb::Lsdb area link-state database.
+class OspfLsdb {
+public:
+    OspfLsdb() : ptr_(lr_ospf_lsdb_new()) {
+        if (!ptr_) throw Error("lr_ospf_lsdb_new returned null");
+    }
+
+    std::size_t size() const noexcept { return lr_ospf_lsdb_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_ospf_lsdb_is_empty(ptr_.get()) != 0; }
+
+    /// Install `lsa` (transfers ownership). Returns 1=New, 2=Replaced,
+    /// 0=Ignored, 3=Purged.
+    int install(OspfLsaHandle lsa, std::uint64_t now_ms = 0) {
+        int rc = lr_ospf_lsdb_install(ptr_.get(), lsa.release(), now_ms);
+        if (rc < 0) throw Error(std::string("lr_ospf_lsdb_install: ") + lr_last_error());
+        return rc;
+    }
+    bool remove(const OspfLsaKey& k) {
+        int rc = lr_ospf_lsdb_remove(ptr_.get(), k.ls_type,
+                                    k.link_state_id, k.advertising_router);
+        if (rc < 0) throw Error(std::string("lr_ospf_lsdb_remove: ") + lr_last_error());
+        return rc != 0;
+    }
+    /// Get a *clone* of the LSA identified by `k` (caller owns the
+    /// returned handle). Returns std::nullopt when absent.
+    std::optional<OspfLsaHandle> get(const OspfLsaKey& k) const {
+        lr_ospf_lsa_box_t out = nullptr;
+        int rc = lr_ospf_lsdb_get(ptr_.get(), k.ls_type, k.link_state_id,
+                                  k.advertising_router, &out);
+        if (rc < 0) throw Error(std::string("lr_ospf_lsdb_get: ") + lr_last_error());
+        if (!out) return std::nullopt;
+        return OspfLsaHandle(out);
+    }
+    /// Every LSA header in the LSDB (copied into a std::vector).
+    std::vector<OspfLsaHeader> headers() const {
+        lr_ospf_lsa_hdr_t* p = nullptr;
+        std::uintptr_t n = 0;
+        int rc = lr_ospf_lsdb_headers(ptr_.get(), &p, &n);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsdb_headers: ") + lr_last_error());
+        std::vector<OspfLsaHeader> out;
+        if (!p || n == 0) return out;
+        out.reserve(n);
+        for (std::uintptr_t i = 0; i < n; ++i) {
+            out.push_back(OspfLsaHeader{
+                p[i].ls_age, p[i].options, p[i].ls_type, p[i].link_state_id,
+                p[i].advertising_router, p[i].ls_sequence_number,
+                p[i].ls_checksum, p[i].length});
+        }
+        lr_ospf_lsa_hdr_array_free(p, n);
+        return out;
+    }
+    /// LSAs whose LS age has crossed LSRefreshTime (RFC 2328 §14.1).
+    OspfLsaArray refresh_due(std::uint32_t router_id, std::uint64_t now_ms) const {
+        lr_ospf_lsa_box_t* p = nullptr;
+        std::uintptr_t n = 0;
+        int rc = lr_ospf_lsdb_refresh_due(ptr_.get(), router_id, now_ms, &p, &n);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsdb_refresh_due: ") + lr_last_error());
+        return OspfLsaArray(p, n);
+    }
+    /// LSAs whose age crossed MaxAge and were flushed (RFC 2328 §14.4).
+    OspfLsaArray age_out(std::uint64_t now_ms) const {
+        lr_ospf_lsa_box_t* p = nullptr;
+        std::uintptr_t n = 0;
+        int rc = lr_ospf_lsdb_age_out(ptr_.get(), now_ms, &p, &n);
+        if (rc != 0) throw Error(std::string("lr_ospf_lsdb_age_out: ") + lr_last_error());
+        return OspfLsaArray(p, n);
+    }
+
+private:
+    std::unique_ptr<std::remove_pointer_t<lr_ospf_lsdb_t>,
+                    detail::OspfLsdbDeleter> ptr_;
+};
+
+/// RAII handle to one per-neighbor LSA retransmission list
+/// (RFC 2328 §13.5). The flood path adds LSAs; the LS-Acknowledgment
+/// handler drains them (§13.7); the poll loop re-floods aged entries
+/// (§13.6).
+class OspfRetransmitList {
+public:
+    OspfRetransmitList() : ptr_(lr_ospf_retransmit_new()) {
+        if (!ptr_) throw Error("lr_ospf_retransmit_new returned null");
+    }
+
+    std::size_t size() const noexcept { return lr_ospf_retransmit_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_ospf_retransmit_is_empty(ptr_.get()) != 0; }
+
+    bool contains(const OspfLsaKey& k) const {
+        return lr_ospf_retransmit_contains(ptr_.get(), k.ls_type,
+                                            k.link_state_id,
+                                            k.advertising_router) != 0;
+    }
+    /// Record `lsa` on the list stamped at `now_ms` (§13.5 step 5).
+    /// Transfers ownership of the LSA handle.
+    void record_flood(OspfLsaHandle lsa, std::uint64_t now_ms) {
+        int rc = lr_ospf_retransmit_record_flood(ptr_.get(), lsa.release(), now_ms);
+        if (rc != 0) throw Error(std::string("lr_ospf_retransmit_record_flood: ") + lr_last_error());
+    }
+    bool remove(const OspfLsaKey& k) {
+        return lr_ospf_retransmit_remove(ptr_.get(), k.ls_type,
+                                         k.link_state_id,
+                                         k.advertising_router) != 0;
+    }
+    void clear() { lr_ospf_retransmit_clear(ptr_.get()); }
+
+    /// Drain `acks` from the list (§13.7). Returns the number of
+    /// entries actually removed — useful for stray-ack diagnostics.
+    std::size_t apply_acks(const std::vector<OspfLsaHeader>& acks) {
+        if (acks.empty()) return 0;
+        return lr_ospf_retransmit_apply_acks(ptr_.get(),
+            reinterpret_cast<const lr_ospf_lsa_hdr_t*>(acks.data()),
+            acks.size());
+    }
+    /// Return LSAs whose now_ms - last_sent_ms >= rxmt_interval_ms
+    /// (§13.6). The returned LSAs are NOT removed from the list; their
+    /// last_sent_ms is bumped to now_ms.
+    OspfLsaArray poll(std::uint64_t now_ms, std::uint64_t rxmt_interval_ms) {
+        lr_ospf_lsa_box_t* p = nullptr;
+        std::uintptr_t n = 0;
+        int rc = lr_ospf_retransmit_poll(ptr_.get(), now_ms,
+                                         rxmt_interval_ms, &p, &n);
+        if (rc != 0) throw Error(std::string("lr_ospf_retransmit_poll: ") + lr_last_error());
+        return OspfLsaArray(p, n);
+    }
+
+private:
+    std::unique_ptr<std::remove_pointer_t<lr_ospf_retransmit_t>,
+                    detail::OspfRetransmitListDeleter> ptr_;
+};
+
+/// External-LSA metric type — RFC 2328 §2.3.
+enum class OspfExternalMetricType : std::int32_t {
+    Type1 = 1,  ///< metric is added to the internal cost.
+    Type2 = 2,  ///< metric is compared only against other Type-2 routes.
+};
+
+/// RAII handle to one AS-external-LSA destination (RFC 2328 §2.3 / §A.4.5).
+class OspfExternalDest {
+public:
+    OspfExternalDest(const unsigned char* prefix_v4,
+                     const unsigned char* prefix_v6,
+                     std::uint8_t prefix_len, std::uint32_t metric,
+                     OspfExternalMetricType mt)
+        : ptr_(lr_ospf_external_dest_new(prefix_v4, prefix_v6, prefix_len,
+                                         metric,
+                                         static_cast<std::int32_t>(mt))) {
+        if (!ptr_) throw Error("lr_ospf_external_dest_new returned null");
+    }
+    static OspfExternalDest v4(const unsigned char prefix[4],
+                               std::uint8_t prefix_len, std::uint32_t metric,
+                               OspfExternalMetricType mt = OspfExternalMetricType::Type1) {
+        return OspfExternalDest(prefix, nullptr, prefix_len, metric, mt);
+    }
+    static OspfExternalDest v6(const unsigned char prefix[16],
+                               std::uint8_t prefix_len, std::uint32_t metric,
+                               OspfExternalMetricType mt = OspfExternalMetricType::Type1) {
+        return OspfExternalDest(nullptr, prefix, prefix_len, metric, mt);
+    }
+
+    void set_forwarding_addr_v4(std::uint32_t addr) {
+        int rc = lr_ospf_external_dest_set_forwarding_addr(ptr_.get(), addr);
+        if (rc != 0) throw Error(std::string("lr_ospf_external_dest_set_forwarding_addr: ") + lr_last_error());
+    }
+    void set_route_tag(std::uint32_t tag) {
+        int rc = lr_ospf_external_dest_set_route_tag(ptr_.get(), tag);
+        if (rc != 0) throw Error(std::string("lr_ospf_external_dest_set_route_tag: ") + lr_last_error());
+    }
+    void set_p_bit(std::uint8_t p) {
+        int rc = lr_ospf_external_dest_set_p_bit(ptr_.get(), p);
+        if (rc != 0) throw Error(std::string("lr_ospf_external_dest_set_p_bit: ") + lr_last_error());
+    }
+
+    std::uint32_t metric() const { return lr_ospf_external_dest_metric(ptr_.get()); }
+    OspfExternalMetricType metric_type() const {
+        return static_cast<OspfExternalMetricType>(
+            lr_ospf_external_dest_metric_type(ptr_.get()));
+    }
+    std::uint32_t forwarding_addr() const {
+        return lr_ospf_external_dest_forwarding_addr(ptr_.get());
+    }
+    std::uint32_t route_tag() const {
+        return lr_ospf_external_dest_route_tag(ptr_.get());
+    }
+    std::uint8_t p_bit() const { return lr_ospf_external_dest_p_bit(ptr_.get()); }
+
+private:
+    std::unique_ptr<std::remove_pointer_t<lr_ospf_external_dest_t>,
+                    detail::OspfExternalDestDeleter> ptr_;
+};
+
 } // namespace librouting

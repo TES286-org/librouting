@@ -961,6 +961,104 @@ int main() {
               "End.X (0x0005) is a cross-connect behavior");
     }
 
+    // ===== lr-ospf: retransmit list / LSDB / LSA / external dest =====
+    {
+        // Retransmit list — empty, record, contains, remove, clear,
+        // apply-acks (incl. stray-ack silent acceptance), poll timing.
+        OspfRetransmitList rtx;
+        check(rtx.empty(), "OspfRetransmitList starts empty");
+        check(rtx.size() == 0, "OspfRetransmitList size = 0");
+
+        auto lsa = OspfLsaHandle::make(OspfLsaHeader{
+            0, 0, 1, 0xa, 0xa, 0x80000001, 0, 20});
+        rtx.record_flood(std::move(lsa), 0);
+        check(rtx.size() == 1, "after RecordFlood size = 1");
+        check(rtx.contains({1, 0xa, 0xa}), "Contains(0xa/0xa) = true");
+        check(!rtx.contains({1, 0xb, 0xa}), "Contains(0xb/0xa) = false");
+
+        check(rtx.remove({1, 0xa, 0xa}), "Remove(0xa/0xa) = true");
+        check(rtx.size() == 0, "after Remove size = 0");
+
+        // Re-add and test Clear.
+        rtx.record_flood(OspfLsaHandle::make(OspfLsaHeader{
+            0, 0, 1, 1, 0xa, 0x80000001, 0, 20}), 0);
+        rtx.record_flood(OspfLsaHandle::make(OspfLsaHeader{
+            0, 0, 1, 2, 0xa, 0x80000001, 0, 20}), 0);
+        check(rtx.size() == 2, "after 2 record_floods size = 2");
+        rtx.clear();
+        check(rtx.empty(), "after Clear empty = true");
+
+        // Apply-acks key-match drain.
+        rtx.record_flood(OspfLsaHandle::make(OspfLsaHeader{
+            0, 0, 1, 0xa, 0xa, 0x80000001, 0, 20}), 0);
+        rtx.record_flood(OspfLsaHandle::make(OspfLsaHeader{
+            0, 0, 1, 0xb, 0xa, 0x80000001, 0, 20}), 0);
+        std::vector<OspfLsaHeader> acks = {
+            {0, 0, 1, 0xa, 0xa, 1, 0, 20},
+        };
+        check(rtx.apply_acks(acks) == 1, "ApplyAcks removes 1 entry");
+        check(rtx.size() == 1, "after ApplyAcks size = 1");
+        check(rtx.contains({1, 0xb, 0xa}),
+              "ApplyAcks(0xa) leaves 0xb intact");
+
+        // Stray ack — §13.7 step 5 silent acceptance.
+        std::vector<OspfLsaHeader> stray = {
+            {0, 0, 1, 0xdead, 0xbeef, 1, 0, 20},
+        };
+        check(rtx.apply_acks(stray) == 0, "stray ack removes 0 entries");
+        check(rtx.size() == 1, "after stray ack size = 1");
+
+        // Poll timing — at RxmtInterval the LSA retransmits.
+        rtx.clear();
+        rtx.record_flood(OspfLsaHandle::make(OspfLsaHeader{
+            0, 0, 1, 0xa, 0xa, 0x80000001, 0, 20}), 1000);
+        auto before = rtx.poll(1500, 5000);
+        check(before.empty(), "Poll at 1.5s returns empty");
+        auto at = rtx.poll(6000, 5000);
+        check(at.size() == 1, "Poll at 6s returns 1 LSA");
+        if (at.size() == 1) {
+            auto borrowed = at.at(0);
+            check(borrowed.key().link_state_id == 0xa,
+                  "Poll returns the right LSA");
+        }
+        auto after = rtx.poll(10999, 5000);
+        check(after.empty(),
+              "Poll at 10.999s returns empty (last_sent_ms was bumped)");
+
+        // LSDB — install, get, headers, remove.
+        OspfLsdb db;
+        check(db.empty(), "OspfLsdb starts empty");
+        auto lsa2 = OspfLsaHandle::make(OspfLsaHeader{
+            0, 0, 1, 0xa, 0xa, 0x80000001, 0, 20});
+        int rc = db.install(std::move(lsa2), 0);
+        check(rc == 1, "LSDB install returns 1 (New)");
+        check(db.size() == 1, "LSDB size after install = 1");
+        auto got = db.get({1, 0xa, 0xa});
+        check(got.has_value(), "LSDB get returns the LSA");
+        if (got) {
+            check(got->header().ls_sequence_number == 0x80000001,
+                  "LSA seqno round-trip");
+            check(got->key().advertising_router == 0xa, "LSA key adv = 0xa");
+        }
+        auto headers = db.headers();
+        check(headers.size() == 1, "LSDB headers size = 1");
+        check(db.remove({1, 0xa, 0xa}), "LSDB Remove returns true");
+        check(db.empty(), "LSDB empty after Remove");
+
+        // External dest — v4 construction + setters.
+        unsigned char v4[4] = {203, 0, 113, 0};
+        auto ext = OspfExternalDest::v4(v4, 24, 100,
+                                        OspfExternalMetricType::Type1);
+        check(ext.metric() == 100, "ExternalDest metric = 100");
+        check(ext.metric_type() == OspfExternalMetricType::Type1,
+              "ExternalDest metric_type = Type1");
+        ext.set_forwarding_addr_v4(0x0A000001);
+        ext.set_route_tag(42);
+        ext.set_p_bit(1);
+        check(ext.route_tag() == 42, "ExternalDest route_tag = 42");
+        check(ext.p_bit() == 1, "ExternalDest p_bit = 1");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");
