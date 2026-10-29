@@ -414,9 +414,24 @@ pub unsafe extern "C" fn lr_srv6_srh_free(srh: lr_srv6_srh_t) {
 // =========================================================================
 
 /// Parse a NUL-terminated IPv6 address string (RFC 4291 §2.2 textual
-/// form) into a `Sid` (16-byte octet array). Returns 0 on success
-/// and writes the 16 bytes to `out`; returns `LR_ERR_NULL` on a
-/// NULL pointer; returns `LR_ERR_BAD_UTF8` (-3) on a parse error.
+/// form, the same input `Sid::from_str` accepts) into a `Sid` (16-byte
+/// octet array).
+///
+/// # Returns
+/// - `0` on success — the 16 raw bytes are written to `out`.
+/// - `LR_ERR_NULL` (-1) on a NULL `s` or `out`.
+/// - `LR_ERR_BAD_UTF8` (-3) when `s` is not valid UTF-8.
+/// - `LR_ERR_PANIC` (-4) on a panic inside the parser.
+/// - **Positive** values are `SidParseError` discriminant codes
+///   (mirrors `lr_srv6::SidParseError`):
+///   - `1` = `Empty`
+///   - `2` = `DoubleDoubleColon`
+///   - `3` = `BadHextet`
+///   - `4` = `WrongLength`
+///
+/// Use [`lr_srv6_sid_parse_error_name`] to render the discriminant as
+/// the variant name. Mirrors `Sid::from_str` in `lr_srv6::sid` — the
+/// discriminants are stable across the C ABI surface.
 ///
 /// # Safety
 /// `s` must point to a NUL-terminated UTF-8 string. `out` must point
@@ -432,13 +447,29 @@ pub unsafe extern "C" fn lr_srv6_sid_from_str(s: *const std::os::raw::c_char, ou
             let Ok(text) = cstr.to_str() else {
                 return LrError::BadUtf8 as i32;
             };
-            let Ok(sid) = Sid::from_str(text) else {
-                set_last_error(format!("invalid SID string: {text}"));
-                return LrError::BadUtf8 as i32;
-            };
-            let octets = sid.octets();
-            unsafe { std::ptr::copy_nonoverlapping(octets.as_ptr(), out, 16) };
-            0
+            match Sid::from_str(text) {
+                Ok(sid) => {
+                    let octets = sid.octets();
+                    unsafe { std::ptr::copy_nonoverlapping(octets.as_ptr(), out, 16) };
+                    0
+                }
+                Err(e) => {
+                    // Map the SidParseError variant to its discriminant code
+                    // (1..=4 — see `lr_srv6_sid_parse_error_name`). The C ABI
+                    // return type stays `i32` so positive values signal a
+                    // parse-error variant, while negative values carry the
+                    // generic LrError codes.
+                    use lr_srv6::SidParseError;
+                    let code: i32 = match e {
+                        SidParseError::Empty => 1,
+                        SidParseError::DoubleDoubleColon => 2,
+                        SidParseError::BadHextet => 3,
+                        SidParseError::WrongLength => 4,
+                    };
+                    set_last_error(format!("invalid SID string: {text} ({e})"));
+                    code
+                }
+            }
         },
         LR_ERR_PANIC,
     )
@@ -483,8 +514,24 @@ pub unsafe extern "C" fn lr_srv6_sid_to_str(sid: *const u8) -> *const std::os::r
 /// Parse a NUL-terminated `<addr>/<block_bits>` string (RFC 4291 +
 /// RFC 8754 §3.1 textual form) into a `Locator`. Writes the 16-byte
 /// address to `out_addr` and the block_bits to `*out_block_bits`.
-/// Returns 0 on success, `LR_ERR_NULL` on a NULL pointer,
-/// `LR_ERR_BAD_UTF8` on a parse error.
+///
+/// # Returns
+/// - `0` on success.
+/// - `LR_ERR_NULL` (-1) on a NULL pointer.
+/// - `LR_ERR_BAD_UTF8` (-3) when `s` is not valid UTF-8.
+/// - `LR_ERR_PANIC` (-4) on a panic inside the parser.
+/// - **Positive** values are `LocatorParseError` discriminant codes
+///   (mirrors `lr_srv6::LocatorParseError`):
+///   - `1` = `MissingPrefixLen`
+///   - `2` = `BadAddr` (the IPv6 portion was malformed; the
+///     underlying `SidParseError` is recorded in the last-error
+///     string for diagnostics)
+///   - `3` = `BadPrefixLen`
+///
+/// Use [`lr_srv6_locator_parse_error_name`] to render the discriminant
+/// as the variant name. Mirrors `Locator::from_str` in
+/// `lr_srv6::locator` — the discriminants are stable across the C ABI
+/// surface.
 ///
 /// # Safety
 /// `s` must point to a NUL-terminated UTF-8 string. `out_addr` must
@@ -505,24 +552,38 @@ pub unsafe extern "C" fn lr_srv6_locator_from_str(
             let Ok(text) = cstr.to_str() else {
                 return LrError::BadUtf8 as i32;
             };
-            // Locator::FromStr expects "<addr>/<bits>" form.
-            let Ok(loc) = Locator::from_str(text) else {
-                set_last_error(format!("invalid locator string: {text}"));
-                return LrError::BadUtf8 as i32;
-            };
-            let octets = loc.as_bytes();
-            unsafe { std::ptr::copy_nonoverlapping(octets.as_ptr(), out_addr, 16) };
-            unsafe { *out_block_bits = loc.block_bits() };
-            0
+            match Locator::from_str(text) {
+                Ok(loc) => {
+                    let octets = loc.as_bytes();
+                    unsafe { std::ptr::copy_nonoverlapping(octets.as_ptr(), out_addr, 16) };
+                    unsafe { *out_block_bits = loc.block_bits() };
+                    0
+                }
+                Err(e) => {
+                    use lr_srv6::LocatorParseError;
+                    let code: i32 = match e {
+                        LocatorParseError::MissingPrefixLen => 1,
+                        LocatorParseError::BadAddr(_) => 2,
+                        LocatorParseError::BadPrefixLen => 3,
+                    };
+                    set_last_error(format!("invalid locator string: {text} ({e})"));
+                    code
+                }
+            }
         },
         LR_ERR_PANIC,
     )
 }
 
-/// Format a `Locator` (16 raw address bytes + block_bits) as an
-/// `<addr>/<bits>` string. Returns a thread-local pointer (valid
-/// until the next call to `lr_srv6_sid_to_str` / `lr_srv6_locator_to_str`
-/// on this thread).
+/// Format a `Locator` (16 raw address bytes + block_bits) as the
+/// canonical RFC 5952 §4 + RFC 8754 §3.1 `<addr>/<bits>` form. The
+/// address portion is rendered through `Sid`'s `Display` impl so the
+/// output matches `Locator::Display` in `lr_srv6::locator` exactly —
+/// runs of >= 2 zero hextets are compressed to `::`, leading zeros
+/// inside each hextet are dropped.
+///
+/// Returns a thread-local pointer (valid until the next call to
+/// `lr_srv6_sid_to_str` / `lr_srv6_locator_to_str` on this thread).
 ///
 /// # Safety
 /// `addr` must point to 16 readable bytes.
@@ -538,20 +599,12 @@ pub unsafe extern "C" fn lr_srv6_locator_to_str(
             }
             let mut octets = [0u8; 16];
             octets.copy_from_slice(unsafe { std::slice::from_raw_parts(addr, 16) });
-            // The Locator::Display format is "<addr>/<bits>". Construct
-            // manually since Locator::new returns Option<Self>.
-            let addr_str = format!(
-                "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-                u16::from_be_bytes([octets[0], octets[1]]),
-                u16::from_be_bytes([octets[2], octets[3]]),
-                u16::from_be_bytes([octets[4], octets[5]]),
-                u16::from_be_bytes([octets[6], octets[7]]),
-                u16::from_be_bytes([octets[8], octets[9]]),
-                u16::from_be_bytes([octets[10], octets[11]]),
-                u16::from_be_bytes([octets[12], octets[13]]),
-                u16::from_be_bytes([octets[14], octets[15]]),
-            );
-            let s = format!("{addr_str}/{block_bits}");
+            // Reuse `Sid`'s `Display` impl (RFC 5952 canonical
+            // compression) so the address portion matches
+            // `Locator::Display` exactly. `Locator`'s own `Display`
+            // delegates to the same `write_v6` helper.
+            let sid = Sid::from_octets(octets);
+            let s = format!("{sid}/{block_bits}");
             let cstr = CString::new(s).unwrap_or_default();
             thread_local! {
                 static BUF: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
@@ -721,7 +774,12 @@ mod tests {
         let cstr = std::ffi::CString::new("not-an-ipv6-addr").unwrap();
         let mut out = [0u8; 16];
         let rc = unsafe { lr_srv6_sid_from_str(cstr.as_ptr(), out.as_mut_ptr()) };
-        assert_eq!(rc, LrError::BadUtf8 as i32);
+        // "not-an-ipv6-addr" fails to parse: it has no `::` but
+        // contains a non-hex character (`n`), so Sid::from_str
+        // rejects it with `SidParseError::BadHextet` (discriminant 3).
+        // Discriminant 1..=4 are SidParseError variants; negative
+        // values are generic LrError codes.
+        assert!(rc > 0, "expected positive SidParseError code, got {rc}");
     }
 
     #[test]
@@ -769,7 +827,12 @@ mod tests {
         let mut bits = 0u8;
         let rc =
             unsafe { lr_srv6_locator_from_str(cstr.as_ptr(), addr.as_mut_ptr(), &raw mut bits) };
-        assert_eq!(rc, LrError::BadUtf8 as i32);
+        // "not-a-locator" fails to parse: it has no `/` separator,
+        // so Locator::from_str rejects it with
+        // `LocatorParseError::MissingPrefixLen` (discriminant 1).
+        // Discriminant 1..=3 are LocatorParseError variants; negative
+        // values are generic LrError codes.
+        assert!(rc > 0, "expected positive LocatorParseError code, got {rc}");
     }
 
     #[test]

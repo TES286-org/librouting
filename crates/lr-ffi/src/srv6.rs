@@ -625,16 +625,23 @@ pub unsafe extern "C" fn lr_srv6_sid_locator_slice(
     )
 }
 
-/// Build a SID by concatenating a locator byte string and a tail
-/// byte string, given the locator's block-bits count. Returns NULL
-/// when the widths are inconsistent.
+/// Build a SID by concatenating a locator byte string and a tail byte
+/// string, given the locator's block-bits count. The locator and tail
+/// lengths are passed explicitly so the C ABI mirrors the Rust
+/// `Sid::from_locator_tail(locator: &[u8], tail: &[u8], block_bits)`
+/// shape — the caller does not have to remember a "16-byte buffer"
+/// contract. Returns NULL when the widths are inconsistent
+/// (`locator.len() != block_bits / 8` or `tail.len() + loc_bytes != 16`).
 ///
 /// # Safety
-/// `locator` and `tail` must each point to 16 readable bytes.
+/// `locator` must point to `locator_len` readable bytes; `tail` must
+/// point to `tail_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn lr_srv6_sid_from_locator_tail(
     locator: *const u8,
+    locator_len: usize,
     tail: *const u8,
+    tail_len: usize,
     locator_block_bits: u8,
 ) -> lr_srv6_sid_t {
     guarded(
@@ -642,8 +649,8 @@ pub unsafe extern "C" fn lr_srv6_sid_from_locator_tail(
             if locator.is_null() || tail.is_null() {
                 return std::ptr::null_mut();
             }
-            let loc_bytes = unsafe { std::slice::from_raw_parts(locator, 16) };
-            let tail_bytes = unsafe { std::slice::from_raw_parts(tail, 16) };
+            let loc_bytes = unsafe { core::slice::from_raw_parts(locator, locator_len) };
+            let tail_bytes = unsafe { core::slice::from_raw_parts(tail, tail_len) };
             match Sid::from_locator_tail(loc_bytes, tail_bytes, locator_block_bits) {
                 Some(sid) => Box::into_raw(Box::new(sid)) as lr_srv6_sid_t,
                 None => std::ptr::null_mut(),
@@ -655,16 +662,18 @@ pub unsafe extern "C" fn lr_srv6_sid_from_locator_tail(
 
 /// True when the SID lives inside the locator byte string of width
 /// `locator_block_bits`. The `locator` pointer must point to
-/// `block_bits / 8` readable bytes (NOT 16). Returns 0 on a NULL sid
-/// handle or an invalid block-bits value.
+/// `locator_len` readable bytes; `locator_len` MUST equal
+/// `block_bits / 8` (the Rust API enforces this — a mismatched length
+/// returns `false` rather than reading past the buffer).
 ///
 /// # Safety
 /// `sid` must be a valid handle. `locator` must point to
-/// `block_bits / 8` readable bytes.
+/// `locator_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn lr_srv6_sid_is_inside_locator(
     sid: lr_srv6_sid_t,
     locator: *const u8,
+    locator_len: usize,
     locator_block_bits: u8,
 ) -> u8 {
     guarded(
@@ -676,8 +685,11 @@ pub unsafe extern "C" fn lr_srv6_sid_is_inside_locator(
                 return 0;
             }
             let loc_bytes = (locator_block_bits / 8) as usize;
+            if locator_len != loc_bytes {
+                return 0;
+            }
             let s = unsafe { &*(sid as *const Sid) };
-            let loc_slice = unsafe { std::slice::from_raw_parts(locator, loc_bytes) };
+            let loc_slice = unsafe { core::slice::from_raw_parts(locator, loc_bytes) };
             s.is_inside_locator(loc_slice, locator_block_bits) as u8
         },
         0,
@@ -1008,13 +1020,22 @@ mod tests {
         // The locator block prefix is 32 bits = 4 bytes.
         let loc_prefix: [u8; 4] = [0xfc, 0xbb, 0xbb, 0x00];
         assert_eq!(
-            unsafe { lr_srv6_sid_is_inside_locator(sid, loc_prefix.as_ptr(), 32) },
+            unsafe {
+                lr_srv6_sid_is_inside_locator(sid, loc_prefix.as_ptr(), loc_prefix.len(), 32)
+            },
             1
         );
         // Different locator prefix: not inside.
         let other_prefix: [u8; 4] = [0xfc, 0xbb, 0xbb, 0x01];
         assert_eq!(
-            unsafe { lr_srv6_sid_is_inside_locator(sid, other_prefix.as_ptr(), 32) },
+            unsafe {
+                lr_srv6_sid_is_inside_locator(sid, other_prefix.as_ptr(), other_prefix.len(), 32)
+            },
+            0
+        );
+        // Mismatched length: must be 4 for block_bits=32; pass 3 → reject.
+        assert_eq!(
+            unsafe { lr_srv6_sid_is_inside_locator(sid, loc_prefix.as_ptr(), 3, 32) },
             0
         );
         unsafe {
