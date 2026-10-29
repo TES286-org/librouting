@@ -509,6 +509,35 @@ could not (the `LrOspfMetric2` tag has no C ABI setter).
 
 ### Fixed
 
+**`lr-ffi` non-Linux build of the `osroute_helpers` module** (`ffi`,
+issue #92). The `non_linux_stubs` module in
+`crates/lr-ffi/src/osroute_helpers.rs` was missing the `use super::*`
+import that brings the parent module's
+`lr_osroute_interface_v4_addr_t` / `lr_osroute_interface_v6_addr_t`
+struct types into scope, so the v4 / v6 address-array stubs
+referenced undeclared types. The Windows cross-build
+(`cargo build --workspace --target x86_64-pc-windows-gnu`), the
+macOS cross-build (`x86_64-apple-darwin`), the Windows native clippy
+job, and the macOS native clippy job — every CI gate that exercises
+a non-Linux target — failed with `error[E0425]: cannot find type
+\`lr_osroute_interface_v4_addr_t\` in this scope`. The Linux path
+compiled because the `linux_helpers` sibling module already had
+`use super::*`; only the non-Linux path was broken, so the bug
+silently passed the Linux-only `cargo build` and `cargo test` gates
+and only surfaced in CI matrix entries that cross-compile or run on
+a non-Linux host. The same fix also pulls the unused `set_last_error`
+import out of the parent module's `use crate::error::{...}` line
+and into the `linux_helpers` module where it is actually referenced
+(the parent only uses `LR_ERR_PANIC` directly); the import triggered
+`-D warnings` / `unused_imports` on Windows and macOS. The
+`LR_ERR_OTHER` constant was likewise moved into `linux_helpers`
+since it is the only consumer — declaring it at the parent scope
+produced `-D warnings` / `dead_code` on non-Linux (where the stubs
+return `0` / success for every entry point, mirroring
+`lr_osroute::stub::StubRouteTable`). No `#[no_mangle]` symbol
+was added or removed and no C ABI signature changed — `ABI_VERSION`
+stays at 2 and the `lr_ffi.h` header diff is empty.
+
 **`lr-policy` community-list and AS-path filter `evaluate` stubs now
 fail-closed when the `bgp` feature is off** (`policy`, issue #92). The
 `#[cfg(not(feature = "bgp"))]` stubs in
