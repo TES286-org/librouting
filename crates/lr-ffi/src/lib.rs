@@ -59,6 +59,7 @@ pub mod enum_extras;
 pub mod error;
 pub mod events;
 pub mod filters;
+pub mod gap_fill_batch;
 pub mod handle;
 pub mod inspection;
 pub mod ldp;

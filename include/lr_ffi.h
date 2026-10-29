@@ -884,6 +884,27 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_FILTER_FALLTHROUGH 2
 
+#define LR_BFD_KEYED_AUTH_ALGO_KEYED_MD5 1
+
+#define LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_MD5 2
+
+#define LR_BFD_KEYED_AUTH_ALGO_KEYED_SHA1 3
+
+#define LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_SHA1 4
+
+/**
+ * AuthType constants (mirrors `lr_bfd::auth::AuthType`).
+ */
+#define LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD 0
+
+#define LR_BFD_AUTH_TYPE_KEYED_MD5 1
+
+#define LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5 2
+
+#define LR_BFD_AUTH_TYPE_KEYED_SHA1 3
+
+#define LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1 4
+
 /**
  * Maximum text length for the `kind` and `state` strings in
  * [`lr_session_summary_t`]. RFC 2328 / RFC 5340 / RFC 8966 never use
@@ -2821,6 +2842,36 @@ typedef struct lr_filter_context_t {
 } lr_filter_context_t;
 
 /**
+ * Opaque HelperEntry handle.
+ */
+typedef struct OpaqueOspfHelperEntry {
+  uint8_t _private[0];
+} OpaqueOspfHelperEntry;
+
+typedef struct OpaqueOspfHelperEntry *lr_ospf_helper_entry_t;
+
+/**
+ * Opaque RestartTracker handle.
+ */
+typedef struct OpaqueOspfRestartTracker {
+  uint8_t _private[0];
+} OpaqueOspfRestartTracker;
+
+typedef struct OpaqueOspfRestartTracker *lr_ospf_restart_tracker_t;
+
+/**
+ * Opaque SessionConfig handle. Constructed via
+ * `lr_session_config_bgp` / `_ospfv2` / `_ospfv3` / `_babel`; the
+ * `with_*` mutators below apply in place and return the same handle
+ * so the embedder can chain.
+ */
+typedef struct OpaqueSessionConfig {
+  uint8_t _private[0];
+} OpaqueSessionConfig;
+
+typedef struct OpaqueSessionConfig *lr_session_config_t;
+
+/**
  * One session summary, mirroring [`lr_router::SessionSummary`].
  *
  * `kind` is one of the `LR_SESSION_KIND_*` constants; `kind_text` is
@@ -3750,7 +3801,7 @@ typedef struct OpaqueOspfSrDb {
 typedef struct OpaqueOspfSrDb *lr_ospf_sr_db_t;
 
 /**
- * Opaque `Srv6Database` handle.
+ * Opaque Srv6Database handle.
  */
 typedef struct OpaqueOspfSrv6Db {
   uint8_t _private[0];
@@ -9625,6 +9676,365 @@ int32_t lr_filter_evaluate(lr_filter_t filter,
                            const struct lr_filter_context_t *ctx,
                            int32_t *out_verdict,
                            struct lr_bytes_t *out_reason);
+
+/**
+ * Construct a Label with just the value (TC=0, TTL=0). Used for the
+ * BGP-LU 3-octet NLRI form, where TTL is absent (RFC 8277 §2.2).
+ * Infallible — the value is masked to 20 bits on encode.
+ */
+Label *lr_mpls_label_new_value(uint32_t value);
+
+/**
+ * True when `value` fits in the 20-bit label range (RFC 3032 §2.1).
+ * Stateless — does not allocate.
+ */
+uint8_t lr_mpls_label_is_valid_value(uint32_t value);
+
+/**
+ * Alias for `lr_mpls_label_new_checked` — the Rust fn `Label::try_new`
+ * maps to the same surface (validate the 20-bit range, return NULL on
+ * out-of-range). Kept as a separate symbol so a C consumer searching
+ * for `try_new` finds it.
+ */
+Label *lr_mpls_label_try_new(uint32_t value);
+
+/**
+ * Wrap an existing Vec of labels into a LabelStack. Takes ownership
+ * of the array contents — the caller must not free the labels
+ * afterwards.
+ *
+ * # Safety
+ * `labels` must point to `count` readable `lr_mpls_label_t` handles
+ * produced by `lr_mpls_label_new` / `_new_value` / `_try_new`. Each
+ * handle is consumed (freed) by this call.
+ */
+LabelStack *lr_mpls_label_stack_from_vec(Label *const *labels, uintptr_t count);
+
+/**
+ * Take the underlying Vec of labels out of the stack. Returns a
+ * freshly-allocated `lr_bytes_t` carrying `count * 4` bytes (one
+ * 4-octet wire entry per label, no S bit set — caller must add the
+ * bottom-of-stack bit if needed). The stack handle is consumed
+ * and freed.
+ *
+ * The shape is bytes (not a label-handle array) because label
+ * handles are owned by the caller and would need individual
+ * `lr_mpls_label_free` calls; the byte form is what an embedder
+ * typically wants when round-tripping through a `Vec<Label>`.
+ *
+ * # Safety
+ * `stack` must be a valid handle produced by a `lr_mpls_label_stack_*`
+ * constructor. `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_mpls_label_stack_into_vec(LabelStack *stack, struct lr_bytes_t *out);
+
+/**
+ * Read the AuthType as one of the `LR_BFD_AUTH_TYPE_*` constants.
+ * Stateless — given an algorithm id, returns the matching AuthType.
+ */
+int32_t lr_bfd_auth_type_from_algorithm(int32_t algorithm);
+
+/**
+ * Construct an empty HelperEntry (RFC 3623 §3 helper state).
+ */
+lr_ospf_helper_entry_t lr_ospf_helper_entry_new(void);
+
+/**
+ * Drop a HelperEntry handle. Safe on NULL.
+ *
+ * # Safety
+ * `h` must have been produced by `lr_ospf_helper_entry_new` and not
+ * already freed.
+ */
+void lr_ospf_helper_entry_free(lr_ospf_helper_entry_t h);
+
+/**
+ * True (1) when helper mode is currently active for this neighbour.
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint8_t lr_ospf_helper_entry_is_active(lr_ospf_helper_entry_t h);
+
+/**
+ * The grace deadline on the caller's clock (0 when inactive).
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint64_t lr_ospf_helper_entry_grace_deadline_ms(lr_ospf_helper_entry_t h);
+
+/**
+ * The grace period last advertised by the restarting neighbour.
+ *
+ * # Safety
+ * `h` must be a valid handle.
+ */
+uint32_t lr_ospf_helper_entry_last_period_secs(lr_ospf_helper_entry_t h);
+
+/**
+ * True (1) when the tracker is in the recovering phase.
+ *
+ * # Safety
+ * `t` must be a valid handle.
+ */
+uint8_t lr_ospf_restart_tracker_recovering(lr_ospf_restart_tracker_t t);
+
+/**
+ * The grace deadline on the caller's clock (0 when inactive).
+ *
+ * # Safety
+ * `t` must be a valid handle.
+ */
+uint64_t lr_ospf_restart_tracker_grace_deadline_ms(lr_ospf_restart_tracker_t t);
+
+/**
+ * Construct a BGP SessionConfig with the default knobs (matches
+ * `SessionConfig::bgp` in Rust).
+ */
+lr_session_config_t lr_session_config_bgp(uint32_t local_as,
+                                          uint32_t peer_as,
+                                          uint32_t local_bgp_id);
+
+/**
+ * Construct an OSPFv2 SessionConfig (matches `SessionConfig::ospfv2`).
+ */
+lr_session_config_t lr_session_config_ospfv2(uint32_t router_id, uint32_t area_id);
+
+/**
+ * Construct an OSPFv3 SessionConfig (matches `SessionConfig::ospfv3`).
+ */
+lr_session_config_t lr_session_config_ospfv3(uint32_t router_id, uint32_t area_id);
+
+/**
+ * Construct a Babel SessionConfig (matches `SessionConfig::babel`).
+ *
+ * # Safety
+ * `addr` must point to 16 readable bytes (IPv6 link-local).
+ */
+lr_session_config_t lr_session_config_babel(const uint8_t *addr, uintptr_t addr_len);
+
+/**
+ * Drop a SessionConfig handle. Safe on NULL.
+ *
+ * # Safety
+ * `c` must have been produced by one of the `lr_session_config_*`
+ * constructors and not already freed.
+ */
+void lr_session_config_free(lr_session_config_t c);
+
+/**
+ * Apply `with_mp_families` (RFC 4760). Returns the same handle on
+ * success, NULL on a NULL handle.
+ *
+ * # Safety
+ * `c` must be a valid handle. `families` must point to `count`
+ * readable `lr_nlri_family_t` structs.
+ */
+lr_session_config_t lr_session_config_with_mp_families(lr_session_config_t c,
+                                                       const NlriFamily *families,
+                                                       uintptr_t count);
+
+/**
+ * Apply `with_add_path` (RFC 7911). Returns the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_add_path(lr_session_config_t c);
+
+/**
+ * Apply `with_extended_next_hop` (RFC 5549 canonical tuple). Returns
+ * the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_extended_next_hop(lr_session_config_t c);
+
+/**
+ * Apply `with_extended_next_hop_tuple` (RFC 5549 arbitrary tuple).
+ * Returns the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_extended_next_hop_tuple(lr_session_config_t c,
+                                                                   uint16_t nlri_afi,
+                                                                   uint8_t nlri_safi,
+                                                                   uint16_t nexthop_afi);
+
+/**
+ * Apply `with_graceful_restart` (RFC 4724). Returns the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_graceful_restart(lr_session_config_t c,
+                                                            uint16_t restart_time_secs);
+
+/**
+ * Apply `with_long_lived_gr` (RFC 9494). Returns the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_long_lived_gr(lr_session_config_t c,
+                                                         uint32_t stale_time_secs);
+
+/**
+ * Apply `with_llgr_max_stale_time`. Returns the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_llgr_max_stale_time(lr_session_config_t c,
+                                                               uint32_t cap_secs);
+
+/**
+ * Apply `with_mrai_ms`. Returns the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_mrai_ms(lr_session_config_t c, uint64_t mrai_ms);
+
+/**
+ * Apply `with_route_reflector_client` (RFC 4456 §3). Returns the
+ * same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_route_reflector_client(lr_session_config_t c);
+
+/**
+ * Apply `with_maximum_prefix`. Returns the same handle. `action` is
+ * one of the `LR_MAX_PREFIX_*` constants.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_maximum_prefix(lr_session_config_t c,
+                                                          uint32_t limit,
+                                                          int32_t action);
+
+/**
+ * Apply `with_maximum_prefix_threshold` (0–100 percent). Returns
+ * the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_maximum_prefix_threshold(lr_session_config_t c,
+                                                                    uint8_t pct);
+
+/**
+ * Apply `with_maximum_prefix_restart_time`. Returns the same handle.
+ *
+ * # Safety
+ * `c` must be a valid handle.
+ */
+lr_session_config_t lr_session_config_with_maximum_prefix_restart_time(lr_session_config_t c,
+                                                                       uint32_t secs);
+
+/**
+ * True (1) when the GTSM error indicates the kernel does not support
+ * the requested operation (e.g. min-TTL filter on BSD).
+ *
+ * # Safety
+ * `err` must point to a valid `lr_gtsm_error_t` (i32 code).
+ */
+uint8_t lr_gtsm_error_is_kernel_unsupported(int32_t err_code);
+
+/**
+ * True (1) when the TCP auth error indicates the kernel does not
+ * support the requested operation (e.g. TCP_MD5SIG on BSD).
+ */
+uint8_t lr_tcp_auth_error_is_kernel_unsupported(int32_t err_code);
+
+/**
+ * Run the peephole optimizer on a flat `Vec<Instr>` (RFC: lr-policy
+ * `peephole::optimize`). Returns the optimized instruction stream as
+ * a flat byte buffer (each instruction is one byte — the
+ * discriminant — followed by its operands; the layout matches
+ * `Instr::encode`).
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes encoding a valid
+ * instruction stream. `out` must point to a writable `lr_bytes_t`.
+ */
+int32_t lr_policy_peephole_optimize(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
+
+/**
+ * Lex one filter source string into a sequence of tokens. The output
+ * is a flat byte buffer carrying the token count as a u64 little-endian
+ * (8 bytes) — full token payloads (identifiers, ints, prefixes) stay
+ * on the Rust side. Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `src` must be a NUL-terminated C string. `out` must point to a
+ * writable `lr_bytes_t`.
+ */
+int32_t lr_policy_lexer_tokenize(const char *src, struct lr_bytes_t *out);
+
+/**
+ * Parse one filter source string into a compiled filter. Returns a
+ * handle the caller frees with `lr_filter_free` (the existing
+ * entry). On error returns NULL and sets the last-error string.
+ *
+ * # Safety
+ * `name` and `src` must be NUL-terminated C strings.
+ */
+lr_filter_t lr_policy_parse_filter(const char *name, const char *src);
+
+/**
+ * Read the `truthy` flag of a `Value`. Returns 1 when the value is
+ * truthy, 0 when not. (Standalone entry — kept here because the
+ * Value type is internal and not exposed via a handle.)
+ */
+uint8_t lr_policy_value_truthy(int32_t value_kind);
+
+/**
+ * Read the precedence of a `BinaryOp` (1–7, mirroring Rust's
+ * `BinaryOp::precedence`). Stateless — given the operator's i32 id,
+ * returns its precedence.
+ */
+uint8_t lr_policy_binary_op_precedence(int32_t op);
+
+/**
+ * True (1) when `kind` is settable (mirrors `RouteFieldKind::is_settable`).
+ * `kind` is one of the `LR_ROUTE_FIELD_*` constants.
+ */
+uint8_t lr_policy_route_field_is_settable(int32_t kind);
+
+/**
+ * Take the inner `Prefix` out of an `IpNet`, copying it to `*out`.
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL pointer.
+ *
+ * # Safety
+ * `net` must point to a valid `IpNet`. `out` must point to a
+ * writable `Prefix`.
+ */
+int32_t lr_ip_net_into_inner(const IpNet *net, Prefix *out);
+
+/**
+ * True (1) when the ASN is the AS_TRANS placeholder 23456 (RFC 4893).
+ *
+ * # Safety
+ * `asn` must point to a valid `Asn`.
+ */
+uint8_t lr_asn_is_as23456(const Asn *asn);
+
+/**
+ * Subtract `other` from `instant`, writing the duration to `*out`.
+ * Returns 0 on success, `LR_ERR_INVALID_HANDLE` when the subtraction
+ * underflows.
+ *
+ * # Safety
+ * `instant` and `out` must point to valid memory.
+ */
+int32_t lr_instant_checked_sub(uint64_t instant, uint64_t other, uint64_t *out);
 
 /**
  * Count of sessions currently registered on the router. Mirrors
