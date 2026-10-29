@@ -25,11 +25,10 @@ use lr_core::addr::IpAddr;
 use lr_osroute::ospf_transport::prefix_mask;
 use lr_osroute::source_check::check_source_compatibility;
 
-use crate::error::{set_last_error, LR_ERR_PANIC};
+use crate::error::LR_ERR_PANIC;
 use crate::guarded;
 
 const LR_ERR_NULL: i32 = -1;
-const LR_ERR_OTHER: i32 = -6;
 
 // ---- Stateless helpers (work on every platform) ----
 
@@ -136,6 +135,7 @@ pub struct lr_osroute_interface_v6_addr_t {
 #[cfg(target_os = "linux")]
 mod linux_helpers {
     use super::*;
+    use crate::error::set_last_error;
     use lr_osroute::bfd_transport::ttl_check_enforced;
     use lr_osroute::mpls_route::mpls_enabled;
     use lr_osroute::ospf_transport::{
@@ -144,6 +144,14 @@ mod linux_helpers {
     use lr_osroute::seg6_route::seg6_enabled;
     use std::ffi::CStr;
     use std::os::raw::c_char;
+
+    // `LR_ERR_OTHER` is used only by the Linux code paths (the
+    // non-Linux stubs return 0 / success for every entry point, in
+    // lockstep with `lr_osroute::stub::StubRouteTable`). Declaring
+    // the constant at the parent scope triggered `-D warnings` /
+    // `dead_code` on Windows and macOS — keep it next to its only
+    // callers so the unused-on-non-Linux path stays compile-clean.
+    const LR_ERR_OTHER: i32 = -6;
 
     /// Resolve an interface name to its kernel index. Returns 0 when
     /// the interface is not found.
@@ -386,6 +394,7 @@ pub use linux_helpers::*;
 // (mirrors lr_osroute::stub::StubRouteTable). ----
 #[cfg(not(target_os = "linux"))]
 mod non_linux_stubs {
+    use super::*;
     use std::os::raw::c_char;
 
     #[no_mangle]
