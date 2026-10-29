@@ -2015,4 +2015,541 @@ inline BfdPacket decode_bfd_packet(const std::vector<std::uint8_t>& bytes) {
     return decode_bfd_packet(bytes.data(), bytes.size());
 }
 
+// =========================================================================
+// SRv6 structured types — Sid / Locator / Srh / Behavior
+// (RFC 8754 / RFC 8986). Mirrors `lr_srv6::{Sid, Locator, Srh, Behavior}`.
+// =========================================================================
+
+namespace detail {
+
+struct Srv6SidDeleter {
+    void operator()(lr_srv6_sid_t s) const noexcept {
+        if (s) lr_srv6_sid_free(s);
+    }
+};
+
+struct Srv6LocatorDeleter {
+    void operator()(lr_srv6_locator_t l) const noexcept {
+        if (l) lr_srv6_locator_free(l);
+    }
+};
+
+struct Srv6SrhDeleter {
+    void operator()(lr_srv6_srh_t s) const noexcept {
+        if (s) lr_srv6_srh_free(s);
+    }
+};
+
+} // namespace detail
+
+/// RAII handle to a 128-bit SRv6 Segment Identifier (RFC 8754 §3).
+using Srv6Sid = std::unique_ptr<OpaqueSrv6Sid, detail::Srv6SidDeleter>;
+
+/// RAII handle to a locator block (RFC 8754 §3.1).
+using Srv6Locator = std::unique_ptr<OpaqueSrv6Locator, detail::Srv6LocatorDeleter>;
+
+/// RAII handle to a Segment Routing Header (RFC 8754 §2).
+using Srv6Srh = std::unique_ptr<OpaqueSrv6Srh, detail::Srv6SrhDeleter>;
+
+/// SRv6 SRH error discriminant (mirrors `lr_srv6::SrhError`).
+enum class Srv6SrhError : std::int32_t {
+    TooShort = 0,
+    LengthMismatch = 1,
+    EmptySegmentList = 2,
+    TooManySegments = 3,
+    LastEntryOutOfRange = 4,
+    SegmentsLeftOutOfRange = 5,
+    WrongRoutingType = 6,
+    ReservedFlagBits = 7,
+    Unknown = -1,
+};
+
+/// Sid parse-error discriminant (mirrors `lr_srv6::SidParseError`).
+/// Values match `lr_srv6_sid_parse_error_name`'s mapping.
+enum class Srv6SidParseError : std::int32_t {
+    Empty = 1,
+    DoubleDoubleColon = 2,
+    BadHextet = 3,
+    WrongLength = 4,
+};
+
+/// Locator parse-error discriminant (mirrors `lr_srv6::LocatorParseError`).
+enum class Srv6LocatorParseError : std::int32_t {
+    MissingPrefixLen = 1,
+    BadAddr = 2,
+    BadPrefixLen = 3,
+};
+
+/// Exception thrown on SRv6 SRH encode/decode failure.
+class Srv6SrhErrorException : public Error {
+public:
+    Srv6SrhErrorException(Srv6SrhError code, std::string msg)
+        : Error(std::string("SrhError(") + srh_error_name(code) + "): " + msg),
+          code_(code) {}
+    Srv6SrhError code() const noexcept { return code_; }
+private:
+    static const char* srh_error_name(Srv6SrhError c) {
+        switch (c) {
+            case Srv6SrhError::TooShort: return "TooShort";
+            case Srv6SrhError::LengthMismatch: return "LengthMismatch";
+            case Srv6SrhError::EmptySegmentList: return "EmptySegmentList";
+            case Srv6SrhError::TooManySegments: return "TooManySegments";
+            case Srv6SrhError::LastEntryOutOfRange: return "LastEntryOutOfRange";
+            case Srv6SrhError::SegmentsLeftOutOfRange: return "SegmentsLeftOutOfRange";
+            case Srv6SrhError::WrongRoutingType: return "WrongRoutingType";
+            case Srv6SrhError::ReservedFlagBits: return "ReservedFlagBits";
+            case Srv6SrhError::Unknown: return "Unknown";
+        }
+        return "Unknown";
+    }
+    Srv6SrhError code_;
+};
+
+/// Exception thrown on SID parse failure.
+class Srv6SidParseException : public Error {
+public:
+    Srv6SidParseException(Srv6SidParseError code, std::string msg)
+        : Error(std::string("SidParseError: ") + msg), code_(code) {}
+    Srv6SidParseError code() const noexcept { return code_; }
+private:
+    Srv6SidParseError code_;
+};
+
+/// Exception thrown on Locator parse failure.
+class Srv6LocatorParseException : public Error {
+public:
+    Srv6LocatorParseException(Srv6LocatorParseError code, std::string msg)
+        : Error(std::string("LocatorParseError: ") + msg), code_(code) {}
+    Srv6LocatorParseError code() const noexcept { return code_; }
+private:
+    Srv6LocatorParseError code_;
+};
+
+// ---- Srv6Sid construction ----
+
+/// Construct a SID from 16 raw bytes (network byte order).
+inline Srv6Sid make_srv6_sid(const std::array<std::uint8_t, 16>& octets) {
+    lr_srv6_sid_t s = lr_srv6_sid_new(octets.data());
+    if (!s) {
+        throw Error("lr_srv6_sid_new returned null: " + std::string(lr_last_error()));
+    }
+    return Srv6Sid(s);
+}
+
+/// Construct a SID from a 16-byte vector.
+inline Srv6Sid make_srv6_sid(const std::vector<std::uint8_t>& octets) {
+    if (octets.size() != 16) {
+        throw Error("Sid must be 16 bytes, got " + std::to_string(octets.size()));
+    }
+    std::array<std::uint8_t, 16> arr{};
+    std::copy(octets.begin(), octets.end(), arr.begin());
+    return make_srv6_sid(arr);
+}
+
+/// Construct the all-zeros SID (`::`).
+inline Srv6Sid make_srv6_sid_unspecified() {
+    return make_srv6_sid(std::array<std::uint8_t, 16>{});
+}
+
+/// Parse a SID from the canonical IPv6 textual form (RFC 5952 §4).
+inline Srv6Sid parse_srv6_sid(std::string_view s) {
+    std::array<std::uint8_t, 16> out{};
+    std::int32_t rc = lr_srv6_sid_from_str(s.data(), out.data());
+    if (rc == 0) {
+        return make_srv6_sid(out);
+    }
+    if (rc > 0) {
+        auto code = static_cast<Srv6SidParseError>(rc);
+        throw Srv6SidParseException(code, std::string(s));
+    }
+    throw Error("lr_srv6_sid_from_str failed (rc=" + std::to_string(rc) + "): "
+                + std::string(lr_last_error()));
+}
+
+/// Construct a SID by concatenating a locator byte string and a
+/// function/argument tail (RFC 8754 §3.1).
+inline Srv6Sid make_srv6_sid_from_locator_tail(
+    const std::vector<std::uint8_t>& locator,
+    const std::vector<std::uint8_t>& tail,
+    std::uint8_t locator_block_bits) {
+    lr_srv6_sid_t s = lr_srv6_sid_from_locator_tail(
+        locator.data(), locator.size(),
+        tail.data(), tail.size(),
+        locator_block_bits);
+    if (!s) {
+        throw Error("lr_srv6_sid_from_locator_tail returned null: "
+                    + std::string(lr_last_error()));
+    }
+    return Srv6Sid(s);
+}
+
+// ---- Srv6Sid accessors ----
+
+/// Read the 16 raw bytes.
+inline std::array<std::uint8_t, 16> srv6_sid_octets(const Srv6Sid& s) {
+    std::array<std::uint8_t, 16> out{};
+    std::int32_t rc = lr_srv6_sid_octets(s.get(), out.data());
+    if (rc != 0) {
+        throw Error("lr_srv6_sid_octets failed: " + std::string(lr_last_error()));
+    }
+    return out;
+}
+
+/// True when the SID is the all-zeros SID (`::`).
+inline bool srv6_sid_is_unspecified(const Srv6Sid& s) {
+    return lr_srv6_sid_is_unspecified(s.get()) != 0;
+}
+
+/// Slice the locator prefix out of the SID (RFC 8754 §3.1).
+/// Returns `(offset, length)` so the caller can borrow the slice via
+/// `srv6_sid_octets(s)[offset..offset+length]`. Returns `std::nullopt`
+/// when `locator_block_bits` exceeds 128 or is not a multiple of 8.
+inline std::optional<std::pair<std::size_t, std::size_t>>
+srv6_sid_locator_slice(const Srv6Sid& s, std::uint8_t locator_block_bits) {
+    std::size_t off = 0, len = 0;
+    if (lr_srv6_sid_locator_slice(s.get(), locator_block_bits, &off, &len)) {
+        return std::make_pair(off, len);
+    }
+    return std::nullopt;
+}
+
+/// True when the SID falls inside the given locator block (RFC 8754 §3.1).
+inline bool srv6_sid_is_inside_locator(
+    const Srv6Sid& s,
+    const std::vector<std::uint8_t>& locator,
+    std::uint8_t locator_block_bits) {
+    return lr_srv6_sid_is_inside_locator(
+        s.get(), locator.data(), locator.size(), locator_block_bits) != 0;
+}
+
+/// Render a SID as the canonical IPv6 textual form (RFC 5952 §4).
+inline std::string srv6_sid_to_string(const Srv6Sid& s) {
+    auto octets = srv6_sid_octets(s);
+    const char* p = lr_srv6_sid_to_str(octets.data());
+    if (!p) return {};
+    return std::string(p);
+}
+
+// ---- Srv6Locator construction ----
+
+/// Construct a Locator from a 16-byte address and a bit length.
+/// The address is masked so host bits are zero (RFC 8754 §3.1).
+inline Srv6Locator make_srv6_locator(
+    const std::array<std::uint8_t, 16>& addr, std::uint8_t block_bits) {
+    if (block_bits > 128) {
+        throw Error("block_bits must be <= 128, got " + std::to_string(block_bits));
+    }
+    lr_srv6_locator_t l = lr_srv6_locator_new(addr.data(), block_bits);
+    if (!l) {
+        throw Error("lr_srv6_locator_new returned null: " + std::string(lr_last_error()));
+    }
+    return Srv6Locator(l);
+}
+
+/// Build a Locator from a Sid's high `block_bits` bits.
+inline Srv6Locator make_srv6_locator_from_sid(const Srv6Sid& sid, std::uint8_t block_bits) {
+    lr_srv6_locator_t l = lr_srv6_locator_from_sid(sid.get(), block_bits);
+    if (!l) {
+        throw Error("lr_srv6_locator_from_sid returned null: " + std::string(lr_last_error()));
+    }
+    return Srv6Locator(l);
+}
+
+/// Parse "fcbb:bb00::/48" (RFC 5952 §4 + a /prefix suffix).
+inline Srv6Locator parse_srv6_locator(std::string_view s) {
+    std::array<std::uint8_t, 16> addr{};
+    std::uint8_t bits = 0;
+    std::int32_t rc = lr_srv6_locator_from_str(s.data(), addr.data(), &bits);
+    if (rc == 0) {
+        return make_srv6_locator(addr, bits);
+    }
+    if (rc > 0) {
+        auto code = static_cast<Srv6LocatorParseError>(rc);
+        throw Srv6LocatorParseException(code, std::string(s));
+    }
+    throw Error("lr_srv6_locator_from_str failed (rc=" + std::to_string(rc) + "): "
+                + std::string(lr_last_error()));
+}
+
+// ---- Srv6Locator accessors ----
+
+/// The raw 16-byte address (host bits zeroed).
+inline std::array<std::uint8_t, 16> srv6_locator_addr(const Srv6Locator& l) {
+    std::array<std::uint8_t, 16> out{};
+    std::int32_t rc = lr_srv6_locator_addr(l.get(), out.data());
+    if (rc != 0) {
+        throw Error("lr_srv6_locator_addr failed: " + std::string(lr_last_error()));
+    }
+    return out;
+}
+
+/// The locator prefix length in bits.
+inline std::uint8_t srv6_locator_block_bits(const Srv6Locator& l) {
+    return lr_srv6_locator_block_bits(l.get());
+}
+
+/// The locator's byte length (rounded up).
+inline std::size_t srv6_locator_block_bytes(const Srv6Locator& l) {
+    return lr_srv6_locator_block_bytes(l.get());
+}
+
+/// True when `sid` falls inside this locator.
+inline bool srv6_locator_contains_sid(const Srv6Locator& l, const Srv6Sid& sid) {
+    return lr_srv6_locator_contains_sid(l.get(), sid.get()) != 0;
+}
+
+/// Build a Sid under this locator by appending the 16-byte `tail`.
+inline Srv6Sid srv6_locator_sid_with_tail(
+    const Srv6Locator& l, const std::array<std::uint8_t, 16>& tail) {
+    lr_srv6_sid_t s = lr_srv6_locator_sid_with_tail(l.get(), tail.data());
+    if (!s) {
+        throw Error("lr_srv6_locator_sid_with_tail returned null: "
+                    + std::string(lr_last_error()));
+    }
+    return Srv6Sid(s);
+}
+
+/// Allocate a Sid at a given function index inside this locator.
+/// Returns `nullptr` (an empty `Srv6Sid`) when the locator leaves
+/// no room for a 4-byte function.
+inline Srv6Sid srv6_locator_sid_with_index(
+    const Srv6Locator& l, std::uint32_t function_index) {
+    lr_srv6_sid_t s = lr_srv6_locator_sid_with_index(l.get(), function_index);
+    return Srv6Sid(s);  // may be nullptr
+}
+
+/// Render a Locator as "<addr>/<bits>" (RFC 5952 §4 + RFC 8754 §3.1).
+inline std::string srv6_locator_to_string(const Srv6Locator& l) {
+    auto addr = srv6_locator_addr(l);
+    const char* p = lr_srv6_locator_to_str(addr.data(), srv6_locator_block_bits(l));
+    if (!p) return {};
+    return std::string(p);
+}
+
+// ---- Srv6Srh construction ----
+
+/// Build an SRH from a segment list. `segments_left` defaults to
+/// `segments.size() - 1` (RFC 8754 §4.2 — the sender's view).
+inline Srv6Srh make_srv6_srh(const std::vector<std::array<std::uint8_t, 16>>& segments) {
+    if (segments.empty()) {
+        throw Srv6SrhErrorException(Srv6SrhError::EmptySegmentList, "segment list is empty");
+    }
+    // Flatten the segment list into a single buffer (16 bytes per SID).
+    std::vector<std::uint8_t> flat;
+    flat.reserve(segments.size() * 16);
+    for (const auto& s : segments) {
+        flat.insert(flat.end(), s.begin(), s.end());
+    }
+    lr_srv6_srh_t s = lr_srv6_srh_new(flat.data(), segments.size());
+    if (!s) {
+        throw Error("lr_srv6_srh_new returned null: " + std::string(lr_last_error()));
+    }
+    return Srv6Srh(s);
+}
+
+/// Like `make_srv6_srh` but with an explicit `segments_left`.
+inline Srv6Srh make_srv6_srh_with_segments_left(
+    const std::vector<std::array<std::uint8_t, 16>>& segments,
+    std::uint8_t segments_left) {
+    if (segments.empty()) {
+        throw Srv6SrhErrorException(Srv6SrhError::EmptySegmentList, "segment list is empty");
+    }
+    std::vector<std::uint8_t> flat;
+    flat.reserve(segments.size() * 16);
+    for (const auto& s : segments) {
+        flat.insert(flat.end(), s.begin(), s.end());
+    }
+    lr_srv6_srh_t s = lr_srv6_srh_new_with_segments_left(
+        flat.data(), segments.size(), segments_left, /*segments_left_present=*/1);
+    if (!s) {
+        throw Error("lr_srv6_srh_new_with_segments_left returned null: "
+                    + std::string(lr_last_error()));
+    }
+    return Srv6Srh(s);
+}
+
+// ---- Srv6Srh builder setters ----
+
+inline Srv6Srh& srv6_srh_set_next_header(Srv6Srh& s, std::uint8_t next_header) {
+    if (lr_srv6_srh_set_next_header(s.get(), next_header) != 0) {
+        throw Error("lr_srv6_srh_set_next_header failed: " + std::string(lr_last_error()));
+    }
+    return s;
+}
+
+inline Srv6Srh& srv6_srh_set_flags(Srv6Srh& s, std::uint8_t flags) {
+    if (lr_srv6_srh_set_flags(s.get(), flags) != 0) {
+        throw Error("lr_srv6_srh_set_flags failed: " + std::string(lr_last_error()));
+    }
+    return s;
+}
+
+inline Srv6Srh& srv6_srh_set_tag(Srv6Srh& s, std::uint16_t tag) {
+    if (lr_srv6_srh_set_tag(s.get(), tag) != 0) {
+        throw Error("lr_srv6_srh_set_tag failed: " + std::string(lr_last_error()));
+    }
+    return s;
+}
+
+inline Srv6Srh& srv6_srh_set_tlvs(Srv6Srh& s, const std::vector<std::uint8_t>& tlvs) {
+    if (lr_srv6_srh_set_tlvs(s.get(), tlvs.data(), tlvs.size()) != 0) {
+        throw Error("lr_srv6_srh_set_tlvs failed: " + std::string(lr_last_error()));
+    }
+    return s;
+}
+
+// ---- Srv6Srh accessors ----
+
+inline std::uint8_t srv6_srh_next_header(const Srv6Srh& s) {
+    return lr_srv6_srh_next_header(s.get());
+}
+
+inline std::uint8_t srv6_srh_segments_left(const Srv6Srh& s) {
+    return lr_srv6_srh_segments_left(s.get());
+}
+
+inline std::uint8_t srv6_srh_last_entry(const Srv6Srh& s) {
+    return lr_srv6_srh_last_entry(s.get());
+}
+
+inline std::uint8_t srv6_srh_flags(const Srv6Srh& s) {
+    return lr_srv6_srh_flags(s.get());
+}
+
+inline std::uint16_t srv6_srh_tag(const Srv6Srh& s) {
+    return lr_srv6_srh_tag(s.get());
+}
+
+inline std::size_t srv6_srh_segment_count(const Srv6Srh& s) {
+    return lr_srv6_srh_segment_count(s.get());
+}
+
+/// Number of segments — mirrors Rust's `Srh::len`.
+inline std::size_t srv6_srh_len(const Srv6Srh& s) {
+    return lr_srv6_srh_len(s.get());
+}
+
+inline bool srv6_srh_is_empty(const Srv6Srh& s) {
+    return lr_srv6_srh_is_empty(s.get()) != 0;
+}
+
+inline std::uint8_t srv6_srh_hdr_ext_len(const Srv6Srh& s) {
+    return lr_srv6_srh_hdr_ext_len(s.get());
+}
+
+/// Segment at `index` (16 raw bytes). Throws on out-of-range.
+inline std::array<std::uint8_t, 16> srv6_srh_segment_at(
+    const Srv6Srh& s, std::size_t index) {
+    std::array<std::uint8_t, 16> out{};
+    if (lr_srv6_srh_segment_at(s.get(), index, out.data()) != 0) {
+        throw Error("lr_srv6_srh_segment_at: out of range");
+    }
+    return out;
+}
+
+/// All segments as a vector of 16-byte arrays.
+inline std::vector<std::array<std::uint8_t, 16>> srv6_srh_segments(const Srv6Srh& s) {
+    std::vector<std::array<std::uint8_t, 16>> out;
+    out.reserve(srv6_srh_segment_count(s));
+    for (std::size_t i = 0; i < out.capacity(); ++i) {
+        out.push_back(srv6_srh_segment_at(s, i));
+    }
+    return out;
+}
+
+/// Segment List[0] — the destination address at the sender (RFC 8754 §4.1).
+inline std::array<std::uint8_t, 16> srv6_srh_first_segment(const Srv6Srh& s) {
+    std::array<std::uint8_t, 16> out{};
+    if (lr_srv6_srh_first_segment(s.get(), out.data()) != 0) {
+        throw Error("lr_srv6_srh_first_segment: empty SRH");
+    }
+    return out;
+}
+
+/// Segment List[Segments Left] — the current destination (RFC 8754 §4.1).
+inline std::array<std::uint8_t, 16> srv6_srh_current_destination(const Srv6Srh& s) {
+    std::array<std::uint8_t, 16> out{};
+    if (lr_srv6_srh_current_destination(s.get(), out.data()) != 0) {
+        throw Error("lr_srv6_srh_current_destination: empty SRH");
+    }
+    return out;
+}
+
+/// The TLV bytes following the segment list (RFC 8754 §2.6).
+inline std::vector<std::uint8_t> srv6_srh_tlvs(const Srv6Srh& s) {
+    auto b = std::make_unique<lr_bytes_t>();
+    if (lr_srv6_srh_tlvs(s.get(), b.get()) != 0) {
+        throw Error("lr_srv6_srh_tlvs failed: " + std::string(lr_last_error()));
+    }
+    const std::uint8_t* p = lr_bytes_ptr(b.get());
+    std::size_t n = lr_bytes_len(b.get());
+    return std::vector<std::uint8_t>(p, p + n);
+}
+
+/// Encode the SRH into wire bytes (RFC 8754 §2 — auto-padded to a
+/// multiple of 8 octets). Throws `Srv6SrhErrorException` on encode failure.
+inline Bytes srv6_srh_encode(const Srv6Srh& s) {
+    auto out = std::make_unique<lr_bytes_t>();
+    std::int32_t rc = lr_srv6_srh_encode(s.get(), out.get());
+    if (rc != 0) {
+        std::int32_t code = lr_srv6_srh_last_err_code();
+        if (code != -1) {
+            throw Srv6SrhErrorException(static_cast<Srv6SrhError>(code),
+                                        std::string(lr_last_error()));
+        }
+        throw Error("lr_srv6_srh_encode failed: " + std::string(lr_last_error()));
+    }
+    return Bytes(out.release());
+}
+
+// ---- SRv6 Behavior (RFC 8986 §4 — endpoint behaviors) ----
+
+/// Parse a 16-bit wire value into `(canonical_wire, name)`.
+/// Returns `std::nullopt` when the wire value does not name a known behavior.
+inline std::optional<std::pair<std::uint16_t, std::string>>
+srv6_behavior_from_wire(std::uint16_t wire) {
+    std::uint16_t out_value = 0;
+    std::array<char, 64> buf{};
+    if (lr_srv6_behavior_from_wire(wire, &out_value, buf.data(), buf.size())) {
+        return std::make_pair(out_value, std::string(buf.data()));
+    }
+    return std::nullopt;
+}
+
+/// Canonical wire value for `wire` (strips reserved bits).
+inline std::uint16_t srv6_behavior_wire_value(std::uint16_t wire) {
+    return lr_srv6_behavior_wire_value(wire);
+}
+
+/// The IANA-registered behavior name (e.g. "End", "End.X", "End.DX6").
+inline std::string srv6_behavior_name(std::uint16_t wire) {
+    auto r = srv6_behavior_from_wire(wire);
+    if (r) return r->second;
+    return "Unknown(0x" + std::to_string(wire) + ")";
+}
+
+inline bool srv6_behavior_is_psp(std::uint16_t wire) {
+    return lr_srv6_behavior_is_psp(wire) != 0;
+}
+
+inline bool srv6_behavior_is_usp(std::uint16_t wire) {
+    return lr_srv6_behavior_is_usp(wire) != 0;
+}
+
+inline bool srv6_behavior_is_usd(std::uint16_t wire) {
+    return lr_srv6_behavior_is_usd(wire) != 0;
+}
+
+inline bool srv6_behavior_is_decap(std::uint16_t wire) {
+    return lr_srv6_behavior_is_decap(wire) != 0;
+}
+
+inline bool srv6_behavior_is_cross_connect(std::uint16_t wire) {
+    return lr_srv6_behavior_is_cross_connect(wire) != 0;
+}
+
+inline bool srv6_behavior_is_table_lookup(std::uint16_t wire) {
+    return lr_srv6_behavior_is_table_lookup(wire) != 0;
+}
+
 } // namespace librouting

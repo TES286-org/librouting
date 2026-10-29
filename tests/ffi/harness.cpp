@@ -776,6 +776,191 @@ int main() {
         check(bfd_packet_your_discriminator(dec) == 0xCAFEBABE, "decoded your_disc");
     }
 
+    // ---- SRv6 structured types (RFC 8754 / RFC 8986) ----
+    {
+        // Sid parse + render roundtrip.
+        auto sid = parse_srv6_sid("fcbb:bb00:0:0:0:0:0:1");
+        check(srv6_sid_to_string(sid) == "fcbb:bb00::1",
+              "Sid::from_str renders canonical RFC 5952 §4 form");
+        // Sid::from_octets roundtrip.
+        std::array<std::uint8_t, 16> oct{};
+        for (std::size_t i = 0; i < 16; ++i) oct[i] = static_cast<std::uint8_t>(i);
+        auto sid2 = make_srv6_sid(oct);
+        auto got = srv6_sid_octets(sid2);
+        check(got == oct, "Sid::from_octets round-trips 16 bytes");
+
+        // Sid::is_unspecified.
+        auto unspec = make_srv6_sid_unspecified();
+        check(srv6_sid_is_unspecified(unspec), "all-zeros SID is unspecified");
+        check(!srv6_sid_is_unspecified(sid), "non-zero SID is not unspecified");
+
+        // Sid::locator_slice.
+        auto sl = srv6_sid_locator_slice(sid, 32);
+        check(sl.has_value(), "locator_slice(32) succeeds on a /32 boundary");
+        check(sl->first == 0 && sl->second == 4, "locator_slice(32) = (0, 4)");
+        check(!srv6_sid_locator_slice(sid, 33).has_value(),
+              "locator_slice(33) fails (not multiple of 8)");
+
+        // Sid::is_inside_locator.
+        std::vector<std::uint8_t> loc_bytes{0xFC, 0xBB, 0xBB, 0x00};
+        check(srv6_sid_is_inside_locator(sid, loc_bytes, 32),
+              "Sid falls inside fcbb:bb00::/32");
+        std::vector<std::uint8_t> other_bytes{0xFC, 0xBB, 0xBB, 0x01};
+        check(!srv6_sid_is_inside_locator(sid, other_bytes, 32),
+              "Sid does NOT fall inside fcbb:bb01::/32");
+
+        // Sid::from_locator_tail.
+        std::vector<std::uint8_t> tail(12, 0);
+        auto sid3 = make_srv6_sid_from_locator_tail(loc_bytes, tail, 32);
+        auto sid3_octets = srv6_sid_octets(sid3);
+        check(sid3_octets[0] == 0xFC && sid3_octets[3] == 0x00,
+              "Sid::from_locator_tail copies locator bytes");
+        check(srv6_sid_is_inside_locator(sid3, loc_bytes, 32),
+              "Sid::from_locator_tail is inside its own locator");
+
+        // Sid parse error variants.
+        bool threw_empty = false;
+        try { parse_srv6_sid(""); }
+        catch (const Srv6SidParseException& e) {
+            threw_empty = e.code() == Srv6SidParseError::Empty;
+        }
+        check(threw_empty, "Sid::from_str(\"\") raises Empty");
+
+        bool threw_double_colon = false;
+        try { parse_srv6_sid("1::2::3"); }
+        catch (const Srv6SidParseException& e) {
+            threw_double_colon = e.code() == Srv6SidParseError::DoubleDoubleColon;
+        }
+        check(threw_double_colon, "Sid::from_str(\"1::2::3\") raises DoubleDoubleColon");
+
+        bool threw_bad_hextet = false;
+        try { parse_srv6_sid("1:2:3:4:5:6:7:8g"); }
+        catch (const Srv6SidParseException& e) {
+            threw_bad_hextet = e.code() == Srv6SidParseError::BadHextet;
+        }
+        check(threw_bad_hextet, "Sid::from_str(\"1:2:3:4:5:6:7:8g\") raises BadHextet");
+
+        bool threw_wrong_length = false;
+        try { parse_srv6_sid("1:2:3:4:5:6:7"); }
+        catch (const Srv6SidParseException& e) {
+            threw_wrong_length = e.code() == Srv6SidParseError::WrongLength;
+        }
+        check(threw_wrong_length, "Sid::from_str(\"1:2:3:4:5:6:7\") raises WrongLength");
+
+        // Locator parse + render roundtrip.
+        auto loc = parse_srv6_locator("fcbb:bb00::/48");
+        check(srv6_locator_block_bits(loc) == 48, "Locator block_bits = 48");
+        check(srv6_locator_to_string(loc) == "fcbb:bb00::/48",
+              "Locator renders canonical RFC 5952 + /prefix form");
+
+        // Locator::from_sid.
+        auto loc2 = make_srv6_locator_from_sid(sid, 32);
+        check(srv6_locator_block_bits(loc2) == 32, "from_sid preserves block_bits");
+
+        // Locator::contains_sid.
+        check(srv6_locator_contains_sid(loc, sid),
+              "Locator contains its own SID");
+        auto other_sid = parse_srv6_sid("2001:db8::1");
+        check(!srv6_locator_contains_sid(loc, other_sid),
+              "Locator does NOT contain a SID outside it");
+
+        // Locator::sid_with_tail.
+        // loc is /48 (block_bytes=6), so the tail's first 6 bytes are
+        // overwritten by the locator. Put the meaningful byte at index 6.
+        std::array<std::uint8_t, 16> tail16{};
+        tail16[6] = 0xE1;
+        auto sid4 = srv6_locator_sid_with_tail(loc, tail16);
+        auto sid4_octets = srv6_sid_octets(sid4);
+        check(sid4_octets[0] == 0xFC && sid4_octets[3] == 0x00,
+              "sid_with_tail copies the locator prefix");
+        check(sid4_octets[6] == 0xE1, "sid_with_tail preserves the tail FUNCT byte");
+
+        // Locator::sid_with_index.
+        auto sid5 = srv6_locator_sid_with_index(loc, 42);
+        check(static_cast<bool>(sid5), "sid_with_index(42) on /48 returns a SID");
+        if (sid5) {
+            auto sid5_octets = srv6_sid_octets(sid5);
+            // Locator block_bytes = 6 for /48, so function index (4 BE
+            // bytes) lands at octets[6..10]. 42 = 0x2A → byte 9.
+            check(sid5_octets[6] == 0 && sid5_octets[9] == 42,
+                  "sid_with_index places the function index in big-endian bytes 6..10");
+        }
+
+        // Locator::sid_with_index returns nullptr when no room.
+        auto loc_short = make_srv6_locator(std::array<std::uint8_t, 16>{}, 120);
+        auto sid6 = srv6_locator_sid_with_index(loc_short, 42);
+        check(!static_cast<bool>(sid6),
+              "sid_with_index returns nullptr when locator leaves no room");
+
+        // Locator parse errors.
+        bool threw_missing_prefix = false;
+        try { parse_srv6_locator("fcbb:bb00::"); }
+        catch (const Srv6LocatorParseException& e) {
+            threw_missing_prefix = e.code() == Srv6LocatorParseError::MissingPrefixLen;
+        }
+        check(threw_missing_prefix,
+              "Locator::from_str(\"fcbb:bb00::\") raises MissingPrefixLen");
+
+        bool threw_bad_prefix = false;
+        try { parse_srv6_locator("fcbb:bb00::/999"); }
+        catch (const Srv6LocatorParseException& e) {
+            threw_bad_prefix = e.code() == Srv6LocatorParseError::BadPrefixLen;
+        }
+        check(threw_bad_prefix,
+              "Locator::from_str(\"fcbb:bb00::/999\") raises BadPrefixLen");
+
+        // Srh construction + accessors.
+        auto seg1 = parse_srv6_sid("fcbb:bb00::1");
+        auto seg1_octets = srv6_sid_octets(seg1);
+        auto seg2 = parse_srv6_sid("fcbb:bb00::2");
+        auto seg2_octets = srv6_sid_octets(seg2);
+        std::vector<std::array<std::uint8_t, 16>> segs = {seg1_octets, seg2_octets};
+        auto srh = make_srv6_srh(segs);
+        check(srv6_srh_segment_count(srh) == 2, "SRH carries 2 segments");
+        check(srv6_srh_last_entry(srh) == 1, "SRH last_entry = 1");
+        check(srv6_srh_segments_left(srh) == 1, "SRH segments_left defaults to last_entry");
+
+        // Builder-style setters.
+        srv6_srh_set_next_header(srh, 59);
+        srv6_srh_set_flags(srh, 0x20);  // SRv6FlagOAM
+        srv6_srh_set_tag(srh, 0x1234);
+        check(srv6_srh_next_header(srh) == 59, "SRH next_header = 59");
+        check(srv6_srh_flags(srh) == 0x20, "SRH flags = 0x20 (OAM)");
+        check(srv6_srh_tag(srh) == 0x1234, "SRH tag = 0x1234");
+
+        // first_segment / current_destination.
+        check(srv6_srh_first_segment(srh) == seg1_octets,
+              "SRH first_segment = Segment List[0]");
+        check(srv6_srh_current_destination(srh) == seg2_octets,
+              "SRH current_destination = Segment List[Segments Left]");
+
+        // Encode produces a 40-byte SRH (8 + 2 * 16).
+        auto wire = srv6_srh_encode(srh);
+        check(lr_bytes_len(wire.get()) == 40, "SRH encode = 40 bytes");
+
+        // Srh with explicit segments_left.
+        auto srh2 = make_srv6_srh_with_segments_left(segs, 0);
+        check(srv6_srh_segments_left(srh2) == 0, "explicit segments_left = 0");
+
+        // Srh empty list error.
+        bool threw_empty_srh = false;
+        try { make_srv6_srh({}); }
+        catch (const Srv6SrhErrorException& e) {
+            threw_empty_srh = e.code() == Srv6SrhError::EmptySegmentList;
+        }
+        check(threw_empty_srh, "make_srv6_srh({}) raises EmptySegmentList");
+
+        // Behavior registry.
+        auto end_bh = srv6_behavior_from_wire(0x0001);
+        check(end_bh.has_value(), "Behavior::from_wire(0x0001) succeeds");
+        if (end_bh) check(end_bh->second == "End", "End behavior name = \"End\"");
+        check(srv6_behavior_name(0x0005) == "End.X", "Behavior::name(0x0005) = \"End.X\"");
+        check(!srv6_behavior_from_wire(0xFFFF).has_value(),
+              "Behavior::from_wire(0xFFFF) returns nullopt");
+        check(srv6_behavior_is_cross_connect(0x0005),
+              "End.X (0x0005) is a cross-connect behavior");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");
