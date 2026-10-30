@@ -94,6 +94,135 @@ recompiling.
 
 ### Added
 
+**`lr-router` `RedistributionPipe::allow_prefixes` typed as
+`Vec<Prefix>`** (`router`, issue #92). The pipe's allow-list was
+stored as `Vec<(IpAddr, u8)>` — the unstructured-tuple shape the
+previous implementation used. Every caller already had a `Prefix` in
+hand and then deconstructed it for the pipe (the daemon parses a
+`Prefix` and immediately splits it into `(addr, prefix_len)`; the
+FFI builds a `Prefix` from `lr_prefix_t` and then splits it; the
+test harness constructs a `(IpAddr, u8)` by hand). The intermediate
+existed only at this seam; the typed `Prefix` is the natural API
+shape.
+
+This is a breaking change to the Rust pub API of `lr-router`. The C
+ABI surface (`lr_router_add_redistribution_pipe` takes `lr_prefix_t*`
++ `allow_count`) is unchanged, so the FFI header (`lr_ffi.h`) and the
+Go / Python / C++ bindings that already pass `PrefixSpec` /
+`lr_prefix_t` / `'A.B.C.D/M'` across the seam are unaffected.
+
+The matching predicate in `matches()` is unchanged behaviour — it
+still delegates to `Prefix::contains_prefix` for bit-level
+containment. The old `(addr, plen)` loop that rebuilt a `Prefix` for
+each entry collapses into one
+`.any(|allow| allow.contains_prefix(route_prefix))` call, which
+short-circuits on the first match like the previous early return.
+
+**OSPF ECMP — `lr-ospf::spf` records equal-cost next-hops** (`ospf`,
+`ffi`, issue #92). The intra-area SPF relaxation used a strict `<`
+comparison on the distance, so the second parent at the same
+shortest distance silently dropped its next hop. RFC 2328 §16.1 (4)
+requires every equal-cost parent's next hop to be installed — that
+is what ECMP is. The fix moves the relaxation to a
+strict-better-or-equal shape: a strictly-better path replaces the
+distance, parent and next-hop set wholesale; an equal-distance path
+keeps the first parent (so the SPF tree shape stays deterministic)
+but appends its next hop to the set, de-duplicated.
+
+API shape changes (break changes, permitted by the task constraint):
+
+- `SpfResult::next_hops` is now `BTreeMap<VertexId, Vec<IpAddr>>`
+  (was `BTreeMap<VertexId, IpAddr>`).
+- `SpfRoute::next_hop` is now `Vec<IpAddr>` (was `Option<IpAddr>`,
+  empty = no next hop).
+- `SpfResultV3::next_hops` follows the same shape on the v3 side:
+  `BTreeMap<V3VertexId, Vec<V3NextHop>>`.
+- `SpfLocatorRoute::next_hop` follows the same shape: `Vec<IpAddr>`.
+
+Inter-area `summary_routes` / `summary_routes_v3` follow the same
+ECMP contract: when several ABRs advertise the same prefix at the
+same total metric, every ABR's first hop lands in the route's
+`next_hop` set, de-duplicated; the lowest border router ID stays in
+`border_router` / `router_id` for the `ospf.router_id` accessor's
+determinism.
+
+The C ABI mirrors the Rust API: `lr_ospf_spf_route_t` replaces its
+single-next-hop fields (`next_hop[16]`, `next_hop_is_ipv6`,
+`has_next_hop`) with a `next_hop_count: u32` and an inline
+`next_hops[LR_OSPF_MAX_NEXTHOPS]` array (16 entries — mirrors BIRD's
+default `ospf_ecmp_max` and the Linux kernel's typical
+`IP_ROUTE_MULTIPATH` ceiling). The four entry points that return
+the struct keep their signatures, so embedders that recompile pick
+up the new shape with no source changes beyond the struct fields
+they read.
+
+The Go / Python / C++ bindings do NOT wrap the OSPF SPF route C ABI
+today (their higher-level OSPF surface is the daemon's
+router-instance API, not the raw SPF run), so no binding update is
+required for this round. The C and C++ FFI harnesses still pass after
+the struct shape change because they do not exercise the OSPF SPF
+route C ABI directly.
+
+The `OspfTableEntry` / `Route` next-hop fields stay `Option<IpAddr>`
+— the RIB and the kernel FIB mirror keep the single-hop install path
+they always had. The ECMP set propagates through the C ABI surface
+so an embedder that wants ECMP at the FIB level can read it. RIB /
+kernel-level ECMP is a follow-up that does not change the
+protocol-level shape this round introduces.
+
+Tests: 3 new ECMP tests in `spf_tests.rs`
+(`ecmp_records_distinct_first_hops_for_equal_cost_paths`,
+`ecmp_summary_collects_next_hops_from_equal_cost_abrs`,
+`ecmp_dedupes_identical_next_hops_from_equal_cost_parents`); 1 new
+FFI test `ffi_spf_route_carries_ecmp_next_hop_set` in `ospf_spf.rs`.
+`lr-ospf` test count: 341 / 341 ✅, `lr-ffi`: 978 / 978 ✅.
+
+**`lr-srv6` `Behavior` enum — RFC 9800 NEXT-CSID + RFC 10018 End.DTMC
+family** (`srv6`, issue #92). The `Behavior` enum now models the full
+RFC 9800 NEXT-CSID family (27 new variants) plus the three RFC 10018
+`End.DTMC` variants — the "Behavior enum 40+ modelling" gap the
+previous round noted. Wire values match the IANA registry verbatim
+(https://www.iana.org/assignments/segment-routing/srv6-endpoint-behaviors.csv):
+
+- RFC 9800 §4.1.1 `End with NEXT-CSID` (8 variants at 43–50; common
+  short name `uN` for value 48).
+- RFC 9800 §4.2.1 `End.X with NEXT-CSID` (8 variants at 52–59; common
+  short name `uA` for value 57).
+- RFC 10018 §4.1-§4.3 `End.DTMC4` / `End.DTMC6` / `End.DTMC46` (decap
+  to MPLS table) at 76–78.
+- RFC 9800 §4.3.1 `End.T with NEXT-CSID` (8 variants at 85–92).
+- RFC 9800 §4.14-§4.15 `End.B6.Encaps` / `End.B6.Encaps.Red` / `End.BM`
+  with NEXT-CSID at 93–95.
+- RFC 9800 §4.4-§4.5 `End.LBS` / `End.XLBS` with NEXT-CSID at 96–97
+  (locator-block swap).
+
+The classifier methods `is_psp` / `is_usp` / `is_usd` / `is_decap` /
+`is_cross_connect` / `is_table_lookup` now cover the new variants —
+NEXT-CSID reuses the same flavor bits (RFC 9800 §4.16), and
+`End.DTMC4/6/46` share the decap and table-lookup classifications with
+the `End.DT*` family.
+
+Deliberately NOT modelled (left for follow-ups): the pre-RFC 9800 draft
+assignments at 42 / 51 / 60-68 (NEXT-ONLY-CSID and uDX/uDT — RFC 9800
+obsoleted the draft with fresh codepoints; no RFC references the old
+values); the RFC 9433 GTP family at 69-72 (needs a GTP-specific
+argument layout the crate does not model); the draft assignments at
+73-75 / 79-84 / 98-100 (End.DTM, End.M Mirror, End.Replicate, End.BXC,
+End.NSH, End.PSID); the RFC 9800 REPLACE-CSID family at 101-141 (the
+second flavor RFC 9800 introduces — same structure as NEXT-CSID but a
+separate container layout); the RFC 9801 `End.DX1` family at 158-160.
+
+The C ABI surface is unchanged — `Behavior` is exposed through the
+runtime lookup `lr_srv6_behavior_from_wire(wire, out_value, out_name,
+name_cap)`, which simply gains more entries in its `match`. No header
+regeneration needed. `lr-srv6` test count grows from 56 to 61 (the
+four new tests `behavior_rfc_9800_next_csid_assignments` /
+`behavior_rfc_10018_dtmc_assignments` /
+`behavior_next_csid_flavor_classification` /
+`behavior_dtmc_classification`, plus the existing
+`behavior_from_wire_unassigned` gains stricter assertions for the
+now-bounded unmodelled ranges).
+
 **Structured BGP message inspection surface** (`ffi`, issue #92). The
 C ABI gained a structured BGP-message inspection surface mirroring
 the `lr_bgp::BgpMessage` enum and its variants, so an embedder can
