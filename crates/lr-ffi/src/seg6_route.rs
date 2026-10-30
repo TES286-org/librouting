@@ -67,19 +67,39 @@
 // crate's `-D warnings` clippy gate.
 #![allow(unused_unsafe)]
 
+// `lr_osroute::seg6_route` is gated behind
+// `#[cfg(all(feature = "std", target_os = "linux"))]` in `lr-osroute`,
+// so the entire construction / mutator / install surface (everything
+// except the error helpers and the opaque typedefs) is Linux-only.
+// On non-Linux platforms we ship matching stubs that return NULL /
+// `LR_ERR_NULL` with `Seg6RouteError::Unsupported` recorded in the
+// last-error string — same shape as `osroute_helpers.rs`'s
+// `non_linux_stubs`.
+
+#[cfg(target_os = "linux")]
 use lr_osroute::seg6_route::{
     Seg6EncapMode, Seg6LocalRoute, Seg6Netlink, Seg6Route, Seg6RouteError,
 };
+#[cfg(target_os = "linux")]
 use lr_srv6::{Behavior, Sid};
 
-use crate::error::{last_error_string, set_last_error, LrError, LR_ERR_PANIC};
+use crate::error::{last_error_string, LrError};
 use crate::guarded;
 use crate::handle::lr_bytes_t;
 use crate::policy::lr_prefix_t;
 use crate::srv6::lr_srv6_sid_t;
 use crate::srv6_srh::lr_srv6_srh_t;
 
+// `set_last_error` and `LR_ERR_PANIC` are only referenced by the
+// Linux-only entry points (record_seg6_route_err + the guarded
+// fallbacks in lr_seg6_*); the non-Linux stubs import `set_last_error`
+// themselves. Gate them so the unused-imports lint stays clean on
+// every platform.
+#[cfg(target_os = "linux")]
+use crate::error::{set_last_error, LR_ERR_PANIC};
+
 const LR_ERR_NULL: i32 = LrError::Null as i32;
+#[cfg(target_os = "linux")]
 const LR_ERR_INVALID_HANDLE: i32 = LrError::InvalidHandle as i32;
 
 // =========================================================================
@@ -128,6 +148,7 @@ pub const LR_SEG6_ERR_UNKNOWN: i32 = -1;
 /// Translate a `Seg6RouteError` to its discriminant code. Public so
 /// the C ABI entry points can call it when surfacing the code from a
 /// failed call without going through the last-error string.
+#[cfg(target_os = "linux")]
 fn seg6_route_err_code(e: &Seg6RouteError) -> i32 {
     match e {
         Seg6RouteError::Unsupported => LR_SEG6_ERR_UNSUPPORTED,
@@ -143,6 +164,7 @@ fn seg6_route_err_code(e: &Seg6RouteError) -> i32 {
 /// (Display form) and return the discriminant. The C ABI entry points
 /// use this so a caller can `lr_seg6_route_err_code()` to recover the
 /// discriminant from a failed call.
+#[cfg(target_os = "linux")]
 fn record_seg6_route_err(e: &Seg6RouteError) -> i32 {
     let s = e.to_string();
     let code = seg6_route_err_code(e);
@@ -175,21 +197,25 @@ pub struct OpaqueSeg6Netlink {
 }
 pub type lr_seg6_netlink_t = *mut OpaqueSeg6Netlink;
 
+#[cfg(target_os = "linux")]
 fn box_seg6_route(r: Seg6Route) -> lr_seg6_route_t {
     Box::into_raw(Box::new(r)) as lr_seg6_route_t
 }
+#[cfg(target_os = "linux")]
 unsafe fn borrow_seg6_route(r: lr_seg6_route_t) -> Option<&'static Seg6Route> {
     if r.is_null() {
         return None;
     }
     Some(unsafe { &*(r as *const Seg6Route) })
 }
+#[cfg(target_os = "linux")]
 unsafe fn borrow_seg6_route_mut(r: lr_seg6_route_t) -> Option<&'static mut Seg6Route> {
     if r.is_null() {
         return None;
     }
     Some(unsafe { &mut *(r as *mut Seg6Route) })
 }
+#[cfg(target_os = "linux")]
 unsafe fn unbox_seg6_route(r: lr_seg6_route_t) -> Option<Box<Seg6Route>> {
     if r.is_null() {
         return None;
@@ -197,9 +223,11 @@ unsafe fn unbox_seg6_route(r: lr_seg6_route_t) -> Option<Box<Seg6Route>> {
     Some(unsafe { Box::from_raw(r as *mut Seg6Route) })
 }
 
+#[cfg(target_os = "linux")]
 fn box_seg6_local_route(r: Seg6LocalRoute) -> lr_seg6_local_route_t {
     Box::into_raw(Box::new(r)) as lr_seg6_local_route_t
 }
+#[cfg(target_os = "linux")]
 unsafe fn borrow_seg6_local_route_mut(
     r: lr_seg6_local_route_t,
 ) -> Option<&'static mut Seg6LocalRoute> {
@@ -208,6 +236,7 @@ unsafe fn borrow_seg6_local_route_mut(
     }
     Some(unsafe { &mut *(r as *mut Seg6LocalRoute) })
 }
+#[cfg(target_os = "linux")]
 unsafe fn unbox_seg6_local_route(r: lr_seg6_local_route_t) -> Option<Box<Seg6LocalRoute>> {
     if r.is_null() {
         return None;
@@ -215,21 +244,25 @@ unsafe fn unbox_seg6_local_route(r: lr_seg6_local_route_t) -> Option<Box<Seg6Loc
     Some(unsafe { Box::from_raw(r as *mut Seg6LocalRoute) })
 }
 
+#[cfg(target_os = "linux")]
 fn box_seg6_netlink(n: Seg6Netlink) -> lr_seg6_netlink_t {
     Box::into_raw(Box::new(n)) as lr_seg6_netlink_t
 }
+#[cfg(target_os = "linux")]
 unsafe fn borrow_seg6_netlink(n: lr_seg6_netlink_t) -> Option<&'static Seg6Netlink> {
     if n.is_null() {
         return None;
     }
     Some(unsafe { &*(n as *const Seg6Netlink) })
 }
+#[cfg(target_os = "linux")]
 unsafe fn borrow_seg6_netlink_mut(n: lr_seg6_netlink_t) -> Option<&'static mut Seg6Netlink> {
     if n.is_null() {
         return None;
     }
     Some(unsafe { &mut *(n as *mut Seg6Netlink) })
 }
+#[cfg(target_os = "linux")]
 unsafe fn unbox_seg6_netlink(n: lr_seg6_netlink_t) -> Option<Box<Seg6Netlink>> {
     if n.is_null() {
         return None;
@@ -258,6 +291,7 @@ unsafe fn unbox_seg6_netlink(n: lr_seg6_netlink_t) -> Option<Box<Seg6Netlink>> {
 /// `srh` must be a valid `lr_srv6_srh_t` produced by
 /// `lr_srv6_srh_new` / `lr_srv6_srh_new_with_segments_left` and not
 /// already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_route_new(
     prefix: lr_prefix_t,
@@ -304,6 +338,7 @@ pub unsafe extern "C" fn lr_seg6_route_new(
 /// # Safety
 /// `r` must be a valid `lr_seg6_route_t` produced by
 /// `lr_seg6_route_new` and not already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_route_set_mode(r: lr_seg6_route_t, mode: u32) -> i32 {
     guarded(
@@ -335,6 +370,7 @@ pub unsafe extern "C" fn lr_seg6_route_set_mode(r: lr_seg6_route_t, mode: u32) -
 ///
 /// # Safety
 /// See [`lr_seg6_route_set_mode`].
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_route_set_if_index(r: lr_seg6_route_t, if_index: u32) -> i32 {
     guarded(
@@ -354,6 +390,7 @@ pub unsafe extern "C" fn lr_seg6_route_set_if_index(r: lr_seg6_route_t, if_index
 /// # Safety
 /// `r` must have been produced by `lr_seg6_route_new` and not
 /// already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_route_free(r: lr_seg6_route_t) {
     guarded(
@@ -383,6 +420,7 @@ pub unsafe extern "C" fn lr_seg6_route_free(r: lr_seg6_route_t) {
 /// `sid` must be a valid `lr_srv6_sid_t` produced by
 /// `lr_srv6_sid_new` / `lr_srv6_locator_sid_with_tail` / ... and not
 /// already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_new(
     sid: lr_srv6_sid_t,
@@ -427,6 +465,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_new(
 /// # Safety
 /// `r` must be a valid `lr_seg6_local_route_t` produced by
 /// `lr_seg6_local_route_new` and not already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_if_index(
     r: lr_seg6_local_route_t,
@@ -453,6 +492,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_if_index(
 /// # Safety
 /// `nh4` must point to 4 readable bytes (or be NULL — the call returns
 /// `LR_ERR_NULL` early without reading).
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_nh4(
     r: lr_seg6_local_route_t,
@@ -485,6 +525,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_nh4(
 /// # Safety
 /// `nh6` must point to 16 readable bytes (or be NULL — the call
 /// returns `LR_ERR_NULL` early without reading).
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_nh6(
     r: lr_seg6_local_route_t,
@@ -516,6 +557,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_nh6(
 ///
 /// # Safety
 /// See [`lr_seg6_local_route_set_if_index`].
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_iif(r: lr_seg6_local_route_t, iif: u32) -> i32 {
     guarded(
@@ -537,6 +579,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_iif(r: lr_seg6_local_route_t, i
 ///
 /// # Safety
 /// See [`lr_seg6_local_route_set_if_index`].
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_oif(r: lr_seg6_local_route_t, oif: u32) -> i32 {
     guarded(
@@ -561,6 +604,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_oif(r: lr_seg6_local_route_t, o
 ///
 /// # Safety
 /// See [`lr_seg6_local_route_set_if_index`].
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_table(
     r: lr_seg6_local_route_t,
@@ -587,6 +631,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_table(
 ///
 /// # Safety
 /// See [`lr_seg6_local_route_set_if_index`].
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_vrf_table(
     r: lr_seg6_local_route_t,
@@ -618,6 +663,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_vrf_table(
 /// `srh` must be a valid `lr_srv6_srh_t` produced by
 /// `lr_srv6_srh_new` / `lr_srv6_srh_new_with_segments_left` and not
 /// already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_set_srh(
     r: lr_seg6_local_route_t,
@@ -647,6 +693,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_set_srh(
 /// # Safety
 /// `r` must have been produced by `lr_seg6_local_route_new` and not
 /// already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_local_route_free(r: lr_seg6_local_route_t) {
     guarded(
@@ -673,6 +720,7 @@ pub unsafe extern "C" fn lr_seg6_local_route_free(r: lr_seg6_local_route_t) {
 /// # Safety
 /// The returned handle must be released with
 /// [`lr_seg6_netlink_free`] to avoid a memory leak.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern "C" fn lr_seg6_netlink_connect() -> lr_seg6_netlink_t {
     guarded(
@@ -703,6 +751,7 @@ pub extern "C" fn lr_seg6_netlink_connect() -> lr_seg6_netlink_t {
 /// `lr_seg6_netlink_connect`; `route` must be a valid
 /// `lr_seg6_route_t` produced by `lr_seg6_route_new`. Both must not
 /// have been freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_netlink_add_seg6_route(
     nl: lr_seg6_netlink_t,
@@ -734,6 +783,7 @@ pub unsafe extern "C" fn lr_seg6_netlink_add_seg6_route(
 /// # Safety
 /// `nl` must be a valid `lr_seg6_netlink_t` produced by
 /// `lr_seg6_netlink_connect`.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_netlink_delete_seg6_route(
     nl: lr_seg6_netlink_t,
@@ -772,6 +822,7 @@ pub unsafe extern "C" fn lr_seg6_netlink_delete_seg6_route(
 /// `lr_seg6_netlink_connect`; `route` must be a valid
 /// `lr_seg6_local_route_t` produced by `lr_seg6_local_route_new`.
 /// Both must not have been freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_netlink_add_seg6local_route(
     nl: lr_seg6_netlink_t,
@@ -805,6 +856,7 @@ pub unsafe extern "C" fn lr_seg6_netlink_add_seg6local_route(
 /// # Safety
 /// `nl` must be a valid `lr_seg6_netlink_t`; `sid` must be a valid
 /// `lr_srv6_sid_t` produced by `lr_srv6_sid_new` / siblings.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_netlink_delete_seg6local_route(
     nl: lr_seg6_netlink_t,
@@ -848,6 +900,7 @@ pub unsafe extern "C" fn lr_seg6_netlink_delete_seg6local_route(
 /// `nl` must be a valid `lr_seg6_netlink_t`; `out` must point to a
 /// writable `lr_bytes_t` (uninitialized is fine — the function writes
 /// the whole struct).
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_netlink_last_request_bytes(
     nl: lr_seg6_netlink_t,
@@ -879,6 +932,7 @@ pub unsafe extern "C" fn lr_seg6_netlink_last_request_bytes(
 ///
 /// # Safety
 /// See [`lr_seg6_netlink_last_request_bytes`].
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_netlink_last_response_bytes(
     nl: lr_seg6_netlink_t,
@@ -905,6 +959,7 @@ pub unsafe extern "C" fn lr_seg6_netlink_last_response_bytes(
 /// # Safety
 /// `nl` must have been produced by `lr_seg6_netlink_connect` and not
 /// already freed.
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lr_seg6_netlink_free(nl: lr_seg6_netlink_t) {
     guarded(
@@ -990,10 +1045,226 @@ pub extern "C" fn lr_seg6_route_err_name(code: i32) -> *const std::os::raw::c_ch
 }
 
 // =========================================================================
+// Non-Linux stubs — the underlying `lr_osroute::seg6_route` module is
+// gated behind `#[cfg(all(feature = "std", target_os = "linux"))]`, so
+// on non-Linux platforms the construction / install surface returns
+// NULL / LR_ERR_NULL with `Seg6RouteError::Unsupported` recorded in the
+// last-error string — same shape as `osroute_helpers.rs`'s
+// `non_linux_stubs`. The error helpers (`lr_seg6_route_err_code` /
+// `_err_name`) are any-platform and live above.
+// =========================================================================
+
+#[cfg(not(target_os = "linux"))]
+mod non_linux_stubs {
+    // Suppress `unused_variables` on every stub parameter — they exist
+    // only to match the Linux signature for cbindgen to emit the same
+    // header. The Linux version is the canonical parameter-naming
+    // surface; we keep names in sync so the abi-freeze gate stays
+    // green (the header's parameter names are part of the contract).
+    #![allow(unused_variables)]
+    use super::*;
+    use crate::error::set_last_error;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_route_new(
+        prefix: lr_prefix_t,
+        srh: lr_srv6_srh_t,
+    ) -> lr_seg6_route_t {
+        let _ = (prefix, srh);
+        guarded(
+            || {
+                set_last_error("SRv6 is not supported on this platform".into());
+                std::ptr::null_mut()
+            },
+            std::ptr::null_mut(),
+        )
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_route_set_mode(r: lr_seg6_route_t, mode: u32) -> i32 {
+        let _ = (r, mode);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_route_set_if_index(r: lr_seg6_route_t, if_index: u32) -> i32 {
+        let _ = (r, if_index);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_route_free(r: lr_seg6_route_t) {
+        let _ = r;
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_new(
+        sid: lr_srv6_sid_t,
+        behavior_wire: u16,
+    ) -> lr_seg6_local_route_t {
+        let _ = (sid, behavior_wire);
+        guarded(
+            || {
+                set_last_error("SRv6 is not supported on this platform".into());
+                std::ptr::null_mut()
+            },
+            std::ptr::null_mut(),
+        )
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_if_index(
+        r: lr_seg6_local_route_t,
+        if_index: u32,
+    ) -> i32 {
+        let _ = (r, if_index);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_nh4(
+        r: lr_seg6_local_route_t,
+        nh4: *const u8,
+    ) -> i32 {
+        let _ = (r, nh4);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_nh6(
+        r: lr_seg6_local_route_t,
+        nh6: *const u8,
+    ) -> i32 {
+        let _ = (r, nh6);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_iif(
+        r: lr_seg6_local_route_t,
+        iif: u32,
+    ) -> i32 {
+        let _ = (r, iif);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_oif(
+        r: lr_seg6_local_route_t,
+        oif: u32,
+    ) -> i32 {
+        let _ = (r, oif);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_table(
+        r: lr_seg6_local_route_t,
+        table: u32,
+    ) -> i32 {
+        let _ = (r, table);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_vrf_table(
+        r: lr_seg6_local_route_t,
+        vrf_table: u32,
+    ) -> i32 {
+        let _ = (r, vrf_table);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_set_srh(
+        r: lr_seg6_local_route_t,
+        srh: lr_srv6_srh_t,
+    ) -> i32 {
+        let _ = (r, srh);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_local_route_free(r: lr_seg6_local_route_t) {
+        let _ = r;
+    }
+
+    #[no_mangle]
+    pub extern "C" fn lr_seg6_netlink_connect() -> lr_seg6_netlink_t {
+        guarded(
+            || {
+                set_last_error("SRv6 is not supported on this platform".into());
+                std::ptr::null_mut()
+            },
+            std::ptr::null_mut(),
+        )
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_netlink_add_seg6_route(
+        nl: lr_seg6_netlink_t,
+        route: lr_seg6_route_t,
+    ) -> i32 {
+        let _ = (nl, route);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_netlink_delete_seg6_route(
+        nl: lr_seg6_netlink_t,
+        prefix: lr_prefix_t,
+    ) -> i32 {
+        let _ = (nl, prefix);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_netlink_add_seg6local_route(
+        nl: lr_seg6_netlink_t,
+        route: lr_seg6_local_route_t,
+    ) -> i32 {
+        let _ = (nl, route);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_netlink_delete_seg6local_route(
+        nl: lr_seg6_netlink_t,
+        sid: lr_srv6_sid_t,
+    ) -> i32 {
+        let _ = (nl, sid);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_netlink_last_request_bytes(
+        nl: lr_seg6_netlink_t,
+        out: *mut lr_bytes_t,
+    ) -> i32 {
+        let _ = (nl, out);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_netlink_last_response_bytes(
+        nl: lr_seg6_netlink_t,
+        out: *mut lr_bytes_t,
+    ) -> i32 {
+        let _ = (nl, out);
+        LR_ERR_NULL
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lr_seg6_netlink_free(nl: lr_seg6_netlink_t) {
+        let _ = nl;
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::srv6::lr_srv6_sid_new;

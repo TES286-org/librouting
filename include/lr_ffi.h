@@ -18542,6 +18542,50 @@ int32_t lr_seg6_route_err_code(void);
  */
 const char *lr_seg6_route_err_name(int32_t code);
 
+lr_seg6_route_t lr_seg6_route_new(struct lr_prefix_t prefix, lr_srv6_srh_t srh);
+
+int32_t lr_seg6_route_set_mode(lr_seg6_route_t r, uint32_t mode);
+
+int32_t lr_seg6_route_set_if_index(lr_seg6_route_t r, uint32_t if_index);
+
+void lr_seg6_route_free(lr_seg6_route_t r);
+
+lr_seg6_local_route_t lr_seg6_local_route_new(lr_srv6_sid_t sid, uint16_t behavior_wire);
+
+int32_t lr_seg6_local_route_set_if_index(lr_seg6_local_route_t r, uint32_t if_index);
+
+int32_t lr_seg6_local_route_set_nh4(lr_seg6_local_route_t r, const uint8_t *nh4);
+
+int32_t lr_seg6_local_route_set_nh6(lr_seg6_local_route_t r, const uint8_t *nh6);
+
+int32_t lr_seg6_local_route_set_iif(lr_seg6_local_route_t r, uint32_t iif);
+
+int32_t lr_seg6_local_route_set_oif(lr_seg6_local_route_t r, uint32_t oif);
+
+int32_t lr_seg6_local_route_set_table(lr_seg6_local_route_t r, uint32_t table);
+
+int32_t lr_seg6_local_route_set_vrf_table(lr_seg6_local_route_t r, uint32_t vrf_table);
+
+int32_t lr_seg6_local_route_set_srh(lr_seg6_local_route_t r, lr_srv6_srh_t srh);
+
+void lr_seg6_local_route_free(lr_seg6_local_route_t r);
+
+lr_seg6_netlink_t lr_seg6_netlink_connect(void);
+
+int32_t lr_seg6_netlink_add_seg6_route(lr_seg6_netlink_t nl, lr_seg6_route_t route);
+
+int32_t lr_seg6_netlink_delete_seg6_route(lr_seg6_netlink_t nl, struct lr_prefix_t prefix);
+
+int32_t lr_seg6_netlink_add_seg6local_route(lr_seg6_netlink_t nl, lr_seg6_local_route_t route);
+
+int32_t lr_seg6_netlink_delete_seg6local_route(lr_seg6_netlink_t nl, lr_srv6_sid_t sid);
+
+int32_t lr_seg6_netlink_last_request_bytes(lr_seg6_netlink_t nl, struct lr_bytes_t *out);
+
+int32_t lr_seg6_netlink_last_response_bytes(lr_seg6_netlink_t nl, struct lr_bytes_t *out);
+
+void lr_seg6_netlink_free(lr_seg6_netlink_t nl);
+
 /**
  * Add an OSPFv2 session with the library defaults: MTU 1500,
  * point-to-point network type, Normal (non-stub) area. Returns 0 with
