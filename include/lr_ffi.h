@@ -1686,6 +1686,19 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_OSPF_ROUTER_LSA_LINK_RAW 3
 
 /**
+ * The maximum number of ECMP next-hops a single SPF route can carry
+ * through the C ABI. The route projection (`lr_ospf_spf_route_t`)
+ * reserves an inline array of this length; routes whose SPF
+ * computation discovers more next-hops at the same distance keep the
+ * lowest-priority extras (the inline array is filled in
+ * relaxation-discovery order, which is the same order the SPF heap
+ * pops vertices). 16 mirrors BIRD's default
+ * `ospf_ecmp_max` and the Linux kernel's typical `IP_ROUTE_MULTIPATH`
+ * ceiling.
+ */
+#define LR_OSPF_MAX_NEXTHOPS 16
+
+/**
  * `LR_GTSM_MODE_*` constants — discriminant for [`lr_gtsm_mode`].
  */
 #define LR_GTSM_MODE_DISABLED 0
@@ -3868,9 +3881,15 @@ typedef struct OpaqueOspfRetransmitList *lr_ospf_retransmit_t;
 /**
  * One SPF route projection. Used by `lr_ospf_spf_route_at`,
  * `_summary_at`, `_v3_route_at` to surface one route to C. The
- * `next_hop` field carries v4 in the low 4 bytes (is_ipv6=0) or all
- * 16 bytes (is_ipv6=1); `has_next_hop` is 0 when the route has no
- * resolved next hop (Loc-RIB will install it blackhole-style).
+ * `next_hops` array carries every ECMP next-hop the SPF computation
+ * discovered for this prefix (RFC 2328 §16.1 (4) — equal-cost paths
+ * install distinct first hops); `next_hop_count` is the number of
+ * valid entries (0 when the route has no resolved next hop, e.g. a
+ * directly connected stub network or an unnumbered p2p link the
+ * LSDB cannot resolve). Each entry follows the same convention as
+ * [`crate::handle::lr_ip_addr_t`]: v4 occupies the last 4 bytes of
+ * `octets` (the first 12 are zero, so the address reads as an
+ * IPv4-mapped IPv6 in `::ffff:a.b.c.d` form), v6 uses all 16.
  */
 typedef struct lr_ospf_spf_route_t {
   /**
@@ -3890,18 +3909,19 @@ typedef struct lr_ospf_spf_route_t {
    */
   uint64_t metric;
   /**
-   * Next-hop address bytes (v4 in low 4 bytes when is_ipv6=0).
+   * Number of valid next-hops in `next_hops` (0..=
+   * `LR_OSPF_MAX_NEXTHOPS`). 0 means the route is reachable but
+   * no gateway resolved in the LSDB (the Loc-RIB installs it
+   * blackhole-style). The order matches the SPF relaxation
+   * discovery order.
    */
-  uint8_t next_hop[16];
+  uint32_t next_hop_count;
   /**
-   * 0 = IPv4 next hop, 1 = IPv6 next hop.
+   * Inline ECMP next-hop array. The first `next_hop_count`
+   * entries are valid; the remaining
+   * `LR_OSPF_MAX_NEXTHOPS - next_hop_count` entries are zeroed.
    */
-  uint8_t next_hop_is_ipv6;
-  /**
-   * 1 when `next_hop` carries a value, 0 when the route has no
-   * resolved next hop.
-   */
-  uint8_t has_next_hop;
+  struct lr_ip_addr_t next_hops[LR_OSPF_MAX_NEXTHOPS];
   /**
    * For inter-area routes derived from summary-LSAs: the
    * advertising router (ABR) that originated the summary. 0 for

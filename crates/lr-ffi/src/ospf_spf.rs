@@ -31,6 +31,7 @@
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::spf::{run_spf, run_spf_v3, run_spf_v3_extended, SpfResult, SpfResultV3, SpfRoute};
 
+use crate::core::lr_ip_addr_t;
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
 use crate::handle::lr_bytes_t;
@@ -87,13 +88,30 @@ unsafe fn unbox_v3_result(r: lr_ospf_spf_v3_result_t) -> Option<Box<SpfResultV3>
 // ---- Common: route projection (used by both v2 stub/transit/summary
 // and v3 routes — the SpfRoute shape is shared). ----
 
+/// The maximum number of ECMP next-hops a single SPF route can carry
+/// through the C ABI. The route projection (`lr_ospf_spf_route_t`)
+/// reserves an inline array of this length; routes whose SPF
+/// computation discovers more next-hops at the same distance keep the
+/// lowest-priority extras (the inline array is filled in
+/// relaxation-discovery order, which is the same order the SPF heap
+/// pops vertices). 16 mirrors BIRD's default
+/// `ospf_ecmp_max` and the Linux kernel's typical `IP_ROUTE_MULTIPATH`
+/// ceiling.
+pub const LR_OSPF_MAX_NEXTHOPS: usize = 16;
+
 /// One SPF route projection. Used by `lr_ospf_spf_route_at`,
 /// `_summary_at`, `_v3_route_at` to surface one route to C. The
-/// `next_hop` field carries v4 in the low 4 bytes (is_ipv6=0) or all
-/// 16 bytes (is_ipv6=1); `has_next_hop` is 0 when the route has no
-/// resolved next hop (Loc-RIB will install it blackhole-style).
+/// `next_hops` array carries every ECMP next-hop the SPF computation
+/// discovered for this prefix (RFC 2328 §16.1 (4) — equal-cost paths
+/// install distinct first hops); `next_hop_count` is the number of
+/// valid entries (0 when the route has no resolved next hop, e.g. a
+/// directly connected stub network or an unnumbered p2p link the
+/// LSDB cannot resolve). Each entry follows the same convention as
+/// [`crate::handle::lr_ip_addr_t`]: v4 occupies the last 4 bytes of
+/// `octets` (the first 12 are zero, so the address reads as an
+/// IPv4-mapped IPv6 in `::ffff:a.b.c.d` form), v6 uses all 16.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct lr_ospf_spf_route_t {
     /// Network prefix address (v4 in low 4 bytes, zero-padded to 16).
     pub prefix_addr: [u8; 16],
@@ -103,13 +121,16 @@ pub struct lr_ospf_spf_route_t {
     pub prefix_len: u8,
     /// SPF distance to this prefix (RFC 2328 §16.1).
     pub metric: u64,
-    /// Next-hop address bytes (v4 in low 4 bytes when is_ipv6=0).
-    pub next_hop: [u8; 16],
-    /// 0 = IPv4 next hop, 1 = IPv6 next hop.
-    pub next_hop_is_ipv6: u8,
-    /// 1 when `next_hop` carries a value, 0 when the route has no
-    /// resolved next hop.
-    pub has_next_hop: u8,
+    /// Number of valid next-hops in `next_hops` (0..=
+    /// `LR_OSPF_MAX_NEXTHOPS`). 0 means the route is reachable but
+    /// no gateway resolved in the LSDB (the Loc-RIB installs it
+    /// blackhole-style). The order matches the SPF relaxation
+    /// discovery order.
+    pub next_hop_count: u32,
+    /// Inline ECMP next-hop array. The first `next_hop_count`
+    /// entries are valid; the remaining
+    /// `LR_OSPF_MAX_NEXTHOPS - next_hop_count` entries are zeroed.
+    pub next_hops: [lr_ip_addr_t; LR_OSPF_MAX_NEXTHOPS],
     /// For inter-area routes derived from summary-LSAs: the
     /// advertising router (ABR) that originated the summary. 0 for
     /// intra-area routes.
@@ -117,6 +138,21 @@ pub struct lr_ospf_spf_route_t {
     /// For inter-area routes derived from summary-LSAs: the
     /// advertising router of the LSA. 0 for intra-area routes.
     pub advertising_router: u32,
+}
+
+impl Default for lr_ospf_spf_route_t {
+    fn default() -> Self {
+        Self {
+            prefix_addr: [0; 16],
+            prefix_is_ipv6: 0,
+            prefix_len: 0,
+            metric: 0,
+            next_hop_count: 0,
+            next_hops: [lr_ip_addr_t::default(); LR_OSPF_MAX_NEXTHOPS],
+            border_router: 0,
+            advertising_router: 0,
+        }
+    }
 }
 
 fn spf_route_to_c(r: &SpfRoute) -> lr_ospf_spf_route_t {
@@ -133,21 +169,35 @@ fn spf_route_to_c(r: &SpfRoute) -> lr_ospf_spf_route_t {
     }
     out.prefix_len = r.prefix.prefix_len;
     out.metric = r.metric;
-    match r.next_hop {
-        Some(lr_core::addr::IpAddr::V4(b)) => {
-            out.next_hop[..4].copy_from_slice(&b);
-            out.next_hop_is_ipv6 = 0;
-            out.has_next_hop = 1;
-        }
-        Some(lr_core::addr::IpAddr::V6(b)) => {
-            out.next_hop = b;
-            out.next_hop_is_ipv6 = 1;
-            out.has_next_hop = 1;
-        }
-        None => {
-            out.has_next_hop = 0;
+    // The SPF's ECMP next-hop set, copied into the inline array in
+    // discovery order. Saturate at LR_OSPF_MAX_NEXTHOPS — the ECMP set
+    // can in principle exceed 16 on pathological LSDBs (a 16-way ECMP
+    // route is already extreme; BIRD's default ceiling is 16, the
+    // Linux kernel's IP_ROUTE_MULTIPATH default is 32). The overflowed
+    // hops are dropped from the C ABI projection; the Rust SpfRoute
+    // retains the full set for in-process consumers.
+    let n = r.next_hop.len().min(LR_OSPF_MAX_NEXTHOPS);
+    for (i, nh) in r.next_hop.iter().take(n).enumerate() {
+        let slot = &mut out.next_hops[i];
+        match nh {
+            lr_core::addr::IpAddr::V4(b) => {
+                // lr_ip_addr_t carries v4 as an IPv4-mapped IPv6
+                // (last 4 bytes of `octets`, first 12 zeroed) — the
+                // same convention `lr_ip_addr_v4` constructs and
+                // `lr_ip_addr_octets` reads back.
+                slot.octets = [0; 16];
+                slot.octets[12..].copy_from_slice(b);
+                slot.is_ipv6 = 0;
+            }
+            lr_core::addr::IpAddr::V6(b) => {
+                slot.octets = *b;
+                slot.is_ipv6 = 1;
+            }
         }
     }
+    // next_hop_count fits in u32 (LR_OSPF_MAX_NEXTHOPS = 16). The cast
+    // is total since `n <= 16 < u32::MAX`.
+    out.next_hop_count = n as u32;
     out.border_router = r.border_router.unwrap_or(0);
     out.advertising_router = r.router_id.unwrap_or(0);
     out
@@ -545,7 +595,7 @@ pub unsafe extern "C" fn lr_ospf_spf_v3_locator_at(
             let route = SpfRoute {
                 prefix: loc.prefix,
                 metric: loc.metric,
-                next_hop: loc.next_hop,
+                next_hop: loc.next_hop.clone(),
                 border_router: None,
                 router_id: Some(loc.advertising_router),
             };
@@ -682,5 +732,112 @@ mod tests {
             unsafe { lr_ospf_spf_v3_route_count(std::ptr::null_mut()) },
             0
         );
+    }
+
+    /// ECMP at the C ABI: a route whose SPF computation discovers two
+    /// equal-cost first-hops surfaces them through `next_hop_count`
+    /// and the `next_hops[0..next_hop_count]` array (RFC 2328 §16.1
+    /// (4)). The struct fields `next_hop`/`next_hop_is_ipv6`/
+    /// `has_next_hop` from the previous single-hop shape are gone —
+    /// the count + inline array is the new contract.
+    ///
+    /// Topology: root (1.1.1.1) has two p2p neighbours R2 (2.2.2.2) and
+    /// R3 (3.3.3.3) at equal cost (10 each); both R2 and R3 have a p2p
+    /// link to R4 (4.4.4.4) at cost 10. R4 is reachable at cost 20 via
+    /// two equal-cost paths through R2 (next hop 10.0.0.1) and R3 (next
+    /// hop 10.0.0.2). The C ABI projection of R4's stub routes must
+    /// surface a `next_hop_count = 2` and the two next-hops in the
+    /// inline array.
+    #[test]
+    fn ffi_spf_route_carries_ecmp_next_hop_set() {
+        let lsdb = unsafe { crate::ospf_lsdb::lr_ospf_lsdb_new() };
+        // Root: p2p links to R2 and R3 (link-data 0 = unnumbered; the
+        // back-links below carry the actual next-hop addresses).
+        install_router_lsa(
+            lsdb,
+            0x01010101,
+            vec![
+                (0x02020202, 0, 1, 10), // P2P to R2
+                (0x03030303, 0, 1, 10), // P2P to R3
+            ],
+        );
+        // R2: back-link toward root (Link Data = R2's addr 10.0.0.1)
+        // and a deeper p2p link toward R4 (Link Data 10.0.0.101).
+        install_router_lsa(
+            lsdb,
+            0x02020202,
+            vec![
+                (0x01010101, 0x0a000001, 1, 10),
+                (0x04040404, 0x0a000101, 1, 10),
+            ],
+        );
+        // R3: back-link toward root (Link Data = R3's addr 10.0.0.2)
+        // and a deeper p2p link toward R4 (Link Data 10.0.0.102).
+        install_router_lsa(
+            lsdb,
+            0x03030303,
+            vec![
+                (0x01010101, 0x0a000002, 1, 10),
+                (0x04040404, 0x0a000102, 1, 10),
+            ],
+        );
+        // R4: back-links toward R2 and R3, plus a stub network so
+        // the SPF surfaces a route projection to the C ABI.
+        install_router_lsa(
+            lsdb,
+            0x04040404,
+            vec![
+                (0x02020202, 0x0a000101, 1, 10),
+                (0x03030303, 0x0a000102, 1, 10),
+                // Stub network 192.0.2.0/24 — surfaces as a route
+                // whose next-hop set carries both R2's and R3's
+                // first hops (the path toward R4's stub is the path
+                // toward R4 itself, ECMP across R2 and R3).
+                (0xc0000200, 0xffff_ff00, 3, 1),
+            ],
+        );
+
+        let r = unsafe { lr_ospf_spf_run(lsdb, 0x01010101) };
+        assert!(!r.is_null());
+
+        // Find the stub route for 192.0.2.0/24 — its next-hop set
+        // is the ECMP pair {10.0.0.1, 10.0.0.2}.
+        let count = unsafe { lr_ospf_spf_route_count(r) };
+        assert!(count >= 1, "SPF produced at least one stub route");
+        let mut found_stub = false;
+        for i in 0..count {
+            let mut route = lr_ospf_spf_route_t::default();
+            let rc = unsafe { lr_ospf_spf_route_at(r, i, &raw mut route) };
+            assert_eq!(rc, 0);
+            if route.prefix_addr[..4] == [192, 0, 2, 0] && route.prefix_len == 24 {
+                found_stub = true;
+                // ECMP: two distinct first hops in the inline array.
+                assert_eq!(
+                    route.next_hop_count, 2,
+                    "ECMP next-hop count for the stub route"
+                );
+                // The two next-hops are 10.0.0.1 (R2) and 10.0.0.2 (R3),
+                // stored as IPv4-mapped IPv6 in the lr_ip_addr_t octets
+                // (last 4 bytes hold the v4, first 12 are zero).
+                let nh0 = &route.next_hops[0];
+                assert_eq!(nh0.is_ipv6, 0, "first next-hop is IPv4");
+                assert_eq!(&nh0.octets[12..], &[10, 0, 0, 1], "R2 first");
+                let nh1 = &route.next_hops[1];
+                assert_eq!(nh1.is_ipv6, 0, "second next-hop is IPv4");
+                assert_eq!(&nh1.octets[12..], &[10, 0, 0, 2], "R3 second");
+                // Slots past `next_hop_count` are zeroed (Default).
+                for slot in route.next_hops.iter().skip(route.next_hop_count as usize) {
+                    assert_eq!(slot.is_ipv6, 0);
+                    assert_eq!(slot.octets, [0u8; 16]);
+                }
+                break;
+            }
+        }
+        assert!(found_stub, "found 192.0.2.0/24 stub route");
+
+        unsafe {
+            lr_ospf_spf_result_free(r);
+            crate::ospf_lsdb::lr_ospf_lsdb_free(lsdb);
+        }
     }
 }
