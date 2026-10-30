@@ -95,7 +95,11 @@ fn v3_p2p_two_routers_exchange_prefixes() {
     // and our interface 5 as oif.
     let r2 = V3VertexId::Router(0x0a00_0002);
     assert_eq!(spf.vertices.get(&r2), Some(&10));
-    let nh = spf.next_hops.get(&r2).expect("next hop resolved");
+    let nh = spf
+        .next_hops
+        .get(&r2)
+        .and_then(|v| v.first())
+        .expect("next hop resolved");
     assert_eq!(nh.link_local, IpAddr::V6(ll2));
     assert_eq!(nh.interface_id, 5, "our p2p link's interface id");
     assert!(spf.adjacent_routers.contains(&0x0a00_0002));
@@ -110,10 +114,10 @@ fn v3_p2p_two_routers_exchange_prefixes() {
     };
     let own = find(&route_of(&p1));
     assert_eq!(own.metric, 0);
-    assert_eq!(own.next_hop, None, "own prefixes are connected");
+    assert!(own.next_hop.is_empty(), "own prefixes are connected");
     let remote = find(&route_of(&p2));
     assert_eq!(remote.metric, 10);
-    assert_eq!(remote.next_hop, Some(IpAddr::V6(ll2)));
+    assert_eq!(remote.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
 }
 
 /// A three-router chain r1 - r2 - r3 (p2p): r1 must reach r3 through
@@ -176,7 +180,11 @@ fn v3_three_hop_chain_inherits_next_hop() {
     let spf = run_spf_v3(&db, r1);
     let v3v = V3VertexId::Router(r3);
     assert_eq!(spf.vertices.get(&v3v), Some(&20), "10 + 10");
-    let nh = spf.next_hops.get(&v3v).expect("inherited next hop");
+    let nh = spf
+        .next_hops
+        .get(&v3v)
+        .and_then(|v| v.first())
+        .expect("inherited next hop");
     assert_eq!(nh.link_local, IpAddr::V6(fe80(2)), "via r2");
     let route = spf
         .routes
@@ -184,7 +192,7 @@ fn v3_three_hop_chain_inherits_next_hop() {
         .find(|r| r.prefix == route_of(&p3))
         .expect("r3's prefix");
     assert_eq!(route.metric, 20);
-    assert_eq!(route.next_hop, Some(IpAddr::V6(fe80(2))));
+    assert_eq!(route.next_hop.first().copied(), Some(IpAddr::V6(fe80(2))));
 }
 
 /// A transit segment with an elected DR: the DR originates the
@@ -297,6 +305,7 @@ fn v3_transit_network_resolves_members() {
         let nh = spf
             .next_hops
             .get(&v)
+            .and_then(|v| v.first())
             .unwrap_or_else(|| panic!("nh for {rid}"));
         assert_eq!(nh.link_local, IpAddr::V6(ll));
         assert_eq!(nh.interface_id, 5, "our interface on the segment");
@@ -305,7 +314,7 @@ fn v3_transit_network_resolves_members() {
     // The segment prefix is connected for r1 (directly attached).
     let route = spf.routes.iter().find(|r| r.prefix == seg_prefix).unwrap();
     assert_eq!(route.metric, 10);
-    assert_eq!(route.next_hop, None);
+    assert!(route.next_hop.is_empty());
 }
 
 /// RFC 5340 §4.8.1 excludes NU prefixes; LA interface addresses
@@ -377,7 +386,7 @@ fn v3_la_prefixes_are_reachable_unless_nu_is_set() {
             .find(|r| r.prefix == route_of(&la))
             .unwrap();
         assert_eq!(host.metric, 10);
-        assert_eq!(host.next_hop, Some(IpAddr::V6(fe80(2))));
+        assert_eq!(host.next_hop.first().copied(), Some(IpAddr::V6(fe80(2))));
     }
 }
 
@@ -429,7 +438,7 @@ fn v3_missing_link_lsa_yields_no_next_hop() {
         .iter()
         .find(|r| r.prefix == route_of(&p2))
         .unwrap();
-    assert_eq!(route.next_hop, None);
+    assert!(route.next_hop.is_empty());
 }
 
 fn route_of(p: &crate::lsa::v3::V3Prefix) -> Prefix {
@@ -548,7 +557,7 @@ fn v3_locator_route_follows_the_advertising_router() {
     assert_eq!(loc.prefix, Prefix::new_v6(prefix, 48));
     assert_eq!(loc.algorithm, 0);
     assert_eq!(loc.metric, 10, "the router's p2p distance");
-    assert_eq!(loc.next_hop, Some(IpAddr::V6(ll2)));
+    assert_eq!(loc.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
     assert_eq!(loc.advertising_router, r2);
 }
 
@@ -593,7 +602,7 @@ fn v3_own_locator_connected_and_unreachable_locator_dropped() {
     let loc = &spf.locators[0];
     assert_eq!(loc.advertising_router, r1);
     assert_eq!(loc.metric, 0);
-    assert_eq!(loc.next_hop, None);
+    assert!(loc.next_hop.is_empty());
 }
 
 /// An inter-area locator (route type 2) is not computed until the
@@ -749,7 +758,7 @@ fn v3_inter_area_prefix_calc() {
     assert_eq!(route.prefix, p_a);
     assert_eq!(route.metric, 17, "dist(r2)=10 + metric 7");
     assert_eq!(route.border_router, Some(r2));
-    assert_eq!(route.next_hop, Some(IpAddr::V6(ll2)));
+    assert_eq!(route.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
 }
 
 /// Candidate selection for identical prefixes: the lowest metric
@@ -1003,6 +1012,7 @@ fn v3_e_lsa_topology_matches_legacy() {
     assert_eq!(
         spf.next_hops
             .get(&V3VertexId::Router(r2))
+            .and_then(|v| v.first())
             .unwrap()
             .link_local,
         IpAddr::V6(ll2)
@@ -1250,6 +1260,7 @@ fn v3_fragmented_router_lsa_merges_links_across_fragments() {
     let nh = spf
         .next_hops
         .get(&v3v)
+        .and_then(|v| v.first())
         .expect("inherited next hop survives the merge");
     assert_eq!(
         nh.link_local,
@@ -1262,7 +1273,7 @@ fn v3_fragmented_router_lsa_merges_links_across_fragments() {
         .find(|r| r.prefix == route_of(&p3))
         .expect("r3's prefix becomes a route");
     assert_eq!(route.metric, 20);
-    assert_eq!(route.next_hop, Some(IpAddr::V6(fe80(2))));
+    assert_eq!(route.next_hop.first().copied(), Some(IpAddr::V6(fe80(2))));
 }
 
 /// Fragment-1-only routers (a router whose fragment 0 was lost or never
@@ -1314,7 +1325,11 @@ fn v3_fragmented_router_lsa_first_fragment_seen_supplies_bits_and_options() {
         Some(0x13),
         "options come from the first fragment seen",
     );
-    let nh = spf.next_hops.get(&v3v).expect("next hop resolved");
+    let nh = spf
+        .next_hops
+        .get(&v3v)
+        .and_then(|v| v.first())
+        .expect("next hop resolved");
     assert_eq!(nh.link_local, IpAddr::V6(fe80(2)));
 }
 
@@ -1379,7 +1394,11 @@ fn v3_fragmented_router_lsa_merge_is_lsdb_order_stable() {
     // r2 is reachable (the back-link in fragment 0).
     let v3v = V3VertexId::Router(r2);
     assert_eq!(spf.vertices.get(&v3v), Some(&10));
-    let nh = spf.next_hops.get(&v3v).expect("next hop resolved");
+    let nh = spf
+        .next_hops
+        .get(&v3v)
+        .and_then(|v| v.first())
+        .expect("next hop resolved");
     assert_eq!(nh.link_local, IpAddr::V6(fe80(2)));
 }
 
@@ -1492,6 +1511,7 @@ fn v3_extended_fragmented_e_router_lsa_merges_links_across_fragments() {
     let nh = spf
         .next_hops
         .get(&v3v)
+        .and_then(|v| v.first())
         .expect("inherited next hop survives the merge");
     assert_eq!(
         nh.link_local,
@@ -1504,5 +1524,5 @@ fn v3_extended_fragmented_e_router_lsa_merges_links_across_fragments() {
         .find(|r| r.prefix == route_of(&p3))
         .expect("r3's prefix becomes a route");
     assert_eq!(route.metric, 20);
-    assert_eq!(route.next_hop, Some(IpAddr::V6(fe80(2))));
+    assert_eq!(route.next_hop.first().copied(), Some(IpAddr::V6(fe80(2))));
 }

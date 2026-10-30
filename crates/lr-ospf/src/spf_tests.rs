@@ -110,12 +110,16 @@ fn next_hops_resolve_from_the_back_link_and_inherit() {
     );
     let res = run_spf(&db, 0x01010101);
     assert_eq!(
-        res.next_hops.get(&VertexId::Router(0x02020202)),
-        Some(&ip([10, 0, 0, 1]))
+        res.next_hops
+            .get(&VertexId::Router(0x02020202))
+            .and_then(|v| v.first().copied()),
+        Some(ip([10, 0, 0, 1]))
     );
     assert_eq!(
-        res.next_hops.get(&VertexId::Router(0x03030303)),
-        Some(&ip([10, 0, 0, 1]))
+        res.next_hops
+            .get(&VertexId::Router(0x03030303))
+            .and_then(|v| v.first().copied()),
+        Some(ip([10, 0, 0, 1]))
     );
     // B's stub network routes forward through B (RFC 2328 §16.1.1:
     // a stub network inherits the advertising router vertex's next
@@ -124,7 +128,7 @@ fn next_hops_resolve_from_the_back_link_and_inherit() {
     assert!(res
         .stub_routes
         .iter()
-        .all(|r| r.next_hop == Some(ip([10, 0, 0, 1]))));
+        .all(|r| r.next_hop.first().copied() == Some(ip([10, 0, 0, 1]))));
     assert!(res.adjacent_routers.contains(&0x02020202));
     assert!(!res.adjacent_routers.contains(&0x03030303));
 }
@@ -178,13 +182,17 @@ fn next_hops_via_transit_network_use_the_attached_router_address() {
     );
     let res = run_spf(&db, 0x01010101);
     assert_eq!(
-        res.next_hops.get(&VertexId::Router(0x02020202)),
-        Some(&ip([10, 0, 0, 2]))
+        res.next_hops
+            .get(&VertexId::Router(0x02020202))
+            .and_then(|v| v.first().copied()),
+        Some(ip([10, 0, 0, 2]))
     );
     // C hangs off B: inherits B's next hop (§16.1.1 (2)).
     assert_eq!(
-        res.next_hops.get(&VertexId::Router(0x03030303)),
-        Some(&ip([10, 0, 0, 2]))
+        res.next_hops
+            .get(&VertexId::Router(0x03030303))
+            .and_then(|v| v.first().copied()),
+        Some(ip([10, 0, 0, 2]))
     );
     // B is one hop away (via the shared network) — penultimate for
     // its prefix-SIDs; C is not.
@@ -197,7 +205,7 @@ fn next_hops_via_transit_network_use_the_attached_router_address() {
         .find(|r| r.prefix == Prefix::new_v4([10, 0, 0, 0], 24))
         .expect("transit route");
     assert_eq!(net.metric, 10);
-    assert!(net.next_hop.is_none());
+    assert!(net.next_hop.is_empty());
 }
 
 #[test]
@@ -490,4 +498,317 @@ fn decode_router_links_stops_on_truncated_tos_section() {
     assert_eq!(links[0].metric, 10);
     // No second link, even though `# links` says 1 — the truncation
     // breaks the advertised count and the loop bails out cleanly.
+}
+
+// ECMP — RFC 2328 §16.1 (4): when several parents at the same shortest
+// distance contribute distinct next hops, every distinct hop is recorded.
+// Two p2p neighbours of equal cost (10 each) gives the root two equal-cost
+// paths to a deeper vertex reached through both — both neighbours' Link
+// Data must end up in the result's next-hop set, not just one.
+#[test]
+fn ecmp_records_distinct_first_hops_for_equal_cost_paths() {
+    // Topology:
+    //   root (1.1.1.1) --10-- R2 (2.2.2.2)
+    //   root          --10-- R3 (3.3.3.3)
+    //   R2 --10-- R4 (4.4.4.4)
+    //   R3 --10-- R4
+    // root → R4 has two equal-cost paths (10+10=20 each) through R2 and
+    // R3. The next-hop set for R4 must carry both R2's address (10.0.0.1)
+    // and R3's address (10.0.0.2) — the SPF relaxation now records equal-
+    // cost next-hops instead of dropping them (the previous strict-`<`
+    // `relax` would have kept only the first parent's hop).
+    let mut db = Lsdb::new();
+    db.install(
+        router_lsa(
+            0x01010101,
+            vec![
+                (0x02020202, 0, RouterLinkType::PointToPoint as u8, 10),
+                (0x03030303, 0, RouterLinkType::PointToPoint as u8, 10),
+            ],
+        ),
+        0,
+    );
+    // R2's back-link toward root carries R2's address (10.0.0.1).
+    db.install(
+        router_lsa(
+            0x02020202,
+            vec![
+                (
+                    0x01010101,
+                    0x0a000001,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+                (
+                    0x04040404,
+                    0x0a000101,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+            ],
+        ),
+        0,
+    );
+    // R3's back-link toward root carries R3's address (10.0.0.2).
+    db.install(
+        router_lsa(
+            0x03030303,
+            vec![
+                (
+                    0x01010101,
+                    0x0a000002,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+                (
+                    0x04040404,
+                    0x0a000102,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+            ],
+        ),
+        0,
+    );
+    // R4 has back-links toward both R2 and R3.
+    db.install(
+        router_lsa(
+            0x04040404,
+            vec![
+                (
+                    0x02020202,
+                    0x0a000101,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+                (
+                    0x03030303,
+                    0x0a000102,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+            ],
+        ),
+        0,
+    );
+    let res = run_spf(&db, 0x01010101);
+
+    // R2 and R3 are each one hop from the root with their own Link Data
+    // as next hop. Both are direct adjacencies — single-hop next-hops.
+    let r2_nh = res
+        .next_hops
+        .get(&VertexId::Router(0x02020202))
+        .and_then(|v| v.first().copied())
+        .expect("R2 next hop resolved");
+    assert_eq!(r2_nh, IpAddr::V4([10, 0, 0, 1]));
+    let r3_nh = res
+        .next_hops
+        .get(&VertexId::Router(0x03030303))
+        .and_then(|v| v.first().copied())
+        .expect("R3 next hop resolved");
+    assert_eq!(r3_nh, IpAddr::V4([10, 0, 0, 2]));
+
+    // R4 is two hops away via both R2 and R3 at equal cost (20). The
+    // next-hop set MUST contain both first hops, in discovery order.
+    // Discovery order is the LSDB's BTreeMap iteration order — R2 (Link
+    // State ID 0x02020202) is iterated before R3 (0x03030303), so R2's
+    // hop is recorded first.
+    let r4_nhs = res
+        .next_hops
+        .get(&VertexId::Router(0x04040404))
+        .expect("R4 reachable");
+    assert_eq!(
+        r4_nhs.len(),
+        2,
+        "ECMP: both R2 and R3 next-hops must be recorded for R4"
+    );
+    assert_eq!(
+        r4_nhs[0],
+        IpAddr::V4([10, 0, 0, 1]),
+        "R2 first (BTreeMap order)"
+    );
+    assert_eq!(r4_nhs[1], IpAddr::V4([10, 0, 0, 2]), "R3 second");
+}
+
+// ECMP inter-area: when two ABRs advertise the same summary at the same
+// total metric (border-router distance + summary metric), the resulting
+// SpfRoute must carry both ABRs' first hops, not just one. The lowest
+// border router ID stays in `border_router` for the `ospf.router_id`
+// accessor's determinism.
+#[test]
+fn ecmp_summary_collects_next_hops_from_equal_cost_abrs() {
+    // Topology: root (1.1.1.1) --10-- BR-a (2.2.2.2),
+    // root --10-- BR-b (3.3.3.3). Both advertise the same prefix
+    // 10.0.0.0/8 at summary metric 5 — total 15 each. ECMP: both
+    // border routers' first hops must land in the route's `next_hop`.
+    //
+    // Root has ONE Router-LSA listing both p2p neighbours (the LSDB
+    // keys a Router-LSA by its advertising-router ID, so the second
+    // install would overwrite the first — the helper's two-LSA shape
+    // is unsuitable here).
+    let mut db = Lsdb::new();
+    let root = 0x01010101;
+    let br_a = 0x02020202;
+    let br_b = 0x03030303;
+    db.install(
+        router_lsa(
+            root,
+            vec![
+                (br_a, 0, RouterLinkType::PointToPoint as u8, 10),
+                (br_b, 0, RouterLinkType::PointToPoint as u8, 10),
+            ],
+        ),
+        0,
+    );
+    db.install(
+        router_lsa(
+            br_a,
+            vec![(root, 0x0a000001, RouterLinkType::PointToPoint as u8, 10)],
+        ),
+        0,
+    );
+    db.install(
+        router_lsa(
+            br_b,
+            vec![(root, 0x0a000002, RouterLinkType::PointToPoint as u8, 10)],
+        ),
+        0,
+    );
+    // Both ABRs advertise the same prefix at the same metric (5) →
+    // total cost 15 each, equal-cost ECMP.
+    db.install(summary_lsa(br_a, 0x0a000000, 0xff000000, 5, 0x80000001), 0);
+    db.install(summary_lsa(br_b, 0x0a000000, 0xff000000, 5, 0x80000001), 0);
+
+    let spf = run_spf(&db, root);
+    let routes = summary_routes(&db, &spf);
+    assert_eq!(routes.len(), 1, "one route for the prefix");
+    let r = &routes[0];
+    assert_eq!(r.prefix, Prefix::new_v4([10, 0, 0, 0], 8));
+    assert_eq!(
+        r.metric, 15,
+        "total cost = border distance + summary metric"
+    );
+    // The border_router / router_id stays the lowest ABR (deterministic
+    // for the ospf.router_id accessor) — br_a (0x02020202) < br_b.
+    assert_eq!(r.border_router, Some(br_a));
+    assert_eq!(r.router_id, Some(br_a));
+    // ECMP: the next-hop set carries both ABRs' first hops, in
+    // discovery order (BTreeMap iteration → br_a first).
+    assert_eq!(r.next_hop.len(), 2, "ECMP: both ABR next-hops recorded");
+    assert_eq!(r.next_hop[0], IpAddr::V4([10, 0, 0, 1]), "BR-a first");
+    assert_eq!(r.next_hop[1], IpAddr::V4([10, 0, 0, 2]), "BR-b second");
+}
+
+// ECMP de-duplicates: when the same first hop is reachable through
+// multiple parents at equal cost, the next-hop set contains it once.
+// The classic case is two ABRs reachable through the same shared
+// transit network — both inherit the network's first hop, but the
+// set should not double-count.
+#[test]
+fn ecmp_dedupes_identical_next_hops_from_equal_cost_parents() {
+    // root (1.1.1.1) -- R2 (2.2.2.2) -- R3 (3.3.3.3)
+    //                  R2 -- R4 (4.4.4.4)
+    //                  R3 -- R4
+    // Two paths to R4 (via R2 or R3), but R3 inherits R2's next hop when
+    // relaxing from R2 — the relaxation from R3 sees the same next hop
+    // already in the set and skips the duplicate.
+    //
+    // For a real de-dupe test we need two distinct next hops that
+    // converge on the same router via different physical adjacencies
+    // that resolve to the SAME IP. The cleanest construction: root has
+    // two p2p neighbours (R2, R3) whose Link Data both happen to be
+    // 10.0.0.1 (e.g. they share an unnumbered link to the root, which
+    // is unusual but legal). The relaxation from R3 still tries to add
+    // 10.0.0.1, but the entry is already there from R2 — the set keeps
+    // one copy.
+    let mut db = Lsdb::new();
+    db.install(
+        router_lsa(
+            0x01010101,
+            vec![
+                (0x02020202, 0, RouterLinkType::PointToPoint as u8, 10),
+                (0x03030303, 0, RouterLinkType::PointToPoint as u8, 10),
+            ],
+        ),
+        0,
+    );
+    db.install(
+        router_lsa(
+            0x02020202,
+            vec![
+                (
+                    0x01010101,
+                    0x0a000001,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+                (
+                    0x04040404,
+                    0x0a000101,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+            ],
+        ),
+        0,
+    );
+    db.install(
+        router_lsa(
+            0x03030303,
+            vec![
+                // Same Link Data 0x0a000001 as R2 uses toward root —
+                // a deliberately degenerate case that exercises the
+                // de-duplicate path in the relaxation's ECMP branch.
+                (
+                    0x01010101,
+                    0x0a000001,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+                (
+                    0x04040404,
+                    0x0a000102,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+            ],
+        ),
+        0,
+    );
+    db.install(
+        router_lsa(
+            0x04040404,
+            vec![
+                (
+                    0x02020202,
+                    0x0a000101,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+                (
+                    0x03030303,
+                    0x0a000102,
+                    RouterLinkType::PointToPoint as u8,
+                    10,
+                ),
+            ],
+        ),
+        0,
+    );
+    let res = run_spf(&db, 0x01010101);
+    let r4_nhs = res
+        .next_hops
+        .get(&VertexId::Router(0x04040404))
+        .expect("R4 reachable");
+    // Both parents (R2 and R3) inherit the SAME next hop (10.0.0.1)
+    // from the root-R2 link and the root-R3 link. De-duplication
+    // collapses the set to one entry — RFC 2328 §16.1 (4) says
+    // "equal-cost paths install distinct first hops", so a duplicate
+    // is not a second path.
+    assert_eq!(
+        r4_nhs.len(),
+        1,
+        "ECMP de-dup: identical next hop recorded once, not twice"
+    );
+    assert_eq!(r4_nhs[0], IpAddr::V4([10, 0, 0, 1]));
 }

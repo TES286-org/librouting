@@ -376,7 +376,7 @@ fn spf_route_struct_field_coverage() {
     let r = SpfRoute {
         prefix: net(1, 24),
         metric: 5,
-        next_hop: None,
+        next_hop: Vec::new(),
         border_router: None,
         router_id: None,
     };
