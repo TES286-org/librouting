@@ -729,6 +729,7 @@ fn external_routes_v3_mode(
         let next_hop = spf_result
             .next_hops
             .get(&V3VertexId::Router(nh_router))
+            .and_then(|v| v.first())
             .map(|nh| nh.link_local);
         let candidate = ExternalRouteV3 {
             prefix,

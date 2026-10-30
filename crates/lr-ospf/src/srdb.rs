@@ -247,7 +247,7 @@ impl SrDatabase {
             let Some(&distance) = spf.vertices.get(&vertex) else {
                 continue; // originator unreachable: no usable path
             };
-            let Some(&next_hop) = spf.next_hops.get(&vertex) else {
+            let Some(next_hop) = spf.next_hops.get(&vertex).and_then(|v| v.first().copied()) else {
                 continue; // no resolvable first hop: nothing to point the LSP at
             };
             if !self.srgbs.contains_key(&rid) {

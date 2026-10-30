@@ -117,7 +117,7 @@ impl DefaultRouter {
             // the gateway itself and cascading ENETUNREACH on every
             // downstream route that points through it.
             table.entry(r.prefix).or_insert_with(|| {
-                OspfTableEntry::intra(r.metric, r.next_hop)
+                OspfTableEntry::intra(r.metric, r.next_hop.first().copied())
                     // RFC 2328 §A.4 `Advertising Router` field
                     // — the Router-LSA's advertising router for
                     // stub routes (the router that owns the stub
@@ -250,7 +250,7 @@ impl DefaultRouter {
                 let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
                     table.entry(r.prefix).or_insert_with(|| {
-                        OspfTableEntry::intra_v3(r.metric, r.next_hop)
+                        OspfTableEntry::intra_v3(r.metric, r.next_hop.first().copied())
                             // RFC 5340 §A.4 — the v3 Intra-Area-Prefix
                             // LSA's referenced advertising router. For
                             // Router references this is the router's own
@@ -275,9 +275,9 @@ impl DefaultRouter {
                         if !Self::ospf_srv6_algorithm_supported(loc.algorithm) {
                             continue;
                         }
-                        table
-                            .entry(loc.prefix)
-                            .or_insert_with(|| OspfTableEntry::intra_v3(loc.metric, loc.next_hop));
+                        table.entry(loc.prefix).or_insert_with(|| {
+                            OspfTableEntry::intra_v3(loc.metric, loc.next_hop.first().copied())
+                        });
                     }
                 }
                 // §4.8.3: inter-area routes from 0x2003 summaries —
@@ -299,7 +299,7 @@ impl DefaultRouter {
                         },
                         label: None,
                         label_nh: None,
-                        next_hop: r.next_hop,
+                        next_hop: r.next_hop.first().copied(),
                         // Inter-area summary routes (RFC 5340 §4.8.3
                         // 0x2003 / RFC 8362 0xA023) carry no LSA tag
                         // — the summary body has no tag field.
@@ -601,13 +601,13 @@ impl DefaultRouter {
                     OspfKind::Inter { border_router } => spf
                         .next_hops
                         .get(&spf::VertexId::Router(border_router))
-                        .copied(),
+                        .and_then(|v| v.first().copied()),
                     _ => spf
                         .stub_routes
                         .iter()
                         .chain(&spf.transit_routes)
                         .find(|r| r.prefix == *prefix)
-                        .and_then(|r| r.next_hop),
+                        .and_then(|r| r.next_hop.first().copied()),
                 };
                 entry.label = Some(label);
                 entry.label_nh = next_hop;
@@ -936,7 +936,7 @@ impl DefaultRouter {
                 let mut t: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
                     t.entry(r.prefix).or_insert_with(|| {
-                        OspfTableEntry::intra_v3(r.metric, r.next_hop)
+                        OspfTableEntry::intra_v3(r.metric, r.next_hop.first().copied())
                             // RFC 5340 §A.4 — the v3 Intra-Area-Prefix
                             // LSA's referenced advertising router; the
                             // same value the global `ospf_recompute`
@@ -962,7 +962,7 @@ impl DefaultRouter {
                         },
                         label: None,
                         label_nh: None,
-                        next_hop: r.next_hop,
+                        next_hop: r.next_hop.first().copied(),
                         // Inter-area summary routes (RFC 5340 §4.8.3
                         // 0x2003 / RFC 8362 0xA023) carry no LSA tag —
                         // the summary body has no tag field.

@@ -527,6 +527,7 @@ fn nssa_routes_v3_mode(
         let next_hop = spf_result
             .next_hops
             .get(&V3VertexId::Router(asbr))
+            .and_then(|v| v.first())
             .map(|nh| nh.link_local)
             .or_else(|| body.forwarding_addr.map(IpAddr::V6));
         let candidate = ExternalRouteV3 {

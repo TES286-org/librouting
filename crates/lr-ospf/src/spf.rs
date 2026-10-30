@@ -30,25 +30,34 @@ pub struct SpfVertex {
 pub struct SpfResult {
     /// Best distances to each vertex.
     pub vertices: BTreeMap<VertexId, u64>,
-    /// RFC 2328 §16.1.1: the next hop toward each vertex — the IP
-    /// interface address of the first-hop neighbour on the shortest
-    /// path — wherever the LSDB carries it. A direct p2p neighbour
+    /// RFC 2328 §16.1: the next hops toward each vertex — the IP
+    /// interface addresses of the first-hop neighbours on the shortest
+    /// path — wherever the LSDB carries them. A direct p2p neighbour
     /// contributes the Link Data of the p2p link pointing back at the
     /// root (its own address on the shared link, §16.1.1 (5)); a router
     /// attached to a directly reachable transit network contributes its
     /// address on that network (§16.1.1 (4)); deeper vertices inherit
     /// their parent's next hop (§16.1.1 (2)-(3)). Vertices whose next
     /// hop the LSDB cannot resolve (unnumbered, Link Data 0) are absent.
-    pub next_hops: BTreeMap<VertexId, IpAddr>,
+    ///
+    /// RFC 2328 §16.1 (4) (ECMP): when several parents at the same
+    /// shortest distance contribute distinct next hops, every distinct
+    /// hop is recorded, in the order the relaxation discovered them —
+    /// deterministic for a given LSDB because the LSDB iterates in
+    /// `BTreeMap` order and the heap pops in (distance, vertex-id)
+    /// order. Consumers that want only a single next hop should read
+    /// `Vec::first`; ECMP-aware consumers (kernel FIB mirror, BGP
+    /// next-hop propagation) should iterate the whole list.
+    pub next_hops: BTreeMap<VertexId, Vec<IpAddr>>,
     /// Router vertices one hop from the root: a direct p2p adjacency or
     /// a router on a directly attached transit network. Segment Routing
     /// uses this for the RFC 8665 §5 PHP rule — the penultimate hop
     /// pops when a Prefix-SID does not carry the NP flag, and a router
     /// in this set *is* the penultimate hop for its own prefix-SIDs.
     pub adjacent_routers: BTreeSet<u32>,
-    /// Best next-hop IP for each prefix reachable through a stub network.
+    /// Best next-hop IPs for each prefix reachable through a stub network.
     pub stub_routes: Vec<SpfRoute>,
-    /// Best next-hop IP for each transit network.
+    /// Best next-hop IPs for each transit network.
     pub transit_routes: Vec<SpfRoute>,
 }
 
@@ -56,7 +65,17 @@ pub struct SpfResult {
 pub struct SpfRoute {
     pub prefix: Prefix,
     pub metric: u64,
-    pub next_hop: Option<IpAddr>,
+    /// Resolved first-hop IP(s) toward this prefix. Empty when the
+    /// route is directly connected (the root owns the prefix) or when
+    /// the LSDB does not carry enough information to resolve a next hop
+    /// (unnumbered p2p links, missing Link-LSAs in v3). When the prefix
+    /// is reachable through several ECMP paths at the same SPF
+    /// distance, every distinct first hop is listed (RFC 2328 §16.1
+    /// (4)); consumers that only want a single next hop should read
+    /// `Vec::first` for parity with the previous `Option<IpAddr>`
+    /// surface, while ECMP-aware consumers should iterate the whole
+    /// list.
+    pub next_hop: Vec<IpAddr>,
     /// For inter-area routes derived from summary-LSAs: the advertising
     /// border router. `None` for intra-area routes.
     pub border_router: Option<u32>,
@@ -193,7 +212,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                             let next_hop = if rid == root {
                                 router_address_towards(&router_lsas, link.link_id, root)
                             } else {
-                                result.next_hops.get(&v.id).copied()
+                                result.next_hops.get(&v.id).and_then(|v| v.first().copied())
                             };
                             relax(
                                 &mut result,
@@ -220,7 +239,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                             let next_hop = if rid == root {
                                 None
                             } else {
-                                result.next_hops.get(&v.id).copied()
+                                result.next_hops.get(&v.id).and_then(|v| v.first().copied())
                             };
                             relax(
                                 &mut result,
@@ -242,10 +261,14 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                             // next hop mapping-server labels ride
                             // (RFC 8661 §3.2.2: installed exactly as
                             // if the owner advertised the SID).
-                            let next_hop = if rid == root {
-                                None // connected: no gateway
+                            let next_hop: Vec<IpAddr> = if rid == root {
+                                Vec::new() // connected: no gateway
                             } else {
-                                result.next_hops.get(&VertexId::Router(rid)).copied()
+                                result
+                                    .next_hops
+                                    .get(&VertexId::Router(rid))
+                                    .cloned()
+                                    .unwrap_or_default()
                             };
                             result.stub_routes.push(SpfRoute {
                                 prefix,
@@ -279,7 +302,11 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                     // The path toward the transit network is the path
                     // toward the network vertex (the same one a
                     // mapping-server label for its prefix rides).
-                    let next_hop = result.next_hops.get(&VertexId::Network(ls_id)).copied();
+                    let next_hop: Vec<IpAddr> = result
+                        .next_hops
+                        .get(&VertexId::Network(ls_id))
+                        .cloned()
+                        .unwrap_or_default();
                     result.transit_routes.push(SpfRoute {
                         prefix: Prefix::new_v4(net.to_be_bytes(), mask_to_pl(*mask)),
                         metric: current_dist,
@@ -302,7 +329,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                         let next_hop = if direct_net {
                             router_address_on_network(&router_lsas, r, ls_id)
                         } else {
-                            result.next_hops.get(&v.id).copied()
+                            result.next_hops.get(&v.id).and_then(|v| v.first().copied())
                         };
                         // Transit networks have zero metric (§16.1).
                         relax(
@@ -327,8 +354,15 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
 
 /// Relax the edge `from → target` at `new_dist`: strictly better paths
 /// update the distance, the parent (for next-hop inheritance) and the
-/// resolved next hop; equal-distance paths keep the first parent, so the
-/// result is deterministic for a given LSDB.
+/// resolved next hop; equal-distance paths keep the first parent but
+/// contribute their next hop to the ECMP set (RFC 2328 §16.1 (4)), so
+/// the result is deterministic for a given LSDB.
+///
+/// A `None` next hop on a strictly-better path *clears* the ECMP set
+/// (the new parent cannot resolve a next hop). A `None` next hop on an
+/// equal-distance path is a no-op — the existing set stays, matching
+/// the previous single-hop behaviour where a None relax at equal
+/// distance left the existing entry alone.
 fn relax(
     result: &mut SpfResult,
     parents: &mut BTreeMap<VertexId, VertexId>,
@@ -340,11 +374,15 @@ fn relax(
 ) {
     let prev = result.vertices.get(&target).copied().unwrap_or(u64::MAX);
     if new_dist < prev {
+        // Strictly better path: replace the distance, parent and
+        // next-hop set wholesale. The set is rebuilt from this single
+        // hop; an `None` next hop yields an empty set (the route is
+        // reachable but the LSDB cannot resolve a gateway).
         result.vertices.insert(target, new_dist);
         parents.insert(target, from);
         match next_hop {
             Some(nh) => {
-                result.next_hops.insert(target, nh);
+                result.next_hops.insert(target, vec![nh]);
             }
             None => {
                 result.next_hops.remove(&target);
@@ -354,6 +392,18 @@ fn relax(
             id: target,
             distance: new_dist,
         });
+    } else if new_dist == prev {
+        // ECMP (RFC 2328 §16.1 (4)): an equal-distance path keeps the
+        // existing parent (the first one to relax at this distance) so
+        // the SPF tree shape is deterministic, but the next hop it
+        // resolves to joins the ECMP set. A `None` next hop resolves
+        // nothing and is silently dropped — the existing set stays.
+        if let Some(nh) = next_hop {
+            let entry = result.next_hops.entry(target).or_default();
+            if !entry.contains(&nh) {
+                entry.push(nh);
+            }
+        }
     }
 }
 
@@ -408,9 +458,16 @@ fn mask_to_pl(mask: u32) -> u8 {
 /// Every type-3 summary-LSA whose advertising border router is reachable
 /// through the intra-area tree contributes a candidate route with metric
 /// `dist(border router) + summary metric`. Candidates with a metric of
-/// LSInfinity (`0x00ff_ffff`) are unreachable and skipped. The best
-/// candidate per prefix wins — lowest metric, ties broken by the lowest
-/// border router ID for determinism.
+/// LSInfinity (`0x00ff_ffff`) are unreachable and skipped.
+///
+/// ECMP (§16.1 (4) carried into §16.2): when several border routers
+/// advertise the same prefix at the same total metric, every border
+/// router's next hop is collected into one `SpfRoute` with a
+/// multi-valued `next_hop`. The lowest border router ID stays in
+/// `border_router` (the existing tie-break field) for the
+/// `ospf.router_id` accessor; the route's full ECMP set is what an
+/// embedder installs. A later border router that beats the current
+/// best metric *replaces* the candidate wholesale, just as before.
 ///
 /// Callers must merge the result with the intra-area routes of the same
 /// area so that intra-area paths always win for an identical prefix
@@ -443,27 +500,82 @@ pub fn summary_routes(lsdb: &Lsdb, result: &SpfResult) -> Vec<SpfRoute> {
         let prefix_len = mask_to_prefix_len(body.network_mask);
         let network = entry.lsa.header.link_state_id & body.network_mask;
         let prefix = Prefix::new_v4(network.to_be_bytes(), prefix_len);
-        let candidate = SpfRoute {
-            prefix,
-            metric: dist + u64::from(metric),
-            next_hop: None, // resolved from the border router's next hop by the caller
-            border_router: Some(key.advertising_router),
-            // The summary-LSA's advertising router IS the ABR that
-            // originated it (RFC 2328 §A.4.3 Summary-LSAs), so the
-            // originating LSA's advertising router matches the
-            // border_router value the inter-area route computation
-            // already records.
-            router_id: Some(key.advertising_router),
-        };
-        let replace = match best.get(&prefix) {
-            None => true,
-            Some((cur, cur_border)) => {
-                candidate.metric < cur.metric
-                    || (candidate.metric == cur.metric && key.advertising_router < *cur_border)
+        // The border router's full ECMP next-hop set — every first hop
+        // the intra-area SPF recorded for it. Inter-area routes inherit
+        // that set wholesale so a controller can ECMP across the same
+        // first hops the intra-area tree would. Empty when the border
+        // router has no resolved first hop (the LSDB cannot resolve a
+        // gateway); the Loc-RIB installs it blackhole-style.
+        let border_nexthops: Vec<IpAddr> = result
+            .next_hops
+            .get(&VertexId::Router(key.advertising_router))
+            .cloned()
+            .unwrap_or_default();
+        let candidate_metric = dist + u64::from(metric);
+        match best.get(&prefix) {
+            None => {
+                best.insert(
+                    prefix,
+                    (
+                        SpfRoute {
+                            prefix,
+                            metric: candidate_metric,
+                            next_hop: border_nexthops,
+                            border_router: Some(key.advertising_router),
+                            // The summary-LSA's advertising router IS
+                            // the ABR that originated it (RFC 2328
+                            // §A.4.3 Summary-LSAs), so the originating
+                            // LSA's advertising router matches the
+                            // border_router value the inter-area route
+                            // computation already records.
+                            router_id: Some(key.advertising_router),
+                        },
+                        key.advertising_router,
+                    ),
+                );
             }
-        };
-        if replace {
-            best.insert(prefix, (candidate, key.advertising_router));
+            Some((cur, _cur_border)) => {
+                if candidate_metric < cur.metric {
+                    // Strictly better: replace wholesale, mirroring the
+                    // previous single-hop "lower wins" rule.
+                    best.insert(
+                        prefix,
+                        (
+                            SpfRoute {
+                                prefix,
+                                metric: candidate_metric,
+                                next_hop: border_nexthops,
+                                border_router: Some(key.advertising_router),
+                                router_id: Some(key.advertising_router),
+                            },
+                            key.advertising_router,
+                        ),
+                    );
+                } else if candidate_metric == cur.metric {
+                    // ECMP at equal cost: collect this ABR's next hops
+                    // into the existing route's set. De-duplicate so a
+                    // border router reachable through the same first hop
+                    // as another does not double-count. The lowest
+                    // border router ID stays in `border_router` /
+                    // `router_id` for the `ospf.router_id` accessor —
+                    // changing it would make the route's tag identity
+                    // non-deterministic on LSDB insertion order.
+                    //
+                    // Drop the immutable borrow before the mutable
+                    // one — Rust's NLL allows `cur.metric` only inside
+                    // the `else if` expression's evaluation, so by
+                    // reaching this block the immutable borrow is no
+                    // longer live.
+                    let cur = best.get_mut(&prefix).unwrap();
+                    for nh in border_nexthops {
+                        if !cur.0.next_hop.contains(&nh) {
+                            cur.0.next_hop.push(nh);
+                        }
+                    }
+                }
+                // Otherwise (worse metric): the existing candidate
+                // stays; this ABR does not contribute to the route.
+            }
         }
     }
     best.into_values().map(|(route, _)| route).collect()
@@ -652,8 +764,13 @@ pub struct V3NextHop {
 #[derive(Debug, Clone, Default)]
 pub struct SpfResultV3 {
     pub vertices: BTreeMap<V3VertexId, u64>,
-    /// The resolved first hop per vertex where the LSDB carries one.
-    pub next_hops: BTreeMap<V3VertexId, V3NextHop>,
+    /// The resolved first hops per vertex where the LSDB carries one,
+    /// plus the outgoing Interface ID for each (the v3 analogue of the
+    /// v2 single next hop, lifted to a list for ECMP — RFC 2328 §16.1
+    /// (4) carried into RFC 5340 §4.8: every distinct (link-local,
+    /// interface) pair that the equal-distance relaxation discovered
+    /// is recorded, in the order the relaxation visited them.
+    pub next_hops: BTreeMap<V3VertexId, Vec<V3NextHop>>,
     /// Routers one hop from the root (direct p2p adjacency, or routers
     /// on a directly attached transit network).
     pub adjacent_routers: BTreeSet<u32>,
@@ -685,9 +802,11 @@ pub struct SpfLocatorRoute {
     pub algorithm: u8,
     /// The SPF distance to the advertising router.
     pub metric: u64,
-    /// The advertising router's resolved first hop; `None` when the
-    /// router is the root itself (directly connected).
-    pub next_hop: Option<IpAddr>,
+    /// The advertising router's resolved first hop(s); empty when the
+    /// router is the root itself (directly connected) or when no
+    /// link-local could be resolved. Multiple entries mean the router
+    /// is reachable through ECMP paths at the same SPF distance.
+    pub next_hop: Vec<IpAddr>,
     pub advertising_router: u32,
 }
 
@@ -1041,18 +1160,35 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
                  next_hop: Option<V3NextHop>| {
         let prev = dist.get(&target).copied().unwrap_or(u64::MAX);
         if new_dist < prev {
+            // Strictly better path: rebuild the distance, parent and
+            // next-hop set wholesale; a `None` next hop yields an empty
+            // set (the vertex is reachable but no gateway resolves).
             dist.insert(target, new_dist);
             result.vertices.insert(target, new_dist);
             parents.insert(target, from);
             match next_hop {
                 Some(nh) => {
-                    result.next_hops.insert(target, nh);
+                    result.next_hops.insert(target, vec![nh]);
                 }
                 None => {
                     result.next_hops.remove(&target);
                 }
             }
             queue.push((std::cmp::Reverse(new_dist), target));
+        } else if new_dist == prev {
+            // ECMP (RFC 2328 §16.1 (4) carried into RFC 5340 §4.8): an
+            // equal-distance path keeps the first parent (so the tree
+            // shape stays deterministic) but its next hop joins the
+            // ECMP set. De-duplicate by (link_local, interface_id) so
+            // the same neighbour reached via two transit networks does
+            // not double-count. A `None` next hop resolves nothing and
+            // is silently dropped.
+            if let Some(nh) = next_hop {
+                let entry = result.next_hops.entry(target).or_default();
+                if !entry.iter().any(|h| h == &nh) {
+                    entry.push(nh);
+                }
+            }
         }
     };
 
@@ -1082,7 +1218,7 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
                                     interface_id: link.interface_id,
                                 })
                             } else {
-                                result.next_hops.get(&v_id).copied()
+                                result.next_hops.get(&v_id).and_then(|v| v.first().copied())
                             };
                             relax(
                                 &mut dist,
@@ -1117,7 +1253,7 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
                             let next_hop = if rid == root {
                                 None // directly connected
                             } else {
-                                result.next_hops.get(&v_id).copied()
+                                result.next_hops.get(&v_id).and_then(|v| v.first().copied())
                             };
                             relax(
                                 &mut dist,
@@ -1168,7 +1304,7 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
                                     .unwrap_or(0),
                             })
                     } else {
-                        result.next_hops.get(&v_id).copied()
+                        result.next_hops.get(&v_id).and_then(|v| v.first().copied())
                     };
                     relax(
                         &mut dist,
@@ -1204,7 +1340,11 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
         let Some(&d) = dist.get(&vertex) else {
             continue;
         };
-        let next_hop = result.next_hops.get(&vertex).copied();
+        let next_hop: Vec<IpAddr> = result
+            .next_hops
+            .get(&vertex)
+            .map(|v| v.iter().map(|nh| nh.link_local).collect())
+            .unwrap_or_default();
         for p in prefixes {
             // §4.8.1: only NU excludes a prefix from unicast calculation.
             if p.options & PREFIX_OPT_NU != 0 {
@@ -1214,7 +1354,7 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
             let route = SpfRoute {
                 prefix,
                 metric: d,
-                next_hop: next_hop.map(|nh| nh.link_local),
+                next_hop: next_hop.clone(),
                 border_router: None,
                 // The Intra-Area-Prefix-LSA references the vertex
                 // (Router-LSA or Network-LSA) whose distance the
@@ -1258,10 +1398,14 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
             let Some(&metric) = dist.get(&vertex) else {
                 continue;
             };
-            let next_hop = if adv == root {
-                None
+            let next_hop: Vec<IpAddr> = if adv == root {
+                Vec::new()
             } else {
-                result.next_hops.get(&vertex).map(|nh| nh.link_local)
+                result
+                    .next_hops
+                    .get(&vertex)
+                    .map(|v| v.iter().map(|nh| nh.link_local).collect())
+                    .unwrap_or_default()
             };
             locators.push(SpfLocatorRoute {
                 prefix: loc.prefix,
@@ -1292,14 +1436,16 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
 ///   by the calculation;
 /// - the LSInfinity metric (`0x00ff_ffff`) still marks unreachable.
 ///
-/// The best candidate per prefix wins — lowest metric, ties broken by
-/// the lowest border router ID for determinism. The candidate's next
-/// hop is the advertising border router's resolved link-local first
-/// hop (the only legal unicast next hop for OSPFv3, RFC 5340 §4.2.1);
-/// `None` when the border router itself has no resolved first hop.
-/// Callers must merge the result with the intra-area routes of the
-/// same area so that intra-area paths always win for an identical
-/// prefix (§16.2 (b)).
+/// ECMP (RFC 2328 §16.1 (4) carried into RFC 5340 §4.8.3): when
+/// several border routers advertise the same prefix at the same total
+/// metric, every border router's resolved link-local first hop is
+/// collected into one `SpfRoute` with a multi-valued `next_hop`. The
+/// lowest border router ID stays in `border_router` for the
+/// `ospf.router_id` accessor; the route's full ECMP set is what an
+/// embedder installs. A later border router that beats the current
+/// best metric *replaces* the candidate wholesale. Callers must merge
+/// the result with the intra-area routes of the same area so that
+/// intra-area paths always win for an identical prefix (§16.2 (b)).
 pub fn summary_routes_v3(lsdb: &Lsdb, result: &SpfResultV3) -> Vec<SpfRoute> {
     summary_routes_v3_mode(lsdb, result, false)
 }
@@ -1365,30 +1511,64 @@ pub(crate) fn summary_routes_v3_mode(
             continue;
         }
         let prefix = Prefix::new_v6(addr, prefix_len);
-        let candidate = SpfRoute {
-            prefix,
-            metric: dist + u64::from(metric),
-            next_hop: result
-                .next_hops
-                .get(&V3VertexId::Router(key.advertising_router))
-                .map(|nh| nh.link_local),
-            border_router: Some(key.advertising_router),
-            // The v3 inter-area-prefix-LSA's advertising router IS
-            // the ABR that originated it (RFC 5340 §A.4.3
-            // Inter-Area-Prefix-LSA), so the originating LSA's
-            // advertising router matches the border_router value the
-            // inter-area route computation already records.
-            router_id: Some(key.advertising_router),
-        };
-        let replace = match best.get(&prefix) {
-            None => true,
-            Some((cur, cur_border)) => {
-                candidate.metric < cur.metric
-                    || (candidate.metric == cur.metric && key.advertising_router < *cur_border)
+        // The border router's full ECMP next-hop set — every link-local
+        // the intra-area SPF recorded for it. Inter-area routes inherit
+        // that set wholesale so a controller can ECMP across the same
+        // first hops the intra-area tree would.
+        let border_nexthops: Vec<IpAddr> = result
+            .next_hops
+            .get(&V3VertexId::Router(key.advertising_router))
+            .map(|v| v.iter().map(|nh| nh.link_local).collect())
+            .unwrap_or_default();
+        let candidate_metric = dist + u64::from(metric);
+        match best.get(&prefix) {
+            None => {
+                best.insert(
+                    prefix,
+                    (
+                        SpfRoute {
+                            prefix,
+                            metric: candidate_metric,
+                            next_hop: border_nexthops,
+                            border_router: Some(key.advertising_router),
+                            // The v3 inter-area-prefix-LSA's advertising
+                            // router IS the ABR that originated it (RFC
+                            // 5340 §A.4.3 Inter-Area-Prefix-LSA), so the
+                            // originating LSA's advertising router matches
+                            // the border_router value the inter-area route
+                            // computation already records.
+                            router_id: Some(key.advertising_router),
+                        },
+                        key.advertising_router,
+                    ),
+                );
             }
-        };
-        if replace {
-            best.insert(prefix, (candidate, key.advertising_router));
+            Some((cur, _cur_border)) => {
+                if candidate_metric < cur.metric {
+                    best.insert(
+                        prefix,
+                        (
+                            SpfRoute {
+                                prefix,
+                                metric: candidate_metric,
+                                next_hop: border_nexthops,
+                                border_router: Some(key.advertising_router),
+                                router_id: Some(key.advertising_router),
+                            },
+                            key.advertising_router,
+                        ),
+                    );
+                } else if candidate_metric == cur.metric {
+                    // ECMP at equal cost — collect this ABR's next hops
+                    // into the existing route's set, de-duplicated.
+                    let cur = best.get_mut(&prefix).unwrap();
+                    for nh in border_nexthops {
+                        if !cur.0.next_hop.contains(&nh) {
+                            cur.0.next_hop.push(nh);
+                        }
+                    }
+                }
+            }
         }
     }
     best.into_values().map(|(route, _)| route).collect()
