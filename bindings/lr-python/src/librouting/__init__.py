@@ -141,6 +141,23 @@ from .ospf import (
     OspfLsdb,
     OspfRetransmitList,
 )
+from .seg6route import (
+    ENCAP_INLINE,
+    ENCAP_ENCAP,
+    ERR_UNSUPPORTED,
+    ERR_NOT_ENABLED,
+    ERR_SYSCALL,
+    ERR_KERNEL,
+    ERR_BAD_SRH,
+    ERR_UNSUPPORTED_ACTION,
+    ERR_UNKNOWN,
+    Seg6Route,
+    Seg6LocalRoute,
+    Seg6Netlink,
+    Seg6RouteErr,
+    err_name,
+    err_code,
+)
 
 __all__ = [
     "Router",
@@ -269,6 +286,22 @@ __all__ = [
     "OspfExternalDest",
     "EXTERNAL_METRIC_TYPE1",
     "EXTERNAL_METRIC_TYPE2",
+    # SRv6 netlink route-table (RFC 8754 §2 + RFC 8986 §4).
+    "Seg6Route",
+    "Seg6LocalRoute",
+    "Seg6Netlink",
+    "Seg6RouteErr",
+    "ENCAP_INLINE",
+    "ENCAP_ENCAP",
+    "ERR_UNSUPPORTED",
+    "ERR_NOT_ENABLED",
+    "ERR_SYSCALL",
+    "ERR_KERNEL",
+    "ERR_BAD_SRH",
+    "ERR_UNSUPPORTED_ACTION",
+    "ERR_UNKNOWN",
+    "err_name",
+    "err_code",
 ]
 
 # The single source of truth for the package version: pyproject.toml reads

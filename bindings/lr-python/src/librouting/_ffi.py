@@ -835,6 +835,66 @@ uint8_t lr_srv6_behavior_is_decap(uint16_t wire);
 uint8_t lr_srv6_behavior_is_cross_connect(uint16_t wire);
 uint8_t lr_srv6_behavior_is_table_lookup(uint16_t wire);
 uintptr_t lr_srv6_behavior_name(uint16_t wire, char *out_name, uintptr_t name_cap);
+
+/* SRv6 netlink route-table — seg6 (encap) + seg6local (endpoint)
+ * (mirrors lr_osroute::seg6_route pub API). */
+#define LR_SEG6_ENCAP_INLINE 0
+#define LR_SEG6_ENCAP_ENCAP 1
+#define LR_SEG6_ERR_UNSUPPORTED 1
+#define LR_SEG6_ERR_NOT_ENABLED 2
+#define LR_SEG6_ERR_SYSCALL 3
+#define LR_SEG6_ERR_KERNEL 4
+#define LR_SEG6_ERR_BAD_SRH 5
+#define LR_SEG6_ERR_UNSUPPORTED_ACTION 6
+#define LR_SEG6_ERR_UNKNOWN -1
+
+typedef struct OpaqueSeg6Route OpaqueSeg6Route;
+typedef struct OpaqueSeg6Route *lr_seg6_route_t;
+typedef struct OpaqueSeg6LocalRoute OpaqueSeg6LocalRoute;
+typedef struct OpaqueSeg6LocalRoute *lr_seg6_local_route_t;
+typedef struct OpaqueSeg6Netlink OpaqueSeg6Netlink;
+typedef struct OpaqueSeg6Netlink *lr_seg6_netlink_t;
+
+lr_seg6_route_t lr_seg6_route_new(struct lr_prefix_t prefix, lr_srv6_srh_t srh);
+int32_t lr_seg6_route_set_mode(lr_seg6_route_t r, uint32_t mode);
+int32_t lr_seg6_route_set_if_index(lr_seg6_route_t r, uint32_t if_index);
+void lr_seg6_route_free(lr_seg6_route_t r);
+
+lr_seg6_local_route_t lr_seg6_local_route_new(lr_srv6_sid_t sid,
+                                               uint16_t behavior_wire);
+int32_t lr_seg6_local_route_set_if_index(lr_seg6_local_route_t r,
+                                          uint32_t if_index);
+int32_t lr_seg6_local_route_set_nh4(lr_seg6_local_route_t r,
+                                    const uint8_t *nh4);
+int32_t lr_seg6_local_route_set_nh6(lr_seg6_local_route_t r,
+                                    const uint8_t *nh6);
+int32_t lr_seg6_local_route_set_iif(lr_seg6_local_route_t r, uint32_t iif);
+int32_t lr_seg6_local_route_set_oif(lr_seg6_local_route_t r, uint32_t oif);
+int32_t lr_seg6_local_route_set_table(lr_seg6_local_route_t r,
+                                       uint32_t table);
+int32_t lr_seg6_local_route_set_vrf_table(lr_seg6_local_route_t r,
+                                           uint32_t vrf_table);
+int32_t lr_seg6_local_route_set_srh(lr_seg6_local_route_t r,
+                                    lr_srv6_srh_t srh);
+void lr_seg6_local_route_free(lr_seg6_local_route_t r);
+
+lr_seg6_netlink_t lr_seg6_netlink_connect(void);
+int32_t lr_seg6_netlink_add_seg6_route(lr_seg6_netlink_t nl,
+                                       lr_seg6_route_t route);
+int32_t lr_seg6_netlink_delete_seg6_route(lr_seg6_netlink_t nl,
+                                          struct lr_prefix_t prefix);
+int32_t lr_seg6_netlink_add_seg6local_route(lr_seg6_netlink_t nl,
+                                            lr_seg6_local_route_t route);
+int32_t lr_seg6_netlink_delete_seg6local_route(lr_seg6_netlink_t nl,
+                                               lr_srv6_sid_t sid);
+int32_t lr_seg6_netlink_last_request_bytes(lr_seg6_netlink_t nl,
+                                            lr_bytes_t *out);
+int32_t lr_seg6_netlink_last_response_bytes(lr_seg6_netlink_t nl,
+                                             lr_bytes_t *out);
+void lr_seg6_netlink_free(lr_seg6_netlink_t nl);
+
+int32_t lr_seg6_route_err_code(void);
+const char *lr_seg6_route_err_name(int32_t code);
 """
 
 
