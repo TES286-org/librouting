@@ -477,6 +477,16 @@ mod tests {
         assert_eq!(lr_osroute_prefix_mask(32), 0xffff_ffff);
     }
 
+    /// On non-Windows platforms the diagnostic is a no-op that returns
+    /// `Ok` (kind = 0) without consulting the kernel (the Linux
+    /// rtnetlink helper is not yet factored out — see
+    /// `lr_osroute::source_check`). The test uses a non-loopback
+    /// source address to make sure the diagnostic does NOT consult
+    /// the kernel on those platforms (an `Ok` here is the no-op
+    /// verdict, not a real `bind()` success). Windows runs its own
+    /// `ffi_check_source_compatibility_loopback_ok` counterpart below
+    /// — it actually performs a `bind()` and must use loopback.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn ffi_check_source_compatibility_returns_ok_on_non_windows() {
         let local = [10u8, 0, 0, 1];
@@ -493,6 +503,30 @@ mod tests {
         };
         assert_eq!(rc, 0);
         // On Linux the diagnostic is a no-op that returns Ok (0).
+        assert_eq!(kind, 0);
+    }
+
+    /// Windows-side counterpart: the kernel sources
+    /// loopback-to-loopback connections from the loopback address, so
+    /// the test `bind()` to `127.0.0.1:0` succeeds and the FFI
+    /// reports `Ok` (kind = 0). Mirrors the upstream
+    /// `lr_osroute::source_check::tests::loopback_matches` test.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ffi_check_source_compatibility_loopback_ok() {
+        let local = [127u8, 0, 0, 1];
+        let peer = [127u8, 0, 0, 1];
+        let mut kind = 99u8;
+        let rc = unsafe {
+            lr_osroute_check_source_compatibility(
+                0,
+                local.as_ptr(),
+                0,
+                peer.as_ptr(),
+                &raw mut kind,
+            )
+        };
+        assert_eq!(rc, 0);
         assert_eq!(kind, 0);
     }
 
