@@ -174,4 +174,5 @@ typedef struct OpaqueIpAddr IpAddr;
     println!("cargo:rerun-if-changed=src/osroute_helpers.rs");
     println!("cargo:rerun-if-changed=src/bgp_codec_helpers.rs");
     println!("cargo:rerun-if-changed=src/misc_helpers.rs");
+    println!("cargo:rerun-if-changed=src/seg6_route.rs");
 }

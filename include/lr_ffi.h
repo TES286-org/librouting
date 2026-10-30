@@ -1911,6 +1911,65 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_AREA_NSSA_NO_SUMMARY 4
 
 /**
+ * `Seg6EncapMode::Inline` (`SEG6_IPTUN_MODE_INLINE` — insert the SRH
+ * into the existing IPv6 packet without adding an outer header).
+ */
+#define LR_SEG6_ENCAP_INLINE 0
+
+/**
+ * `Seg6EncapMode::Encap` (`SEG6_IPTUN_MODE_ENCAP` — wrap the original
+ * packet in an outer IPv6 header carrying the SRH; default).
+ */
+#define LR_SEG6_ENCAP_ENCAP 1
+
+/**
+ * `Seg6RouteError::Unsupported` (the platform has no SRv6 — non-Linux
+ * builds).
+ */
+#define LR_SEG6_ERR_UNSUPPORTED 1
+
+/**
+ * `Seg6RouteError::NotEnabled` (the kernel's `seg6_enabled` sysctl
+ * is 0 — the embedder must `sysctl -w
+ * net.ipv6.conf.all.seg6_enabled=1` first).
+ */
+#define LR_SEG6_ERR_NOT_ENABLED 2
+
+/**
+ * `Seg6RouteError::Syscall` — a netlink syscall failed (sendmsg /
+ * recv / socket / bind).
+ */
+#define LR_SEG6_ERR_SYSCALL 3
+
+/**
+ * `Seg6RouteError::Kernel` — the kernel rejected the request (e.g.
+ * EEXIST on a duplicate SID, ENODEV on a device-less IPv6 route).
+ */
+#define LR_SEG6_ERR_KERNEL 4
+
+/**
+ * `Seg6RouteError::BadSrh` — the SRH encode failed (RFC 8754 §2
+ * validation: empty segment list, reserved flag bits, out-of-range
+ * segments_left, etc.).
+ */
+#define LR_SEG6_ERR_BAD_SRH 5
+
+/**
+ * `Seg6RouteError::UnsupportedAction` — the behavior cannot be
+ * encoded as a `seg6local` action (the kernel's
+ * `seg6_action_table` has no descriptor for it, or the route's
+ * parameter set does not satisfy the kernel's contract for it).
+ */
+#define LR_SEG6_ERR_UNSUPPORTED_ACTION 6
+
+/**
+ * Unknown `Seg6RouteError` variant (forward-compat sentinel — kept
+ * in the discriminant space so a future variant is visible to a C
+ * embedder as a distinct code).
+ */
+#define LR_SEG6_ERR_UNKNOWN -1
+
+/**
  * Interface network-type ids (RFC 2328 §9.1), shared by
  * `lr_router_add_ospf_session_ext`.
  */
@@ -4306,6 +4365,24 @@ typedef struct OpaqueRtrPdu {
 typedef struct OpaqueRtrPdu *lr_rtr_pdu_t;
 
 /**
+ * Opaque `Seg6Route` handle (boxed `Seg6Route`).
+ */
+typedef struct OpaqueSeg6Route {
+  uint8_t _private[0];
+} OpaqueSeg6Route;
+
+typedef struct OpaqueSeg6Route *lr_seg6_route_t;
+
+/**
+ * Opaque `Seg6LocalRoute` handle (boxed `Seg6LocalRoute`).
+ */
+typedef struct OpaqueSeg6LocalRoute {
+  uint8_t _private[0];
+} OpaqueSeg6LocalRoute;
+
+typedef struct OpaqueSeg6LocalRoute *lr_seg6_local_route_t;
+
+/**
  * Opaque `Sid` handle.
  */
 typedef struct OpaqueSrv6Sid {
@@ -4313,6 +4390,15 @@ typedef struct OpaqueSrv6Sid {
 } OpaqueSrv6Sid;
 
 typedef struct OpaqueSrv6Sid *lr_srv6_sid_t;
+
+/**
+ * Opaque `Seg6Netlink` handle (boxed `Seg6Netlink`).
+ */
+typedef struct OpaqueSeg6Netlink {
+  uint8_t _private[0];
+} OpaqueSeg6Netlink;
+
+typedef struct OpaqueSeg6Netlink *lr_seg6_netlink_t;
 
 /**
  * Opaque `Locator` handle.
@@ -18111,6 +18197,350 @@ int32_t lr_rtr_error_code_is_fatal(uint16_t code, uint8_t *out);
  * success, `LR_ERR_INVALID_HANDLE` when unknown.
  */
 int32_t lr_rtr_error_code_from_u16(uint16_t code);
+
+/**
+ * Construct a `Seg6Route` (RFC 8754 §2 — `seg6` lwtunnel encap
+ * route) from an IPv6 prefix and an SRH handle. The default encap
+ * mode is `Encap` (mirrors `ip route add ... encap seg6 mode encap
+ * ...` and is what most operators want); pass the SRH by value
+ * (the handle is borrowed — the constructor clones the inner `Srh`).
+ *
+ * Returns NULL on a NULL `srh` or when `prefix` carries an IPv4
+ * address (the `seg6` lwtunnel only accepts IPv6 routes — `ip -6
+ * route add ... encap seg6 ...` rejects an IPv4 prefix at the
+ * iproute2 layer too). The error code is recorded in the
+ * thread-local last-error string — recover it with
+ * [`lr_seg6_route_err_code`].
+ *
+ * # Safety
+ * `srh` must be a valid `lr_srv6_srh_t` produced by
+ * `lr_srv6_srh_new` / `lr_srv6_srh_new_with_segments_left` and not
+ * already freed.
+ */
+lr_seg6_route_t lr_seg6_route_new(struct lr_prefix_t prefix, lr_srv6_srh_t srh);
+
+/**
+ * Set the encap mode on a `Seg6Route` (RFC 8754 §2 — `Inline`
+ * inserts the SRH into the existing IPv6 packet; `Encap` wraps it
+ * in an outer IPv6 header carrying the SRH).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle, `LR_ERR_OTHER`
+ * on an unknown mode value (the caller passes one of
+ * `LR_SEG6_ENCAP_INLINE` / `LR_SEG6_ENCAP_ENCAP`).
+ *
+ * # Safety
+ * `r` must be a valid `lr_seg6_route_t` produced by
+ * `lr_seg6_route_new` and not already freed.
+ */
+int32_t lr_seg6_route_set_mode(lr_seg6_route_t r, uint32_t mode);
+
+/**
+ * Set the output interface index (`RTA_OIF`) on a `Seg6Route`. The
+ * kernel's `fib6_nh_init` rejects an IPv6 route that names neither
+ * an egress device nor a gateway with `ENODEV`, so callers usually
+ * set this. 0 means "let the kernel resolve via the gateway".
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_seg6_route_set_mode`].
+ */
+int32_t lr_seg6_route_set_if_index(lr_seg6_route_t r, uint32_t if_index);
+
+/**
+ * Drop a boxed `Seg6Route`. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_seg6_route_new` and not
+ * already freed.
+ */
+void lr_seg6_route_free(lr_seg6_route_t r);
+
+/**
+ * Construct a `Seg6LocalRoute` (RFC 8986 §4 — `seg6local` endpoint
+ * route) from a SID handle and an IANA behavior wire value (one of
+ * the `lr_srv6::Behavior` wire codes — End=1, End.X=5, End.T=9, …).
+ * The behavior is resolved via `Behavior::from_wire`; an unknown
+ * wire value (40+ which the crate does not yet model) is rejected
+ * with `LR_ERR_OTHER`.
+ *
+ * Returns NULL on a NULL `sid` or an unrecognized behavior. The
+ * error code is recorded in the thread-local last-error string —
+ * recover it with [`lr_seg6_route_err_code`].
+ *
+ * # Safety
+ * `sid` must be a valid `lr_srv6_sid_t` produced by
+ * `lr_srv6_sid_new` / `lr_srv6_locator_sid_with_tail` / ... and not
+ * already freed.
+ */
+lr_seg6_local_route_t lr_seg6_local_route_new(lr_srv6_sid_t sid, uint16_t behavior_wire);
+
+/**
+ * Set the route-level egress interface index (`RTA_OIF`) on a
+ * `Seg6LocalRoute`. Required for the install to be accepted: the
+ * kernel's `fib6_nh_init` rejects a route that names neither an
+ * egress device nor a gateway with `ENODEV`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * `r` must be a valid `lr_seg6_local_route_t` produced by
+ * `lr_seg6_local_route_new` and not already freed.
+ */
+int32_t lr_seg6_local_route_set_if_index(lr_seg6_local_route_t r, uint32_t if_index);
+
+/**
+ * Set the IPv4 next-hop (`SEG6_LOCAL_NH4` — the `End.DX4` parameter).
+ * `nh4` is a 4-byte buffer in network byte order.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle or a NULL
+ * `nh4` pointer.
+ *
+ * # Safety
+ * `nh4` must point to 4 readable bytes (or be NULL — the call returns
+ * `LR_ERR_NULL` early without reading).
+ */
+int32_t lr_seg6_local_route_set_nh4(lr_seg6_local_route_t r, const uint8_t *nh4);
+
+/**
+ * Set the IPv6 next-hop (`SEG6_LOCAL_NH6` — the `End.X` /
+ * `End.DX6` parameter). `nh6` is a 16-byte buffer in network byte
+ * order.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle or a NULL
+ * `nh6` pointer.
+ *
+ * # Safety
+ * `nh6` must point to 16 readable bytes (or be NULL — the call
+ * returns `LR_ERR_NULL` early without reading).
+ */
+int32_t lr_seg6_local_route_set_nh6(lr_seg6_local_route_t r, const uint8_t *nh6);
+
+/**
+ * Set the input interface index (`SEG6_LOCAL_IIF`). Note: no
+ * mainline kernel `seg6local` action consumes the IIF parameter
+ * today — the install will fail with a descriptive error until a
+ * kernel action adopts it.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_seg6_local_route_set_if_index`].
+ */
+int32_t lr_seg6_local_route_set_iif(lr_seg6_local_route_t r, uint32_t iif);
+
+/**
+ * Set the output interface index (`SEG6_LOCAL_OIF` — the
+ * `End.DX2` parameter; an optional `End.X` steering parameter).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_seg6_local_route_set_if_index`].
+ */
+int32_t lr_seg6_local_route_set_oif(lr_seg6_local_route_t r, uint32_t oif);
+
+/**
+ * Set the routing table ID (`SEG6_LOCAL_TABLE` — the `End.T`
+ * parameter; also tolerated by the legacy `End.DT6` path on a
+ * non-L3-master kernel). Mutually exclusive with
+ * [`lr_seg6_local_route_set_vrf_table`] in practice — the encoder's
+ * parameter contract check rejects a route that sets both.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_seg6_local_route_set_if_index`].
+ */
+int32_t lr_seg6_local_route_set_table(lr_seg6_local_route_t r, uint32_t table);
+
+/**
+ * Set the VRF table ID (`SEG6_LOCAL_VRFTABLE` — the `End.DT4` /
+ * `End.DT46` parameter; also accepted by the L3-master-dev form of
+ * `End.DT6`). Mutually exclusive with
+ * [`lr_seg6_local_route_set_table`].
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle.
+ *
+ * # Safety
+ * See [`lr_seg6_local_route_set_if_index`].
+ */
+int32_t lr_seg6_local_route_set_vrf_table(lr_seg6_local_route_t r, uint32_t vrf_table);
+
+/**
+ * Set the SRv6 Routing Header (`SEG6_LOCAL_SRH` — the
+ * `End.B6.Insert` / `End.B6.Encaps` parameter). The SRH is the
+ * same wire form a `seg6` encap route pushes (RFC 8754 §2); the
+ * endpoint inserts (End.B6.Insert) or wraps (End.B6.Encaps) it
+ * onto the packet at the binding-SID endpoint. The handle is
+ * borrowed — the setter clones the inner `Srh`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle or a NULL
+ * `srh`.
+ *
+ * # Safety
+ * `srh` must be a valid `lr_srv6_srh_t` produced by
+ * `lr_srv6_srh_new` / `lr_srv6_srh_new_with_segments_left` and not
+ * already freed.
+ */
+int32_t lr_seg6_local_route_set_srh(lr_seg6_local_route_t r, lr_srv6_srh_t srh);
+
+/**
+ * Drop a boxed `Seg6LocalRoute`. Safe to call with NULL.
+ *
+ * # Safety
+ * `r` must have been produced by `lr_seg6_local_route_new` and not
+ * already freed.
+ */
+void lr_seg6_local_route_free(lr_seg6_local_route_t r);
+
+/**
+ * Open a `NETLINK_ROUTE` socket for SRv6 route installation.
+ *
+ * Returns a handle on success, NULL on failure. On failure the
+ * thread-local last-error string carries the `Display` form of the
+ * `Seg6RouteError` and [`lr_seg6_route_err_code`] returns the
+ * discriminant. The most common failure on a Linux CI runner is
+ * `NotEnabled` (the kernel's `seg6_enabled` sysctl is 0); a
+ * non-Linux build returns `Unsupported`.
+ *
+ * # Safety
+ * The returned handle must be released with
+ * [`lr_seg6_netlink_free`] to avoid a memory leak.
+ */
+lr_seg6_netlink_t lr_seg6_netlink_connect(void);
+
+/**
+ * Install a `seg6` encap route (RFC 8754 §2 — the LSP head-end:
+ * push an SRH on packets matching `prefix`). The kernel's
+ * `fib6_nh_init` rejects a route that names neither an egress
+ * device nor a gateway, so the caller usually sets `if_index` via
+ * [`lr_seg6_route_set_if_index`].
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle / route,
+ * `LR_ERR_INVALID_HANDLE` on an invalid handle, and a positive
+ * `LR_SEG6_ERR_*` discriminant on a backend error (recorded in the
+ * last-error string too).
+ *
+ * # Safety
+ * `nl` must be a valid `lr_seg6_netlink_t` produced by
+ * `lr_seg6_netlink_connect`; `route` must be a valid
+ * `lr_seg6_route_t` produced by `lr_seg6_route_new`. Both must not
+ * have been freed.
+ */
+int32_t lr_seg6_netlink_add_seg6_route(lr_seg6_netlink_t nl, lr_seg6_route_t route);
+
+/**
+ * Delete a `seg6` encap route by prefix (the minimal
+ * prefix-shaped delete iproute2 sends: `ip route del PREFIX`).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle, and a
+ * positive `LR_SEG6_ERR_*` discriminant on a backend error.
+ *
+ * # Safety
+ * `nl` must be a valid `lr_seg6_netlink_t` produced by
+ * `lr_seg6_netlink_connect`.
+ */
+int32_t lr_seg6_netlink_delete_seg6_route(lr_seg6_netlink_t nl, struct lr_prefix_t prefix);
+
+/**
+ * Install a `seg6local` endpoint route (RFC 8986 §4 — the LSP
+ * tail-end: run `behavior` when a packet arrives addressed to
+ * `sid`). The kernel's `seg6_action_table` requires a per-behavior
+ * parameter set; the encoder fails fast with
+ * `UnsupportedAction` for behaviors or parameter sets the kernel
+ * would reject with a bare `EINVAL`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle / route,
+ * and a positive `LR_SEG6_ERR_*` discriminant on a backend error.
+ *
+ * # Safety
+ * `nl` must be a valid `lr_seg6_netlink_t` produced by
+ * `lr_seg6_netlink_connect`; `route` must be a valid
+ * `lr_seg6_local_route_t` produced by `lr_seg6_local_route_new`.
+ * Both must not have been freed.
+ */
+int32_t lr_seg6_netlink_add_seg6local_route(lr_seg6_netlink_t nl, lr_seg6_local_route_t route);
+
+/**
+ * Delete a `seg6local` endpoint route by SID (the same minimal
+ * prefix-shaped delete as `lr_seg6_netlink_delete_seg6_route`,
+ * against the local table — seg6local rows are /128 SIDs).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a NULL handle / sid, and
+ * a positive `LR_SEG6_ERR_*` discriminant on a backend error.
+ *
+ * # Safety
+ * `nl` must be a valid `lr_seg6_netlink_t`; `sid` must be a valid
+ * `lr_srv6_sid_t` produced by `lr_srv6_sid_new` / siblings.
+ */
+int32_t lr_seg6_netlink_delete_seg6local_route(lr_seg6_netlink_t nl, lr_srv6_sid_t sid);
+
+/**
+ * Write the most recent request bytes (the diagnostic for "the
+ * kernel rejected this and I need to see what \"this\" was" —
+ * hex-dump it on failure and compare against a reference
+ * implementation's bytes) to `*out`. The bytes are owned by the
+ * caller and must be released with [`lr_bytes_free`].
+ *
+ * Returns 0 on success (including the no-bytes case — `out` is set
+ * to an empty `lr_bytes_t`), `LR_ERR_NULL` on a NULL handle / out
+ * pointer.
+ *
+ * # Safety
+ * `nl` must be a valid `lr_seg6_netlink_t`; `out` must point to a
+ * writable `lr_bytes_t` (uninitialized is fine — the function writes
+ * the whole struct).
+ */
+int32_t lr_seg6_netlink_last_request_bytes(lr_seg6_netlink_t nl, struct lr_bytes_t *out);
+
+/**
+ * Write the most recent response bytes (the raw NAK, extack
+ * attributes included, for the same purpose as
+ * [`lr_seg6_netlink_last_request_bytes`]) to `*out`. The bytes are
+ * owned by the caller and must be released with [`lr_bytes_free`].
+ *
+ * Returns 0 on success (including the no-bytes case), `LR_ERR_NULL`
+ * on a NULL handle / out pointer.
+ *
+ * # Safety
+ * See [`lr_seg6_netlink_last_request_bytes`].
+ */
+int32_t lr_seg6_netlink_last_response_bytes(lr_seg6_netlink_t nl, struct lr_bytes_t *out);
+
+/**
+ * Drop a boxed `Seg6Netlink`. Safe to call with NULL.
+ *
+ * # Safety
+ * `nl` must have been produced by `lr_seg6_netlink_connect` and not
+ * already freed.
+ */
+void lr_seg6_netlink_free(lr_seg6_netlink_t nl);
+
+/**
+ * Return the discriminant of the most recent `Seg6RouteError`
+ * recorded in the thread-local last-error string. The Display form
+ * is parsed back into a discriminant by substring match — kept in
+ * the C ABI's own surface so a future typed-error-pointer surface
+ * can call into `seg6_route_err_code` directly without going
+ * through the thread-local string. Returns `LR_SEG6_ERR_UNKNOWN`
+ * (-1) when no seg6 error is recorded.
+ *
+ * This is a peek-only helper: it does not clear the last-error
+ * string. Callers that need the human-readable message should still
+ * call `lr_last_error`.
+ */
+int32_t lr_seg6_route_err_code(void);
+
+/**
+ * Return a stable, NUL-terminated name for a `Seg6RouteError`
+ * discriminant. Returns `"unknown"` for an unrecognized code. The
+ * returned pointer is valid until the next
+ * `lr_seg6_route_err_name` call on this thread — same lifetime
+ * contract as `lr_rtr_error_code_name` (the function writes the
+ * name into a thread-local buffer).
+ */
+const char *lr_seg6_route_err_name(int32_t code);
 
 /**
  * Add an OSPFv2 session with the library defaults: MTU 1500,

@@ -110,6 +110,7 @@ pub mod route_attrs;
 pub mod router;
 pub mod rtr_client;
 pub mod rtr_pdu;
+pub mod seg6_route;
 pub mod sessions;
 pub mod srv6;
 pub mod srv6_constants;
