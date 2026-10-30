@@ -1362,6 +1362,148 @@ int main(void) {
         check(lr_safety_net_check(NULL, NULL, 1) == -1, "check on NULL = -1");
     }
 
+    /* ---- lr_seg6_route_* / lr_seg6_local_route_* / lr_seg6_netlink_* (issue #92) ---- */
+    {
+        /* SID + SRH construction (raw C ABI). */
+        uint8_t sid_octets[16] = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 1};
+        lr_srv6_sid_t sid = lr_srv6_sid_new(sid_octets);
+        check(sid != NULL, "lr_srv6_sid_new returns non-NULL");
+
+        /* SRH from a single 16-byte segment. */
+        lr_srv6_srh_t srh = lr_srv6_srh_new(sid_octets, 1);
+        check(srh != NULL, "lr_srv6_srh_new returns non-NULL");
+
+        /* IPv6 prefix for the seg6 encap route. */
+        lr_prefix_t v6_prefix;
+        memset(&v6_prefix, 0, sizeof(v6_prefix));
+        v6_prefix.is_ipv6 = 1;
+        v6_prefix.prefix_len = 64;
+        v6_prefix.addr[0] = 0x20; v6_prefix.addr[1] = 0x01;
+        v6_prefix.addr[2] = 0x0d; v6_prefix.addr[3] = 0xb8;
+
+        lr_seg6_route_t route = lr_seg6_route_new(v6_prefix, srh);
+        check(route != NULL, "lr_seg6_route_new returns non-NULL");
+
+        /* Set mode round-trip. */
+        check(lr_seg6_route_set_mode(route, LR_SEG6_ENCAP_INLINE) == 0,
+              "lr_seg6_route_set_mode(Inline) returns 0");
+        check(lr_seg6_route_set_mode(route, LR_SEG6_ENCAP_ENCAP) == 0,
+              "lr_seg6_route_set_mode(Encap) returns 0");
+        check(lr_seg6_route_set_mode(route, 0xFFFFFFFFu) != 0,
+              "lr_seg6_route_set_mode(unknown) returns non-zero");
+
+        /* Set if_index round-trip. */
+        check(lr_seg6_route_set_if_index(route, 7) == 0,
+              "lr_seg6_route_set_if_index(7) returns 0");
+
+        /* NULL handle returns LR_ERR_NULL. */
+        check(lr_seg6_route_set_mode(NULL, LR_SEG6_ENCAP_INLINE) == -1,
+              "lr_seg6_route_set_mode(NULL) returns -1");
+
+        lr_seg6_route_free(route);
+
+        /* IPv4 prefix should be rejected — srh_new returns NULL. */
+        lr_prefix_t v4_prefix;
+        memset(&v4_prefix, 0, sizeof(v4_prefix));
+        v4_prefix.is_ipv6 = 0;
+        v4_prefix.prefix_len = 24;
+        v4_prefix.addr[0] = 203; v4_prefix.addr[1] = 0;
+        v4_prefix.addr[2] = 113; v4_prefix.addr[3] = 0;
+        check(lr_seg6_route_new(v4_prefix, srh) == NULL,
+              "lr_seg6_route_new(IPv4) returns NULL");
+
+        /* NULL srh is rejected. */
+        check(lr_seg6_route_new(v6_prefix, NULL) == NULL,
+              "lr_seg6_route_new(NULL srh) returns NULL");
+
+        /* ---- Seg6LocalRoute ---- */
+        lr_seg6_local_route_t local =
+            lr_seg6_local_route_new(sid, 1 /* End behavior */);
+        check(local != NULL,
+              "lr_seg6_local_route_new(End) returns non-NULL");
+
+        /* All builder setters return 0 on a valid handle. */
+        check(lr_seg6_local_route_set_if_index(local, 1) == 0,
+              "lr_seg6_local_route_set_if_index(1) returns 0");
+
+        uint8_t nh4[4] = {203, 0, 113, 1};
+        check(lr_seg6_local_route_set_nh4(local, nh4) == 0,
+              "lr_seg6_local_route_set_nh4 returns 0");
+
+        uint8_t nh6[16];
+        memset(nh6, 0xfe, 16);
+        check(lr_seg6_local_route_set_nh6(local, nh6) == 0,
+              "lr_seg6_local_route_set_nh6 returns 0");
+
+        check(lr_seg6_local_route_set_iif(local, 2) == 0,
+              "lr_seg6_local_route_set_iif(2) returns 0");
+        check(lr_seg6_local_route_set_oif(local, 3) == 0,
+              "lr_seg6_local_route_set_oif(3) returns 0");
+        check(lr_seg6_local_route_set_table(local, 254) == 0,
+              "lr_seg6_local_route_set_table(254) returns 0");
+        check(lr_seg6_local_route_set_vrf_table(local, 100) == 0,
+              "lr_seg6_local_route_set_vrf_table(100) returns 0");
+        check(lr_seg6_local_route_set_srh(local, srh) == 0,
+              "lr_seg6_local_route_set_srh returns 0");
+
+        /* NULL pointers on set_nh4 / set_nh6 return LR_ERR_NULL. */
+        check(lr_seg6_local_route_set_nh4(local, NULL) == -1,
+              "lr_seg6_local_route_set_nh4(NULL) returns -1");
+        check(lr_seg6_local_route_set_nh6(local, NULL) == -1,
+              "lr_seg6_local_route_set_nh6(NULL) returns -1");
+
+        /* NULL handle returns LR_ERR_NULL. */
+        check(lr_seg6_local_route_set_if_index(NULL, 1) == -1,
+              "lr_seg6_local_route_set_if_index(NULL) returns -1");
+
+        lr_seg6_local_route_free(local);
+
+        /* Unknown behavior wire value (0xFFFF) is rejected. */
+        check(lr_seg6_local_route_new(sid, 0xFFFF) == NULL,
+              "lr_seg6_local_route_new(0xFFFF) returns NULL");
+
+        /* ---- Seg6Netlink ---- */
+        lr_seg6_netlink_t nl = lr_seg6_netlink_connect();
+        if (nl == NULL) {
+            /* On a CI runner without SRv6 enabled the connect call
+             * fails — the discriminant is recorded in the last-error
+             * string and must be either NotEnabled or Unsupported. */
+            int32_t code = lr_seg6_route_err_code();
+            check(code == LR_SEG6_ERR_NOT_ENABLED ||
+                      code == LR_SEG6_ERR_UNSUPPORTED,
+                  "lr_seg6_netlink_connect sets NotEnabled or Unsupported");
+        } else {
+            /* On a kernel with SRv6 enabled the handle is non-NULL. */
+            lr_seg6_netlink_free(nl);
+        }
+
+        /* ---- Error helpers ---- */
+        /* lr_seg6_route_err_name lookup on every known code. */
+        const char* name_unsup = lr_seg6_route_err_name(LR_SEG6_ERR_UNSUPPORTED);
+        check(name_unsup != NULL && strcmp(name_unsup, "unsupported") == 0,
+              "lr_seg6_route_err_name(Unsupported) returns 'unsupported'");
+        const char* name_not_enabled = lr_seg6_route_err_name(LR_SEG6_ERR_NOT_ENABLED);
+        check(name_not_enabled != NULL && strcmp(name_not_enabled, "not-enabled") == 0,
+              "lr_seg6_route_err_name(NotEnabled) returns 'not-enabled'");
+        const char* name_unknown = lr_seg6_route_err_name(999);
+        check(name_unknown != NULL && strcmp(name_unknown, "unknown") == 0,
+              "lr_seg6_route_err_name(999) returns 'unknown'");
+
+        /* Add seg6 route on NULL handle returns LR_ERR_NULL. */
+        check(lr_seg6_netlink_add_seg6_route(NULL, NULL) == -1,
+              "lr_seg6_netlink_add_seg6_route(NULL) returns -1");
+
+        /* Free is safe on NULL. */
+        lr_seg6_netlink_free(NULL);
+        lr_seg6_route_free(NULL);
+        lr_seg6_local_route_free(NULL);
+
+        lr_srv6_srh_free(srh);
+        lr_srv6_sid_free(sid);
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

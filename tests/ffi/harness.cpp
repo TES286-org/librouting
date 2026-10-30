@@ -1057,6 +1057,99 @@ int main() {
         ext.set_p_bit(1);
         check(ext.route_tag() == 42, "ExternalDest route_tag = 42");
         check(ext.p_bit() == 1, "ExternalDest p_bit = 1");
+
+        // ---- Seg6Route / Seg6LocalRoute / Seg6Netlink (issue #92) ----
+        // Build a SID and an SRH for the route constructors.
+        std::array<std::uint8_t, 16> sid_octets = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 1};
+        Srv6Sid sid = make_srv6_sid(sid_octets);
+        check(static_cast<bool>(sid), "Srv6Sid from octets is non-null");
+
+        std::vector<std::array<std::uint8_t, 16>> segs = {sid_octets};
+        Srv6Srh srh = make_srv6_srh(segs);
+        check(static_cast<bool>(srh), "Srv6Srh from single segment is non-null");
+
+        // IPv6 prefix for the seg6 encap route.
+        lr_prefix_t v6_prefix{};
+        v6_prefix.is_ipv6 = 1;
+        v6_prefix.prefix_len = 64;
+        std::array<std::uint8_t, 16> pfx_octets = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0};
+        std::copy(pfx_octets.begin(), pfx_octets.end(), v6_prefix.addr);
+
+        auto seg6_route = make_seg6_route(v6_prefix, srh.get());
+        check(static_cast<bool>(seg6_route), "make_seg6_route returned non-null");
+        seg6_route_set_mode(seg6_route, Seg6EncapMode::Inline);
+        seg6_route_set_mode(seg6_route, Seg6EncapMode::Encap);
+        seg6_route_set_if_index(seg6_route, 7);
+        check(true, "Seg6Route builder setters succeed");
+
+        // IPv4 prefix should be rejected.
+        lr_prefix_t v4_prefix{};
+        v4_prefix.is_ipv6 = 0;
+        v4_prefix.prefix_len = 24;
+        v4_prefix.addr[0] = 203; v4_prefix.addr[1] = 0;
+        v4_prefix.addr[2] = 113; v4_prefix.addr[3] = 0;
+        try {
+            make_seg6_route(v4_prefix, srh.get());
+            check(false, "make_seg6_route(IPv4) should have thrown");
+        } catch (const Error&) {
+            check(true, "make_seg6_route(IPv4) throws");
+        }
+
+        // Seg6LocalRoute — End behavior (IANA wire value 1).
+        auto local_route = make_seg6_local_route(sid.get(), 1);
+        check(static_cast<bool>(local_route), "make_seg6_local_route returned non-null");
+        seg6_local_route_set_if_index(local_route, 1);
+        std::array<std::uint8_t, 4> nh4 = {203, 0, 113, 1};
+        seg6_local_route_set_nh4(local_route, nh4);
+        std::array<std::uint8_t, 16> nh6 = {};
+        nh6.fill(0xfe);
+        seg6_local_route_set_nh6(local_route, nh6);
+        seg6_local_route_set_iif(local_route, 2);
+        seg6_local_route_set_oif(local_route, 3);
+        seg6_local_route_set_table(local_route, 254);
+        seg6_local_route_set_vrf_table(local_route, 100);
+        seg6_local_route_set_srh(local_route, srh.get());
+        check(true, "Seg6LocalRoute builder setters succeed");
+
+        // Unknown behavior wire value (0xFFFF) should be rejected.
+        try {
+            make_seg6_local_route(sid.get(), 0xFFFF);
+            check(false, "make_seg6_local_route(0xFFFF) should have thrown");
+        } catch (const Error&) {
+            check(true, "make_seg6_local_route(unknown behavior) throws");
+        }
+
+        // Seg6Netlink::connect — on a kernel without SRv6 (typical
+        // CI runner) it throws Seg6RouteErrorException with code
+        // NotEnabled or Unsupported. Either is acceptable.
+        try {
+            auto nl = make_seg6_netlink();
+            // On a kernel with SRv6 enabled the handle is non-null;
+            // no further exercise here (no root inside the runner
+            // to actually install routes).
+            check(static_cast<bool>(nl), "make_seg6_netlink returned non-null");
+        } catch (const Seg6RouteErrorException& e) {
+            auto code = e.code();
+            check(code == Seg6RouteError::NotEnabled ||
+                      code == Seg6RouteError::Unsupported,
+                  "make_seg6_netlink throws NotEnabled or Unsupported");
+        }
+
+        // lr_seg6_route_err_name lookup on every known code.
+        for (auto code : {Seg6RouteError::Unsupported,
+                          Seg6RouteError::NotEnabled,
+                          Seg6RouteError::Syscall,
+                          Seg6RouteError::Kernel,
+                          Seg6RouteError::BadSrh,
+                          Seg6RouteError::UnsupportedAction}) {
+            const char* n = Seg6RouteErrorException::name(code);
+            check(n != nullptr && std::string(n) != "unknown",
+                  "Seg6RouteError name lookup is non-null");
+        }
     }
 
     // Router goes out of scope — RAII cleanup runs.

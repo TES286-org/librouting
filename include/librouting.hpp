@@ -3001,4 +3001,360 @@ private:
                     detail::OspfExternalDestDeleter> ptr_;
 };
 
+// =========================================================================
+// ===== lr-osroute::seg6_route — Seg6Route / Seg6LocalRoute / Seg6Netlink ==
+// =========================================================================
+//
+// Mirrors `lr_osroute::seg6_route` (RFC 8754 §2 + RFC 8986 §4 + the
+// Linux `seg6` / `seg6local` lwtunnel netlink surface). Same
+// hierarchy as the Rust crate's module split:
+//   - Seg6Route       — lr_osroute::seg6_route::Seg6Route       (RFC 8754 §2)
+//   - Seg6LocalRoute  — lr_osroute::seg6_route::Seg6LocalRoute  (RFC 8986 §4)
+//   - Seg6Netlink     — lr_osroute::seg6_route::Seg6Netlink     (NETLINK_ROUTE)
+//   - Seg6EncapMode   — lr_osroute::seg6_route::Seg6EncapMode
+//   - Seg6RouteError  — lr_osroute::seg6_route::Seg6RouteError
+
+namespace detail {
+
+struct Seg6RouteDeleter {
+    void operator()(lr_seg6_route_t r) const noexcept {
+        if (r) lr_seg6_route_free(r);
+    }
+};
+
+struct Seg6LocalRouteDeleter {
+    void operator()(lr_seg6_local_route_t r) const noexcept {
+        if (r) lr_seg6_local_route_free(r);
+    }
+};
+
+struct Seg6NetlinkDeleter {
+    void operator()(lr_seg6_netlink_t n) const noexcept {
+        if (n) lr_seg6_netlink_free(n);
+    }
+};
+
+} // namespace detail
+
+/// RAII handle to a `seg6` encap route (RFC 8754 §2).
+using Seg6Route = std::unique_ptr<OpaqueSeg6Route, detail::Seg6RouteDeleter>;
+
+/// RAII handle to a `seg6local` endpoint route (RFC 8986 §4).
+using Seg6LocalRoute = std::unique_ptr<OpaqueSeg6LocalRoute, detail::Seg6LocalRouteDeleter>;
+
+/// RAII handle to a `NETLINK_ROUTE` backend for SRv6 route installation.
+using Seg6Netlink = std::unique_ptr<OpaqueSeg6Netlink, detail::Seg6NetlinkDeleter>;
+
+/// Seg6EncapMode (mirrors `uapi/linux/seg6_iptunnel.h`).
+enum class Seg6EncapMode : std::uint32_t {
+    Inline = LR_SEG6_ENCAP_INLINE,
+    Encap = LR_SEG6_ENCAP_ENCAP,
+};
+
+/// Seg6RouteError discriminant (mirrors `lr_osroute::Seg6RouteError`).
+/// Positive integers; the global `LR_ERR_*` codes remain negative.
+enum class Seg6RouteError : std::int32_t {
+    Unsupported = LR_SEG6_ERR_UNSUPPORTED,
+    NotEnabled = LR_SEG6_ERR_NOT_ENABLED,
+    Syscall = LR_SEG6_ERR_SYSCALL,
+    Kernel = LR_SEG6_ERR_KERNEL,
+    BadSrh = LR_SEG6_ERR_BAD_SRH,
+    UnsupportedAction = LR_SEG6_ERR_UNSUPPORTED_ACTION,
+    Unknown = LR_SEG6_ERR_UNKNOWN,
+};
+
+/// Exception thrown on seg6 route failure (carries the discriminant
+/// and the human-readable last-error message).
+class Seg6RouteErrorException : public Error {
+public:
+    Seg6RouteErrorException(Seg6RouteError code, std::string msg)
+        : Error(std::string("Seg6RouteError(") + name(code) + "): " + msg),
+          code_(code) {}
+    Seg6RouteError code() const noexcept { return code_; }
+
+    static const char* name(Seg6RouteError c) {
+        switch (c) {
+            case Seg6RouteError::Unsupported: return "unsupported";
+            case Seg6RouteError::NotEnabled: return "not-enabled";
+            case Seg6RouteError::Syscall: return "syscall";
+            case Seg6RouteError::Kernel: return "kernel";
+            case Seg6RouteError::BadSrh: return "bad-srh";
+            case Seg6RouteError::UnsupportedAction: return "unsupported-action";
+            case Seg6RouteError::Unknown: return "unknown";
+        }
+        return "unknown";
+    }
+private:
+    Seg6RouteError code_;
+};
+
+/// Throw `Seg6RouteErrorException` when the C ABI recorded a
+/// `Seg6RouteError` in the last-error string (peeked via
+/// `lr_seg6_route_err_code`). Falls back to a generic `Error` when
+/// no seg6 error is recorded (the rc was negative — `LR_ERR_*`).
+inline void throw_seg6_err(const char* what) {
+    auto code_int = lr_seg6_route_err_code();
+    const char* err = lr_last_error();
+    std::string msg = err ? std::string(err) : std::string("unknown");
+    if (code_int == LR_SEG6_ERR_UNKNOWN) {
+        throw Error(std::string(what) + std::string(" failed: ") + msg);
+    }
+    throw Seg6RouteErrorException(
+        static_cast<Seg6RouteError>(code_int),
+        std::move(msg));
+}
+
+// ---- Seg6Route construction + mutators ----
+
+/// Construct a `seg6` encap route (RFC 8754 §2 — the LSP head-end:
+/// push an SRH on packets matching `prefix`). The default encap
+/// mode is `Encap`. The SRH handle is borrowed — the constructor
+/// clones the inner SRH.
+inline Seg6Route make_seg6_route(lr_prefix_t prefix, lr_srv6_srh_t srh) {
+    if (!srh) {
+        throw Error("make_seg6_route: srh is null");
+    }
+    if (prefix.is_ipv6 == 0) {
+        throw Error("make_seg6_route: prefix must be IPv6 (seg6 lwtunnel is IPv6-only)");
+    }
+    auto r = lr_seg6_route_new(prefix, srh);
+    if (!r) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_route_new: ") + (err ? err : "unknown"));
+    }
+    return Seg6Route(r);
+}
+
+/// Set the encap mode. Builder-style.
+inline Seg6Route& seg6_route_set_mode(Seg6Route& r, Seg6EncapMode mode) {
+    auto rc = lr_seg6_route_set_mode(r.get(), static_cast<std::uint32_t>(mode));
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_route_set_mode: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the output interface index. Builder-style.
+inline Seg6Route& seg6_route_set_if_index(Seg6Route& r, std::uint32_t if_index) {
+    auto rc = lr_seg6_route_set_if_index(r.get(), if_index);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_route_set_if_index: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+// ---- Seg6LocalRoute construction + mutators ----
+
+/// Construct a `seg6local` endpoint route (RFC 8986 §4 — the LSP
+/// tail-end: run `behavior` when a packet arrives addressed to
+/// `sid`). `behavior_wire` is an IANA behavior wire value (one of
+/// the `lr_srv6::Behavior` wire codes — End=1, End.X=5, End.T=9,
+/// ...). The SID handle is borrowed — the constructor reads the 16
+/// octets and rebuilds the `Sid`.
+inline Seg6LocalRoute make_seg6_local_route(lr_srv6_sid_t sid, std::uint16_t behavior_wire) {
+    if (!sid) {
+        throw Error("make_seg6_local_route: sid is null");
+    }
+    auto r = lr_seg6_local_route_new(sid, behavior_wire);
+    if (!r) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_new: ") + (err ? err : "unknown"));
+    }
+    return Seg6LocalRoute(r);
+}
+
+/// Set the route-level egress interface index. Builder-style.
+inline Seg6LocalRoute& seg6_local_route_set_if_index(Seg6LocalRoute& r, std::uint32_t if_index) {
+    auto rc = lr_seg6_local_route_set_if_index(r.get(), if_index);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_if_index: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the IPv4 next-hop (SEG6_LOCAL_NH4 — the End.DX4 parameter).
+inline Seg6LocalRoute& seg6_local_route_set_nh4(Seg6LocalRoute& r, const std::array<std::uint8_t, 4>& nh4) {
+    auto rc = lr_seg6_local_route_set_nh4(r.get(), nh4.data());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_nh4: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the IPv6 next-hop (SEG6_LOCAL_NH6 — the End.X / End.DX6
+/// parameter).
+inline Seg6LocalRoute& seg6_local_route_set_nh6(Seg6LocalRoute& r, const std::array<std::uint8_t, 16>& nh6) {
+    auto rc = lr_seg6_local_route_set_nh6(r.get(), nh6.data());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_nh6: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the input interface index. Builder-style. Note: no mainline
+/// kernel `seg6local` action consumes the IIF parameter today —
+/// the install will fail with a descriptive error until a kernel
+/// action adopts it.
+inline Seg6LocalRoute& seg6_local_route_set_iif(Seg6LocalRoute& r, std::uint32_t iif) {
+    auto rc = lr_seg6_local_route_set_iif(r.get(), iif);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_iif: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the output interface index. Builder-style.
+inline Seg6LocalRoute& seg6_local_route_set_oif(Seg6LocalRoute& r, std::uint32_t oif) {
+    auto rc = lr_seg6_local_route_set_oif(r.get(), oif);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_oif: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the routing table ID. Mutually exclusive with
+/// `seg6_local_route_set_vrf_table`. Builder-style.
+inline Seg6LocalRoute& seg6_local_route_set_table(Seg6LocalRoute& r, std::uint32_t table) {
+    auto rc = lr_seg6_local_route_set_table(r.get(), table);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_table: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the VRF table ID. Mutually exclusive with
+/// `seg6_local_route_set_table`. Builder-style.
+inline Seg6LocalRoute& seg6_local_route_set_vrf_table(Seg6LocalRoute& r, std::uint32_t vrf_table) {
+    auto rc = lr_seg6_local_route_set_vrf_table(r.get(), vrf_table);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_vrf_table: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+/// Set the SRv6 Routing Header (SEG6_LOCAL_SRH — the End.B6.Insert /
+/// End.B6.Encaps parameter). The SRH handle is borrowed — the
+/// setter clones the inner SRH. Builder-style.
+inline Seg6LocalRoute& seg6_local_route_set_srh(Seg6LocalRoute& r, lr_srv6_srh_t srh) {
+    if (!srh) {
+        throw Error("seg6_local_route_set_srh: srh is null");
+    }
+    auto rc = lr_seg6_local_route_set_srh(r.get(), srh);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_local_route_set_srh: ") + (err ? err : "unknown"));
+    }
+    return r;
+}
+
+// ---- Seg6Netlink ----
+
+/// Open a `NETLINK_ROUTE` socket for SRv6 route installation.
+/// Throws `Seg6RouteErrorException` when the kernel's `seg6_enabled`
+/// sysctl is 0 (Code = `NotEnabled`) or the platform has no SRv6
+/// (Code = `Unsupported`).
+inline Seg6Netlink make_seg6_netlink() {
+    auto n = lr_seg6_netlink_connect();
+    if (!n) {
+        throw_seg6_err("lr_seg6_netlink_connect");
+    }
+    return Seg6Netlink(n);
+}
+
+/// Install a `seg6` encap route (RFC 8754 §2 — the LSP head-end:
+/// push an SRH on packets matching `prefix`).
+inline void seg6_netlink_add_seg6_route(Seg6Netlink& n, const Seg6Route& route) {
+    if (!route) {
+        throw Error("seg6_netlink_add_seg6_route: route is null");
+    }
+    auto rc = lr_seg6_netlink_add_seg6_route(n.get(), route.get());
+    if (rc != 0) {
+        throw_seg6_err("lr_seg6_netlink_add_seg6_route");
+    }
+}
+
+/// Delete a `seg6` encap route by prefix (the minimal prefix-shaped
+/// delete iproute2 sends: `ip route del PREFIX`).
+inline void seg6_netlink_delete_seg6_route(Seg6Netlink& n, lr_prefix_t prefix) {
+    auto rc = lr_seg6_netlink_delete_seg6_route(n.get(), prefix);
+    if (rc != 0) {
+        throw_seg6_err("lr_seg6_netlink_delete_seg6_route");
+    }
+}
+
+/// Install a `seg6local` endpoint route (RFC 8986 §4 — the LSP
+/// tail-end: run `behavior` when a packet arrives addressed to
+/// `sid`).
+inline void seg6_netlink_add_seg6local_route(Seg6Netlink& n, const Seg6LocalRoute& route) {
+    if (!route) {
+        throw Error("seg6_netlink_add_seg6local_route: route is null");
+    }
+    auto rc = lr_seg6_netlink_add_seg6local_route(n.get(), route.get());
+    if (rc != 0) {
+        throw_seg6_err("lr_seg6_netlink_add_seg6local_route");
+    }
+}
+
+/// Delete a `seg6local` endpoint route by SID (the same minimal
+/// prefix-shaped delete as `seg6_netlink_delete_seg6_route`, against
+/// the local table — seg6local rows are /128 SIDs).
+inline void seg6_netlink_delete_seg6local_route(Seg6Netlink& n, lr_srv6_sid_t sid) {
+    if (!sid) {
+        throw Error("seg6_netlink_delete_seg6local_route: sid is null");
+    }
+    auto rc = lr_seg6_netlink_delete_seg6local_route(n.get(), sid);
+    if (rc != 0) {
+        throw_seg6_err("lr_seg6_netlink_delete_seg6local_route");
+    }
+}
+
+/// Read the most recent request bytes (the diagnostic for "the
+/// kernel rejected this and I need to see what \"this\" was" —
+/// hex-dump it on failure and compare against a reference
+/// implementation's bytes). Returns an empty vector when no
+/// request has been sent yet.
+inline std::vector<std::uint8_t> seg6_netlink_last_request_bytes(Seg6Netlink& n) {
+    lr_bytes_t out{};
+    auto rc = lr_seg6_netlink_last_request_bytes(n.get(), &out);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_netlink_last_request_bytes: ") + (err ? err : "unknown"));
+    }
+    std::vector<std::uint8_t> buf;
+    if (out.ptr && out.len > 0) {
+        buf.assign(out.ptr, out.ptr + out.len);
+    }
+    lr_bytes_free(&out);
+    return buf;
+}
+
+/// Read the most recent response bytes (the raw NAK, extack
+/// attributes included, for the same purpose as
+/// `seg6_netlink_last_request_bytes`). Returns an empty vector when
+/// no response has been received yet.
+inline std::vector<std::uint8_t> seg6_netlink_last_response_bytes(Seg6Netlink& n) {
+    lr_bytes_t out{};
+    auto rc = lr_seg6_netlink_last_response_bytes(n.get(), &out);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string("lr_seg6_netlink_last_response_bytes: ") + (err ? err : "unknown"));
+    }
+    std::vector<std::uint8_t> buf;
+    if (out.ptr && out.len > 0) {
+        buf.assign(out.ptr, out.ptr + out.len);
+    }
+    lr_bytes_free(&out);
+    return buf;
+}
+
 } // namespace librouting
+
