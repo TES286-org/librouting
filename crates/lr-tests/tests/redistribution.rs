@@ -170,7 +170,7 @@ fn redistribution_prefix_filter() {
     // Only redistribute 203.0.113.0/24, not 198.51.100.0/24.
     a.add_redistribution_pipe(
         RedistributionPipe::new(Protocol::Bgp, Protocol::Bgp)
-            .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 0]), 24)]),
+            .with_allow_prefixes(vec![Prefix::new_v4([203, 0, 113, 0], 24)]),
     );
 
     b.originate(

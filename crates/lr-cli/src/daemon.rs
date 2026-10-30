@@ -585,7 +585,7 @@ fn apply_cross_protocol_config(
                 let p: Prefix = text
                     .parse()
                     .map_err(|_| format!("[[redistribute]] bad allow prefix '{text}'"))?;
-                allow.push((p.addr, p.prefix_len));
+                allow.push(p);
             }
             pipe = pipe.with_allow_prefixes(allow);
         }

@@ -254,10 +254,7 @@ pub unsafe extern "C" fn lr_router_add_redistribution_pipe(
                 for i in 0..allow_count {
                     let p = unsafe { *allow.add(i) };
                     match p.to_prefix() {
-                        Some(prefix) => {
-                            let ip = prefix.network();
-                            out.push((ip, prefix.prefix_len));
-                        }
+                        Some(prefix) => out.push(prefix),
                         None => {
                             set_last_error(format!(
                                 "allow prefix {i}: invalid prefix length {}",

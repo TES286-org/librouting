@@ -47,7 +47,7 @@ Cross-protocol redistribution (BIRD `pipe`, FRR `redistribute`) bridges
 routes from a source protocol into a target one:
 
 ```rust
-use lr_core::addr::IpAddr;
+use lr_core::addr::Prefix;
 use lr_core::rib::Protocol;
 use lr_router::{DefaultRouter, MetricPolicy, RedistributionPipe};
 
@@ -65,7 +65,7 @@ r.add_redistribution_pipe(RedistributionPipe::new(Protocol::Ospfv2, Protocol::Bg
 // BGP -> BGP, restricted to specific prefixes.
 r.add_redistribution_pipe(
     RedistributionPipe::new(Protocol::Bgp, Protocol::Bgp)
-        .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 0]), 24)]),
+        .with_allow_prefixes(vec![Prefix::new_v4([203, 0, 113, 0], 24)]),
 );
 
 // Removes every pipe with that source/target pair; returns how many.
@@ -123,7 +123,7 @@ the route dumps. Both are read-only views — the router keeps ownership.
 | `MetricPolicy::Fixed(n)` | — | Advertise exactly `n` |
 | `MetricPolicy::Add(n)` | — | Add `n`, saturating at `u32::MAX` |
 | `RedistributionPipe::with_tag(n)` | 0 | Protocol tag carried through |
-| `RedistributionPipe::with_allow_prefixes(v)` | all | `(IpAddr, prefix_len)` allow list |
+| `RedistributionPipe::with_allow_prefixes(v)` | all | `Prefix` allow list |
 | `add_blackhole_route(prefix)` | — | Kernel discard route |
 | `RouterEvent::Log(String)` | — | Diagnostics surface, including policy rejections |
 

@@ -94,11 +94,18 @@ pub struct RedistributionPipe {
     /// read it programmatically.
     pub tag: u32,
     /// Optional prefix-list filter — only routes matching the list are
-    /// redistributed. `None` = accept all. The actual filtering is done
-    /// by the caller (the router checks `matches` before re-originating).
-    /// Stored as a list of `(prefix, prefix_len)` pairs; a route matches
-    /// when its prefix is within one of these.
-    pub allow_prefixes: Vec<(lr_core::addr::IpAddr, u8)>,
+    /// redistributed. `None` (empty vec) = accept all. The actual filtering
+    /// is done by the caller (the router checks `matches` before
+    /// re-originating). A route matches when its prefix is contained in
+    /// one of these.
+    ///
+    /// The list stores [`Prefix`] values directly rather than the
+    /// `(IpAddr, u8)` shape it used before. The two were semantically
+    /// equivalent but the typed form is what every caller already has
+    /// (the daemon parses a `Prefix`, the FFI builds one from
+    /// `lr_prefix_t`), so the unstructured-tuple intermediate only
+    /// existed at this seam.
+    pub allow_prefixes: Vec<lr_core::addr::Prefix>,
 }
 
 impl RedistributionPipe {
@@ -128,7 +135,7 @@ impl RedistributionPipe {
 
     /// Restrict the pipe to a set of prefixes. A route matches when its
     /// network address falls within one of the listed prefixes.
-    pub fn with_allow_prefixes(mut self, prefixes: Vec<(lr_core::addr::IpAddr, u8)>) -> Self {
+    pub fn with_allow_prefixes(mut self, prefixes: Vec<lr_core::addr::Prefix>) -> Self {
         self.allow_prefixes = prefixes;
         self
     }
@@ -148,28 +155,21 @@ impl RedistributionPipe {
         if self.allow_prefixes.is_empty() {
             return true;
         }
-        for (addr, plen) in &self.allow_prefixes {
-            // Bit-level containment via `Prefix::contains_prefix`, which
-            // masks both addresses down to `plen` bits and compares. This
-            // is the same primitive the daemon's filter DSL uses for
-            // `prefix-set` membership, so the import filter and the
-            // redistribution pipe agree on what "within" means.
-            let allow = match addr {
-                lr_core::addr::IpAddr::V4(b) => lr_core::addr::Prefix::new_v4(*b, *plen),
-                lr_core::addr::IpAddr::V6(b) => lr_core::addr::Prefix::new_v6(*b, *plen),
-            };
-            if allow.contains_prefix(route_prefix) {
-                return true;
-            }
-        }
-        false
+        // Bit-level containment via `Prefix::contains_prefix`, which
+        // masks both addresses down to `plen` bits and compares. This
+        // is the same primitive the daemon's filter DSL uses for
+        // `prefix-set` membership, so the import filter and the
+        // redistribution pipe agree on what "within" means.
+        self.allow_prefixes
+            .iter()
+            .any(|allow| allow.contains_prefix(route_prefix))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lr_core::addr::{IpAddr, Prefix};
+    use lr_core::addr::Prefix;
 
     #[test]
     fn metric_inherit() {
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn matches_allow_list() {
         let p = RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2)
-            .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 0]), 24)]);
+            .with_allow_prefixes(vec![Prefix::new_v4([203, 0, 113, 0], 24)]);
         // 203.0.113.0/24 → matches
         assert!(p.matches(&Prefix::new_v4([203, 0, 113, 0], 24)));
         // 203.0.113.128/25 → matches (within /24)
@@ -220,11 +220,12 @@ mod tests {
 
     #[test]
     fn matches_ipv6() {
-        let p =
-            RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2).with_allow_prefixes(vec![(
-                IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        let p = RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2).with_allow_prefixes(vec![
+            Prefix::new_v6(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 32,
-            )]);
+            ),
+        ]);
         // 2001:db8::/32 → matches
         assert!(p.matches(&Prefix::new_v6(
             [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
@@ -245,7 +246,7 @@ mod tests {
     fn matches_non_byte_boundary_v4() {
         // Allow 203.0.113.0/25 (covers 203.0.113.0 .. 203.0.113.127).
         let p = RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2)
-            .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 0]), 25)]);
+            .with_allow_prefixes(vec![Prefix::new_v4([203, 0, 113, 0], 25)]);
         // 203.0.113.5/32 is inside the /25 — the high 25 bits agree.
         assert!(
             p.matches(&Prefix::new_v4([203, 0, 113, 5], 32)),
@@ -266,13 +267,14 @@ mod tests {
         // byte 4 (group 2 high byte): any address whose first 32 bits are
         // 2001:db8 and whose 33rd bit is 0 is inside. The 0x08 lives in
         // byte 7 (well below the /33 mask), so it is ignored.
-        let p =
-            RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2).with_allow_prefixes(vec![(
-                IpAddr::V6([
+        let p = RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2).with_allow_prefixes(vec![
+            Prefix::new_v6(
+                [
                     0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 33,
-            )]);
+            ),
+        ]);
         // 2001:db8:0:1::/64 is inside the /33 (byte 4 = 0x00, 33rd bit 0).
         assert!(p.matches(&Prefix::new_v6(
             [0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 1,],
@@ -299,7 +301,7 @@ mod tests {
         // network address). Containment must still be computed against
         // the masked network.
         let p = RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2)
-            .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 5]), 25)]);
+            .with_allow_prefixes(vec![Prefix::new_v4([203, 0, 113, 5], 25)]);
         // 203.0.113.5/25 normalises to 203.0.113.0/25, so 203.0.113.10/32
         // is inside it.
         assert!(p.matches(&Prefix::new_v4([203, 0, 113, 10], 32)));
