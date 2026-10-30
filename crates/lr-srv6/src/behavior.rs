@@ -33,11 +33,22 @@
 //! (`https://www.iana.org/assignments/segment-routing/`): RFC 8986
 //! assigned the contiguous block 1–24 plus 26–39 (25 is Reserved);
 //! RFC 9433 appended 40 (End.MAP) and 41 (End.Limit) for the 3GPP
-//! mobile user plane. The NEXT-CSID family from RFC 9800 starts at
-//! 42 and is not modelled here yet. Unassigned values are `None`
-//! from [`Behavior::from_wire`]; RFC 8986 §4.19 says the data plane
-//! treats them as "End.Un" (count and drop), which is a *policy*,
-//! not a registry value, so no variant is synthesized for it.
+//! mobile user plane. RFC 9800 (Compressed SRv6 Segment-List
+//! Encoding) appends the NEXT-CSID family at 43–50, 52–59, 85–97
+//! (End / End.X / End.T with NEXT-CSID plus their flavor
+//! combinations, plus End.B6.Encaps / End.B6.Encaps.Red / End.BM /
+//! End.LBS / End.XLBS with NEXT-CSID). RFC 10018 appends End.DTMC4 /
+//! End.DTMC6 / End.DTMC46 at 76–78 (decap to an MPLS table). The
+//! draft-only assignments at 42 / 51 / 60-68 (NEXT-ONLY-CSID and
+//! uDX/uDT — pre-RFC 9800 draft), the GTP family at 69-72 (RFC 9433
+//! §6.4-§6.7 — needs a GTP argument layout the crate does not
+//! model), and the REPLACE-CSID family at 101-141 (RFC 9800's
+//! second flavor — same structure as NEXT-CSID but a separate
+//! container layout) are not yet modelled here. Unassigned values
+//! are `None` from [`Behavior::from_wire`]; RFC 8986 §4.19 says the
+//! data plane treats them as "End.Un" (count and drop), which is a
+//! *policy*, not a registry value, so no variant is synthesized for
+//! it.
 //!
 //! ## PSP / USP / USD flavors
 //!
@@ -171,12 +182,127 @@ pub enum Behavior {
     /// session independently of forwarding. The packet is otherwise
     /// processed as `End` (RFC 8986 §4.1).
     EndLimit = 41,
-    // The NEXT-CSID family (RFC 9800) starts at 42 — RFC 9800
-    // assigns a contiguous block (End/End.X/End.T with NEXT-CSID
-    // and their flavor combinations, plus the uDX/uDT short forms).
-    // Modelling that family requires the 16-octet CSID layout rules
-    // (RFC 9800 §5) on top of the variant set, so it is left for a
-    // follow-up that lands the full block at once.
+    // 42 is End with NEXT-ONLY-CSID (draft-filsfils-spring-net-pgm-
+    // extension-srv6-usid) — pre-RFC 9800 draft assignment. RFC 9800
+    // obsoleted the draft with a fresh block starting at 43; 42 stays
+    // unmodelled (the registry still carries the draft entry, but no
+    // RFC references it).
+    /// End with NEXT-CSID (RFC 9800 §4.1.1). The NEXT-CSID flavor lets
+    /// a single 128-bit SID carry a sequence of short C-SIDs that the
+    /// endpoint walks in place — the segment-list compression the
+    /// RFC introduces. End with NEXT-CSID is the basic End behavior
+    /// with the NEXT-CSID flavor.
+    EndWithNextCsid = 43,
+    /// End with NEXT-CSID & PSP (RFC 9800 §4.1.1 + §4.16).
+    EndWithNextCsidPsp = 44,
+    /// End with NEXT-CSID & USP (RFC 9800 §4.1.1 + §4.16).
+    EndWithNextCsidUsp = 45,
+    /// End with NEXT-CSID, PSP & USP (RFC 9800 §4.1.1 + §4.16).
+    EndWithNextCsidPspUsp = 46,
+    /// End with NEXT-CSID & USD (RFC 9800 §4.1.1 + §4.16).
+    EndWithNextCsidUsd = 47,
+    /// End with NEXT-CSID, PSP & USD (RFC 9800 §4.1.1 + §4.16). The
+    /// common short name in deployments is `uN` (uNode) — most SRv6
+    /// implementations install this variant as the per-node SID.
+    EndWithNextCsidPspUsd = 48,
+    /// End with NEXT-CSID, USP & USD (RFC 9800 §4.1.1 + §4.16).
+    EndWithNextCsidUspUsd = 49,
+    /// End with NEXT-CSID, PSP, USP & USD (RFC 9800 §4.1.1 + §4.16).
+    EndWithNextCsidPspUspUsd = 50,
+    // 51 is End.X with NEXT-ONLY-CSID (draft-filsfils-spring-net-pgm-
+    // extension-srv6-usid) — pre-RFC 9800 draft. Same reason as 42.
+    /// End.X with NEXT-CSID (RFC 9800 §4.2.1). Cross-connect to a
+    /// specific adjacency with the NEXT-CSID flavor.
+    EndXWithNextCsid = 52,
+    /// End.X with NEXT-CSID & PSP (RFC 9800 §4.2.1 + §4.16).
+    EndXWithNextCsidPsp = 53,
+    /// End.X with NEXT-CSID & USP (RFC 9800 §4.2.1 + §4.16).
+    EndXWithNextCsidUsp = 54,
+    /// End.X with NEXT-CSID, PSP & USP (RFC 9800 §4.2.1 + §4.16).
+    EndXWithNextCsidPspUsp = 55,
+    /// End.X with NEXT-CSID & USD (RFC 9800 §4.2.1 + §4.16).
+    EndXWithNextCsidUsd = 56,
+    /// End.X with NEXT-CSID, PSP & USD (RFC 9800 §4.2.1 + §4.16). The
+    /// common short name in deployments is `uA` (uAdjacency).
+    EndXWithNextCsidPspUsd = 57,
+    /// End.X with NEXT-CSID, USP & USD (RFC 9800 §4.2.1 + §4.16).
+    EndXWithNextCsidUspUsd = 58,
+    /// End.X with NEXT-CSID, PSP, USP & USD (RFC 9800 §4.2.1 + §4.16).
+    EndXWithNextCsidPspUspUsd = 59,
+    // 60-68 are the uDX/uDT family from the same pre-RFC 9800 draft
+    // (draft-filsfils-spring-net-pgm-extension-srv6-usid). RFC 9800
+    // obsoleted the draft; the registry still carries the draft
+    // entries but no RFC references them. Left unmodelled.
+    // 69-72 are End.M.GTP6.D / End.M.GTP6.Di / End.M.GTP6.E /
+    // End.M.GTP4.E (RFC 9433 §6.4-§6.7 — 3GPP mobile user-plane GTP
+    // interworking). They depend on a GTP-specific argument layout
+    // the crate does not model; left for a follow-up that lands the
+    // GTP container layout alongside the variants.
+    // 73-75 are draft assignments (End.DTM, End.M Mirror, End.Replicate
+    // — RFC 9524). RFC 9524's End.Replicate will land in a follow-up
+    // alongside its replication-group state model.
+    /// End.DTMC4 — decap and MPLS table lookup for IPv4 (RFC 10018
+    /// §4.1). The decap-and-table-lookup variant whose forwarding
+    /// result is an MPLS label stack instead of an L3 next hop —
+    /// used in SRv6-MPLS interworking where the inner packet is
+    /// MPLS-encapsulated.
+    EndDtmc4 = 76,
+    /// End.DTMC6 — decap and MPLS table lookup for IPv6 (RFC 10018
+    /// §4.2). Same shape as `End.DTMC4` for IPv6 payloads.
+    EndDtmc6 = 77,
+    /// End.DTMC46 — decap and MPLS table lookup for both IPv4 and
+    /// IPv6 (RFC 10018 §4.3). The dual-family variant.
+    EndDtmc46 = 78,
+    // 79-84 are draft / RFC 9491 (End.BXC, End.NSH) assignments that
+    // depend on argument layouts the crate does not model; left for
+    // follow-ups that land the layout alongside the variant.
+    /// End.T with NEXT-CSID (RFC 9800 §4.3.1). Table lookup with the
+    /// NEXT-CSID flavor.
+    EndTWithNextCsid = 85,
+    /// End.T with NEXT-CSID & PSP (RFC 9800 §4.3.1 + §4.16).
+    EndTWithNextCsidPsp = 86,
+    /// End.T with NEXT-CSID & USP (RFC 9800 §4.3.1 + §4.16).
+    EndTWithNextCsidUsp = 87,
+    /// End.T with NEXT-CSID, PSP & USP (RFC 9800 §4.3.1 + §4.16).
+    EndTWithNextCsidPspUsp = 88,
+    /// End.T with NEXT-CSID & USD (RFC 9800 §4.3.1 + §4.16).
+    EndTWithNextCsidUsd = 89,
+    /// End.T with NEXT-CSID, PSP & USD (RFC 9800 §4.3.1 + §4.16).
+    EndTWithNextCsidPspUsd = 90,
+    /// End.T with NEXT-CSID, USP & USD (RFC 9800 §4.3.1 + §4.16).
+    EndTWithNextCsidUspUsd = 91,
+    /// End.T with NEXT-CSID, PSP, USP & USD (RFC 9800 §4.3.1 + §4.16).
+    EndTWithNextCsidPspUspUsd = 92,
+    /// End.B6.Encaps with NEXT-CSID (RFC 9800 §4.14). SRH
+    /// encapsulation with the NEXT-CSID flavor.
+    EndB6EncapsWithNextCsid = 93,
+    /// End.B6.Encaps.Red with NEXT-CSID (RFC 9800 §4.14). Reduced-SRH
+    /// encapsulation with NEXT-CSID.
+    EndB6EncapsRedWithNextCsid = 94,
+    /// End.BM with NEXT-CSID (RFC 9800 §4.15). SR-MPLS insertion with
+    /// NEXT-CSID.
+    EndBmWithNextCsid = 95,
+    /// End.LBS with NEXT-CSID (RFC 9800 §4.4). Locator-Block swap
+    /// under the NEXT-CSID flavor — the endpoint rewrites the
+    /// locator-block portion of the active SID sequence, letting a
+    /// multi-domain path cross locator-block boundaries without
+    /// popping.
+    EndLbsWithNextCsid = 96,
+    /// End.XLBS with NEXT-CSID (RFC 9800 §4.5). The cross-connect
+    /// variant of End.LBS — swaps the locator block and forwards out
+    /// a specific adjacency.
+    EndXlbsWithNextCsid = 97,
+    // 98-100 are pre-RFC draft assignments (End.B6.Encaps.Red /
+    // End.B6.Insert.Red with NEXT-CSID, PSP & USD; End.PSID). 100 is
+    // draft-ietf-spring-srv6-path-segment. Left for follow-ups.
+    // 101-141 (REPLACE-CSID family from RFC 9800) — the second flavor
+    // RFC 9800 introduces. Same structure as the NEXT-CSID family
+    // (End/End.X/End.T with REPLACE-CSID + flavor combinations, plus
+    // the End.DX*/End.DT* REPLACE-CSID forms and End.LBS/XLBS with
+    // REPLACE-CSID). Left for a follow-up so the model can land the
+    // REPLACE-CSID container layout (RFC 9800 §5) alongside the
+    // variants.
+    // 158-160 are RFC 9801 (End.DX1 family). Left for a follow-up.
 }
 
 impl Behavior {
@@ -187,11 +313,11 @@ impl Behavior {
 
     /// Look up a behavior by its 16-bit wire value. Returns `None`
     /// for unassigned values (RFC 8986 §9.2 — the registry is sparse:
-    /// 0 is invalid, 25 is Reserved, and the values ≥ 42 the crate
-    /// does not model yet (the NEXT-CSID family from RFC 9800 and
-    /// later assignments) MUST be treated as `End.Un` per §4.19 by
-    /// data-plane policy, but the crate leaves that decision to the
-    /// caller).
+    /// 0 is invalid, 25 is Reserved; the draft-only assignments at
+    /// 42 / 51 / 60-68 / 73-75 / 79-84 / 98-100 and the REPLACE-CSID
+    /// family at 101-141 / RFC 9801 family at 158-160 are not yet
+    /// modelled here, and per §4.19 the data plane treats them as
+    /// `End.Un` — the crate leaves that decision to the caller).
     pub fn from_wire(v: u16) -> Option<Self> {
         // Match on the literal value so the mapping stays a
         // reviewable transcript of the registry itself.
@@ -236,6 +362,43 @@ impl Behavior {
             39 => Self::EndTPspUspUsd,
             40 => Self::EndMap,
             41 => Self::EndLimit,
+            // RFC 9800 NEXT-CSID family (End / End.X / End.T with
+            // NEXT-CSID + flavor combinations, plus End.B6.Encaps /
+            // End.B6.Encaps.Red / End.BM / End.LBS / End.XLBS with
+            // NEXT-CSID).
+            43 => Self::EndWithNextCsid,
+            44 => Self::EndWithNextCsidPsp,
+            45 => Self::EndWithNextCsidUsp,
+            46 => Self::EndWithNextCsidPspUsp,
+            47 => Self::EndWithNextCsidUsd,
+            48 => Self::EndWithNextCsidPspUsd,
+            49 => Self::EndWithNextCsidUspUsd,
+            50 => Self::EndWithNextCsidPspUspUsd,
+            52 => Self::EndXWithNextCsid,
+            53 => Self::EndXWithNextCsidPsp,
+            54 => Self::EndXWithNextCsidUsp,
+            55 => Self::EndXWithNextCsidPspUsp,
+            56 => Self::EndXWithNextCsidUsd,
+            57 => Self::EndXWithNextCsidPspUsd,
+            58 => Self::EndXWithNextCsidUspUsd,
+            59 => Self::EndXWithNextCsidPspUspUsd,
+            // RFC 10018 End.DTMC family (decap to MPLS table).
+            76 => Self::EndDtmc4,
+            77 => Self::EndDtmc6,
+            78 => Self::EndDtmc46,
+            85 => Self::EndTWithNextCsid,
+            86 => Self::EndTWithNextCsidPsp,
+            87 => Self::EndTWithNextCsidUsp,
+            88 => Self::EndTWithNextCsidPspUsp,
+            89 => Self::EndTWithNextCsidUsd,
+            90 => Self::EndTWithNextCsidPspUsd,
+            91 => Self::EndTWithNextCsidUspUsd,
+            92 => Self::EndTWithNextCsidPspUspUsd,
+            93 => Self::EndB6EncapsWithNextCsid,
+            94 => Self::EndB6EncapsRedWithNextCsid,
+            95 => Self::EndBmWithNextCsid,
+            96 => Self::EndLbsWithNextCsid,
+            97 => Self::EndXlbsWithNextCsid,
             _ => return None,
         })
     }
@@ -285,12 +448,50 @@ impl Behavior {
             Self::EndTPspUspUsd => "End.T with PSP, USP & USD",
             Self::EndMap => "End.MAP",
             Self::EndLimit => "End.Limit",
+            // RFC 9800 NEXT-CSID family — names match the IANA
+            // registry verbatim ("End with NEXT-CSID", etc.).
+            Self::EndWithNextCsid => "End with NEXT-CSID",
+            Self::EndWithNextCsidPsp => "End with NEXT-CSID & PSP",
+            Self::EndWithNextCsidUsp => "End with NEXT-CSID & USP",
+            Self::EndWithNextCsidPspUsp => "End with NEXT-CSID, PSP & USP",
+            Self::EndWithNextCsidUsd => "End with NEXT-CSID & USD",
+            Self::EndWithNextCsidPspUsd => "End with NEXT-CSID, PSP & USD",
+            Self::EndWithNextCsidUspUsd => "End with NEXT-CSID, USP & USD",
+            Self::EndWithNextCsidPspUspUsd => "End with NEXT-CSID, PSP, USP & USD",
+            Self::EndXWithNextCsid => "End.X with NEXT-CSID",
+            Self::EndXWithNextCsidPsp => "End.X with NEXT-CSID & PSP",
+            Self::EndXWithNextCsidUsp => "End.X with NEXT-CSID & USP",
+            Self::EndXWithNextCsidPspUsp => "End.X with NEXT-CSID, PSP & USP",
+            Self::EndXWithNextCsidUsd => "End.X with NEXT-CSID & USD",
+            Self::EndXWithNextCsidPspUsd => "End.X with NEXT-CSID, PSP & USD",
+            Self::EndXWithNextCsidUspUsd => "End.X with NEXT-CSID, USP & USD",
+            Self::EndXWithNextCsidPspUspUsd => "End.X with NEXT-CSID, PSP, USP & USD",
+            // RFC 10018 End.DTMC family.
+            Self::EndDtmc4 => "End.DTMC4",
+            Self::EndDtmc6 => "End.DTMC6",
+            Self::EndDtmc46 => "End.DTMC46",
+            // RFC 9800 End.T with NEXT-CSID and the B6/BM/LBS/XLBS
+            // NEXT-CSID variants.
+            Self::EndTWithNextCsid => "End.T with NEXT-CSID",
+            Self::EndTWithNextCsidPsp => "End.T with NEXT-CSID & PSP",
+            Self::EndTWithNextCsidUsp => "End.T with NEXT-CSID & USP",
+            Self::EndTWithNextCsidPspUsp => "End.T with NEXT-CSID, PSP & USP",
+            Self::EndTWithNextCsidUsd => "End.T with NEXT-CSID & USD",
+            Self::EndTWithNextCsidPspUsd => "End.T with NEXT-CSID, PSP & USD",
+            Self::EndTWithNextCsidUspUsd => "End.T with NEXT-CSID, USP & USD",
+            Self::EndTWithNextCsidPspUspUsd => "End.T with NEXT-CSID, PSP, USP & USD",
+            Self::EndB6EncapsWithNextCsid => "End.B6.Encaps with NEXT-CSID",
+            Self::EndB6EncapsRedWithNextCsid => "End.B6.Encaps.Red with NEXT-CSID",
+            Self::EndBmWithNextCsid => "End.BM with NEXT-CSID",
+            Self::EndLbsWithNextCsid => "End.LBS with NEXT-CSID",
+            Self::EndXlbsWithNextCsid => "End.XLBS with NEXT-CSID",
         }
     }
 
     /// True when the behavior carries the PSP flavor (RFC 8986
     /// §4.16 — Penultimate Segment Pop, the SRH is removed one hop
-    /// before the endpoint).
+    /// before the endpoint). Includes the NEXT-CSID variants whose
+    /// name carries PSP (RFC 9800 §4.16 reuses the same flavor bits).
     pub const fn is_psp(self) -> bool {
         matches!(
             self,
@@ -306,12 +507,25 @@ impl Behavior {
                 | Self::EndTPspUsp
                 | Self::EndTPspUsd
                 | Self::EndTPspUspUsd
+                | Self::EndWithNextCsidPsp
+                | Self::EndWithNextCsidPspUsp
+                | Self::EndWithNextCsidPspUsd
+                | Self::EndWithNextCsidPspUspUsd
+                | Self::EndXWithNextCsidPsp
+                | Self::EndXWithNextCsidPspUsp
+                | Self::EndXWithNextCsidPspUsd
+                | Self::EndXWithNextCsidPspUspUsd
+                | Self::EndTWithNextCsidPsp
+                | Self::EndTWithNextCsidPspUsp
+                | Self::EndTWithNextCsidPspUsd
+                | Self::EndTWithNextCsidPspUspUsd
         )
     }
 
     /// True when the behavior carries the USP flavor (RFC 8986
     /// §4.16 — Ultimate Segment Pop, the SRH is removed at the
-    /// endpoint).
+    /// endpoint). Includes the NEXT-CSID variants whose name carries
+    /// USP (RFC 9800 §4.16 reuses the same flavor bits).
     pub const fn is_usp(self) -> bool {
         matches!(
             self,
@@ -327,12 +541,26 @@ impl Behavior {
                 | Self::EndTPspUsp
                 | Self::EndTUspUsd
                 | Self::EndTPspUspUsd
+                | Self::EndWithNextCsidUsp
+                | Self::EndWithNextCsidPspUsp
+                | Self::EndWithNextCsidUspUsd
+                | Self::EndWithNextCsidPspUspUsd
+                | Self::EndXWithNextCsidUsp
+                | Self::EndXWithNextCsidPspUsp
+                | Self::EndXWithNextCsidUspUsd
+                | Self::EndXWithNextCsidPspUspUsd
+                | Self::EndTWithNextCsidUsp
+                | Self::EndTWithNextCsidPspUsp
+                | Self::EndTWithNextCsidUspUsd
+                | Self::EndTWithNextCsidPspUspUsd
         )
     }
 
     /// True when the behavior carries the USD flavor (RFC 8986
     /// §4.16 — Ultimate Segment Decap, the inner packet is
-    /// decapsulated at the endpoint).
+    /// decapsulated at the endpoint). Includes the NEXT-CSID variants
+    /// whose name carries USD (RFC 9800 §4.16 reuses the same flavor
+    /// bits).
     pub const fn is_usd(self) -> bool {
         matches!(
             self,
@@ -348,11 +576,24 @@ impl Behavior {
                 | Self::EndTPspUsd
                 | Self::EndTUspUsd
                 | Self::EndTPspUspUsd
+                | Self::EndWithNextCsidUsd
+                | Self::EndWithNextCsidPspUsd
+                | Self::EndWithNextCsidUspUsd
+                | Self::EndWithNextCsidPspUspUsd
+                | Self::EndXWithNextCsidUsd
+                | Self::EndXWithNextCsidPspUsd
+                | Self::EndXWithNextCsidUspUsd
+                | Self::EndXWithNextCsidPspUspUsd
+                | Self::EndTWithNextCsidUsd
+                | Self::EndTWithNextCsidPspUsd
+                | Self::EndTWithNextCsidUspUsd
+                | Self::EndTWithNextCsidPspUspUsd
         )
     }
 
-    /// True when the behavior decapsulates a packet (End.D* family,
-    /// RFC 8986 §4.5–§4.13).
+    /// True when the behavior decapsulates a packet (End.D*
+    /// family, RFC 8986 §4.5–§4.13). Includes the End.DTMC family
+    /// (RFC 10018 — decap to an MPLS table).
     pub const fn is_decap(self) -> bool {
         matches!(
             self,
@@ -365,11 +606,15 @@ impl Behavior {
                 | Self::EndDX2V
                 | Self::EndDT2U
                 | Self::EndDT2M
+                | Self::EndDtmc4
+                | Self::EndDtmc6
+                | Self::EndDtmc46
         )
     }
 
     /// True when the behavior is a "cross-connect" — forwards to a
-    /// single next hop, not a table lookup (End.X*, End.DX*).
+    /// single next hop, not a table lookup (End.X*, End.DX*). Includes
+    /// the End.X with NEXT-CSID family (RFC 9800 §4.2.1).
     pub const fn is_cross_connect(self) -> bool {
         matches!(
             self,
@@ -385,11 +630,21 @@ impl Behavior {
                 | Self::EndDX4
                 | Self::EndDX2
                 | Self::EndDX2V
+                | Self::EndXWithNextCsid
+                | Self::EndXWithNextCsidPsp
+                | Self::EndXWithNextCsidUsp
+                | Self::EndXWithNextCsidPspUsp
+                | Self::EndXWithNextCsidUsd
+                | Self::EndXWithNextCsidPspUsd
+                | Self::EndXWithNextCsidUspUsd
+                | Self::EndXWithNextCsidPspUspUsd
         )
     }
 
     /// True when the behavior is a "table lookup" — forwards via a
-    /// specific routing or bridging table (End.T*, End.DT*).
+    /// specific routing or bridging table (End.T*, End.DT*). Includes
+    /// the End.T with NEXT-CSID family (RFC 9800 §4.3.1) and the
+    /// End.DTMC family (RFC 10018 — decap to an MPLS table).
     pub const fn is_table_lookup(self) -> bool {
         matches!(
             self,
@@ -406,6 +661,17 @@ impl Behavior {
                 | Self::EndDT46
                 | Self::EndDT2U
                 | Self::EndDT2M
+                | Self::EndTWithNextCsid
+                | Self::EndTWithNextCsidPsp
+                | Self::EndTWithNextCsidUsp
+                | Self::EndTWithNextCsidPspUsp
+                | Self::EndTWithNextCsidUsd
+                | Self::EndTWithNextCsidPspUsd
+                | Self::EndTWithNextCsidUspUsd
+                | Self::EndTWithNextCsidPspUspUsd
+                | Self::EndDtmc4
+                | Self::EndDtmc6
+                | Self::EndDtmc46
         )
     }
 }
@@ -496,13 +762,40 @@ mod tests {
 
     #[test]
     fn behavior_from_wire_unassigned() {
-        // 0 is invalid, 25 Reserved, 42+ unassigned-or-unmodelled
-        // (NEXT-CSID family from RFC 9800 starts at 42), and the
-        // registry's high ranges (32768+ Private Use is the only
-        // other populated block) are not behaviors either.
+        // 0 is invalid, 25 Reserved, 42 / 51 / 60-68 are draft-only
+        // assignments (pre-RFC 9800 NEXT-ONLY-CSID and uDX/uDT)
+        // deliberately not modelled, 69-72 are RFC 9433 GTP family
+        // (not modelled — needs GTP argument layout), 73-75 / 79-84 /
+        // 98-100 are draft assignments not modelled. The REPLACE-CSID
+        // family at 101-141 is RFC 9800's second flavor, also not
+        // modelled yet (separate container layout). The registry's
+        // high ranges (32768+ Private Use) are not behaviors either.
         assert!(Behavior::from_wire(0).is_none());
         assert!(Behavior::from_wire(25).is_none());
-        assert!(Behavior::from_wire(42).is_none());
+        assert!(
+            Behavior::from_wire(42).is_none(),
+            "42 = End with NEXT-ONLY-CSID (draft, pre-RFC 9800) — not modelled"
+        );
+        assert!(
+            Behavior::from_wire(51).is_none(),
+            "51 = End.X with NEXT-ONLY-CSID (draft) — not modelled"
+        );
+        assert!(
+            Behavior::from_wire(60).is_none(),
+            "60 = uDX6 (draft) — not modelled"
+        );
+        assert!(
+            Behavior::from_wire(69).is_none(),
+            "69 = End.M.GTP6.D (RFC 9433) — not modelled"
+        );
+        assert!(
+            Behavior::from_wire(72).is_none(),
+            "72 = End.M.GTP4.E (RFC 9433) — not modelled"
+        );
+        assert!(
+            Behavior::from_wire(101).is_none(),
+            "101 = End with REPLACE-CSID (RFC 9800) — not modelled yet"
+        );
         assert!(Behavior::from_wire(u16::MAX).is_none());
     }
 
@@ -524,15 +817,243 @@ mod tests {
         assert_eq!(limit.name(), "End.Limit");
 
         // RFC 9433 assigns the *mobile user-plane* End.M.* family
-        // (End.M.GTP6.D/Di/E, End.M.GTP4.E) at 69-72, well above
-        // 42. Those depend on a GTP-specific argument layout the
-        // crate does not model; left for a follow-up.
+        // (End.M.GTP6.D/Di/E, End.M.GTP4.E) at 69-72. Those depend on
+        // a GTP-specific argument layout the crate does not model;
+        // left for a follow-up.
         for v in [69u16, 70, 71, 72] {
             assert!(
                 Behavior::from_wire(v).is_none(),
                 "{v}: End.M.* not modelled"
             );
         }
+    }
+
+    /// Every RFC 9800 NEXT-CSID family assignment, checked against
+    /// the live IANA registry (rows `43..=50, 52..=59, 85..=97` with
+    /// `Reference = RFC 9800`). The common short names `uN` (End
+    /// with NEXT-CSID, PSP & USD = 48) and `uA` (End.X with NEXT-CSID,
+    /// PSP & USD = 57) are documented in the variant doc-comments;
+    /// the registry itself spells them in the long form.
+    #[test]
+    fn behavior_rfc_9800_next_csid_assignments() {
+        // (wire value, expected variant, IANA-registry name). The
+        // registry is the source of truth; the variant discriminant
+        // and the `name()` output must match exactly.
+        let cases: &[(u16, Behavior, &str)] = &[
+            // End with NEXT-CSID family (RFC 9800 §4.1.1).
+            (43, Behavior::EndWithNextCsid, "End with NEXT-CSID"),
+            (44, Behavior::EndWithNextCsidPsp, "End with NEXT-CSID & PSP"),
+            (45, Behavior::EndWithNextCsidUsp, "End with NEXT-CSID & USP"),
+            (
+                46,
+                Behavior::EndWithNextCsidPspUsp,
+                "End with NEXT-CSID, PSP & USP",
+            ),
+            (47, Behavior::EndWithNextCsidUsd, "End with NEXT-CSID & USD"),
+            (
+                48,
+                Behavior::EndWithNextCsidPspUsd,
+                "End with NEXT-CSID, PSP & USD",
+            ),
+            (
+                49,
+                Behavior::EndWithNextCsidUspUsd,
+                "End with NEXT-CSID, USP & USD",
+            ),
+            (
+                50,
+                Behavior::EndWithNextCsidPspUspUsd,
+                "End with NEXT-CSID, PSP, USP & USD",
+            ),
+            // End.X with NEXT-CSID family (RFC 9800 §4.2.1).
+            (52, Behavior::EndXWithNextCsid, "End.X with NEXT-CSID"),
+            (
+                53,
+                Behavior::EndXWithNextCsidPsp,
+                "End.X with NEXT-CSID & PSP",
+            ),
+            (
+                54,
+                Behavior::EndXWithNextCsidUsp,
+                "End.X with NEXT-CSID & USP",
+            ),
+            (
+                55,
+                Behavior::EndXWithNextCsidPspUsp,
+                "End.X with NEXT-CSID, PSP & USP",
+            ),
+            (
+                56,
+                Behavior::EndXWithNextCsidUsd,
+                "End.X with NEXT-CSID & USD",
+            ),
+            (
+                57,
+                Behavior::EndXWithNextCsidPspUsd,
+                "End.X with NEXT-CSID, PSP & USD",
+            ),
+            (
+                58,
+                Behavior::EndXWithNextCsidUspUsd,
+                "End.X with NEXT-CSID, USP & USD",
+            ),
+            (
+                59,
+                Behavior::EndXWithNextCsidPspUspUsd,
+                "End.X with NEXT-CSID, PSP, USP & USD",
+            ),
+            // End.T with NEXT-CSID family (RFC 9800 §4.3.1).
+            (85, Behavior::EndTWithNextCsid, "End.T with NEXT-CSID"),
+            (
+                86,
+                Behavior::EndTWithNextCsidPsp,
+                "End.T with NEXT-CSID & PSP",
+            ),
+            (
+                87,
+                Behavior::EndTWithNextCsidUsp,
+                "End.T with NEXT-CSID & USP",
+            ),
+            (
+                88,
+                Behavior::EndTWithNextCsidPspUsp,
+                "End.T with NEXT-CSID, PSP & USP",
+            ),
+            (
+                89,
+                Behavior::EndTWithNextCsidUsd,
+                "End.T with NEXT-CSID & USD",
+            ),
+            (
+                90,
+                Behavior::EndTWithNextCsidPspUsd,
+                "End.T with NEXT-CSID, PSP & USD",
+            ),
+            (
+                91,
+                Behavior::EndTWithNextCsidUspUsd,
+                "End.T with NEXT-CSID, USP & USD",
+            ),
+            (
+                92,
+                Behavior::EndTWithNextCsidPspUspUsd,
+                "End.T with NEXT-CSID, PSP, USP & USD",
+            ),
+            // End.B6.Encaps / End.B6.Encaps.Red / End.BM with NEXT-CSID.
+            (
+                93,
+                Behavior::EndB6EncapsWithNextCsid,
+                "End.B6.Encaps with NEXT-CSID",
+            ),
+            (
+                94,
+                Behavior::EndB6EncapsRedWithNextCsid,
+                "End.B6.Encaps.Red with NEXT-CSID",
+            ),
+            (95, Behavior::EndBmWithNextCsid, "End.BM with NEXT-CSID"),
+            // End.LBS / End.XLBS with NEXT-CSID (RFC 9800 §4.4-§4.5).
+            (96, Behavior::EndLbsWithNextCsid, "End.LBS with NEXT-CSID"),
+            (97, Behavior::EndXlbsWithNextCsid, "End.XLBS with NEXT-CSID"),
+        ];
+        for (v, expect_variant, expect_name) in cases {
+            let b = Behavior::from_wire(*v).unwrap_or_else(|| {
+                panic!("RFC 9800 wire value {v} ({expect_name}) has no variant");
+            });
+            assert_eq!(b, *expect_variant, "wire {v}: variant mismatch");
+            assert_eq!(b.wire_value(), *v, "{expect_name}: wire value drifted");
+            assert_eq!(
+                b.name(),
+                *expect_name,
+                "wire {v}: name drifted from the IANA registry"
+            );
+        }
+    }
+
+    /// RFC 10018 End.DTMC family (decap to MPLS table):
+    /// `76,0x004C,End.DTMC4,[RFC 10018],IETF`,
+    /// `77,0x004D,End.DTMC6,[RFC 10018],IETF`,
+    /// `78,0x004E,End.DTMC46,[RFC 10018],IETF`.
+    #[test]
+    fn behavior_rfc_10018_dtmc_assignments() {
+        let dtmc4 = Behavior::from_wire(76).expect("End.DTMC4 assigned at 76");
+        assert_eq!(dtmc4, Behavior::EndDtmc4);
+        assert_eq!(dtmc4.wire_value(), 76);
+        assert_eq!(dtmc4.name(), "End.DTMC4");
+
+        let dtmc6 = Behavior::from_wire(77).expect("End.DTMC6 assigned at 77");
+        assert_eq!(dtmc6, Behavior::EndDtmc6);
+        assert_eq!(dtmc6.wire_value(), 77);
+        assert_eq!(dtmc6.name(), "End.DTMC6");
+
+        let dtmc46 = Behavior::from_wire(78).expect("End.DTMC46 assigned at 78");
+        assert_eq!(dtmc46, Behavior::EndDtmc46);
+        assert_eq!(dtmc46.wire_value(), 78);
+        assert_eq!(dtmc46.name(), "End.DTMC46");
+    }
+
+    /// Flavor classification for the RFC 9800 NEXT-CSID family —
+    /// the PSP/USP/USD classifiers must cover the new variants,
+    /// mirroring the same flavor bits the non-CSID family carries.
+    #[test]
+    fn behavior_next_csid_flavor_classification() {
+        // End with NEXT-CSID, PSP & USD (uN) carries PSP and USD.
+        let un = Behavior::EndWithNextCsidPspUsd;
+        assert!(un.is_psp(), "uN carries PSP");
+        assert!(!un.is_usp(), "uN does not carry USP");
+        assert!(un.is_usd(), "uN carries USD");
+
+        // End.X with NEXT-CSID, PSP & USD (uA) carries PSP and USD.
+        let ua = Behavior::EndXWithNextCsidPspUsd;
+        assert!(ua.is_psp(), "uA carries PSP");
+        assert!(!ua.is_usp(), "uA does not carry USP");
+        assert!(ua.is_usd(), "uA carries USD");
+        // uA is a cross-connect (End.X family).
+        assert!(ua.is_cross_connect(), "uA is a cross-connect");
+        assert!(!ua.is_table_lookup(), "uA is not a table lookup");
+
+        // End.T with NEXT-CSID, PSP, USP & USD carries every flavor.
+        let endt_all = Behavior::EndTWithNextCsidPspUspUsd;
+        assert!(endt_all.is_psp());
+        assert!(endt_all.is_usp());
+        assert!(endt_all.is_usd());
+        assert!(
+            endt_all.is_table_lookup(),
+            "End.T with NEXT-CSID is a table lookup"
+        );
+        assert!(!endt_all.is_cross_connect());
+
+        // Plain End with NEXT-CSID (43) carries no flavor.
+        let plain = Behavior::EndWithNextCsid;
+        assert!(!plain.is_psp());
+        assert!(!plain.is_usp());
+        assert!(!plain.is_usd());
+        // End with NEXT-CSID is neither a cross-connect nor a table
+        // lookup — it is the basic End behavior with the NEXT-CSID
+        // flavor.
+        assert!(!plain.is_cross_connect());
+        assert!(!plain.is_table_lookup());
+    }
+
+    /// End.DTMC4/6/46 (RFC 10018) decap and look up an MPLS table —
+    /// they share the decap and table-lookup classifications with
+    /// the End.DT* family.
+    #[test]
+    fn behavior_dtmc_classification() {
+        assert!(Behavior::EndDtmc4.is_decap());
+        assert!(Behavior::EndDtmc6.is_decap());
+        assert!(Behavior::EndDtmc46.is_decap());
+        assert!(Behavior::EndDtmc4.is_table_lookup());
+        assert!(Behavior::EndDtmc6.is_table_lookup());
+        assert!(Behavior::EndDtmc46.is_table_lookup());
+        // DTMC is not a cross-connect (it is a table lookup).
+        assert!(!Behavior::EndDtmc4.is_cross_connect());
+        // End.LBS / End.XLBS with NEXT-CSID (RFC 9800 §4.4-§4.5)
+        // are neither cross-connect nor table-lookup — they are a
+        // new behavior class (locator-block swap).
+        assert!(!Behavior::EndLbsWithNextCsid.is_cross_connect());
+        assert!(!Behavior::EndLbsWithNextCsid.is_table_lookup());
+        assert!(!Behavior::EndXlbsWithNextCsid.is_cross_connect());
+        assert!(!Behavior::EndXlbsWithNextCsid.is_table_lookup());
     }
 
     #[test]
