@@ -1016,6 +1016,172 @@ uintptr_t lr_rtr_client_step_log_at(const lr_rtr_client_step_t *step,
                                     uint8_t *out_buf,
                                     uintptr_t cap);
 void lr_rtr_client_step_free(lr_rtr_client_step_t *step);
+
+/* ---- RIB (lr-rib mirror) ---- */
+
+typedef struct lr_ip_addr_t {
+  uint8_t is_ipv6;
+  uint8_t octets[16];
+} lr_ip_addr_t;
+
+typedef struct lr_core_prefix_t {
+  struct lr_ip_addr_t addr;
+  uint8_t prefix_len;
+} lr_core_prefix_t;
+
+typedef struct lr_route_key_t {
+  struct lr_core_prefix_t prefix;
+  uint16_t afi_safi;
+  uint8_t has_source;
+  struct lr_core_prefix_t source_prefix;
+} lr_route_key_t;
+
+typedef struct lr_route_origin_t {
+  uint8_t protocol;
+  uint64_t peer;
+} lr_route_origin_t;
+
+typedef struct OpaqueLocRib *lr_loc_rib_t;
+typedef struct OpaqueAdjRibIn *lr_adj_rib_in_t;
+typedef struct OpaqueAdjRibOut *lr_adj_rib_out_t;
+typedef struct OpaqueRibMux *lr_rib_mux_t;
+
+lr_loc_rib_t lr_loc_rib_new(void);
+void lr_loc_rib_free(lr_loc_rib_t r);
+int32_t lr_loc_rib_install(lr_loc_rib_t r, lr_route_t route);
+int32_t lr_loc_rib_uninstall(lr_loc_rib_t r,
+                             const struct lr_prefix_t *prefix,
+                             uint16_t afi,
+                             uint8_t safi,
+                             const struct lr_prefix_t *source);
+uintptr_t lr_loc_rib_len(lr_loc_rib_t r);
+uint8_t lr_loc_rib_is_empty(lr_loc_rib_t r);
+uintptr_t lr_loc_rib_paths_len(lr_loc_rib_t r);
+uint64_t lr_loc_rib_generation(lr_loc_rib_t r);
+uint8_t lr_loc_rib_best_present(lr_loc_rib_t r,
+                                const struct lr_prefix_t *prefix,
+                                uint16_t afi,
+                                uint8_t safi,
+                                const struct lr_prefix_t *source);
+int32_t lr_loc_rib_best(lr_loc_rib_t r,
+                        const struct lr_prefix_t *prefix,
+                        uint16_t afi,
+                        uint8_t safi,
+                        const struct lr_prefix_t *source,
+                        lr_route_t *out);
+int32_t lr_loc_rib_install_set(lr_loc_rib_t r,
+                               const struct lr_route_key_t *key,
+                               const lr_route_t *routes,
+                               uintptr_t count);
+uintptr_t lr_loc_rib_paths(lr_loc_rib_t r, const struct lr_route_key_t *key);
+int64_t lr_loc_rib_iter_best(lr_loc_rib_t r,
+                              void (*cb)(lr_route_t route, void *user),
+                              void *user);
+int64_t lr_loc_rib_iter_paths(lr_loc_rib_t r,
+                               void (*cb)(lr_route_t route, void *user),
+                               void *user);
+int64_t lr_loc_rib_iter_sets(lr_loc_rib_t r,
+                              void (*cb)(uint8_t *prefix_out,
+                                         uint8_t prefix_len,
+                                         uint8_t is_ipv6,
+                                         uintptr_t path_count,
+                                         void *user),
+                              void *user);
+int32_t lr_loc_rib_diff_since(lr_loc_rib_t r,
+                              uint64_t since_gen,
+                              uintptr_t *out_added,
+                              uintptr_t *out_modified,
+                              uintptr_t *out_removed);
+
+lr_adj_rib_in_t lr_adj_rib_in_new(void);
+void lr_adj_rib_in_free(lr_adj_rib_in_t r);
+int32_t lr_adj_rib_in_feed(lr_adj_rib_in_t r,
+                            uint64_t origin_peer,
+                            int32_t origin_proto,
+                            lr_route_t route);
+int32_t lr_adj_rib_in_withdraw(lr_adj_rib_in_t r,
+                                uint64_t origin_peer,
+                                int32_t origin_proto,
+                                const struct lr_prefix_t *prefix,
+                                uint16_t afi,
+                                uint8_t safi,
+                                const struct lr_prefix_t *source,
+                                uint32_t path_id);
+uintptr_t lr_adj_rib_in_len(lr_adj_rib_in_t r);
+uint8_t lr_adj_rib_in_is_empty(lr_adj_rib_in_t r);
+int32_t lr_adj_rib_in_get(lr_adj_rib_in_t r,
+                          struct lr_route_origin_t origin,
+                          const struct lr_route_key_t *key,
+                          uint32_t path_id,
+                          lr_route_t *out_route);
+int32_t lr_adj_rib_in_origins_for(lr_adj_rib_in_t r,
+                                   const struct lr_route_key_t *key,
+                                   struct lr_route_origin_t *out_origins,
+                                   uintptr_t cap,
+                                   uintptr_t *out_count);
+int32_t lr_adj_rib_in_clear(lr_adj_rib_in_t r);
+int32_t lr_adj_rib_in_clear_for(lr_adj_rib_in_t r,
+                                  struct lr_route_origin_t origin);
+int64_t lr_adj_rib_in_iter_all(lr_adj_rib_in_t r,
+                                void (*cb)(lr_route_t route, void *user),
+                                void *user);
+int64_t lr_adj_rib_in_iter_origin(lr_adj_rib_in_t r,
+                                    uint64_t origin_peer,
+                                    int32_t origin_proto,
+                                    void (*cb)(lr_route_t route, void *user),
+                                    void *user);
+
+lr_adj_rib_out_t lr_adj_rib_out_new(void);
+void lr_adj_rib_out_free(lr_adj_rib_out_t r);
+int32_t lr_adj_rib_out_advertise(lr_adj_rib_out_t r,
+                                  uint64_t dest_peer,
+                                  int32_t dest_proto,
+                                  lr_route_t route,
+                                  uint32_t tx_path_id);
+int32_t lr_adj_rib_out_suppress(lr_adj_rib_out_t r,
+                                  uint64_t dest_peer,
+                                  int32_t dest_proto,
+                                  const struct lr_prefix_t *prefix,
+                                  uint16_t afi,
+                                  uint8_t safi,
+                                  const struct lr_prefix_t *source,
+                                  uint32_t tx_path_id);
+uintptr_t lr_adj_rib_out_len(lr_adj_rib_out_t r);
+uint8_t lr_adj_rib_out_is_empty(lr_adj_rib_out_t r);
+int32_t lr_adj_rib_out_tx_path_ids(lr_adj_rib_out_t r,
+                                     struct lr_route_origin_t dest,
+                                     const struct lr_route_key_t *key,
+                                     uint32_t *out_path_ids,
+                                     uintptr_t cap,
+                                     uintptr_t *out_count);
+int32_t lr_adj_rib_out_clear(lr_adj_rib_out_t r);
+int32_t lr_adj_rib_out_clear_for(lr_adj_rib_out_t r,
+                                   struct lr_route_origin_t dest);
+int64_t lr_adj_rib_out_iter_for(lr_adj_rib_out_t r,
+                                  uint64_t origin_peer,
+                                  int32_t origin_proto,
+                                  void (*cb)(lr_route_t route, void *user),
+                                  void *user);
+
+lr_rib_mux_t lr_rib_mux_new(void);
+void lr_rib_mux_free(lr_rib_mux_t r);
+int32_t lr_rib_mux_install(lr_rib_mux_t r, lr_route_t route);
+int32_t lr_rib_mux_uninstall(lr_rib_mux_t r,
+                              const struct lr_prefix_t *prefix,
+                              uint16_t afi,
+                              uint8_t safi,
+                              const struct lr_prefix_t *source);
+int32_t lr_rib_mux_get(lr_rib_mux_t r,
+                        const struct lr_prefix_t *prefix,
+                        uint16_t afi,
+                        uint8_t safi,
+                        const struct lr_prefix_t *source,
+                        lr_route_t *out);
+uintptr_t lr_rib_mux_len(lr_rib_mux_t r);
+uint8_t lr_rib_mux_is_empty(lr_rib_mux_t r);
+
+int64_t lr_route_selector_select(const lr_route_t *routes, uintptr_t count);
+int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
 """
 
 

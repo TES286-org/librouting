@@ -160,6 +160,21 @@ from .seg6route import (
     err_code,
 )
 from .rtr import RtrClient, RtrClientStep, RoaDelta as RtrRoaDelta, RoaEntry as RtrRoaEntry
+from .rib import (
+    AFI_IPV4,
+    AFI_IPV6,
+    SAFI_UNICAST,
+    SAFI_MULTICAST,
+    SAFI_LABELED_UNICAST,
+    AdjRibIn,
+    AdjRibOut,
+    LocRib,
+    RibDiff,
+    RibMux,
+    RouteKey,
+    RouteOrigin,
+    RouteSelector,
+)
 
 __all__ = [
     "Router",
@@ -309,6 +324,21 @@ __all__ = [
     "RtrClientStep",
     "RtrRoaDelta",
     "RtrRoaEntry",
+    # RIB storage (RFC 4271 §9: Loc-RIB / Adj-RIB-In / Adj-RIB-Out /
+    # cross-protocol mux / RouteSelector). Mirrors lr_rib.
+    "LocRib",
+    "AdjRibIn",
+    "AdjRibOut",
+    "RibMux",
+    "RouteKey",
+    "RouteOrigin",
+    "RouteSelector",
+    "RibDiff",
+    "AFI_IPV4",
+    "AFI_IPV6",
+    "SAFI_UNICAST",
+    "SAFI_MULTICAST",
+    "SAFI_LABELED_UNICAST",
 ]
 
 # The single source of truth for the package version: pyproject.toml reads
