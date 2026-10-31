@@ -1154,6 +1154,22 @@ int32_t lr_adj_rib_out_tx_path_ids(lr_adj_rib_out_t r,
                                      uint32_t *out_path_ids,
                                      uintptr_t cap,
                                      uintptr_t *out_count);
+int64_t lr_adj_rib_out_paths_for(lr_adj_rib_out_t r,
+                                   struct lr_route_origin_t dest,
+                                   const struct lr_route_key_t *key,
+                                   void (*cb)(uint32_t path_id,
+                                              lr_route_t route,
+                                              void *user),
+                                   void *user);
+int64_t lr_adj_rib_out_advertised_keys(lr_adj_rib_out_t r,
+                                          struct lr_route_origin_t dest,
+                                          uint16_t afi,
+                                          uint8_t safi,
+                                          void (*cb)(const struct lr_route_key_t *key,
+                                                     const uint32_t *path_ids,
+                                                     uintptr_t path_id_count,
+                                                     void *user),
+                                          void *user);
 int32_t lr_adj_rib_out_clear(lr_adj_rib_out_t r);
 int32_t lr_adj_rib_out_clear_for(lr_adj_rib_out_t r,
                                    struct lr_route_origin_t dest);
@@ -1179,9 +1195,13 @@ int32_t lr_rib_mux_get(lr_rib_mux_t r,
                         lr_route_t *out);
 uintptr_t lr_rib_mux_len(lr_rib_mux_t r);
 uint8_t lr_rib_mux_is_empty(lr_rib_mux_t r);
+int64_t lr_rib_mux_iter(lr_rib_mux_t r,
+                          void (*cb)(lr_route_t route, void *user),
+                          void *user);
 
 int64_t lr_route_selector_select(const lr_route_t *routes, uintptr_t count);
 int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
+int32_t lr_route_selector_compare(lr_route_t a, lr_route_t b);
 
 /* Babel protocol surface — mirrors lr_babel::{BabelFrame, BabelNeighbor,
  * BabelRouteTable, BabelRoute, RouteKey, BabelCodec, tlv::Tlv} and the

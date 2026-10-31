@@ -617,6 +617,73 @@ class AdjRibOut:
             n = int(out_count[0])
         return [int(out_ids[i]) for i in range(min(n, cap))]
 
+    def paths_for(
+        self, dest: RouteOrigin, key: RouteKey
+    ) -> List[Tuple[int, "_BorrowedRoute"]]:
+        """Walk every advertised ``(tx_path_id, route)`` pair for
+        ``(dest, key)``. Each route is *borrowed* — the Adj-RIB-Out
+        owns it for the duration of the call; the borrow is only
+        valid until the next mutating call on this Adj-RIB-Out.
+        """
+        key_c = key._to_c()
+        dest_c = dest._to_c()
+        results: List[Tuple[int, _BorrowedRoute]] = []
+
+        @ffi.callback("void(uint32_t, lr_route_t, void *)")
+        def cb(path_id, route, _user):
+            results.append((int(path_id), _BorrowedRoute(route)))
+
+        count = get_lib().lr_adj_rib_out_paths_for(
+            self._ptr, dest_c[0], key_c, cb, ffi.NULL
+        )
+        if count < 0:
+            raise LrError(f"lr_adj_rib_out_paths_for: {last_error()}")
+        return results
+
+    def advertised_keys(
+        self, dest: RouteOrigin, family: Tuple[int, int]
+    ) -> List[Tuple[RouteKey, List[int]]]:
+        """Walk every ``(RouteKey, [tx_path_id])`` pair advertised to
+        ``dest`` for the given AFI/SAFI ``family``. Each pair is
+        materialized into Python-owned objects before the callback
+        returns, so the returned list is safe to keep.
+        """
+        dest_c = dest._to_c()
+        afi, safi = int(family[0]), int(family[1])
+        results: List[Tuple[RouteKey, List[int]]] = []
+
+        @ffi.callback("void(const lr_route_key_t *, const uint32_t *, uintptr_t, void *)")
+        def cb(key_ptr, path_ids_ptr, path_id_count, _user):
+            # Read the C key into a Python RouteKey.
+            k_c = key_ptr[0]
+            is_v6 = bool(k_c.prefix.addr.is_ipv6)
+            if is_v6:
+                addr = bytes(ffi.buffer(k_c.prefix.addr.octets, 16))
+            else:
+                addr = bytes(ffi.buffer(k_c.prefix.addr.octets + 12, 4))
+            prefix = (addr, int(k_c.prefix.prefix_len))
+            afi = int(k_c.afi_safi >> 8)
+            safi = int(k_c.afi_safi & 0xFF)
+            source = None
+            if k_c.has_source != 0:
+                if k_c.source_prefix.addr.is_ipv6:
+                    src_addr = bytes(ffi.buffer(k_c.source_prefix.addr.octets, 16))
+                else:
+                    src_addr = bytes(ffi.buffer(k_c.source_prefix.addr.octets + 12, 4))
+                source = (src_addr, int(k_c.source_prefix.prefix_len))
+            rk = RouteKey(prefix=prefix, afi=afi, safi=safi, source=source)
+            # Read the path_ids array (only valid for this invocation).
+            n = int(path_id_count)
+            ids = [int(path_ids_ptr[i]) for i in range(n)] if n > 0 else []
+            results.append((rk, ids))
+
+        count = get_lib().lr_adj_rib_out_advertised_keys(
+            self._ptr, dest_c[0], afi, safi, cb, ffi.NULL
+        )
+        if count < 0:
+            raise LrError(f"lr_adj_rib_out_advertised_keys: {last_error()}")
+        return results
+
     def clear(self) -> None:
         rc = get_lib().lr_adj_rib_out_clear(self._ptr)
         _check_rc(rc, "lr_adj_rib_out_clear")
@@ -728,6 +795,23 @@ class RibMux:
     def is_empty(self) -> bool:
         return bool(get_lib().lr_rib_mux_is_empty(self._ptr))
 
+    def iter(self) -> Iterator:
+        """Walk every merged route in the mux. The callback receives a
+        *borrowed* route handle — the caller must NOT free it. The
+        borrow is only valid until the next mutating call on this mux.
+        """
+        results: List = []
+
+        @ffi.callback("void(lr_route_t, void *)")
+        def cb(route, _user):
+            r = _BorrowedRoute(route)
+            results.append(r)
+
+        count = get_lib().lr_rib_mux_iter(self._ptr, cb, ffi.NULL)
+        if count < 0:
+            raise LrError(f"lr_rib_mux_iter: {last_error()}")
+        return iter(results)
+
 
 class RouteSelector:
     """BIRD/FRR best-path selector (RFC 4271 §9.1)."""
@@ -760,4 +844,18 @@ class RouteSelector:
         rc = get_lib().lr_route_selector_select_bgp(arr, len(routes))
         if rc < -1:
             raise LrError(f"lr_route_selector_select_bgp: {last_error()}")
+        return int(rc)
+
+    @staticmethod
+    def compare(a, b) -> int:
+        """Compare two routes with the daemon's default comparator
+        (admin distance, then metric, then age, then protocol priority).
+
+        Returns -1 when ``a`` is preferred over ``b``, 0 when they tie
+        on every discriminator, 1 when ``b`` is preferred over ``a``,
+        and raises :class:`LrError` on a NULL handle or a panic.
+        """
+        rc = get_lib().lr_route_selector_compare(a._ptr, b._ptr)
+        if rc < -1:
+            raise LrError(f"lr_route_selector_compare: {last_error()}")
         return int(rc)

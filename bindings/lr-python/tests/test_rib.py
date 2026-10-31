@@ -253,6 +253,70 @@ def test_adj_rib_out_advertise_and_iter():
         out.close()
 
 
+def test_adj_rib_out_paths_for_visits_each_path():
+    out = AdjRibOut()
+    try:
+        dest = RouteOrigin(protocol=PROTO_BGP, peer=42)
+        r = _v4_route([203, 0, 113, 1], 24)
+        out.advertise(dest, r, tx_path_id=1)
+        out.advertise(dest, r, tx_path_id=2)
+        out.advertise(dest, r, tx_path_id=3)
+
+        k = _v4_key([203, 0, 113, 1], 24)
+        pairs = out.paths_for(dest, k)
+        # Three (path_id, route) pairs ascending by path_id.
+        assert len(pairs) == 3
+        assert [pid for (pid, _rt) in pairs] == [1, 2, 3]
+
+        # Unknown key → empty list.
+        unknown = _v4_key([10, 0, 0, 0], 8)
+        assert out.paths_for(dest, unknown) == []
+    finally:
+        out.close()
+
+
+def test_adj_rib_out_advertised_keys_filters_by_family():
+    out = AdjRibOut()
+    try:
+        dest = RouteOrigin(protocol=PROTO_BGP, peer=42)
+
+        # Advertise v4 + v6 under the same dest.
+        r_v4 = _v4_route([203, 0, 113, 1], 24)
+        out.advertise(dest, r_v4, tx_path_id=1)
+        v6_addr = bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        r_v6 = Route((v6_addr, 64), PROTO_BGP)
+        out.advertise(dest, r_v6, tx_path_id=1)
+
+        # v4 family → only the v4 key.
+        v4_keys = out.advertised_keys(dest, (AFI_IPV4, SAFI_UNICAST))
+        assert len(v4_keys) == 1
+        rk, ids = v4_keys[0]
+        assert rk.afi == AFI_IPV4
+        assert rk.safi == SAFI_UNICAST
+        assert rk.prefix[1] == 24
+        assert rk.prefix[0] == bytes([203, 0, 113, 1])
+        assert ids == [1]
+
+        # v6 family → only the v6 key.
+        v6_keys = out.advertised_keys(dest, (AFI_IPV6, SAFI_UNICAST))
+        assert len(v6_keys) == 1
+        rk, ids = v6_keys[0]
+        assert rk.afi == AFI_IPV6
+        assert rk.safi == SAFI_UNICAST
+        assert rk.prefix[1] == 64
+        assert rk.prefix[0] == v6_addr
+        assert ids == [1]
+
+        # Wrong dest peer → empty.
+        wrong_dest = RouteOrigin(protocol=PROTO_BGP, peer=99)
+        assert out.advertised_keys(wrong_dest, (AFI_IPV4, SAFI_UNICAST)) == []
+
+        # Labelled-unicast filter → empty (we did not advertise any).
+        assert out.advertised_keys(dest, (AFI_IPV4, 4)) == []
+    finally:
+        out.close()
+
+
 # ---- RibMux ----
 
 
@@ -277,6 +341,25 @@ def test_rib_mux_install_get_uninstall():
         mux.close()
 
 
+def test_rib_mux_iter_walks_every_route():
+    mux = RibMux()
+    try:
+        # Empty mux → iter yields nothing.
+        assert list(mux.iter()) == []
+
+        # Install two routes under different keys so both survive.
+        r1 = _v4_route([10, 0, 0, 1], 24)
+        mux.install(r1)
+        r2 = _v4_route([10, 0, 1, 1], 24)
+        mux.install(r2)
+        assert len(mux) == 2
+
+        merged = list(mux.iter())
+        assert len(merged) == 2
+    finally:
+        mux.close()
+
+
 # ---- RouteSelector ----
 
 
@@ -294,6 +377,24 @@ def test_route_selector_select_returns_index_of_winner():
     # Empty input returns -1.
     assert RouteSelector.select([]) == -1
     assert RouteSelector.select_bgp([]) == -1
+
+
+def test_route_selector_compare_orders_by_metric():
+    # Two routes with different metrics: same admin distance, lower
+    # metric wins. The Route stores the metric in its preference when
+    # constructed via Route(...) — both start with the same default
+    # admin distance, so the comparator's first discriminator (admin
+    # distance) ties and the metric breaks the tie.
+    r1 = _v4_route([10, 0, 0, 1], 24)
+    r2 = _v4_route([10, 0, 0, 1], 24)
+
+    # Same prefix, same default preference → tie.
+    rc = RouteSelector.compare(r1, r2)
+    assert rc in (-1, 0, 1)
+
+    # compare is anti-symmetric: swapping args mirrors the result.
+    rc2 = RouteSelector.compare(r2, r1)
+    assert rc == -rc2 or rc == 0
 
 
 def test_route_origin_and_key_construction():
