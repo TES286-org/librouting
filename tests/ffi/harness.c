@@ -1692,6 +1692,178 @@ int main(void) {
         lr_rtr_client_free(c);
     }
 
+    /* ---- RIB (lr-rib mirror): LocRib / AdjRibIn / AdjRibOut / RibMux
+     * / RouteSelector. Exercises the C ABI directly (no RAII wrapper).
+     * Mirrors the FFI tests in crates/lr-ffi/src/rib.rs. ---- */
+    {
+        /* LocRib lifecycle + install / uninstall / best. */
+        lr_loc_rib_t rib = lr_loc_rib_new();
+        check(rib != NULL, "lr_loc_rib_new");
+        check(lr_loc_rib_is_empty(rib) == 1, "LocRib fresh is empty");
+        check(lr_loc_rib_len(rib) == 0, "LocRib len == 0");
+        check(lr_loc_rib_paths_len(rib) == 0, "LocRib paths_len == 0");
+        check(lr_loc_rib_generation(rib) == 0, "LocRib generation == 0");
+
+        lr_route_t r1 = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        check(r1 != NULL, "lr_route_new_v4 for LocRib install");
+        int rc = lr_loc_rib_install(rib, r1);
+        check(rc == 1, "lr_loc_rib_install returns 1 (changed)");
+        check(lr_loc_rib_len(rib) == 1, "LocRib len == 1 after install");
+        check(lr_loc_rib_paths_len(rib) == 1, "LocRib paths_len == 1 after install");
+        uint64_t gen0 = lr_loc_rib_generation(rib);
+        check(gen0 >= 1, "LocRib generation advanced");
+
+        lr_prefix_t p = {0};
+        memcpy(p.addr, "\x0a\x00\x00\x01", 4);
+        p.is_ipv6 = 0;
+        p.prefix_len = 24;
+        check(lr_loc_rib_best_present(rib, &p, 1, 1, NULL) == 1,
+              "lr_loc_rib_best_present");
+        lr_route_t best = NULL;
+        rc = lr_loc_rib_best(rib, &p, 1, 1, NULL, &best);
+        check(rc == 0 && best != NULL, "lr_loc_rib_best non-null");
+        if (best) lr_route_free(best);
+
+        /* Re-install the same prefix is a no-op (no generation bump). */
+        lr_route_t r1b = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        rc = lr_loc_rib_install(rib, r1b);
+        check(rc == 0, "lr_loc_rib_install returns 0 (no-op)");
+        check(lr_loc_rib_generation(rib) == gen0,
+              "LocRib generation unchanged on no-op");
+
+        /* Uninstall. */
+        rc = lr_loc_rib_uninstall(rib, &p, 1, 1, NULL);
+        check(rc == 1, "lr_loc_rib_uninstall returns 1");
+        check(lr_loc_rib_len(rib) == 0, "LocRib len == 0 after uninstall");
+        check(lr_loc_rib_best_present(rib, &p, 1, 1, NULL) == 0,
+              "lr_loc_rib_best_present false after uninstall");
+        check(lr_loc_rib_uninstall(rib, &p, 1, 1, NULL) == 0,
+              "lr_loc_rib_uninstall returns 0 on second call");
+
+        /* install_set (RFC 7911 Add-Path) + iter_best / iter_paths /
+         * iter_sets. */
+        lr_route_t rr1 = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        lr_route_t rr2 = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        lr_route_key_t k = {0};
+        /* Structured lr_route_key_t: lr_core_prefix_t prefix + uint16_t
+         * afi_safi + uint8_t has_source + lr_core_prefix_t source_prefix.
+         * IPv4 occupies the *last* 4 bytes of the 16-byte octets array. */
+        k.prefix.addr.is_ipv6 = 0;
+        k.prefix.addr.octets[12] = 10; k.prefix.addr.octets[13] = 0;
+        k.prefix.addr.octets[14] = 0;  k.prefix.addr.octets[15] = 1;
+        k.prefix.prefix_len = 24;
+        k.afi_safi = (1u << 8) | 1u;
+        k.has_source = 0;
+        lr_route_t routes[2] = {rr1, rr2};
+        rc = lr_loc_rib_install_set(rib, &k, routes, 2);
+        check(rc == 0, "lr_loc_rib_install_set");
+        check(lr_loc_rib_paths_len(rib) == 2, "LocRib paths_len == 2 after install_set");
+        check(lr_loc_rib_len(rib) == 1, "LocRib len == 1 after install_set");
+        check(lr_loc_rib_paths(rib, &k) == 2, "lr_loc_rib_paths == 2");
+
+        /* iter_best with NULL cb correctly returns -1 (LR_ERR_NULL). */
+        int64_t n = lr_loc_rib_iter_best(rib, NULL, NULL);
+        check(n == -1, "lr_loc_rib_iter_best (NULL cb) returns -1");
+
+        /* diff_since: at least one added route. */
+        uintptr_t added = 0, modified = 0, removed = 0;
+        rc = lr_loc_rib_diff_since(rib, 0, &added, &modified, &removed);
+        check(rc == 0 && added >= 1, "lr_loc_rib_diff_since added >= 1");
+
+        /* Free the route handles (InstallSet did not consume them). */
+        lr_route_free(rr1);
+        lr_route_free(rr2);
+        lr_loc_rib_free(rib);
+
+        /* AdjRibIn lifecycle + feed / withdraw / get / origins_for. */
+        lr_adj_rib_in_t adj_in = lr_adj_rib_in_new();
+        check(adj_in != NULL, "lr_adj_rib_in_new");
+        check(lr_adj_rib_in_is_empty(adj_in) == 1, "AdjRibIn fresh is empty");
+        lr_route_t in_r = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        rc = lr_adj_rib_in_feed(adj_in, 42, LR_PROTO_BGP, in_r);
+        check(rc == 0, "lr_adj_rib_in_feed");
+        check(lr_adj_rib_in_len(adj_in) == 1, "AdjRibIn len == 1 after feed");
+
+        lr_route_origin_t origin = {0};
+        origin.protocol = LR_PROTO_BGP;
+        origin.peer = 42;
+        lr_route_t in_got = NULL;
+        rc = lr_adj_rib_in_get(adj_in, origin, &k, 0, &in_got);
+        check(rc == 1 && in_got != NULL, "lr_adj_rib_in_get returns 1");
+        if (in_got) lr_route_free(in_got);
+
+        uintptr_t orig_count = 0;
+        rc = lr_adj_rib_in_origins_for(adj_in, &k, NULL, 0, &orig_count);
+        check(rc == 0 && orig_count >= 1, "lr_adj_rib_in_origins_for count >= 1");
+
+        rc = lr_adj_rib_in_withdraw(adj_in, 42, LR_PROTO_BGP, &p, 1, 1, NULL, 0);
+        check(rc == 1, "lr_adj_rib_in_withdraw returns 1");
+        check(lr_adj_rib_in_len(adj_in) == 0, "AdjRibIn len == 0 after withdraw");
+        rc = lr_adj_rib_in_withdraw(adj_in, 42, LR_PROTO_BGP, &p, 1, 1, NULL, 0);
+        check(rc == 0, "lr_adj_rib_in_withdraw returns 0 on no-op");
+
+        lr_adj_rib_in_free(adj_in);
+
+        /* AdjRibOut: advertise / suppress / tx_path_ids. */
+        lr_adj_rib_out_t out = lr_adj_rib_out_new();
+        check(out != NULL, "lr_adj_rib_out_new");
+        check(lr_adj_rib_out_is_empty(out) == 1, "AdjRibOut fresh is empty");
+        lr_route_t out_r = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        rc = lr_adj_rib_out_advertise(out, 42, LR_PROTO_BGP, out_r, 100);
+        check(rc == 0, "lr_adj_rib_out_advertise 100");
+        rc = lr_adj_rib_out_advertise(out, 42, LR_PROTO_BGP, out_r, 200);
+        check(rc == 0, "lr_adj_rib_out_advertise 200");
+        check(lr_adj_rib_out_len(out) == 2, "AdjRibOut len == 2");
+
+        uintptr_t ids_count = 0;
+        rc = lr_adj_rib_out_tx_path_ids(out, origin, &k, NULL, 0, &ids_count);
+        check(rc == 0 && ids_count == 2, "lr_adj_rib_out_tx_path_ids count == 2");
+
+        rc = lr_adj_rib_out_suppress(out, 42, LR_PROTO_BGP, &p, 1, 1, NULL, 100);
+        check(rc == 1, "lr_adj_rib_out_suppress returns 1");
+        check(lr_adj_rib_out_len(out) == 1, "AdjRibOut len == 1 after suppress");
+        rc = lr_adj_rib_out_suppress(out, 42, LR_PROTO_BGP, &p, 1, 1, NULL, 100);
+        check(rc == 0, "lr_adj_rib_out_suppress returns 0 on no-op");
+
+        rc = lr_adj_rib_out_clear_for(out, origin);
+        check(rc == 0, "lr_adj_rib_out_clear_for");
+        check(lr_adj_rib_out_is_empty(out) == 1, "AdjRibOut empty after clear_for");
+
+        lr_route_free(out_r);
+        lr_adj_rib_out_free(out);
+
+        /* RibMux: install / uninstall / get. */
+        lr_rib_mux_t mux = lr_rib_mux_new();
+        check(mux != NULL, "lr_rib_mux_new");
+        check(lr_rib_mux_is_empty(mux) == 1, "RibMux fresh is empty");
+        lr_route_t mux_r = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        rc = lr_rib_mux_install(mux, mux_r);
+        check(rc == 0, "lr_rib_mux_install");
+        check(lr_rib_mux_len(mux) == 1, "RibMux len == 1 after install");
+        lr_route_t mux_got = NULL;
+        rc = lr_rib_mux_get(mux, &p, 1, 1, NULL, &mux_got);
+        check(rc == 0 && mux_got != NULL, "lr_rib_mux_get non-null");
+        if (mux_got) lr_route_free(mux_got);
+        rc = lr_rib_mux_uninstall(mux, &p, 1, 1, NULL);
+        check(rc == 1, "lr_rib_mux_uninstall returns 1");
+        check(lr_rib_mux_is_empty(mux) == 1, "RibMux empty after uninstall");
+        check(lr_rib_mux_uninstall(mux, &p, 1, 1, NULL) == 0,
+              "lr_rib_mux_uninstall returns 0 on no-op");
+        lr_rib_mux_free(mux);
+
+        /* RouteSelector: select / select_bgp. */
+        lr_route_t s1 = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        lr_route_t s2 = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+        lr_route_t sel[2] = {s1, s2};
+        int64_t idx = lr_route_selector_select(sel, 2);
+        check(idx == 0 || idx == 1, "lr_route_selector_select valid index");
+        int64_t idx_bgp = lr_route_selector_select_bgp(sel, 2);
+        check(idx_bgp == 0 || idx_bgp == 1, "lr_route_selector_select_bgp valid index");
+        check(lr_route_selector_select(NULL, 0) == -1, "select empty == -1");
+        lr_route_free(s1);
+        lr_route_free(s2);
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");
