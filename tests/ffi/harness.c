@@ -1606,6 +1606,92 @@ int main(void) {
         lr_srv6_sid_free(sid);
     }
 
+    /* ---- RTR client (RFC 8210 §6-§8): construct, readers,
+     * intervals, on_connect, on_pdu_raw, step accessor for
+     * roa_deltas/logs. Mirrors the FFI test in
+     * crates/lr-ffi/src/rtr_client.rs. ---- */
+    {
+        lr_rtr_client_t c = lr_rtr_client_new();
+        check(c != NULL, "lr_rtr_client_new returns non-null");
+        check(lr_rtr_client_version(c) != 0, "lr_rtr_client_version > 0");
+        uint16_t sid = 0;
+        check(lr_rtr_client_session_id(c, &sid) == 0, "session_id empty on fresh client");
+        uint32_t serial = 0;
+        check(lr_rtr_client_serial(c, &serial) == 0, "serial empty on fresh client");
+        char phase[32];
+        size_t n = lr_rtr_client_phase_name(c, (uint8_t*)phase, sizeof phase);
+        check(n == strlen("awaiting-reset") &&
+                  memcmp(phase, "awaiting-reset", n) == 0,
+              "phase_name is awaiting-reset on fresh client");
+
+        uint32_t refresh = 0, retry = 0, expire = 0;
+        check(lr_rtr_client_intervals(c, &refresh, &retry, &expire) == 0,
+              "lr_rtr_client_intervals succeeds");
+        check(refresh == 3600 && retry == 600 && expire == 7200,
+              "default intervals (RFC 8210 §6)");
+
+        check(lr_rtr_client_set_intervals(c, 100, 60, 600) == 0,
+              "lr_rtr_client_set_intervals succeeds");
+        uint32_t r2 = 0, re2 = 0, e2 = 0;
+        check(lr_rtr_client_intervals(c, &r2, &re2, &e2) == 0,
+              "lr_rtr_client_intervals round-trip succeeds");
+        check(r2 == 100 && re2 == 60 && e2 == 600,
+              "set_intervals round-trips the values");
+
+        /* on_connect emits a Reset Query (8 bytes, RFC 8210 §5.3). */
+        lr_bytes_t out = {};
+        check(lr_rtr_client_on_connect(c, &out) == 0,
+              "lr_rtr_client_on_connect succeeds");
+        check(out.len == 8, "on_connect emits 8-byte Reset Query");
+        check(out.ptr != NULL && out.ptr[1] == 2,
+              "Reset Query type byte == 2");
+        lr_bytes_free(&out);
+
+        /* poll on a fresh client returns an empty step. */
+        lr_rtr_client_step_t step = {};
+        check(lr_rtr_client_poll(c, 0, &step) == 0,
+              "lr_rtr_client_poll succeeds");
+        check(step.synced == 0, "fresh poll is not synced");
+        check(step.expired == 0, "fresh poll is not expired");
+        check(step.roa_delta_count == 0, "fresh poll has 0 deltas");
+        check(step.log_count == 0, "fresh poll has 0 logs");
+        check(step.send_bytes.len == 0, "fresh poll send_bytes empty");
+        check(step.roa_deltas == NULL, "fresh poll roa_deltas is NULL");
+        check(step.logs == NULL, "fresh poll logs is NULL");
+
+        /* out-of-bounds accessor returns -2 (LR_ERR_INVALID_HANDLE). */
+        lr_roa_delta_t d;
+        check(lr_rtr_client_step_roa_delta_at(&step, 0, &d) == -2,
+              "roa_delta_at out-of-bounds returns -2");
+        /* NULL step returns -1 (LR_ERR_NULL). */
+        check(lr_rtr_client_step_roa_delta_at(NULL, 0, &d) == -1,
+              "roa_delta_at NULL step returns -1");
+        check(lr_rtr_client_step_roa_delta_at(&step, 0, NULL) == -1,
+              "roa_delta_at NULL out returns -1");
+        /* log_at on empty step returns 0. */
+        check(lr_rtr_client_step_log_at(&step, 0, NULL, 0) == 0,
+              "log_at on empty step returns 0");
+        check(lr_rtr_client_step_log_at(NULL, 0, NULL, 0) == 0,
+              "log_at NULL step returns 0");
+
+        /* lr_rtr_client_step_free clears the fields. */
+        lr_rtr_client_step_free(&step);
+        check(step.roa_deltas == NULL && step.logs == NULL,
+              "step_free clears the pointer fields");
+        check(step.roa_delta_count == 0 && step.log_count == 0,
+              "step_free clears the count fields");
+        check(step.send_bytes.len == 0,
+              "step_free clears send_bytes");
+        /* step_free is safe on NULL. */
+        lr_rtr_client_step_free(NULL);
+
+        /* snapshot on fresh client is empty. */
+        check(lr_rtr_client_snapshot(c, NULL, 0) == 0,
+              "snapshot empty on fresh client");
+
+        lr_rtr_client_free(c);
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");
