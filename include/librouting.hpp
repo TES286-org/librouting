@@ -1403,6 +1403,15 @@ inline std::vector<lr_ext_comm_t> ext_communities(Route& r) {
     return out;
 }
 
+/// Replace the whole EXTENDED_COMMUNITIES attribute (RFC 4360). An
+/// empty list drops the attribute.
+inline void set_ext_communities(Route& r, const std::vector<lr_ext_comm_t>& items) {
+    check_rc(lr_route_set_ext_communities(r.get(),
+                                          items.empty() ? nullptr : items.data(),
+                                          items.size()),
+             "lr_route_set_ext_communities");
+}
+
 inline void set_metric(Route& r, std::uint32_t value) {
     check_rc(lr_route_set_metric(r.get(), value), "lr_route_set_metric");
 }
@@ -1425,6 +1434,274 @@ inline std::optional<std::uint32_t> tag(Route& r) {
     if (rc != 0) {
         throw Error("lr_route_tag failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
     }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// Per-route BGP / Babel / OSPF attribute readers (RFC 4271 §5.1,
+// RFC 4456 §8, RFC 6514 §5, RFC 7311, RFC 9231 §4, RFC 8966 §3.2/§4.6.9,
+// RFC 2328 §16 / RFC 5340 §4.1). Mirrors the `lr_route_*` C ABI surface
+// defined in `crates/lr-ffi/src/route_attrs.rs`. Every read returns
+// `std::nullopt` when the attribute is absent so the caller can
+// distinguish "no attribute" from "attribute is zero".
+// ---------------------------------------------------------------------------
+
+/// True when the route carries an ATOMIC_AGGREGATE (RFC 4271 §5.1.6).
+inline bool atomic_aggregate(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_atomic_aggregate(r.get(), &v), "lr_route_atomic_aggregate");
+    return v != 0;
+}
+
+/// The ORIGINATOR_ID (RFC 4456 §8). 4-byte IPv4; `nullopt` when absent.
+inline std::optional<std::array<std::uint8_t, 4>> originator_id(Route& r) {
+    std::array<std::uint8_t, 4> addr{};
+    std::uint8_t present = 0;
+    check_rc(lr_route_originator_id(r.get(), addr.data(), &present), "lr_route_originator_id");
+    if (!present) return std::nullopt;
+    return addr;
+}
+
+/// True when the route carries a CLUSTER_LIST (RFC 4456 §8).
+inline bool has_cluster_list(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_cluster_list(r.get(), &v), "lr_route_has_cluster_list");
+    return v != 0;
+}
+
+/// The CLUSTER_LIST (RFC 4456 §8) — flat 4-byte IPv4 Cluster-IDs.
+inline std::vector<std::array<std::uint8_t, 4>> cluster_list(Route& r) {
+    std::uintptr_t n = 0;
+    check_rc(lr_route_cluster_list_len(r.get(), &n), "lr_route_cluster_list_len");
+    std::vector<std::array<std::uint8_t, 4>> out(n);
+    for (std::uintptr_t i = 0; i < n; ++i) {
+        check_rc(lr_route_cluster_list_at(r.get(), i, out[i].data()), "lr_route_cluster_list_at");
+    }
+    return out;
+}
+
+/// True when the route carries an OTC attribute (RFC 9231 §4).
+inline bool has_otc(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_otc(r.get(), &v), "lr_route_has_otc");
+    return v != 0;
+}
+
+/// The OTC value (RFC 9231 §4). `nullopt` when absent.
+inline std::optional<std::uint32_t> otc(Route& r) {
+    std::uint32_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_otc(r.get(), &v, &present), "lr_route_otc");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// True when the route carries an AIGP attribute (RFC 7311).
+inline bool has_aigp(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_aigp(r.get(), &v), "lr_route_has_aigp");
+    return v != 0;
+}
+
+/// The AIGP value (RFC 7311). `nullopt` when absent.
+inline std::optional<std::uint64_t> aigp(Route& r) {
+    std::uint64_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_aigp(r.get(), &v, &present), "lr_route_aigp");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// True when the route carries an AGGREGATOR (RFC 4271 §5.1.7 / RFC 6793 §4).
+inline bool has_aggregator(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_aggregator(r.get(), &v), "lr_route_has_aggregator");
+    return v != 0;
+}
+
+/// The AGGREGATOR AS number (RFC 4271 §5.1.7 / RFC 6793 §4). `nullopt`
+/// when absent.
+inline std::optional<std::uint32_t> aggregator_asn(Route& r) {
+    std::uint32_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_aggregator_asn(r.get(), &v, &present), "lr_route_aggregator_asn");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// The AGGREGATOR speaker IPv4 address (RFC 4271 §5.1.7 / RFC 6793 §4).
+/// `nullopt` when absent.
+inline std::optional<std::array<std::uint8_t, 4>> aggregator_speaker(Route& r) {
+    std::array<std::uint8_t, 4> addr{};
+    std::uint8_t present = 0;
+    check_rc(lr_route_aggregator_speaker(r.get(), addr.data(), &present),
+             "lr_route_aggregator_speaker");
+    if (!present) return std::nullopt;
+    return addr;
+}
+
+/// True when the route carries a PMSI_TUNNEL attribute (RFC 6514 §5).
+inline bool has_pmsi_tunnel(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_pmsi_tunnel(r.get(), &v), "lr_route_has_pmsi_tunnel");
+    return v != 0;
+}
+
+/// The PMSI_TUNNEL flags (RFC 6514 §5). `nullopt` when absent.
+inline std::optional<std::uint8_t> pmsi_tunnel_flags(Route& r) {
+    std::uint8_t flags = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_pmsi_tunnel_flags(r.get(), &flags, &present), "lr_route_pmsi_tunnel_flags");
+    if (!present) return std::nullopt;
+    return flags;
+}
+
+/// The flat AS_SEQUENCE (RFC 4271 §5.1.2) — sets flattened in order.
+inline std::vector<std::uint32_t> as_sequence(Route& r) {
+    std::uintptr_t n = 0;
+    check_rc(lr_route_as_sequence_len(r.get(), &n), "lr_route_as_sequence_len");
+    std::vector<std::uint32_t> out(n);
+    for (std::uintptr_t i = 0; i < n; ++i) {
+        check_rc(lr_route_as_sequence_at(r.get(), i, &out[i]), "lr_route_as_sequence_at");
+    }
+    return out;
+}
+
+/// Replace the route's AS_PATH with a flat AS_SEQUENCE (RFC 4271 §5.1.2).
+inline void set_as_sequence(Route& r, const std::vector<std::uint32_t>& asns) {
+    check_rc(lr_route_set_as_sequence(r.get(),
+                                      asns.empty() ? nullptr : asns.data(),
+                                      asns.size()),
+             "lr_route_set_as_sequence");
+}
+
+/// Prepend `asn` to the route's AS_PATH (RFC 4271 §5.1.2 — the standard
+/// eBGP AS_PATH prepend action).
+inline void prepend_as(Route& r, std::uint32_t asn) {
+    check_rc(lr_route_prepend_as(r.get(), asn), "lr_route_prepend_as");
+}
+
+/// Remove `community` from the COMMUNITIES attribute (RFC 1997 §4).
+inline void remove_community(Route& r, std::uint32_t asn, std::uint16_t value) {
+    check_rc(lr_route_remove_community(r.get(), asn, value), "lr_route_remove_community");
+}
+
+/// True when the route carries a Babel metric attribute (RFC 8966 §3.2).
+inline bool has_babel_metric(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_babel_metric(r.get(), &v), "lr_route_has_babel_metric");
+    return v != 0;
+}
+
+/// The Babel primary metric (RFC 8966 §3.2 + §3.4.3). `nullopt` when absent.
+inline std::optional<std::uint32_t> babel_metric(Route& r) {
+    std::uint32_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_babel_metric(r.get(), &v, &present), "lr_route_babel_metric");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// True when the route carries a Babel sequence number attribute.
+inline bool has_babel_seqno(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_babel_seqno(r.get(), &v), "lr_route_has_babel_seqno");
+    return v != 0;
+}
+
+/// The Babel sequence number (RFC 8966 §3.2 + §4.6.9). `nullopt` when absent.
+inline std::optional<std::uint16_t> babel_seqno(Route& r) {
+    std::uint16_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_babel_seqno(r.get(), &v, &present), "lr_route_babel_seqno");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// True when the route carries a Babel router-id attribute.
+inline bool has_babel_router_id(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_babel_router_id(r.get(), &v), "lr_route_has_babel_router_id");
+    return v != 0;
+}
+
+/// The Babel router-id (RFC 8966 §3.2 + §4.6.9), 8 bytes big-endian.
+/// `nullopt` when absent.
+inline std::optional<std::array<std::uint8_t, 8>> babel_router_id(Route& r) {
+    std::array<std::uint8_t, 8> rid{};
+    std::uint8_t present = 0;
+    check_rc(lr_route_babel_router_id(r.get(), rid.data(), &present),
+             "lr_route_babel_router_id");
+    if (!present) return std::nullopt;
+    return rid;
+}
+
+/// True when the route carries an OSPF metric1 attribute (RFC 2328 §16).
+inline bool has_ospf_metric1(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_ospf_metric1(r.get(), &v), "lr_route_has_ospf_metric1");
+    return v != 0;
+}
+
+/// The OSPF primary metric (RFC 2328 §16 / RFC 5340 §4.1). `nullopt` when
+/// absent.
+inline std::optional<std::uint32_t> ospf_metric1(Route& r) {
+    std::uint32_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_ospf_metric1(r.get(), &v, &present), "lr_route_ospf_metric1");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// True when the route carries an OSPF metric2 attribute.
+inline bool has_ospf_metric2(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_ospf_metric2(r.get(), &v), "lr_route_has_ospf_metric2");
+    return v != 0;
+}
+
+/// The OSPF type-2 external metric (RFC 2328 §16.4 / RFC 5340 §4.8.5).
+/// `nullopt` when absent.
+inline std::optional<std::uint32_t> ospf_metric2(Route& r) {
+    std::uint32_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_ospf_metric2(r.get(), &v, &present), "lr_route_ospf_metric2");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// True when the route carries an OSPF tag attribute.
+inline bool has_ospf_tag(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_ospf_tag(r.get(), &v), "lr_route_has_ospf_tag");
+    return v != 0;
+}
+
+/// The OSPF external route tag (RFC 2328 §A.4.5 / RFC 3101 §2.3 /
+/// RFC 5340 §A.4.7 T bit / RFC 8362 External-Prefix sub-TLV 3).
+/// `nullopt` when absent.
+inline std::optional<std::uint32_t> ospf_tag(Route& r) {
+    std::uint32_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_ospf_tag(r.get(), &v, &present), "lr_route_ospf_tag");
+    if (!present) return std::nullopt;
+    return v;
+}
+
+/// True when the route carries an OSPF router-id attribute.
+inline bool has_ospf_router_id(Route& r) {
+    std::uint8_t v = 0;
+    check_rc(lr_route_has_ospf_router_id(r.get(), &v), "lr_route_has_ospf_router_id");
+    return v != 0;
+}
+
+/// The OSPF advertising router (RFC 2328 §A.4 / RFC 5340 §A.4).
+/// `nullopt` when absent.
+inline std::optional<std::uint32_t> ospf_router_id(Route& r) {
+    std::uint32_t v = 0;
+    std::uint8_t present = 0;
+    check_rc(lr_route_ospf_router_id(r.get(), &v, &present), "lr_route_ospf_router_id");
+    if (!present) return std::nullopt;
     return v;
 }
 
