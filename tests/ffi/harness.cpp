@@ -1197,6 +1197,159 @@ int main() {
         check(snap.empty(), "RtrClient snapshot empty on fresh client");
     }
 
+    // ---- RIB RAII wrappers (lr_rib mirror): LocRib / AdjRibIn /
+    // AdjRibOut / RibMux / RouteSelector. Mirrors the FFI tests in
+    // crates/lr-ffi/src/rib.rs. ----
+    {
+        // LocRib lifecycle + install / uninstall / best.
+        LocRib rib;
+        check(rib.empty(), "LocRib fresh is empty");
+        check(rib.size() == 0, "LocRib size == 0");
+        check(rib.paths_size() == 0, "LocRib paths_size == 0");
+        check(rib.generation() == 0, "LocRib generation == 0");
+
+        auto r1 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        bool changed = rib.install(std::move(r1));
+        check(changed, "LocRib install changed");
+        check(rib.size() == 1, "LocRib size == 1 after install");
+        check(rib.paths_size() == 1, "LocRib paths_size == 1 after install");
+        auto gen0 = rib.generation();
+        check(gen0 >= 1, "LocRib generation advanced");
+
+        RouteKey k;
+        k.addr = {10, 0, 0, 1};
+        k.prefix_len = 24;
+        k.afi = AFI_IPV4;
+        k.safi = SAFI_UNICAST;
+        check(rib.best_present(k), "LocRib best_present");
+        auto best = rib.best(k);
+        check(best != nullptr, "LocRib best non-null");
+
+        // Re-install the same prefix is a no-op (no generation bump).
+        auto r1b = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        bool changed2 = rib.install(std::move(r1b));
+        check(!changed2, "LocRib re-install is no-op");
+        check(rib.generation() == gen0, "LocRib generation unchanged on no-op");
+
+        // Uninstall.
+        check(rib.uninstall(k), "LocRib uninstall returns true");
+        check(rib.size() == 0, "LocRib size == 0 after uninstall");
+        check(!rib.best_present(k), "LocRib best_present false after uninstall");
+        check(!rib.uninstall(k), "LocRib second uninstall is no-op");
+
+        // Install_set (RFC 7911 Add-Path) + iter_best / iter_paths /
+        // iter_sets.
+        auto p1 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        auto p2 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        std::vector<Route> paths;
+        paths.push_back(std::move(p1));
+        paths.push_back(std::move(p2));
+        rib.install_set(k, paths);
+        check(rib.paths_size() == 2, "LocRib paths_size == 2 after install_set");
+        check(rib.size() == 1, "LocRib size == 1 after install_set");
+        check(rib.paths(k) == 2, "LocRib paths(k) == 2");
+
+        std::size_t n_best = rib.iter_best([&](lr_route_t) {});
+        check(n_best == 1, "LocRib iter_best count == 1");
+        std::size_t n_paths = rib.iter_paths([&](lr_route_t) {});
+        check(n_paths == 2, "LocRib iter_paths count == 2");
+        std::size_t n_sets = rib.iter_sets([&](std::array<std::uint8_t, 16> addr,
+                                                std::uint8_t plen, bool is_v6,
+                                                std::size_t cnt) {
+            check(plen == 24, "LocRib iter_sets prefix_len == 24");
+            check(!is_v6, "LocRib iter_sets not IPv6");
+            check(cnt == 2, "LocRib iter_sets path_count == 2");
+            check(addr[0] == 10 && addr[1] == 0 && addr[2] == 0 && addr[3] == 1,
+                  "LocRib iter_sets addr[:4] == 10.0.0.1");
+        });
+        check(n_sets == 1, "LocRib iter_sets count == 1");
+
+        // diff_since: at least one added route.
+        auto diff = rib.diff_since(0);
+        check(diff.added >= 1, "LocRib diff_since added >= 1");
+
+        // IPv6 install + best.
+        LocRib v6rib;
+        RouteKey k6;
+        k6.addr = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+        k6.prefix_len = 64;
+        k6.afi = AFI_IPV6;
+        k6.safi = SAFI_UNICAST;
+        std::array<std::uint8_t, 16> v6_octets = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+        auto v6 = make_route_v6(v6_octets, 64, Protocol::Bgp);
+        v6rib.install(std::move(v6));
+        check(v6rib.best_present(k6), "LocRib v6 best_present");
+
+        // AdjRibIn lifecycle + feed / withdraw / get / origins_for /
+        // iter_all / iter_origin / clear_for.
+        AdjRibIn adj_in;
+        check(adj_in.empty(), "AdjRibIn fresh is empty");
+        RouteOrigin origin{Protocol::Bgp, 42};
+        auto in_r = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        adj_in.feed(origin, std::move(in_r));
+        check(adj_in.size() == 1, "AdjRibIn size == 1 after feed");
+        auto in_got = adj_in.get(origin, k, 0);
+        check(in_got != nullptr, "AdjRibIn get non-null");
+        auto origins = adj_in.origins_for(k);
+        check(!origins.empty(), "AdjRibIn origins_for non-empty");
+        bool found = false;
+        for (const auto& o : origins) {
+            if (o.protocol == Protocol::Bgp && o.peer == 42) found = true;
+        }
+        check(found, "AdjRibIn origins_for contains (Bgp, 42)");
+
+        auto in_r2 = make_route_v4({10, 0, 0, 2}, 24, Protocol::Bgp);
+        adj_in.feed(origin, std::move(in_r2));
+        std::size_t n_all = adj_in.iter_all([&](lr_route_t) {});
+        check(n_all == 2, "AdjRibIn iter_all count == 2");
+        std::size_t n_org = adj_in.iter_origin(origin, [&](lr_route_t) {});
+        check(n_org == 2, "AdjRibIn iter_origin count == 2");
+        adj_in.clear_for(origin);
+        check(adj_in.empty(), "AdjRibIn empty after clear_for");
+
+        // AdjRibOut: advertise / suppress / tx_path_ids / iter_for /
+        // clear_for.
+        AdjRibOut out;
+        check(out.empty(), "AdjRibOut fresh is empty");
+        auto out_r = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        out.advertise(origin, out_r, 100);
+        out.advertise(origin, out_r, 200);
+        check(out.size() == 2, "AdjRibOut size == 2 after 2 advertises");
+        auto ids = out.tx_path_ids(origin, k);
+        check(ids.size() == 2, "AdjRibOut tx_path_ids size == 2");
+        std::size_t n_for = out.iter_for(origin, [&](lr_route_t) {});
+        check(n_for == 2, "AdjRibOut iter_for count == 2");
+        check(out.suppress(origin, k, 100), "AdjRibOut suppress returns true");
+        check(out.size() == 1, "AdjRibOut size == 1 after suppress");
+        check(!out.suppress(origin, k, 100), "AdjRibOut suppress (no-op)");
+        out.clear_for(origin);
+        check(out.empty(), "AdjRibOut empty after clear_for");
+
+        // RibMux: install / uninstall / get.
+        RibMux mux;
+        check(mux.empty(), "RibMux fresh is empty");
+        auto mux_r = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        mux.install(std::move(mux_r));
+        check(mux.size() == 1, "RibMux size == 1 after install");
+        auto mux_got = mux.get(k);
+        check(mux_got != nullptr, "RibMux get non-null");
+        check(mux.uninstall(k), "RibMux uninstall returns true");
+        check(mux.empty(), "RibMux empty after uninstall");
+        check(!mux.uninstall(k), "RibMux uninstall (no-op)");
+
+        // RouteSelector.
+        auto s1 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        auto s2 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+        std::vector<lr_route_t> sel = {s1.get(), s2.get()};
+        auto idx = RouteSelector::select(sel);
+        check(idx == 0 || idx == 1, "RouteSelector::select returns valid index");
+        auto idx_bgp = RouteSelector::select_bgp(sel);
+        check(idx_bgp == 0 || idx_bgp == 1, "RouteSelector::select_bgp returns valid index");
+        auto empty = std::vector<lr_route_t>{};
+        check(RouteSelector::select(empty) == -1, "RouteSelector::select empty == -1");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

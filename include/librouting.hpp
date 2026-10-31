@@ -3897,5 +3897,536 @@ private:
     std::unique_ptr<OpaqueRtrClient, RtrClientDeleter> ptr_;
 };
 
+// ===========================================================================
+// RIB storage — Loc-RIB / Adj-RIB-In / Adj-RIB-Out / cross-protocol mux.
+//
+// Mirrors the public Rust API of lr_rib::{LocRib, AdjRibIn, AdjRibOut,
+// RibMux, RouteSelector} and the C ABI surface in crates/lr-ffi/src/rib.rs
+// (lr_loc_rib_*, lr_adj_rib_in_*, lr_adj_rib_out_*, lr_rib_mux_*,
+// lr_route_selector_*).
+//
+// RFC references:
+//   - RFC 4271 §9: the RIB model (Adj-RIB-In, Loc-RIB, Adj-RIB-Out).
+//   - RFC 7911: Add-Path keeps more than one path per prefix in Loc-RIB.
+//   - RFC 8277: labeled-unicast uses a source-prefix in the key.
+// ===========================================================================
+
+namespace detail {
+struct LocRibDeleter {
+    void operator()(lr_loc_rib_t p) const noexcept { if (p) lr_loc_rib_free(p); }
+};
+struct AdjRibInDeleter {
+    void operator()(lr_adj_rib_in_t p) const noexcept { if (p) lr_adj_rib_in_free(p); }
+};
+struct AdjRibOutDeleter {
+    void operator()(lr_adj_rib_out_t p) const noexcept { if (p) lr_adj_rib_out_free(p); }
+};
+struct RibMuxDeleter {
+    void operator()(lr_rib_mux_t p) const noexcept { if (p) lr_rib_mux_free(p); }
+};
+} // namespace detail
+
+/// AFI / SAFI constants (mirror lr_core::nlri::NlriFamily).
+inline constexpr std::uint16_t AFI_IPV4 = 1;
+inline constexpr std::uint16_t AFI_IPV6 = 2;
+inline constexpr std::uint8_t SAFI_UNICAST = 1;
+inline constexpr std::uint8_t SAFI_MULTICAST = 2;
+inline constexpr std::uint8_t SAFI_LABELED_UNICAST = 4;
+
+/// Repr-C RouteKey mirror. The prefix is (addr, prefix_len); the
+/// address slice is 4 (IPv4) or 16 (IPv6) bytes. `afi` / `safi`
+/// identify the NLRI family. The optional source prefix carries the
+/// RFC 8277 source-specific address.
+struct RouteKey {
+    std::vector<std::uint8_t> addr;
+    std::uint8_t prefix_len = 0;
+    std::uint16_t afi = AFI_IPV4;
+    std::uint8_t safi = SAFI_UNICAST;
+    std::vector<std::uint8_t> source;  // empty when has_source == 0
+    std::uint8_t source_len = 0;
+};
+
+/// Repr-C RouteOrigin mirror. `protocol` is one of the Protocol
+/// constants; `peer` is the per-peer session handle (0 for locally
+/// originated routes).
+struct RouteOrigin {
+    Protocol protocol = Protocol::Bgp;
+    std::uint64_t peer = 0;
+};
+
+/// Generation-based delta returned from LocRib::diff_since. Only the
+/// three counts are surfaced through the C ABI today.
+struct RibDiff {
+    std::size_t added = 0;
+    std::size_t modified = 0;
+    std::size_t removed = 0;
+};
+
+namespace detail {
+/// Build a `lr_prefix_t` from a (addr, prefix_len) pair. The address
+/// slice must be 4 or 16 bytes.
+inline lr_prefix_t to_lr_prefix(const std::vector<std::uint8_t>& addr,
+                                 std::uint8_t prefix_len) {
+    if (addr.size() != 4 && addr.size() != 16) {
+        throw Error("prefix address must be 4 or 16 bytes");
+    }
+    lr_prefix_t p{};
+    std::copy(addr.begin(), addr.end(), p.addr);
+    p.is_ipv6 = addr.size() == 16 ? 1 : 0;
+    p.prefix_len = prefix_len;
+    return p;
+}
+
+/// Build a `lr_core_prefix_t` from a (addr, prefix_len) pair. IPv4
+/// addresses occupy the *last* 4 bytes of the 16-byte `octets` array
+/// (the IPv4-mapped IPv6 layout the C ABI uses).
+inline lr_core_prefix_t to_lr_core_prefix(const std::vector<std::uint8_t>& addr,
+                                            std::uint8_t prefix_len) {
+    if (addr.size() != 4 && addr.size() != 16) {
+        throw Error("prefix address must be 4 or 16 bytes");
+    }
+    lr_core_prefix_t p{};
+    if (addr.size() == 4) {
+        p.addr.is_ipv6 = 0;
+        for (std::size_t i = 0; i < 4; ++i) p.addr.octets[12 + i] = addr[i];
+    } else {
+        p.addr.is_ipv6 = 1;
+        for (std::size_t i = 0; i < 16; ++i) p.addr.octets[i] = addr[i];
+    }
+    p.prefix_len = prefix_len;
+    return p;
+}
+
+/// Build a `lr_route_key_t` from a RouteKey. The structured layout
+/// matches the C header (lr_core_prefix_t prefix + uint16_t afi_safi
+/// + uint8_t has_source + lr_core_prefix_t source_prefix).
+inline lr_route_key_t to_lr_route_key(const RouteKey& k) {
+    lr_route_key_t ck{};
+    ck.prefix = to_lr_core_prefix(k.addr, k.prefix_len);
+    ck.afi_safi = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(k.afi) << 8) |
+        (static_cast<std::uint16_t>(k.safi) & 0xff));
+    if (!k.source.empty()) {
+        ck.has_source = 1;
+        ck.source_prefix = to_lr_core_prefix(k.source, k.source_len);
+    } else {
+        ck.has_source = 0;
+    }
+    return ck;
+}
+
+inline lr_route_origin_t to_lr_route_origin(const RouteOrigin& o) {
+    lr_route_origin_t out{};
+    out.protocol = static_cast<std::uint8_t>(o.protocol);
+    out.peer = o.peer;
+    return out;
+}
+} // namespace detail
+
+/// RAII handle to one lr_rib::LocRib (RFC 4271 §9.1). The Loc-RIB
+/// holds the routes after import policy and best-path selection.
+class LocRib {
+public:
+    LocRib() : ptr_(lr_loc_rib_new()) {
+        if (!ptr_) throw Error(std::string("lr_loc_rib_new: ") + lr_last_error());
+    }
+
+    std::size_t size() const noexcept { return lr_loc_rib_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_loc_rib_is_empty(ptr_.get()) != 0; }
+    /// Total number of stored paths (>= size() under RFC 7911 Add-Path).
+    std::size_t paths_size() const noexcept { return lr_loc_rib_paths_len(ptr_.get()); }
+    std::uint64_t generation() const noexcept { return lr_loc_rib_generation(ptr_.get()); }
+
+    /// Install one path. The route handle is *consumed*.
+    /// Returns true when the install changed the Loc-RIB.
+    bool install(Route route) {
+        int rc = lr_loc_rib_install(ptr_.get(), route.release());
+        if (rc < 0) throw Error(std::string("lr_loc_rib_install: ") + lr_last_error());
+        return rc == 1;
+    }
+    /// Uninstall a key. Returns true when a route was withdrawn.
+    bool uninstall(const RouteKey& k) {
+        lr_prefix_t prefix = detail::to_lr_prefix(k.addr, k.prefix_len);
+        lr_prefix_t src{};
+        lr_prefix_t* src_p = nullptr;
+        if (!k.source.empty()) {
+            src = detail::to_lr_prefix(k.source, k.source_len);
+            src_p = &src;
+        }
+        int rc = lr_loc_rib_uninstall(ptr_.get(), &prefix, k.afi, k.safi, src_p);
+        if (rc < 0) throw Error(std::string("lr_loc_rib_uninstall: ") + lr_last_error());
+        return rc == 1;
+    }
+    /// Install a ranked set of paths for a key (RFC 7911 Add-Path).
+    /// The handles are *not* consumed — the Loc-RIB clones the
+    /// underlying Route value.
+    void install_set(const RouteKey& k, const std::vector<Route>& routes) {
+        if (routes.empty()) throw Error("install_set: at least one route required");
+        lr_route_key_t ck = detail::to_lr_route_key(k);
+        std::vector<lr_route_t> handles(routes.size());
+        for (std::size_t i = 0; i < routes.size(); ++i) {
+            handles[i] = const_cast<Route&>(routes[i]).get();
+        }
+        int rc = lr_loc_rib_install_set(ptr_.get(), &ck, handles.data(), routes.size());
+        if (rc < 0) throw Error(std::string("lr_loc_rib_install_set: ") + lr_last_error());
+    }
+    /// Number of paths stored for a key (RFC 7911 Add-Path).
+    std::size_t paths(const RouteKey& k) const {
+        lr_route_key_t ck = detail::to_lr_route_key(k);
+        return lr_loc_rib_paths(ptr_.get(), &ck);
+    }
+    /// True when a route is present for the given key.
+    bool best_present(const RouteKey& k) const {
+        lr_prefix_t prefix = detail::to_lr_prefix(k.addr, k.prefix_len);
+        lr_prefix_t src{};
+        lr_prefix_t* src_p = nullptr;
+        if (!k.source.empty()) {
+            src = detail::to_lr_prefix(k.source, k.source_len);
+            src_p = &src;
+        }
+        return lr_loc_rib_best_present(ptr_.get(), &prefix, k.afi, k.safi, src_p) != 0;
+    }
+    /// Read the best path for a key. Returns a NEW Route (a copy the
+    /// caller owns), or nullptr when the key is absent.
+    Route best(const RouteKey& k) const {
+        lr_prefix_t prefix = detail::to_lr_prefix(k.addr, k.prefix_len);
+        lr_prefix_t src{};
+        lr_prefix_t* src_p = nullptr;
+        if (!k.source.empty()) {
+            src = detail::to_lr_prefix(k.source, k.source_len);
+            src_p = &src;
+        }
+        lr_route_t out = nullptr;
+        int rc = lr_loc_rib_best(ptr_.get(), &prefix, k.afi, k.safi, src_p, &out);
+        if (rc < 0) throw Error(std::string("lr_loc_rib_best: ") + lr_last_error());
+        return Route(out);
+    }
+    /// Walk every best route in the Loc-RIB. The callback receives a
+    /// *borrowed* route handle — the caller must NOT free it.
+    template <typename F>
+    std::size_t iter_best(F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_route_t route, void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            Route borrowed(route);
+            (*c->f)(borrowed.get());
+            borrowed.release();
+        };
+        std::int64_t n = lr_loc_rib_iter_best(ptr_.get(), trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_loc_rib_iter_best: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
+    /// Walk every path (every multipath entry, not just the best).
+    template <typename F>
+    std::size_t iter_paths(F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_route_t route, void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            Route borrowed(route);
+            (*c->f)(borrowed.get());
+            borrowed.release();
+        };
+        std::int64_t n = lr_loc_rib_iter_paths(ptr_.get(), trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_loc_rib_iter_paths: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
+    /// Walk every (RouteKey, paths) set in the Loc-RIB. The callback
+    /// receives a 16-byte address buffer (IPv4 occupies the first 4
+    /// bytes), the prefix length, an IPv6 flag, and the path count.
+    template <typename F>
+    std::size_t iter_sets(F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](std::uint8_t* prefix_out, std::uint8_t prefix_len,
+                              std::uint8_t is_ipv6, std::uintptr_t path_count,
+                              void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            std::array<std::uint8_t, 16> addr{};
+            for (std::size_t i = 0; i < 16; ++i) addr[i] = prefix_out[i];
+            (*c->f)(addr, prefix_len, is_ipv6 != 0, static_cast<std::size_t>(path_count));
+        };
+        std::int64_t n = lr_loc_rib_iter_sets(ptr_.get(), trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_loc_rib_iter_sets: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
+    /// Compute the diff between the Loc-RIB's current state and its
+    /// state at generation `since_gen`.
+    RibDiff diff_since(std::uint64_t since_gen) const {
+        std::uintptr_t added = 0, modified = 0, removed = 0;
+        int rc = lr_loc_rib_diff_since(ptr_.get(), since_gen, &added, &modified, &removed);
+        if (rc < 0) throw Error(std::string("lr_loc_rib_diff_since: ") + lr_last_error());
+        return RibDiff{added, modified, removed};
+    }
+
+private:
+    std::unique_ptr<OpaqueLocRib, detail::LocRibDeleter> ptr_;
+};
+
+/// RAII handle to one lr_rib::AdjRibIn (RFC 4271 §9). The Adj-RIB-In
+/// holds the pre-policy routes received from each peer, keyed by
+/// (origin, RouteKey, path_id).
+class AdjRibIn {
+public:
+    AdjRibIn() : ptr_(lr_adj_rib_in_new()) {
+        if (!ptr_) throw Error(std::string("lr_adj_rib_in_new: ") + lr_last_error());
+    }
+
+    std::size_t size() const noexcept { return lr_adj_rib_in_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_adj_rib_in_is_empty(ptr_.get()) != 0; }
+
+    /// Install one pre-policy route from `origin`. The route handle
+    /// is *consumed*.
+    void feed(const RouteOrigin& origin, Route route) {
+        int rc = lr_adj_rib_in_feed(ptr_.get(), origin.peer,
+                                     static_cast<std::int32_t>(origin.protocol),
+                                     route.release());
+        if (rc < 0) throw Error(std::string("lr_adj_rib_in_feed: ") + lr_last_error());
+    }
+    /// Withdraw one (origin, key, path_id) tuple. Returns true when
+    /// a route was withdrawn.
+    bool withdraw(const RouteOrigin& origin, const RouteKey& k, std::uint32_t path_id = 0) {
+        lr_prefix_t prefix = detail::to_lr_prefix(k.addr, k.prefix_len);
+        lr_prefix_t src{};
+        lr_prefix_t* src_p = nullptr;
+        if (!k.source.empty()) {
+            src = detail::to_lr_prefix(k.source, k.source_len);
+            src_p = &src;
+        }
+        int rc = lr_adj_rib_in_withdraw(ptr_.get(), origin.peer,
+                                          static_cast<std::int32_t>(origin.protocol),
+                                          &prefix, k.afi, k.safi, src_p, path_id);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_in_withdraw: ") + lr_last_error());
+        return rc == 1;
+    }
+    /// Look up a route by (origin, key, path_id). Returns a NEW Route
+    /// (a copy) or nullptr when absent.
+    Route get(const RouteOrigin& origin, const RouteKey& k, std::uint32_t path_id = 0) const {
+        lr_route_key_t ck = detail::to_lr_route_key(k);
+        lr_route_origin_t oc = detail::to_lr_route_origin(origin);
+        lr_route_t out = nullptr;
+        int rc = lr_adj_rib_in_get(ptr_.get(), oc, &ck, path_id, &out);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_in_get: ") + lr_last_error());
+        return Route(out);
+    }
+    /// List the origins that have a route for `key`.
+    std::vector<RouteOrigin> origins_for(const RouteKey& k) const {
+        lr_route_key_t ck = detail::to_lr_route_key(k);
+        std::vector<lr_route_origin_t> buf(64);
+        std::uintptr_t count = 0;
+        int rc = lr_adj_rib_in_origins_for(ptr_.get(), &ck, buf.data(), buf.size(), &count);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_in_origins_for: ") + lr_last_error());
+        if (count > buf.size()) {
+            buf.resize(count);
+            rc = lr_adj_rib_in_origins_for(ptr_.get(), &ck, buf.data(), buf.size(), &count);
+            if (rc < 0) throw Error(std::string("lr_adj_rib_in_origins_for (retry): ") + lr_last_error());
+        }
+        std::vector<RouteOrigin> out(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            out[i] = RouteOrigin{static_cast<Protocol>(buf[i].protocol), buf[i].peer};
+        }
+        return out;
+    }
+    /// Drop every route from every origin.
+    void clear() {
+        int rc = lr_adj_rib_in_clear(ptr_.get());
+        if (rc < 0) throw Error(std::string("lr_adj_rib_in_clear: ") + lr_last_error());
+    }
+    /// Drop every route from one origin.
+    void clear_for(const RouteOrigin& origin) {
+        lr_route_origin_t oc = detail::to_lr_route_origin(origin);
+        int rc = lr_adj_rib_in_clear_for(ptr_.get(), oc);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_in_clear_for: ") + lr_last_error());
+    }
+    /// Walk every route in the Adj-RIB-In, regardless of origin.
+    template <typename F>
+    std::size_t iter_all(F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_route_t route, void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            Route borrowed(route);
+            (*c->f)(borrowed.get());
+            borrowed.release();
+        };
+        std::int64_t n = lr_adj_rib_in_iter_all(ptr_.get(), trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_adj_rib_in_iter_all: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
+    /// Walk every route from one origin.
+    template <typename F>
+    std::size_t iter_origin(const RouteOrigin& origin, F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_route_t route, void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            Route borrowed(route);
+            (*c->f)(borrowed.get());
+            borrowed.release();
+        };
+        std::int64_t n = lr_adj_rib_in_iter_origin(ptr_.get(), origin.peer,
+                                                     static_cast<std::int32_t>(origin.protocol),
+                                                     trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_adj_rib_in_iter_origin: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
+
+private:
+    std::unique_ptr<OpaqueAdjRibIn, detail::AdjRibInDeleter> ptr_;
+};
+
+/// RAII handle to one lr_rib::AdjRibOut (RFC 4271 §9). The Adj-RIB-Out
+/// holds the routes advertised to each peer, keyed by
+/// (dest, RouteKey, tx_path_id).
+class AdjRibOut {
+public:
+    AdjRibOut() : ptr_(lr_adj_rib_out_new()) {
+        if (!ptr_) throw Error(std::string("lr_adj_rib_out_new: ") + lr_last_error());
+    }
+
+    std::size_t size() const noexcept { return lr_adj_rib_out_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_adj_rib_out_is_empty(ptr_.get()) != 0; }
+
+    /// Advertise one route to a destination. The route handle is
+    /// *not* consumed — the Adj-RIB-Out stores a clone.
+    void advertise(const RouteOrigin& dest, const Route& route, std::uint32_t tx_path_id = 0) {
+        int rc = lr_adj_rib_out_advertise(ptr_.get(), dest.peer,
+                                            static_cast<std::int32_t>(dest.protocol),
+                                            const_cast<lr_route_t>(route.get()), tx_path_id);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_out_advertise: ") + lr_last_error());
+    }
+    /// Suppress (withdraw) one (dest, key, tx_path_id) tuple. Returns
+    /// true when a route was suppressed.
+    bool suppress(const RouteOrigin& dest, const RouteKey& k, std::uint32_t tx_path_id = 0) {
+        lr_prefix_t prefix = detail::to_lr_prefix(k.addr, k.prefix_len);
+        lr_prefix_t src{};
+        lr_prefix_t* src_p = nullptr;
+        if (!k.source.empty()) {
+            src = detail::to_lr_prefix(k.source, k.source_len);
+            src_p = &src;
+        }
+        int rc = lr_adj_rib_out_suppress(ptr_.get(), dest.peer,
+                                            static_cast<std::int32_t>(dest.protocol),
+                                            &prefix, k.afi, k.safi, src_p, tx_path_id);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_out_suppress: ") + lr_last_error());
+        return rc == 1;
+    }
+    /// Read the TX path IDs advertised to `dest` for `key`.
+    std::vector<std::uint32_t> tx_path_ids(const RouteOrigin& dest, const RouteKey& k) const {
+        lr_route_key_t ck = detail::to_lr_route_key(k);
+        lr_route_origin_t oc = detail::to_lr_route_origin(dest);
+        std::vector<std::uint32_t> buf(64);
+        std::uintptr_t count = 0;
+        int rc = lr_adj_rib_out_tx_path_ids(ptr_.get(), oc, &ck, buf.data(), buf.size(), &count);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_out_tx_path_ids: ") + lr_last_error());
+        if (count > buf.size()) {
+            buf.resize(count);
+            rc = lr_adj_rib_out_tx_path_ids(ptr_.get(), oc, &ck, buf.data(), buf.size(), &count);
+            if (rc < 0) throw Error(std::string("lr_adj_rib_out_tx_path_ids (retry): ") + lr_last_error());
+        }
+        buf.resize(count);
+        return buf;
+    }
+    /// Drop every advertised route. The RIB becomes empty.
+    void clear() {
+        int rc = lr_adj_rib_out_clear(ptr_.get());
+        if (rc < 0) throw Error(std::string("lr_adj_rib_out_clear: ") + lr_last_error());
+    }
+    /// Drop every advertised route for one destination.
+    void clear_for(const RouteOrigin& dest) {
+        lr_route_origin_t oc = detail::to_lr_route_origin(dest);
+        int rc = lr_adj_rib_out_clear_for(ptr_.get(), oc);
+        if (rc < 0) throw Error(std::string("lr_adj_rib_out_clear_for: ") + lr_last_error());
+    }
+    /// Walk every route advertised to a given destination.
+    template <typename F>
+    std::size_t iter_for(const RouteOrigin& dest, F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_route_t route, void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            Route borrowed(route);
+            (*c->f)(borrowed.get());
+            borrowed.release();
+        };
+        std::int64_t n = lr_adj_rib_out_iter_for(ptr_.get(), dest.peer,
+                                                   static_cast<std::int32_t>(dest.protocol),
+                                                   trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_adj_rib_out_iter_for: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
+
+private:
+    std::unique_ptr<OpaqueAdjRibOut, detail::AdjRibOutDeleter> ptr_;
+};
+
+/// RAII handle to one lr_rib::RibMux — the cross-protocol mux (RFC
+/// 4271 §9 + the admin-distance model the daemon uses to merge BGP /
+/// OSPF / Babel routes into one FIB).
+class RibMux {
+public:
+    RibMux() : ptr_(lr_rib_mux_new()) {
+        if (!ptr_) throw Error(std::string("lr_rib_mux_new: ") + lr_last_error());
+    }
+
+    std::size_t size() const noexcept { return lr_rib_mux_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_rib_mux_is_empty(ptr_.get()) != 0; }
+
+    /// Install one route (the handle is *consumed*).
+    void install(Route route) {
+        int rc = lr_rib_mux_install(ptr_.get(), route.release());
+        if (rc < 0) throw Error(std::string("lr_rib_mux_install: ") + lr_last_error());
+    }
+    /// Uninstall a key. Returns true when a route was withdrawn.
+    bool uninstall(const RouteKey& k) {
+        lr_prefix_t prefix = detail::to_lr_prefix(k.addr, k.prefix_len);
+        lr_prefix_t src{};
+        lr_prefix_t* src_p = nullptr;
+        if (!k.source.empty()) {
+            src = detail::to_lr_prefix(k.source, k.source_len);
+            src_p = &src;
+        }
+        int rc = lr_rib_mux_uninstall(ptr_.get(), &prefix, k.afi, k.safi, src_p);
+        if (rc < 0) throw Error(std::string("lr_rib_mux_uninstall: ") + lr_last_error());
+        return rc == 1;
+    }
+    /// Read the merged route for a key. Returns a NEW Route (a copy)
+    /// or nullptr when the key is absent.
+    Route get(const RouteKey& k) const {
+        lr_prefix_t prefix = detail::to_lr_prefix(k.addr, k.prefix_len);
+        lr_prefix_t src{};
+        lr_prefix_t* src_p = nullptr;
+        if (!k.source.empty()) {
+            src = detail::to_lr_prefix(k.source, k.source_len);
+            src_p = &src;
+        }
+        lr_route_t out = nullptr;
+        int rc = lr_rib_mux_get(ptr_.get(), &prefix, k.afi, k.safi, src_p, &out);
+        if (rc < 0) throw Error(std::string("lr_rib_mux_get: ") + lr_last_error());
+        return Route(out);
+    }
+
+private:
+    std::unique_ptr<OpaqueRibMux, detail::RibMuxDeleter> ptr_;
+};
+
+/// BIRD/FRR best-path selector (RFC 4271 §9.1).
+class RouteSelector {
+public:
+    /// Apply the BIRD/FRR best-path selector to a flat array of route
+    /// handles. Returns the index of the winning route, or -1 when
+    /// the array is empty. The handles are *not* consumed.
+    static std::int64_t select(const std::vector<lr_route_t>& routes) {
+        if (routes.empty()) return -1;
+        return lr_route_selector_select(routes.data(), routes.size());
+    }
+    /// Apply the BGP-specific best-path selector (RFC 4271 §9.1).
+    static std::int64_t select_bgp(const std::vector<lr_route_t>& routes) {
+        if (routes.empty()) return -1;
+        return lr_route_selector_select_bgp(routes.data(), routes.size());
+    }
+};
+
 } // namespace librouting
 
