@@ -19,6 +19,8 @@ typedef struct OpaqueRouter OpaqueRouter;
 typedef struct OpaqueRouter *lr_router_t;
 typedef struct OpaqueFilter OpaqueFilter;
 typedef struct OpaqueFilter *lr_filter_t;
+typedef struct OpaqueRoute OpaqueRoute;
+typedef struct OpaqueRoute *lr_route_t;
 
 const char *lr_last_error(void);
 uint32_t lr_abi_version(void);
@@ -547,14 +549,42 @@ typedef struct lr_community_entry_t {
 
 typedef struct lr_filter_context_t {
     void *user_data;
-    /* Every field may be NULL (built-in route-backed behaviour). The
-     * Python binding uses the built-in context; the raw table is
-     * available for advanced embedders. */
-    void *unused_padding[19];
+    /* Every field may be NULL (built-in route-backed behaviour).
+     * The full callback table mirrors the C ABI struct in
+     * include/lr_ffi.h (lines 2877-2938) so Python embedders can
+     * supply custom ROA / BGP attribute hooks. */
+    int32_t (*bgp_local_pref)(void *user_data, lr_route_t route, uint32_t *out);
+    int32_t (*bgp_med)(void *user_data, lr_route_t route, uint32_t *out);
+    int32_t (*bgp_next_hop)(void *user_data, lr_route_t route,
+                            int32_t *out_is_v6, uint8_t *out);
+    int64_t (*bgp_as_path)(void *user_data, lr_route_t route,
+                           uint32_t *out, uintptr_t cap);
+    int64_t (*bgp_communities)(void *user_data, lr_route_t route,
+                                uint64_t *out, uintptr_t cap);
+    int64_t (*bgp_large_communities)(void *user_data, lr_route_t route,
+                                     uint32_t *out, uintptr_t cap);
+    int64_t (*bgp_ext_communities)(void *user_data, lr_route_t route,
+                                    struct lr_ext_comm_t *out, uintptr_t cap);
+    int32_t (*bgp_origin)(void *user_data, lr_route_t route, uint8_t *out);
+    uint8_t (*roa_state)(void *user_data, lr_route_t route);
+    void (*set_bgp_local_pref)(void *user_data, lr_route_t route, uint32_t value);
+    void (*set_bgp_med)(void *user_data, lr_route_t route, uint32_t value);
+    void (*set_bgp_next_hop)(void *user_data, lr_route_t route,
+                              int32_t is_v6, const uint8_t *addr);
+    void (*bgp_as_path_prepend)(void *user_data, lr_route_t route, uint32_t asn);
+    void (*bgp_communities_add)(void *user_data, lr_route_t route,
+                                 uint32_t asn, uint16_t value);
+    void (*set_bgp_communities)(void *user_data, lr_route_t route,
+                                 const uint64_t *items, uintptr_t count);
+    void (*set_bgp_as_path)(void *user_data, lr_route_t route,
+                             const uint32_t *seq, uintptr_t count);
+    void (*set_bgp_large_communities)(void *user_data, lr_route_t route,
+                                       const uint32_t *triples, uintptr_t count);
+    void (*set_bgp_ext_communities)(void *user_data, lr_route_t route,
+                                     const struct lr_ext_comm_t *items,
+                                     uintptr_t count);
 } lr_filter_context_t;
 
-typedef struct OpaqueRoute OpaqueRoute;
-typedef struct OpaqueRoute *lr_route_t;
 typedef struct OpaquePrefixList OpaquePrefixList;
 typedef struct OpaquePrefixList *lr_prefix_list_t;
 typedef struct OpaqueRouteMap OpaqueRouteMap;
@@ -596,6 +626,44 @@ int32_t lr_route_set_metric(lr_route_t route, uint32_t value);
 int32_t lr_route_metric(lr_route_t route, uint32_t *out);
 int32_t lr_route_set_tag(lr_route_t route, int32_t has_tag, uint32_t tag);
 int32_t lr_route_tag(lr_route_t route, uint32_t *out);
+
+/* Per-route BGP / Babel / OSPF attribute readers (RFC 4271 §5.1,
+ * RFC 4456 §8, RFC 6514 §5, RFC 7311, RFC 9231 §4, RFC 8966 §3.2/§4.6.9,
+ * RFC 2328 §16 / RFC 5340 §4.1). Mirrors the C ABI surface in
+ * crates/lr-ffi/src/route_attrs.rs. */
+int32_t lr_route_atomic_aggregate(lr_route_t route, uint8_t *out);
+int32_t lr_route_originator_id(lr_route_t route, uint8_t *out_addr, uint8_t *out_present);
+int32_t lr_route_has_cluster_list(lr_route_t route, uint8_t *out);
+int32_t lr_route_cluster_list_len(lr_route_t route, uintptr_t *out);
+int32_t lr_route_cluster_list_at(lr_route_t route, uintptr_t index, uint8_t *out_addr);
+int32_t lr_route_has_otc(lr_route_t route, uint8_t *out);
+int32_t lr_route_otc(lr_route_t route, uint32_t *out, uint8_t *out_present);
+int32_t lr_route_has_aigp(lr_route_t route, uint8_t *out);
+int32_t lr_route_aigp(lr_route_t route, uint64_t *out, uint8_t *out_present);
+int32_t lr_route_has_aggregator(lr_route_t route, uint8_t *out);
+int32_t lr_route_aggregator_asn(lr_route_t route, uint32_t *out, uint8_t *out_present);
+int32_t lr_route_aggregator_speaker(lr_route_t route, uint8_t *out_addr, uint8_t *out_present);
+int32_t lr_route_has_pmsi_tunnel(lr_route_t route, uint8_t *out);
+int32_t lr_route_pmsi_tunnel_flags(lr_route_t route, uint8_t *out_flags, uint8_t *out_present);
+int32_t lr_route_as_sequence_len(lr_route_t route, uintptr_t *out);
+int32_t lr_route_as_sequence_at(lr_route_t route, uintptr_t index, uint32_t *out);
+int32_t lr_route_set_as_sequence(lr_route_t route, const uint32_t *asns, uintptr_t count);
+int32_t lr_route_prepend_as(lr_route_t route, uint32_t asn);
+int32_t lr_route_remove_community(lr_route_t route, uint32_t asn, uint16_t value);
+int32_t lr_route_has_babel_metric(lr_route_t route, uint8_t *out);
+int32_t lr_route_babel_metric(lr_route_t route, uint32_t *out, uint8_t *out_present);
+int32_t lr_route_has_babel_seqno(lr_route_t route, uint8_t *out);
+int32_t lr_route_babel_seqno(lr_route_t route, uint16_t *out, uint8_t *out_present);
+int32_t lr_route_has_babel_router_id(lr_route_t route, uint8_t *out);
+int32_t lr_route_babel_router_id(lr_route_t route, uint8_t *out_router_id, uint8_t *out_present);
+int32_t lr_route_has_ospf_metric1(lr_route_t route, uint8_t *out);
+int32_t lr_route_ospf_metric1(lr_route_t route, uint32_t *out, uint8_t *out_present);
+int32_t lr_route_has_ospf_metric2(lr_route_t route, uint8_t *out);
+int32_t lr_route_ospf_metric2(lr_route_t route, uint32_t *out, uint8_t *out_present);
+int32_t lr_route_has_ospf_tag(lr_route_t route, uint8_t *out);
+int32_t lr_route_ospf_tag(lr_route_t route, uint32_t *out, uint8_t *out_present);
+int32_t lr_route_has_ospf_router_id(lr_route_t route, uint8_t *out);
+int32_t lr_route_ospf_router_id(lr_route_t route, uint32_t *out, uint8_t *out_present);
 
 lr_prefix_list_t lr_prefix_list_new(void);
 void lr_prefix_list_free(lr_prefix_list_t list);

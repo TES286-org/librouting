@@ -71,6 +71,7 @@ from .policy import (
     AsPathFilter,
     CommunityEntry,
     CompiledFilter,
+    FilterContext,
     Match,
     PrefixList,
     Resolver,

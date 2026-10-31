@@ -314,6 +314,331 @@ class Route:
             raise LrError(f"lr_route_tag failed (rc={rc}): {last_error()}")
         return int(out[0])
 
+    # ---- Per-route BGP / Babel / OSPF attribute readers (RFC 4271
+    # §5.1, RFC 4456 §8, RFC 6514 §5, RFC 7311, RFC 9231 §4, RFC 8966
+    # §3.2/§4.6.9, RFC 2328 §16 / RFC 5340 §4.1). Mirrors the
+    # `lr_route_*` C ABI surface in crates/lr-ffi/src/route_attrs.rs. ----
+
+    def atomic_aggregate(self) -> bool:
+        """True when the route carries an ATOMIC_AGGREGATE (RFC 4271
+        §5.1.6)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_atomic_aggregate(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_atomic_aggregate failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def originator_id(self) -> bytes | None:
+        """The ORIGINATOR_ID (RFC 4456 §8) — 4-byte IPv4. Returns
+        ``None`` when the attribute is absent."""
+        addr = ffi.new("uint8_t[4]")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_originator_id(self._ptr, addr, present)
+        if rc != 0:
+            raise LrError(f"lr_route_originator_id failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return bytes(addr[0:4])
+
+    def has_cluster_list(self) -> bool:
+        """True when the route carries a CLUSTER_LIST (RFC 4456 §8)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_cluster_list(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_cluster_list failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def cluster_list(self) -> list[bytes]:
+        """The CLUSTER_LIST (RFC 4456 §8) — flat 4-byte IPv4
+        Cluster-IDs."""
+        n = ffi.new("uintptr_t*")
+        rc = get_lib().lr_route_cluster_list_len(self._ptr, n)
+        if rc != 0:
+            raise LrError(f"lr_route_cluster_list_len failed (rc={rc}): {last_error()}")
+        out: list[bytes] = []
+        for i in range(int(n[0])):
+            addr = ffi.new("uint8_t[4]")
+            rc = get_lib().lr_route_cluster_list_at(self._ptr, i, addr)
+            if rc != 0:
+                raise LrError(f"lr_route_cluster_list_at failed (rc={rc}): {last_error()}")
+            out.append(bytes(addr[0:4]))
+        return out
+
+    def has_otc(self) -> bool:
+        """True when the route carries an OTC attribute (RFC 9231 §4)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_otc(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_otc failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def otc(self) -> int | None:
+        """The OTC value (RFC 9231 §4). Returns ``None`` when absent."""
+        out = ffi.new("uint32_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_otc(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_otc failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def has_aigp(self) -> bool:
+        """True when the route carries an AIGP attribute (RFC 7311)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_aigp(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_aigp failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def aigp(self) -> int | None:
+        """The AIGP value (RFC 7311). Returns ``None`` when absent."""
+        out = ffi.new("uint64_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_aigp(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_aigp failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def has_aggregator(self) -> bool:
+        """True when the route carries an AGGREGATOR (RFC 4271 §5.1.7 /
+        RFC 6793 §4)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_aggregator(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_aggregator failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def aggregator_asn(self) -> int | None:
+        """The AGGREGATOR AS number (RFC 4271 §5.1.7 / RFC 6793 §4).
+        Returns ``None`` when absent."""
+        out = ffi.new("uint32_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_aggregator_asn(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_aggregator_asn failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def aggregator_speaker(self) -> bytes | None:
+        """The AGGREGATOR speaker IPv4 address (RFC 4271 §5.1.7 /
+        RFC 6793 §4). 4 bytes. Returns ``None`` when absent."""
+        addr = ffi.new("uint8_t[4]")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_aggregator_speaker(self._ptr, addr, present)
+        if rc != 0:
+            raise LrError(f"lr_route_aggregator_speaker failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return bytes(addr[0:4])
+
+    def has_pmsi_tunnel(self) -> bool:
+        """True when the route carries a PMSI_TUNNEL attribute
+        (RFC 6514 §5)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_pmsi_tunnel(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_pmsi_tunnel failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def pmsi_tunnel_flags(self) -> int | None:
+        """The PMSI_TUNNEL flags (RFC 6514 §5). Returns ``None`` when
+        absent."""
+        flags = ffi.new("uint8_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_pmsi_tunnel_flags(self._ptr, flags, present)
+        if rc != 0:
+            raise LrError(f"lr_route_pmsi_tunnel_flags failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(flags[0])
+
+    def as_sequence(self) -> list[int]:
+        """The flat AS_SEQUENCE (RFC 4271 §5.1.2) — sets flattened in
+        order."""
+        n = ffi.new("uintptr_t*")
+        rc = get_lib().lr_route_as_sequence_len(self._ptr, n)
+        if rc != 0:
+            raise LrError(f"lr_route_as_sequence_len failed (rc={rc}): {last_error()}")
+        out: list[int] = []
+        for i in range(int(n[0])):
+            v = ffi.new("uint32_t*")
+            rc = get_lib().lr_route_as_sequence_at(self._ptr, i, v)
+            if rc != 0:
+                raise LrError(f"lr_route_as_sequence_at failed (rc={rc}): {last_error()}")
+            out.append(int(v[0]))
+        return out
+
+    def set_as_sequence(self, asns: list[int]) -> None:
+        """Replace the route's AS_PATH with a flat AS_SEQUENCE (RFC 4271
+        §5.1.2). The previous AS_PATH is overwritten."""
+        arr = ffi.new("uint32_t[]", [int(a) for a in asns]) if asns else ffi.NULL
+        rc = get_lib().lr_route_set_as_sequence(self._ptr, arr, len(asns))
+        if rc != 0:
+            raise LrError(f"lr_route_set_as_sequence failed (rc={rc}): {last_error()}")
+
+    def prepend_as(self, asn: int) -> None:
+        """Prepend ``asn`` to the route's AS_PATH (RFC 4271 §5.1.2 — the
+        standard eBGP AS_PATH prepend action)."""
+        rc = get_lib().lr_route_prepend_as(self._ptr, int(asn))
+        if rc != 0:
+            raise LrError(f"lr_route_prepend_as failed (rc={rc}): {last_error()}")
+
+    def remove_community(self, asn: int, value: int) -> None:
+        """Remove ``community`` from the COMMUNITIES attribute (RFC 1997
+        §4). No-op when the route carries no COMMUNITIES or the
+        community is not present."""
+        rc = get_lib().lr_route_remove_community(self._ptr, int(asn), int(value))
+        if rc != 0:
+            raise LrError(f"lr_route_remove_community failed (rc={rc}): {last_error()}")
+
+    def has_babel_metric(self) -> bool:
+        """True when the route carries a Babel metric attribute (RFC 8966
+        §3.2)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_babel_metric(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_babel_metric failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def babel_metric(self) -> int | None:
+        """The Babel primary metric (RFC 8966 §3.2 + §3.4.3). Returns
+        ``None`` when absent."""
+        out = ffi.new("uint32_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_babel_metric(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_babel_metric failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def has_babel_seqno(self) -> bool:
+        """True when the route carries a Babel sequence number
+        attribute."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_babel_seqno(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_babel_seqno failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def babel_seqno(self) -> int | None:
+        """The Babel sequence number (RFC 8966 §3.2 + §4.6.9). Returns
+        ``None`` when absent."""
+        out = ffi.new("uint16_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_babel_seqno(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_babel_seqno failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def has_babel_router_id(self) -> bool:
+        """True when the route carries a Babel router-id attribute."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_babel_router_id(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_babel_router_id failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def babel_router_id(self) -> bytes | None:
+        """The Babel router-id (RFC 8966 §3.2 + §4.6.9), 8 bytes
+        big-endian. Returns ``None`` when absent."""
+        rid = ffi.new("uint8_t[8]")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_babel_router_id(self._ptr, rid, present)
+        if rc != 0:
+            raise LrError(f"lr_route_babel_router_id failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return bytes(rid[0:8])
+
+    def has_ospf_metric1(self) -> bool:
+        """True when the route carries an OSPF metric1 attribute (RFC 2328
+        §16)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_ospf_metric1(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_ospf_metric1 failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def ospf_metric1(self) -> int | None:
+        """The OSPF primary metric (RFC 2328 §16 / RFC 5340 §4.1).
+        Returns ``None`` when absent."""
+        out = ffi.new("uint32_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_ospf_metric1(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_ospf_metric1 failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def has_ospf_metric2(self) -> bool:
+        """True when the route carries an OSPF metric2 attribute."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_ospf_metric2(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_ospf_metric2 failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def ospf_metric2(self) -> int | None:
+        """The OSPF type-2 external metric (RFC 2328 §16.4 / RFC 5340
+        §4.8.5). Returns ``None`` when absent."""
+        out = ffi.new("uint32_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_ospf_metric2(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_ospf_metric2 failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def has_ospf_tag(self) -> bool:
+        """True when the route carries an OSPF tag attribute."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_ospf_tag(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_ospf_tag failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def ospf_tag(self) -> int | None:
+        """The OSPF external route tag (RFC 2328 §A.4.5 / RFC 3101 §2.3
+        / RFC 5340 §A.4.7 T bit / RFC 8362 External-Prefix sub-TLV 3).
+        Returns ``None`` when absent."""
+        out = ffi.new("uint32_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_ospf_tag(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_ospf_tag failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def has_ospf_router_id(self) -> bool:
+        """True when the route carries an OSPF router-id attribute."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_has_ospf_router_id(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_has_ospf_router_id failed (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def ospf_router_id(self) -> int | None:
+        """The OSPF advertising router (RFC 2328 §A.4 / RFC 5340 §A.4).
+        Returns ``None`` when absent."""
+        out = ffi.new("uint32_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_ospf_router_id(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_ospf_router_id failed (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
 
 class PrefixList:
     """An owned prefix-list handle (FRR ge/le semantics, first-match
@@ -509,6 +834,114 @@ FILTER_FALLTHROUGH = 2
 __all__ += ["CompiledFilter", "compile_filter", "FILTER_ACCEPT", "FILTER_REJECT", "FILTER_FALLTHROUGH"]
 
 
+class FilterContext:
+    """An owned ``lr_filter_context_t`` callback table.
+
+    Every field may be ``None`` (the default — built-in route-backed
+    behaviour). Setting any field to a Python callable wires that
+    callable into the C callback table so the filter VM calls back
+    into Python instead of reading the route directly. The C++ RAII
+    wrapper exposes the same table as a plain struct; this Python
+    class adds the lifetime management cffi callbacks require (the
+    ``@ffi.callback`` trampolines must be kept referenced for the
+    lifetime of the context, otherwise cffi may free them while the
+    table still points at them).
+
+    Currently the most useful hook is :meth:`set_roa_state`, which
+    mirrors the C harness's ``roa_always_invalid`` example and the
+    C++ harness's ``roa_state`` lambda.
+    """
+
+    def __init__(self, user_data: object | None = None):
+        self._table = ffi.new("lr_filter_context_t*")
+        # Zero-init every function pointer so an unset field falls
+        # through to the built-in route-backed behaviour.
+        self._table.bgp_local_pref = ffi.NULL
+        self._table.bgp_med = ffi.NULL
+        self._table.bgp_next_hop = ffi.NULL
+        self._table.bgp_as_path = ffi.NULL
+        self._table.bgp_communities = ffi.NULL
+        self._table.bgp_large_communities = ffi.NULL
+        self._table.bgp_ext_communities = ffi.NULL
+        self._table.bgp_origin = ffi.NULL
+        self._table.roa_state = ffi.NULL
+        self._table.set_bgp_local_pref = ffi.NULL
+        self._table.set_bgp_med = ffi.NULL
+        self._table.set_bgp_next_hop = ffi.NULL
+        self._table.bgp_as_path_prepend = ffi.NULL
+        self._table.bgp_communities_add = ffi.NULL
+        self._table.set_bgp_communities = ffi.NULL
+        self._table.set_bgp_as_path = ffi.NULL
+        self._table.set_bgp_large_communities = ffi.NULL
+        self._table.set_bgp_ext_communities = ffi.NULL
+        # Hold strong references to every installed trampoline so cffi
+        # does not GC them while the C side still holds the pointer.
+        self._callbacks: dict[str, object] = {}
+        # The user_data slot is a void* in C; Python keeps the real
+        # object alive on this side and hands a sentinel pointer to
+        # the C side. Callers that need to identify their object can
+        # stash it on the FilterContext instead.
+        self._user_obj = user_data
+        self._table.user_data = ffi.NULL
+
+    @property
+    def _as_cptr(self):
+        """Pass-through for callers that need the raw ``const
+        lr_filter_context_t*`` (the C ABI takes it by pointer)."""
+        return self._table
+
+    def set_roa_state(self, fn) -> None:
+        """Install a ``roa_state`` callback (RFC 6811). ``fn`` takes
+        the route handle and returns one of the ``LR_ROA_VALID`` /
+        ``LR_ROA_NOT_FOUND`` / ``LR_ROA_INVALID`` constants."""
+        trampoline = ffi.callback("uint8_t(void *user_data, lr_route_t route)",
+                                  lambda _ud, _r: int(fn(_r)))
+        self._table.roa_state = trampoline
+        self._callbacks["roa_state"] = trampoline
+
+    def set_bgp_local_pref(self, fn) -> None:
+        """Install a ``bgp_local_pref`` reader. ``fn`` takes the route
+        handle and returns ``int | None`` (``None`` means absent)."""
+        def trampoline(_ud, _r, out):
+            v = fn(_r)
+            if v is None:
+                return 0
+            out[0] = int(v) & 0xffffffff
+            return 1
+        cb = ffi.callback("int32_t(void *user_data, lr_route_t route, uint32_t *out)",
+                          trampoline)
+        self._table.bgp_local_pref = cb
+        self._callbacks["bgp_local_pref"] = cb
+
+    def set_bgp_med(self, fn) -> None:
+        """Install a ``bgp_med`` reader. ``fn`` takes the route handle
+        and returns ``int | None``."""
+        def trampoline(_ud, _r, out):
+            v = fn(_r)
+            if v is None:
+                return 0
+            out[0] = int(v) & 0xffffffff
+            return 1
+        cb = ffi.callback("int32_t(void *user_data, lr_route_t route, uint32_t *out)",
+                          trampoline)
+        self._table.bgp_med = cb
+        self._callbacks["bgp_med"] = cb
+
+    def set_bgp_origin(self, fn) -> None:
+        """Install a ``bgp_origin`` reader. ``fn`` takes the route
+        handle and returns ``int | None`` (0/1/2 per RFC 4271 §5.1.1)."""
+        def trampoline(_ud, _r, out):
+            v = fn(_r)
+            if v is None:
+                return 0
+            out[0] = int(v) & 0xff
+            return 1
+        cb = ffi.callback("int32_t(void *user_data, lr_route_t route, uint8_t *out)",
+                          trampoline)
+        self._table.bgp_origin = cb
+        self._callbacks["bgp_origin"] = cb
+
+
 class CompiledFilter:
     """An owned compiled filter (the D3.7 stack VM — the same hot
     path the daemon executes per route)."""
@@ -540,16 +973,21 @@ class CompiledFilter:
             raise LrError(f"lr_filter_name failed (rc={rc}): {last_error()}")
         return bytes(buf[0:need - 1]).decode()
 
-    def evaluate(self, route: Route) -> tuple[int, str]:
-        """Run the filter against ``route`` with the built-in
-        route-backed context (attribute reads/writes hit the route;
-        ``roa.state`` is not-found). Returns ``(verdict, reason)``
-        where ``verdict`` is ``FILTER_ACCEPT`` / ``FILTER_REJECT`` /
-        ``FILTER_FALLTHROUGH`` and ``reason`` is the optional
-        ``reject with`` payload."""
+    def evaluate(self, route: Route,
+                 context: FilterContext | None = None) -> tuple[int, str]:
+        """Run the filter against ``route``. With no ``context`` the
+        built-in route-backed context is used (attribute reads/writes
+        hit the route directly; ``roa.state`` is not-found). Pass a
+        :class:`FilterContext` to override individual attribute
+        readers — most commonly ``roa_state`` for RFC 6811 testing.
+
+        Returns ``(verdict, reason)`` where ``verdict`` is
+        ``FILTER_ACCEPT`` / ``FILTER_REJECT`` / ``FILTER_FALLTHROUGH``
+        and ``reason`` is the optional ``reject with`` payload."""
         verdict = ffi.new("int32_t*")
         reason = ffi.new("lr_bytes_t*")
-        rc = get_lib().lr_filter_evaluate(self._ptr, route._ptr, ffi.NULL, verdict, reason)
+        ctx = context._as_cptr if context is not None else ffi.NULL
+        rc = get_lib().lr_filter_evaluate(self._ptr, route._ptr, ctx, verdict, reason)
         if rc != 0:
             raise LrError(f"lr_filter_evaluate failed (rc={rc}): {last_error()}")
         out = ""
