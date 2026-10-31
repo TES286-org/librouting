@@ -32,6 +32,54 @@ static void check(int cond, const char *what) {
     }
 }
 
+/* Trampoline for lr_adj_rib_out_paths_for: records each (path_id, route)
+ * pair. The route handle is *borrowed* — we do NOT free it. */
+struct PathsForCtx { int count; uint32_t ids[8]; };
+static void paths_for_cb(uint32_t path_id, lr_route_t route, void *user) {
+    (void)route;
+    if (user != NULL) {
+        struct PathsForCtx *c = (struct PathsForCtx *)user;
+        if (c->count < 8) {
+            c->ids[c->count] = path_id;
+        }
+        c->count += 1;
+    }
+}
+
+/* Trampoline for lr_adj_rib_out_advertised_keys: records each key +
+ * path-id count. The key pointer + path-ids array are borrowed and
+ * only valid for the duration of one callback invocation. */
+struct AdvKeysCtx { int count; int v4_seen; int v6_seen; };
+static void adv_keys_cb(const lr_route_key_t *key,
+                       const uint32_t *path_ids,
+                       uintptr_t path_id_count,
+                       void *user) {
+    (void)path_ids;
+    (void)path_id_count;
+    if (user != NULL) {
+        struct AdvKeysCtx *c = (struct AdvKeysCtx *)user;
+        if (key != NULL) {
+            if (key->prefix.addr.is_ipv6 == 0) {
+                c->v4_seen = 1;
+            } else {
+                c->v6_seen = 1;
+            }
+        }
+        c->count += 1;
+    }
+}
+
+/* Trampoline for lr_rib_mux_iter: counts each visited merged route.
+ * The route handle is *borrowed* — we do NOT free it. */
+struct MuxIterCtx { int count; };
+static void mux_iter_cb(lr_route_t route, void *user) {
+    (void)route;
+    if (user != NULL) {
+        struct MuxIterCtx *c = (struct MuxIterCtx *)user;
+        c->count += 1;
+    }
+}
+
 int main(void) {
     /* ABI version */
     uint32_t v = lr_abi_version();
@@ -1829,6 +1877,76 @@ int main(void) {
         check(rc == 0, "lr_adj_rib_out_clear_for");
         check(lr_adj_rib_out_is_empty(out) == 1, "AdjRibOut empty after clear_for");
 
+        /* AdjRibOut::paths_for — callback fires once per (tx_path_id,
+         * route) pair, ascending by tx_path_id. */
+        {
+            lr_route_t p1 = lr_route_new_v4((const uint8_t *)"\xcb\x00\x71\x01", 24, LR_PROTO_BGP);
+            check(p1 != NULL, "lr_route_new_v4 (paths_for r1)");
+            rc = lr_adj_rib_out_advertise(out, 42, LR_PROTO_BGP, p1, 1);
+            check(rc == 0, "lr_adj_rib_out_advertise paths_for 1");
+            rc = lr_adj_rib_out_advertise(out, 42, LR_PROTO_BGP, p1, 2);
+            check(rc == 0, "lr_adj_rib_out_advertise paths_for 2");
+            rc = lr_adj_rib_out_advertise(out, 42, LR_PROTO_BGP, p1, 3);
+            check(rc == 0, "lr_adj_rib_out_advertise paths_for 3");
+            lr_route_free(p1);
+            check(lr_adj_rib_out_len(out) == 3, "AdjRibOut paths_for len == 3");
+
+            lr_route_key_t pf_k = {0};
+            pf_k.prefix.prefix_len = 24;
+            pf_k.prefix.addr.is_ipv6 = 0;
+            pf_k.prefix.addr.octets[12] = 0xcb;
+            pf_k.prefix.addr.octets[13] = 0x00;
+            pf_k.prefix.addr.octets[14] = 0x71;
+            pf_k.prefix.addr.octets[15] = 0x01;
+            pf_k.afi_safi = (1 << 8) | 1;
+
+            struct PathsForCtx { int count; uint32_t ids[8]; } pf_ctx = {0, {0}};
+            int64_t pf_n = lr_adj_rib_out_paths_for(out, origin, &pf_k,
+                                                    paths_for_cb, &pf_ctx);
+            check(pf_n == 3, "lr_adj_rib_out_paths_for visited 3 paths");
+            check(pf_ctx.count == 3, "paths_for callback fired 3 times");
+            check(pf_ctx.ids[0] == 1 && pf_ctx.ids[1] == 2 && pf_ctx.ids[2] == 3,
+                  "paths_for path_ids ascending 1, 2, 3");
+
+            /* Unknown key → 0 visited. */
+            lr_route_key_t unk = {0};
+            unk.prefix.prefix_len = 8;
+            unk.prefix.addr.is_ipv6 = 0;
+            unk.prefix.addr.octets[12] = 0x0a;
+            unk.afi_safi = (1 << 8) | 1;
+            int64_t unk_n = lr_adj_rib_out_paths_for(out, origin, &unk,
+                                                     paths_for_cb, NULL);
+            check(unk_n == 0, "lr_adj_rib_out_paths_for unknown key visited 0");
+        }
+
+        /* AdjRibOut::advertised_keys — filter by (dest, family). */
+        {
+            /* Already populated by paths_for block above. The dest
+             * `origin` has one v4 unicast key under tx_path_ids
+             * {1, 2, 3}. */
+            struct AdvKeysCtx { int count; int v4_seen; int v6_seen; } ak_ctx = {0, 0, 0};
+            int64_t ak_v4 = lr_adj_rib_out_advertised_keys(out, origin, 1, 1,
+                                                          adv_keys_cb, &ak_ctx);
+            check(ak_v4 == 1, "advertised_keys (v4) returned 1 key");
+            check(ak_ctx.count == 1, "advertised_keys (v4) callback fired once");
+            check(ak_ctx.v4_seen == 1, "advertised_keys (v4) saw a v4 key");
+
+            int64_t ak_v6 = lr_adj_rib_out_advertised_keys(out, origin, 2, 1,
+                                                          adv_keys_cb, NULL);
+            check(ak_v6 == 0, "advertised_keys (v6) returned 0 (no v6 advertised)");
+
+            int64_t ak_labeled = lr_adj_rib_out_advertised_keys(out, origin, 1, 4,
+                                                               adv_keys_cb, NULL);
+            check(ak_labeled == 0, "advertised_keys (labeled) returned 0");
+
+            lr_route_origin_t wrong = {0};
+            wrong.protocol = LR_PROTO_BGP;
+            wrong.peer = 99;
+            int64_t ak_wrong = lr_adj_rib_out_advertised_keys(out, wrong, 1, 1,
+                                                              adv_keys_cb, NULL);
+            check(ak_wrong == 0, "advertised_keys (wrong peer) returned 0");
+        }
+
         lr_route_free(out_r);
         lr_adj_rib_out_free(out);
 
@@ -1849,6 +1967,45 @@ int main(void) {
         check(lr_rib_mux_is_empty(mux) == 1, "RibMux empty after uninstall");
         check(lr_rib_mux_uninstall(mux, &p, 1, 1, NULL) == 0,
               "lr_rib_mux_uninstall returns 0 on no-op");
+
+        /* RibMux::iter — walk every merged route. */
+        {
+            /* Empty mux → 0 routes. */
+            struct MuxIterCtx empty_ctx = {0};
+            int64_t empty_n = lr_rib_mux_iter(mux, mux_iter_cb, &empty_ctx);
+            check(empty_n == 0, "lr_rib_mux_iter on empty mux returns 0");
+            check(empty_ctx.count == 0, "lr_rib_mux_iter (empty) callback count 0");
+
+            /* NULL handle → -1. */
+            int64_t null_n = lr_rib_mux_iter(NULL, mux_iter_cb, NULL);
+            check(null_n == -1, "lr_rib_mux_iter NULL handle returns -1");
+
+            /* NULL cb → -1. */
+            int64_t null_cb = lr_rib_mux_iter(mux, NULL, NULL);
+            check(null_cb == -1, "lr_rib_mux_iter NULL cb returns -1");
+
+            /* Install two routes under different keys, then iter.
+             * lr_rib_mux_install consumes the handle — do NOT free. */
+            lr_route_t m1 = lr_route_new_v4((const uint8_t *)"\x0a\x00\x00\x01", 24, LR_PROTO_BGP);
+            rc = lr_rib_mux_install(mux, m1);
+            check(rc == 0, "lr_rib_mux_install (m1)");
+            lr_route_t m2 = lr_route_new_v4((const uint8_t *)"\x0a\x00\x01\x01", 24, LR_PROTO_BGP);
+            rc = lr_rib_mux_install(mux, m2);
+            check(rc == 0, "lr_rib_mux_install (m2)");
+            check(lr_rib_mux_len(mux) == 2, "RibMux len == 2 after second install");
+
+            struct MuxIterCtx iter_ctx = {0};
+            int64_t iter_n = lr_rib_mux_iter(mux, mux_iter_cb, &iter_ctx);
+            check(iter_n == 2, "lr_rib_mux_iter visited 2 routes");
+            check(iter_ctx.count == 2, "lr_rib_mux_iter callback fired 2 times");
+
+            /* Clear and re-test emptiness. */
+            lr_rib_mux_uninstall(mux, &p, 1, 1, NULL);
+            lr_prefix_t p2 = p;
+            p2.addr[0] = 0x0a; p2.addr[1] = 0x00; p2.addr[2] = 0x01; p2.addr[3] = 0x01;
+            lr_rib_mux_uninstall(mux, &p2, 1, 1, NULL);
+            check(lr_rib_mux_is_empty(mux) == 1, "RibMux empty after uninstall both");
+        }
         lr_rib_mux_free(mux);
 
         /* RouteSelector: select / select_bgp. */
@@ -1860,6 +2017,19 @@ int main(void) {
         int64_t idx_bgp = lr_route_selector_select_bgp(sel, 2);
         check(idx_bgp == 0 || idx_bgp == 1, "lr_route_selector_select_bgp valid index");
         check(lr_route_selector_select(NULL, 0) == -1, "select empty == -1");
+
+        /* RouteSelector::compare — same admin distance + metric + age
+         * + protocol tie → 0. */
+        int32_t cmp = lr_route_selector_compare(s1, s2);
+        check(cmp == 0, "lr_route_selector_compare identical routes tie");
+        /* Anti-symmetric: swapping args mirrors the result. */
+        int32_t cmp_swap = lr_route_selector_compare(s2, s1);
+        check(cmp_swap == 0, "lr_route_selector_compare swapped identical routes tie");
+        /* NULL handle → LR_ERR_INVALID_HANDLE (-2). */
+        int32_t cmp_null = lr_route_selector_compare(NULL, s2);
+        check(cmp_null == -2, "lr_route_selector_compare NULL a returns LR_ERR_INVALID_HANDLE");
+        int32_t cmp_null2 = lr_route_selector_compare(s1, NULL);
+        check(cmp_null2 == -2, "lr_route_selector_compare NULL b returns LR_ERR_INVALID_HANDLE");
         lr_route_free(s1);
         lr_route_free(s2);
 

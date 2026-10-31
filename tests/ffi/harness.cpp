@@ -1326,6 +1326,67 @@ int main() {
         out.clear_for(origin);
         check(out.empty(), "AdjRibOut empty after clear_for");
 
+        // AdjRibOut::paths_for — walk (tx_path_id, route) pairs.
+        {
+            auto pr = make_route_v4({203, 0, 113, 1}, 24, Protocol::Bgp);
+            out.advertise(origin, pr, 1);
+            out.advertise(origin, pr, 2);
+            out.advertise(origin, pr, 3);
+            check(out.size() == 3, "AdjRibOut paths_for size == 3");
+            RouteKey pk;
+            pk.addr = std::vector<std::uint8_t>{203, 0, 113, 1};
+            pk.prefix_len = 24;
+            pk.afi = AFI_IPV4;
+            pk.safi = SAFI_UNICAST;
+            std::vector<std::uint32_t> seen_ids;
+            std::size_t n_pf = out.paths_for(origin, pk, [&](std::uint32_t pid, lr_route_t) {
+                seen_ids.push_back(pid);
+            });
+            check(n_pf == 3, "AdjRibOut paths_for count == 3");
+            check(seen_ids.size() == 3, "AdjRibOut paths_for seen 3 ids");
+            check(seen_ids[0] == 1 && seen_ids[1] == 2 && seen_ids[2] == 3,
+                  "AdjRibOut paths_for ids ascending 1, 2, 3");
+            // Unknown key returns 0.
+            RouteKey unk;
+            unk.addr = std::vector<std::uint8_t>{10, 0, 0, 0};
+            unk.prefix_len = 8;
+            unk.afi = AFI_IPV4;
+            unk.safi = SAFI_UNICAST;
+            std::size_t n_unk = out.paths_for(origin, unk, [&](std::uint32_t, lr_route_t) {});
+            check(n_unk == 0, "AdjRibOut paths_for (unknown) == 0");
+            out.clear_for(origin);
+        }
+
+        // AdjRibOut::advertised_keys — filter by (dest, family).
+        {
+            auto rv4 = make_route_v4({203, 0, 113, 1}, 24, Protocol::Bgp);
+            out.advertise(origin, rv4, 1);
+            auto rv6 = make_route_v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 1}, 64, Protocol::Bgp);
+            out.advertise(origin, rv6, 1);
+
+            auto v4_keys = out.advertised_keys(origin, AFI_IPV4, SAFI_UNICAST);
+            check(v4_keys.size() == 1, "AdjRibOut advertised_keys (v4) size == 1");
+            check(v4_keys[0].first.afi == AFI_IPV4, "advertised_keys (v4) AFI");
+            check(v4_keys[0].first.prefix_len == 24, "advertised_keys (v4) prefix_len");
+            check(v4_keys[0].second.size() == 1 && v4_keys[0].second[0] == 1,
+                  "advertised_keys (v4) tx_path_ids [1]");
+
+            auto v6_keys = out.advertised_keys(origin, AFI_IPV6, SAFI_UNICAST);
+            check(v6_keys.size() == 1, "AdjRibOut advertised_keys (v6) size == 1");
+            check(v6_keys[0].first.afi == AFI_IPV6, "advertised_keys (v6) AFI");
+            check(v6_keys[0].first.prefix_len == 64, "advertised_keys (v6) prefix_len");
+
+            auto labeled_keys = out.advertised_keys(origin, AFI_IPV4, SAFI_LABELED_UNICAST);
+            check(labeled_keys.empty(), "AdjRibOut advertised_keys (labeled) empty");
+
+            RouteOrigin wrong{Protocol::Bgp, 99};
+            auto wrong_keys = out.advertised_keys(wrong, AFI_IPV4, SAFI_UNICAST);
+            check(wrong_keys.empty(), "AdjRibOut advertised_keys (wrong peer) empty");
+
+            out.clear_for(origin);
+        }
+
         // RibMux: install / uninstall / get.
         RibMux mux;
         check(mux.empty(), "RibMux fresh is empty");
@@ -1338,6 +1399,22 @@ int main() {
         check(mux.empty(), "RibMux empty after uninstall");
         check(!mux.uninstall(k), "RibMux uninstall (no-op)");
 
+        // RibMux::iter — walk every merged route.
+        {
+            check(mux.empty(), "RibMux iter — empty pre-condition");
+            std::size_t n_empty = mux.iter([&](lr_route_t) {});
+            check(n_empty == 0, "RibMux iter (empty) count == 0");
+
+            auto m1 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
+            mux.install(std::move(m1));
+            auto m2 = make_route_v4({10, 0, 1, 1}, 24, Protocol::Bgp);
+            mux.install(std::move(m2));
+            check(mux.size() == 2, "RibMux iter — size == 2 after two installs");
+
+            std::size_t n_iter = mux.iter([&](lr_route_t) {});
+            check(n_iter == 2, "RibMux iter count == 2");
+        }
+
         // RouteSelector.
         auto s1 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
         auto s2 = make_route_v4({10, 0, 0, 1}, 24, Protocol::Bgp);
@@ -1348,6 +1425,17 @@ int main() {
         check(idx_bgp == 0 || idx_bgp == 1, "RouteSelector::select_bgp returns valid index");
         auto empty = std::vector<lr_route_t>{};
         check(RouteSelector::select(empty) == -1, "RouteSelector::select empty == -1");
+
+        // RouteSelector::compare — anti-symmetric comparator.
+        {
+            auto cmp = RouteSelector::compare(s1.get(), s2.get());
+            check(cmp == 0, "RouteSelector::compare identical routes tie");
+            auto cmp_swap = RouteSelector::compare(s2.get(), s1.get());
+            check(cmp_swap == 0, "RouteSelector::compare swapped identical tie");
+            // Self-compare is zero.
+            auto cmp_self = RouteSelector::compare(s1.get(), s1.get());
+            check(cmp_self == 0, "RouteSelector::compare self == 0");
+        }
 
         // ----------------------------------------------------------------
         // Babel — RFC 8966 + RFC 8967. Mirrors the Python and Go
