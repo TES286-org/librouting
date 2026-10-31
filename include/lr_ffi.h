@@ -203,6 +203,16 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_BFD_AUTH_ALGO_METICULOUS_KEYED_SHA1 4
 
+#define LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD 1
+
+#define LR_BFD_AUTH_TYPE_KEYED_MD5 2
+
+#define LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5 3
+
+#define LR_BFD_AUTH_TYPE_KEYED_SHA1 4
+
+#define LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1 5
+
 #define LR_BFD_ROLE_ACTIVE 0
 
 #define LR_BFD_ROLE_PASSIVE 1
@@ -882,19 +892,6 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_BFD_KEYED_AUTH_ALGO_KEYED_SHA1 3
 
 #define LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_SHA1 4
-
-/**
- * AuthType constants (mirrors `lr_bfd::auth::AuthType`).
- */
-#define LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD 0
-
-#define LR_BFD_AUTH_TYPE_KEYED_MD5 1
-
-#define LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5 2
-
-#define LR_BFD_AUTH_TYPE_KEYED_SHA1 3
-
-#define LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1 4
 
 /**
  * Maximum text length for the `kind` and `state` strings in
@@ -2319,6 +2316,15 @@ typedef struct OpaqueBfdPacket {
 
 typedef struct OpaqueBfdPacket *lr_bfd_packet_t;
 
+/**
+ * Opaque `AuthSection` handle. C side never touches internals.
+ */
+typedef struct OpaqueBfdAuthSection {
+  uint8_t _private[0];
+} OpaqueBfdAuthSection;
+
+typedef struct OpaqueBfdAuthSection *lr_bfd_auth_section_t;
+
 typedef struct OpaqueBfdKeyedAuth {
   uint8_t _private[0];
 } OpaqueBfdKeyedAuth;
@@ -2336,6 +2342,15 @@ typedef struct OpaqueBfdSessionEvent {
 } OpaqueBfdSessionEvent;
 
 typedef struct OpaqueBfdSessionEvent *lr_bfd_session_event_t;
+
+/**
+ * Opaque `AuthKey` handle. C side never touches internals.
+ */
+typedef struct OpaqueBfdAuthKey {
+  uint8_t _private[0];
+} OpaqueBfdAuthKey;
+
+typedef struct OpaqueBfdAuthKey *lr_bfd_auth_key_t;
 
 typedef struct OpaqueBfdConfig {
   uint8_t _private[0];
@@ -5963,6 +5978,44 @@ int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uin
  */
 void lr_bfd_packet_free(lr_bfd_packet_t packet);
 
+/**
+ * Install (or replace) the Authentication Section on a `BfdPacket`
+ * (RFC 5880 §4.1 A-bit). The `section` handle is *consumed* — the
+ * boxed `AuthSection` is moved into the packet, so the caller must
+ * NOT call `lr_bfd_auth_section_free` on the same handle afterwards.
+ * Pass `NULL` to clear the auth field. Returns 0 on success,
+ * `LR_ERR_NULL` (-1) on a NULL packet.
+ *
+ * # Safety
+ * `packet` must be a valid `lr_bfd_packet_t` handle. `section` (when
+ * non-NULL) must have been produced by an
+ * `lr_bfd_auth_section_*` constructor and not double-freed.
+ */
+int32_t lr_bfd_packet_set_auth(lr_bfd_packet_t packet, lr_bfd_auth_section_t section);
+
+/**
+ * True (1) when the packet carries an Authentication Section
+ * (RFC 5880 §4.1 A-bit set). Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `packet` must be a valid handle.
+ */
+uint8_t lr_bfd_packet_auth_present(lr_bfd_packet_t packet);
+
+/**
+ * Read a *copy* of the packet's Authentication Section (RFC 5880
+ * §4.1 / §4.2-§4.4). Returns 0 on success and writes a NEW
+ * `lr_bfd_auth_section_t` handle (the caller frees it via
+ * `lr_bfd_auth_section_free`). Returns 0 with `*out = NULL` when
+ * the packet has no auth section. Returns `LR_ERR_NULL` (-1) on a
+ * NULL packet or NULL out-pointer.
+ *
+ * # Safety
+ * `packet` must be a valid handle. `out` must point to a writable
+ * `lr_bfd_auth_section_t`.
+ */
+int32_t lr_bfd_packet_auth(lr_bfd_packet_t packet, lr_bfd_auth_section_t *out);
+
 lr_bfd_keyed_auth_t lr_bfd_keyed_auth_new(int32_t algorithm,
                                           uint8_t key_id,
                                           const uint8_t *secret,
@@ -5986,6 +6039,67 @@ uint32_t lr_bfd_keyed_auth_rcv_auth_seq(lr_bfd_keyed_auth_t a);
 
 int32_t lr_bfd_keyed_auth_advance_xmit_seq(lr_bfd_keyed_auth_t a);
 
+/**
+ * Build the wire auth section to ride the next outbound packet
+ * (RFC 5880 §6.7.3 / §6.7.4): the auth type, key ID, current transmit
+ * sequence and the **shared key in the digest field** (the
+ * placeholder the hash is computed over). The returned
+ * `lr_bfd_auth_section_t` is owned by the caller; free it via
+ * [`crate::bfd_auth_section::lr_bfd_auth_section_free`]. Returns
+ * NULL on a NULL `BfdKeyedAuth` or on panic.
+ *
+ * Mirrors `lr_bfd::keyed_auth::BfdKeyedAuth::auth_section_for_tx`.
+ *
+ * # Safety
+ * `a` must be a valid handle.
+ */
+lr_bfd_auth_section_t lr_bfd_keyed_auth_auth_section_for_tx(lr_bfd_keyed_auth_t a);
+
+/**
+ * Sign an encoded outbound BFD Control packet in place (RFC 5880
+ * §6.7.3 / §6.7.4). The `packet` slice MUST be the full encoded
+ * packet with the auth section's digest field carrying the shared
+ * key (as produced by `auth_section_for_tx` + `BfdCodec::encode`).
+ * The last `digest_len` bytes of the slice are replaced with the
+ * computed digest. Returns 0 on success, `LR_ERR_NULL` (-1) on a
+ * NULL handle / NULL packet, `LR_ERR_OTHER` (-6) when the packet is
+ * shorter than the digest length (defensive — the caller has
+ * already encoded a valid section).
+ *
+ * Mirrors `lr_bfd::keyed_auth::BfdKeyedAuth::sign_packet`.
+ *
+ * # Safety
+ * `a` must be a valid handle. `packet` must point to `packet_len`
+ * writable bytes.
+ */
+int32_t lr_bfd_keyed_auth_sign_packet(lr_bfd_keyed_auth_t a, uint8_t *packet, uintptr_t packet_len);
+
+/**
+ * Verify an inbound BFD Control packet against this auth state
+ * (RFC 5880 §6.7.3 / §6.7.4 anti-replay + digest check). Returns 1
+ * when the packet authenticates and the sequence number is within
+ * the anti-replay window (the receive state is updated in place),
+ * 0 when it does not, `LR_ERR_NULL` (-1) on a NULL handle / NULL
+ * packet / NULL section.
+ *
+ * `received_packet` is the full encoded packet bytes as received;
+ * `section` is the parsed auth section (the received digest lives
+ * in its `data` field); `detect_mult` is the session's detect
+ * multiplier used to bound the anti-replay window.
+ *
+ * Mirrors `lr_bfd::keyed_auth::BfdKeyedAuth::verify_inbound`.
+ *
+ * # Safety
+ * `a` must be a valid handle. `packet` must point to `packet_len`
+ * readable bytes. `section` must be a valid
+ * `lr_bfd_auth_section_t` handle.
+ */
+int32_t lr_bfd_keyed_auth_verify_inbound(lr_bfd_keyed_auth_t a,
+                                         const uint8_t *packet,
+                                         uintptr_t packet_len,
+                                         lr_bfd_auth_section_t section,
+                                         uint8_t detect_mult);
+
 void lr_bfd_keyed_auth_free(lr_bfd_keyed_auth_t a);
 
 int32_t lr_bfd_session_set_keyed_auth(lr_bfd_session_t s, lr_bfd_keyed_auth_t auth);
@@ -6002,6 +6116,263 @@ int32_t lr_bfd_session_update_timers(lr_bfd_session_t s,
 uint8_t lr_bfd_session_remote_detect_mult(lr_bfd_session_t s);
 
 uint8_t lr_bfd_session_poll_active(lr_bfd_session_t s);
+
+/**
+ * Expected digest length for the keyed-hash auth types
+ * (RFC 5880 §4.3 / §4.4): 16 for the MD5 variants, 20 for the SHA1
+ * variants. Returns `-1` for Simple Password (variable length) and
+ * unknown types (no fixed length to validate against).
+ *
+ * Mirrors `lr_bfd::auth::AuthType::expected_digest_len`.
+ */
+intptr_t lr_bfd_auth_type_expected_digest_len(uint8_t auth_type);
+
+/**
+ * True (1) when `auth_type` is one of the four keyed-hash types
+ * (KeyedMd5 / MeticulousKeyedMd5 / KeyedSha1 / MeticulousKeyedSha1);
+ * they share the §4.3/§4.4 layout: reserved byte + sequence number +
+ * digest. Simple Password and unknown types return 0.
+ *
+ * Mirrors `lr_bfd::auth::AuthType::is_keyed_hash`.
+ */
+uint8_t lr_bfd_auth_type_is_keyed_hash(uint8_t auth_type);
+
+/**
+ * True (1) when `auth_type` is one of the two Meticulous variants
+ * (MeticulousKeyedMd5 / MeticulousKeyedSha1) where the sequence
+ * number MUST advance on every packet; 0 otherwise. Mirrors
+ * `lr_bfd::auth::AuthType::is_meticulous`.
+ */
+uint8_t lr_bfd_auth_type_is_meticulous(uint8_t auth_type);
+
+/**
+ * Construct an `AuthKey` from a raw key id and a secret buffer.
+ * Returns NULL on a NULL secret (when `secret_len > 0`) or on panic.
+ *
+ * The key carries the per-key shared secret the digest computation
+ * folds in (RFC 5880 §4.2 / §4.3 / §4.4). Use
+ * [`lr_bfd_auth_key_simple_password`] for the §4.2 Simple Password
+ * convenience constructor that documents the §4.2 length rule (1..=16
+ * bytes).
+ *
+ * # Safety
+ * `secret` must point to `secret_len` readable bytes when
+ * `secret_len > 0`.
+ */
+lr_bfd_auth_key_t lr_bfd_auth_key_new(uint8_t key_id, const uint8_t *secret, uintptr_t secret_len);
+
+/**
+ * Construct a Simple Password `AuthKey` (RFC 5880 §4.2). Passwords
+ * must be 1..=16 bytes; the C ABI does not enforce the upper bound
+ * (the codec rejects longer passwords at encode time) so the
+ * constructor is infallible. Returns NULL on a NULL password or on
+ * panic.
+ *
+ * Mirrors `lr_bfd::auth::AuthKey::simple_password`.
+ *
+ * # Safety
+ * `password` must point to `password_len` readable bytes when
+ * `password_len > 0`.
+ */
+lr_bfd_auth_key_t lr_bfd_auth_key_simple_password(uint8_t key_id,
+                                                  const uint8_t *password,
+                                                  uintptr_t password_len);
+
+/**
+ * Drop a boxed `AuthKey`. Safe to call with NULL.
+ *
+ * # Safety
+ * `k` must have been produced by [`lr_bfd_auth_key_new`] /
+ * [`lr_bfd_auth_key_simple_password`] and must not be used after this
+ * call. Double-free is undefined behaviour.
+ */
+void lr_bfd_auth_key_free(lr_bfd_auth_key_t k);
+
+/**
+ * Read the key id (RFC 5880 §4.3 / §4.4 `Auth Key ID`). Returns 0 on
+ * a NULL handle.
+ *
+ * # Safety
+ * `k` must be a valid handle.
+ */
+uint8_t lr_bfd_auth_key_key_id(lr_bfd_auth_key_t k);
+
+/**
+ * Read the secret length in bytes. Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `k` must be a valid handle.
+ */
+uintptr_t lr_bfd_auth_key_data_len(lr_bfd_auth_key_t k);
+
+/**
+ * Copy the secret bytes into `out_data` (up to `cap` bytes) and write
+ * the actual length to `*out_len`. Returns 0 on success,
+ * `LR_ERR_NULL` on a NULL handle / NULL out_len, `LR_ERR_OTHER` when
+ * the buffer is too small (the length is still written to
+ * `*out_len` so the caller can retry).
+ *
+ * # Safety
+ * `k` must be a valid handle. `out_data` (when `cap > 0`) must point
+ * to `cap` writable bytes. `out_len` must point to a writable
+ * `uintptr_t`.
+ */
+int32_t lr_bfd_auth_key_data(lr_bfd_auth_key_t k,
+                             uint8_t *out_data,
+                             uintptr_t cap,
+                             uintptr_t *out_len);
+
+/**
+ * Construct a Simple Password `AuthSection` (RFC 5880 §4.2). The
+ * `password` slice becomes the section's `data`; `key_id` is the
+ * `Auth Key ID` field. The wire codec later enforces the §4.2
+ * length rule (1..=16 bytes) at encode time. Returns NULL on a NULL
+ * password (when `password_len > 0`) or on panic.
+ *
+ * Mirrors `lr_bfd::auth::AuthSection::simple_password`.
+ *
+ * # Safety
+ * `password` must point to `password_len` readable bytes when
+ * `password_len > 0`.
+ */
+lr_bfd_auth_section_t lr_bfd_auth_section_simple_password(const uint8_t *password,
+                                                          uintptr_t password_len,
+                                                          uint8_t key_id);
+
+/**
+ * Construct a Keyed MD5 `AuthSection` (RFC 5880 §4.3, type 2). The
+ * `digest` slice carries the 16-byte MD5 digest the codec will emit
+ * in the Auth Key/Digest field. Returns NULL on a NULL digest or on
+ * panic.
+ *
+ * Mirrors `lr_bfd::auth::AuthSection::keyed_md5`.
+ *
+ * # Safety
+ * `digest` must point to `digest_len` readable bytes when
+ * `digest_len > 0`.
+ */
+lr_bfd_auth_section_t lr_bfd_auth_section_keyed_md5(uint8_t key_id,
+                                                    uint32_t sequence,
+                                                    const uint8_t *digest,
+                                                    uintptr_t digest_len);
+
+/**
+ * Construct a Meticulous Keyed MD5 `AuthSection` (RFC 5880 §4.3,
+ * type 3). Mirrors `lr_bfd::auth::AuthSection::meticulous_keyed_md5`.
+ *
+ * # Safety
+ * See [`lr_bfd_auth_section_keyed_md5`].
+ */
+lr_bfd_auth_section_t lr_bfd_auth_section_meticulous_keyed_md5(uint8_t key_id,
+                                                               uint32_t sequence,
+                                                               const uint8_t *digest,
+                                                               uintptr_t digest_len);
+
+/**
+ * Construct a Keyed SHA1 `AuthSection` (RFC 5880 §4.4, type 4). The
+ * `digest` slice carries the 20-byte SHA1 digest. Returns NULL on a
+ * NULL digest or on panic. Mirrors
+ * `lr_bfd::auth::AuthSection::keyed_sha1`.
+ *
+ * # Safety
+ * See [`lr_bfd_auth_section_keyed_md5`].
+ */
+lr_bfd_auth_section_t lr_bfd_auth_section_keyed_sha1(uint8_t key_id,
+                                                     uint32_t sequence,
+                                                     const uint8_t *digest,
+                                                     uintptr_t digest_len);
+
+/**
+ * Construct a Meticulous Keyed SHA1 `AuthSection` (RFC 5880 §4.4,
+ * type 5). Mirrors
+ * `lr_bfd::auth::AuthSection::meticulous_keyed_sha1`.
+ *
+ * # Safety
+ * See [`lr_bfd_auth_section_keyed_md5`].
+ */
+lr_bfd_auth_section_t lr_bfd_auth_section_meticulous_keyed_sha1(uint8_t key_id,
+                                                                uint32_t sequence,
+                                                                const uint8_t *digest,
+                                                                uintptr_t digest_len);
+
+/**
+ * Drop a boxed `AuthSection`. Safe to call with NULL.
+ *
+ * # Safety
+ * `s` must have been produced by an `lr_bfd_auth_section_*`
+ * constructor and must not be used after this call. Double-free is
+ * undefined behaviour.
+ */
+void lr_bfd_auth_section_free(lr_bfd_auth_section_t s);
+
+/**
+ * Read the auth type code (`LR_BFD_AUTH_TYPE_*`). Returns 0 on a
+ * NULL handle.
+ *
+ * # Safety
+ * `s` must be a valid handle.
+ */
+uint8_t lr_bfd_auth_section_auth_type(lr_bfd_auth_section_t s);
+
+/**
+ * Read the key id (RFC 5880 §4.3 / §4.4 `Auth Key ID`). Returns 0 on
+ * a NULL handle.
+ *
+ * # Safety
+ * `s` must be a valid handle.
+ */
+uint8_t lr_bfd_auth_section_key_id(lr_bfd_auth_section_t s);
+
+/**
+ * Read the sequence number (RFC 5880 §4.3 / §4.4). Returns 1 when
+ * the section carries a sequence (the keyed-hash types), 0
+ * otherwise (Simple Password / unknown types) — the value is
+ * written to `*out_sequence`. Returns `LR_ERR_NULL` (-1) on a NULL
+ * handle or NULL out-pointer.
+ *
+ * # Safety
+ * `s` must be a valid handle. `out_sequence` must point to a
+ * writable `uint32_t`.
+ */
+int32_t lr_bfd_auth_section_sequence(lr_bfd_auth_section_t s, uint32_t *out_sequence);
+
+/**
+ * Read the data length (RFC 5880 §4.2 password bytes / §4.3 / §4.4
+ * digest bytes). Returns 0 on a NULL handle.
+ *
+ * # Safety
+ * `s` must be a valid handle.
+ */
+uintptr_t lr_bfd_auth_section_data_len(lr_bfd_auth_section_t s);
+
+/**
+ * Copy the data bytes (password / digest) into `out_data` (up to
+ * `cap` bytes) and write the actual length to `*out_len`. Returns 0
+ * on success, `LR_ERR_NULL` on a NULL handle / NULL out_len,
+ * `LR_ERR_OTHER` when the buffer is too small (the length is still
+ * written to `*out_len`).
+ *
+ * # Safety
+ * `s` must be a valid handle. `out_data` (when `cap > 0`) must
+ * point to `cap` writable bytes. `out_len` must point to a writable
+ * `uintptr_t`.
+ */
+int32_t lr_bfd_auth_section_data(lr_bfd_auth_section_t s,
+                                 uint8_t *out_data,
+                                 uintptr_t cap,
+                                 uintptr_t *out_len);
+
+/**
+ * Total wire length of the section (the `Auth Len` field value):
+ * Simple Password = 3 + password length; Keyed MD5 = 24; Keyed
+ * SHA1 = 28 (RFC 5880 §4.2-§4.4). Returns 0 on a NULL handle.
+ *
+ * Mirrors `lr_bfd::auth::AuthSection::wire_len`.
+ *
+ * # Safety
+ * `s` must be a valid handle.
+ */
+uintptr_t lr_bfd_auth_section_wire_len(lr_bfd_auth_section_t s);
 
 lr_bfd_config_t lr_bfd_config_new(uint8_t detect_mult,
                                   uint32_t desired_min_tx_interval_us,
@@ -10563,8 +10934,14 @@ lr_mpls_label_stack_t lr_mpls_label_stack_from_vec(const lr_mpls_label_t *labels
 int32_t lr_mpls_label_stack_into_vec(lr_mpls_label_stack_t stack, struct lr_bytes_t *out);
 
 /**
- * Read the AuthType as one of the `LR_BFD_AUTH_TYPE_*` constants.
- * Stateless — given an algorithm id, returns the matching AuthType.
+ * Read the AuthType wire code (`LR_BFD_AUTH_TYPE_*` per RFC 5880 §8)
+ * for a keyed-auth algorithm id (`LR_BFD_AUTH_ALGO_*`). Returns
+ * `LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD` (1) for an unknown algorithm
+ * id (defensive — RFC 5880 §8 reserves 0 as reserved).
+ *
+ * Stateless. Mirrors `KeyedAuthAlgorithm::auth_type().to_u8()`.
+ * The canonical `LR_BFD_AUTH_TYPE_*` constants live in
+ * `bfd_auth_section.rs` and use the IANA-assigned wire codes (1-5).
  */
 int32_t lr_bfd_auth_type_from_algorithm(int32_t algorithm);
 

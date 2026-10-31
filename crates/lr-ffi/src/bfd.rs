@@ -584,6 +584,106 @@ pub unsafe extern "C" fn lr_bfd_packet_free(packet: lr_bfd_packet_t) {
     )
 }
 
+// ---- BfdPacket auth section integration (RFC 5880 §4.1 A bit) ----
+//
+// Mirrors `BfdPacket::auth: Option<AuthSection>` so an embedder can
+// install / read / clear the Authentication Section that rides the
+// packet when the A flag bit is set. The C ABI takes ownership of
+// the `lr_bfd_auth_section_t` handle on `set_auth` (the boxed
+// `AuthSection` is moved into the packet); a NULL `section` clears
+// the field. `lr_bfd_packet_auth` returns a *copy* (a new handle the
+// caller frees via `lr_bfd_auth_section_free`).
+
+/// Install (or replace) the Authentication Section on a `BfdPacket`
+/// (RFC 5880 §4.1 A-bit). The `section` handle is *consumed* — the
+/// boxed `AuthSection` is moved into the packet, so the caller must
+/// NOT call `lr_bfd_auth_section_free` on the same handle afterwards.
+/// Pass `NULL` to clear the auth field. Returns 0 on success,
+/// `LR_ERR_NULL` (-1) on a NULL packet.
+///
+/// # Safety
+/// `packet` must be a valid `lr_bfd_packet_t` handle. `section` (when
+/// non-NULL) must have been produced by an
+/// `lr_bfd_auth_section_*` constructor and not double-freed.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_packet_set_auth(
+    packet: lr_bfd_packet_t,
+    section: crate::bfd_auth_section::lr_bfd_auth_section_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(p) = borrow_packet_mut(packet) else {
+                return LR_ERR_NULL;
+            };
+            if section.is_null() {
+                p.auth = None;
+            } else {
+                let Some(s) = crate::bfd_auth_section::unbox_section_pub(section) else {
+                    return LR_ERR_NULL;
+                };
+                p.auth = Some(*s);
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// True (1) when the packet carries an Authentication Section
+/// (RFC 5880 §4.1 A-bit set). Returns 0 on a NULL handle.
+///
+/// # Safety
+/// `packet` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_packet_auth_present(packet: lr_bfd_packet_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_packet(packet)
+                .map(|p| p.auth.is_some() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Read a *copy* of the packet's Authentication Section (RFC 5880
+/// §4.1 / §4.2-§4.4). Returns 0 on success and writes a NEW
+/// `lr_bfd_auth_section_t` handle (the caller frees it via
+/// `lr_bfd_auth_section_free`). Returns 0 with `*out = NULL` when
+/// the packet has no auth section. Returns `LR_ERR_NULL` (-1) on a
+/// NULL packet or NULL out-pointer.
+///
+/// # Safety
+/// `packet` must be a valid handle. `out` must point to a writable
+/// `lr_bfd_auth_section_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bfd_packet_auth(
+    packet: lr_bfd_packet_t,
+    out: *mut crate::bfd_auth_section::lr_bfd_auth_section_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(p) = borrow_packet(packet) else {
+                return LR_ERR_NULL;
+            };
+            match &p.auth {
+                None => {
+                    unsafe { *out = std::ptr::null_mut() };
+                    0
+                }
+                Some(sec) => {
+                    unsafe { *out = crate::bfd_auth_section::box_section_pub(sec.clone()) };
+                    0
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,6 +843,87 @@ mod tests {
     fn ffi_packet_version_always_one() {
         let p = lr_bfd_packet_new();
         assert_eq!(unsafe { lr_bfd_packet_version(p) }, 1);
+        unsafe { lr_bfd_packet_free(p) };
+    }
+
+    // ---- BfdPacket auth integration ----
+
+    /// A fresh packet has no auth section attached; `auth_present`
+    /// returns 0 and `auth` writes NULL to the out-pointer.
+    #[test]
+    fn ffi_packet_auth_absent_by_default() {
+        use crate::bfd_auth_section::*;
+        let p = lr_bfd_packet_new();
+        assert_eq!(unsafe { lr_bfd_packet_auth_present(p) }, 0);
+        let mut out: lr_bfd_auth_section_t = std::ptr::null_mut();
+        let rc = unsafe { lr_bfd_packet_auth(p, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert!(out.is_null(), "no auth section → *out must be NULL");
+        unsafe { lr_bfd_packet_free(p) };
+    }
+
+    /// Install a Simple Password auth section, read it back, clear
+    /// it. `set_auth` consumes the section handle (the boxed
+    /// AuthSection is moved into the packet); a NULL handle clears.
+    #[test]
+    fn ffi_packet_set_auth_simple_password_round_trip() {
+        use crate::bfd_auth_section::*;
+        let p = lr_bfd_packet_new();
+        // Build a Simple Password section.
+        let pw = b"hunter2";
+        let s = unsafe { lr_bfd_auth_section_simple_password(pw.as_ptr(), pw.len(), 7) };
+        assert!(!s.is_null());
+        // Install it.
+        let rc = unsafe { lr_bfd_packet_set_auth(p, s) };
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { lr_bfd_packet_auth_present(p) }, 1);
+        // Read it back — a NEW handle.
+        let mut out: lr_bfd_auth_section_t = std::ptr::null_mut();
+        let rc = unsafe { lr_bfd_packet_auth(p, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert!(!out.is_null());
+        assert_eq!(
+            unsafe { lr_bfd_auth_section_auth_type(out) },
+            LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD
+        );
+        assert_eq!(unsafe { lr_bfd_auth_section_key_id(out) }, 7);
+        assert_eq!(unsafe { lr_bfd_auth_section_data_len(out) }, pw.len());
+        unsafe { lr_bfd_auth_section_free(out) };
+        // Clear via NULL section.
+        let rc = unsafe { lr_bfd_packet_set_auth(p, std::ptr::null_mut()) };
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { lr_bfd_packet_auth_present(p) }, 0);
+        unsafe { lr_bfd_packet_free(p) };
+    }
+
+    /// NULL packet on set_auth / auth / auth_present: LR_ERR_NULL / 0.
+    #[test]
+    fn ffi_packet_auth_handles_null_safely() {
+        use crate::bfd_auth_section::*;
+        // set_auth: NULL packet.
+        let s = unsafe { lr_bfd_auth_section_simple_password(b"x".as_ptr(), 1, 1) };
+        assert_eq!(
+            unsafe { lr_bfd_packet_set_auth(std::ptr::null_mut(), s) },
+            LR_ERR_NULL
+        );
+        unsafe { lr_bfd_auth_section_free(s) };
+        // auth_present: NULL packet → 0.
+        assert_eq!(
+            unsafe { lr_bfd_packet_auth_present(std::ptr::null_mut()) },
+            0
+        );
+        // auth: NULL packet → LR_ERR_NULL.
+        let mut out: lr_bfd_auth_section_t = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { lr_bfd_packet_auth(std::ptr::null_mut(), &raw mut out) },
+            LR_ERR_NULL
+        );
+        // auth: NULL out-pointer → LR_ERR_NULL.
+        let p = lr_bfd_packet_new();
+        assert_eq!(
+            unsafe { lr_bfd_packet_auth(p, std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
         unsafe { lr_bfd_packet_free(p) };
     }
 }

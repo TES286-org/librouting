@@ -32,6 +32,7 @@ pub mod babel_neighbor;
 pub mod best_path;
 pub mod bfd;
 pub mod bfd_auth;
+pub mod bfd_auth_section;
 pub mod bfd_session;
 pub mod bgp_codec;
 pub mod bgp_codec_helpers;

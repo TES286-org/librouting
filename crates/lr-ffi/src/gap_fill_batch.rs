@@ -179,24 +179,31 @@ pub const LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_MD5: i32 = 2;
 pub const LR_BFD_KEYED_AUTH_ALGO_KEYED_SHA1: i32 = 3;
 pub const LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_SHA1: i32 = 4;
 
-/// AuthType constants (mirrors `lr_bfd::auth::AuthType`).
-pub const LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD: i32 = 0;
-pub const LR_BFD_AUTH_TYPE_KEYED_MD5: i32 = 1;
-pub const LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5: i32 = 2;
-pub const LR_BFD_AUTH_TYPE_KEYED_SHA1: i32 = 3;
-pub const LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1: i32 = 4;
-
-/// Read the AuthType as one of the `LR_BFD_AUTH_TYPE_*` constants.
-/// Stateless — given an algorithm id, returns the matching AuthType.
+/// Read the AuthType wire code (`LR_BFD_AUTH_TYPE_*` per RFC 5880 §8)
+/// for a keyed-auth algorithm id (`LR_BFD_AUTH_ALGO_*`). Returns
+/// `LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD` (1) for an unknown algorithm
+/// id (defensive — RFC 5880 §8 reserves 0 as reserved).
+///
+/// Stateless. Mirrors `KeyedAuthAlgorithm::auth_type().to_u8()`.
+/// The canonical `LR_BFD_AUTH_TYPE_*` constants live in
+/// `bfd_auth_section.rs` and use the IANA-assigned wire codes (1-5).
 #[no_mangle]
 pub extern "C" fn lr_bfd_auth_type_from_algorithm(algorithm: i32) -> i32 {
     guarded(
         || match algorithm {
-            1 => LR_BFD_AUTH_TYPE_KEYED_MD5,
-            2 => LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5,
-            3 => LR_BFD_AUTH_TYPE_KEYED_SHA1,
-            4 => LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1,
-            _ => 0,
+            LR_BFD_KEYED_AUTH_ALGO_KEYED_MD5 => {
+                crate::bfd_auth_section::LR_BFD_AUTH_TYPE_KEYED_MD5 as i32
+            }
+            LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_MD5 => {
+                crate::bfd_auth_section::LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5 as i32
+            }
+            LR_BFD_KEYED_AUTH_ALGO_KEYED_SHA1 => {
+                crate::bfd_auth_section::LR_BFD_AUTH_TYPE_KEYED_SHA1 as i32
+            }
+            LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_SHA1 => {
+                crate::bfd_auth_section::LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1 as i32
+            }
+            _ => crate::bfd_auth_section::LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD as i32,
         },
         0,
     )
