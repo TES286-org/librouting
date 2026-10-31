@@ -1182,6 +1182,279 @@ uint8_t lr_rib_mux_is_empty(lr_rib_mux_t r);
 
 int64_t lr_route_selector_select(const lr_route_t *routes, uintptr_t count);
 int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
+
+/* Babel protocol surface — mirrors lr_babel::{BabelFrame, BabelNeighbor,
+ * BabelRouteTable, BabelRoute, RouteKey, BabelCodec, tlv::Tlv} and the
+ * auth::* helpers. Mirrors the C ABI in crates/lr-ffi/src/babel*.rs.
+ * RFC 8966 §3 (Babel routing protocol) + RFC 8967 (authentication).
+ */
+
+/* Opaque handle types (one per Rust struct). */
+typedef struct OpaqueBabelFrame OpaqueBabelFrame;
+typedef struct OpaqueBabelFrame *lr_babel_frame_t;
+typedef struct OpaqueBabelCodec OpaqueBabelCodec;
+typedef struct OpaqueBabelCodec *lr_babel_codec_t;
+typedef struct OpaqueBabelTlv OpaqueBabelTlv;
+typedef struct OpaqueBabelTlv *lr_babel_tlv_t;
+typedef struct OpaqueBabelRoute OpaqueBabelRoute;
+typedef struct OpaqueBabelRoute *lr_babel_route_t;
+typedef struct OpaqueBabelRouteKey OpaqueBabelRouteKey;
+typedef struct OpaqueBabelRouteKey *lr_babel_route_key_t;
+typedef struct OpaqueBabelRouteTable OpaqueBabelRouteTable;
+typedef struct OpaqueBabelRouteTable *lr_babel_route_table_t;
+typedef struct OpaqueBabelNeighbor OpaqueBabelNeighbor;
+typedef struct OpaqueBabelNeighbor *lr_babel_neighbor_t;
+typedef struct OpaqueBabelMacKey OpaqueBabelMacKey;
+typedef struct OpaqueBabelMacKey *lr_babel_mac_key_t;
+typedef struct OpaqueBabelPseudoHeader OpaqueBabelPseudoHeader;
+typedef struct OpaqueBabelPseudoHeader *lr_babel_pseudo_header_t;
+typedef struct OpaqueBabelPacketCounter OpaqueBabelPacketCounter;
+typedef struct OpaqueBabelPacketCounter *lr_babel_packet_counter_t;
+typedef struct OpaqueBabelReplayProtection OpaqueBabelReplayProtection;
+typedef struct OpaqueBabelReplayProtection *lr_babel_replay_protection_t;
+typedef struct OpaqueBabelHello OpaqueBabelHello;
+typedef struct OpaqueBabelHello *lr_babel_hello_t;
+typedef struct OpaqueBabelIhu OpaqueBabelIhu;
+typedef struct OpaqueBabelIhu *lr_babel_ihu_t;
+typedef struct OpaqueBabelAckReq OpaqueBabelAckReq;
+typedef struct OpaqueBabelAckReq *lr_babel_ack_req_t;
+typedef struct OpaqueBabelAck OpaqueBabelAck;
+typedef struct OpaqueBabelAck *lr_babel_ack_t;
+typedef struct OpaqueBabelNextHop OpaqueBabelNextHop;
+typedef struct OpaqueBabelNextHop *lr_babel_next_hop_t;
+typedef struct OpaqueBabelRouterId OpaqueBabelRouterId;
+typedef struct OpaqueBabelRouterId *lr_babel_router_id_t;
+typedef struct OpaqueBabelRouteRequest OpaqueBabelRouteRequest;
+typedef struct OpaqueBabelRouteRequest *lr_babel_route_request_t;
+typedef struct OpaqueBabelSeqnoRequest OpaqueBabelSeqnoRequest;
+typedef struct OpaqueBabelSeqnoRequest *lr_babel_seqno_request_t;
+
+/* Callback shape for lr_babel_route_table_iter / _best_routes_iter.
+ * Returns 0 to continue iteration, non-zero to stop early. */
+typedef int32_t (*lr_babel_route_iter_cb)(lr_babel_route_t route, void *user);
+
+/* Babel codec + frame surface (RFC 8966 §4). */
+lr_babel_codec_t lr_babel_codec_new(void);
+void lr_babel_codec_free(lr_babel_codec_t c);
+int32_t lr_babel_codec_decode_slice(lr_babel_codec_t c,
+                                    const uint8_t *data,
+                                    uintptr_t len,
+                                    lr_babel_frame_t *out);
+int32_t lr_babel_codec_encode_vec(lr_babel_codec_t c,
+                                  lr_babel_frame_t frame,
+                                  lr_bytes_t *out);
+int32_t lr_babel_codec_decode_authenticated_slice(lr_babel_codec_t c,
+                                                   const uint8_t *data,
+                                                   uintptr_t len,
+                                                   lr_babel_pseudo_header_t ph,
+                                                   lr_bytes_t *out);
+int32_t lr_babel_codec_encode_authenticated(lr_babel_codec_t c,
+                                            lr_babel_frame_t frame,
+                                            lr_babel_pseudo_header_t ph,
+                                            const lr_babel_mac_key_t *keys,
+                                            uintptr_t keys_len,
+                                            lr_bytes_t *out);
+
+int32_t lr_babel_decode_frame(const uint8_t *data, uintptr_t len, lr_babel_frame_t *out);
+int32_t lr_babel_encode_frame(lr_babel_frame_t frame, lr_bytes_t *out);
+lr_babel_frame_t lr_babel_frame_new_empty(void);
+lr_babel_frame_t lr_babel_frame_new_from_tlvs(const lr_babel_tlv_t *tlvs, uintptr_t count);
+int32_t lr_babel_frame_push_tlv(lr_babel_frame_t frame, lr_babel_tlv_t tlv);
+uintptr_t lr_babel_frame_tlv_count(lr_babel_frame_t frame);
+uint8_t lr_babel_frame_tlv_type_at(lr_babel_frame_t frame, uintptr_t index);
+uintptr_t lr_babel_frame_tlv_value_len_at(lr_babel_frame_t frame, uintptr_t index);
+uintptr_t lr_babel_frame_tlv_value_at(lr_babel_frame_t frame,
+                                      uintptr_t index,
+                                      uint8_t *out,
+                                      uintptr_t cap);
+void lr_babel_frame_free(lr_babel_frame_t frame);
+
+/* TLV constructors (RFC 8966 §4.4). */
+lr_babel_tlv_t lr_babel_tlv_new(uint8_t kind,
+                                const uint8_t *value,
+                                uintptr_t value_len);
+lr_babel_tlv_t lr_babel_tlv_pad1(void);
+lr_babel_tlv_t lr_babel_tlv_pad_n(uintptr_t n);
+uint8_t lr_babel_tlv_kind(lr_babel_tlv_t t);
+int32_t lr_babel_tlv_value(lr_babel_tlv_t t, lr_bytes_t *out);
+void lr_babel_tlv_free(lr_babel_tlv_t t);
+uint8_t lr_babel_tlv_type_to_u8(uint8_t value);
+uint8_t lr_babel_tlv_type_from_u8(uint8_t wire);
+const char *lr_babel_tlv_type_name(uint8_t value);
+
+/* RouteKey + BabelRoute + BabelRouteTable (RFC 8966 §3.2 / §3.5). */
+lr_babel_route_key_t lr_babel_route_key_new(uint8_t dest_is_ipv6,
+                                            const uint8_t *dest_addr,
+                                            uint8_t dest_prefix_len,
+                                            uint8_t source_present,
+                                            uint8_t source_is_ipv6,
+                                            const uint8_t *source_addr,
+                                            uint8_t source_prefix_len,
+                                            const uint8_t *router_id);
+void lr_babel_route_key_free(lr_babel_route_key_t k);
+uint8_t lr_babel_route_key_destination_is_ipv6(lr_babel_route_key_t k);
+int32_t lr_babel_route_key_destination_addr(lr_babel_route_key_t k, uint8_t *out);
+uint8_t lr_babel_route_key_destination_prefix_len(lr_babel_route_key_t k);
+uint8_t lr_babel_route_key_source_present(lr_babel_route_key_t k);
+uint8_t lr_babel_route_key_source_is_ipv6(lr_babel_route_key_t k);
+int32_t lr_babel_route_key_source_addr(lr_babel_route_key_t k, uint8_t *out);
+uint8_t lr_babel_route_key_source_prefix_len(lr_babel_route_key_t k);
+int32_t lr_babel_route_key_router_id(lr_babel_route_key_t k, uint8_t *out);
+
+lr_babel_route_t lr_babel_route_new(lr_babel_route_key_t key,
+                                    uint16_t seqno,
+                                    uint32_t metric,
+                                    uint8_t next_hop_is_ipv6,
+                                    const uint8_t *next_hop,
+                                    uint8_t feasible,
+                                    uint8_t installed);
+void lr_babel_route_free(lr_babel_route_t r);
+uint16_t lr_babel_route_seqno(lr_babel_route_t r);
+uint32_t lr_babel_route_metric(lr_babel_route_t r);
+uint8_t lr_babel_route_next_hop_is_ipv6(lr_babel_route_t r);
+int32_t lr_babel_route_next_hop(lr_babel_route_t r, uint8_t *out);
+uint8_t lr_babel_route_feasible(lr_babel_route_t r);
+uint8_t lr_babel_route_installed(lr_babel_route_t r);
+lr_babel_route_key_t lr_babel_route_borrow_key(lr_babel_route_t r);
+
+lr_babel_route_table_t lr_babel_route_table_new(void);
+void lr_babel_route_table_free(lr_babel_route_table_t r);
+uintptr_t lr_babel_route_table_len(lr_babel_route_table_t r);
+uint8_t lr_babel_route_table_is_empty(lr_babel_route_table_t r);
+int32_t lr_babel_route_table_insert(lr_babel_route_table_t table, lr_babel_route_t route);
+int32_t lr_babel_route_table_insert_timed(lr_babel_route_table_t table,
+                                          lr_babel_route_t route,
+                                          uint16_t interval_cs,
+                                          uint64_t now_ms);
+int32_t lr_babel_route_table_withdraw(lr_babel_route_table_t table, lr_babel_route_key_t key);
+uintptr_t lr_babel_route_table_expire(lr_babel_route_table_t table, uint64_t now_ms);
+uint8_t lr_babel_route_table_contains(lr_babel_route_table_t table, lr_babel_route_key_t key);
+uintptr_t lr_babel_route_table_best_routes_count(lr_babel_route_table_t table);
+lr_babel_route_t lr_babel_route_table_get(lr_babel_route_table_t table, lr_babel_route_key_t key);
+int32_t lr_babel_route_table_iter(lr_babel_route_table_t table,
+                                  lr_babel_route_iter_cb cb,
+                                  void *user);
+int32_t lr_babel_route_table_best_routes_iter(lr_babel_route_table_t table,
+                                              lr_babel_route_iter_cb cb,
+                                              void *user);
+
+/* BabelNeighbor (RFC 8966 §3.4) — Hello / IHU feeding, RTT tracking. */
+lr_babel_neighbor_t lr_babel_neighbor_new(const uint8_t *addr_v4,
+                                          const uint8_t *addr_v6,
+                                          uint64_t now_ms);
+void lr_babel_neighbor_free(lr_babel_neighbor_t r);
+int32_t lr_babel_neighbor_hello(lr_babel_neighbor_t r,
+                                uint16_t seqno,
+                                uint16_t interval_cs,
+                                uint64_t now_ms);
+int32_t lr_babel_neighbor_ihu(lr_babel_neighbor_t r,
+                              uint16_t rxcost,
+                              uint16_t interval_cs,
+                              uint64_t now_ms);
+uint32_t lr_babel_neighbor_rtt_us(lr_babel_neighbor_t r, uint64_t now_ms);
+uint8_t lr_babel_neighbor_rtt_valid(lr_babel_neighbor_t r, uint64_t now_ms);
+
+/* Auth helpers (RFC 8967) — MAC key, pseudo-header, replay protection. */
+lr_babel_mac_key_t lr_babel_mac_key_new(int32_t algorithm,
+                                const uint8_t *secret,
+                                uintptr_t secret_len);
+lr_babel_mac_key_t lr_babel_mac_key_hmac_sha256(const uint8_t *secret, uintptr_t secret_len);
+lr_babel_mac_key_t lr_babel_mac_key_blake2s128(const uint8_t *secret, uintptr_t secret_len);
+int32_t lr_babel_mac_key_algorithm(lr_babel_mac_key_t k);
+uintptr_t lr_babel_mac_key_digest_len(lr_babel_mac_key_t k);
+uintptr_t lr_babel_mac_key_secret_len(lr_babel_mac_key_t k);
+int32_t lr_babel_mac_key_secret_copy(lr_babel_mac_key_t k, uint8_t *out, uintptr_t cap);
+void lr_babel_mac_key_free(lr_babel_mac_key_t k);
+
+lr_babel_pseudo_header_t lr_babel_pseudo_header_new_v4(const uint8_t *src_v4,
+                                                       uint16_t src_port,
+                                                       const uint8_t *dst_v4,
+                                                       uint16_t dst_port);
+lr_babel_pseudo_header_t lr_babel_pseudo_header_new_v6(const uint8_t *src_v6,
+                                                       uint16_t src_port,
+                                                       const uint8_t *dst_v6,
+                                                       uint16_t dst_port);
+int32_t lr_babel_pseudo_header_encode(lr_babel_pseudo_header_t p, lr_bytes_t *out);
+void lr_babel_pseudo_header_free(lr_babel_pseudo_header_t p);
+
+lr_babel_packet_counter_t lr_babel_packet_counter_new(const uint8_t *index,
+                                                      uintptr_t index_len,
+                                                      uint32_t initial);
+uint32_t lr_babel_packet_counter_peek_counter(lr_babel_packet_counter_t c);
+uintptr_t lr_babel_packet_counter_peek_index_len(lr_babel_packet_counter_t c);
+int32_t lr_babel_packet_counter_peek_index_copy(lr_babel_packet_counter_t c,
+                                                uint8_t *out,
+                                                uintptr_t cap);
+void lr_babel_packet_counter_free(lr_babel_packet_counter_t c);
+
+lr_babel_replay_protection_t lr_babel_replay_protection_new(void);
+int32_t lr_babel_replay_protection_accept(lr_babel_replay_protection_t r,
+                                          const uint8_t *index,
+                                          uintptr_t index_len,
+                                          uint32_t counter);
+void lr_babel_replay_protection_free(lr_babel_replay_protection_t r);
+
+/* Babel message constructors (RFC 8966 §4.4) — Hello / IHU / AckReq /
+ * Ack / NextHop / RouterId / RouteRequest / SeqnoRequest. */
+lr_babel_hello_t lr_babel_hello_new(uint16_t seqno, uint16_t interval_cs);
+int32_t lr_babel_hello_set_unicast(lr_babel_hello_t h, uint8_t on);
+uint16_t lr_babel_hello_seqno(lr_babel_hello_t h);
+uint16_t lr_babel_hello_interval_cs(lr_babel_hello_t h);
+uint16_t lr_babel_hello_flags(lr_babel_hello_t h);
+int32_t lr_babel_hello_timestamp(lr_babel_hello_t h, uint32_t *out);
+int32_t lr_babel_hello_encode(lr_babel_hello_t h, lr_bytes_t *out);
+void lr_babel_hello_free(lr_babel_hello_t h);
+
+lr_babel_ihu_t lr_babel_ihu_new(uint16_t rxcost, uint16_t interval_cs);
+uint8_t lr_babel_ihu_ae(lr_babel_ihu_t h);
+uint16_t lr_babel_ihu_rxcost(lr_babel_ihu_t h);
+uint16_t lr_babel_ihu_interval_cs(lr_babel_ihu_t h);
+int32_t lr_babel_ihu_address(lr_babel_ihu_t h, uint8_t *octets_out, uint8_t *present_out);
+int32_t lr_babel_ihu_encode(lr_babel_ihu_t h, lr_bytes_t *out);
+void lr_babel_ihu_free(lr_babel_ihu_t h);
+
+lr_babel_ack_req_t lr_babel_ack_req_new(uint16_t nonce, uint16_t interval_cs);
+uint16_t lr_babel_ack_req_nonce(lr_babel_ack_req_t a);
+uint16_t lr_babel_ack_req_interval_cs(lr_babel_ack_req_t a);
+void lr_babel_ack_req_free(lr_babel_ack_req_t a);
+
+lr_babel_ack_t lr_babel_ack_new(uint16_t opaque);
+uint16_t lr_babel_ack_opaque(lr_babel_ack_t a);
+int32_t lr_babel_ack_encode(lr_babel_ack_t a, lr_bytes_t *out);
+void lr_babel_ack_free(lr_babel_ack_t a);
+
+lr_babel_next_hop_t lr_babel_next_hop_new_v4(const uint8_t *addr);
+lr_babel_next_hop_t lr_babel_next_hop_new_v6(const uint8_t *addr);
+uint8_t lr_babel_next_hop_ae(lr_babel_next_hop_t n);
+uintptr_t lr_babel_next_hop_address(lr_babel_next_hop_t n, uint8_t *out, uintptr_t out_len);
+int32_t lr_babel_next_hop_encode(lr_babel_next_hop_t n, lr_bytes_t *out);
+void lr_babel_next_hop_free(lr_babel_next_hop_t n);
+
+lr_babel_router_id_t lr_babel_router_id_new(const uint8_t *router_id);
+int32_t lr_babel_router_id_bytes(lr_babel_router_id_t r, uint8_t *out);
+void lr_babel_router_id_free(lr_babel_router_id_t r);
+
+lr_babel_route_request_t lr_babel_route_request_new_wildcard(void);
+void lr_babel_route_request_free(lr_babel_route_request_t r);
+
+lr_babel_seqno_request_t lr_babel_seqno_request_new(const uint8_t *prefix_v4,
+                                                   const uint8_t *prefix_v6,
+                                                   uint8_t prefix_len,
+                                                   uint16_t seqno,
+                                                   const uint8_t *router_id,
+                                                   uint8_t hop_count);
+void lr_babel_seqno_request_free(lr_babel_seqno_request_t r);
+
+/* Misc Babel helpers (RFC 8966 §A.2.4 / §3.1 / §3.2.2). */
+uint16_t lr_babel_rtt_penalty(uint32_t rtt_us,
+                              uint32_t rtt_min_us,
+                              uint32_t rtt_max_us,
+                              uint16_t max_penalty);
+uint32_t lr_babel_route_metric_sum(const uint32_t *link_metrics, uintptr_t count);
+uint8_t lr_babel_feasible(uint16_t route_seqno,
+                         uint32_t route_metric,
+                         uint16_t feasible_seqno,
+                         uint32_t feasible_metric);
 """
 
 

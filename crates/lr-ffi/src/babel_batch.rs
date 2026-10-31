@@ -971,6 +971,32 @@ pub unsafe extern "C" fn lr_babel_route_installed(r: lr_babel_route_t) -> u8 {
     )
 }
 
+/// Borrow the route's key as a `lr_babel_route_key_t`. The returned
+/// handle is **borrowed** from the route — the caller MUST NOT free
+/// it via `lr_babel_route_key_free`. The key handle is invalidated
+/// when the route is freed (or, when the route was itself borrowed
+/// from a table via `lr_babel_route_table_get` / `_iter` /
+/// `_best_routes_iter`, when the table is mutated).
+///
+/// Returns NULL on a NULL `r` handle.
+///
+/// # Safety
+/// `r` must be a valid handle (owned or borrowed). The returned
+/// pointer shares the route's lifetime — do not use it after the
+/// route is freed/mutated.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_borrow_key(r: lr_babel_route_t) -> lr_babel_route_key_t {
+    guarded(
+        || unsafe {
+            let Some(r) = borrow_route(r) else {
+                return std::ptr::null_mut();
+            };
+            &r.key as *const RouteKey as lr_babel_route_key_t
+        },
+        std::ptr::null_mut(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5097,6 +5097,23 @@ uint8_t lr_babel_route_feasible(lr_babel_route_t r);
  */
 uint8_t lr_babel_route_installed(lr_babel_route_t r);
 
+/**
+ * Borrow the route's key as a `lr_babel_route_key_t`. The returned
+ * handle is **borrowed** from the route — the caller MUST NOT free
+ * it via `lr_babel_route_key_free`. The key handle is invalidated
+ * when the route is freed (or, when the route was itself borrowed
+ * from a table via `lr_babel_route_table_get` / `_iter` /
+ * `_best_routes_iter`, when the table is mutated).
+ *
+ * Returns NULL on a NULL `r` handle.
+ *
+ * # Safety
+ * `r` must be a valid handle (owned or borrowed). The returned
+ * pointer shares the route's lifetime — do not use it after the
+ * route is freed/mutated.
+ */
+lr_babel_route_key_t lr_babel_route_borrow_key(lr_babel_route_t r);
+
 lr_babel_codec_t lr_babel_codec_new(void);
 
 int32_t lr_babel_codec_decode_slice(lr_babel_codec_t c,
