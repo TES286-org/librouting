@@ -2515,6 +2515,384 @@ func (r *Route) Tag() (uint32, bool, error) {
 	return uint32(v), true, nil
 }
 
+// ---------------------------------------------------------------------------
+// Per-route BGP / Babel / OSPF attribute readers (RFC 4271 §5.1,
+// RFC 4456 §8, RFC 6514 §5, RFC 7311, RFC 9231 §4, RFC 8966 §3.2/§4.6.9,
+// RFC 2328 §16 / RFC 5340 §4.1). Mirrors the `lr_route_*` C ABI surface
+// defined in crates/lr-ffi/src/route_attrs.rs. Reads return (value, ok, err)
+// where ok is false when the attribute is absent so callers can
+// distinguish "no attribute" from "attribute is zero".
+// ---------------------------------------------------------------------------
+
+// AtomicAggregate reports whether the route carries an
+// ATOMIC_AGGREGATE attribute (RFC 4271 §5.1.6).
+func (r *Route) AtomicAggregate() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_atomic_aggregate(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_atomic_aggregate: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// OriginatorID reads the ORIGINATOR_ID (RFC 4456 §8). 4-byte IPv4.
+// ok is false when the attribute is absent.
+func (r *Route) OriginatorID() (addr [4]byte, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_originator_id(r.ptr, (*C.uint8_t)(&addr[0]), &present); rc != 0 {
+		return [4]byte{}, false, fmt.Errorf("lr_route_originator_id: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return [4]byte{}, false, nil
+	}
+	return addr, true, nil
+}
+
+// HasClusterList reports whether the route carries a CLUSTER_LIST
+// attribute (RFC 4456 §8).
+func (r *Route) HasClusterList() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_cluster_list(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_cluster_list: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// ClusterList reads the CLUSTER_LIST (RFC 4456 §8) — flat 4-byte
+// IPv4 Cluster-IDs.
+func (r *Route) ClusterList() ([][4]byte, error) {
+	var n C.uintptr_t
+	if rc := C.lr_route_cluster_list_len(r.ptr, &n); rc != 0 {
+		return nil, fmt.Errorf("lr_route_cluster_list_len: %s (rc=%d)", LastError(), int(rc))
+	}
+	out := make([][4]byte, int(n))
+	for i := 0; i < int(n); i++ {
+		var addr [4]byte
+		if rc := C.lr_route_cluster_list_at(r.ptr, C.uintptr_t(i), (*C.uint8_t)(&addr[0])); rc != 0 {
+			return nil, fmt.Errorf("lr_route_cluster_list_at: %s (rc=%d)", LastError(), int(rc))
+		}
+		out[i] = addr
+	}
+	return out, nil
+}
+
+// HasOtc reports whether the route carries an OTC attribute
+// (RFC 9231 §4).
+func (r *Route) HasOtc() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_otc(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_otc: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// Otc reads the OTC value (RFC 9231 §4). ok is false when absent.
+func (r *Route) Otc() (value uint32, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_otc(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_otc: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// HasAigp reports whether the route carries an AIGP attribute
+// (RFC 7311).
+func (r *Route) HasAigp() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_aigp(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_aigp: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// Aigp reads the AIGP value (RFC 7311). ok is false when absent.
+func (r *Route) Aigp() (value uint64, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_aigp(r.ptr, (*C.uint64_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_aigp: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// HasAggregator reports whether the route carries an AGGREGATOR
+// attribute (RFC 4271 §5.1.7 / RFC 6793 §4).
+func (r *Route) HasAggregator() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_aggregator(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_aggregator: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// AggregatorAsn reads the AGGREGATOR AS number (RFC 4271 §5.1.7 /
+// RFC 6793 §4). ok is false when absent.
+func (r *Route) AggregatorAsn() (value uint32, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_aggregator_asn(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_aggregator_asn: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// AggregatorSpeaker reads the AGGREGATOR speaker IPv4 address
+// (RFC 4271 §5.1.7 / RFC 6793 §4). 4 bytes. ok is false when absent.
+func (r *Route) AggregatorSpeaker() (addr [4]byte, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_aggregator_speaker(r.ptr, (*C.uint8_t)(&addr[0]), &present); rc != 0 {
+		return [4]byte{}, false, fmt.Errorf("lr_route_aggregator_speaker: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return [4]byte{}, false, nil
+	}
+	return addr, true, nil
+}
+
+// HasPmsiTunnel reports whether the route carries a PMSI_TUNNEL
+// attribute (RFC 6514 §5).
+func (r *Route) HasPmsiTunnel() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_pmsi_tunnel(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_pmsi_tunnel: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// PmsiTunnelFlags reads the PMSI_TUNNEL flags (RFC 6514 §5). ok is
+// false when the attribute is absent.
+func (r *Route) PmsiTunnelFlags() (flags uint8, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_pmsi_tunnel_flags(r.ptr, (*C.uint8_t)(&flags), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_pmsi_tunnel_flags: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return flags, true, nil
+}
+
+// AsSequence reads the flat AS_SEQUENCE (RFC 4271 §5.1.2) — sets
+// flattened in order.
+func (r *Route) AsSequence() ([]uint32, error) {
+	var n C.uintptr_t
+	if rc := C.lr_route_as_sequence_len(r.ptr, &n); rc != 0 {
+		return nil, fmt.Errorf("lr_route_as_sequence_len: %s (rc=%d)", LastError(), int(rc))
+	}
+	out := make([]uint32, int(n))
+	for i := 0; i < int(n); i++ {
+		var v C.uint32_t
+		if rc := C.lr_route_as_sequence_at(r.ptr, C.uintptr_t(i), &v); rc != 0 {
+			return nil, fmt.Errorf("lr_route_as_sequence_at: %s (rc=%d)", LastError(), int(rc))
+		}
+		out[i] = uint32(v)
+	}
+	return out, nil
+}
+
+// SetAsSequence replaces the route's AS_PATH with a flat
+// AS_SEQUENCE (RFC 4271 §5.1.2). The previous AS_PATH is overwritten.
+func (r *Route) SetAsSequence(asns []uint32) error {
+	var p *C.uint32_t
+	if len(asns) > 0 {
+		tmp := make([]C.uint32_t, len(asns))
+		for i, v := range asns {
+			tmp[i] = C.uint32_t(v)
+		}
+		p = &tmp[0]
+	}
+	if rc := C.lr_route_set_as_sequence(r.ptr, p, C.uintptr_t(len(asns))); rc != 0 {
+		return fmt.Errorf("lr_route_set_as_sequence: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// PrependAs prepends asn to the route's AS_PATH (RFC 4271 §5.1.2 —
+// the standard eBGP AS_PATH prepend action).
+func (r *Route) PrependAs(asn uint32) error {
+	if rc := C.lr_route_prepend_as(r.ptr, C.uint32_t(asn)); rc != 0 {
+		return fmt.Errorf("lr_route_prepend_as: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// RemoveCommunity removes the (asn, value) community from the
+// COMMUNITIES attribute (RFC 1997 §4). No-op when the route carries
+// no COMMUNITIES or the community is not present.
+func (r *Route) RemoveCommunity(asn uint32, value uint16) error {
+	if rc := C.lr_route_remove_community(r.ptr, C.uint32_t(asn), C.uint16_t(value)); rc != 0 {
+		return fmt.Errorf("lr_route_remove_community: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// HasBabelMetric reports whether the route carries a Babel metric
+// attribute (RFC 8966 §3.2).
+func (r *Route) HasBabelMetric() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_babel_metric(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_babel_metric: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// BabelMetric reads the Babel primary metric (RFC 8966 §3.2 + §3.4.3).
+// ok is false when absent.
+func (r *Route) BabelMetric() (value uint32, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_babel_metric(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_babel_metric: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// HasBabelSeqno reports whether the route carries a Babel sequence
+// number attribute.
+func (r *Route) HasBabelSeqno() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_babel_seqno(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_babel_seqno: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// BabelSeqno reads the Babel sequence number (RFC 8966 §3.2 + §4.6.9).
+// ok is false when absent.
+func (r *Route) BabelSeqno() (value uint16, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_babel_seqno(r.ptr, (*C.uint16_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_babel_seqno: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// HasBabelRouterID reports whether the route carries a Babel
+// router-id attribute.
+func (r *Route) HasBabelRouterID() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_babel_router_id(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_babel_router_id: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// BabelRouterID reads the Babel router-id (RFC 8966 §3.2 + §4.6.9),
+// 8 bytes big-endian. ok is false when absent.
+func (r *Route) BabelRouterID() (rid [8]byte, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_babel_router_id(r.ptr, (*C.uint8_t)(&rid[0]), &present); rc != 0 {
+		return [8]byte{}, false, fmt.Errorf("lr_route_babel_router_id: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return [8]byte{}, false, nil
+	}
+	return rid, true, nil
+}
+
+// HasOspfMetric1 reports whether the route carries an OSPF metric1
+// attribute (RFC 2328 §16).
+func (r *Route) HasOspfMetric1() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_ospf_metric1(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_ospf_metric1: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// OspfMetric1 reads the OSPF primary metric (RFC 2328 §16 /
+// RFC 5340 §4.1). ok is false when absent.
+func (r *Route) OspfMetric1() (value uint32, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_ospf_metric1(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_ospf_metric1: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// HasOspfMetric2 reports whether the route carries an OSPF metric2
+// attribute.
+func (r *Route) HasOspfMetric2() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_ospf_metric2(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_ospf_metric2: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// OspfMetric2 reads the OSPF type-2 external metric (RFC 2328 §16.4 /
+// RFC 5340 §4.8.5). ok is false when absent.
+func (r *Route) OspfMetric2() (value uint32, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_ospf_metric2(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_ospf_metric2: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// HasOspfTag reports whether the route carries an OSPF tag attribute.
+func (r *Route) HasOspfTag() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_ospf_tag(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_ospf_tag: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// OspfTag reads the OSPF external route tag (RFC 2328 §A.4.5 /
+// RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 External-Prefix
+// sub-TLV 3). ok is false when absent.
+func (r *Route) OspfTag() (value uint32, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_ospf_tag(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_ospf_tag: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// HasOspfRouterID reports whether the route carries an OSPF router-id
+// attribute.
+func (r *Route) HasOspfRouterID() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_has_ospf_router_id(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_has_ospf_router_id: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// OspfRouterID reads the OSPF advertising router (RFC 2328 §A.4 /
+// RFC 5340 §A.4). ok is false when absent.
+func (r *Route) OspfRouterID() (value uint32, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_ospf_router_id(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_ospf_router_id: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
 // PrefixList is an owned prefix-list handle (FRR ge/le semantics,
 // first-match evaluation, implicit deny).
 type PrefixList struct {
