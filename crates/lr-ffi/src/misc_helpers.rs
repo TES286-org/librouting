@@ -55,10 +55,7 @@ pub extern "C" fn lr_babel_rtt_penalty(
 /// # Safety
 /// `link_metrics` must point to `count` readable `uint32_t` values.
 #[no_mangle]
-pub unsafe extern "C" fn lr_babel_route_metric_sum(
-    link_metrics: *const u32,
-    count: usize,
-) -> u32 {
+pub unsafe extern "C" fn lr_babel_route_metric_sum(link_metrics: *const u32, count: usize) -> u32 {
     guarded(
         || unsafe {
             if link_metrics.is_null() && count != 0 {

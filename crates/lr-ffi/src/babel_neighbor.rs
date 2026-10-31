@@ -99,9 +99,7 @@ pub(crate) unsafe fn borrow_route_table_mut(
     }
     Some(unsafe { &mut *(r as *mut BabelRouteTable) })
 }
-pub(crate) unsafe fn unbox_route_table(
-    r: lr_babel_route_table_t,
-) -> Option<Box<BabelRouteTable>> {
+pub(crate) unsafe fn unbox_route_table(r: lr_babel_route_table_t) -> Option<Box<BabelRouteTable>> {
     if r.is_null() {
         return None;
     }

@@ -710,9 +710,7 @@ pub unsafe extern "C" fn lr_babel_route_table_best_routes_iter(
 /// # Safety
 /// `k` must be a valid handle (owned or borrowed).
 #[no_mangle]
-pub unsafe extern "C" fn lr_babel_route_key_destination_is_ipv6(
-    k: lr_babel_route_key_t,
-) -> u8 {
+pub unsafe extern "C" fn lr_babel_route_key_destination_is_ipv6(k: lr_babel_route_key_t) -> u8 {
     guarded(
         || unsafe {
             borrow_route_key(k)
@@ -758,9 +756,7 @@ pub unsafe extern "C" fn lr_babel_route_key_destination_addr(
 
 /// Destination prefix length in bits. Returns 0 on a NULL handle.
 #[no_mangle]
-pub unsafe extern "C" fn lr_babel_route_key_destination_prefix_len(
-    k: lr_babel_route_key_t,
-) -> u8 {
+pub unsafe extern "C" fn lr_babel_route_key_destination_prefix_len(k: lr_babel_route_key_t) -> u8 {
     guarded(
         || unsafe {
             borrow_route_key(k)
@@ -839,9 +835,7 @@ pub unsafe extern "C" fn lr_babel_route_key_source_addr(
 /// Source prefix length in bits. Returns 0 when the key is not
 /// source-specific or the handle is NULL.
 #[no_mangle]
-pub unsafe extern "C" fn lr_babel_route_key_source_prefix_len(
-    k: lr_babel_route_key_t,
-) -> u8 {
+pub unsafe extern "C" fn lr_babel_route_key_source_prefix_len(k: lr_babel_route_key_t) -> u8 {
     guarded(
         || unsafe {
             borrow_route_key(k)
@@ -923,10 +917,7 @@ pub unsafe extern "C" fn lr_babel_route_next_hop_is_ipv6(r: lr_babel_route_t) ->
 /// `r` must be a valid handle (owned or borrowed). `out` must point
 /// to 16 writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn lr_babel_route_next_hop(
-    r: lr_babel_route_t,
-    out: *mut u8,
-) -> i32 {
+pub unsafe extern "C" fn lr_babel_route_next_hop(r: lr_babel_route_t, out: *mut u8) -> i32 {
     guarded(
         || unsafe {
             let Some(r) = borrow_route(r) else {
@@ -1115,7 +1106,10 @@ mod tests {
         assert!(!r.is_null());
 
         assert_eq!(unsafe { lr_babel_route_table_insert(t, r) }, 0);
-        assert_eq!(unsafe { crate::babel_neighbor::lr_babel_route_table_len(t) }, 1);
+        assert_eq!(
+            unsafe { crate::babel_neighbor::lr_babel_route_table_len(t) },
+            1
+        );
         assert_eq!(
             unsafe { crate::babel_neighbor::lr_babel_route_table_is_empty(t) },
             0
@@ -1128,7 +1122,10 @@ mod tests {
         assert_eq!(unsafe { lr_babel_route_metric(borrowed) }, 100);
         assert_eq!(unsafe { lr_babel_route_next_hop_is_ipv6(borrowed) }, 0);
         let mut out = [0u8; 16];
-        assert_eq!(unsafe { lr_babel_route_next_hop(borrowed, out.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { lr_babel_route_next_hop(borrowed, out.as_mut_ptr()) },
+            0
+        );
         assert_eq!(&out[12..16], &[10, 0, 0, 1]);
         // The table marks a freshly-inserted route feasible when no
         // prior feasibility record exists (RFC 8966 §3.5.2 — a route
@@ -1138,7 +1135,10 @@ mod tests {
         assert_eq!(unsafe { lr_babel_route_installed(borrowed) }, 0);
 
         assert_eq!(unsafe { lr_babel_route_table_withdraw(t, k) }, 0);
-        assert_eq!(unsafe { crate::babel_neighbor::lr_babel_route_table_len(t) }, 0);
+        assert_eq!(
+            unsafe { crate::babel_neighbor::lr_babel_route_table_len(t) },
+            0
+        );
 
         unsafe {
             lr_babel_route_free(r);
@@ -1246,12 +1246,18 @@ mod tests {
         assert!(!k.is_null());
         assert_eq!(unsafe { lr_babel_route_key_destination_is_ipv6(k) }, 0);
         let mut out = [0u8; 16];
-        assert_eq!(unsafe { lr_babel_route_key_destination_addr(k, out.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { lr_babel_route_key_destination_addr(k, out.as_mut_ptr()) },
+            0
+        );
         assert_eq!(&out[12..16], &[10, 0, 0, 0]);
         assert_eq!(unsafe { lr_babel_route_key_destination_prefix_len(k) }, 8);
         assert_eq!(unsafe { lr_babel_route_key_source_present(k) }, 0);
         let mut rid_out = [0u8; 8];
-        assert_eq!(unsafe { lr_babel_route_key_router_id(k, rid_out.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { lr_babel_route_key_router_id(k, rid_out.as_mut_ptr()) },
+            0
+        );
         assert_eq!(rid_out, rid);
         unsafe { lr_babel_route_key_free(k) };
     }
@@ -1262,27 +1268,24 @@ mod tests {
         let src = [0xfd_u8, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         let rid = [2u8; 8];
         let k = unsafe {
-            lr_babel_route_key_new(
-                1,
-                addr.as_ptr(),
-                64,
-                1,
-                1,
-                src.as_ptr(),
-                48,
-                rid.as_ptr(),
-            )
+            lr_babel_route_key_new(1, addr.as_ptr(), 64, 1, 1, src.as_ptr(), 48, rid.as_ptr())
         };
         assert!(!k.is_null());
         assert_eq!(unsafe { lr_babel_route_key_destination_is_ipv6(k) }, 1);
         let mut out = [0u8; 16];
-        assert_eq!(unsafe { lr_babel_route_key_destination_addr(k, out.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { lr_babel_route_key_destination_addr(k, out.as_mut_ptr()) },
+            0
+        );
         assert_eq!(out, addr);
         assert_eq!(unsafe { lr_babel_route_key_destination_prefix_len(k) }, 64);
         assert_eq!(unsafe { lr_babel_route_key_source_present(k) }, 1);
         assert_eq!(unsafe { lr_babel_route_key_source_is_ipv6(k) }, 1);
         let mut sout = [0u8; 16];
-        assert_eq!(unsafe { lr_babel_route_key_source_addr(k, sout.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { lr_babel_route_key_source_addr(k, sout.as_mut_ptr()) },
+            0
+        );
         assert_eq!(sout, src);
         assert_eq!(unsafe { lr_babel_route_key_source_prefix_len(k) }, 48);
         unsafe { lr_babel_route_key_free(k) };
