@@ -4015,6 +4015,31 @@ inline lr_route_key_t to_lr_route_key(const RouteKey& k) {
     return ck;
 }
 
+/// Inverse of [to_lr_route_key]: materialize a Go-style `RouteKey`
+/// from the C ABI's `lr_route_key_t`. Used by FFI iterators that
+/// surface keys to the embedder (e.g. `AdjRibOut::advertised_keys`).
+inline RouteKey from_lr_route_key(const lr_route_key_t& ck) {
+    RouteKey k;
+    if (ck.prefix.addr.is_ipv6 != 0) {
+        k.addr.assign(ck.prefix.addr.octets, ck.prefix.addr.octets + 16);
+    } else {
+        // IPv4 occupies the *last* 4 bytes of the 16-byte octets array.
+        k.addr.assign(ck.prefix.addr.octets + 12, ck.prefix.addr.octets + 16);
+    }
+    k.prefix_len = ck.prefix.prefix_len;
+    k.afi = static_cast<std::uint16_t>(ck.afi_safi >> 8);
+    k.safi = static_cast<std::uint8_t>(ck.afi_safi & 0xff);
+    if (ck.has_source != 0) {
+        if (ck.source_prefix.addr.is_ipv6 != 0) {
+            k.source.assign(ck.source_prefix.addr.octets, ck.source_prefix.addr.octets + 16);
+        } else {
+            k.source.assign(ck.source_prefix.addr.octets + 12, ck.source_prefix.addr.octets + 16);
+        }
+        k.source_len = ck.source_prefix.prefix_len;
+    }
+    return k;
+}
+
 inline lr_route_origin_t to_lr_route_origin(const RouteOrigin& o) {
     lr_route_origin_t out{};
     out.protocol = static_cast<std::uint8_t>(o.protocol);
@@ -4356,6 +4381,51 @@ public:
         if (n < 0) throw Error(std::string("lr_adj_rib_out_iter_for: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
+    /// Walk every advertised (tx_path_id, route) pair for (dest, key).
+    /// The callback receives the borrowed `lr_route_t` (do NOT free
+    /// it; the Adj-RIB-Out owns it for the duration of the walk).
+    template <typename F>
+    std::size_t paths_for(const RouteOrigin& dest, const RouteKey& k, F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](std::uint32_t path_id, lr_route_t route, void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            (*c->f)(path_id, route);
+        };
+        lr_route_key_t ck = detail::to_lr_route_key(k);
+        lr_route_origin_t oc = detail::to_lr_route_origin(dest);
+        std::int64_t n = lr_adj_rib_out_paths_for(ptr_.get(), oc, &ck,
+                                                    trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_adj_rib_out_paths_for: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
+    /// Walk every (RouteKey, [tx_path_id]) pair advertised to `dest`
+    /// for the given AFI/SAFI family. Returns a vector of (key, ids)
+    /// pairs; both the key and the ids are materialized into C++-owned
+    /// storage, so the returned vector is safe to keep.
+    std::vector<std::pair<RouteKey, std::vector<std::uint32_t>>>
+    advertised_keys(const RouteOrigin& dest, std::uint16_t afi, std::uint8_t safi) const {
+        std::vector<std::pair<RouteKey, std::vector<std::uint32_t>>> out;
+        struct Ctx { decltype(out)* v; };
+        Ctx ctx{&out};
+        auto trampoline = +[](const lr_route_key_t* key,
+                              const std::uint32_t* path_ids,
+                              std::uintptr_t count,
+                              void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            RouteKey k = detail::from_lr_route_key(*key);
+            std::vector<std::uint32_t> ids;
+            if (path_ids != nullptr && count > 0) {
+                ids.assign(path_ids, path_ids + count);
+            }
+            c->v->emplace_back(std::move(k), std::move(ids));
+        };
+        lr_route_origin_t oc = detail::to_lr_route_origin(dest);
+        std::int64_t n = lr_adj_rib_out_advertised_keys(ptr_.get(), oc, afi, safi,
+                                                         trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_adj_rib_out_advertised_keys: ") + lr_last_error());
+        return out;
+    }
 
 private:
     std::unique_ptr<OpaqueAdjRibOut, detail::AdjRibOutDeleter> ptr_;
@@ -4406,6 +4476,21 @@ public:
         if (rc < 0) throw Error(std::string("lr_rib_mux_get: ") + lr_last_error());
         return Route(out);
     }
+    /// Walk every merged route in the mux. The callback receives the
+    /// borrowed `lr_route_t` (do NOT free it; the mux owns it for the
+    /// duration of the walk).
+    template <typename F>
+    std::size_t iter(F&& cb) const {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_route_t route, void* user) {
+            auto* c = static_cast<Ctx*>(user);
+            (*c->f)(route);
+        };
+        std::int64_t n = lr_rib_mux_iter(ptr_.get(), trampoline, &ctx);
+        if (n < 0) throw Error(std::string("lr_rib_mux_iter: ") + lr_last_error());
+        return static_cast<std::size_t>(n);
+    }
 
 private:
     std::unique_ptr<OpaqueRibMux, detail::RibMuxDeleter> ptr_;
@@ -4425,6 +4510,18 @@ public:
     static std::int64_t select_bgp(const std::vector<lr_route_t>& routes) {
         if (routes.empty()) return -1;
         return lr_route_selector_select_bgp(routes.data(), routes.size());
+    }
+    /// Compare two routes with the daemon's default comparator (admin
+    /// distance, then metric, then age, then protocol priority).
+    /// Returns -1 when `a` is preferred over `b`, 0 when they tie,
+    /// 1 when `b` is preferred over `a`. The handles are *not*
+    /// consumed.
+    static std::int32_t compare(lr_route_t a, lr_route_t b) {
+        std::int32_t rc = lr_route_selector_compare(a, b);
+        if (rc < -1) {
+            throw Error(std::string("lr_route_selector_compare: ") + lr_last_error());
+        }
+        return rc;
     }
 };
 
