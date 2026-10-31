@@ -29,6 +29,13 @@ extern void go_lr_loc_rib_iter_sets_cb(uint8_t *prefix_out,
                                         uint8_t is_ipv6,
                                         uintptr_t path_count,
                                         void *user);
+extern void go_lr_adj_rib_out_paths_for_cb(uint32_t path_id,
+                                            lr_route_t route,
+                                            void *user);
+extern void go_lr_adj_rib_out_advertised_keys_cb(lr_route_key_t *key,
+                                                  uint32_t *path_ids,
+                                                  uintptr_t path_id_count,
+                                                  void *user);
 */
 import "C"
 
@@ -139,6 +146,24 @@ func go_lr_loc_rib_iter_sets_cb(prefixOut *C.uint8_t, prefixLen C.uint8_t, isIPv
 	}
 }
 
+//export go_lr_adj_rib_out_paths_for_cb
+func go_lr_adj_rib_out_paths_for_cb(pathID C.uint32_t, route C.lr_route_t, user unsafe.Pointer) {
+	idx := int(uintptr(user))
+	cb := ribCallbackLookup(idx)
+	if fn, ok := cb.(func(C.uint32_t, C.lr_route_t)); ok {
+		fn(pathID, route)
+	}
+}
+
+//export go_lr_adj_rib_out_advertised_keys_cb
+func go_lr_adj_rib_out_advertised_keys_cb(key *C.lr_route_key_t, pathIDs *C.uint32_t, pathIDCount C.uintptr_t, user unsafe.Pointer) {
+	idx := int(uintptr(user))
+	cb := ribCallbackLookup(idx)
+	if fn, ok := cb.(func(C.lr_route_key_t, *C.uint32_t, uintptr)); ok {
+		fn(*key, pathIDs, uintptr(pathIDCount))
+	}
+}
+
 // toC builds a `lr_route_key_t` from this RouteKey. The returned C
 // struct lives on the heap; the caller passes its address to the C
 // ABI and lets Go GC the backing memory.
@@ -153,6 +178,40 @@ func (k *RouteKey) toC() C.lr_route_key_t {
 		ck.has_source = C.uint8_t(0)
 	}
 	return ck
+}
+
+// routeKeyFromC materializes a Go RouteKey from the C ABI's
+// `lr_route_key_t`. Inverse of [RouteKey.toC]. Used by iterators that
+// surface keys to the embedder (e.g. [AdjRibOut.AdvertisedKeys]).
+func routeKeyFromC(ck *C.lr_route_key_t) RouteKey {
+	var k RouteKey
+	k.Addr = readCorePrefixAddr(&ck.prefix)
+	k.PrefixLen = uint8(ck.prefix.prefix_len)
+	k.AFI = uint16(ck.afi_safi >> 8)
+	k.SAFI = uint8(ck.afi_safi & 0xff)
+	if ck.has_source != 0 {
+		k.Source = readCorePrefixAddr(&ck.source_prefix)
+		k.SourceLen = uint8(ck.source_prefix.prefix_len)
+	}
+	return k
+}
+
+// readCorePrefixAddr reads the address slice (4 or 16 bytes) from a
+// `lr_core_prefix_t`. IPv4 occupies the *last* 4 bytes of the 16-byte
+// `octets` array (the IPv4-mapped IPv6 layout the C ABI uses).
+func readCorePrefixAddr(p *C.lr_core_prefix_t) []byte {
+	if p.addr.is_ipv6 != 0 {
+		out := make([]byte, 16)
+		for i := 0; i < 16; i++ {
+			out[i] = byte(p.addr.octets[i])
+		}
+		return out
+	}
+	out := make([]byte, 4)
+	for i := 0; i < 4; i++ {
+		out[i] = byte(p.addr.octets[12+i])
+	}
+	return out
 }
 
 // writeCorePrefix fills a `lr_core_prefix_t` from an address slice
@@ -695,6 +754,85 @@ func (r *AdjRibOut) TxPathIDs(dest RouteOrigin, key RouteKey) ([]uint32, error) 
 	return ids, nil
 }
 
+// AdjRibOutPath is one entry returned by [AdjRibOut.PathsFor]: the
+// (tx_path_id, route) pair. The Route is *borrowed* — its lifetime is
+// bound to the AdjRibOut and the next mutating call may invalidate
+// it.
+type AdjRibOutPath struct {
+	TxPathID uint32
+	Route    BorrowedRoute
+}
+
+// PathsFor walks every advertised (tx_path_id, route) pair for
+// (dest, key), ascending by tx_path_id. Each Route is *borrowed* —
+// the caller must NOT call Free on it. The returned slice is safe to
+// keep; the underlying routes are only valid until the next mutating
+// call on this AdjRibOut.
+func (r *AdjRibOut) PathsFor(dest RouteOrigin, key RouteKey) ([]AdjRibOutPath, error) {
+	keyC := key.toC()
+	destC := C.lr_route_origin_t{
+		protocol: C.uint8_t(dest.Protocol),
+		peer:     C.uint64_t(dest.Peer),
+	}
+	var out []AdjRibOutPath
+	idx := ribCallbackRegister(func(pathID C.uint32_t, route C.lr_route_t) {
+		out = append(out, AdjRibOutPath{
+			TxPathID: uint32(pathID),
+			Route:    BorrowedRoute{ptr: route},
+		})
+	})
+	defer ribCallbackRelease(idx)
+	rc := C.lr_adj_rib_out_paths_for(r.ptr, destC, &keyC,
+		(*[0]byte)(C.go_lr_adj_rib_out_paths_for_cb),
+		unsafe.Pointer(uintptr(idx)))
+	if int64(rc) < 0 {
+		return nil, fmt.Errorf("lr_adj_rib_out_paths_for: %s", LastError())
+	}
+	return out, nil
+}
+
+// AdvertisedKey is one (key, tx_path_ids) pair returned by
+// [AdjRibOut.AdvertisedKeys]. Both fields are materialized into
+// Go-owned slices before the callback returns, so the slice is safe
+// to keep.
+type AdvertisedKey struct {
+	Key      RouteKey
+	TxPathID []uint32
+}
+
+// AdvertisedKeys walks every (RouteKey, [tx_path_id]) pair advertised
+// to `dest` for the given AFI/SAFI family. Returns Go-owned copies of
+// the key and path-id slice.
+func (r *AdjRibOut) AdvertisedKeys(dest RouteOrigin, afi uint16, safi uint8) ([]AdvertisedKey, error) {
+	destC := C.lr_route_origin_t{
+		protocol: C.uint8_t(dest.Protocol),
+		peer:     C.uint64_t(dest.Peer),
+	}
+	var out []AdvertisedKey
+	idx := ribCallbackRegister(func(key C.lr_route_key_t, pathIDs *C.uint32_t, count uintptr) {
+		k := routeKeyFromC(&key)
+		var ids []uint32
+		if pathIDs != nil && count > 0 {
+			// Materialize the C-owned path_ids array into a
+			// Go-owned slice. The C storage lives only for
+			// this callback invocation.
+			slice := unsafe.Slice((*uint32)(unsafe.Pointer(pathIDs)), count)
+			ids = make([]uint32, count)
+			copy(ids, slice)
+		}
+		out = append(out, AdvertisedKey{Key: k, TxPathID: ids})
+	})
+	defer ribCallbackRelease(idx)
+	rc := C.lr_adj_rib_out_advertised_keys(r.ptr, destC,
+		C.uint16_t(afi), C.uint8_t(safi),
+		(*[0]byte)(C.go_lr_adj_rib_out_advertised_keys_cb),
+		unsafe.Pointer(uintptr(idx)))
+	if int64(rc) < 0 {
+		return nil, fmt.Errorf("lr_adj_rib_out_advertised_keys: %s", LastError())
+	}
+	return out, nil
+}
+
 // Clear drops every advertised route. The RIB becomes empty.
 func (r *AdjRibOut) Clear() error {
 	rc := C.lr_adj_rib_out_clear(r.ptr)
@@ -833,6 +971,23 @@ func (r *RibMux) IsEmpty() bool {
 	return C.lr_rib_mux_is_empty(r.ptr) != 0
 }
 
+// Iter walks every merged route in the mux. The callback receives a
+// *borrowed* route handle — the caller must NOT call Free on it.
+// Returns the number of routes visited.
+func (r *RibMux) Iter(cb func(rt BorrowedRoute)) (uint, error) {
+	idx := ribCallbackRegister(func(p C.lr_route_t) {
+		cb(BorrowedRoute{ptr: p})
+	})
+	defer ribCallbackRelease(idx)
+	rc := C.lr_rib_mux_iter(r.ptr,
+		(*[0]byte)(C.go_lr_route_iter_cb),
+		unsafe.Pointer(uintptr(idx)))
+	if int64(rc) < 0 {
+		return 0, fmt.Errorf("lr_rib_mux_iter: %s", LastError())
+	}
+	return uint(rc), nil
+}
+
 // RouteSelector applies the BIRD/FRR best-path selector (RFC 4271
 // §9.1).
 type RouteSelector struct{}
@@ -864,4 +1019,16 @@ func (RouteSelector) SelectBGP(routes []*Route) int {
 	}
 	rc := C.lr_route_selector_select_bgp((*C.lr_route_t)(unsafe.Pointer(&arr[0])), C.uintptr_t(len(routes)))
 	return int(int64(rc))
+}
+
+// Compare returns the daemon's default comparator's result for two
+// routes: -1 when `a` is preferred over `b`, 0 when they tie on every
+// discriminator, 1 when `b` is preferred over `a`. Returns an error on
+// a NULL handle or a panic.
+func (RouteSelector) Compare(a, b *Route) (int, error) {
+	rc := int32(C.lr_route_selector_compare(a.ptr, b.ptr))
+	if rc < -1 {
+		return int(rc), fmt.Errorf("lr_route_selector_compare: %s", LastError())
+	}
+	return int(rc), nil
 }

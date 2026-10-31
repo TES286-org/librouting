@@ -421,6 +421,129 @@ func TestAdjRibOutAdvertiseAndIter(t *testing.T) {
 	}
 }
 
+func TestAdjRibOutPathsFor(t *testing.T) {
+	out, err := NewAdjRibOut()
+	if err != nil {
+		t.Fatalf("NewAdjRibOut: %v", err)
+	}
+	defer out.Free()
+	dest := RouteOrigin{Protocol: ProtoBgp, Peer: 42}
+	r := v4Route(t, [4]byte{203, 0, 113, 1}, 24, ProtoBgp)
+	defer r.Free()
+
+	// Advertise the same route under three different tx_path_ids.
+	for _, id := range []uint32{1, 2, 3} {
+		if err := out.Advertise(dest, r, id); err != nil {
+			t.Fatalf("Advertise(%d): %v", id, err)
+		}
+	}
+
+	k := v4Key([4]byte{203, 0, 113, 1}, 24)
+	pairs, err := out.PathsFor(dest, k)
+	if err != nil {
+		t.Fatalf("PathsFor: %v", err)
+	}
+	if len(pairs) != 3 {
+		t.Fatalf("PathsFor len: got %d want 3", len(pairs))
+	}
+	want := []uint32{1, 2, 3}
+	for i, p := range pairs {
+		if p.TxPathID != want[i] {
+			t.Errorf("PathsFor[%d].TxPathID: got %d want %d", i, p.TxPathID, want[i])
+		}
+	}
+
+	// Unknown key returns an empty slice.
+	unknown := v4Key([4]byte{10, 0, 0, 0}, 8)
+	empty, err := out.PathsFor(dest, unknown)
+	if err != nil {
+		t.Fatalf("PathsFor (unknown): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("PathsFor (unknown): got %d want 0", len(empty))
+	}
+}
+
+func TestAdjRibOutAdvertisedKeys(t *testing.T) {
+	out, err := NewAdjRibOut()
+	if err != nil {
+		t.Fatalf("NewAdjRibOut: %v", err)
+	}
+	defer out.Free()
+	dest := RouteOrigin{Protocol: ProtoBgp, Peer: 42}
+
+	// v4 path.
+	rV4 := v4Route(t, [4]byte{203, 0, 113, 1}, 24, ProtoBgp)
+	defer rV4.Free()
+	if err := out.Advertise(dest, rV4, 1); err != nil {
+		t.Fatalf("Advertise (v4): %v", err)
+	}
+
+	// v6 path.
+	v6 := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	rV6, err := NewRouteV6(v6, 64, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV6: %v", err)
+	}
+	defer rV6.Free()
+	if err := out.Advertise(dest, rV6, 1); err != nil {
+		t.Fatalf("Advertise (v6): %v", err)
+	}
+
+	// Filter by v4 unicast → only the v4 key.
+	v4Keys, err := out.AdvertisedKeys(dest, AFIIPv4, SAFIUnicast)
+	if err != nil {
+		t.Fatalf("AdvertisedKeys (v4): %v", err)
+	}
+	if len(v4Keys) != 1 {
+		t.Fatalf("AdvertisedKeys (v4): got %d want 1", len(v4Keys))
+	}
+	if v4Keys[0].Key.AFI != AFIIPv4 || v4Keys[0].Key.SAFI != SAFIUnicast {
+		t.Errorf("AdvertisedKeys (v4) family: AFI=%d SAFI=%d want %d/%d",
+			v4Keys[0].Key.AFI, v4Keys[0].Key.SAFI, AFIIPv4, SAFIUnicast)
+	}
+	if v4Keys[0].Key.PrefixLen != 24 {
+		t.Errorf("AdvertisedKeys (v4) PrefixLen: got %d want 24", v4Keys[0].Key.PrefixLen)
+	}
+	if len(v4Keys[0].TxPathID) != 1 || v4Keys[0].TxPathID[0] != 1 {
+		t.Errorf("AdvertisedKeys (v4) TxPathID: got %v want [1]", v4Keys[0].TxPathID)
+	}
+
+	// Filter by v6 unicast → only the v6 key.
+	v6Keys, err := out.AdvertisedKeys(dest, AFIIPv6, SAFIUnicast)
+	if err != nil {
+		t.Fatalf("AdvertisedKeys (v6): %v", err)
+	}
+	if len(v6Keys) != 1 {
+		t.Fatalf("AdvertisedKeys (v6): got %d want 1", len(v6Keys))
+	}
+	if v6Keys[0].Key.AFI != AFIIPv6 {
+		t.Errorf("AdvertisedKeys (v6) AFI: got %d want %d", v6Keys[0].Key.AFI, AFIIPv6)
+	}
+	if v6Keys[0].Key.PrefixLen != 64 {
+		t.Errorf("AdvertisedKeys (v6) PrefixLen: got %d want 64", v6Keys[0].Key.PrefixLen)
+	}
+
+	// Wrong dest peer → empty.
+	wrong := RouteOrigin{Protocol: ProtoBgp, Peer: 99}
+	wrongKeys, err := out.AdvertisedKeys(wrong, AFIIPv4, SAFIUnicast)
+	if err != nil {
+		t.Fatalf("AdvertisedKeys (wrong): %v", err)
+	}
+	if len(wrongKeys) != 0 {
+		t.Fatalf("AdvertisedKeys (wrong): got %d want 0", len(wrongKeys))
+	}
+
+	// Labelled-unicast filter → empty (we did not advertise any).
+	labeledKeys, err := out.AdvertisedKeys(dest, AFIIPv4, SAFILabeledUni)
+	if err != nil {
+		t.Fatalf("AdvertisedKeys (labeled): %v", err)
+	}
+	if len(labeledKeys) != 0 {
+		t.Fatalf("AdvertisedKeys (labeled): got %d want 0", len(labeledKeys))
+	}
+}
+
 // ---- RibMux ----
 
 func TestRibMuxInstallGetUninstall(t *testing.T) {
@@ -468,6 +591,47 @@ func TestRibMuxInstallGetUninstall(t *testing.T) {
 	}
 }
 
+func TestRibMuxIter(t *testing.T) {
+	m, err := NewRibMux()
+	if err != nil {
+		t.Fatalf("NewRibMux: %v", err)
+	}
+	defer m.Free()
+
+	// Empty mux → Iter walks nothing.
+	n, err := m.Iter(func(rt BorrowedRoute) {})
+	if err != nil {
+		t.Fatalf("Iter (empty): %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("Iter (empty): got %d want 0", n)
+	}
+
+	// Install two routes under different keys so both survive.
+	r1 := v4Route(t, [4]byte{10, 0, 0, 1}, 24, ProtoBgp)
+	defer r1.Free()
+	if err := m.Install(r1); err != nil {
+		t.Fatalf("Install(r1): %v", err)
+	}
+	r2 := v4Route(t, [4]byte{10, 0, 1, 1}, 24, ProtoBgp)
+	defer r2.Free()
+	if err := m.Install(r2); err != nil {
+		t.Fatalf("Install(r2): %v", err)
+	}
+	if m.Len() != 2 {
+		t.Fatalf("Len: got %d want 2", m.Len())
+	}
+
+	// Iter walks both merged routes.
+	n, err = m.Iter(func(rt BorrowedRoute) {})
+	if err != nil {
+		t.Fatalf("Iter: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("Iter: got %d want 2", n)
+	}
+}
+
 // ---- RouteSelector ----
 
 func TestRouteSelectorSelect(t *testing.T) {
@@ -495,6 +659,41 @@ func TestRouteSelectorSelect(t *testing.T) {
 	}
 	if got := rs.SelectBGP(nil); got != -1 {
 		t.Errorf("SelectBGP (empty): got %d want -1", got)
+	}
+}
+
+func TestRouteSelectorCompare(t *testing.T) {
+	r1 := v4Route(t, [4]byte{10, 0, 0, 1}, 24, ProtoBgp)
+	defer r1.Free()
+	r2 := v4Route(t, [4]byte{10, 0, 0, 1}, 24, ProtoBgp)
+	defer r2.Free()
+	rs := RouteSelector{}
+
+	// Two equal-default routes tie on every discriminator.
+	rc, err := rs.Compare(r1, r2)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if rc < -1 || rc > 1 {
+		t.Fatalf("Compare: got %d want -1..1", rc)
+	}
+
+	// Anti-symmetric: swapping args mirrors the result.
+	rc2, err := rs.Compare(r2, r1)
+	if err != nil {
+		t.Fatalf("Compare (swap): %v", err)
+	}
+	if rc != -rc2 && rc != 0 {
+		t.Errorf("Compare anti-symmetry: %d vs swapped %d", rc, rc2)
+	}
+
+	// Identical routes compare equal.
+	rc3, err := rs.Compare(r1, r1)
+	if err != nil {
+		t.Fatalf("Compare (self): %v", err)
+	}
+	if rc3 != 0 {
+		t.Errorf("Compare (self): got %d want 0", rc3)
 	}
 }
 
