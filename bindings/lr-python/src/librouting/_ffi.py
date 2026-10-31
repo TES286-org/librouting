@@ -963,6 +963,59 @@ void lr_seg6_netlink_free(lr_seg6_netlink_t nl);
 
 int32_t lr_seg6_route_err_code(void);
 const char *lr_seg6_route_err_name(int32_t code);
+
+/* RTR client (RFC 8210 §6-§8) — transport-agnostic state machine.
+ * Mirrors `lr_bgp::rtr::client::{RtrClient, ClientStep, RoaDelta}`. */
+typedef struct OpaqueRtrClient OpaqueRtrClient;
+typedef struct OpaqueRtrClient *lr_rtr_client_t;
+
+typedef struct lr_rtr_client_step_t {
+    lr_bytes_t send_bytes;
+    uint8_t synced;
+    uint8_t drop;
+    uint8_t expired;
+    uintptr_t roa_delta_count;
+    uintptr_t log_count;
+    lr_roa_delta_t *roa_deltas;
+    char **logs;
+} lr_rtr_client_step_t;
+
+lr_rtr_client_t lr_rtr_client_new(void);
+void lr_rtr_client_free(lr_rtr_client_t c);
+uint8_t lr_rtr_client_version(lr_rtr_client_t c);
+uint8_t lr_rtr_client_session_id(lr_rtr_client_t c, uint16_t *out_session);
+uint8_t lr_rtr_client_serial(lr_rtr_client_t c, uint32_t *out_serial);
+uintptr_t lr_rtr_client_phase_name(lr_rtr_client_t c,
+                                    uint8_t *out_buf,
+                                    uintptr_t cap);
+int32_t lr_rtr_client_intervals(lr_rtr_client_t c,
+                                 uint32_t *out_refresh,
+                                 uint32_t *out_retry,
+                                 uint32_t *out_expire);
+int32_t lr_rtr_client_set_intervals(lr_rtr_client_t c,
+                                     uint32_t refresh,
+                                     uint32_t retry,
+                                     uint32_t expire);
+int32_t lr_rtr_client_on_connect(lr_rtr_client_t c, lr_bytes_t *out);
+int32_t lr_rtr_client_poll(lr_rtr_client_t c,
+                            uint64_t now_ms,
+                            lr_rtr_client_step_t *out_step);
+int32_t lr_rtr_client_on_pdu_raw(lr_rtr_client_t c,
+                                 const uint8_t *data,
+                                 uintptr_t len,
+                                 uint64_t now_ms,
+                                 lr_rtr_client_step_t *out_step);
+uintptr_t lr_rtr_client_snapshot(lr_rtr_client_t c,
+                                 lr_roa_entry_t *out_entries,
+                                 uintptr_t cap);
+int32_t lr_rtr_client_step_roa_delta_at(const lr_rtr_client_step_t *step,
+                                        uintptr_t index,
+                                        lr_roa_delta_t *out);
+uintptr_t lr_rtr_client_step_log_at(const lr_rtr_client_step_t *step,
+                                    uintptr_t index,
+                                    uint8_t *out_buf,
+                                    uintptr_t cap);
+void lr_rtr_client_step_free(lr_rtr_client_step_t *step);
 """
 
 

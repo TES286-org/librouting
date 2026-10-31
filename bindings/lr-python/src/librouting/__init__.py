@@ -159,6 +159,7 @@ from .seg6route import (
     err_name,
     err_code,
 )
+from .rtr import RtrClient, RtrClientStep, RoaDelta as RtrRoaDelta, RoaEntry as RtrRoaEntry
 
 __all__ = [
     "Router",
@@ -303,6 +304,11 @@ __all__ = [
     "ERR_UNKNOWN",
     "err_name",
     "err_code",
+    # RTR client (RFC 8210 §6-§8 RPKI-Router state machine).
+    "RtrClient",
+    "RtrClientStep",
+    "RtrRoaDelta",
+    "RtrRoaEntry",
 ]
 
 # The single source of truth for the package version: pyproject.toml reads
