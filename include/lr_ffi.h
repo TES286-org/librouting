@@ -2180,16 +2180,21 @@ typedef struct OpaqueBabelRoute {
 
 typedef struct OpaqueBabelRoute *lr_babel_route_t;
 
-/**
- * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
- * and route-map evaluation run against the same data model the
- * library uses internally.
- */
-typedef struct OpaqueRoute {
+typedef struct OpaqueBabelRouteTable {
   uint8_t _private[0];
-} OpaqueRoute;
+} OpaqueBabelRouteTable;
 
-typedef struct OpaqueRoute *lr_route_t;
+typedef struct OpaqueBabelRouteTable *lr_babel_route_table_t;
+
+/**
+ * Callback shape for [`lr_babel_route_table_iter`] /
+ * [`lr_babel_route_table_best_routes_iter`]. The callback receives
+ * a borrowed `route` handle (DO NOT free) and the `user` pointer
+ * passed to the iter call. Return 0 to continue iteration,
+ * non-zero to stop early (the non-zero value is returned to the
+ * caller of the iter entry point).
+ */
+typedef int32_t (*lr_babel_route_iter_cb)(lr_babel_route_t route, void *user);
 
 /**
  * Opaque `Hello` handle (RFC 8966 §4.6.5).
@@ -2278,12 +2283,6 @@ typedef struct OpaqueBabelNeighbor {
 
 typedef struct OpaqueBabelNeighbor *lr_babel_neighbor_t;
 
-typedef struct OpaqueBabelRouteTable {
-  uint8_t _private[0];
-} OpaqueBabelRouteTable;
-
-typedef struct OpaqueBabelRouteTable *lr_babel_route_table_t;
-
 /**
  * Repr-C `BestPathConfig`. Mirrors `lr_bgp::best_path::BestPathConfig`.
  */
@@ -2299,6 +2298,17 @@ typedef struct lr_best_path_config_t {
   uint8_t compare_igp_metric;
   uint8_t prefer_next_hop_self;
 } lr_best_path_config_t;
+
+/**
+ * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
+ * and route-map evaluation run against the same data model the
+ * library uses internally.
+ */
+typedef struct OpaqueRoute {
+  uint8_t _private[0];
+} OpaqueRoute;
+
+typedef struct OpaqueRoute *lr_route_t;
 
 /**
  * Opaque `BfdPacket` handle.
@@ -4863,7 +4873,7 @@ void lr_babel_route_free(lr_babel_route_t r);
  * `table` must be a valid handle returned by `lr_babel_route_table_new`.
  * `route` must be a valid handle.
  */
-int32_t lr_babel_route_table_insert(lr_route_t table, lr_babel_route_t route);
+int32_t lr_babel_route_table_insert(lr_babel_route_table_t table, lr_babel_route_t route);
 
 /**
  * Insert a route together with its reception time and the interval
@@ -4875,7 +4885,7 @@ int32_t lr_babel_route_table_insert(lr_route_t table, lr_babel_route_t route);
  * # Safety
  * See [`lr_babel_route_table_insert`].
  */
-int32_t lr_babel_route_table_insert_timed(lr_route_t table,
+int32_t lr_babel_route_table_insert_timed(lr_babel_route_table_t table,
                                           lr_babel_route_t route,
                                           uint16_t interval_cs,
                                           uint64_t now_ms);
@@ -4887,7 +4897,7 @@ int32_t lr_babel_route_table_insert_timed(lr_route_t table,
  * # Safety
  * `table` and `key` must be valid handles.
  */
-int32_t lr_babel_route_table_withdraw(lr_route_t table, lr_babel_route_key_t key);
+int32_t lr_babel_route_table_withdraw(lr_babel_route_table_t table, lr_babel_route_key_t key);
 
 /**
  * Expire the routes whose re-announcement hold time lapsed
@@ -4897,7 +4907,7 @@ int32_t lr_babel_route_table_withdraw(lr_route_t table, lr_babel_route_key_t key
  * # Safety
  * `table` must be a valid handle.
  */
-uintptr_t lr_babel_route_table_expire(lr_route_t table, uint64_t now_ms);
+uintptr_t lr_babel_route_table_expire(lr_babel_route_table_t table, uint64_t now_ms);
 
 /**
  * True when the table holds a route for the given key.
@@ -4905,7 +4915,7 @@ uintptr_t lr_babel_route_table_expire(lr_route_t table, uint64_t now_ms);
  * # Safety
  * `table` and `key` must be valid handles.
  */
-uint8_t lr_babel_route_table_contains(lr_route_t table, lr_babel_route_key_t key);
+uint8_t lr_babel_route_table_contains(lr_babel_route_table_t table, lr_babel_route_key_t key);
 
 /**
  * Number of best (lowest-metric, feasible) routes per destination.
@@ -4916,7 +4926,176 @@ uint8_t lr_babel_route_table_contains(lr_route_t table, lr_babel_route_key_t key
  * # Safety
  * `table` must be a valid handle.
  */
-uintptr_t lr_babel_route_table_best_routes_count(lr_route_t table);
+uintptr_t lr_babel_route_table_best_routes_count(lr_babel_route_table_t table);
+
+/**
+ * Look up the route stored under `key`. Returns a borrowed
+ * `lr_babel_route_t` (the table retains ownership — DO NOT pass the
+ * returned handle to `lr_babel_route_free`). Returns NULL when the
+ * key is not present, when either handle is NULL, or on a panic.
+ *
+ * The returned handle is invalidated by any subsequent mutation of
+ * the table (insert / withdraw / expire) — embedders that need a
+ * stable handle across mutations must clone the route fields out via
+ * the reader entry points below.
+ *
+ * # Safety
+ * `table` and `key` must be valid handles. The returned pointer is
+ * borrowed from the table and is only valid until the next table
+ * mutation.
+ */
+lr_babel_route_t lr_babel_route_table_get(lr_babel_route_table_t table, lr_babel_route_key_t key);
+
+/**
+ * Iterate over every route in the table (RFC 8966 §3.5). The
+ * callback is invoked once per route, in `BTreeMap<RouteKey, _>`
+ * order (deterministic). The route handle passed to the callback
+ * is borrowed from the table — DO NOT free it.
+ *
+ * Returns 0 if the callback returned 0 for every entry, the
+ * callback's non-zero return value if it stopped early, or
+ * `LR_ERR_NULL` (-1) on a NULL `table` or `cb`.
+ *
+ * Iteration is invalidated by any table mutation that runs
+ * concurrently on another thread (the table is not `Sync`).
+ *
+ * # Safety
+ * `table` must be a valid handle. `cb` must be a valid function
+ * pointer. `user` is opaque to the library and is passed through
+ * unchanged.
+ */
+int32_t lr_babel_route_table_iter(lr_babel_route_table_t table,
+                                  lr_babel_route_iter_cb cb,
+                                  void *user);
+
+/**
+ * Iterate over the best (lowest-metric, feasible) route per
+ * destination (RFC 8966 §3.5 — the routes eligible for FIB
+ * install). The callback gets a borrowed route handle — DO NOT
+ * free it. Iteration order is `BTreeMap<RouteKey, _>` order, the
+ * same order `BabelRouteTable::best_routes()` yields in Rust.
+ *
+ * Returns 0 if the callback returned 0 for every entry, the
+ * callback's non-zero return value if it stopped early, or
+ * `LR_ERR_NULL` (-1) on a NULL `table` or `cb`.
+ *
+ * # Safety
+ * See [`lr_babel_route_table_iter`].
+ */
+int32_t lr_babel_route_table_best_routes_iter(lr_babel_route_table_t table,
+                                              lr_babel_route_iter_cb cb,
+                                              void *user);
+
+/**
+ * 1 when the destination prefix is IPv6, 0 for IPv4. Returns 0 on
+ * a NULL handle.
+ *
+ * # Safety
+ * `k` must be a valid handle (owned or borrowed).
+ */
+uint8_t lr_babel_route_key_destination_is_ipv6(lr_babel_route_key_t k);
+
+/**
+ * Copy the destination address into the 16-byte `out` buffer (the
+ * IPv4 address is written to the last 4 bytes, matching the
+ * `IpAddr::V4([u8;4])` → `[u8;16]` IPv4-mapped layout the rest of
+ * the C ABI uses). Returns 0 on success, `LR_ERR_NULL` (-1) on a
+ * NULL `k` or `out`.
+ *
+ * # Safety
+ * `k` must be a valid handle. `out` must point to 16 writable bytes.
+ */
+int32_t lr_babel_route_key_destination_addr(lr_babel_route_key_t k, uint8_t *out);
+
+/**
+ * Destination prefix length in bits. Returns 0 on a NULL handle.
+ */
+uint8_t lr_babel_route_key_destination_prefix_len(lr_babel_route_key_t k);
+
+/**
+ * 1 when the RouteKey is source-specific (RFC 8966 §3.1 — a
+ * source-specific route narrows the match to a source prefix). 0
+ * otherwise or on a NULL handle.
+ */
+uint8_t lr_babel_route_key_source_present(lr_babel_route_key_t k);
+
+/**
+ * 1 when the source prefix (if present) is IPv6, 0 for IPv4. Returns
+ * 0 when the key is not source-specific or the handle is NULL.
+ */
+uint8_t lr_babel_route_key_source_is_ipv6(lr_babel_route_key_t k);
+
+/**
+ * Copy the source prefix address into the 16-byte `out` buffer (the
+ * IPv4 address is written to the last 4 bytes). Returns 0 on
+ * success, `LR_ERR_NULL` (-1) on a NULL `k` or `out`, and
+ * `LR_ERR_INVALID_HANDLE` (-2) when the key is not source-specific.
+ *
+ * # Safety
+ * `k` must be a valid handle. `out` must point to 16 writable bytes.
+ */
+int32_t lr_babel_route_key_source_addr(lr_babel_route_key_t k, uint8_t *out);
+
+/**
+ * Source prefix length in bits. Returns 0 when the key is not
+ * source-specific or the handle is NULL.
+ */
+uint8_t lr_babel_route_key_source_prefix_len(lr_babel_route_key_t k);
+
+/**
+ * Copy the 8-byte Babel router identifier into `out`. Returns 0 on
+ * success, `LR_ERR_NULL` (-1) on a NULL `k` or `out`.
+ *
+ * # Safety
+ * `k` must be a valid handle. `out` must point to 8 writable bytes.
+ */
+int32_t lr_babel_route_key_router_id(lr_babel_route_key_t k, uint8_t *out);
+
+/**
+ * Read the route's seqno (RFC 8966 §3.2 — the 16-bit monotonically
+ * increasing sequence number from the source). Returns 0 on a NULL
+ * handle.
+ */
+uint16_t lr_babel_route_seqno(lr_babel_route_t r);
+
+/**
+ * Read the route's metric (RFC 8966 §3.4.4 — link cost + neighbour
+ * cost). Returns 0 on a NULL handle.
+ */
+uint32_t lr_babel_route_metric(lr_babel_route_t r);
+
+/**
+ * 1 when the route's next hop is IPv6, 0 for IPv4. Returns 0 on a
+ * NULL handle.
+ */
+uint8_t lr_babel_route_next_hop_is_ipv6(lr_babel_route_t r);
+
+/**
+ * Copy the route's next-hop address into the 16-byte `out` buffer
+ * (the IPv4 address is written to the last 4 bytes). Returns 0 on
+ * success, `LR_ERR_NULL` (-1) on a NULL `r` or `out`.
+ *
+ * # Safety
+ * `r` must be a valid handle (owned or borrowed). `out` must point
+ * to 16 writable bytes.
+ */
+int32_t lr_babel_route_next_hop(lr_babel_route_t r, uint8_t *out);
+
+/**
+ * 1 when the route's feasibility predicate is satisfied (RFC 8966
+ * §3.4.4 — the route's seqno is strictly greater than the source's
+ * feas-seqno, or the metric is lower). 0 otherwise or on a NULL
+ * handle.
+ */
+uint8_t lr_babel_route_feasible(lr_babel_route_t r);
+
+/**
+ * 1 when the route has been installed into the FIB by the
+ * embedder. This is a per-route flag the daemon sets; lr itself
+ * never mutates it after `BabelRoute::new`. 0 otherwise or on a
+ * NULL handle.
+ */
+uint8_t lr_babel_route_installed(lr_babel_route_t r);
 
 lr_babel_codec_t lr_babel_codec_new(void);
 
@@ -11821,10 +12000,16 @@ uint16_t lr_babel_rtt_penalty(uint32_t rtt_us,
 /**
  * Compute the total route metric: sum of link costs (RFC 8966 §3.1).
  *
+ * Renamed from `lr_babel_route_metric` so the unqualified name is
+ * free for the per-route field reader on `lr_babel_route_t` (the
+ * `BabelRoute::metric` field). The two functions are semantically
+ * distinct: this one computes a metric from a list of link costs;
+ * the field reader reads the stored metric from a route handle.
+ *
  * # Safety
  * `link_metrics` must point to `count` readable `uint32_t` values.
  */
-uint32_t lr_babel_route_metric(const uint32_t *link_metrics, uintptr_t count);
+uint32_t lr_babel_route_metric_sum(const uint32_t *link_metrics, uintptr_t count);
 
 /**
  * Feasibility condition (RFC 8966 §3.2.2): a route is feasible iff

@@ -14,13 +14,14 @@
 #![allow(unused_unsafe)]
 #![allow(dead_code)]
 
-use lr_babel::route::{BabelRoute, BabelRouteTable, RouteKey};
+use lr_babel::route::{BabelRoute, RouteKey};
 use lr_babel::source::SourcePrefix;
 use lr_babel::tlv::{Tlv, TlvType};
 use lr_babel::BabelFrame;
 use lr_core::addr::{IpAddr, Prefix};
 
 use crate::babel::{box_frame, lr_babel_frame_t};
+use crate::babel_neighbor::{borrow_route_table, borrow_route_table_mut, lr_babel_route_table_t};
 use crate::error::LrError;
 use crate::guarded;
 use crate::handle::lr_bytes_t;
@@ -429,16 +430,17 @@ pub unsafe extern "C" fn lr_babel_route_free(r: lr_babel_route_t) {
 /// `route` must be a valid handle.
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_route_table_insert(
-    table: crate::handle::lr_route_t,
+    table: lr_babel_route_table_t,
     route: lr_babel_route_t,
 ) -> i32 {
     guarded(
         || unsafe {
-            if table.is_null() || route.is_null() {
+            let Some(t) = borrow_route_table_mut(table) else {
                 return LR_ERR_NULL;
-            }
-            let t: &mut BabelRouteTable = &mut *(table as *mut BabelRouteTable);
-            let r: &BabelRoute = &*(route as *const BabelRoute);
+            };
+            let Some(r) = borrow_route(route) else {
+                return LR_ERR_NULL;
+            };
             t.insert(r.clone());
             0
         },
@@ -456,18 +458,19 @@ pub unsafe extern "C" fn lr_babel_route_table_insert(
 /// See [`lr_babel_route_table_insert`].
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_route_table_insert_timed(
-    table: crate::handle::lr_route_t,
+    table: lr_babel_route_table_t,
     route: lr_babel_route_t,
     interval_cs: u16,
     now_ms: u64,
 ) -> i32 {
     guarded(
         || unsafe {
-            if table.is_null() || route.is_null() {
+            let Some(t) = borrow_route_table_mut(table) else {
                 return LR_ERR_NULL;
-            }
-            let t: &mut BabelRouteTable = &mut *(table as *mut BabelRouteTable);
-            let r: &BabelRoute = &*(route as *const BabelRoute);
+            };
+            let Some(r) = borrow_route(route) else {
+                return LR_ERR_NULL;
+            };
             t.insert_timed(r.clone(), interval_cs, now_ms);
             0
         },
@@ -482,16 +485,17 @@ pub unsafe extern "C" fn lr_babel_route_table_insert_timed(
 /// `table` and `key` must be valid handles.
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_route_table_withdraw(
-    table: crate::handle::lr_route_t,
+    table: lr_babel_route_table_t,
     key: lr_babel_route_key_t,
 ) -> i32 {
     guarded(
         || unsafe {
-            if table.is_null() || key.is_null() {
+            let Some(t) = borrow_route_table_mut(table) else {
                 return LR_ERR_NULL;
-            }
-            let t: &mut BabelRouteTable = &mut *(table as *mut BabelRouteTable);
-            let k: &RouteKey = &*(key as *const RouteKey);
+            };
+            let Some(k) = borrow_route_key(key) else {
+                return LR_ERR_NULL;
+            };
             t.withdraw(k);
             0
         },
@@ -507,15 +511,14 @@ pub unsafe extern "C" fn lr_babel_route_table_withdraw(
 /// `table` must be a valid handle.
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_route_table_expire(
-    table: crate::handle::lr_route_t,
+    table: lr_babel_route_table_t,
     now_ms: u64,
 ) -> usize {
     guarded(
         || unsafe {
-            if table.is_null() {
+            let Some(t) = borrow_route_table_mut(table) else {
                 return 0;
-            }
-            let t: &mut BabelRouteTable = &mut *(table as *mut BabelRouteTable);
+            };
             t.expire(now_ms).len()
         },
         0,
@@ -528,16 +531,17 @@ pub unsafe extern "C" fn lr_babel_route_table_expire(
 /// `table` and `key` must be valid handles.
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_route_table_contains(
-    table: crate::handle::lr_route_t,
+    table: lr_babel_route_table_t,
     key: lr_babel_route_key_t,
 ) -> u8 {
     guarded(
         || unsafe {
-            if table.is_null() || key.is_null() {
+            let Some(t) = borrow_route_table(table) else {
                 return 0;
-            }
-            let t: &BabelRouteTable = &*(table as *const BabelRouteTable);
-            let k: &RouteKey = &*(key as *const RouteKey);
+            };
+            let Some(k) = borrow_route_key(key) else {
+                return 0;
+            };
             t.get(k).is_some() as u8
         },
         0,
@@ -553,16 +557,416 @@ pub unsafe extern "C" fn lr_babel_route_table_contains(
 /// `table` must be a valid handle.
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_route_table_best_routes_count(
-    table: crate::handle::lr_route_t,
+    table: lr_babel_route_table_t,
 ) -> usize {
     guarded(
         || unsafe {
-            if table.is_null() {
+            let Some(t) = borrow_route_table(table) else {
                 return 0;
-            }
-            let t: &BabelRouteTable = &*(table as *const BabelRouteTable);
+            };
             t.best_routes().len()
         },
+        0,
+    )
+}
+
+/// Look up the route stored under `key`. Returns a borrowed
+/// `lr_babel_route_t` (the table retains ownership — DO NOT pass the
+/// returned handle to `lr_babel_route_free`). Returns NULL when the
+/// key is not present, when either handle is NULL, or on a panic.
+///
+/// The returned handle is invalidated by any subsequent mutation of
+/// the table (insert / withdraw / expire) — embedders that need a
+/// stable handle across mutations must clone the route fields out via
+/// the reader entry points below.
+///
+/// # Safety
+/// `table` and `key` must be valid handles. The returned pointer is
+/// borrowed from the table and is only valid until the next table
+/// mutation.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_table_get(
+    table: lr_babel_route_table_t,
+    key: lr_babel_route_key_t,
+) -> lr_babel_route_t {
+    guarded(
+        || unsafe {
+            let Some(t) = borrow_route_table(table) else {
+                return std::ptr::null_mut();
+            };
+            let Some(k) = borrow_route_key(key) else {
+                return std::ptr::null_mut();
+            };
+            match t.get(k) {
+                Some(r) => r as *const BabelRoute as lr_babel_route_t,
+                None => std::ptr::null_mut(),
+            }
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Callback shape for [`lr_babel_route_table_iter`] /
+/// [`lr_babel_route_table_best_routes_iter`]. The callback receives
+/// a borrowed `route` handle (DO NOT free) and the `user` pointer
+/// passed to the iter call. Return 0 to continue iteration,
+/// non-zero to stop early (the non-zero value is returned to the
+/// caller of the iter entry point).
+pub type lr_babel_route_iter_cb =
+    Option<unsafe extern "C" fn(route: lr_babel_route_t, user: *mut std::ffi::c_void) -> i32>;
+
+/// Iterate over every route in the table (RFC 8966 §3.5). The
+/// callback is invoked once per route, in `BTreeMap<RouteKey, _>`
+/// order (deterministic). The route handle passed to the callback
+/// is borrowed from the table — DO NOT free it.
+///
+/// Returns 0 if the callback returned 0 for every entry, the
+/// callback's non-zero return value if it stopped early, or
+/// `LR_ERR_NULL` (-1) on a NULL `table` or `cb`.
+///
+/// Iteration is invalidated by any table mutation that runs
+/// concurrently on another thread (the table is not `Sync`).
+///
+/// # Safety
+/// `table` must be a valid handle. `cb` must be a valid function
+/// pointer. `user` is opaque to the library and is passed through
+/// unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_table_iter(
+    table: lr_babel_route_table_t,
+    cb: lr_babel_route_iter_cb,
+    user: *mut std::ffi::c_void,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(t) = borrow_route_table(table) else {
+                return LR_ERR_NULL;
+            };
+            let cb = match cb {
+                Some(cb) => cb,
+                None => return LR_ERR_NULL,
+            };
+            for (_, r) in t.iter() {
+                let rc = unsafe { cb(r as *const BabelRoute as lr_babel_route_t, user) };
+                if rc != 0 {
+                    return rc;
+                }
+            }
+            0
+        },
+        LrError::Panic as i32,
+    )
+}
+
+/// Iterate over the best (lowest-metric, feasible) route per
+/// destination (RFC 8966 §3.5 — the routes eligible for FIB
+/// install). The callback gets a borrowed route handle — DO NOT
+/// free it. Iteration order is `BTreeMap<RouteKey, _>` order, the
+/// same order `BabelRouteTable::best_routes()` yields in Rust.
+///
+/// Returns 0 if the callback returned 0 for every entry, the
+/// callback's non-zero return value if it stopped early, or
+/// `LR_ERR_NULL` (-1) on a NULL `table` or `cb`.
+///
+/// # Safety
+/// See [`lr_babel_route_table_iter`].
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_table_best_routes_iter(
+    table: lr_babel_route_table_t,
+    cb: lr_babel_route_iter_cb,
+    user: *mut std::ffi::c_void,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(t) = borrow_route_table(table) else {
+                return LR_ERR_NULL;
+            };
+            let cb = match cb {
+                Some(cb) => cb,
+                None => return LR_ERR_NULL,
+            };
+            for r in t.best_routes() {
+                let rc = unsafe { cb(r as *const BabelRoute as lr_babel_route_t, user) };
+                if rc != 0 {
+                    return rc;
+                }
+            }
+            0
+        },
+        LrError::Panic as i32,
+    )
+}
+
+// =========================================================================
+// RouteKey + BabelRoute field accessors — let embedders read the
+// stored state without going through the daemon. The accessors
+// mirror the field readers `BabelRouteTable::iter` / `get` yield in
+// Rust; the C ABI surface was previously write-only.
+// =========================================================================
+
+/// 1 when the destination prefix is IPv6, 0 for IPv4. Returns 0 on
+/// a NULL handle.
+///
+/// # Safety
+/// `k` must be a valid handle (owned or borrowed).
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_destination_is_ipv6(
+    k: lr_babel_route_key_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_route_key(k)
+                .map(|k| matches!(k.destination.addr, IpAddr::V6(_)) as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Copy the destination address into the 16-byte `out` buffer (the
+/// IPv4 address is written to the last 4 bytes, matching the
+/// `IpAddr::V4([u8;4])` → `[u8;16]` IPv4-mapped layout the rest of
+/// the C ABI uses). Returns 0 on success, `LR_ERR_NULL` (-1) on a
+/// NULL `k` or `out`.
+///
+/// # Safety
+/// `k` must be a valid handle. `out` must point to 16 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_destination_addr(
+    k: lr_babel_route_key_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(k) = borrow_route_key(k) else {
+                return LR_ERR_NULL;
+            };
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let mut buf = [0u8; 16];
+            match k.destination.addr {
+                IpAddr::V4(b) => buf[12..16].copy_from_slice(&b),
+                IpAddr::V6(b) => buf.copy_from_slice(&b),
+            }
+            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), out, 16) };
+            0
+        },
+        LrError::Panic as i32,
+    )
+}
+
+/// Destination prefix length in bits. Returns 0 on a NULL handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_destination_prefix_len(
+    k: lr_babel_route_key_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_route_key(k)
+                .map(|k| k.destination.prefix_len)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// 1 when the RouteKey is source-specific (RFC 8966 §3.1 — a
+/// source-specific route narrows the match to a source prefix). 0
+/// otherwise or on a NULL handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_source_present(k: lr_babel_route_key_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_route_key(k)
+                .map(|k| k.source.is_some() as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// 1 when the source prefix (if present) is IPv6, 0 for IPv4. Returns
+/// 0 when the key is not source-specific or the handle is NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_source_is_ipv6(k: lr_babel_route_key_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_route_key(k)
+                .and_then(|k| k.source.as_ref())
+                .map(|s| matches!(s.prefix.addr, IpAddr::V6(_)) as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Copy the source prefix address into the 16-byte `out` buffer (the
+/// IPv4 address is written to the last 4 bytes). Returns 0 on
+/// success, `LR_ERR_NULL` (-1) on a NULL `k` or `out`, and
+/// `LR_ERR_INVALID_HANDLE` (-2) when the key is not source-specific.
+///
+/// # Safety
+/// `k` must be a valid handle. `out` must point to 16 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_source_addr(
+    k: lr_babel_route_key_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(k) = borrow_route_key(k) else {
+                return LR_ERR_NULL;
+            };
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(s) = k.source.as_ref() else {
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let mut buf = [0u8; 16];
+            match s.prefix.addr {
+                IpAddr::V4(b) => buf[12..16].copy_from_slice(&b),
+                IpAddr::V6(b) => buf.copy_from_slice(&b),
+            }
+            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), out, 16) };
+            0
+        },
+        LrError::Panic as i32,
+    )
+}
+
+/// Source prefix length in bits. Returns 0 when the key is not
+/// source-specific or the handle is NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_source_prefix_len(
+    k: lr_babel_route_key_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_route_key(k)
+                .and_then(|k| k.source.as_ref())
+                .map(|s| s.prefix.prefix_len)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Copy the 8-byte Babel router identifier into `out`. Returns 0 on
+/// success, `LR_ERR_NULL` (-1) on a NULL `k` or `out`.
+///
+/// # Safety
+/// `k` must be a valid handle. `out` must point to 8 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_key_router_id(
+    k: lr_babel_route_key_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(k) = borrow_route_key(k) else {
+                return LR_ERR_NULL;
+            };
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(k.router_id.as_ptr(), out, 8) };
+            0
+        },
+        LrError::Panic as i32,
+    )
+}
+
+// ---- BabelRoute field accessors ----
+
+/// Read the route's seqno (RFC 8966 §3.2 — the 16-bit monotonically
+/// increasing sequence number from the source). Returns 0 on a NULL
+/// handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_seqno(r: lr_babel_route_t) -> u16 {
+    guarded(
+        || unsafe { borrow_route(r).map(|r| r.seqno).unwrap_or(0) },
+        0,
+    )
+}
+
+/// Read the route's metric (RFC 8966 §3.4.4 — link cost + neighbour
+/// cost). Returns 0 on a NULL handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_metric(r: lr_babel_route_t) -> u32 {
+    guarded(
+        || unsafe { borrow_route(r).map(|r| r.metric).unwrap_or(0) },
+        0,
+    )
+}
+
+/// 1 when the route's next hop is IPv6, 0 for IPv4. Returns 0 on a
+/// NULL handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_next_hop_is_ipv6(r: lr_babel_route_t) -> u8 {
+    guarded(
+        || unsafe {
+            borrow_route(r)
+                .map(|r| matches!(r.next_hop, IpAddr::V6(_)) as u8)
+                .unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Copy the route's next-hop address into the 16-byte `out` buffer
+/// (the IPv4 address is written to the last 4 bytes). Returns 0 on
+/// success, `LR_ERR_NULL` (-1) on a NULL `r` or `out`.
+///
+/// # Safety
+/// `r` must be a valid handle (owned or borrowed). `out` must point
+/// to 16 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_next_hop(
+    r: lr_babel_route_t,
+    out: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(r) = borrow_route(r) else {
+                return LR_ERR_NULL;
+            };
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let mut buf = [0u8; 16];
+            match r.next_hop {
+                IpAddr::V4(b) => buf[12..16].copy_from_slice(&b),
+                IpAddr::V6(b) => buf.copy_from_slice(&b),
+            }
+            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), out, 16) };
+            0
+        },
+        LrError::Panic as i32,
+    )
+}
+
+/// 1 when the route's feasibility predicate is satisfied (RFC 8966
+/// §3.4.4 — the route's seqno is strictly greater than the source's
+/// feas-seqno, or the metric is lower). 0 otherwise or on a NULL
+/// handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_feasible(r: lr_babel_route_t) -> u8 {
+    guarded(
+        || unsafe { borrow_route(r).map(|r| r.feasible as u8).unwrap_or(0) },
+        0,
+    )
+}
+
+/// 1 when the route has been installed into the FIB by the
+/// embedder. This is a per-route flag the daemon sets; lr itself
+/// never mutates it after `BabelRoute::new`. 0 otherwise or on a
+/// NULL handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_babel_route_installed(r: lr_babel_route_t) -> u8 {
+    guarded(
+        || unsafe { borrow_route(r).map(|r| r.installed as u8).unwrap_or(0) },
         0,
     )
 }
@@ -673,50 +1077,237 @@ mod tests {
 
     #[test]
     fn ffi_babel_route_table_insert_round_trip() {
-        // The lr_babel_route_table_* mutators take the existing
-        // `lr_route_t` opaque handle (BabelRouteTable is internally
-        // type-erased to that handle in `babel_neighbor.rs`). Verify
-        // the surface compiles and the call paths round-trip a
-        // route through insert / withdraw.
-        let mut t = BabelRouteTable::new();
-        let key = RouteKey {
-            destination: Prefix::new_v4([10, 0, 0, 0], 8),
-            source: None,
-            router_id: [1; 8],
-        };
-        let r = BabelRoute {
-            key: key.clone(),
-            seqno: 1,
-            metric: 100,
-            next_hop: IpAddr::V4([10, 0, 0, 1]),
-            feasible: false,
-            installed: false,
-        };
-        t.insert(r);
-        assert_eq!(t.len(), 1);
-        assert!(t.get(&key).is_some());
-        t.withdraw(&key);
-        assert_eq!(t.len(), 0);
+        // Round-trip a route through the C ABI mutators. The type fix
+        // (lr_babel_route_table_* now take lr_babel_route_table_t,
+        // not the generic lr_route_t) is what makes the chain below
+        // compile without an explicit cast.
+        let t = crate::babel_neighbor::lr_babel_route_table_new();
+        assert!(!t.is_null());
+        let k = make_route_key();
+        let next_hop = [10u8, 0, 0, 1];
+        let r = unsafe { lr_babel_route_new(k, 1, 100, 0, next_hop.as_ptr(), 0, 0) };
+        assert!(!r.is_null());
+
+        assert_eq!(unsafe { lr_babel_route_table_insert(t, r) }, 0);
+        assert_eq!(unsafe { crate::babel_neighbor::lr_babel_route_table_len(t) }, 1);
+        assert_eq!(
+            unsafe { crate::babel_neighbor::lr_babel_route_table_is_empty(t) },
+            0
+        );
+        assert_eq!(unsafe { lr_babel_route_table_contains(t, k) }, 1);
+
+        let borrowed = unsafe { lr_babel_route_table_get(t, k) };
+        assert!(!borrowed.is_null());
+        assert_eq!(unsafe { lr_babel_route_seqno(borrowed) }, 1);
+        assert_eq!(unsafe { lr_babel_route_metric(borrowed) }, 100);
+        assert_eq!(unsafe { lr_babel_route_next_hop_is_ipv6(borrowed) }, 0);
+        let mut out = [0u8; 16];
+        assert_eq!(unsafe { lr_babel_route_next_hop(borrowed, out.as_mut_ptr()) }, 0);
+        assert_eq!(&out[12..16], &[10, 0, 0, 1]);
+        // The table marks a freshly-inserted route feasible when no
+        // prior feasibility record exists (RFC 8966 §3.5.2 — a route
+        // from a new source is feasible by default). The `feasible=0`
+        // flag passed at construction is overwritten on insert.
+        assert_eq!(unsafe { lr_babel_route_feasible(borrowed) }, 1);
+        assert_eq!(unsafe { lr_babel_route_installed(borrowed) }, 0);
+
+        assert_eq!(unsafe { lr_babel_route_table_withdraw(t, k) }, 0);
+        assert_eq!(unsafe { crate::babel_neighbor::lr_babel_route_table_len(t) }, 0);
+
+        unsafe {
+            lr_babel_route_free(r);
+            lr_babel_route_key_free(k);
+            crate::babel_neighbor::lr_babel_route_table_free(t);
+        }
     }
 
     #[test]
     fn ffi_babel_route_table_best_routes_count_round_trip() {
-        let mut t = BabelRouteTable::new();
-        let key = RouteKey {
-            destination: Prefix::new_v4([10, 0, 0, 0], 8),
-            source: None,
-            router_id: [1; 8],
+        let t = crate::babel_neighbor::lr_babel_route_table_new();
+        let k = make_route_key();
+        let next_hop = [10u8, 0, 0, 1];
+        let r = unsafe { lr_babel_route_new(k, 1, 100, 0, next_hop.as_ptr(), 0, 0) };
+        assert_eq!(unsafe { lr_babel_route_table_insert(t, r) }, 0);
+        assert_eq!(unsafe { lr_babel_route_table_best_routes_count(t) }, 1);
+        unsafe {
+            lr_babel_route_free(r);
+            lr_babel_route_key_free(k);
+            crate::babel_neighbor::lr_babel_route_table_free(t);
+        }
+    }
+
+    #[test]
+    fn ffi_babel_route_table_iter_walks_inserted_routes() {
+        let t = crate::babel_neighbor::lr_babel_route_table_new();
+        let k = make_route_key();
+        let next_hop = [10u8, 0, 0, 1];
+        let r = unsafe { lr_babel_route_new(k, 1, 100, 0, next_hop.as_ptr(), 0, 0) };
+        assert_eq!(unsafe { lr_babel_route_table_insert(t, r) }, 0);
+
+        extern "C" fn cb(_route: lr_babel_route_t, user: *mut std::ffi::c_void) -> i32 {
+            unsafe {
+                let count: *mut usize = user as *mut usize;
+                *count += 1;
+            }
+            0
+        }
+        let mut count: usize = 0;
+        let rc = unsafe { lr_babel_route_table_iter(t, Some(cb), &mut count as *mut _ as *mut _) };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 1);
+
+        let rc = unsafe {
+            lr_babel_route_table_best_routes_iter(t, Some(cb), &mut count as *mut _ as *mut _)
         };
-        let r = BabelRoute {
-            key: key.clone(),
-            seqno: 1,
-            metric: 100,
-            next_hop: IpAddr::V4([10, 0, 0, 1]),
-            feasible: false,
-            installed: false,
+        assert_eq!(rc, 0);
+        assert_eq!(count, 2);
+
+        unsafe {
+            lr_babel_route_free(r);
+            lr_babel_route_key_free(k);
+            crate::babel_neighbor::lr_babel_route_table_free(t);
+        }
+    }
+
+    #[test]
+    fn ffi_babel_route_table_iter_stops_early_on_nonzero_callback() {
+        let t = crate::babel_neighbor::lr_babel_route_table_new();
+        let k = make_route_key();
+        let next_hop = [10u8, 0, 0, 1];
+        let r = unsafe { lr_babel_route_new(k, 1, 100, 0, next_hop.as_ptr(), 0, 0) };
+        assert_eq!(unsafe { lr_babel_route_table_insert(t, r) }, 0);
+
+        extern "C" fn cb(_r: lr_babel_route_t, _u: *mut std::ffi::c_void) -> i32 {
+            42
+        }
+        let rc = unsafe { lr_babel_route_table_iter(t, Some(cb), std::ptr::null_mut()) };
+        assert_eq!(rc, 42);
+
+        unsafe {
+            lr_babel_route_free(r);
+            lr_babel_route_key_free(k);
+            crate::babel_neighbor::lr_babel_route_table_free(t);
+        }
+    }
+
+    #[test]
+    fn ffi_babel_route_table_iter_rejects_null_cb() {
+        let t = crate::babel_neighbor::lr_babel_route_table_new();
+        let rc = unsafe { lr_babel_route_table_iter(t, None, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
+        unsafe { crate::babel_neighbor::lr_babel_route_table_free(t) };
+    }
+
+    #[test]
+    fn ffi_babel_route_table_get_returns_null_for_missing_key() {
+        let t = crate::babel_neighbor::lr_babel_route_table_new();
+        let k = make_route_key();
+        let r = unsafe { lr_babel_route_table_get(t, k) };
+        assert!(r.is_null());
+        unsafe {
+            lr_babel_route_key_free(k);
+            crate::babel_neighbor::lr_babel_route_table_free(t);
+        }
+    }
+
+    #[test]
+    fn ffi_babel_route_key_accessors_round_trip_v4() {
+        let addr = [10u8, 0, 0, 0];
+        let rid = [1u8; 8];
+        let k = unsafe {
+            lr_babel_route_key_new(0, addr.as_ptr(), 8, 0, 0, std::ptr::null(), 0, rid.as_ptr())
         };
-        t.insert(r);
-        assert_eq!(t.best_routes().len(), 1);
+        assert!(!k.is_null());
+        assert_eq!(unsafe { lr_babel_route_key_destination_is_ipv6(k) }, 0);
+        let mut out = [0u8; 16];
+        assert_eq!(unsafe { lr_babel_route_key_destination_addr(k, out.as_mut_ptr()) }, 0);
+        assert_eq!(&out[12..16], &[10, 0, 0, 0]);
+        assert_eq!(unsafe { lr_babel_route_key_destination_prefix_len(k) }, 8);
+        assert_eq!(unsafe { lr_babel_route_key_source_present(k) }, 0);
+        let mut rid_out = [0u8; 8];
+        assert_eq!(unsafe { lr_babel_route_key_router_id(k, rid_out.as_mut_ptr()) }, 0);
+        assert_eq!(rid_out, rid);
+        unsafe { lr_babel_route_key_free(k) };
+    }
+
+    #[test]
+    fn ffi_babel_route_key_accessors_round_trip_v6_with_source() {
+        let addr = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let src = [0xfd_u8, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let rid = [2u8; 8];
+        let k = unsafe {
+            lr_babel_route_key_new(
+                1,
+                addr.as_ptr(),
+                64,
+                1,
+                1,
+                src.as_ptr(),
+                48,
+                rid.as_ptr(),
+            )
+        };
+        assert!(!k.is_null());
+        assert_eq!(unsafe { lr_babel_route_key_destination_is_ipv6(k) }, 1);
+        let mut out = [0u8; 16];
+        assert_eq!(unsafe { lr_babel_route_key_destination_addr(k, out.as_mut_ptr()) }, 0);
+        assert_eq!(out, addr);
+        assert_eq!(unsafe { lr_babel_route_key_destination_prefix_len(k) }, 64);
+        assert_eq!(unsafe { lr_babel_route_key_source_present(k) }, 1);
+        assert_eq!(unsafe { lr_babel_route_key_source_is_ipv6(k) }, 1);
+        let mut sout = [0u8; 16];
+        assert_eq!(unsafe { lr_babel_route_key_source_addr(k, sout.as_mut_ptr()) }, 0);
+        assert_eq!(sout, src);
+        assert_eq!(unsafe { lr_babel_route_key_source_prefix_len(k) }, 48);
+        unsafe { lr_babel_route_key_free(k) };
+    }
+
+    #[test]
+    fn ffi_babel_route_key_source_addr_rejects_missing_source() {
+        let addr = [10u8, 0, 0, 0];
+        let rid = [1u8; 8];
+        let k = unsafe {
+            lr_babel_route_key_new(0, addr.as_ptr(), 8, 0, 0, std::ptr::null(), 0, rid.as_ptr())
+        };
+        let mut sout = [0u8; 16];
+        let rc = unsafe { lr_babel_route_key_source_addr(k, sout.as_mut_ptr()) };
+        assert_eq!(rc, LR_ERR_INVALID_HANDLE);
+        unsafe { lr_babel_route_key_free(k) };
+    }
+
+    #[test]
+    fn ffi_babel_route_table_insert_rejects_null_table() {
+        let k = make_route_key();
+        let next_hop = [10u8, 0, 0, 1];
+        let r = unsafe { lr_babel_route_new(k, 1, 100, 0, next_hop.as_ptr(), 0, 0) };
+        let rc = unsafe { lr_babel_route_table_insert(std::ptr::null_mut(), r) };
+        assert_eq!(rc, LR_ERR_NULL);
+        unsafe {
+            lr_babel_route_free(r);
+            lr_babel_route_key_free(k);
+        }
+    }
+
+    #[test]
+    fn ffi_babel_route_table_insert_rejects_null_route() {
+        let t = crate::babel_neighbor::lr_babel_route_table_new();
+        let rc = unsafe { lr_babel_route_table_insert(t, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
+        unsafe { crate::babel_neighbor::lr_babel_route_table_free(t) };
+    }
+
+    #[test]
+    fn ffi_babel_route_table_withdraw_rejects_null_table() {
+        let k = make_route_key();
+        let rc = unsafe { lr_babel_route_table_withdraw(std::ptr::null_mut(), k) };
+        assert_eq!(rc, LR_ERR_NULL);
+        unsafe { lr_babel_route_key_free(k) };
+    }
+
+    #[test]
+    fn ffi_babel_route_table_expire_returns_zero_on_null() {
+        let n = unsafe { lr_babel_route_table_expire(std::ptr::null_mut(), 0) };
+        assert_eq!(n, 0);
     }
 
     #[test]

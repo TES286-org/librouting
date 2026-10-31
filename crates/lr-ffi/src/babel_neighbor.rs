@@ -77,17 +77,31 @@ unsafe fn unbox_neighbor(r: lr_babel_neighbor_t) -> Option<Box<BabelNeighbor>> {
 }
 
 // ---- BabelRouteTable box / unbox helpers ----
+// `pub(crate)` so `babel_batch.rs` can use the same helpers — the
+// mutator surface (insert / withdraw / expire / iter) lives there.
 
-fn box_route_table(t: BabelRouteTable) -> lr_babel_route_table_t {
+pub(crate) fn box_route_table(t: BabelRouteTable) -> lr_babel_route_table_t {
     Box::into_raw(Box::new(t)) as lr_babel_route_table_t
 }
-unsafe fn borrow_route_table(r: lr_babel_route_table_t) -> Option<&'static BabelRouteTable> {
+pub(crate) unsafe fn borrow_route_table(
+    r: lr_babel_route_table_t,
+) -> Option<&'static BabelRouteTable> {
     if r.is_null() {
         return None;
     }
     Some(unsafe { &*(r as *const BabelRouteTable) })
 }
-unsafe fn unbox_route_table(r: lr_babel_route_table_t) -> Option<Box<BabelRouteTable>> {
+pub(crate) unsafe fn borrow_route_table_mut(
+    r: lr_babel_route_table_t,
+) -> Option<&'static mut BabelRouteTable> {
+    if r.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(r as *mut BabelRouteTable) })
+}
+pub(crate) unsafe fn unbox_route_table(
+    r: lr_babel_route_table_t,
+) -> Option<Box<BabelRouteTable>> {
     if r.is_null() {
         return None;
     }

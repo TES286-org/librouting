@@ -46,10 +46,19 @@ pub extern "C" fn lr_babel_rtt_penalty(
 
 /// Compute the total route metric: sum of link costs (RFC 8966 §3.1).
 ///
+/// Renamed from `lr_babel_route_metric` so the unqualified name is
+/// free for the per-route field reader on `lr_babel_route_t` (the
+/// `BabelRoute::metric` field). The two functions are semantically
+/// distinct: this one computes a metric from a list of link costs;
+/// the field reader reads the stored metric from a route handle.
+///
 /// # Safety
 /// `link_metrics` must point to `count` readable `uint32_t` values.
 #[no_mangle]
-pub unsafe extern "C" fn lr_babel_route_metric(link_metrics: *const u32, count: usize) -> u32 {
+pub unsafe extern "C" fn lr_babel_route_metric_sum(
+    link_metrics: *const u32,
+    count: usize,
+) -> u32 {
     guarded(
         || unsafe {
             if link_metrics.is_null() && count != 0 {
@@ -352,11 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn ffi_babel_route_metric() {
+    fn ffi_babel_route_metric_sum() {
         let metrics = [100u32, 200, 300];
-        let total = unsafe { lr_babel_route_metric(metrics.as_ptr(), 3) };
+        let total = unsafe { lr_babel_route_metric_sum(metrics.as_ptr(), 3) };
         assert_eq!(total, 600);
-        let total = unsafe { lr_babel_route_metric(std::ptr::null(), 0) };
+        let total = unsafe { lr_babel_route_metric_sum(std::ptr::null(), 0) };
         assert_eq!(total, 0);
     }
 
