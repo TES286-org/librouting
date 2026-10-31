@@ -3633,5 +3633,269 @@ inline std::vector<std::uint8_t> seg6_netlink_last_response_bytes(Seg6Netlink& n
     return buf;
 }
 
+// ---------------------------------------------------------------------------
+// RTR client (RFC 8210 §6-§8 RPKI-Router protocol state machine).
+//
+// Mirrors the public Rust API of `lr_bgp::rtr::client::{RtrClient,
+// ClientStep, RoaDelta}` — transport-agnostic state machine: the
+// embedder owns the TCP connection, the clock and the live ROA
+// table; the C++ `RtrClient` owns the protocol (one session, one
+// authoritative ROA snapshot). RAII frees the underlying
+// `lr_rtr_client_t` on destruction.
+// ---------------------------------------------------------------------------
+
+/// One ROA record delta of a completed RTR sync (RFC 8210 §5.6 /
+/// §5.7). Mirrors `lr_bgp::rtr::client::RoaDelta`.
+struct RoaDelta {
+    bool announce;
+    lr_roa_entry_t entry;
+};
+
+/// `ClientStep` projection — what the embedder should do after one
+/// protocol step. Owns the wire bytes (`send`), the ROA deltas
+/// (`roa_deltas`) and the diagnostic log lines (`logs`). All three
+/// are freed by the destructor.
+class RtrClientStep {
+public:
+    RtrClientStep() = default;
+    RtrClientStep(const RtrClientStep&) = delete;
+    RtrClientStep& operator=(const RtrClientStep&) = delete;
+    RtrClientStep(RtrClientStep&& other) noexcept
+        : step_(other.step_), moved_(other.moved_) {
+        other.step_ = lr_rtr_client_step_t{};
+        other.moved_ = true;
+    }
+    RtrClientStep& operator=(RtrClientStep&& other) noexcept {
+        if (this != &other) {
+            free_if_owned();
+            step_ = other.step_;
+            moved_ = other.moved_;
+            other.step_ = lr_rtr_client_step_t{};
+            other.moved_ = true;
+        }
+        return *this;
+    }
+    ~RtrClientStep() { free_if_owned(); }
+
+    /// True when this step completed a sync (End of Data processed).
+    bool synced() const noexcept { return step_.synced != 0; }
+    /// True when the transport connection should be closed.
+    bool drop() const noexcept { return step_.drop != 0; }
+    /// True when the last synced data exceeded its expire interval
+    /// without a successful poll (§6) — validation on it must stop.
+    bool expired() const noexcept { return step_.expired != 0; }
+
+    /// Wire bytes to transmit. Returns an empty vector when the
+    /// step carries no outgoing PDU.
+    std::vector<std::uint8_t> send_bytes() const {
+        std::vector<std::uint8_t> out;
+        if (step_.send_bytes.ptr && step_.send_bytes.len > 0) {
+            out.assign(step_.send_bytes.ptr,
+                       step_.send_bytes.ptr + step_.send_bytes.len);
+        }
+        return out;
+    }
+    /// Number of ROA deltas in this step (zero unless `synced`).
+    std::size_t roa_delta_count() const noexcept { return step_.roa_delta_count; }
+    /// Read one ROA delta by index. Out-of-bounds indices return
+    /// std::nullopt (mirrors the `Option<RoaDelta>` shape the Rust
+    /// API surfaces on the same index check).
+    std::optional<RoaDelta> roa_delta_at(std::size_t i) const {
+        if (i >= step_.roa_delta_count) return std::nullopt;
+        lr_roa_delta_t d{};
+        int rc = lr_rtr_client_step_roa_delta_at(&step_, i, &d);
+        if (rc != 0) return std::nullopt;
+        return RoaDelta{d.announce != 0, d.entry};
+    }
+    /// All ROA deltas as a single vector (convenience for embedders
+    /// that drain the whole batch in one pass).
+    std::vector<RoaDelta> roa_deltas() const {
+        std::vector<RoaDelta> out;
+        out.reserve(step_.roa_delta_count);
+        for (std::size_t i = 0; i < step_.roa_delta_count; ++i) {
+            lr_roa_delta_t d{};
+            if (lr_rtr_client_step_roa_delta_at(&step_, i, &d) != 0) break;
+            out.push_back(RoaDelta{d.announce != 0, d.entry});
+        }
+        return out;
+    }
+
+    /// Number of diagnostic log lines the state machine produced.
+    std::size_t log_count() const noexcept { return step_.log_count; }
+    /// Read one log line by index. Returns std::nullopt on a NULL
+    /// step, an out-of-bounds index, or a NULL entry inside the
+    /// array (which never happens for steps produced by
+    /// `poll` / `on_pdu_raw` but is defended for safety).
+    std::optional<std::string> log_at(std::size_t i) const {
+        if (i >= step_.log_count) return std::nullopt;
+        auto n = lr_rtr_client_step_log_at(&step_, i, nullptr, 0);
+        if (n == 0) return std::nullopt;
+        std::string out(n, '\0');
+        auto written = lr_rtr_client_step_log_at(
+            &step_, i, reinterpret_cast<std::uint8_t*>(out.data()), n + 1);
+        if (written == 0) return std::nullopt;
+        out.resize(written);
+        return out;
+    }
+    /// All log lines as a single vector.
+    std::vector<std::string> logs() const {
+        std::vector<std::string> out;
+        out.reserve(step_.log_count);
+        for (std::size_t i = 0; i < step_.log_count; ++i) {
+            auto s = log_at(i);
+            if (!s) break;
+            out.push_back(std::move(*s));
+        }
+        return out;
+    }
+
+    /// Borrow the underlying C struct (advanced use — lifetime
+    /// stays bound to this `RtrClientStep`).
+    const lr_rtr_client_step_t& raw() const noexcept { return step_; }
+
+    /// Take ownership of the underlying C struct (advanced use —
+    /// the caller becomes responsible for `lr_rtr_client_step_free`).
+    lr_rtr_client_step_t release() noexcept {
+        auto out = step_;
+        step_ = lr_rtr_client_step_t{};
+        moved_ = true;
+        return out;
+    }
+
+    /// Construct from a raw C struct (takes ownership). Used by
+    /// `RtrClient::poll` / `RtrClient::on_pdu_raw`.
+    static RtrClientStep adopt(lr_rtr_client_step_t s) {
+        RtrClientStep out;
+        out.step_ = s;
+        out.moved_ = false;
+        return out;
+    }
+
+private:
+    void free_if_owned() noexcept {
+        if (!moved_) {
+            lr_rtr_client_step_free(&step_);
+        }
+        moved_ = true;
+    }
+    lr_rtr_client_step_t step_{};
+    bool moved_ = true;  // default-constructed steps have nothing to free
+};
+
+struct RtrClientDeleter {
+    void operator()(lr_rtr_client_t c) const noexcept {
+        if (c) lr_rtr_client_free(c);
+    }
+};
+
+/// RAII handle to one RTR client state machine (RFC 8210 §6-§8).
+class RtrClient {
+public:
+    RtrClient() : ptr_(lr_rtr_client_new()) {
+        if (!ptr_) throw Error("lr_rtr_client_new returned null");
+    }
+    explicit RtrClient(lr_rtr_client_t p) : ptr_(p) {
+        if (!p) throw Error("RtrClient: null handle");
+    }
+
+    lr_rtr_client_t get() const noexcept { return ptr_.get(); }
+    lr_rtr_client_t release() noexcept { return ptr_.release(); }
+
+    /// Protocol version in use (post-§7 downgrade).
+    std::uint8_t version() const noexcept {
+        return lr_rtr_client_version(ptr_.get());
+    }
+    /// The remembered session ID, or std::nullopt until the first
+    /// Cache Response (RFC 8210 §8.2).
+    std::optional<std::uint16_t> session_id() const {
+        std::uint16_t v = 0;
+        if (lr_rtr_client_session_id(ptr_.get(), &v) == 0) return std::nullopt;
+        return v;
+    }
+    /// The serial of the last completed sync, or std::nullopt.
+    std::optional<std::uint32_t> serial() const {
+        std::uint32_t v = 0;
+        if (lr_rtr_client_serial(ptr_.get(), &v) == 0) return std::nullopt;
+        return v;
+    }
+    /// Phase name ("awaiting-reset" / "awaiting-serial" /
+    /// "receiving" / "synced") for diagnostics.
+    std::string phase_name() const {
+        std::string out;
+        out.resize(32);
+        auto n = lr_rtr_client_phase_name(ptr_.get(),
+                                          reinterpret_cast<std::uint8_t*>(out.data()),
+                                          out.size());
+        if (n > out.size()) {
+            out.resize(n);
+            n = lr_rtr_client_phase_name(ptr_.get(),
+                                         reinterpret_cast<std::uint8_t*>(out.data()),
+                                         out.size());
+        }
+        out.resize(n);
+        return out;
+    }
+    /// §6 timing intervals (refresh, retry, expire — seconds).
+    std::tuple<std::uint32_t, std::uint32_t, std::uint32_t> intervals() const {
+        std::uint32_t r = 0, re = 0, e = 0;
+        int rc = lr_rtr_client_intervals(ptr_.get(), &r, &re, &e);
+        if (rc != 0) throw Error("lr_rtr_client_intervals failed");
+        return {r, re, e};
+    }
+    /// Override the initial §6 intervals. The embedder calls this
+    /// once at construction from its configuration; a v1+ cache
+    /// replaces all three from every End-of-Data PDU (§6).
+    void set_intervals(std::uint32_t refresh,
+                       std::uint32_t retry,
+                       std::uint32_t expire) {
+        int rc = lr_rtr_client_set_intervals(ptr_.get(), refresh, retry, expire);
+        if (rc != 0) throw Error("lr_rtr_client_set_intervals failed");
+    }
+    /// Bytes to transmit when the transport comes up (§8.1): a
+    /// Serial Query when the client remembers an unexpired session,
+    /// a Reset Query otherwise.
+    std::vector<std::uint8_t> on_connect() {
+        lr_bytes_t out{};
+        int rc = lr_rtr_client_on_connect(ptr_.get(), &out);
+        if (rc != 0) throw Error("lr_rtr_client_on_connect failed");
+        std::vector<std::uint8_t> buf;
+        if (out.ptr && out.len > 0) buf.assign(out.ptr, out.ptr + out.len);
+        lr_bytes_free(&out);
+        return buf;
+    }
+    /// Run the §6 timing rules at `now_ms`. Returns the projection
+    /// of "what to do next" — see `RtrClientStep`.
+    RtrClientStep poll(std::uint64_t now_ms) {
+        lr_rtr_client_step_t s{};
+        int rc = lr_rtr_client_poll(ptr_.get(), now_ms, &s);
+        if (rc != 0) throw Error("lr_rtr_client_poll failed");
+        return RtrClientStep::adopt(s);
+    }
+    /// Decode one RTR PDU from `data` and feed it to the client
+    /// (RFC 8210 §5 / §8.2 — the receive-side entry point). Returns
+    /// the same projection as `poll`.
+    RtrClientStep on_pdu_raw(const std::uint8_t* data, std::size_t len, std::uint64_t now_ms) {
+        lr_rtr_client_step_t s{};
+        int rc = lr_rtr_client_on_pdu_raw(ptr_.get(),
+                                          const_cast<std::uint8_t*>(data), len,
+                                          now_ms, &s);
+        if (rc != 0) throw Error("lr_rtr_client_on_pdu_raw failed");
+        return RtrClientStep::adopt(s);
+    }
+    /// Read the authoritative ROA record set after the last
+    /// completed sync, sorted for deterministic snapshots.
+    std::vector<lr_roa_entry_t> snapshot() const {
+        std::vector<lr_roa_entry_t> out;
+        std::size_t n = lr_rtr_client_snapshot(ptr_.get(), nullptr, 0);
+        if (n == 0) return out;
+        out.resize(n);
+        lr_rtr_client_snapshot(ptr_.get(), out.data(), n);
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueRtrClient, RtrClientDeleter> ptr_;
+};
+
 } // namespace librouting
 

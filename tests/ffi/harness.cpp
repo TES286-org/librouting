@@ -1152,6 +1152,51 @@ int main() {
         }
     }
 
+    // ---- RTR client RAII wrapper (RFC 8210 §6-§8): construct,
+    // readers, intervals, on_connect, on_pdu_raw, step accessor for
+    // roa_deltas/logs. Mirrors the FFI test in
+    // crates/lr-ffi/src/rtr_client.rs. ----
+    {
+        RtrClient c;
+        check(c.version() != 0, "RtrClient default version > 0");
+        check(!c.session_id().has_value(), "RtrClient session_id empty on fresh client");
+        check(!c.serial().has_value(), "RtrClient serial empty on fresh client");
+        check(c.phase_name() == "awaiting-reset",
+              "RtrClient phase_name is awaiting-reset");
+
+        auto [refresh, retry, expire] = c.intervals();
+        check(refresh == 3600 && retry == 600 && expire == 7200,
+              "RtrClient default intervals (RFC 8210 §6)");
+
+        c.set_intervals(100, 60, 600);
+        auto [r2, re2, e2] = c.intervals();
+        check(r2 == 100 && re2 == 60 && e2 == 600, "RtrClient set_intervals round-trips");
+
+        // on_connect emits a Reset Query (8 bytes, RFC 8210 §5.3).
+        auto bytes = c.on_connect();
+        check(bytes.size() == 8, "RtrClient on_connect emits 8-byte Reset Query");
+        check(bytes[1] == 2, "RtrClient Reset Query type byte == 2");
+
+        // poll on a fresh client returns an empty step. The RAII
+        // wrapper frees the underlying C struct on scope exit.
+        {
+            auto step = c.poll(0);
+            check(!step.synced(), "RtrClientStep fresh poll is not synced");
+            check(!step.expired(), "RtrClientStep fresh poll is not expired");
+            check(step.roa_delta_count() == 0, "RtrClientStep fresh poll has 0 deltas");
+            check(step.log_count() == 0, "RtrClientStep fresh poll has 0 logs");
+            check(step.send_bytes().empty(), "RtrClientStep fresh poll send_bytes empty");
+            check(!step.roa_delta_at(0).has_value(),
+                  "RtrClientStep out-of-bounds delta returns nullopt");
+            check(!step.log_at(0).has_value(),
+                  "RtrClientStep out-of-bounds log returns nullopt");
+        }
+
+        // snapshot on a fresh client is empty.
+        auto snap = c.snapshot();
+        check(snap.empty(), "RtrClient snapshot empty on fresh client");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");
