@@ -753,8 +753,7 @@ pub unsafe extern "C" fn lr_adj_rib_out_suppress(
                 peer: dest_peer,
                 proto: proto_u32,
             };
-            rib.suppress(dest, &key, tx_path_id);
-            0
+            rib.suppress(dest, &key, tx_path_id).is_some() as i32
         },
         LR_ERR_PANIC,
     )
@@ -1092,10 +1091,7 @@ pub unsafe extern "C" fn lr_loc_rib_install_set(
                 return LR_ERR_NULL;
             }
             let key_c: lr_route_key_t = unsafe { *key };
-            let Some(key) = key_c.to_key() else {
-                set_last_error("malformed route key".to_string());
-                return LrError::Other as i32;
-            };
+            let key = crate::core::route_key_from_c(&key_c);
             let mut ranked: Vec<Route> = Vec::with_capacity(count);
             for i in 0..count {
                 let h = unsafe { *routes.add(i) };
@@ -1129,107 +1125,25 @@ pub unsafe extern "C" fn lr_loc_rib_paths(r: lr_loc_rib_t, key: *const lr_route_
                 return 0;
             }
             let key_c: lr_route_key_t = unsafe { *key };
-            let Some(key) = key_c.to_key() else {
-                return 0;
-            };
+            let key = crate::core::route_key_from_c(&key_c);
             rib.paths(&key).len()
         },
         0,
     )
 }
 
-/// One route-key projection — (prefix, family_afi, family_safi) +
-/// optional source prefix. Used by `lr_loc_rib_iter_best` /
-/// `lr_loc_rib_install_set` so the C side can pass / receive keys
-/// without going through a separate handle type.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct lr_route_key_t {
-    /// Network address octets (first 4 for IPv4, all 16 for IPv6).
-    pub addr: [u8; 16],
-    /// 0 = IPv4 (first 4 bytes of `addr`), 1 = IPv6 (all 16 bytes).
-    pub is_ipv6: u8,
-    /// Prefix length (0..=32 for IPv4, 0..=128 for IPv6).
-    pub prefix_len: u8,
-    /// Address-family identifier (1 = IPv4, 2 = IPv6, etc.).
-    pub family_afi: u16,
-    /// Subsequent address-family identifier (1 = unicast, etc.).
-    pub family_safi: u8,
-    /// 1 when `source_addr` / `source_prefix_len` carry a source
-    /// prefix (RFC 8277 / flow-spec), 0 otherwise.
-    pub has_source: u8,
-    /// Source-prefix address octets (zero-padded to 16).
-    pub source_addr: [u8; 16],
-    /// 0 = IPv4 source, 1 = IPv6 source.
-    pub source_is_ipv6: u8,
-    /// Source-prefix length.
-    pub source_prefix_len: u8,
-}
-
-impl lr_route_key_t {
-    fn to_key(self) -> Option<lr_core::rib::RouteKey> {
-        let addr = if self.is_ipv6 == 0 {
-            lr_core::addr::IpAddr::V4([self.addr[0], self.addr[1], self.addr[2], self.addr[3]])
-        } else {
-            lr_core::addr::IpAddr::V6(self.addr)
-        };
-        let prefix = if self.is_ipv6 == 0 {
-            if self.prefix_len > 32 {
-                return None;
-            }
-            lr_core::addr::Prefix::new_v4(
-                [self.addr[0], self.addr[1], self.addr[2], self.addr[3]],
-                self.prefix_len,
-            )
-        } else {
-            if self.prefix_len > 128 {
-                return None;
-            }
-            lr_core::addr::Prefix::new_v6(self.addr, self.prefix_len)
-        };
-        let family = lr_core::nlri::NlriFamily {
-            afi: self.family_afi,
-            safi: self.family_safi,
-        };
-        if self.has_source == 0 {
-            Some(lr_core::rib::RouteKey::new(prefix, family))
-        } else {
-            let src_addr = if self.source_is_ipv6 == 0 {
-                lr_core::addr::IpAddr::V4([
-                    self.source_addr[0],
-                    self.source_addr[1],
-                    self.source_addr[2],
-                    self.source_addr[3],
-                ])
-            } else {
-                lr_core::addr::IpAddr::V6(self.source_addr)
-            };
-            let src_prefix = if self.source_is_ipv6 == 0 {
-                if self.source_prefix_len > 32 {
-                    return None;
-                }
-                lr_core::addr::Prefix::new_v4(
-                    [
-                        self.source_addr[0],
-                        self.source_addr[1],
-                        self.source_addr[2],
-                        self.source_addr[3],
-                    ],
-                    self.source_prefix_len,
-                )
-            } else {
-                if self.source_prefix_len > 128 {
-                    return None;
-                }
-                lr_core::addr::Prefix::new_v6(self.source_addr, self.source_prefix_len)
-            };
-            let _ = (addr, src_addr);
-            Some(lr_core::rib::RouteKey::with_source(
-                prefix, family, src_prefix,
-            ))
-        }
-    }
-}
+/// One route-key projection — (prefix, family) + optional source
+/// prefix. Used by `lr_loc_rib_iter_best` / `lr_loc_rib_install_set`
+/// so the C side can pass / receive keys without going through a
+/// separate handle type.
+///
+/// This re-exports `crate::core::lr_route_key_t` so the C header
+/// (which cbindgen generates from the canonical definition in
+/// `core.rs`) and every FFI consumer agree on one layout. The
+/// previous flat-field layout in this file did not match the
+/// generated header, which silently corrupted every caller that
+/// passed the structured `lr_route_key_t` the header documents.
+pub use crate::core::lr_route_key_t;
 
 /// Walk every best route in the Loc-RIB. The caller provides a
 /// callback that receives one route handle per iteration (the
@@ -1698,8 +1612,15 @@ mod tests {
 
         let p = v4_prefix([10, 0, 0, 0], 24);
         let rc = unsafe { lr_adj_rib_out_suppress(rib, 1, 0, &p, 1, 1, std::ptr::null(), 0) };
-        assert_eq!(rc, 0);
+        // suppress now returns 1 when a route was suppressed (the
+        // previous always-0 implementation was a bug — the Rust
+        // `suppress` returns `Option<Route>` and the C ABI was
+        // discarding the result).
+        assert_eq!(rc, 1);
         assert_eq!(unsafe { lr_adj_rib_out_len(rib) }, 0);
+        // A second suppress on the same key is a no-op (returns 0).
+        let rc = unsafe { lr_adj_rib_out_suppress(rib, 1, 0, &p, 1, 1, std::ptr::null(), 0) };
+        assert_eq!(rc, 0);
 
         unsafe { lr_adj_rib_out_free(rib) };
     }
@@ -1758,12 +1679,15 @@ mod tests {
     // ---- LocRib: install_set / paths / iter_best / diff_since ----
 
     fn build_key_v4(addr: [u8; 4], prefix_len: u8) -> lr_route_key_t {
+        // The structured `lr_route_key_t` (now re-exported from
+        // `crate::core`) carries the address in `lr_ip_addr_t` with
+        // IPv4 occupying the *last* 4 bytes of the 16-byte `octets`
+        // array (the IPv4-mapped IPv6 layout).
         let mut k = lr_route_key_t::default();
-        k.addr[..4].copy_from_slice(&addr);
-        k.is_ipv6 = 0;
-        k.prefix_len = prefix_len;
-        k.family_afi = 1;
-        k.family_safi = 1;
+        k.prefix.addr.is_ipv6 = 0;
+        k.prefix.addr.octets[12..16].copy_from_slice(&addr);
+        k.prefix.prefix_len = prefix_len;
+        k.afi_safi = (1u16 << 8) | 1u16;
         k.has_source = 0;
         k
     }
