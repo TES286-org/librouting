@@ -1311,6 +1311,230 @@ int main(void) {
         check(bad_out == NULL, "decode sets *out to NULL on failure");
     }
 
+    /* ---- BFD AuthType readers (RFC 5880 §8 IANA codes) ---- */
+    {
+        check(lr_bfd_auth_type_expected_digest_len(LR_BFD_AUTH_TYPE_KEYED_MD5) == 16,
+              "MD5 expected digest length = 16");
+        check(lr_bfd_auth_type_expected_digest_len(LR_BFD_AUTH_TYPE_KEYED_SHA1) == 20,
+              "SHA1 expected digest length = 20");
+        check(lr_bfd_auth_type_expected_digest_len(LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5) == 16,
+              "Meticulous MD5 expected digest length = 16");
+        check(lr_bfd_auth_type_expected_digest_len(LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1) == 20,
+              "Meticulous SHA1 expected digest length = 20");
+        check(lr_bfd_auth_type_expected_digest_len(LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD) == -1,
+              "Simple Password has no fixed digest length");
+        check(lr_bfd_auth_type_expected_digest_len(99) == -1,
+              "Unknown type has no fixed digest length");
+        check(lr_bfd_auth_type_is_keyed_hash(LR_BFD_AUTH_TYPE_KEYED_MD5) == 1,
+              "MD5 is keyed-hash");
+        check(lr_bfd_auth_type_is_keyed_hash(LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD) == 0,
+              "Simple Password is not keyed-hash");
+        check(lr_bfd_auth_type_is_meticulous(LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5) == 1,
+              "Meticulous MD5 is meticulous");
+        check(lr_bfd_auth_type_is_meticulous(LR_BFD_AUTH_TYPE_KEYED_MD5) == 0,
+              "Plain Keyed MD5 is not meticulous");
+    }
+
+    /* ---- BFD AuthKey lifecycle ---- */
+    {
+        uint8_t secret[16] = "0123456789abcdef";
+        lr_bfd_auth_key_t k = lr_bfd_auth_key_new(7, secret, sizeof(secret));
+        check(k != NULL, "lr_bfd_auth_key_new returns non-NULL");
+        check(lr_bfd_auth_key_key_id(k) == 7, "AuthKey key_id = 7");
+        check(lr_bfd_auth_key_data_len(k) == 16, "AuthKey data_len = 16");
+        uint8_t out[16] = {0};
+        uintptr_t out_len = 0;
+        check(lr_bfd_auth_key_data(k, out, sizeof(out), &out_len) == 0,
+              "AuthKey data read returns 0");
+        check(out_len == 16, "AuthKey data out_len = 16");
+        check(memcmp(out, secret, 16) == 0, "AuthKey data round-trips");
+        lr_bfd_auth_key_free(k);
+
+        /* simple_password constructor */
+        uint8_t pw[7] = "hunter2";
+        lr_bfd_auth_key_t sk = lr_bfd_auth_key_simple_password(3, pw, 7);
+        check(sk != NULL, "lr_bfd_auth_key_simple_password returns non-NULL");
+        check(lr_bfd_auth_key_key_id(sk) == 3, "Simple Password key_id = 3");
+        check(lr_bfd_auth_key_data_len(sk) == 7, "Simple Password data_len = 7");
+        lr_bfd_auth_key_free(sk);
+
+        /* NULL safe */
+        check(lr_bfd_auth_key_key_id(NULL) == 0, "NULL AuthKey key_id = 0");
+        check(lr_bfd_auth_key_data_len(NULL) == 0, "NULL AuthKey data_len = 0");
+        check(lr_bfd_auth_key_data(NULL, NULL, 0, NULL) == LR_ERR_NULL,
+              "NULL AuthKey data returns LR_ERR_NULL");
+        lr_bfd_auth_key_free(NULL);
+    }
+
+    /* ---- BFD AuthSection lifecycle ---- */
+    {
+        /* Simple Password */
+        uint8_t pw[7] = "hunter2";
+        lr_bfd_auth_section_t s =
+            lr_bfd_auth_section_simple_password(pw, sizeof(pw), 7);
+        check(s != NULL, "lr_bfd_auth_section_simple_password returns non-NULL");
+        check(lr_bfd_auth_section_auth_type(s) == LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD,
+              "Simple Password auth_type = 1");
+        check(lr_bfd_auth_section_key_id(s) == 7, "Simple Password key_id = 7");
+        uint32_t seq = 0;
+        check(lr_bfd_auth_section_sequence(s, &seq) == 0,
+              "Simple Password has no sequence (returns 0)");
+        check(lr_bfd_auth_section_data_len(s) == 7, "Simple Password data_len = 7");
+        check(lr_bfd_auth_section_wire_len(s) == 3 + 7,
+              "Simple Password wire_len = 3 + password_len");
+        uint8_t data_out[16] = {0};
+        uintptr_t data_len = 0;
+        check(lr_bfd_auth_section_data(s, data_out, sizeof(data_out), &data_len) == 0,
+              "Simple Password data read returns 0");
+        check(data_len == 7, "Simple Password data out_len = 7");
+        check(memcmp(data_out, pw, 7) == 0, "Simple Password data round-trips");
+        lr_bfd_auth_section_free(s);
+
+        /* Keyed MD5 */
+        uint8_t digest16[16] = {0};
+        lr_bfd_auth_section_t md5 =
+            lr_bfd_auth_section_keyed_md5(2, 0xDEADBEEF, digest16, sizeof(digest16));
+        check(md5 != NULL, "lr_bfd_auth_section_keyed_md5 returns non-NULL");
+        check(lr_bfd_auth_section_auth_type(md5) == LR_BFD_AUTH_TYPE_KEYED_MD5,
+              "Keyed MD5 auth_type = 2");
+        check(lr_bfd_auth_section_key_id(md5) == 2, "Keyed MD5 key_id = 2");
+        check(lr_bfd_auth_section_sequence(md5, &seq) == 1,
+              "Keyed MD5 has sequence (returns 1)");
+        check(seq == 0xDEADBEEF, "Keyed MD5 sequence = 0xDEADBEEF");
+        check(lr_bfd_auth_section_data_len(md5) == 16, "Keyed MD5 data_len = 16");
+        check(lr_bfd_auth_section_wire_len(md5) == 24, "Keyed MD5 wire_len = 24");
+        lr_bfd_auth_section_free(md5);
+
+        /* Keyed SHA1 */
+        uint8_t digest20[20] = {0};
+        lr_bfd_auth_section_t sha1 =
+            lr_bfd_auth_section_keyed_sha1(4, 0xFEEDFACE, digest20, sizeof(digest20));
+        check(sha1 != NULL, "lr_bfd_auth_section_keyed_sha1 returns non-NULL");
+        check(lr_bfd_auth_section_auth_type(sha1) == LR_BFD_AUTH_TYPE_KEYED_SHA1,
+              "Keyed SHA1 auth_type = 4");
+        check(lr_bfd_auth_section_wire_len(sha1) == 28, "Keyed SHA1 wire_len = 28");
+        lr_bfd_auth_section_free(sha1);
+
+        /* Meticulous variants */
+        lr_bfd_auth_section_t mmd5 = lr_bfd_auth_section_meticulous_keyed_md5(
+            3, 42, digest16, sizeof(digest16));
+        check(lr_bfd_auth_section_auth_type(mmd5) == LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5,
+              "Meticulous Keyed MD5 auth_type = 3");
+        lr_bfd_auth_section_free(mmd5);
+
+        lr_bfd_auth_section_t msha1 = lr_bfd_auth_section_meticulous_keyed_sha1(
+            5, 42, digest20, sizeof(digest20));
+        check(lr_bfd_auth_section_auth_type(msha1) == LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1,
+              "Meticulous Keyed SHA1 auth_type = 5");
+        lr_bfd_auth_section_free(msha1);
+
+        /* NULL safe */
+        check(lr_bfd_auth_section_auth_type(NULL) == 0, "NULL auth_type = 0");
+        check(lr_bfd_auth_section_key_id(NULL) == 0, "NULL key_id = 0");
+        check(lr_bfd_auth_section_data_len(NULL) == 0, "NULL data_len = 0");
+        check(lr_bfd_auth_section_wire_len(NULL) == 0, "NULL wire_len = 0");
+        check(lr_bfd_auth_section_sequence(NULL, &seq) == LR_ERR_NULL,
+              "NULL section sequence returns LR_ERR_NULL");
+        check(lr_bfd_auth_section_sequence(NULL, NULL) == LR_ERR_NULL,
+              "NULL section + NULL out returns LR_ERR_NULL");
+        lr_bfd_auth_section_free(NULL);
+    }
+
+    /* ---- BfdPacket auth integration ---- */
+    {
+        lr_bfd_packet_t p = lr_bfd_packet_new();
+        check(p != NULL, "lr_bfd_packet_new returns non-NULL");
+        check(lr_bfd_packet_auth_present(p) == 0, "fresh packet has no auth");
+        lr_bfd_auth_section_t sec_out = NULL;
+        check(lr_bfd_packet_auth(p, &sec_out) == 0, "auth returns 0 on no-auth");
+        check(sec_out == NULL, "auth writes NULL when no auth attached");
+
+        /* Install a Simple Password section */
+        uint8_t pw[7] = "hunter2";
+        lr_bfd_auth_section_t s =
+            lr_bfd_auth_section_simple_password(pw, sizeof(pw), 7);
+        check(s != NULL, "lr_bfd_auth_section_simple_password returns non-NULL");
+        check(lr_bfd_packet_set_auth(p, s) == 0, "set_auth consumes section");
+        check(lr_bfd_packet_auth_present(p) == 1, "packet now carries auth");
+
+        /* Read it back — a NEW handle */
+        check(lr_bfd_packet_auth(p, &sec_out) == 0, "auth returns 0 on attached");
+        check(sec_out != NULL, "auth writes non-NULL when attached");
+        check(lr_bfd_auth_section_auth_type(sec_out) == LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD,
+              "read-back auth_type = Simple Password");
+        check(lr_bfd_auth_section_key_id(sec_out) == 7, "read-back key_id = 7");
+        check(lr_bfd_auth_section_data_len(sec_out) == 7, "read-back data_len = 7");
+        lr_bfd_auth_section_free(sec_out);
+
+        /* Clear via NULL */
+        check(lr_bfd_packet_set_auth(p, NULL) == 0, "set_auth(NULL) clears");
+        check(lr_bfd_packet_auth_present(p) == 0, "auth now absent");
+
+        /* NULL safety — use a FRESH section since set_auth consumes its
+         * argument (the boxed AuthSection is moved into the packet). */
+        uint8_t pw2[3] = "abc";
+        lr_bfd_auth_section_t s2 = lr_bfd_auth_section_simple_password(pw2, 3, 1);
+        check(s2 != NULL, "lr_bfd_auth_section_simple_password returns non-NULL (for NULL test)");
+        check(lr_bfd_packet_set_auth(NULL, s2) == LR_ERR_NULL,
+              "set_auth on NULL packet returns LR_ERR_NULL");
+        /* The packet was NULL so set_auth did NOT consume s2 — free it. */
+        lr_bfd_auth_section_free(s2);
+        check(lr_bfd_packet_auth_present(NULL) == 0, "auth_present on NULL returns 0");
+        check(lr_bfd_packet_auth(NULL, &sec_out) == LR_ERR_NULL,
+              "auth on NULL packet returns LR_ERR_NULL");
+        check(lr_bfd_packet_auth(p, NULL) == LR_ERR_NULL,
+              "auth with NULL out returns LR_ERR_NULL");
+
+        lr_bfd_packet_free(p);
+    }
+
+    /* ---- BfdKeyedAuth auth_section_for_tx / sign / verify ---- */
+    {
+        uint8_t secret[16] = "0123456789abcdef";
+        lr_bfd_keyed_auth_t a = lr_bfd_keyed_auth_new(
+            LR_BFD_AUTH_ALGO_KEYED_MD5, 7, secret, sizeof(secret));
+        check(a != NULL, "lr_bfd_keyed_auth_new returns non-NULL");
+        check(lr_bfd_keyed_auth_xmit_seq(a) == 0, "fresh xmit_seq = 0");
+
+        /* auth_section_for_tx: returns the wire auth section with the
+         * shared key in the digest field. */
+        lr_bfd_auth_section_t sec = lr_bfd_keyed_auth_auth_section_for_tx(a);
+        check(sec != NULL, "auth_section_for_tx returns non-NULL");
+        check(lr_bfd_auth_section_auth_type(sec) == LR_BFD_AUTH_TYPE_KEYED_MD5,
+              "auth_section_for_tx auth_type = Keyed MD5");
+        check(lr_bfd_auth_section_key_id(sec) == 7, "auth_section_for_tx key_id = 7");
+        uint32_t seq = 0;
+        check(lr_bfd_auth_section_sequence(sec, &seq) == 1, "auth_section_for_tx has seq");
+        check(seq == 0, "auth_section_for_tx seq = 0 (xmit_seq before any advance)");
+        check(lr_bfd_auth_section_data_len(sec) == 16,
+              "auth_section_for_tx data_len = 16 (MD5 digest field)");
+        uint8_t data_out[16] = {0};
+        uintptr_t data_len = 0;
+        check(lr_bfd_auth_section_data(sec, data_out, sizeof(data_out), &data_len) == 0,
+              "auth_section_for_tx data read returns 0");
+        check(memcmp(data_out, secret, 16) == 0,
+              "auth_section_for_tx carries shared key in digest field");
+        lr_bfd_auth_section_free(sec);
+
+        /* auth_section_for_tx on NULL returns NULL */
+        check(lr_bfd_keyed_auth_auth_section_for_tx(NULL) == NULL,
+              "auth_section_for_tx on NULL returns NULL");
+
+        /* sign_packet / verify_inbound: NULL safety */
+        check(lr_bfd_keyed_auth_sign_packet(a, NULL, 0) == LR_ERR_NULL,
+              "sign_packet with NULL packet returns LR_ERR_NULL");
+        uint8_t buf[32] = {0};
+        check(lr_bfd_keyed_auth_sign_packet(NULL, buf, sizeof(buf)) == LR_ERR_NULL,
+              "sign_packet with NULL auth returns LR_ERR_NULL");
+        check(lr_bfd_keyed_auth_verify_inbound(NULL, buf, sizeof(buf), NULL, 3) ==
+                  LR_ERR_NULL,
+              "verify_inbound with NULL auth returns LR_ERR_NULL");
+        check(lr_bfd_keyed_auth_verify_inbound(a, NULL, 0, NULL, 3) == LR_ERR_NULL,
+              "verify_inbound with NULL packet returns LR_ERR_NULL");
+
+        lr_bfd_keyed_auth_free(a);
+    }
+
     /* ---- lr_loc_rib / lr_adj_rib / lr_rib_mux / lr_route_selector ---- */
     {
         lr_loc_rib_t rib = lr_loc_rib_new();

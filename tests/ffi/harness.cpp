@@ -776,6 +776,145 @@ int main() {
         check(bfd_packet_your_discriminator(dec) == 0xCAFEBABE, "decoded your_disc");
     }
 
+    // ---- BFD AuthType readers (RFC 5880 §8 IANA codes) ----
+    {
+        check(bfd_auth_type_expected_digest_len(bfd_auth_type::kKeyedMd5) == 16,
+              "MD5 expected digest length = 16");
+        check(bfd_auth_type_expected_digest_len(bfd_auth_type::kKeyedSha1) == 20,
+              "SHA1 expected digest length = 20");
+        check(bfd_auth_type_expected_digest_len(bfd_auth_type::kMeticulousKeyedMd5) == 16,
+              "Meticulous MD5 expected digest length = 16");
+        check(bfd_auth_type_expected_digest_len(bfd_auth_type::kMeticulousKeyedSha1) == 20,
+              "Meticulous SHA1 expected digest length = 20");
+        check(bfd_auth_type_expected_digest_len(bfd_auth_type::kSimplePassword) == -1,
+              "Simple Password has no fixed digest length");
+        check(bfd_auth_type_expected_digest_len(99) == -1,
+              "Unknown type has no fixed digest length");
+        check(bfd_auth_type_is_keyed_hash(bfd_auth_type::kKeyedMd5), "MD5 is keyed-hash");
+        check(!bfd_auth_type_is_keyed_hash(bfd_auth_type::kSimplePassword),
+              "Simple Password is not keyed-hash");
+        check(bfd_auth_type_is_meticulous(bfd_auth_type::kMeticulousKeyedMd5),
+              "Meticulous MD5 is meticulous");
+        check(!bfd_auth_type_is_meticulous(bfd_auth_type::kKeyedMd5),
+              "Plain Keyed MD5 is not meticulous");
+    }
+
+    // ---- BFD AuthKey lifecycle ----
+    {
+        std::vector<std::uint8_t> secret(16, 0);
+        for (std::size_t i = 0; i < 16; ++i) secret[i] = static_cast<std::uint8_t>('0' + i);
+        auto k = make_bfd_auth_key(7, secret);
+        check(bfd_auth_key_key_id(k) == 7, "AuthKey key_id = 7");
+        check(bfd_auth_key_data_len(k) == 16, "AuthKey data_len = 16");
+        auto data = bfd_auth_key_data(k);
+        check(data.size() == 16, "AuthKey data out_len = 16");
+        check(data == secret, "AuthKey data round-trips");
+
+        // simple_password constructor
+        std::vector<std::uint8_t> pw{'h', 'u', 'n', 't', 'e', 'r', '2'};
+        auto sk = make_bfd_auth_key_simple_password(3, pw);
+        check(bfd_auth_key_key_id(sk) == 3, "Simple Password key_id = 3");
+        check(bfd_auth_key_data_len(sk) == 7, "Simple Password data_len = 7");
+    }
+
+    // ---- BFD AuthSection lifecycle ----
+    {
+        // Simple Password
+        std::vector<std::uint8_t> pw{'h', 'u', 'n', 't', 'e', 'r', '2'};
+        auto s = make_bfd_auth_section_simple_password(pw, 7);
+        check(bfd_auth_section_auth_type(s) == bfd_auth_type::kSimplePassword,
+              "Simple Password auth_type = 1");
+        check(bfd_auth_section_key_id(s) == 7, "Simple Password key_id = 7");
+        check(!bfd_auth_section_sequence(s).has_value(),
+              "Simple Password has no sequence");
+        check(bfd_auth_section_data_len(s) == 7, "Simple Password data_len = 7");
+        check(bfd_auth_section_wire_len(s) == 3 + 7, "Simple Password wire_len = 10");
+        auto data = bfd_auth_section_data(s);
+        check(data == pw, "Simple Password data round-trips");
+
+        // Keyed MD5
+        std::vector<std::uint8_t> digest16(16, 0);
+        auto md5 = make_bfd_auth_section_keyed_md5(2, 0xDEADBEEF, digest16);
+        check(bfd_auth_section_auth_type(md5) == bfd_auth_type::kKeyedMd5,
+              "Keyed MD5 auth_type = 2");
+        check(bfd_auth_section_key_id(md5) == 2, "Keyed MD5 key_id = 2");
+        check(bfd_auth_section_sequence(md5).has_value(), "Keyed MD5 has sequence");
+        check(bfd_auth_section_sequence(md5).value() == 0xDEADBEEF,
+              "Keyed MD5 seq = 0xDEADBEEF");
+        check(bfd_auth_section_data_len(md5) == 16, "Keyed MD5 data_len = 16");
+        check(bfd_auth_section_wire_len(md5) == 24, "Keyed MD5 wire_len = 24");
+
+        // Keyed SHA1
+        std::vector<std::uint8_t> digest20(20, 0);
+        auto sha1 = make_bfd_auth_section_keyed_sha1(4, 0xFEEDFACE, digest20);
+        check(bfd_auth_section_auth_type(sha1) == bfd_auth_type::kKeyedSha1,
+              "Keyed SHA1 auth_type = 4");
+        check(bfd_auth_section_wire_len(sha1) == 28, "Keyed SHA1 wire_len = 28");
+
+        // Meticulous variants
+        auto mmd5 = make_bfd_auth_section_meticulous_keyed_md5(3, 42, digest16);
+        check(bfd_auth_section_auth_type(mmd5) == bfd_auth_type::kMeticulousKeyedMd5,
+              "Meticulous Keyed MD5 auth_type = 3");
+        auto msha1 = make_bfd_auth_section_meticulous_keyed_sha1(5, 42, digest20);
+        check(bfd_auth_section_auth_type(msha1) == bfd_auth_type::kMeticulousKeyedSha1,
+              "Meticulous Keyed SHA1 auth_type = 5");
+    }
+
+    // ---- BfdPacket auth integration ----
+    {
+        auto p = make_bfd_packet();
+        check(!bfd_packet_auth_present(p), "fresh packet has no auth");
+        check(!bfd_packet_auth(p).has_value(), "auth returns nullopt when no auth attached");
+
+        // Install a Simple Password section
+        std::vector<std::uint8_t> pw{'h', 'u', 'n', 't', 'e', 'r', '2'};
+        auto s = make_bfd_auth_section_simple_password(pw, 7);
+        bfd_packet_set_auth(p, std::move(s));
+        check(bfd_packet_auth_present(p), "packet now carries auth");
+
+        // Read it back
+        auto sec_out = bfd_packet_auth(p);
+        check(sec_out.has_value(), "auth returns a value when attached");
+        check(bfd_auth_section_auth_type(*sec_out) == bfd_auth_type::kSimplePassword,
+              "read-back auth_type = Simple Password");
+        check(bfd_auth_section_key_id(*sec_out) == 7, "read-back key_id = 7");
+        check(bfd_auth_section_data_len(*sec_out) == 7, "read-back data_len = 7");
+
+        // Clear via a NULL handle (default-constructed BfdAuthSection).
+        BfdAuthSection null_section;
+        bfd_packet_set_auth(p, std::move(null_section));
+        check(!bfd_packet_auth_present(p), "auth now absent");
+    }
+
+    // ---- BfdKeyedAuth auth_section_for_tx / sign / verify ----
+    {
+        std::vector<std::uint8_t> secret(16, 0);
+        for (std::size_t i = 0; i < 16; ++i) secret[i] = static_cast<std::uint8_t>('0' + i);
+        auto a = make_bfd_keyed_auth(bfd_auth_algo::kKeyedMd5, 7, secret);
+        check(bfd_keyed_auth_xmit_seq(a) == 0, "fresh xmit_seq = 0");
+        check(bfd_keyed_auth_key_id(a) == 7, "key_id = 7");
+        check(bfd_keyed_auth_digest_len(a) == 16, "digest_len = 16");
+        check(!bfd_keyed_auth_is_meticulous(a), "KeyedMd5 is not meticulous");
+
+        // auth_section_for_tx: returns the wire auth section with the
+        // shared key in the digest field.
+        auto sec = bfd_keyed_auth_auth_section_for_tx(a);
+        check(bfd_auth_section_auth_type(sec) == bfd_auth_type::kKeyedMd5,
+              "auth_section_for_tx auth_type = Keyed MD5");
+        check(bfd_auth_section_key_id(sec) == 7, "auth_section_for_tx key_id = 7");
+        check(bfd_auth_section_sequence(sec).has_value(), "auth_section_for_tx has seq");
+        check(bfd_auth_section_sequence(sec).value() == 0,
+              "auth_section_for_tx seq = 0 (xmit_seq before any advance)");
+        check(bfd_auth_section_data_len(sec) == 16,
+              "auth_section_for_tx data_len = 16 (MD5 digest field)");
+        auto data = bfd_auth_section_data(sec);
+        check(data == secret, "auth_section_for_tx carries shared key in digest field");
+
+        // advance_xmit_seq bumps the counter.
+        bfd_keyed_auth_advance_xmit_seq(a);
+        check(bfd_keyed_auth_xmit_seq(a) == 1, "xmit_seq = 1 after advance");
+    }
+
     // ---- SRv6 structured types (RFC 8754 / RFC 8986) ----
     {
         // Sid parse + render roundtrip.
