@@ -805,6 +805,69 @@ int32_t lr_bfd_packet_set_required_min_rx_interval(lr_bfd_packet_t packet, uint3
 int32_t lr_bfd_packet_set_required_min_echo_interval(lr_bfd_packet_t packet, uint32_t interval);
 void lr_bfd_packet_free(lr_bfd_packet_t packet);
 
+/* ----- BFD AuthType / AuthKey / AuthSection (RFC 5880 §4.2-§4.4) -----
+ * Mirrors lr_bfd::auth::{AuthType, AuthKey, AuthSection}. Each type is
+ * exposed as an opaque handle that owns its heap allocation; the
+ * Python wrapper (bindings/lr-python/src/librouting/bfd.py) provides
+ * the idiomatic class surface on top. */
+typedef struct OpaqueBfdAuthKey OpaqueBfdAuthKey;
+typedef struct OpaqueBfdAuthKey *lr_bfd_auth_key_t;
+typedef struct OpaqueBfdAuthSection OpaqueBfdAuthSection;
+typedef struct OpaqueBfdAuthSection *lr_bfd_auth_section_t;
+
+/* AuthType free-function readers (RFC 5880 §8 IANA codes). */
+intptr_t lr_bfd_auth_type_expected_digest_len(uint8_t auth_type);
+uint8_t lr_bfd_auth_type_is_keyed_hash(uint8_t auth_type);
+uint8_t lr_bfd_auth_type_is_meticulous(uint8_t auth_type);
+
+/* AuthKey lifecycle + accessors. */
+lr_bfd_auth_key_t lr_bfd_auth_key_new(uint8_t key_id, const uint8_t *secret, uintptr_t secret_len);
+lr_bfd_auth_key_t lr_bfd_auth_key_simple_password(uint8_t key_id, const uint8_t *password, uintptr_t password_len);
+void lr_bfd_auth_key_free(lr_bfd_auth_key_t k);
+uint8_t lr_bfd_auth_key_key_id(lr_bfd_auth_key_t k);
+uintptr_t lr_bfd_auth_key_data_len(lr_bfd_auth_key_t k);
+int32_t lr_bfd_auth_key_data(lr_bfd_auth_key_t k, uint8_t *out_data, uintptr_t cap, uintptr_t *out_len);
+
+/* AuthSection lifecycle (RFC 5880 §4.2-§4.4 — five type-specific
+ * constructors matching the §8 IANA codes). */
+lr_bfd_auth_section_t lr_bfd_auth_section_simple_password(const uint8_t *password, uintptr_t password_len, uint8_t key_id);
+lr_bfd_auth_section_t lr_bfd_auth_section_keyed_md5(uint8_t key_id, uint32_t sequence, const uint8_t *digest, uintptr_t digest_len);
+lr_bfd_auth_section_t lr_bfd_auth_section_meticulous_keyed_md5(uint8_t key_id, uint32_t sequence, const uint8_t *digest, uintptr_t digest_len);
+lr_bfd_auth_section_t lr_bfd_auth_section_keyed_sha1(uint8_t key_id, uint32_t sequence, const uint8_t *digest, uintptr_t digest_len);
+lr_bfd_auth_section_t lr_bfd_auth_section_meticulous_keyed_sha1(uint8_t key_id, uint32_t sequence, const uint8_t *digest, uintptr_t digest_len);
+void lr_bfd_auth_section_free(lr_bfd_auth_section_t s);
+
+/* AuthSection readers. */
+uint8_t lr_bfd_auth_section_auth_type(lr_bfd_auth_section_t s);
+uint8_t lr_bfd_auth_section_key_id(lr_bfd_auth_section_t s);
+int32_t lr_bfd_auth_section_sequence(lr_bfd_auth_section_t s, uint32_t *out_sequence);
+uintptr_t lr_bfd_auth_section_data_len(lr_bfd_auth_section_t s);
+int32_t lr_bfd_auth_section_data(lr_bfd_auth_section_t s, uint8_t *out_data, uintptr_t cap, uintptr_t *out_len);
+uintptr_t lr_bfd_auth_section_wire_len(lr_bfd_auth_section_t s);
+
+/* BfdPacket auth integration (RFC 5880 §4.1 A bit). */
+int32_t lr_bfd_packet_set_auth(lr_bfd_packet_t packet, lr_bfd_auth_section_t section);
+uint8_t lr_bfd_packet_auth_present(lr_bfd_packet_t packet);
+int32_t lr_bfd_packet_auth(lr_bfd_packet_t packet, lr_bfd_auth_section_t *out);
+
+/* BfdKeyedAuth (RFC 5880 §6.7 / §6.8.5). */
+typedef struct OpaqueBfdKeyedAuth OpaqueBfdKeyedAuth;
+typedef struct OpaqueBfdKeyedAuth *lr_bfd_keyed_auth_t;
+lr_bfd_keyed_auth_t lr_bfd_keyed_auth_new(int32_t algorithm, uint8_t key_id, const uint8_t *secret, uintptr_t secret_len);
+void lr_bfd_keyed_auth_free(lr_bfd_keyed_auth_t a);
+uint8_t lr_bfd_keyed_auth_key_id(lr_bfd_keyed_auth_t a);
+int32_t lr_bfd_keyed_auth_algorithm(lr_bfd_keyed_auth_t a);
+uint8_t lr_bfd_keyed_auth_auth_type_value(lr_bfd_keyed_auth_t a);
+uintptr_t lr_bfd_keyed_auth_digest_len(lr_bfd_keyed_auth_t a);
+uint8_t lr_bfd_keyed_auth_is_meticulous(lr_bfd_keyed_auth_t a);
+uint32_t lr_bfd_keyed_auth_xmit_seq(lr_bfd_keyed_auth_t a);
+uint8_t lr_bfd_keyed_auth_rcv_auth_seq_known(lr_bfd_keyed_auth_t a);
+uint32_t lr_bfd_keyed_auth_rcv_auth_seq(lr_bfd_keyed_auth_t a);
+int32_t lr_bfd_keyed_auth_advance_xmit_seq(lr_bfd_keyed_auth_t a);
+lr_bfd_auth_section_t lr_bfd_keyed_auth_auth_section_for_tx(lr_bfd_keyed_auth_t a);
+int32_t lr_bfd_keyed_auth_sign_packet(lr_bfd_keyed_auth_t a, uint8_t *packet, uintptr_t packet_len);
+int32_t lr_bfd_keyed_auth_verify_inbound(lr_bfd_keyed_auth_t a, const uint8_t *packet, uintptr_t packet_len, lr_bfd_auth_section_t section, uint8_t detect_mult);
+
 /* ----- SRv6 structured types (RFC 8754 / RFC 8986) -----
  * Mirrors lr_srv6::{Sid, Locator, Srh, Behavior}. Each type is exposed
  * as an opaque handle that owns its heap allocation; the Python wrapper
