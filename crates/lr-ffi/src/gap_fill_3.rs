@@ -694,6 +694,122 @@ pub unsafe extern "C" fn lr_adj_rib_out_clear_for(
     )
 }
 
+/// Walk every advertised path of `(dest, key)` — the full
+/// `(tx_path_id, route)` pair, not just the TX path identifiers
+/// [`lr_adj_rib_out_tx_path_ids`] surfaces. The callback fires once per
+/// stored path, ascending by `tx_path_id`. Returns the number of
+/// paths visited, or `LR_ERR_NULL` (-1) on a NULL handle / pointer /
+/// callback.
+///
+/// The route handle passed to the callback is *borrowed* — the
+/// Adj-RIB-Out owns the underlying `Route` for the duration of the
+/// walk. The callback MUST NOT call `lr_route_free` on it, and MUST NOT
+/// mutate the Adj-RIB-Out (the borrow is held for the duration of the
+/// walk; re-entrancy is undefined).
+///
+/// Mirrors `lr_rib::adj_rib_out::AdjRibOut::paths_for`.
+///
+/// # Safety
+/// `r` must be a live AdjRibOut handle. `key` must point to a readable
+/// `lr_route_key_t`. `cb` must be a non-NULL function pointer that
+/// respects the borrowing contract above.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_paths_for(
+    r: lr_adj_rib_out_t,
+    dest: lr_route_origin_t,
+    key: *const lr_route_key_t,
+    cb: Option<unsafe extern "C" fn(path_id: u32, route: lr_route_t, user: *mut core::ffi::c_void)>,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            if key.is_null() {
+                return -1;
+            }
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let Some(rib) = crate::rib::borrow_adj_rib_out_pub(r) else {
+                return -1;
+            };
+            let key_rust = crate::core::route_key_from_c(&unsafe { *key });
+            let paths = rib.paths_for(origin_to_rust(dest), &key_rust);
+            let mut count: i64 = 0;
+            for (path_id, route) in paths.iter() {
+                // SAFETY: caller's cb must not free the handle and must
+                // not re-enter the Adj-RIB-Out for the duration of the
+                // walk (the borrow is held).
+                let h: lr_route_t =
+                    route as *const lr_core::rib::Route as *mut crate::handle::OpaqueRoute;
+                unsafe { cb_fn(*path_id, h, user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
+/// Walk every key advertised to `dest` belonging to `family` — the
+/// full `(RouteKey, Vec<tx_path_id>)` pair, ascending by `RouteKey`.
+/// Returns the number of keys visited, or `LR_ERR_NULL` (-1) on a
+/// NULL handle / callback.
+///
+/// The callback receives a *borrowed* `lr_route_key_t` pointer and a
+/// *borrowed* `uint32_t` array; the underlying storage lives only for
+/// the duration of one callback invocation. The callback MUST copy any
+/// data it needs to persist before returning.
+///
+/// Mirrors `lr_rib::adj_rib_out::AdjRibOut::advertised_keys`.
+///
+/// # Safety
+/// `r` must be a live AdjRibOut handle. `cb` must be a non-NULL
+/// function pointer that respects the borrowing contract above.
+#[no_mangle]
+pub unsafe extern "C" fn lr_adj_rib_out_advertised_keys(
+    r: lr_adj_rib_out_t,
+    dest: lr_route_origin_t,
+    afi: u16,
+    safi: u8,
+    cb: Option<
+        unsafe extern "C" fn(
+            key: *const lr_route_key_t,
+            path_ids: *const u32,
+            path_id_count: usize,
+            user: *mut core::ffi::c_void,
+        ),
+    >,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let Some(rib) = crate::rib::borrow_adj_rib_out_pub(r) else {
+                return -1;
+            };
+            let family = lr_core::nlri::NlriFamily { afi, safi };
+            let entries = rib.advertised_keys(origin_to_rust(dest), family);
+            let mut count: i64 = 0;
+            for (key, ids) in entries.iter() {
+                let key_c = crate::core::route_key_to_c(key);
+                // Pass the ids slice as a raw pointer + length. The
+                // slice lives only for this callback invocation.
+                let ids_ptr = if ids.is_empty() {
+                    std::ptr::null()
+                } else {
+                    ids.as_ptr()
+                };
+                unsafe { cb_fn(&key_c, ids_ptr, ids.len(), user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,5 +897,296 @@ mod tests {
         assert_eq!(unsafe { lr_adj_rib_out_clear(r) }, 0);
         assert_eq!(unsafe { crate::rib::lr_adj_rib_out_is_empty(r) }, 1);
         unsafe { crate::rib::lr_adj_rib_out_free(r) };
+    }
+
+    // ---- AdjRibOut::paths_for / advertised_keys ----
+
+    /// Minimal v4 route for AdjRibOut tests — the Adj-RIB-Out clones
+    /// every advertised route, so we can drop the handle immediately.
+    fn build_route_v4(prefix: [u8; 4], plen: u8) -> lr_route_t {
+        let route = lr_core::rib::Route {
+            key: lr_core::rib::RouteKey::new(
+                lr_core::addr::Prefix::new_v4(prefix, plen),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(100, 0),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        Box::into_raw(Box::new(route)) as lr_route_t
+    }
+
+    fn build_route_v6(prefix: [u8; 16], plen: u8) -> lr_route_t {
+        let route = lr_core::rib::Route {
+            key: lr_core::rib::RouteKey::new(
+                lr_core::addr::Prefix::new_v6(prefix, plen),
+                lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(100, 0),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        Box::into_raw(Box::new(route)) as lr_route_t
+    }
+
+    fn build_key_v4(addr: [u8; 4], prefix_len: u8) -> lr_route_key_t {
+        let mut k = lr_route_key_t::default();
+        k.prefix.addr.is_ipv6 = 0;
+        k.prefix.addr.octets[12..16].copy_from_slice(&addr);
+        k.prefix.prefix_len = prefix_len;
+        k.afi_safi = (1u16 << 8) | 1u16;
+        k.has_source = 0;
+        k
+    }
+
+    #[test]
+    fn ffi_adj_rib_out_paths_for_visits_each_advertised_path() {
+        // Counter callback: records the (path_id, route_addr) pairs.
+        extern "C" fn collector(path_id: u32, route: lr_route_t, user: *mut core::ffi::c_void) {
+            unsafe {
+                let r: &lr_core::rib::Route = &*(route as *const lr_core::rib::Route);
+                let (addr, plen) = match r.key.prefix.addr {
+                    lr_core::addr::IpAddr::V4(b) => (b.to_vec(), r.key.prefix.prefix_len),
+                    lr_core::addr::IpAddr::V6(b) => (b.to_vec(), r.key.prefix.prefix_len),
+                };
+                let bag: &mut Vec<(u32, Vec<u8>, u8)> =
+                    &mut *(user as *mut Vec<(u32, Vec<u8>, u8)>);
+                bag.push((path_id, addr, plen));
+            }
+        }
+
+        let rib = crate::rib::lr_adj_rib_out_new();
+        let dest = lr_route_origin_t {
+            protocol: 0, // BGP
+            peer: 7,
+        };
+        let key = build_key_v4([203, 0, 113, 0], 24);
+        // Advertise two paths for the same key under different path IDs.
+        let r1 = build_route_v4([203, 0, 113, 0], 24);
+        let rc = unsafe {
+            crate::rib::lr_adj_rib_out_advertise(rib, dest.peer, dest.protocol as i32, r1, 1)
+        };
+        assert_eq!(rc, 0);
+        // r1 was cloned into the RIB; drop our copy.
+        unsafe { crate::policy_objects::lr_route_free(r1) };
+        let r2 = build_route_v4([203, 0, 113, 0], 24);
+        let rc = unsafe {
+            crate::rib::lr_adj_rib_out_advertise(rib, dest.peer, dest.protocol as i32, r2, 2)
+        };
+        assert_eq!(rc, 0);
+        unsafe { crate::policy_objects::lr_route_free(r2) };
+
+        let mut seen: Vec<(u32, Vec<u8>, u8)> = Vec::new();
+        let rc = unsafe {
+            lr_adj_rib_out_paths_for(
+                rib,
+                dest,
+                &key,
+                Some(collector),
+                &raw mut seen as *mut core::ffi::c_void,
+            )
+        };
+        assert_eq!(rc, 2, "paths_for visited {rc} paths, expected 2");
+        assert_eq!(seen.len(), 2);
+        // Path IDs ascending.
+        assert_eq!(seen[0].0, 1);
+        assert_eq!(seen[1].0, 2);
+        // Each route is the v4 prefix we advertised.
+        assert_eq!(seen[0].1, vec![203, 0, 113, 0]);
+        assert_eq!(seen[0].2, 24);
+
+        // NULL handle / NULL key / NULL cb → -1.
+        let rc = unsafe {
+            lr_adj_rib_out_paths_for(
+                std::ptr::null_mut(),
+                dest,
+                &key,
+                Some(collector),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, -1);
+        let rc = unsafe {
+            lr_adj_rib_out_paths_for(
+                rib,
+                dest,
+                std::ptr::null(),
+                Some(collector),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, -1);
+        let rc = unsafe { lr_adj_rib_out_paths_for(rib, dest, &key, None, std::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+
+        // Empty result for an unknown key.
+        let unknown_key = build_key_v4([10, 0, 0, 0], 8);
+        let mut empty: Vec<(u32, Vec<u8>, u8)> = Vec::new();
+        let rc = unsafe {
+            lr_adj_rib_out_paths_for(
+                rib,
+                dest,
+                &unknown_key,
+                Some(collector),
+                &raw mut empty as *mut core::ffi::c_void,
+            )
+        };
+        assert_eq!(rc, 0, "paths_for on unknown key returns 0 visited");
+        assert!(empty.is_empty());
+
+        unsafe { crate::rib::lr_adj_rib_out_free(rib) };
+    }
+
+    #[test]
+    fn ffi_adj_rib_out_advertised_keys_filters_by_dest_and_family() {
+        // Collector: record (key_prefix, key_is_ipv6, path_ids).
+        extern "C" fn collector(
+            key: *const lr_route_key_t,
+            path_ids: *const u32,
+            path_id_count: usize,
+            user: *mut core::ffi::c_void,
+        ) {
+            unsafe {
+                let k = &*key;
+                let (addr, is_ipv6) = if k.prefix.addr.is_ipv6 != 0 {
+                    (k.prefix.addr.octets.to_vec(), true)
+                } else {
+                    (k.prefix.addr.octets[12..16].to_vec(), false)
+                };
+                let ids: Vec<u32> = if path_ids.is_null() || path_id_count == 0 {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(path_ids, path_id_count).to_vec()
+                };
+                let bag: &mut Vec<(Vec<u8>, u8, bool, Vec<u32>)> =
+                    &mut *(user as *mut Vec<(Vec<u8>, u8, bool, Vec<u32>)>);
+                bag.push((addr, k.prefix.prefix_len, is_ipv6, ids));
+            }
+        }
+
+        let rib = crate::rib::lr_adj_rib_out_new();
+        let dest = lr_route_origin_t {
+            protocol: 0,
+            peer: 7,
+        };
+        // v4 path under tx_path_id = 1.
+        let r_v4 = build_route_v4([203, 0, 113, 0], 24);
+        let rc = unsafe {
+            crate::rib::lr_adj_rib_out_advertise(rib, dest.peer, dest.protocol as i32, r_v4, 1)
+        };
+        assert_eq!(rc, 0);
+        unsafe { crate::policy_objects::lr_route_free(r_v4) };
+        // v6 path under tx_path_id = 1.
+        let r_v6 = build_route_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            32,
+        );
+        let rc = unsafe {
+            crate::rib::lr_adj_rib_out_advertise(rib, dest.peer, dest.protocol as i32, r_v6, 1)
+        };
+        assert_eq!(rc, 0);
+        unsafe { crate::policy_objects::lr_route_free(r_v6) };
+
+        // Filter: v4 unicast (AFI=1, SAFI=1) → only the v4 key.
+        let mut seen: Vec<(Vec<u8>, u8, bool, Vec<u32>)> = Vec::new();
+        let rc = unsafe {
+            lr_adj_rib_out_advertised_keys(
+                rib,
+                dest,
+                1, // AFI_IPV4
+                1, // SAFI_UNICAST
+                Some(collector),
+                &raw mut seen as *mut core::ffi::c_void,
+            )
+        };
+        assert_eq!(
+            rc, 1,
+            "advertised_keys for v4 returned {rc} keys, expected 1"
+        );
+        assert_eq!(seen.len(), 1);
+        assert!(!seen[0].2, "v4 key has is_ipv6=false");
+        assert_eq!(seen[0].0, vec![203, 0, 113, 0]);
+        assert_eq!(seen[0].1, 24);
+        assert_eq!(seen[0].3, vec![1], "one tx path id");
+
+        // Filter: v6 unicast (AFI=2, SAFI=1) → only the v6 key.
+        let mut seen: Vec<(Vec<u8>, u8, bool, Vec<u32>)> = Vec::new();
+        let rc = unsafe {
+            lr_adj_rib_out_advertised_keys(
+                rib,
+                dest,
+                2, // AFI_IPV6
+                1, // SAFI_UNICAST
+                Some(collector),
+                &raw mut seen as *mut core::ffi::c_void,
+            )
+        };
+        assert_eq!(
+            rc, 1,
+            "advertised_keys for v6 returned {rc} keys, expected 1"
+        );
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].2, "v6 key has is_ipv6=true");
+
+        // Filter: v4 labelled-unicast (AFI=1, SAFI=4) → no keys.
+        let mut seen: Vec<(Vec<u8>, u8, bool, Vec<u32>)> = Vec::new();
+        let rc = unsafe {
+            lr_adj_rib_out_advertised_keys(
+                rib,
+                dest,
+                1,
+                4, // SAFI_LABELED_UNICAST
+                Some(collector),
+                &raw mut seen as *mut core::ffi::c_void,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert!(seen.is_empty());
+
+        // Wrong destination peer → no keys.
+        let other_dest = lr_route_origin_t {
+            protocol: 0,
+            peer: 99,
+        };
+        let mut seen: Vec<(Vec<u8>, u8, bool, Vec<u32>)> = Vec::new();
+        let rc = unsafe {
+            lr_adj_rib_out_advertised_keys(
+                rib,
+                other_dest,
+                1,
+                1,
+                Some(collector),
+                &raw mut seen as *mut core::ffi::c_void,
+            )
+        };
+        assert_eq!(rc, 0);
+
+        // NULL handle / NULL cb → -1.
+        let rc = unsafe {
+            lr_adj_rib_out_advertised_keys(
+                std::ptr::null_mut(),
+                dest,
+                1,
+                1,
+                Some(collector),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, -1);
+        let rc =
+            unsafe { lr_adj_rib_out_advertised_keys(rib, dest, 1, 1, None, std::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+
+        unsafe { crate::rib::lr_adj_rib_out_free(rib) };
     }
 }

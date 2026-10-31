@@ -10458,6 +10458,60 @@ int32_t lr_adj_rib_out_clear(lr_adj_rib_out_t r);
 int32_t lr_adj_rib_out_clear_for(lr_adj_rib_out_t r, struct lr_route_origin_t dest);
 
 /**
+ * Walk every advertised path of `(dest, key)` — the full
+ * `(tx_path_id, route)` pair, not just the TX path identifiers
+ * [`lr_adj_rib_out_tx_path_ids`] surfaces. The callback fires once per
+ * stored path, ascending by `tx_path_id`. Returns the number of
+ * paths visited, or `LR_ERR_NULL` (-1) on a NULL handle / pointer /
+ * callback.
+ *
+ * The route handle passed to the callback is *borrowed* — the
+ * Adj-RIB-Out owns the underlying `Route` for the duration of the
+ * walk. The callback MUST NOT call `lr_route_free` on it, and MUST NOT
+ * mutate the Adj-RIB-Out (the borrow is held for the duration of the
+ * walk; re-entrancy is undefined).
+ *
+ * Mirrors `lr_rib::adj_rib_out::AdjRibOut::paths_for`.
+ *
+ * # Safety
+ * `r` must be a live AdjRibOut handle. `key` must point to a readable
+ * `lr_route_key_t`. `cb` must be a non-NULL function pointer that
+ * respects the borrowing contract above.
+ */
+int64_t lr_adj_rib_out_paths_for(lr_adj_rib_out_t r,
+                                 struct lr_route_origin_t dest,
+                                 const struct lr_route_key_t *key,
+                                 void (*cb)(uint32_t path_id, lr_route_t route, void *user),
+                                 void *user);
+
+/**
+ * Walk every key advertised to `dest` belonging to `family` — the
+ * full `(RouteKey, Vec<tx_path_id>)` pair, ascending by `RouteKey`.
+ * Returns the number of keys visited, or `LR_ERR_NULL` (-1) on a
+ * NULL handle / callback.
+ *
+ * The callback receives a *borrowed* `lr_route_key_t` pointer and a
+ * *borrowed* `uint32_t` array; the underlying storage lives only for
+ * the duration of one callback invocation. The callback MUST copy any
+ * data it needs to persist before returning.
+ *
+ * Mirrors `lr_rib::adj_rib_out::AdjRibOut::advertised_keys`.
+ *
+ * # Safety
+ * `r` must be a live AdjRibOut handle. `cb` must be a non-NULL
+ * function pointer that respects the borrowing contract above.
+ */
+int64_t lr_adj_rib_out_advertised_keys(lr_adj_rib_out_t r,
+                                       struct lr_route_origin_t dest,
+                                       uint16_t afi,
+                                       uint8_t safi,
+                                       void (*cb)(const struct lr_route_key_t *key,
+                                                  const uint32_t *path_ids,
+                                                  uintptr_t path_id_count,
+                                                  void *user),
+                                       void *user);
+
+/**
  * Construct a Label with just the value (TC=0, TTL=0). Used for the
  * BGP-LU 3-octet NLRI form, where TTL is absent (RFC 8277 §2.2).
  * Infallible — the value is masked to 20 bits on encode.
@@ -16681,6 +16735,50 @@ int64_t lr_adj_rib_out_iter_for(lr_adj_rib_out_t r,
                                 int32_t origin_proto,
                                 void (*cb)(lr_route_t route, void *user),
                                 void *user);
+
+/**
+ * Walk every merged route in the cross-protocol mux (RFC 4271 §9 +
+ * the daemon's admin-distance merge). The caller provides a callback
+ * that receives one route handle per iteration (the handle is
+ * *borrowed* — the caller must NOT free it). Returns the number of
+ * routes visited, or `LR_ERR_NULL` (-1) on a NULL mux / NULL callback.
+ *
+ * Mirrors `lr_rib::merging::RibMux::iter`.
+ *
+ * # Safety
+ * `r` must be a valid RibMux handle. `cb` must be a non-NULL function
+ * pointer that does not free `route` and does not call back into the
+ * FFI on the same RibMux handle (re-entrancy is undefined — the
+ * borrow is held for the duration of the walk).
+ */
+int64_t lr_rib_mux_iter(lr_rib_mux_t r, void (*cb)(lr_route_t route, void *user), void *user);
+
+/**
+ * Compare two routes for best-path selection using the daemon's
+ * default comparator (`RouteSelector::compare` — admin distance,
+ * then metric, then age, then protocol priority).
+ *
+ * Return value:
+ * - `-1` when `a` is preferred over `b`,
+ * - `0` when they tie on every discriminator,
+ * - `1` when `b` is preferred over `a`,
+ * - `LR_ERR_INVALID_HANDLE` (`-2`) when either handle is NULL,
+ * - `LR_ERR_PANIC` (`-4`) on a panic caught by the `catch_unwind`
+ *   barrier.
+ *
+ * The `-1` collision with `LR_ERR_NULL` is intentional: `LR_ERR_NULL`
+ * is never returned here (both inputs being NULL maps to
+ * `LR_ERR_INVALID_HANDLE`), and a comparator that returns `Less` is a
+ * legitimate result, not an error. Callers that need to distinguish
+ * the error path can check `rc < -1` or null-check inputs before the
+ * call.
+ *
+ * Mirrors `lr_rib::selection::RouteSelector::compare`.
+ *
+ * # Safety
+ * `a` and `b` must be valid (non-NULL, live) `lr_route_t` handles.
+ */
+int32_t lr_route_selector_compare(lr_route_t a, lr_route_t b);
 
 /**
  * Create an empty ROA store. NULL on panic (last-error set).

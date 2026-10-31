@@ -587,6 +587,22 @@ pub(crate) fn route_key_from_c(c: &lr_route_key_t) -> RouteKey {
     }
 }
 
+/// `pub(crate)` inverse of [`route_key_from_c`]: convert a Rust
+/// `RouteKey` to its repr-C layout so FFI iterators that surface
+/// keys to the embedder can fill an `lr_route_key_t` out-parameter
+/// without re-implementing the field-by-field translation.
+pub(crate) fn route_key_to_c(k: &RouteKey) -> lr_route_key_t {
+    let source_prefix = k
+        .source
+        .map_or_else(lr_core_prefix_t::default, |s| s.into());
+    lr_route_key_t {
+        prefix: k.prefix.into(),
+        afi_safi: (k.family.afi << 8) | (k.family.safi as u16),
+        has_source: k.source.is_some() as u8,
+        source_prefix,
+    }
+}
+
 // ---- Instant / Duration (RFC 5905 §3.2 logical millisecond clock) ----
 
 #[no_mangle]

@@ -1463,6 +1463,98 @@ pub unsafe extern "C" fn lr_adj_rib_out_iter_for(
     )
 }
 
+// ---- RibMux::iter + RouteSelector::compare (issue #92) ----
+//
+// The remaining lr-rib pub API: `RibMux::iter` (walk every merged
+// route) and `RouteSelector::compare` (the per-route comparator,
+// surfaced so an embedder can re-order routes without going through
+// `select`). Both are deterministic readers — no allocation, no
+// mutation, no handle ownership transfer.
+
+/// Walk every merged route in the cross-protocol mux (RFC 4271 §9 +
+/// the daemon's admin-distance merge). The caller provides a callback
+/// that receives one route handle per iteration (the handle is
+/// *borrowed* — the caller must NOT free it). Returns the number of
+/// routes visited, or `LR_ERR_NULL` (-1) on a NULL mux / NULL callback.
+///
+/// Mirrors `lr_rib::merging::RibMux::iter`.
+///
+/// # Safety
+/// `r` must be a valid RibMux handle. `cb` must be a non-NULL function
+/// pointer that does not free `route` and does not call back into the
+/// FFI on the same RibMux handle (re-entrancy is undefined — the
+/// borrow is held for the duration of the walk).
+#[no_mangle]
+pub unsafe extern "C" fn lr_rib_mux_iter(
+    r: lr_rib_mux_t,
+    cb: Option<unsafe extern "C" fn(route: lr_route_t, user: *mut core::ffi::c_void)>,
+    user: *mut core::ffi::c_void,
+) -> i64 {
+    guarded(
+        || unsafe {
+            let Some(mux) = borrow_rib_mux(r) else {
+                return -1;
+            };
+            let Some(cb_fn) = cb else {
+                return -1;
+            };
+            let mut count: i64 = 0;
+            for route in mux.iter() {
+                // SAFETY: caller's cb must not free the handle and must
+                // not re-enter the mux for the duration of the walk
+                // (the borrow is held).
+                let h: lr_route_t = route as *const Route as *mut OpaqueRoute;
+                unsafe { cb_fn(h, user) };
+                count += 1;
+            }
+            count
+        },
+        -1,
+    )
+}
+
+/// Compare two routes for best-path selection using the daemon's
+/// default comparator (`RouteSelector::compare` — admin distance,
+/// then metric, then age, then protocol priority).
+///
+/// Return value:
+/// - `-1` when `a` is preferred over `b`,
+/// - `0` when they tie on every discriminator,
+/// - `1` when `b` is preferred over `a`,
+/// - `LR_ERR_INVALID_HANDLE` (`-2`) when either handle is NULL,
+/// - `LR_ERR_PANIC` (`-4`) on a panic caught by the `catch_unwind`
+///   barrier.
+///
+/// The `-1` collision with `LR_ERR_NULL` is intentional: `LR_ERR_NULL`
+/// is never returned here (both inputs being NULL maps to
+/// `LR_ERR_INVALID_HANDLE`), and a comparator that returns `Less` is a
+/// legitimate result, not an error. Callers that need to distinguish
+/// the error path can check `rc < -1` or null-check inputs before the
+/// call.
+///
+/// Mirrors `lr_rib::selection::RouteSelector::compare`.
+///
+/// # Safety
+/// `a` and `b` must be valid (non-NULL, live) `lr_route_t` handles.
+#[no_mangle]
+pub unsafe extern "C" fn lr_route_selector_compare(a: lr_route_t, b: lr_route_t) -> i32 {
+    guarded(
+        || unsafe {
+            if a.is_null() || b.is_null() {
+                return LrError::InvalidHandle as i32;
+            }
+            let a_r: &Route = unsafe { &*(a as *const Route) };
+            let b_r: &Route = unsafe { &*(b as *const Route) };
+            match RouteSelector::compare(a_r, b_r) {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Equal => 0,
+                core::cmp::Ordering::Greater => 1,
+            }
+        },
+        LrError::Panic as i32,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1957,5 +2049,85 @@ mod tests {
         let rc = unsafe { lr_adj_rib_out_iter_for(rib, 0, 99, Some(noop), std::ptr::null_mut()) };
         assert_eq!(rc, -2);
         unsafe { lr_adj_rib_out_free(rib) };
+    }
+
+    // ---- RibMux::iter + RouteSelector::compare ----
+
+    #[test]
+    fn rib_mux_iter_walks_every_merged_route() {
+        extern "C" fn counter(_route: lr_route_t, user: *mut core::ffi::c_void) {
+            unsafe {
+                let c: *mut i64 = user as *mut i64;
+                *c += 1;
+            }
+        }
+        // NULL handle → -1.
+        let rc =
+            unsafe { lr_rib_mux_iter(std::ptr::null_mut(), Some(counter), std::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+
+        let mux = lr_rib_mux_new();
+        // NULL cb → -1.
+        let rc = unsafe { lr_rib_mux_iter(mux, None, std::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+
+        // Empty mux → 0.
+        let mut count: i64 = 0;
+        let rc = unsafe {
+            lr_rib_mux_iter(mux, Some(counter), &raw mut count as *mut core::ffi::c_void)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 0);
+
+        // Install two routes (different keys so they don't dedupe).
+        let r1 = build_route_with_metric([10, 0, 0, 0], 24, 100);
+        let rc = unsafe { lr_rib_mux_install(mux, r1) };
+        assert_eq!(rc, 0);
+        let r2 = build_route_with_metric([10, 0, 1, 0], 24, 100);
+        let rc = unsafe { lr_rib_mux_install(mux, r2) };
+        assert_eq!(rc, 0);
+
+        let mut count: i64 = 0;
+        let rc = unsafe {
+            lr_rib_mux_iter(mux, Some(counter), &raw mut count as *mut core::ffi::c_void)
+        };
+        assert_eq!(rc, 2, "iter walked {rc} routes, expected 2");
+        assert_eq!(count, 2);
+        assert_eq!(unsafe { lr_rib_mux_len(mux) }, 2);
+
+        unsafe { lr_rib_mux_free(mux) };
+    }
+
+    #[test]
+    fn route_selector_compare_orders_by_admin_distance_then_metric() {
+        // Higher-pref route wins: admin distance 20 (BGP eBGP) beats 110 (OSPF).
+        let a = build_route_with_metric([10, 0, 0, 0], 24, 100); // admin 100, metric 100
+        let b = build_route_with_metric([10, 0, 0, 0], 24, 50); // admin 100, metric 50
+                                                                // Same admin distance, b has lower metric → b preferred → return 1.
+        let rc = unsafe { lr_route_selector_compare(a, b) };
+        assert_eq!(rc, 1, "lower metric should be preferred");
+
+        // Swap argument order — should mirror result.
+        let rc = unsafe { lr_route_selector_compare(b, a) };
+        assert_eq!(rc, -1, "lower metric as `a` should be preferred (Less)");
+
+        // Identical routes → 0.
+        let a2 = build_route_with_metric([10, 0, 0, 0], 24, 100);
+        let b2 = build_route_with_metric([10, 0, 0, 0], 24, 100);
+        let rc = unsafe { lr_route_selector_compare(a2, b2) };
+        assert_eq!(rc, 0, "identical routes tie");
+
+        // NULL handle → LR_ERR_INVALID_HANDLE (-2).
+        let rc = unsafe { lr_route_selector_compare(std::ptr::null_mut(), b) };
+        assert_eq!(rc, LR_ERR_INVALID_HANDLE);
+        let rc = unsafe { lr_route_selector_compare(a, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_INVALID_HANDLE);
+
+        unsafe {
+            crate::policy_objects::lr_route_free(a);
+            crate::policy_objects::lr_route_free(b);
+            crate::policy_objects::lr_route_free(a2);
+            crate::policy_objects::lr_route_free(b2);
+        }
     }
 }
