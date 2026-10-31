@@ -1348,6 +1348,143 @@ int main() {
         check(idx_bgp == 0 || idx_bgp == 1, "RouteSelector::select_bgp returns valid index");
         auto empty = std::vector<lr_route_t>{};
         check(RouteSelector::select(empty) == -1, "RouteSelector::select empty == -1");
+
+        // ----------------------------------------------------------------
+        // Babel — RFC 8966 + RFC 8967. Mirrors the Python and Go
+        // binding coverage of the same surface.
+        // ----------------------------------------------------------------
+
+        // BabelFrame lifecycle.
+        auto frame = BabelFrame::empty();
+        check(frame.tlv_count() == 0, "BabelFrame::empty tlv_count == 0");
+        frame.push(BabelTlv::pad1());
+        check(frame.tlv_count() == 1, "BabelFrame tlv_count == 1 after push");
+        check(frame.tlv_type_at(0) == babel_tlv_type::Pad1,
+              "BabelFrame tlv_type_at(0) == Pad1");
+        auto wire = frame.encode();
+        check(!wire.empty() && wire[0] == 0x2A,
+              "BabelFrame encode starts with Babel magic 0x2A");
+
+        // Round-trip through decode.
+        auto decoded = BabelFrame::decode(wire);
+        check(decoded.tlv_count() >= 1, "BabelFrame::decode recovers >= 1 TLV");
+
+        // BabelRouteTable lifecycle.
+        BabelRouteTable tab;
+        check(tab.empty(), "BabelRouteTable fresh is empty");
+        check(tab.size() == 0, "BabelRouteTable size == 0");
+
+        BabelRouteKey key;
+        key.destination_addr = std::vector<std::uint8_t>{10, 0, 0, 0};
+        key.destination_prefix_len = 8;
+        key.router_id = std::array<std::uint8_t, 8>{1, 1, 1, 1, 1, 1, 1, 1};
+
+        BabelRoute r;
+        r.key = key;
+        r.seqno = 1;
+        r.metric = 100;
+        r.next_hop = std::vector<std::uint8_t>{10, 0, 0, 1};
+        tab.insert(r);
+        check(tab.size() == 1, "BabelRouteTable size == 1 after insert");
+        check(tab.contains(key), "BabelRouteTable contains inserted key");
+        auto got = tab.get(key);
+        check(got.has_value(), "BabelRouteTable::get returns value");
+        check(got->seqno == 1, "BabelRoute::seqno == 1");
+        check(got->metric == 100, "BabelRoute::metric == 100");
+        check(got->feasible, "BabelRoute::feasible (fresh route is feasible)");
+        check(got->next_hop == std::vector<std::uint8_t>{10, 0, 0, 1},
+              "BabelRoute::next_hop round-trips");
+
+        std::size_t n_iter_all = 0;
+        tab.iter_all([&](const BabelRoute&) { n_iter_all++; });
+        check(n_iter_all == 1, "BabelRouteTable iter_all visits 1 route");
+        std::size_t n_iter_best = 0;
+        tab.iter_best([&](const BabelRoute&) { n_iter_best++; });
+        check(n_iter_best == 1, "BabelRouteTable iter_best visits 1 route");
+        check(tab.best_routes_count() == 1, "BabelRouteTable best_routes_count == 1");
+
+        tab.withdraw(key);
+        check(tab.size() == 0, "BabelRouteTable size == 0 after withdraw");
+        check(!tab.contains(key), "BabelRouteTable !contains after withdraw");
+        check(!tab.get(key).has_value(), "BabelRouteTable::get returns nullopt after withdraw");
+
+        // BabelNeighbor lifecycle.
+        BabelNeighbor nbr{std::vector<std::uint8_t>{10, 0, 0, 1}, 1000};
+        nbr.hello(1, 100, 1100);
+        nbr.ihu(96, 100, 1100);
+        check(!nbr.rtt_valid(1200), "BabelNeighbor rtt_valid == false (no timestamped Hello)");
+        check(nbr.rtt_us(1200) == 0, "BabelNeighbor rtt_us == 0");
+
+        // MacKey + PseudoHeader + PacketCounter + ReplayProtection.
+        auto mk = BabelMacKey::hmac_sha256(std::vector<std::uint8_t>{97, 98, 99});
+        check(mk.algorithm() == babel_mac::HMACSHA256, "BabelMacKey hmac_sha256 algorithm");
+        check(mk.digest_len() == 32, "BabelMacKey hmac_sha256 digest_len == 32");
+        check(mk.secret() == std::vector<std::uint8_t>{97, 98, 99},
+              "BabelMacKey secret round-trips");
+
+        auto mk2 = BabelMacKey::blake2s128(std::vector<std::uint8_t>{97, 98, 99});
+        check(mk2.algorithm() == babel_mac::Blake2s128, "BabelMacKey blake2s128 algorithm");
+        check(mk2.digest_len() == 16, "BabelMacKey blake2s128 digest_len == 16");
+
+        auto ph = BabelPseudoHeader::v4(
+            std::array<std::uint8_t, 4>{10, 0, 0, 1}, 6696,
+            std::array<std::uint8_t, 4>{10, 0, 0, 2}, 6696);
+        auto ph_wire = ph.encode();
+        check(!ph_wire.empty(), "BabelPseudoHeader::encode non-empty");
+
+        BabelPacketCounter pc{std::vector<std::uint8_t>{1, 2, 3, 4, 5}, 10};
+        check(pc.counter() == 10, "BabelPacketCounter::counter == 10");
+        check(pc.index_len() == 5, "BabelPacketCounter::index_len == 5");
+        check(pc.index() == std::vector<std::uint8_t>{1, 2, 3, 4, 5},
+              "BabelPacketCounter::index round-trips");
+
+        BabelReplayProtection rp;
+        check(rp.accept(std::vector<std::uint8_t>{1}, 5), "ReplayProtection accept(5)");
+        check(!rp.accept(std::vector<std::uint8_t>{1}, 3), "ReplayProtection !accept(3, replay)");
+        check(!rp.accept(std::vector<std::uint8_t>{1}, 5), "ReplayProtection !accept(5, equal)");
+        check(rp.accept(std::vector<std::uint8_t>{1}, 6), "ReplayProtection accept(6)");
+
+        // Message constructors.
+        BabelHello h{1, 100};
+        check(h.seqno() == 1, "BabelHello::seqno == 1");
+        check(h.interval_cs() == 100, "BabelHello::interval_cs == 100");
+        h.set_unicast(true);
+        check(h.flags() != 0, "BabelHello::flags != 0 after set_unicast(true)");
+        check(!h.encode().empty(), "BabelHello::encode non-empty");
+
+        BabelIhu ihu{96, 100};
+        check(ihu.rxcost() == 96, "BabelIhu::rxcost == 96");
+        check(ihu.interval_cs() == 100, "BabelIhu::interval_cs == 100");
+
+        BabelAckReq ar{42, 200};
+        check(ar.nonce() == 42, "BabelAckReq::nonce == 42");
+        check(ar.interval_cs() == 200, "BabelAckReq::interval_cs == 200");
+
+        BabelAck ack{42};
+        check(ack.opaque() == 42, "BabelAck::opaque == 42");
+        check(!ack.encode().empty(), "BabelAck::encode non-empty");
+
+        BabelNextHop nh{std::vector<std::uint8_t>{10, 0, 0, 1}};
+        check(nh.ae() == babel_ae::IPv4, "BabelNextHop IPv4 ae");
+        check(nh.address() == std::vector<std::uint8_t>{10, 0, 0, 1},
+              "BabelNextHop::address round-trips");
+
+        BabelRouterId rid{std::array<std::uint8_t, 8>{1, 1, 1, 1, 1, 1, 1, 1}};
+        check(rid.bytes() == std::array<std::uint8_t, 8>{1, 1, 1, 1, 1, 1, 1, 1},
+              "BabelRouterId::bytes round-trips");
+
+        BabelRouteRequest rr = BabelRouteRequest::wildcard();
+
+        BabelSeqnoRequest sr{std::vector<std::uint8_t>{10, 0, 0, 0}, 8, 1,
+                              std::array<std::uint8_t, 8>{1, 1, 1, 1, 1, 1, 1, 1}, 255};
+
+        // Free function helpers.
+        check(babel_rtt_penalty(1'000'000, 10'000, 120'000, 96) == 96,
+              "babel_rtt_penalty clamps at max_penalty");
+        check(babel_route_metric_sum({100, 200, 300}) == 600,
+              "babel_route_metric_sum([100,200,300]) == 600");
+        check(babel_feasible(1, 100, 0, 200), "babel_feasible strictly better");
+        check(!babel_feasible(1, 100, 1, 100), "babel_feasible equal -> false");
     }
 
     // Router goes out of scope — RAII cleanup runs.

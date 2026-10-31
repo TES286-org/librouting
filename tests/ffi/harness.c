@@ -1862,6 +1862,193 @@ int main(void) {
         check(lr_route_selector_select(NULL, 0) == -1, "select empty == -1");
         lr_route_free(s1);
         lr_route_free(s2);
+
+        /* ------------------------------------------------------------
+         * Babel — RFC 8966 + RFC 8967. Mirrors the Python / Go / C++
+         * binding coverage of the same surface.
+         * ------------------------------------------------------------ */
+
+        /* BabelFrame lifecycle. */
+        lr_babel_frame_t frame = lr_babel_frame_new_empty();
+        check(frame != NULL, "lr_babel_frame_new_empty");
+        check(lr_babel_frame_tlv_count(frame) == 0, "BabelFrame empty tlv_count == 0");
+        lr_babel_tlv_t pad1 = lr_babel_tlv_pad1();
+        rc = lr_babel_frame_push_tlv(frame, pad1);
+        check(rc == 0, "lr_babel_frame_push_tlv");
+        check(lr_babel_frame_tlv_count(frame) == 1, "BabelFrame tlv_count == 1");
+        check(lr_babel_frame_tlv_type_at(frame, 0) == 0,
+              "BabelFrame tlv_type_at(0) == Pad1 (0)");
+        lr_bytes_t fwire = {};
+        rc = lr_babel_encode_frame(frame, &fwire);
+        check(rc == 0 && fwire.len > 0 && ((const uint8_t *)fwire.ptr)[0] == 0x2A,
+              "lr_babel_encode_frame produces wire starting with magic 0x2A");
+        lr_bytes_free(&fwire);
+        lr_babel_frame_free(frame);
+
+        /* BabelRouteTable lifecycle. */
+        lr_babel_route_table_t tab = lr_babel_route_table_new();
+        check(tab != NULL, "lr_babel_route_table_new");
+        check(lr_babel_route_table_is_empty(tab) == 1, "BabelRouteTable fresh is empty");
+        check(lr_babel_route_table_len(tab) == 0, "BabelRouteTable fresh len == 0");
+
+        uint8_t rid[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+        uint8_t dest[4] = {10, 0, 0, 0};
+        uint8_t nh[4] = {10, 0, 0, 1};
+        lr_babel_route_key_t key_h = lr_babel_route_key_new(
+            0, dest, 8, 0, 0, NULL, 0, rid);
+        check(key_h != NULL, "lr_babel_route_key_new");
+        lr_babel_route_t r_h = lr_babel_route_new(key_h, 1, 100, 0, nh, 0, 0);
+        check(r_h != NULL, "lr_babel_route_new");
+        rc = lr_babel_route_table_insert(tab, r_h);
+        check(rc == 0, "lr_babel_route_table_insert");
+        check(lr_babel_route_table_len(tab) == 1, "BabelRouteTable len == 1 after insert");
+        check(lr_babel_route_table_contains(tab, key_h) == 1, "BabelRouteTable contains inserted");
+        lr_babel_route_t borrowed = lr_babel_route_table_get(tab, key_h);
+        check(borrowed != NULL, "lr_babel_route_table_get non-null");
+        if (borrowed) {
+            check(lr_babel_route_seqno(borrowed) == 1, "BabelRoute seqno == 1");
+            check(lr_babel_route_metric(borrowed) == 100, "BabelRoute metric == 100");
+            check(lr_babel_route_feasible(borrowed) == 1, "BabelRoute feasible (fresh)");
+            uint8_t out[16] = {};
+            rc = lr_babel_route_next_hop(borrowed, out);
+            check(rc == 0 && out[12] == 10 && out[13] == 0 && out[14] == 0 && out[15] == 1,
+                  "BabelRoute next_hop round-trips");
+        }
+        check(lr_babel_route_table_best_routes_count(tab) == 1, "BabelRouteTable best_routes_count == 1");
+        rc = lr_babel_route_table_withdraw(tab, key_h);
+        check(rc == 0, "lr_babel_route_table_withdraw");
+        check(lr_babel_route_table_len(tab) == 0, "BabelRouteTable len == 0 after withdraw");
+        check(lr_babel_route_table_get(tab, key_h) == NULL,
+              "BabelRouteTable::get returns NULL after withdraw");
+        lr_babel_route_free(r_h);
+        lr_babel_route_key_free(key_h);
+        lr_babel_route_table_free(tab);
+
+        /* BabelNeighbor lifecycle. */
+        uint8_t nbr_addr[4] = {10, 0, 0, 1};
+        lr_babel_neighbor_t nbr = lr_babel_neighbor_new(nbr_addr, NULL, 1000);
+        check(nbr != NULL, "lr_babel_neighbor_new v4");
+        rc = lr_babel_neighbor_hello(nbr, 1, 100, 1100);
+        check(rc == 0, "lr_babel_neighbor_hello");
+        rc = lr_babel_neighbor_ihu(nbr, 96, 100, 1100);
+        check(rc == 0, "lr_babel_neighbor_ihu");
+        check(lr_babel_neighbor_rtt_valid(nbr, 1200) == 0, "BabelNeighbor rtt_valid == false");
+        check(lr_babel_neighbor_rtt_us(nbr, 1200) == 0, "BabelNeighbor rtt_us == 0");
+        lr_babel_neighbor_free(nbr);
+
+        /* MacKey + PseudoHeader + PacketCounter + ReplayProtection. */
+        lr_babel_mac_key_t mk = lr_babel_mac_key_hmac_sha256((const uint8_t *)"abc", 3);
+        check(mk != NULL, "lr_babel_mac_key_hmac_sha256");
+        check(lr_babel_mac_key_algorithm(mk) == 1, "MacKey HMACSHA256 algorithm");
+        check(lr_babel_mac_key_digest_len(mk) == 32, "MacKey HMACSHA256 digest_len == 32");
+        check(lr_babel_mac_key_secret_len(mk) == 3, "MacKey secret_len == 3");
+        uint8_t sec[3] = {};
+        lr_babel_mac_key_secret_copy(mk, sec, 3);
+        check(sec[0] == 'a' && sec[1] == 'b' && sec[2] == 'c', "MacKey secret round-trips");
+        lr_babel_mac_key_free(mk);
+
+        lr_babel_pseudo_header_t ph = lr_babel_pseudo_header_new_v4(
+            (const uint8_t *)"\x0a\x00\x00\x01", 6696,
+            (const uint8_t *)"\x0a\x00\x00\x02", 6696);
+        check(ph != NULL, "lr_babel_pseudo_header_new_v4");
+        lr_bytes_t ph_wire = {};
+        rc = lr_babel_pseudo_header_encode(ph, &ph_wire);
+        check(rc == 0 && ph_wire.len > 0, "PseudoHeader encode non-empty");
+        lr_bytes_free(&ph_wire);
+        lr_babel_pseudo_header_free(ph);
+
+        lr_babel_packet_counter_t pc = lr_babel_packet_counter_new(
+            (const uint8_t *)"\x01\x02\x03\x04\x05", 5, 10);
+        check(pc != NULL, "lr_babel_packet_counter_new");
+        check(lr_babel_packet_counter_peek_counter(pc) == 10, "PacketCounter counter == 10");
+        check(lr_babel_packet_counter_peek_index_len(pc) == 5, "PacketCounter index_len == 5");
+        uint8_t idx_out[5] = {};
+        lr_babel_packet_counter_peek_index_copy(pc, idx_out, 5);
+        check(idx_out[0] == 1 && idx_out[4] == 5, "PacketCounter index round-trips");
+        lr_babel_packet_counter_free(pc);
+
+        lr_babel_replay_protection_t rp = lr_babel_replay_protection_new();
+        check(rp != NULL, "lr_babel_replay_protection_new");
+        check(lr_babel_replay_protection_accept(rp, (const uint8_t *)"\x01", 1, 5) == 1,
+              "ReplayProtection accept(5) == true");
+        check(lr_babel_replay_protection_accept(rp, (const uint8_t *)"\x01", 1, 3) == 0,
+              "ReplayProtection accept(3) == false (replay)");
+        check(lr_babel_replay_protection_accept(rp, (const uint8_t *)"\x01", 1, 5) == 0,
+              "ReplayProtection accept(5) == false (equal)");
+        check(lr_babel_replay_protection_accept(rp, (const uint8_t *)"\x01", 1, 6) == 1,
+              "ReplayProtection accept(6) == true");
+        lr_babel_replay_protection_free(rp);
+
+        /* Message constructors. */
+        lr_babel_hello_t h = lr_babel_hello_new(1, 100);
+        check(h != NULL, "lr_babel_hello_new");
+        check(lr_babel_hello_seqno(h) == 1, "Hello seqno == 1");
+        check(lr_babel_hello_interval_cs(h) == 100, "Hello interval_cs == 100");
+        rc = lr_babel_hello_set_unicast(h, 1);
+        check(rc == 0, "lr_babel_hello_set_unicast");
+        check(lr_babel_hello_flags(h) != 0, "Hello flags != 0 after set_unicast");
+        lr_bytes_t hello_wire = {};
+        rc = lr_babel_hello_encode(h, &hello_wire);
+        check(rc == 0 && hello_wire.len > 0, "Hello encode non-empty");
+        lr_bytes_free(&hello_wire);
+        lr_babel_hello_free(h);
+
+        lr_babel_ihu_t ihu = lr_babel_ihu_new(96, 100);
+        check(ihu != NULL, "lr_babel_ihu_new");
+        check(lr_babel_ihu_rxcost(ihu) == 96, "Ihu rxcost == 96");
+        check(lr_babel_ihu_interval_cs(ihu) == 100, "Ihu interval_cs == 100");
+        lr_babel_ihu_free(ihu);
+
+        lr_babel_ack_req_t ar = lr_babel_ack_req_new(42, 200);
+        check(ar != NULL, "lr_babel_ack_req_new");
+        check(lr_babel_ack_req_nonce(ar) == 42, "AckReq nonce == 42");
+        check(lr_babel_ack_req_interval_cs(ar) == 200, "AckReq interval_cs == 200");
+        lr_babel_ack_req_free(ar);
+
+        lr_babel_ack_t ack = lr_babel_ack_new(42);
+        check(ack != NULL, "lr_babel_ack_new");
+        check(lr_babel_ack_opaque(ack) == 42, "Ack opaque == 42");
+        lr_bytes_t ack_wire = {};
+        rc = lr_babel_ack_encode(ack, &ack_wire);
+        check(rc == 0 && ack_wire.len > 0, "Ack encode non-empty");
+        lr_bytes_free(&ack_wire);
+        lr_babel_ack_free(ack);
+
+        lr_babel_next_hop_t nh_t = lr_babel_next_hop_new_v4(nh);
+        check(nh_t != NULL, "lr_babel_next_hop_new_v4");
+        check(lr_babel_next_hop_ae(nh_t) == 1, "NextHop ae == 1 (IPv4)");
+        uint8_t nh_out[16] = {};
+        size_t nh_n = lr_babel_next_hop_address(nh_t, nh_out, 16);
+        check(nh_n == 4 && nh_out[0] == 10 && nh_out[3] == 1, "NextHop address round-trips");
+        lr_babel_next_hop_free(nh_t);
+
+        lr_babel_router_id_t rid_t = lr_babel_router_id_new(rid);
+        check(rid_t != NULL, "lr_babel_router_id_new");
+        uint8_t rid_out[10] = {};
+        rc = lr_babel_router_id_bytes(rid_t, rid_out);
+        check(rc == 0, "lr_babel_router_id_bytes");
+        check(rid_out[2] == 1 && rid_out[9] == 1, "RouterId bytes round-trip");
+        lr_babel_router_id_free(rid_t);
+
+        lr_babel_route_request_t rr = lr_babel_route_request_new_wildcard();
+        check(rr != NULL, "lr_babel_route_request_new_wildcard");
+        lr_babel_route_request_free(rr);
+
+        lr_babel_seqno_request_t sr = lr_babel_seqno_request_new(
+            dest, NULL, 8, 1, rid, 255);
+        check(sr != NULL, "lr_babel_seqno_request_new");
+        lr_babel_seqno_request_free(sr);
+
+        /* Free function helpers. */
+        check(lr_babel_rtt_penalty(1000000, 10000, 120000, 96) == 96,
+              "lr_babel_rtt_penalty clamps at max");
+        uint32_t metrics[3] = {100, 200, 300};
+        check(lr_babel_route_metric_sum(metrics, 3) == 600,
+              "lr_babel_route_metric_sum([100,200,300]) == 600");
+        check(lr_babel_feasible(1, 100, 0, 200) == 1,
+              "lr_babel_feasible strictly better -> 1");
+        check(lr_babel_feasible(1, 100, 1, 100) == 0,
+              "lr_babel_feasible equal -> 0");
     }
 
     lr_router_destroy(r);

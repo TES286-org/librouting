@@ -4428,5 +4428,820 @@ public:
     }
 };
 
+// =========================================================================
+// Babel — RFC 8966 (the Babel routing protocol) + RFC 8967 (HMAC auth).
+// =========================================================================
+
+namespace detail {
+
+struct BabelFrameDeleter {
+    void operator()(OpaqueBabelFrame* p) const noexcept { lr_babel_frame_free(p); }
+};
+struct BabelCodecDeleter {
+    void operator()(OpaqueBabelCodec* p) const noexcept { lr_babel_codec_free(p); }
+};
+struct BabelTlvDeleter {
+    void operator()(OpaqueBabelTlv* p) const noexcept { lr_babel_tlv_free(p); }
+};
+struct BabelRouteKeyDeleter {
+    void operator()(OpaqueBabelRouteKey* p) const noexcept { lr_babel_route_key_free(p); }
+};
+struct BabelRouteDeleter {
+    void operator()(OpaqueBabelRoute* p) const noexcept { lr_babel_route_free(p); }
+};
+struct BabelRouteTableDeleter {
+    void operator()(OpaqueBabelRouteTable* p) const noexcept { lr_babel_route_table_free(p); }
+};
+struct BabelNeighborDeleter {
+    void operator()(OpaqueBabelNeighbor* p) const noexcept { lr_babel_neighbor_free(p); }
+};
+struct BabelMacKeyDeleter {
+    void operator()(OpaqueBabelMacKey* p) const noexcept { lr_babel_mac_key_free(p); }
+};
+struct BabelPseudoHeaderDeleter {
+    void operator()(OpaqueBabelPseudoHeader* p) const noexcept { lr_babel_pseudo_header_free(p); }
+};
+struct BabelPacketCounterDeleter {
+    void operator()(OpaqueBabelPacketCounter* p) const noexcept { lr_babel_packet_counter_free(p); }
+};
+struct BabelReplayProtectionDeleter {
+    void operator()(OpaqueBabelReplayProtection* p) const noexcept { lr_babel_replay_protection_free(p); }
+};
+struct BabelHelloDeleter {
+    void operator()(OpaqueBabelHello* p) const noexcept { lr_babel_hello_free(p); }
+};
+struct BabelIhuDeleter {
+    void operator()(OpaqueBabelIhu* p) const noexcept { lr_babel_ihu_free(p); }
+};
+struct BabelAckReqDeleter {
+    void operator()(OpaqueBabelAckReq* p) const noexcept { lr_babel_ack_req_free(p); }
+};
+struct BabelAckDeleter {
+    void operator()(OpaqueBabelAck* p) const noexcept { lr_babel_ack_free(p); }
+};
+struct BabelNextHopDeleter {
+    void operator()(OpaqueBabelNextHop* p) const noexcept { lr_babel_next_hop_free(p); }
+};
+struct BabelRouterIdDeleter {
+    void operator()(OpaqueBabelRouterId* p) const noexcept { lr_babel_router_id_free(p); }
+};
+struct BabelRouteRequestDeleter {
+    void operator()(OpaqueBabelRouteRequest* p) const noexcept { lr_babel_route_request_free(p); }
+};
+struct BabelSeqnoRequestDeleter {
+    void operator()(OpaqueBabelSeqnoRequest* p) const noexcept { lr_babel_seqno_request_free(p); }
+};
+
+/// Build a 16-byte address buffer with IPv4 in the last 4 bytes
+/// (the IPv4-mapped IPv6 layout used by lr_babel_route_key_*_addr /
+/// lr_babel_route_next_hop on the read path). For 16-byte inputs the
+/// bytes are copied verbatim.
+inline std::array<std::uint8_t, 16> to_babel_addr16(const std::vector<std::uint8_t>& addr) {
+    std::array<std::uint8_t, 16> buf{};
+    if (addr.size() == 4) {
+        std::copy(addr.begin(), addr.end(), buf.begin() + 12);
+    } else if (addr.size() == 16) {
+        std::copy(addr.begin(), addr.end(), buf.begin());
+    } else {
+        throw Error("to_babel_addr16: address must be 4 or 16 bytes");
+    }
+    return buf;
+}
+
+/// Read the address out of a 16-byte buffer (the inverse of
+/// to_babel_addr16) given the family.
+inline std::vector<std::uint8_t> from_babel_addr16(const std::array<std::uint8_t, 16>& buf, bool is_v6) {
+    if (is_v6) return std::vector<std::uint8_t>(buf.begin(), buf.end());
+    return std::vector<std::uint8_t>(buf.begin() + 12, buf.end());
+}
+
+} // namespace detail
+
+// ---- TLV type / AE / MAC algorithm constants (mirror lr_ffi.h) ----
+
+namespace babel_tlv_type {
+    constexpr std::uint8_t Pad1 = 0;
+    constexpr std::uint8_t PadN = 1;
+    constexpr std::uint8_t AckReq = 2;
+    constexpr std::uint8_t Ack = 3;
+    constexpr std::uint8_t Hello = 4;
+    constexpr std::uint8_t Ihu = 5;
+    constexpr std::uint8_t RouterID = 6;
+    constexpr std::uint8_t NextHop = 7;
+    constexpr std::uint8_t Update = 8;
+    constexpr std::uint8_t RouteRequest = 9;
+    constexpr std::uint8_t SeqnoRequest = 10;
+    constexpr std::uint8_t TSpc = 11;
+    constexpr std::uint8_t Hmac = 12;
+} // namespace babel_tlv_type
+
+namespace babel_ae {
+    constexpr std::uint8_t Wildcard = 0;
+    constexpr std::uint8_t IPv4 = 1;
+    constexpr std::uint8_t IPv6 = 2;
+    constexpr std::uint8_t IPv6LinkLocal = 3;
+} // namespace babel_ae
+
+namespace babel_mac {
+    constexpr std::int32_t HMACSHA256 = 1;
+    constexpr std::int32_t Blake2s128 = 2;
+} // namespace babel_mac
+
+/// BabelRouteKey mirrors `lr_babel::route::RouteKey` — destination
+/// prefix + optional source prefix + 8-byte router identifier
+/// (RFC 8966 §3.1).
+struct BabelRouteKey {
+    std::vector<std::uint8_t> destination_addr;  // 4 or 16 bytes
+    std::uint8_t destination_prefix_len = 0;
+    std::vector<std::uint8_t> source_addr;  // empty for non-source-specific
+    std::uint8_t source_prefix_len = 0;
+    std::array<std::uint8_t, 8> router_id{};
+
+    bool is_source_specific() const noexcept { return !source_addr.empty(); }
+};
+
+/// BabelRoute mirrors `lr_babel::route::BabelRoute` — the per-destination
+/// route entry (RFC 8966 §3.2).
+struct BabelRoute {
+    BabelRouteKey key;
+    std::uint16_t seqno = 0;
+    std::uint32_t metric = 0;
+    std::vector<std::uint8_t> next_hop;  // 4 or 16 bytes
+    bool feasible = false;
+    bool installed = false;
+};
+
+// ---- TLV — RFC 8966 §4.4 ----
+
+/// RAII handle to a single Babel TLV.
+class BabelTlv {
+public:
+    BabelTlv() = default;
+    explicit BabelTlv(lr_babel_tlv_t p) : ptr_(p) {}
+
+    /// Build a TLV with the given kind code and value bytes.
+    static BabelTlv make(std::uint8_t kind, std::vector<std::uint8_t> value = {}) {
+        lr_babel_tlv_t p = lr_babel_tlv_new(kind, value.data(), value.size());
+        if (!p) throw Error(std::string("lr_babel_tlv_new: ") + lr_last_error());
+        return BabelTlv(p);
+    }
+    /// Build a Pad1 TLV (RFC 8966 §4.4.1).
+    static BabelTlv pad1() { return BabelTlv(lr_babel_tlv_pad1()); }
+    /// Build a PadN TLV (RFC 8966 §4.4.2).
+    static BabelTlv pad_n(std::size_t n) { return BabelTlv(lr_babel_tlv_pad_n(n)); }
+
+    std::uint8_t kind() const noexcept { return lr_babel_tlv_kind(ptr_.get()); }
+    std::vector<std::uint8_t> value() const {
+        lr_bytes_t b{};
+        int rc = lr_babel_tlv_value(ptr_.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_tlv_value: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+    lr_babel_tlv_t release() noexcept { return ptr_.release(); }
+    lr_babel_tlv_t get() const noexcept { return ptr_.get(); }
+
+private:
+    std::unique_ptr<OpaqueBabelTlv, detail::BabelTlvDeleter> ptr_;
+};
+
+// ---- BabelFrame — RFC 8966 §4.1 ----
+
+/// RAII handle to a Babel frame body.
+class BabelFrame {
+public:
+    BabelFrame() = default;
+    explicit BabelFrame(lr_babel_frame_t p) : ptr_(p) {}
+
+    /// Build an empty frame.
+    static BabelFrame empty() { return BabelFrame(lr_babel_frame_new_empty()); }
+    /// Build a frame from a flat list of TLVs. The TLV handles are
+    /// *consumed* — release() them before passing in.
+    static BabelFrame from_tlvs(std::vector<BabelTlv> tlvs) {
+        std::vector<lr_babel_tlv_t> raw;
+        raw.reserve(tlvs.size());
+        for (auto& t : tlvs) raw.push_back(t.release());
+        lr_babel_frame_t p = lr_babel_frame_new_from_tlvs(raw.data(), raw.size());
+        if (!p) throw Error(std::string("lr_babel_frame_new_from_tlvs: ") + lr_last_error());
+        return BabelFrame(p);
+    }
+    /// Decode a raw Babel wire frame.
+    static BabelFrame decode(const std::uint8_t* data, std::size_t len) {
+        lr_babel_frame_t out = nullptr;
+        int rc = lr_babel_decode_frame(data, len, &out);
+        if (rc != 0) throw Error(std::string("lr_babel_decode_frame: ") + lr_last_error());
+        if (!out) throw Error("lr_babel_decode_frame: NULL out");
+        return BabelFrame(out);
+    }
+    static BabelFrame decode(const std::vector<std::uint8_t>& wire) {
+        return decode(wire.data(), wire.size());
+    }
+
+    /// Append one TLV (consumes the TLV handle).
+    void push(BabelTlv tlv) {
+        int rc = lr_babel_frame_push_tlv(ptr_.get(), tlv.release());
+        if (rc != 0) throw Error(std::string("lr_babel_frame_push_tlv: ") + lr_last_error());
+    }
+
+    std::size_t tlv_count() const noexcept { return lr_babel_frame_tlv_count(ptr_.get()); }
+    std::uint8_t tlv_type_at(std::size_t index) const {
+        return lr_babel_frame_tlv_type_at(ptr_.get(), index);
+    }
+    std::vector<std::uint8_t> tlv_value_at(std::size_t index) const {
+        std::size_t n = lr_babel_frame_tlv_value_len_at(ptr_.get(), index);
+        if (n == 0) return {};
+        std::vector<std::uint8_t> out(n);
+        lr_babel_frame_tlv_value_at(ptr_.get(), index, out.data(), n);
+        return out;
+    }
+    /// Encode the frame to its on-the-wire representation.
+    std::vector<std::uint8_t> encode() const {
+        lr_bytes_t b{};
+        int rc = lr_babel_encode_frame(ptr_.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_encode_frame: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+    lr_babel_frame_t get() const noexcept { return ptr_.get(); }
+
+private:
+    std::unique_ptr<OpaqueBabelFrame, detail::BabelFrameDeleter> ptr_;
+};
+
+// ---- BabelCodec — RFC 8966 §4.3 + RFC 8967 ----
+
+class BabelCodec {
+public:
+    BabelCodec() : ptr_(lr_babel_codec_new()) {
+        if (!ptr_) throw Error(std::string("lr_babel_codec_new: ") + lr_last_error());
+    }
+
+    /// Decode a wire slice; returns a BabelFrame when complete, or
+    /// std::nullopt when more bytes are needed.
+    std::optional<BabelFrame> decode_slice(const std::uint8_t* data, std::size_t len) {
+        lr_babel_frame_t out = nullptr;
+        int rc = lr_babel_codec_decode_slice(ptr_.get(), data, len, &out);
+        if (rc != 0) throw Error(std::string("lr_babel_codec_decode_slice: ") + lr_last_error());
+        if (!out) return std::nullopt;
+        return BabelFrame(out);
+    }
+    std::optional<BabelFrame> decode_slice(const std::vector<std::uint8_t>& wire) {
+        return decode_slice(wire.data(), wire.size());
+    }
+
+    std::vector<std::uint8_t> encode_vec(const BabelFrame& f) const {
+        lr_bytes_t b{};
+        int rc = lr_babel_codec_encode_vec(ptr_.get(), f.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_codec_encode_vec: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelCodec, detail::BabelCodecDeleter> ptr_;
+};
+
+// ---- BabelRouteTable — RFC 8966 §3.5 ----
+
+/// RAII handle to a BabelRouteTable. The table tracks feasibility
+/// state per destination and yields the lowest-metric feasible route
+/// per destination via `best_routes_iter`.
+class BabelRouteTable {
+public:
+    BabelRouteTable() : ptr_(lr_babel_route_table_new()) {
+        if (!ptr_) throw Error(std::string("lr_babel_route_table_new: ") + lr_last_error());
+    }
+
+    std::size_t size() const noexcept { return lr_babel_route_table_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_babel_route_table_is_empty(ptr_.get()) != 0; }
+
+    /// Insert a route. The route is cloned into the table.
+    void insert(const BabelRoute& r) {
+        auto key_h = detail_route_key_to_c(r.key);
+        if (r.next_hop.size() != 4 && r.next_hop.size() != 16)
+            throw Error("BabelRouteTable.insert: next_hop must be 4 or 16 bytes");
+        // The C ABI's lr_babel_route_new reads the first 4 bytes for
+        // IPv4 (not the IPv4-mapped IPv6 layout). Pass the raw bytes.
+        std::uint8_t nh_is_v6 = (r.next_hop.size() == 16) ? 1 : 0;
+        lr_babel_route_t route_h = lr_babel_route_new(
+            key_h.get(), r.seqno, r.metric, nh_is_v6, r.next_hop.data(),
+            r.feasible ? 1 : 0, r.installed ? 1 : 0);
+        if (!route_h) throw Error(std::string("lr_babel_route_new: ") + lr_last_error());
+        int rc = lr_babel_route_table_insert(ptr_.get(), route_h);
+        lr_babel_route_free(route_h);
+        if (rc != 0) throw Error(std::string("lr_babel_route_table_insert: ") + lr_last_error());
+    }
+
+    void withdraw(const BabelRouteKey& k) {
+        auto key_h = detail_route_key_to_c(k);
+        int rc = lr_babel_route_table_withdraw(ptr_.get(), key_h.get());
+        if (rc != 0) throw Error(std::string("lr_babel_route_table_withdraw: ") + lr_last_error());
+    }
+
+    std::size_t expire(std::uint64_t now_ms) {
+        return lr_babel_route_table_expire(ptr_.get(), now_ms);
+    }
+
+    bool contains(const BabelRouteKey& k) const {
+        auto key_h = detail_route_key_to_c(k);
+        return lr_babel_route_table_contains(ptr_.get(), key_h.get()) != 0;
+    }
+
+    /// Read the route stored under `k`. Returns std::nullopt when
+    /// the key is not present.
+    std::optional<BabelRoute> get(const BabelRouteKey& k) const {
+        auto key_h = detail_route_key_to_c(k);
+        lr_babel_route_t rp = lr_babel_route_table_get(ptr_.get(), key_h.get());
+        if (!rp) return std::nullopt;
+        return detail_route_from_c(rp);
+    }
+
+    std::size_t best_routes_count() const {
+        return lr_babel_route_table_best_routes_count(ptr_.get());
+    }
+
+    /// Iterate every route in the table. The callback receives a
+    /// borrowed BabelRoute snapshot copied out of the table.
+    template <typename F>
+    void iter_all(F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_babel_route_t route, void* user) -> std::int32_t {
+            auto* c = static_cast<Ctx*>(user);
+            (*c->f)(detail_route_from_c(route));
+            return 0;
+        };
+        std::int32_t rc = lr_babel_route_table_iter(ptr_.get(), trampoline, &ctx);
+        if (rc != 0) throw Error(std::string("lr_babel_route_table_iter: ") + lr_last_error());
+    }
+    /// Iterate the best (lowest-metric feasible) route per destination.
+    template <typename F>
+    void iter_best(F&& cb) {
+        struct Ctx { F* f; };
+        Ctx ctx{&cb};
+        auto trampoline = +[](lr_babel_route_t route, void* user) -> std::int32_t {
+            auto* c = static_cast<Ctx*>(user);
+            (*c->f)(detail_route_from_c(route));
+            return 0;
+        };
+        std::int32_t rc = lr_babel_route_table_best_routes_iter(ptr_.get(), trampoline, &ctx);
+        if (rc != 0) throw Error(std::string("lr_babel_route_table_best_routes_iter: ") + lr_last_error());
+    }
+
+private:
+    static std::unique_ptr<OpaqueBabelRouteKey, detail::BabelRouteKeyDeleter>
+    detail_route_key_to_c(const BabelRouteKey& k) {
+        if (k.destination_addr.size() != 4 && k.destination_addr.size() != 16)
+            throw Error("BabelRouteKey: destination address must be 4 or 16 bytes");
+        auto dest16 = detail::to_babel_addr16(k.destination_addr);
+        std::uint8_t dest_is_v6 = (k.destination_addr.size() == 16) ? 1 : 0;
+        std::uint8_t src_present = k.is_source_specific() ? 1 : 0;
+        std::uint8_t src_is_v6 = 0;
+        std::array<std::uint8_t, 16> src16{};
+        if (k.is_source_specific()) {
+            src16 = detail::to_babel_addr16(k.source_addr);
+            src_is_v6 = (k.source_addr.size() == 16) ? 1 : 0;
+        }
+        lr_babel_route_key_t p = lr_babel_route_key_new(
+            dest_is_v6, dest16.data(), k.destination_prefix_len,
+            src_present, src_is_v6,
+            k.is_source_specific() ? src16.data() : nullptr,
+            k.source_prefix_len, k.router_id.data());
+        if (!p) throw Error(std::string("lr_babel_route_key_new: ") + lr_last_error());
+        return std::unique_ptr<OpaqueBabelRouteKey, detail::BabelRouteKeyDeleter>(p);
+    }
+
+    static BabelRouteKey detail_route_key_from_c(lr_babel_route_key_t h) {
+        BabelRouteKey k;
+        bool is_v6 = lr_babel_route_key_destination_is_ipv6(h) != 0;
+        std::array<std::uint8_t, 16> buf{};
+        lr_babel_route_key_destination_addr(h, buf.data());
+        k.destination_addr = detail::from_babel_addr16(buf, is_v6);
+        k.destination_prefix_len = lr_babel_route_key_destination_prefix_len(h);
+        if (lr_babel_route_key_source_present(h) != 0) {
+            bool src_v6 = lr_babel_route_key_source_is_ipv6(h) != 0;
+            std::array<std::uint8_t, 16> sbuf{};
+            lr_babel_route_key_source_addr(h, sbuf.data());
+            k.source_addr = detail::from_babel_addr16(sbuf, src_v6);
+            k.source_prefix_len = lr_babel_route_key_source_prefix_len(h);
+        }
+        lr_babel_route_key_router_id(h, k.router_id.data());
+        return k;
+    }
+
+    static BabelRoute detail_route_from_c(lr_babel_route_t h) {
+        BabelRoute r;
+        lr_babel_route_key_t key_h = lr_babel_route_borrow_key(h);
+        r.key = detail_route_key_from_c(key_h);
+        r.seqno = lr_babel_route_seqno(h);
+        r.metric = lr_babel_route_metric(h);
+        bool is_v6 = lr_babel_route_next_hop_is_ipv6(h) != 0;
+        std::array<std::uint8_t, 16> buf{};
+        lr_babel_route_next_hop(h, buf.data());
+        r.next_hop = detail::from_babel_addr16(buf, is_v6);
+        r.feasible = lr_babel_route_feasible(h) != 0;
+        r.installed = lr_babel_route_installed(h) != 0;
+        return r;
+    }
+
+    std::unique_ptr<OpaqueBabelRouteTable, detail::BabelRouteTableDeleter> ptr_;
+};
+
+// ---- BabelNeighbor — RFC 8966 §3.4 ----
+
+class BabelNeighbor {
+public:
+    /// Construct a neighbor at the given remote address (4 or 16 bytes).
+    explicit BabelNeighbor(const std::vector<std::uint8_t>& addr, std::uint64_t now_ms = 0) {
+        if (addr.size() != 4 && addr.size() != 16)
+            throw Error("BabelNeighbor: address must be 4 or 16 bytes");
+        const std::uint8_t* v4 = nullptr;
+        const std::uint8_t* v6 = nullptr;
+        if (addr.size() == 4) v4 = addr.data();
+        else v6 = addr.data();
+        lr_babel_neighbor_t p = lr_babel_neighbor_new(v4, v6, now_ms);
+        if (!p) throw Error(std::string("lr_babel_neighbor_new: ") + lr_last_error());
+        ptr_.reset(p);
+    }
+
+    void hello(std::uint16_t seqno, std::uint16_t interval_cs, std::uint64_t now_ms) {
+        int rc = lr_babel_neighbor_hello(ptr_.get(), seqno, interval_cs, now_ms);
+        if (rc != 0) throw Error(std::string("lr_babel_neighbor_hello: ") + lr_last_error());
+    }
+    void ihu(std::uint16_t rxcost, std::uint16_t interval_cs, std::uint64_t now_ms) {
+        int rc = lr_babel_neighbor_ihu(ptr_.get(), rxcost, interval_cs, now_ms);
+        if (rc != 0) throw Error(std::string("lr_babel_neighbor_ihu: ") + lr_last_error());
+    }
+    std::uint32_t rtt_us(std::uint64_t now_ms) const {
+        return lr_babel_neighbor_rtt_us(ptr_.get(), now_ms);
+    }
+    bool rtt_valid(std::uint64_t now_ms) const {
+        return lr_babel_neighbor_rtt_valid(ptr_.get(), now_ms) != 0;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelNeighbor, detail::BabelNeighborDeleter> ptr_;
+};
+
+// ---- MacKey — RFC 8967 §2.1 ----
+
+class BabelMacKey {
+public:
+    BabelMacKey(std::int32_t algorithm, std::vector<std::uint8_t> secret) {
+        lr_babel_mac_key_t p = lr_babel_mac_key_new(algorithm, secret.data(), secret.size());
+        if (!p) throw Error(std::string("lr_babel_mac_key_new: ") + lr_last_error());
+        ptr_.reset(p);
+    }
+    static BabelMacKey hmac_sha256(std::vector<std::uint8_t> secret) {
+        lr_babel_mac_key_t p = lr_babel_mac_key_hmac_sha256(secret.data(), secret.size());
+        if (!p) throw Error(std::string("lr_babel_mac_key_hmac_sha256: ") + lr_last_error());
+        return BabelMacKey(p);
+    }
+    static BabelMacKey blake2s128(std::vector<std::uint8_t> secret) {
+        lr_babel_mac_key_t p = lr_babel_mac_key_blake2s128(secret.data(), secret.size());
+        if (!p) throw Error(std::string("lr_babel_mac_key_blake2s128: ") + lr_last_error());
+        return BabelMacKey(p);
+    }
+
+    std::int32_t algorithm() const noexcept { return lr_babel_mac_key_algorithm(ptr_.get()); }
+    std::size_t digest_len() const noexcept { return lr_babel_mac_key_digest_len(ptr_.get()); }
+    std::size_t secret_len() const noexcept { return lr_babel_mac_key_secret_len(ptr_.get()); }
+    std::vector<std::uint8_t> secret() const {
+        std::size_t n = secret_len();
+        if (n == 0) return {};
+        std::vector<std::uint8_t> out(n);
+        lr_babel_mac_key_secret_copy(ptr_.get(), out.data(), n);
+        return out;
+    }
+
+    lr_babel_mac_key_t get() const noexcept { return ptr_.get(); }
+
+private:
+    explicit BabelMacKey(lr_babel_mac_key_t p) : ptr_(p) {}
+    std::unique_ptr<OpaqueBabelMacKey, detail::BabelMacKeyDeleter> ptr_;
+};
+
+// ---- PseudoHeader — RFC 8967 §4.2 ----
+
+class BabelPseudoHeader {
+public:
+    static BabelPseudoHeader v4(const std::array<std::uint8_t, 4>& src,
+                                std::uint16_t src_port,
+                                const std::array<std::uint8_t, 4>& dst,
+                                std::uint16_t dst_port) {
+        lr_babel_pseudo_header_t p = lr_babel_pseudo_header_new_v4(
+            src.data(), src_port, dst.data(), dst_port);
+        if (!p) throw Error(std::string("lr_babel_pseudo_header_new_v4: ") + lr_last_error());
+        return BabelPseudoHeader(p);
+    }
+    static BabelPseudoHeader v6(const std::array<std::uint8_t, 16>& src,
+                                std::uint16_t src_port,
+                                const std::array<std::uint8_t, 16>& dst,
+                                std::uint16_t dst_port) {
+        lr_babel_pseudo_header_t p = lr_babel_pseudo_header_new_v6(
+            src.data(), src_port, dst.data(), dst_port);
+        if (!p) throw Error(std::string("lr_babel_pseudo_header_new_v6: ") + lr_last_error());
+        return BabelPseudoHeader(p);
+    }
+
+    std::vector<std::uint8_t> encode() const {
+        lr_bytes_t b{};
+        int rc = lr_babel_pseudo_header_encode(ptr_.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_pseudo_header_encode: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+    lr_babel_pseudo_header_t get() const noexcept { return ptr_.get(); }
+
+private:
+    explicit BabelPseudoHeader(lr_babel_pseudo_header_t p) : ptr_(p) {}
+    std::unique_ptr<OpaqueBabelPseudoHeader, detail::BabelPseudoHeaderDeleter> ptr_;
+};
+
+// ---- PacketCounter — RFC 8967 §3.2 ----
+
+class BabelPacketCounter {
+public:
+    BabelPacketCounter(std::vector<std::uint8_t> index, std::uint32_t initial) {
+        lr_babel_packet_counter_t p = lr_babel_packet_counter_new(
+            index.data(), index.size(), initial);
+        if (!p) throw Error(std::string("lr_babel_packet_counter_new: ") + lr_last_error());
+        ptr_.reset(p);
+    }
+
+    std::uint32_t counter() const noexcept {
+        return lr_babel_packet_counter_peek_counter(ptr_.get());
+    }
+    std::size_t index_len() const noexcept {
+        return lr_babel_packet_counter_peek_index_len(ptr_.get());
+    }
+    std::vector<std::uint8_t> index() const {
+        std::size_t n = index_len();
+        if (n == 0) return {};
+        std::vector<std::uint8_t> out(n);
+        lr_babel_packet_counter_peek_index_copy(ptr_.get(), out.data(), n);
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelPacketCounter, detail::BabelPacketCounterDeleter> ptr_;
+};
+
+// ---- ReplayProtection — RFC 8967 §3.3 ----
+
+class BabelReplayProtection {
+public:
+    BabelReplayProtection() : ptr_(lr_babel_replay_protection_new()) {
+        if (!ptr_) throw Error(std::string("lr_babel_replay_protection_new: ") + lr_last_error());
+    }
+    /// Accept a packet; returns true when (index, counter) is strictly
+    /// greater than the previously-accepted counter for this index.
+    bool accept(const std::vector<std::uint8_t>& index, std::uint32_t counter) {
+        std::int32_t rc = lr_babel_replay_protection_accept(
+            ptr_.get(), index.data(), index.size(), counter);
+        if (rc < 0) throw Error(std::string("lr_babel_replay_protection_accept: ") + lr_last_error());
+        return rc != 0;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelReplayProtection, detail::BabelReplayProtectionDeleter> ptr_;
+};
+
+// ---- Message constructors — RFC 8966 §4.4 ----
+
+class BabelHello {
+public:
+    BabelHello(std::uint16_t seqno, std::uint16_t interval_cs)
+        : ptr_(lr_babel_hello_new(seqno, interval_cs)) {
+        if (!ptr_) throw Error(std::string("lr_babel_hello_new: ") + lr_last_error());
+    }
+    void set_unicast(bool on) {
+        int rc = lr_babel_hello_set_unicast(ptr_.get(), on ? 1 : 0);
+        if (rc != 0) throw Error(std::string("lr_babel_hello_set_unicast: ") + lr_last_error());
+    }
+    std::uint16_t seqno() const noexcept { return lr_babel_hello_seqno(ptr_.get()); }
+    std::uint16_t interval_cs() const noexcept { return lr_babel_hello_interval_cs(ptr_.get()); }
+    std::uint16_t flags() const noexcept { return lr_babel_hello_flags(ptr_.get()); }
+    std::optional<std::uint32_t> timestamp() const {
+        std::uint8_t present = 0;
+        std::uint32_t out = 0;
+        int rc = lr_babel_hello_timestamp(ptr_.get(), &present, &out);
+        if (rc < 0 || present == 0) return std::nullopt;
+        return out;
+    }
+    std::vector<std::uint8_t> encode() const {
+        lr_bytes_t b{};
+        int rc = lr_babel_hello_encode(ptr_.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_hello_encode: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelHello, detail::BabelHelloDeleter> ptr_;
+};
+
+class BabelIhu {
+public:
+    BabelIhu(std::uint16_t rxcost, std::uint16_t interval_cs)
+        : ptr_(lr_babel_ihu_new(rxcost, interval_cs)) {
+        if (!ptr_) throw Error(std::string("lr_babel_ihu_new: ") + lr_last_error());
+    }
+    std::uint8_t ae() const noexcept { return lr_babel_ihu_ae(ptr_.get()); }
+    std::uint16_t rxcost() const noexcept { return lr_babel_ihu_rxcost(ptr_.get()); }
+    std::uint16_t interval_cs() const noexcept { return lr_babel_ihu_interval_cs(ptr_.get()); }
+    std::vector<std::uint8_t> encode() const {
+        lr_bytes_t b{};
+        int rc = lr_babel_ihu_encode(ptr_.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_ihu_encode: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelIhu, detail::BabelIhuDeleter> ptr_;
+};
+
+class BabelAckReq {
+public:
+    BabelAckReq(std::uint16_t nonce, std::uint16_t interval_cs)
+        : ptr_(lr_babel_ack_req_new(nonce, interval_cs)) {
+        if (!ptr_) throw Error(std::string("lr_babel_ack_req_new: ") + lr_last_error());
+    }
+    std::uint16_t nonce() const noexcept { return lr_babel_ack_req_nonce(ptr_.get()); }
+    std::uint16_t interval_cs() const noexcept { return lr_babel_ack_req_interval_cs(ptr_.get()); }
+
+private:
+    std::unique_ptr<OpaqueBabelAckReq, detail::BabelAckReqDeleter> ptr_;
+};
+
+class BabelAck {
+public:
+    explicit BabelAck(std::uint16_t opaque)
+        : ptr_(lr_babel_ack_new(opaque)) {
+        if (!ptr_) throw Error(std::string("lr_babel_ack_new: ") + lr_last_error());
+    }
+    std::uint16_t opaque() const noexcept { return lr_babel_ack_opaque(ptr_.get()); }
+    std::vector<std::uint8_t> encode() const {
+        lr_bytes_t b{};
+        int rc = lr_babel_ack_encode(ptr_.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_ack_encode: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelAck, detail::BabelAckDeleter> ptr_;
+};
+
+class BabelNextHop {
+public:
+    explicit BabelNextHop(const std::vector<std::uint8_t>& addr) {
+        if (addr.size() == 4) {
+            ptr_.reset(lr_babel_next_hop_new_v4(addr.data()));
+        } else if (addr.size() == 16) {
+            ptr_.reset(lr_babel_next_hop_new_v6(addr.data()));
+        } else {
+            throw Error("BabelNextHop: address must be 4 or 16 bytes");
+        }
+        if (!ptr_) throw Error(std::string("lr_babel_next_hop_new_*: ") + lr_last_error());
+    }
+    std::uint8_t ae() const noexcept { return lr_babel_next_hop_ae(ptr_.get()); }
+    std::vector<std::uint8_t> address() const {
+        std::array<std::uint8_t, 16> buf{};
+        std::size_t n = lr_babel_next_hop_address(ptr_.get(), buf.data(), buf.size());
+        if (n == 0) return {};
+        return std::vector<std::uint8_t>(buf.begin(), buf.begin() + n);
+    }
+    std::vector<std::uint8_t> encode() const {
+        lr_bytes_t b{};
+        int rc = lr_babel_next_hop_encode(ptr_.get(), &b);
+        if (rc != 0) throw Error(std::string("lr_babel_next_hop_encode: ") + lr_last_error());
+        std::vector<std::uint8_t> out;
+        if (lr_bytes_len(&b) > 0) {
+            const std::uint8_t* p = lr_bytes_ptr(&b);
+            out.assign(p, p + lr_bytes_len(&b));
+        }
+        lr_bytes_free(&b);
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelNextHop, detail::BabelNextHopDeleter> ptr_;
+};
+
+class BabelRouterId {
+public:
+    explicit BabelRouterId(const std::array<std::uint8_t, 8>& router_id) {
+        lr_babel_router_id_t p = lr_babel_router_id_new(router_id.data());
+        if (!p) throw Error(std::string("lr_babel_router_id_new: ") + lr_last_error());
+        ptr_.reset(p);
+    }
+    std::array<std::uint8_t, 8> bytes() const {
+        // The C ABI copies 10 bytes out (2 reserved + 8 router_id).
+        std::array<std::uint8_t, 10> buf{};
+        int rc = lr_babel_router_id_bytes(ptr_.get(), buf.data());
+        if (rc != 0) throw Error(std::string("lr_babel_router_id_bytes: ") + lr_last_error());
+        std::array<std::uint8_t, 8> out{};
+        std::copy(buf.begin() + 2, buf.end(), out.begin());
+        return out;
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelRouterId, detail::BabelRouterIdDeleter> ptr_;
+};
+
+class BabelRouteRequest {
+public:
+    static BabelRouteRequest wildcard() {
+        return BabelRouteRequest(lr_babel_route_request_new_wildcard());
+    }
+
+private:
+    explicit BabelRouteRequest(lr_babel_route_request_t p) {
+        if (!p) throw Error(std::string("lr_babel_route_request_new_wildcard: ") + lr_last_error());
+        ptr_.reset(p);
+    }
+    std::unique_ptr<OpaqueBabelRouteRequest, detail::BabelRouteRequestDeleter> ptr_;
+};
+
+class BabelSeqnoRequest {
+public:
+    BabelSeqnoRequest(const std::vector<std::uint8_t>& prefix, std::uint8_t prefix_len,
+                      std::uint16_t seqno, const std::array<std::uint8_t, 8>& router_id,
+                      std::uint8_t hop_count = 255) {
+        if (prefix.size() != 4 && prefix.size() != 16)
+            throw Error("BabelSeqnoRequest: prefix must be 4 or 16 bytes");
+        const std::uint8_t* v4 = nullptr;
+        const std::uint8_t* v6 = nullptr;
+        if (prefix.size() == 4) v4 = prefix.data();
+        else v6 = prefix.data();
+        lr_babel_seqno_request_t p = lr_babel_seqno_request_new(
+            v4, v6, prefix_len, seqno, router_id.data(), hop_count);
+        if (!p) throw Error(std::string("lr_babel_seqno_request_new: ") + lr_last_error());
+        ptr_.reset(p);
+    }
+
+private:
+    std::unique_ptr<OpaqueBabelSeqnoRequest, detail::BabelSeqnoRequestDeleter> ptr_;
+};
+
+// ---- Free function helpers — metric helpers (RFC 8966 §A.2.4 / §3.1 / §3.2.2) ----
+
+/// RTT-based extra link cost (RFC 8966 §A.2.4, BABEL-RTT).
+inline std::uint16_t babel_rtt_penalty(std::uint32_t rtt_us, std::uint32_t rtt_min_us,
+                                       std::uint32_t rtt_max_us, std::uint16_t max_penalty) {
+    return lr_babel_rtt_penalty(rtt_us, rtt_min_us, rtt_max_us, max_penalty);
+}
+/// Sum a list of per-link metric values (RFC 8966 §3.1).
+inline std::uint32_t babel_route_metric_sum(const std::vector<std::uint32_t>& link_metrics) {
+    if (link_metrics.empty()) return 0;
+    return lr_babel_route_metric_sum(link_metrics.data(), link_metrics.size());
+}
+/// Feasibility condition (RFC 8966 §3.2.2).
+inline bool babel_feasible(std::uint16_t route_seqno, std::uint32_t route_metric,
+                           std::uint16_t feasible_seqno, std::uint32_t feasible_metric) {
+    return lr_babel_feasible(route_seqno, route_metric,
+                              feasible_seqno, feasible_metric) != 0;
+}
+
 } // namespace librouting
 
