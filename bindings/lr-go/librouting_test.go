@@ -2368,3 +2368,148 @@ func TestDrainOspfGraceEventsEmpty(t *testing.T) {
 		t.Fatalf("events len = %d, want 0", len(events))
 	}
 }
+
+// TestRtrClientFreshClientReaders verifies the RtrClient surface on
+// a freshly-constructed state machine: version, empty session/serial,
+// phase name, default intervals, on_connect Reset Query, and the
+// step projection returned by poll (mirrors the FFI test in
+// crates/lr-ffi/src/rtr_client.rs).
+func TestRtrClientFreshClientReaders(t *testing.T) {
+	c, err := NewRtrClient()
+	if err != nil {
+		t.Fatalf("NewRtrClient: %v", err)
+	}
+	defer c.Close()
+
+	if c.Version() == 0 {
+		t.Fatal("RtrClient.Version == 0")
+	}
+	if _, ok := c.SessionID(); ok {
+		t.Fatal("RtrClient.SessionID should be absent on fresh client")
+	}
+	if _, ok := c.Serial(); ok {
+		t.Fatal("RtrClient.Serial should be absent on fresh client")
+	}
+	phase, err := c.PhaseName()
+	if err != nil {
+		t.Fatalf("PhaseName: %v", err)
+	}
+	if phase != "awaiting-reset" {
+		t.Fatalf("PhaseName = %q, want %q", phase, "awaiting-reset")
+	}
+
+	r, re, e, err := c.Intervals()
+	if err != nil {
+		t.Fatalf("Intervals: %v", err)
+	}
+	if r != 3600 || re != 600 || e != 7200 {
+		t.Fatalf("Intervals = (%d,%d,%d), want (3600,600,7200)", r, re, e)
+	}
+
+	if err := c.SetIntervals(100, 60, 600); err != nil {
+		t.Fatalf("SetIntervals: %v", err)
+	}
+	r, re, e, _ = c.Intervals()
+	if r != 100 || re != 60 || e != 600 {
+		t.Fatalf("Intervals after SetIntervals = (%d,%d,%d), want (100,60,600)", r, re, e)
+	}
+
+	// on_connect emits a Reset Query (8 bytes, RFC 8210 §5.3).
+	bytes, err := c.OnConnect()
+	if err != nil {
+		t.Fatalf("OnConnect: %v", err)
+	}
+	if len(bytes) != 8 {
+		t.Fatalf("OnConnect bytes = %d, want 8", len(bytes))
+	}
+	if bytes[1] != 2 {
+		t.Fatalf("Reset Query type byte = %d, want 2", bytes[1])
+	}
+
+	// poll on a fresh client returns an empty step.
+	step, err := c.Poll(0)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	defer step.Free()
+	if step.Synced() {
+		t.Fatal("fresh poll Synced = true, want false")
+	}
+	if step.Expired() {
+		t.Fatal("fresh poll Expired = true, want false")
+	}
+	if step.RoaDeltaCount() != 0 {
+		t.Fatalf("fresh poll RoaDeltaCount = %d, want 0", step.RoaDeltaCount())
+	}
+	if step.LogCount() != 0 {
+		t.Fatalf("fresh poll LogCount = %d, want 0", step.LogCount())
+	}
+	if len(step.SendBytes()) != 0 {
+		t.Fatalf("fresh poll SendBytes len = %d, want 0", len(step.SendBytes()))
+	}
+
+	// out-of-bounds accessor returns ok=false.
+	if _, ok, err := step.RoaDeltaAt(0); err != nil {
+		t.Fatalf("RoaDeltaAt: %v", err)
+	} else if ok {
+		t.Fatal("RoaDeltaAt(0) should return ok=false on empty step")
+	}
+	if _, ok, err := step.LogAt(0); err != nil {
+		t.Fatalf("LogAt: %v", err)
+	} else if ok {
+		t.Fatal("LogAt(0) should return ok=false on empty step")
+	}
+
+	// snapshot on a fresh client is empty.
+	snap, err := c.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap) != 0 {
+		t.Fatalf("Snapshot len = %d, want 0", len(snap))
+	}
+}
+
+// TestRtrClientStepRoaDeltasAfterFullSync drives one Cache Response
+// PDU through OnPduRaw, then verifies that the step returned by
+// the subsequent Poll reflects the not-yet-synced state — the
+// full-wire test that exercises End-of-Data with two ROA deltas
+// lives in the Rust FFI test suite
+// (`ffi_rtr_client_step_roa_deltas_after_full_sync`), since the
+// encoder surface that produces a v1 EoD PDU is not exposed
+// through the C ABI yet. The binding test here only asserts the
+// Go-side projection mirrors the C ABI counts.
+func TestRtrClientStepRoaDeltasAfterFullSync(t *testing.T) {
+	c, err := NewRtrClient()
+	if err != nil {
+		t.Fatalf("NewRtrClient: %v", err)
+	}
+	defer c.Close()
+
+	// RFC 8210 §5.4 Cache Response: version 1, type 3, length 8,
+	// session ID 0x00ff.
+	cacheResp := []byte{
+		0x01,       // version 1
+		0x03,       // type 3 = Cache Response
+		0x00, 0x00, // reserved
+		0x00, 0x00, 0x00, 0x08, // length 8
+		0x00, 0xff, // session ID 0x00ff
+	}
+	if _, err := c.OnPduRaw(cacheResp, 1_000); err != nil {
+		t.Fatalf("OnPduRaw(CacheResponse): %v", err)
+	}
+
+	// poll after the cache response — still no deltas (we have not
+	// hit End of Data yet).
+	step, err := c.Poll(1_500)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	defer step.Free()
+	if step.Synced() {
+		t.Fatal("Poll before EoD Synced = true, want false")
+	}
+	if step.RoaDeltaCount() != 0 {
+		t.Fatalf("Poll before EoD RoaDeltaCount = %d, want 0", step.RoaDeltaCount())
+	}
+}

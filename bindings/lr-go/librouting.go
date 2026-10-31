@@ -3246,3 +3246,333 @@ func (f *CompiledFilter) Evaluate(route *Route) (int32, string, error) {
 	}
 	return int32(verdict), out, nil
 }
+
+// ---- RTR client (RFC 8210 §6-§8 RPKI-Router protocol state machine) ----
+//
+// Mirrors the public Rust API of lr_bgp::rtr::client::{RtrClient,
+// ClientStep, RoaDelta} so an embedder can drive the RPKI-Router
+// protocol state machine without going through the daemon. The
+// state machine owns the protocol: OnConnect returns the initial
+// query, OnPduRaw advances per received PDU, Poll advances per the
+// §6 timing. The Go RtrClient frees the underlying lr_rtr_client_t
+// via a finalizer; RtrClientStep owns its own arrays via a Free
+// method the caller is expected to invoke (the finalizer on the
+// step is a safety net but explicit Close keeps step churn from
+// piling up finalizers in long-running embedders).
+
+// RtrClient is a transport-agnostic RTR client state machine.
+type RtrClient struct {
+	ptr C.lr_rtr_client_t
+}
+
+// NewRtrClient constructs a fresh RtrClient (RFC 8210 §8.1 cold
+// start — no session memory, protocol version starts at
+// RTR_VERSION_MAX). The returned *RtrClient is garbage-collected
+// via a finalizer that calls lr_rtr_client_free.
+func NewRtrClient() (*RtrClient, error) {
+	c := C.lr_rtr_client_new()
+	if c == nil {
+		return nil, fmt.Errorf("lr_rtr_client_new returned null")
+	}
+	out := &RtrClient{ptr: c}
+	runtime.SetFinalizer(out, func(o *RtrClient) {
+		if o.ptr != nil {
+			C.lr_rtr_client_free(o.ptr)
+			o.ptr = nil
+		}
+	})
+	return out, nil
+}
+
+// Close releases the client early. Idempotent; the finalizer covers
+// missing Close calls.
+func (c *RtrClient) Close() {
+	if c.ptr != nil {
+		C.lr_rtr_client_free(c.ptr)
+		c.ptr = nil
+	}
+}
+
+// Version returns the protocol version currently spoken (post-§7
+// downgrade).
+func (c *RtrClient) Version() uint8 {
+	return uint8(C.lr_rtr_client_version(c.ptr))
+}
+
+// SessionID returns the remembered session ID and true when a
+// Cache Response has been received, or 0 and false otherwise.
+func (c *RtrClient) SessionID() (uint16, bool) {
+	var v C.uint16_t
+	if C.lr_rtr_client_session_id(c.ptr, &v) == 0 {
+		return 0, false
+	}
+	return uint16(v), true
+}
+
+// Serial returns the serial of the last completed sync and true
+// when present, or 0 and false otherwise.
+func (c *RtrClient) Serial() (uint32, bool) {
+	var v C.uint32_t
+	if C.lr_rtr_client_serial(c.ptr, &v) == 0 {
+		return 0, false
+	}
+	return uint32(v), true
+}
+
+// PhaseName returns the current phase name for diagnostics:
+// "awaiting-reset", "awaiting-serial", "receiving" or "synced".
+func (c *RtrClient) PhaseName() (string, error) {
+	need := C.lr_rtr_client_phase_name(c.ptr, nil, 0)
+	if need == 0 {
+		return "", nil
+	}
+	buf := make([]byte, int(need)+1)
+	n := C.lr_rtr_client_phase_name(c.ptr, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if n == 0 {
+		return "", fmt.Errorf("lr_rtr_client_phase_name: %s", LastError())
+	}
+	return string(buf[:int(n)]), nil
+}
+
+// Intervals returns the §6 timing intervals (refresh, retry, expire
+// — seconds) currently in effect.
+func (c *RtrClient) Intervals() (refresh, retry, expire uint32, err error) {
+	var r, re, e C.uint32_t
+	if rc := C.lr_rtr_client_intervals(c.ptr, &r, &re, &e); rc != 0 {
+		return 0, 0, 0, fmt.Errorf("lr_rtr_client_intervals: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint32(r), uint32(re), uint32(e), nil
+}
+
+// SetIntervals overrides the initial §6 intervals. The embedder
+// calls this once at construction from its configuration; a v1+
+// cache replaces all three from every End-of-Data PDU (§6).
+func (c *RtrClient) SetIntervals(refresh, retry, expire uint32) error {
+	if rc := C.lr_rtr_client_set_intervals(c.ptr, C.uint32_t(refresh), C.uint32_t(retry), C.uint32_t(expire)); rc != 0 {
+		return fmt.Errorf("lr_rtr_client_set_intervals: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// OnConnect returns the bytes to transmit when the transport comes
+// up (§8.1): a Serial Query when the client remembers an unexpired
+// session, a Reset Query otherwise.
+func (c *RtrClient) OnConnect() ([]byte, error) {
+	var out C.struct_lr_bytes_t
+	if rc := C.lr_rtr_client_on_connect(c.ptr, &out); rc != 0 {
+		return nil, fmt.Errorf("lr_rtr_client_on_connect: %s (rc=%d)", LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&out)
+	return copyBytes(&out), nil
+}
+
+// Snapshot returns the authoritative ROA record set after the last
+// completed sync, sorted for deterministic snapshots. Returns nil
+// (no entries) on a fresh client or one whose first sync has not
+// yet completed.
+func (c *RtrClient) Snapshot() ([]RoaEntry, error) {
+	n := C.lr_rtr_client_snapshot(c.ptr, nil, 0)
+	if n == 0 {
+		return nil, nil
+	}
+	cEntries := make([]C.struct_lr_roa_entry_t, int(n))
+	got := C.lr_rtr_client_snapshot(c.ptr, &cEntries[0], C.size_t(len(cEntries)))
+	if got == 0 {
+		return nil, fmt.Errorf("lr_rtr_client_snapshot: %s", LastError())
+	}
+	out := make([]RoaEntry, int(got))
+	for i := range out {
+		out[i] = roaEntryFromC(&cEntries[i])
+	}
+	return out, nil
+}
+
+// Poll runs the §6 timing rules at nowMs (milliseconds since the
+// Unix epoch). Returns the projection of "what to do next" — the
+// caller must call Free on the returned step once it has drained
+// the wire bytes / deltas / logs.
+func (c *RtrClient) Poll(nowMs uint64) (*RtrClientStep, error) {
+	var step C.struct_lr_rtr_client_step_t
+	if rc := C.lr_rtr_client_poll(c.ptr, C.uint64_t(nowMs), &step); rc != 0 {
+		return nil, fmt.Errorf("lr_rtr_client_poll: %s (rc=%d)", LastError(), int(rc))
+	}
+	return adoptRtrClientStep(&step), nil
+}
+
+// OnPduRaw decodes one RTR PDU from data and feeds it to the client
+// (RFC 8210 §5 / §8.2 — the receive-side entry point). Returns the
+// same projection as Poll.
+func (c *RtrClient) OnPduRaw(data []byte, nowMs uint64) (*RtrClientStep, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("OnPduRaw: data is empty")
+	}
+	var step C.struct_lr_rtr_client_step_t
+	if rc := C.lr_rtr_client_on_pdu_raw(c.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)),
+		C.uint64_t(nowMs), &step); rc != 0 {
+		return nil, fmt.Errorf("lr_rtr_client_on_pdu_raw: %s (rc=%d)", LastError(), int(rc))
+	}
+	return adoptRtrClientStep(&step), nil
+}
+
+// RtrClientStep is the projection of one RTR protocol step: the
+// wire bytes to transmit, the ROA deltas of a completed sync, the
+// diagnostic log lines, and the synced / drop / expired flags.
+// The Go wrapper owns the underlying C arrays and frees them via
+// Free (or a finalizer safety net).
+type RtrClientStep struct {
+	step C.struct_lr_rtr_client_step_t
+	// keep a reference to the Go-side "owned" flag so the
+	// finalizer + explicit Free agree on who runs the cleanup.
+	freed bool
+}
+
+// adoptRtrClientStep wraps a freshly-filled C struct in a
+// RtrClientStep and installs the finalizer safety net.
+func adoptRtrClientStep(s *C.struct_lr_rtr_client_step_t) *RtrClientStep {
+	out := &RtrClientStep{step: *s}
+	runtime.SetFinalizer(out, func(o *RtrClientStep) {
+		o.destroy()
+	})
+	return out
+}
+
+func (s *RtrClientStep) destroy() {
+	if !s.freed {
+		C.lr_rtr_client_step_free(&s.step)
+		s.freed = true
+	}
+}
+
+// Free releases the step's underlying C arrays. Idempotent; the
+// finalizer covers missing Free calls but explicit Close keeps
+// step churn from piling up finalizers in long-running embedders.
+func (s *RtrClientStep) Free() {
+	runtime.SetFinalizer(s, nil)
+	s.destroy()
+}
+
+// Synced reports whether this step completed a sync (End of Data
+// processed).
+func (s *RtrClientStep) Synced() bool { return s.step.synced != 0 }
+
+// Drop reports whether the transport connection should be closed.
+func (s *RtrClientStep) Drop() bool { return s.step.drop != 0 }
+
+// Expired reports whether the last synced data exceeded its expire
+// interval without a successful poll (§6) — validation on it must
+// stop.
+func (s *RtrClientStep) Expired() bool { return s.step.expired != 0 }
+
+// SendBytes returns the wire bytes to transmit (zero or more
+// complete PDUs). Returns nil when the step carries no outgoing PDU.
+func (s *RtrClientStep) SendBytes() []byte {
+	return copyBytes(&s.step.send_bytes)
+}
+
+// RoaDeltaCount returns the number of ROA deltas in this step
+// (zero unless Synced is true).
+func (s *RtrClientStep) RoaDeltaCount() int { return int(s.step.roa_delta_count) }
+
+// RoaDeltaAt returns the i-th ROA delta and nil on success, or
+// (0, false, error) on an out-of-bounds index.
+func (s *RtrClientStep) RoaDeltaAt(i int) (RoaDelta, bool, error) {
+	if i < 0 || i >= int(s.step.roa_delta_count) {
+		return RoaDelta{}, false, nil
+	}
+	var d C.struct_lr_roa_delta_t
+	if rc := C.lr_rtr_client_step_roa_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
+		return RoaDelta{}, false, fmt.Errorf("lr_rtr_client_step_roa_delta_at: %s (rc=%d)", LastError(), int(rc))
+	}
+	return RoaDelta{
+		Announce: d.announce != 0,
+		Entry:    roaEntryFromC(&d.entry),
+	}, true, nil
+}
+
+// RoaDeltas returns every ROA delta in the step as a slice. Returns
+// nil when the step carries no deltas.
+func (s *RtrClientStep) RoaDeltas() ([]RoaDelta, error) {
+	n := int(s.step.roa_delta_count)
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]RoaDelta, 0, n)
+	for i := 0; i < n; i++ {
+		d, ok, err := s.RoaDeltaAt(i)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// LogCount returns the number of diagnostic log lines the state
+// machine produced in this step.
+func (s *RtrClientStep) LogCount() int { return int(s.step.log_count) }
+
+// LogAt returns the i-th log line, or ("", false, nil) on an
+// out-of-bounds index.
+func (s *RtrClientStep) LogAt(i int) (string, bool, error) {
+	if i < 0 || i >= int(s.step.log_count) {
+		return "", false, nil
+	}
+	need := C.lr_rtr_client_step_log_at(&s.step, C.size_t(i), nil, 0)
+	if need == 0 {
+		return "", false, nil
+	}
+	buf := make([]byte, int(need)+1)
+	n := C.lr_rtr_client_step_log_at(&s.step, C.size_t(i),
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if n == 0 {
+		return "", false, nil
+	}
+	return string(buf[:int(n)]), true, nil
+}
+
+// Logs returns every diagnostic log line in the step as a slice.
+func (s *RtrClientStep) Logs() ([]string, error) {
+	n := int(s.step.log_count)
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		s, ok, err := s.LogAt(i)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// roaEntryFromC copies a C lr_roa_entry_t into a Go RoaEntry. The
+// address bytes are returned as 4 (IPv4) or 16 (IPv6) bytes.
+func roaEntryFromC(e *C.struct_lr_roa_entry_t) RoaEntry {
+	var addr []byte
+	if e.is_ipv6 == 0 {
+		addr = make([]byte, 4)
+		for i := 0; i < 4; i++ {
+			addr[i] = byte(e.addr[i])
+		}
+	} else {
+		addr = make([]byte, 16)
+		for i := 0; i < 16; i++ {
+			addr[i] = byte(e.addr[i])
+		}
+	}
+	return RoaEntry{
+		Addr:      addr,
+		PrefixLen: uint8(e.prefix_len),
+		MaxLength: uint8(e.max_length),
+		ASN:       uint32(e.asn),
+	}
+}
