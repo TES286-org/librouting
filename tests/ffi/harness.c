@@ -840,6 +840,108 @@ int main(void) {
         lr_route_free(NULL);
     }
     {
+        /* Route attribute readers (D5.4 surface, RFC 4271 §5.1 /
+         * RFC 4456 §8 / RFC 6514 §5 / RFC 7311 / RFC 9231 §4 /
+         * RFC 8966 §3.2/§4.6.9 / RFC 2328 §16 / RFC 5340 §4.1):
+         * a fresh route starts with every attribute absent; setting
+         * one attribute and reading it back exercises the full
+         * has_X / get_X matrix. */
+        const unsigned char p4[4] = {203, 0, 113, 0};
+        lr_route_t rt = lr_route_new_v4(p4, 24, LR_PROTO_BGP);
+        check(rt != NULL, "route_new_v4 for attrs");
+
+        /* ATOMIC_AGGREGATE: starts false (no attribute). */
+        uint8_t aa = 2;
+        check(lr_route_atomic_aggregate(rt, &aa) == 0 && aa == 0,
+              "atomic_aggregate absent is false");
+
+        /* ORIGINATOR_ID: absent on a fresh route. */
+        unsigned char oid[4] = {0};
+        uint8_t present = 2;
+        check(lr_route_originator_id(rt, oid, &present) == 0 && present == 0,
+              "originator_id absent is not present");
+
+        /* CLUSTER_LIST: absent on a fresh route. */
+        uint8_t hcl = 2;
+        check(lr_route_has_cluster_list(rt, &hcl) == 0 && hcl == 0,
+              "has_cluster_list absent is false");
+        uintptr_t cl_len = 99;
+        check(lr_route_cluster_list_len(rt, &cl_len) == 0 && cl_len == 0,
+              "cluster_list_len absent is 0");
+
+        /* OTC, AIGP, AGGREGATOR, PMSI_TUNNEL: absent on a fresh route. */
+        uint8_t hotc = 2, haigp = 2, hagg = 2, hpmsi = 2;
+        check(lr_route_has_otc(rt, &hotc) == 0 && hotc == 0,
+              "has_otc absent is false");
+        uint32_t otc = 99; uint8_t otc_p = 2;
+        check(lr_route_otc(rt, &otc, &otc_p) == 0 && otc_p == 0,
+              "otc absent is not present");
+        check(lr_route_has_aigp(rt, &haigp) == 0 && haigp == 0,
+              "has_aigp absent is false");
+        uint64_t aigp = 99; uint8_t aigp_p = 2;
+        check(lr_route_aigp(rt, &aigp, &aigp_p) == 0 && aigp_p == 0,
+              "aigp absent is not present");
+        check(lr_route_has_aggregator(rt, &hagg) == 0 && hagg == 0,
+              "has_aggregator absent is false");
+        uint32_t agg_asn = 99; uint8_t agg_p = 2;
+        check(lr_route_aggregator_asn(rt, &agg_asn, &agg_p) == 0 && agg_p == 0,
+              "aggregator_asn absent is not present");
+        check(lr_route_has_pmsi_tunnel(rt, &hpmsi) == 0 && hpmsi == 0,
+              "has_pmsi_tunnel absent is false");
+        uint8_t pmsi_flags = 99; uint8_t pmsi_p = 2;
+        check(lr_route_pmsi_tunnel_flags(rt, &pmsi_flags, &pmsi_p) == 0 &&
+                  pmsi_p == 0, "pmsi_tunnel_flags absent is not present");
+
+        /* AS_SEQUENCE round trip via set_as_sequence. */
+        const uint32_t seq[3] = {64512, 64513, 65001};
+        check(lr_route_set_as_sequence(rt, seq, 3) == 0, "set_as_sequence");
+        uintptr_t seq_len = 0;
+        check(lr_route_as_sequence_len(rt, &seq_len) == 0 && seq_len == 3,
+              "as_sequence_len round trip");
+        uint32_t got0 = 0;
+        check(lr_route_as_sequence_at(rt, 0, &got0) == 0 && got0 == 64512,
+              "as_sequence_at 0");
+        check(lr_route_as_sequence_at(rt, 3, &got0) == -2,
+              "as_sequence_at out-of-range is -2");
+        /* prepend_as adds at the head. */
+        check(lr_route_prepend_as(rt, 64500) == 0, "prepend_as");
+        check(lr_route_as_sequence_at(rt, 0, &got0) == 0 && got0 == 64500,
+              "as_sequence_at 0 after prepend");
+
+        /* COMMUNITIES add + remove round trip. */
+        check(lr_route_add_community(rt, 64512, 100) == 0, "add_community");
+        check(lr_route_communities(rt, NULL, 0) == 1, "communities has 1");
+        check(lr_route_remove_community(rt, 64512, 100) == 0, "remove_community");
+        check(lr_route_communities(rt, NULL, 0) == 0, "communities now empty");
+        /* remove_community is a no-op on an absent community. */
+        check(lr_route_remove_community(rt, 65000, 999) == 0,
+              "remove_community no-op on absent");
+
+        /* Babel / OSPF attributes: absent on a fresh BGP route. */
+        uint8_t hbm = 2, hbs = 2, hbr = 2;
+        check(lr_route_has_babel_metric(rt, &hbm) == 0 && hbm == 0,
+              "has_babel_metric absent is false");
+        check(lr_route_has_babel_seqno(rt, &hbs) == 0 && hbs == 0,
+              "has_babel_seqno absent is false");
+        check(lr_route_has_babel_router_id(rt, &hbr) == 0 && hbr == 0,
+              "has_babel_router_id absent is false");
+        uint8_t hom1 = 2, hom2 = 2, hot = 2, hor = 2;
+        check(lr_route_has_ospf_metric1(rt, &hom1) == 0 && hom1 == 0,
+              "has_ospf_metric1 absent is false");
+        check(lr_route_has_ospf_metric2(rt, &hom2) == 0 && hom2 == 0,
+              "has_ospf_metric2 absent is false");
+        check(lr_route_has_ospf_tag(rt, &hot) == 0 && hot == 0,
+              "has_ospf_tag absent is false");
+        check(lr_route_has_ospf_router_id(rt, &hor) == 0 && hor == 0,
+              "has_ospf_router_id absent is false");
+
+        /* NULL handle / NULL out-pointer rejection. */
+        check(lr_route_atomic_aggregate(NULL, &aa) == -1, "atomic_aggregate NULL handle");
+        check(lr_route_atomic_aggregate(rt, NULL) == -1, "atomic_aggregate NULL out");
+
+        lr_route_free(rt);
+    }
+    {
         /* Filter DSL (ROADMAP-v3 D5.2): compile, accept/reject with
          * the built-in context, ROA override through the callback
          * table, and the reject reason buffer. */
