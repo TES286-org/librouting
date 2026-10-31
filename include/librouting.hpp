@@ -2293,6 +2293,344 @@ inline BfdPacket decode_bfd_packet(const std::vector<std::uint8_t>& bytes) {
 }
 
 // =========================================================================
+// BFD AuthKey + AuthSection (RFC 5880 §4.2-§4.4) — RAII wrappers.
+// Mirrors `lr_bfd::auth::{AuthKey, AuthSection}` so an embedder that
+// owns its own BFD packet encoder can build / read / free the
+// Authentication Section and the per-key secret directly.
+// =========================================================================
+
+/// BFD auth type codes (RFC 5880 §8 IANA registry).
+/// 1 = Simple Password, 2 = Keyed MD5, 3 = Meticulous Keyed MD5,
+/// 4 = Keyed SHA1, 5 = Meticulous Keyed SHA1.
+namespace bfd_auth_type {
+constexpr std::uint8_t kSimplePassword = LR_BFD_AUTH_TYPE_SIMPLE_PASSWORD;
+constexpr std::uint8_t kKeyedMd5 = LR_BFD_AUTH_TYPE_KEYED_MD5;
+constexpr std::uint8_t kMeticulousKeyedMd5 = LR_BFD_AUTH_TYPE_METICULOUS_KEYED_MD5;
+constexpr std::uint8_t kKeyedSha1 = LR_BFD_AUTH_TYPE_KEYED_SHA1;
+constexpr std::uint8_t kMeticulousKeyedSha1 = LR_BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1;
+}  // namespace bfd_auth_type
+
+inline std::ptrdiff_t bfd_auth_type_expected_digest_len(std::uint8_t auth_type) {
+    return lr_bfd_auth_type_expected_digest_len(auth_type);
+}
+inline bool bfd_auth_type_is_keyed_hash(std::uint8_t auth_type) {
+    return lr_bfd_auth_type_is_keyed_hash(auth_type) != 0;
+}
+inline bool bfd_auth_type_is_meticulous(std::uint8_t auth_type) {
+    return lr_bfd_auth_type_is_meticulous(auth_type) != 0;
+}
+
+struct BfdAuthKeyDeleter {
+    void operator()(lr_bfd_auth_key_t k) const noexcept {
+        if (k) lr_bfd_auth_key_free(k);
+    }
+};
+
+/// RAII handle to one `lr_bfd::auth::AuthKey` — the per-key shared
+/// secret + key id pair (RFC 5880 §4.2).
+using BfdAuthKey = std::unique_ptr<OpaqueBfdAuthKey, BfdAuthKeyDeleter>;
+
+inline BfdAuthKey make_bfd_auth_key(std::uint8_t key_id, const std::uint8_t* secret, std::size_t len) {
+    auto k = lr_bfd_auth_key_new(key_id, secret, len);
+    if (!k) throw Error("lr_bfd_auth_key_new returned null");
+    return BfdAuthKey(k);
+}
+inline BfdAuthKey make_bfd_auth_key(std::uint8_t key_id, const std::vector<std::uint8_t>& secret) {
+    return make_bfd_auth_key(key_id, secret.data(), secret.size());
+}
+inline BfdAuthKey make_bfd_auth_key_simple_password(std::uint8_t key_id,
+                                                    const std::uint8_t* password,
+                                                    std::size_t len) {
+    auto k = lr_bfd_auth_key_simple_password(key_id, password, len);
+    if (!k) throw Error("lr_bfd_auth_key_simple_password returned null");
+    return BfdAuthKey(k);
+}
+inline BfdAuthKey make_bfd_auth_key_simple_password(std::uint8_t key_id,
+                                                    const std::vector<std::uint8_t>& password) {
+    return make_bfd_auth_key_simple_password(key_id, password.data(), password.size());
+}
+
+inline std::uint8_t bfd_auth_key_key_id(const BfdAuthKey& k) {
+    return lr_bfd_auth_key_key_id(k.get());
+}
+inline std::size_t bfd_auth_key_data_len(const BfdAuthKey& k) {
+    return lr_bfd_auth_key_data_len(k.get());
+}
+inline std::vector<std::uint8_t> bfd_auth_key_data(const BfdAuthKey& k) {
+    std::vector<std::uint8_t> buf(bfd_auth_key_data_len(k));
+    std::uintptr_t out_len = 0;
+    std::int32_t rc = lr_bfd_auth_key_data(k.get(), buf.data(), buf.size(), &out_len);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_auth_key_data failed: " + std::string(err ? err : "unknown"));
+    }
+    buf.resize(out_len);
+    return buf;
+}
+
+struct BfdAuthSectionDeleter {
+    void operator()(lr_bfd_auth_section_t s) const noexcept {
+        if (s) lr_bfd_auth_section_free(s);
+    }
+};
+
+/// RAII handle to one `lr_bfd::auth::AuthSection` — the wire form of
+/// the Authentication Section (RFC 5880 §4.2-§4.4).
+using BfdAuthSection = std::unique_ptr<OpaqueBfdAuthSection, BfdAuthSectionDeleter>;
+
+inline BfdAuthSection make_bfd_auth_section_simple_password(const std::uint8_t* password,
+                                                             std::size_t len,
+                                                             std::uint8_t key_id) {
+    auto s = lr_bfd_auth_section_simple_password(password, len, key_id);
+    if (!s) throw Error("lr_bfd_auth_section_simple_password returned null");
+    return BfdAuthSection(s);
+}
+inline BfdAuthSection make_bfd_auth_section_simple_password(const std::vector<std::uint8_t>& password,
+                                                             std::uint8_t key_id) {
+    return make_bfd_auth_section_simple_password(password.data(), password.size(), key_id);
+}
+
+inline BfdAuthSection make_bfd_auth_section_keyed_md5(std::uint8_t key_id,
+                                                       std::uint32_t sequence,
+                                                       const std::uint8_t* digest,
+                                                       std::size_t len) {
+    auto s = lr_bfd_auth_section_keyed_md5(key_id, sequence, digest, len);
+    if (!s) throw Error("lr_bfd_auth_section_keyed_md5 returned null");
+    return BfdAuthSection(s);
+}
+inline BfdAuthSection make_bfd_auth_section_keyed_md5(std::uint8_t key_id,
+                                                      std::uint32_t sequence,
+                                                      const std::vector<std::uint8_t>& digest) {
+    return make_bfd_auth_section_keyed_md5(key_id, sequence, digest.data(), digest.size());
+}
+
+inline BfdAuthSection make_bfd_auth_section_meticulous_keyed_md5(std::uint8_t key_id,
+                                                                 std::uint32_t sequence,
+                                                                 const std::uint8_t* digest,
+                                                                 std::size_t len) {
+    auto s = lr_bfd_auth_section_meticulous_keyed_md5(key_id, sequence, digest, len);
+    if (!s) throw Error("lr_bfd_auth_section_meticulous_keyed_md5 returned null");
+    return BfdAuthSection(s);
+}
+inline BfdAuthSection make_bfd_auth_section_meticulous_keyed_md5(std::uint8_t key_id,
+                                                                  std::uint32_t sequence,
+                                                                  const std::vector<std::uint8_t>& digest) {
+    return make_bfd_auth_section_meticulous_keyed_md5(key_id, sequence, digest.data(), digest.size());
+}
+
+inline BfdAuthSection make_bfd_auth_section_keyed_sha1(std::uint8_t key_id,
+                                                       std::uint32_t sequence,
+                                                       const std::uint8_t* digest,
+                                                       std::size_t len) {
+    auto s = lr_bfd_auth_section_keyed_sha1(key_id, sequence, digest, len);
+    if (!s) throw Error("lr_bfd_auth_section_keyed_sha1 returned null");
+    return BfdAuthSection(s);
+}
+inline BfdAuthSection make_bfd_auth_section_keyed_sha1(std::uint8_t key_id,
+                                                       std::uint32_t sequence,
+                                                       const std::vector<std::uint8_t>& digest) {
+    return make_bfd_auth_section_keyed_sha1(key_id, sequence, digest.data(), digest.size());
+}
+
+inline BfdAuthSection make_bfd_auth_section_meticulous_keyed_sha1(std::uint8_t key_id,
+                                                                   std::uint32_t sequence,
+                                                                   const std::uint8_t* digest,
+                                                                   std::size_t len) {
+    auto s = lr_bfd_auth_section_meticulous_keyed_sha1(key_id, sequence, digest, len);
+    if (!s) throw Error("lr_bfd_auth_section_meticulous_keyed_sha1 returned null");
+    return BfdAuthSection(s);
+}
+inline BfdAuthSection make_bfd_auth_section_meticulous_keyed_sha1(std::uint8_t key_id,
+                                                                  std::uint32_t sequence,
+                                                                  const std::vector<std::uint8_t>& digest) {
+    return make_bfd_auth_section_meticulous_keyed_sha1(key_id, sequence, digest.data(), digest.size());
+}
+
+inline std::uint8_t bfd_auth_section_auth_type(const BfdAuthSection& s) {
+    return lr_bfd_auth_section_auth_type(s.get());
+}
+inline std::uint8_t bfd_auth_section_key_id(const BfdAuthSection& s) {
+    return lr_bfd_auth_section_key_id(s.get());
+}
+/// Read the sequence number; returns `std::nullopt` when the section
+/// has no sequence (Simple Password / unknown types).
+inline std::optional<std::uint32_t> bfd_auth_section_sequence(const BfdAuthSection& s) {
+    std::uint32_t seq = 0;
+    std::int32_t rc = lr_bfd_auth_section_sequence(s.get(), &seq);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_auth_section_sequence failed: " + std::string(err ? err : "unknown"));
+    }
+    return rc == 1 ? std::optional<std::uint32_t>{seq} : std::nullopt;
+}
+inline std::size_t bfd_auth_section_data_len(const BfdAuthSection& s) {
+    return lr_bfd_auth_section_data_len(s.get());
+}
+inline std::vector<std::uint8_t> bfd_auth_section_data(const BfdAuthSection& s) {
+    std::vector<std::uint8_t> buf(bfd_auth_section_data_len(s));
+    std::uintptr_t out_len = 0;
+    std::int32_t rc = lr_bfd_auth_section_data(s.get(), buf.data(), buf.size(), &out_len);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_auth_section_data failed: " + std::string(err ? err : "unknown"));
+    }
+    buf.resize(out_len);
+    return buf;
+}
+inline std::size_t bfd_auth_section_wire_len(const BfdAuthSection& s) {
+    return lr_bfd_auth_section_wire_len(s.get());
+}
+
+// ---- BfdPacket auth integration (RFC 5880 §4.1 A bit) ----
+
+/// Install (or replace) the Authentication Section on a `BfdPacket`.
+/// The `BfdAuthSection` handle is *consumed* (released) — the boxed
+/// `AuthSection` is moved into the packet. Pass a default-constructed
+/// (NULL) `BfdAuthSection` to clear the auth field.
+inline void bfd_packet_set_auth(BfdPacket& p, BfdAuthSection section) {
+    lr_bfd_auth_section_t raw = section.release();
+    std::int32_t rc = lr_bfd_packet_set_auth(p.get(), raw);
+    if (rc != 0) {
+        // set_auth did not consume `raw` (NULL packet path) — re-take
+        // ownership so the deleter frees it on the way out.
+        BfdAuthSection rebound(raw);
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_set_auth failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// True when the packet carries an Authentication Section.
+inline bool bfd_packet_auth_present(const BfdPacket& p) {
+    return lr_bfd_packet_auth_present(p.get()) != 0;
+}
+
+/// Read a *copy* of the packet's Authentication Section. Returns
+/// `std::nullopt` when the packet has no auth section.
+inline std::optional<BfdAuthSection> bfd_packet_auth(const BfdPacket& p) {
+    lr_bfd_auth_section_t raw = nullptr;
+    std::int32_t rc = lr_bfd_packet_auth(p.get(), &raw);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_packet_auth failed: " + std::string(err ? err : "unknown"));
+    }
+    if (!raw) return std::nullopt;
+    return std::optional<BfdAuthSection>{BfdAuthSection(raw)};
+}
+
+// =========================================================================
+// BfdKeyedAuth (RFC 5880 §6.7 / §6.8.5) — RAII wrapper. Mirrors
+// `lr_bfd::keyed_auth::BfdKeyedAuth` plus the auth_section_for_tx /
+// sign_packet / verify_inbound entry points the embedder needs when
+// owning its own BFD packet encoder.
+// =========================================================================
+
+namespace bfd_auth_algo {
+constexpr std::int32_t kKeyedMd5 = LR_BFD_AUTH_ALGO_KEYED_MD5;
+constexpr std::int32_t kMeticulousKeyedMd5 = LR_BFD_AUTH_ALGO_METICULOUS_KEYED_MD5;
+constexpr std::int32_t kKeyedSha1 = LR_BFD_AUTH_ALGO_KEYED_SHA1;
+constexpr std::int32_t kMeticulousKeyedSha1 = LR_BFD_AUTH_ALGO_METICULOUS_KEYED_SHA1;
+}  // namespace bfd_auth_algo
+
+struct BfdKeyedAuthDeleter {
+    void operator()(lr_bfd_keyed_auth_t a) const noexcept {
+        if (a) lr_bfd_keyed_auth_free(a);
+    }
+};
+
+/// RAII handle to one `lr_bfd::keyed_auth::BfdKeyedAuth`.
+using BfdKeyedAuth = std::unique_ptr<OpaqueBfdKeyedAuth, BfdKeyedAuthDeleter>;
+
+inline BfdKeyedAuth make_bfd_keyed_auth(std::int32_t algorithm, std::uint8_t key_id,
+                                        const std::uint8_t* secret, std::size_t len) {
+    auto a = lr_bfd_keyed_auth_new(algorithm, key_id, secret, len);
+    if (!a) throw Error("lr_bfd_keyed_auth_new returned null");
+    return BfdKeyedAuth(a);
+}
+inline BfdKeyedAuth make_bfd_keyed_auth(std::int32_t algorithm, std::uint8_t key_id,
+                                        const std::vector<std::uint8_t>& secret) {
+    return make_bfd_keyed_auth(algorithm, key_id, secret.data(), secret.size());
+}
+
+inline std::uint8_t bfd_keyed_auth_key_id(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_key_id(a.get());
+}
+inline std::int32_t bfd_keyed_auth_algorithm(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_algorithm(a.get());
+}
+inline std::uint8_t bfd_keyed_auth_auth_type_value(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_auth_type_value(a.get());
+}
+inline std::size_t bfd_keyed_auth_digest_len(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_digest_len(a.get());
+}
+inline bool bfd_keyed_auth_is_meticulous(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_is_meticulous(a.get()) != 0;
+}
+inline std::uint32_t bfd_keyed_auth_xmit_seq(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_xmit_seq(a.get());
+}
+inline bool bfd_keyed_auth_rcv_auth_seq_known(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_rcv_auth_seq_known(a.get()) != 0;
+}
+inline std::uint32_t bfd_keyed_auth_rcv_auth_seq(const BfdKeyedAuth& a) {
+    return lr_bfd_keyed_auth_rcv_auth_seq(a.get());
+}
+inline void bfd_keyed_auth_advance_xmit_seq(BfdKeyedAuth& a) {
+    std::int32_t rc = lr_bfd_keyed_auth_advance_xmit_seq(a.get());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_keyed_auth_advance_xmit_seq failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// Build the wire auth section to ride the next outbound packet
+/// (RFC 5880 §6.7.3 / §6.7.4): the auth type, key ID, current
+/// transmit sequence and the shared key in the digest field.
+inline BfdAuthSection bfd_keyed_auth_auth_section_for_tx(const BfdKeyedAuth& a) {
+    auto s = lr_bfd_keyed_auth_auth_section_for_tx(a.get());
+    if (!s) throw Error("lr_bfd_keyed_auth_auth_section_for_tx returned null");
+    return BfdAuthSection(s);
+}
+
+/// Sign an encoded outbound BFD Control packet in place (RFC 5880
+/// §6.7.3 / §6.7.4). The `packet` slice MUST be the full encoded
+/// packet with the auth section's digest field carrying the shared
+/// key (as produced by `auth_section_for_tx` + `bfd_packet_encode`).
+inline void bfd_keyed_auth_sign_packet(const BfdKeyedAuth& a, std::uint8_t* packet, std::size_t len) {
+    std::int32_t rc = lr_bfd_keyed_auth_sign_packet(a.get(), packet, len);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_keyed_auth_sign_packet failed: " + std::string(err ? err : "unknown"));
+    }
+}
+inline void bfd_keyed_auth_sign_packet(const BfdKeyedAuth& a, std::vector<std::uint8_t>& packet) {
+    bfd_keyed_auth_sign_packet(a, packet.data(), packet.size());
+}
+
+/// Verify an inbound BFD Control packet against this auth state
+/// (RFC 5880 §6.7.3 / §6.7.4 anti-replay + digest check). Returns
+/// `true` when the packet authenticates and the sequence number is
+/// within the anti-replay window (the receive state is updated in
+/// place); `false` otherwise.
+inline bool bfd_keyed_auth_verify_inbound(BfdKeyedAuth& a,
+                                          const std::uint8_t* packet, std::size_t len,
+                                          const BfdAuthSection& section,
+                                          std::uint8_t detect_mult) {
+    std::int32_t rc = lr_bfd_keyed_auth_verify_inbound(a.get(), packet, len, section.get(), detect_mult);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bfd_keyed_auth_verify_inbound failed: " + std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+inline bool bfd_keyed_auth_verify_inbound(BfdKeyedAuth& a,
+                                          const std::vector<std::uint8_t>& packet,
+                                          const BfdAuthSection& section,
+                                          std::uint8_t detect_mult) {
+    return bfd_keyed_auth_verify_inbound(a, packet.data(), packet.size(), section, detect_mult);
+}
+
+// =========================================================================
 // SRv6 structured types — Sid / Locator / Srh / Behavior
 // (RFC 8754 / RFC 8986). Mirrors `lr_srv6::{Sid, Locator, Srh, Behavior}`.
 // =========================================================================
