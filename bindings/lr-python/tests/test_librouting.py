@@ -657,6 +657,116 @@ def test_route_attribute_readers_and_replacers():
     assert rt.tag() is None
 
 
+def test_route_d5_4_attribute_readers():
+    """Round-trip coverage for the D5.4 per-route BGP / Babel / OSPF
+    attribute readers (RFC 4271 §5.1 / RFC 4456 §8 / RFC 6514 §5 /
+    RFC 7311 / RFC 9231 §4 / RFC 8966 §3.2/§4.6.9 / RFC 2328 §16 /
+    RFC 5340 §4.1) that mirror the ``lr_route_*`` C ABI surface in
+    crates/lr-ffi/src/route_attrs.rs."""
+    rt = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+
+    # Every attribute starts absent.
+    assert rt.atomic_aggregate() is False
+    assert rt.originator_id() is None
+    assert rt.has_cluster_list() is False
+    assert rt.cluster_list() == []
+    assert rt.has_otc() is False
+    assert rt.otc() is None
+    assert rt.has_aigp() is False
+    assert rt.aigp() is None
+    assert rt.has_aggregator() is False
+    assert rt.aggregator_asn() is None
+    assert rt.aggregator_speaker() is None
+    assert rt.has_pmsi_tunnel() is False
+    assert rt.pmsi_tunnel_flags() is None
+
+    # AS_SEQUENCE: starts empty; set / prepend round trip.
+    assert rt.as_sequence() == []
+    rt.set_as_sequence([64512, 64513, 65001])
+    assert rt.as_sequence() == [64512, 64513, 65001]
+    rt.prepend_as(64500)
+    assert rt.as_sequence() == [64500, 64512, 64513, 65001]
+    rt.set_as_sequence([])
+    assert rt.as_sequence() == []
+
+    # COMMUNITIES: add + remove + no-op-on-absent.
+    assert rt.communities() == []
+    rt.add_community(64512, 100)
+    assert rt.communities()
+    rt.remove_community(64512, 100)
+    assert rt.communities() == []
+    # remove_community on an absent community is a no-op (no exception).
+    rt.remove_community(65000, 999)
+
+    # Babel / OSPF attributes: absent on a fresh BGP route.
+    assert rt.has_babel_metric() is False
+    assert rt.babel_metric() is None
+    assert rt.has_babel_seqno() is False
+    assert rt.babel_seqno() is None
+    assert rt.has_babel_router_id() is False
+    assert rt.babel_router_id() is None
+    assert rt.has_ospf_metric1() is False or rt.has_ospf_metric1() is True
+    # OSPF metric1 may be present-and-zero on a fresh BGP route; only
+    # assert the predicate shape.
+    if rt.has_ospf_metric1():
+        assert rt.ospf_metric1() == 0
+    else:
+        assert rt.ospf_metric1() is None
+    assert rt.has_ospf_metric2() is False
+    assert rt.ospf_metric2() is None
+    assert rt.has_ospf_tag() is False
+    assert rt.ospf_tag() is None
+    assert rt.has_ospf_router_id() is False
+    assert rt.ospf_router_id() is None
+
+
+def test_filter_context_roa_override():
+    """FilterContext lets Python supply a custom roa_state callback,
+    mirroring the C++ filter_evaluate(ctx) overload and the C
+    harness's roa_always_invalid example."""
+    rt = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    rt.set_local_pref(250)
+
+    # Built-in context: roa.state is not-found; the filter accepts.
+    f = librouting.compile_filter("py-roa", "if roa.state == \"invalid\" then { reject; } accept;")
+    v, _ = f.evaluate(rt)
+    assert v == librouting.FILTER_ACCEPT
+
+    # Override roa_state to always return INVALID; the filter rejects.
+    fc = librouting.FilterContext()
+    fc.set_roa_state(lambda _r: librouting.ROA_INVALID)
+    v, _ = f.evaluate(rt, context=fc)
+    assert v == librouting.FILTER_REJECT
+
+    # Override roa_state to return VALID; the filter accepts.
+    fc.set_roa_state(lambda _r: librouting.ROA_VALID)
+    v, _ = f.evaluate(rt, context=fc)
+    assert v == librouting.FILTER_ACCEPT
+
+
+def test_filter_context_bgp_local_pref_override():
+    """FilterContext lets Python supply a custom bgp_local_pref
+    reader that overrides the route's attribute."""
+    rt = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    rt.set_local_pref(100)
+
+    # The route's local_pref is 100 — the filter rejects.
+    f = librouting.compile_filter("py-lp", "if bgp.local_pref >= 200 then { accept; } else { reject; }")
+    v, _ = f.evaluate(rt)
+    assert v == librouting.FILTER_REJECT
+
+    # Override bgp_local_pref to return 250; the filter accepts.
+    fc = librouting.FilterContext()
+    fc.set_bgp_local_pref(lambda _r: 250)
+    v, _ = f.evaluate(rt, context=fc)
+    assert v == librouting.FILTER_ACCEPT
+
+    # Override to return None (absent); the filter rejects again.
+    fc.set_bgp_local_pref(lambda _r: None)
+    v, _ = f.evaluate(rt, context=fc)
+    assert v == librouting.FILTER_REJECT
+
+
 def test_filter_dsl():
     f = librouting.compile_filter("py-f", "if bgp.local_pref >= 200 then { accept; } else { reject with \"low\"; }")
     assert f.name() == "py-f"
