@@ -4343,13 +4343,24 @@ typedef struct OpaqueRtrClient *lr_rtr_client_t;
  * One `ClientStep` projection — what the embedder should do after
  * one protocol step. The `send_bytes` field carries the wire bytes
  * to transmit (NULL `lr_bytes_t` when empty); `roa_deltas` carries
- * the atomic ROA deltas at End of Data; the boolean flags surface
- * `synced` / `drop` / `expired`.
+ * the atomic ROA deltas at End of Data; `logs` carries the
+ * diagnostic log lines the state machine produced; the boolean
+ * flags surface `synced` / `drop` / `expired`.
+ *
+ * # Ownership
+ *
+ * `send_bytes`, `roa_deltas` and `logs` are caller-owned. Free
+ * them all with a single [`lr_rtr_client_step_free`] call. The
+ * accessor [`lr_rtr_client_step_roa_delta_at`] and
+ * [`lr_rtr_client_step_log_at`] borrow the arrays in place — they
+ * do not allocate, and the arrays they read from stay owned by the
+ * step until [`lr_rtr_client_step_free`] runs.
  */
 typedef struct lr_rtr_client_step_t {
   /**
-   * Wire bytes to transmit (zero or more complete PDUs). NULL when
-   * empty — caller must call `lr_bytes_free` to release.
+   * Wire bytes to transmit (zero or more complete PDUs). NULL
+   * `ptr` means empty — caller must call [`crate::bytes::lr_bytes_free`]
+   * (or [`lr_rtr_client_step_free`]) to release.
    */
   struct lr_bytes_t send_bytes;
   /**
@@ -4373,6 +4384,19 @@ typedef struct lr_rtr_client_step_t {
    * Number of diagnostic log lines in this step.
    */
   uintptr_t log_count;
+  /**
+   * Owned flat array of `roa_delta_count` [`lr_roa_delta_t`]
+   * values. NULL when `roa_delta_count == 0`. Freed by
+   * [`lr_rtr_client_step_free`].
+   */
+  struct lr_roa_delta_t *roa_deltas;
+  /**
+   * Owned array of `log_count` NUL-terminated C strings. NULL
+   * when `log_count == 0`. Each entry is a heap `CString`; the
+   * array and every entry are freed by
+   * [`lr_rtr_client_step_free`].
+   */
+  char **logs;
 } lr_rtr_client_step_t;
 
 /**
@@ -17839,6 +17863,54 @@ int32_t lr_rtr_client_on_pdu_raw(lr_rtr_client_t c,
 uintptr_t lr_rtr_client_snapshot(lr_rtr_client_t c,
                                  struct lr_roa_entry_t *out_entries,
                                  uintptr_t cap);
+
+/**
+ * Reclaim one delta entry by index. Copies the value into `*out`.
+ * Returns `0` on success, `LR_ERR_NULL` (-1) on a NULL `step` or
+ * `out`, `LR_ERR_INVALID_HANDLE` (-2) on an out-of-bounds index.
+ *
+ * # Safety
+ * `step` must point to a `lr_rtr_client_step_t` returned by
+ * [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+ * yet freed. `out` must point to a writable `lr_roa_delta_t`.
+ */
+int32_t lr_rtr_client_step_roa_delta_at(const struct lr_rtr_client_step_t *step,
+                                        uintptr_t index,
+                                        struct lr_roa_delta_t *out);
+
+/**
+ * Read one log line by index into `out_buf` (NUL-terminated).
+ * Returns the length needed (excluding the NUL) — call with
+ * `cap=0` to size. `0` is also returned on a NULL `step` or
+ * out-of-bounds index (callers must check `log_count` first
+ * when they need to disambiguate).
+ *
+ * # Safety
+ * `step` must point to a `lr_rtr_client_step_t` returned by
+ * [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+ * yet freed. `out_buf` must point to writable bytes (NULL only
+ * when `cap == 0`).
+ */
+uintptr_t lr_rtr_client_step_log_at(const struct lr_rtr_client_step_t *step,
+                                    uintptr_t index,
+                                    uint8_t *out_buf,
+                                    uintptr_t cap);
+
+/**
+ * Free every owned field of a `lr_rtr_client_step_t`: the
+ * `send_bytes`, the `roa_deltas` array and the `logs` array
+ * (including every C string inside it). Safe to call with NULL.
+ * After this returns, the step's pointer fields are NULL and the
+ * counts are zero — the embedder may let the step go out of scope
+ * without further cleanup.
+ *
+ * # Safety
+ * `step` must point to a `lr_rtr_client_step_t` returned by
+ * [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+ * already freed. Calling this twice on the same step is a
+ * use-after-free.
+ */
+void lr_rtr_client_step_free(struct lr_rtr_client_step_t *step);
 
 /**
  * Encode `pdu` at protocol `version` and write the wire bytes to

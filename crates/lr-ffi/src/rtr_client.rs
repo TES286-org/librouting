@@ -14,11 +14,22 @@
 //! through `lr_rtr_client_on_pdu_raw` (decode + on_pdu in one
 //! call, returning the `ClientStep` projection).
 //!
+//! `lr_rtr_client_step_t` carries the step's `send_bytes`,
+//! `roa_deltas` array and `logs` array inline; the embedder frees
+//! all three with a single [`lr_rtr_client_step_free`] call (or
+//! by freeing `send_bytes` with [`crate::bytes::lr_bytes_free`]
+//! and leaving the deltas/logs arrays to be reclaimed at process
+//! exit, but the helper is the canonical path).
+//!
 //! Every entry point runs inside the crate's `catch_unwind` barrier
 //! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
 //! thread-local last-error string.
 
+#![allow(unsafe_code)]
 #![allow(unused_unsafe)]
+
+use std::ffi::CString;
+use std::os::raw::c_char;
 
 use lr_bgp::rtr::client::{ClientStep, RtrClient};
 use lr_bgp::rtr::pdu::decode as decode_pdu;
@@ -26,7 +37,7 @@ use lr_bgp::rtr::pdu::decode as decode_pdu;
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
 use crate::handle::lr_bytes_t;
-use crate::roa_store::lr_roa_entry_t;
+use crate::roa_store::{lr_roa_delta_t, lr_roa_entry_t};
 
 const LR_ERR_NULL: i32 = LrError::Null as i32;
 
@@ -62,12 +73,23 @@ unsafe fn unbox_client(c: lr_rtr_client_t) -> Option<Box<RtrClient>> {
 /// One `ClientStep` projection — what the embedder should do after
 /// one protocol step. The `send_bytes` field carries the wire bytes
 /// to transmit (NULL `lr_bytes_t` when empty); `roa_deltas` carries
-/// the atomic ROA deltas at End of Data; the boolean flags surface
-/// `synced` / `drop` / `expired`.
+/// the atomic ROA deltas at End of Data; `logs` carries the
+/// diagnostic log lines the state machine produced; the boolean
+/// flags surface `synced` / `drop` / `expired`.
+///
+/// # Ownership
+///
+/// `send_bytes`, `roa_deltas` and `logs` are caller-owned. Free
+/// them all with a single [`lr_rtr_client_step_free`] call. The
+/// accessor [`lr_rtr_client_step_roa_delta_at`] and
+/// [`lr_rtr_client_step_log_at`] borrow the arrays in place — they
+/// do not allocate, and the arrays they read from stay owned by the
+/// step until [`lr_rtr_client_step_free`] runs.
 #[repr(C)]
 pub struct lr_rtr_client_step_t {
-    /// Wire bytes to transmit (zero or more complete PDUs). NULL when
-    /// empty — caller must call `lr_bytes_free` to release.
+    /// Wire bytes to transmit (zero or more complete PDUs). NULL
+    /// `ptr` means empty — caller must call [`crate::bytes::lr_bytes_free`]
+    /// (or [`lr_rtr_client_step_free`]) to release.
     pub send_bytes: lr_bytes_t,
     /// 1 when this step completed a sync (End of Data processed).
     pub synced: u8,
@@ -80,6 +102,15 @@ pub struct lr_rtr_client_step_t {
     pub roa_delta_count: usize,
     /// Number of diagnostic log lines in this step.
     pub log_count: usize,
+    /// Owned flat array of `roa_delta_count` [`lr_roa_delta_t`]
+    /// values. NULL when `roa_delta_count == 0`. Freed by
+    /// [`lr_rtr_client_step_free`].
+    pub roa_deltas: *mut lr_roa_delta_t,
+    /// Owned array of `log_count` NUL-terminated C strings. NULL
+    /// when `log_count == 0`. Each entry is a heap `CString`; the
+    /// array and every entry are freed by
+    /// [`lr_rtr_client_step_free`].
+    pub logs: *mut *mut c_char,
 }
 
 impl Default for lr_rtr_client_step_t {
@@ -95,6 +126,8 @@ impl Default for lr_rtr_client_step_t {
             expired: 0,
             roa_delta_count: 0,
             log_count: 0,
+            roa_deltas: std::ptr::null_mut(),
+            logs: std::ptr::null_mut(),
         }
     }
 }
@@ -450,14 +483,190 @@ fn roa_entry_to_c(e: &lr_bgp::roa::RoaEntry) -> lr_roa_entry_t {
 }
 
 fn step_to_c(step: ClientStep) -> lr_rtr_client_step_t {
+    // Project the Rust `Vec<RoaDelta>` into a flat C array. The
+    // array is owned by the step and freed by
+    // `lr_rtr_client_step_free`. Using `into_boxed_slice` shrinks
+    // the allocation to the exact count, so the free path can
+    // reconstruct it via `slice_from_raw_parts_mut(ptr, count)`.
+    let roa_delta_count = step.roa_deltas.len();
+    let roa_deltas_ptr = if roa_delta_count == 0 {
+        std::ptr::null_mut()
+    } else {
+        let c_deltas: Vec<lr_roa_delta_t> = step
+            .roa_deltas
+            .iter()
+            .map(|d| lr_roa_delta_t {
+                announce: u8::from(d.announce),
+                entry: roa_entry_to_c(&d.entry),
+            })
+            .collect();
+        let boxed: Box<[lr_roa_delta_t]> = c_deltas.into_boxed_slice();
+        Box::into_raw(boxed) as *mut lr_roa_delta_t
+    };
+
+    // Project the Rust `Vec<String>` into a C array of NUL-terminated
+    // strings. Interior NUL bytes are replaced with U+FFFD so
+    // `CString::new` cannot fail (the replacement keeps the log
+    // readable from C; the original Rust `String` is preserved on
+    // the Rust side and round-trips through tracing unchanged).
+    let log_count = step.logs.len();
+    let logs_ptr = if log_count == 0 {
+        std::ptr::null_mut()
+    } else {
+        let c_logs: Vec<*mut c_char> = step
+            .logs
+            .iter()
+            .map(|s| {
+                let cleaned: String = s
+                    .chars()
+                    .map(|c| if c == '\0' { '\u{FFFD}' } else { c })
+                    .collect();
+                CString::new(cleaned)
+                    .unwrap_or_else(|_| CString::new("").unwrap())
+                    .into_raw()
+            })
+            .collect();
+        let boxed: Box<[*mut c_char]> = c_logs.into_boxed_slice();
+        Box::into_raw(boxed) as *mut *mut c_char
+    };
+
     lr_rtr_client_step_t {
         send_bytes: lr_bytes_t::from_vec(step.send),
         synced: step.synced as u8,
         drop: step.drop as u8,
         expired: step.expired as u8,
-        roa_delta_count: step.roa_deltas.len(),
-        log_count: step.logs.len(),
+        roa_delta_count,
+        log_count,
+        roa_deltas: roa_deltas_ptr,
+        logs: logs_ptr,
     }
+}
+
+/// Reclaim one delta entry by index. Copies the value into `*out`.
+/// Returns `0` on success, `LR_ERR_NULL` (-1) on a NULL `step` or
+/// `out`, `LR_ERR_INVALID_HANDLE` (-2) on an out-of-bounds index.
+///
+/// # Safety
+/// `step` must point to a `lr_rtr_client_step_t` returned by
+/// [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+/// yet freed. `out` must point to a writable `lr_roa_delta_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_rtr_client_step_roa_delta_at(
+    step: *const lr_rtr_client_step_t,
+    index: usize,
+    out: *mut lr_roa_delta_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if step.is_null() || out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let s = &*step;
+            if index >= s.roa_delta_count || s.roa_deltas.is_null() {
+                return LrError::InvalidHandle as i32;
+            }
+            *out = *s.roa_deltas.add(index);
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read one log line by index into `out_buf` (NUL-terminated).
+/// Returns the length needed (excluding the NUL) — call with
+/// `cap=0` to size. `0` is also returned on a NULL `step` or
+/// out-of-bounds index (callers must check `log_count` first
+/// when they need to disambiguate).
+///
+/// # Safety
+/// `step` must point to a `lr_rtr_client_step_t` returned by
+/// [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+/// yet freed. `out_buf` must point to writable bytes (NULL only
+/// when `cap == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn lr_rtr_client_step_log_at(
+    step: *const lr_rtr_client_step_t,
+    index: usize,
+    out_buf: *mut u8,
+    cap: usize,
+) -> usize {
+    guarded(
+        || unsafe {
+            if step.is_null() {
+                return 0;
+            }
+            let s = &*step;
+            if index >= s.log_count || s.logs.is_null() {
+                return 0;
+            }
+            let p = *s.logs.add(index);
+            if p.is_null() {
+                return 0;
+            }
+            // CStr::from_ptr is safe here because we allocated with
+            // CString::into_raw, which guarantees a NUL terminator.
+            let bytes = std::ffi::CStr::from_ptr(p).to_bytes();
+            let n = bytes.len();
+            if out_buf.is_null() || cap == 0 {
+                return n;
+            }
+            let to_copy = n.min(cap - 1);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, to_copy);
+            *out_buf.add(to_copy) = 0; // NUL-terminate
+            n
+        },
+        0,
+    )
+}
+
+/// Free every owned field of a `lr_rtr_client_step_t`: the
+/// `send_bytes`, the `roa_deltas` array and the `logs` array
+/// (including every C string inside it). Safe to call with NULL.
+/// After this returns, the step's pointer fields are NULL and the
+/// counts are zero — the embedder may let the step go out of scope
+/// without further cleanup.
+///
+/// # Safety
+/// `step` must point to a `lr_rtr_client_step_t` returned by
+/// [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+/// already freed. Calling this twice on the same step is a
+/// use-after-free.
+#[no_mangle]
+pub unsafe extern "C" fn lr_rtr_client_step_free(step: *mut lr_rtr_client_step_t) {
+    guarded(
+        || unsafe {
+            if step.is_null() {
+                return;
+            }
+            let s = &mut *step;
+            // send_bytes — always reclaim through the bytes surface.
+            crate::bytes::lr_bytes_free(&raw mut s.send_bytes);
+            // roa_deltas — reconstruct the boxed slice from the
+            // thin pointer + count, then drop it.
+            if !s.roa_deltas.is_null() && s.roa_delta_count > 0 {
+                let slice_ptr = std::ptr::slice_from_raw_parts_mut(s.roa_deltas, s.roa_delta_count);
+                let boxed: Box<[lr_roa_delta_t]> = Box::from_raw(slice_ptr);
+                drop(boxed);
+            }
+            s.roa_deltas = std::ptr::null_mut();
+            s.roa_delta_count = 0;
+            // logs — drop every CString, then drop the array.
+            if !s.logs.is_null() && s.log_count > 0 {
+                let slice_ptr = std::ptr::slice_from_raw_parts_mut(s.logs, s.log_count);
+                let boxed: Box<[*mut c_char]> = Box::from_raw(slice_ptr);
+                for p in boxed.iter() {
+                    if !p.is_null() {
+                        // CString::from_raw reclaims the allocation.
+                        drop(CString::from_raw(*p));
+                    }
+                }
+                drop(boxed);
+            }
+            s.logs = std::ptr::null_mut();
+            s.log_count = 0;
+        },
+        (),
+    )
 }
 
 #[cfg(test)]
@@ -574,13 +783,172 @@ mod tests {
         assert_eq!(step.synced, 0);
         assert_eq!(step.expired, 0);
         assert_eq!(step.roa_delta_count, 0);
+        assert_eq!(step.log_count, 0);
+        assert!(step.roa_deltas.is_null());
+        assert!(step.logs.is_null());
         // send_bytes is empty (length 0; the ptr may be the Vec's
         // dangling pointer for an empty Vec, so check len not ptr).
         assert_eq!(step.send_bytes.len, 0);
         // The caller is responsible for freeing — even an empty
-        // bytes handle must go through lr_bytes_free.
-        unsafe { crate::bytes::lr_bytes_free(&raw mut step.send_bytes) };
+        // bytes handle must go through lr_bytes_free. The helper
+        // also clears the deltas/logs arrays.
+        unsafe { lr_rtr_client_step_free(&raw mut step) };
+        assert!(step.roa_deltas.is_null());
+        assert!(step.logs.is_null());
+        assert_eq!(step.send_bytes.len, 0);
         unsafe { lr_rtr_client_free(c) };
+    }
+
+    /// Drive one full sync via `lr_rtr_client_on_pdu_raw` and confirm
+    /// the step's `roa_deltas` array surfaces every record the cache
+    /// announced. End-of-Data with session 0x00ff / serial 5 carries
+    /// two announced IPv4 Prefix PDUs (RFC 8210 §5.6 / §5.7).
+    #[test]
+    fn ffi_rtr_client_step_roa_deltas_after_full_sync() {
+        use lr_bgp::rtr::pdu::{encode_vec, RtrPdu, RTR_VERSION_1};
+        let c = lr_rtr_client_new();
+        // 1) Feed a Cache Response.
+        let cr = RtrPdu::CacheResponse { session_id: 0x00ff };
+        let wire_cr = encode_vec(&cr, RTR_VERSION_1);
+        let mut step = lr_rtr_client_step_t::default();
+        let rc = unsafe {
+            lr_rtr_client_on_pdu_raw(c, wire_cr.as_ptr(), wire_cr.len(), 1_000, &raw mut step)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(step.roa_delta_count, 0);
+        unsafe { lr_rtr_client_step_free(&raw mut step) };
+
+        // 2) Feed two IPv4 Prefix PDUs (announced).
+        let a = RtrPdu::Ipv4Prefix {
+            announce: true,
+            prefix: lr_core::addr::Prefix::new_v4([192, 0, 2, 0], 24),
+            max_length: 24,
+            asn: 64512,
+        };
+        let b = RtrPdu::Ipv4Prefix {
+            announce: true,
+            prefix: lr_core::addr::Prefix::new_v4([198, 51, 100, 0], 24),
+            max_length: 24,
+            asn: 64513,
+        };
+        for pdu in [&a, &b] {
+            let wire = encode_vec(pdu, RTR_VERSION_1);
+            let rc = unsafe {
+                lr_rtr_client_on_pdu_raw(c, wire.as_ptr(), wire.len(), 1_000, &raw mut step)
+            };
+            assert_eq!(rc, 0);
+            assert_eq!(step.roa_delta_count, 0);
+            unsafe { lr_rtr_client_step_free(&raw mut step) };
+        }
+
+        // 3) Feed End-of-Data — the step the FFI surface returns now
+        // carries the two ROA deltas. `diff_records` iterates a
+        // HashSet, so the order is not guaranteed — collect both
+        // and check the entries are the two we announced (in any
+        // order).
+        let eod = RtrPdu::EndOfData {
+            session_id: 0x00ff,
+            serial: 5,
+            refresh_interval: Some(60),
+            retry_interval: Some(30),
+            expire_interval: Some(600),
+        };
+        let wire_eod = encode_vec(&eod, RTR_VERSION_1);
+        let rc = unsafe {
+            lr_rtr_client_on_pdu_raw(c, wire_eod.as_ptr(), wire_eod.len(), 1_000, &raw mut step)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(step.synced, 1);
+        assert_eq!(step.roa_delta_count, 2);
+
+        let mut seen_a = false;
+        let mut seen_b = false;
+        for i in 0..step.roa_delta_count {
+            let mut d = lr_roa_delta_t {
+                announce: 0,
+                entry: lr_roa_entry_t {
+                    addr: [0u8; 16],
+                    is_ipv6: 0,
+                    prefix_len: 0,
+                    max_length: 0,
+                    asn: 0,
+                },
+            };
+            let rc = unsafe { lr_rtr_client_step_roa_delta_at(&raw const step, i, &raw mut d) };
+            assert_eq!(rc, 0);
+            assert_eq!(d.announce, 1);
+            assert_eq!(d.entry.prefix_len, 24);
+            assert_eq!(d.entry.max_length, 24);
+            match &d.entry.addr[..4] {
+                [192, 0, 2, 0] => {
+                    assert_eq!(d.entry.asn, 64512);
+                    seen_a = true;
+                }
+                [198, 51, 100, 0] => {
+                    assert_eq!(d.entry.asn, 64513);
+                    seen_b = true;
+                }
+                other => panic!("unexpected delta entry addr: {other:?}"),
+            }
+        }
+        assert!(seen_a, "delta for 192.0.2.0/24 missing from step");
+        assert!(seen_b, "delta for 198.51.100.0/24 missing from step");
+
+        // Out-of-bounds returns -2 (LR_ERR_INVALID_HANDLE).
+        let mut d0 = lr_roa_delta_t {
+            announce: 0,
+            entry: lr_roa_entry_t {
+                addr: [0u8; 16],
+                is_ipv6: 0,
+                prefix_len: 0,
+                max_length: 0,
+                asn: 0,
+            },
+        };
+        let rc = unsafe { lr_rtr_client_step_roa_delta_at(&raw const step, 2, &raw mut d0) };
+        assert_eq!(rc, LrError::InvalidHandle as i32);
+
+        // NULL step or out returns -1 (LR_ERR_NULL).
+        let rc = unsafe { lr_rtr_client_step_roa_delta_at(std::ptr::null(), 0, &raw mut d0) };
+        assert_eq!(rc, LR_ERR_NULL);
+        let rc =
+            unsafe { lr_rtr_client_step_roa_delta_at(&raw const step, 0, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
+
+        unsafe { lr_rtr_client_step_free(&raw mut step) };
+        // After free, the arrays are NULL and the counts are zero.
+        assert!(step.roa_deltas.is_null());
+        assert!(step.logs.is_null());
+        assert_eq!(step.roa_delta_count, 0);
+        assert_eq!(step.log_count, 0);
+        unsafe { lr_rtr_client_free(c) };
+    }
+
+    /// `lr_rtr_client_step_log_at` mirrors the count -> sized-buffer
+    /// pattern that the rest of the C ABI uses for strings. A step
+    /// whose `log_count` is zero has a NULL `logs` pointer and the
+    /// accessor returns 0.
+    #[test]
+    fn ffi_rtr_client_step_log_at_on_empty_step() {
+        let c = lr_rtr_client_new();
+        let mut step = lr_rtr_client_step_t::default();
+        let rc = unsafe { lr_rtr_client_poll(c, 0, &raw mut step) };
+        assert_eq!(rc, 0);
+        assert_eq!(step.log_count, 0);
+        // Calling the accessor with an out-of-bounds index returns 0.
+        let n = unsafe { lr_rtr_client_step_log_at(&raw const step, 0, std::ptr::null_mut(), 0) };
+        assert_eq!(n, 0);
+        // NULL step returns 0.
+        let n = unsafe { lr_rtr_client_step_log_at(std::ptr::null(), 0, std::ptr::null_mut(), 0) };
+        assert_eq!(n, 0);
+        unsafe { lr_rtr_client_step_free(&raw mut step) };
+        unsafe { lr_rtr_client_free(c) };
+    }
+
+    /// `lr_rtr_client_step_free` is safe to call with NULL.
+    #[test]
+    fn ffi_rtr_client_step_free_null_safely() {
+        unsafe { lr_rtr_client_step_free(std::ptr::null_mut()) };
     }
 
     // The unused-import suppressor: keep a no-op so the test module
