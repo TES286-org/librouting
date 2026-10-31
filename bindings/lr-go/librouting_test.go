@@ -985,6 +985,142 @@ func TestRouteAttributeReadersAndReplacers(t *testing.T) {
 	}
 }
 
+func TestRouteD5_4AttributeReaders(t *testing.T) {
+	// Round-trip coverage for the D5.4 per-route BGP / Babel /
+	// OSPF attribute readers (RFC 4271 §5.1 / RFC 4456 §8 /
+	// RFC 6514 §5 / RFC 7311 / RFC 9231 §4 / RFC 8966 §3.2/§4.6.9 /
+	// RFC 2328 §16 / RFC 5340 §4.1) that mirror the lr_route_* C
+	// ABI surface in crates/lr-ffi/src/route_attrs.rs.
+	rt, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV4: %v", err)
+	}
+	defer rt.Free()
+
+	// Every attribute starts absent.
+	if v, err := rt.AtomicAggregate(); err != nil || v {
+		t.Fatalf("AtomicAggregate default: got (%v, %v), want (false, nil)", v, err)
+	}
+	if _, ok, err := rt.OriginatorID(); err != nil || ok {
+		t.Fatalf("OriginatorID default: ok=%v, err=%v, want (false, nil)", ok, err)
+	}
+	if v, err := rt.HasClusterList(); err != nil || v {
+		t.Fatalf("HasClusterList default: got (%v, %v), want (false, nil)", v, err)
+	}
+	if cl, err := rt.ClusterList(); err != nil || len(cl) != 0 {
+		t.Fatalf("ClusterList default: got (%v, %v), want ([], nil)", cl, err)
+	}
+	if v, err := rt.HasOtc(); err != nil || v {
+		t.Fatalf("HasOtc default: got (%v, %v), want (false, nil)", v, err)
+	}
+	if _, ok, err := rt.Otc(); err != nil || ok {
+		t.Fatalf("Otc default: ok=%v, err=%v, want (false, nil)", ok, err)
+	}
+	if v, err := rt.HasAigp(); err != nil || v {
+		t.Fatalf("HasAigp default: got (%v, %v), want (false, nil)", v, err)
+	}
+	if _, ok, err := rt.Aigp(); err != nil || ok {
+		t.Fatalf("Aigp default: ok=%v, err=%v, want (false, nil)", ok, err)
+	}
+	if v, err := rt.HasAggregator(); err != nil || v {
+		t.Fatalf("HasAggregator default: got (%v, %v), want (false, nil)", v, err)
+	}
+	if _, ok, err := rt.AggregatorAsn(); err != nil || ok {
+		t.Fatalf("AggregatorAsn default: ok=%v, err=%v, want (false, nil)", ok, err)
+	}
+	if _, ok, err := rt.AggregatorSpeaker(); err != nil || ok {
+		t.Fatalf("AggregatorSpeaker default: ok=%v, err=%v, want (false, nil)", ok, err)
+	}
+	if v, err := rt.HasPmsiTunnel(); err != nil || v {
+		t.Fatalf("HasPmsiTunnel default: got (%v, %v), want (false, nil)", v, err)
+	}
+	if _, ok, err := rt.PmsiTunnelFlags(); err != nil || ok {
+		t.Fatalf("PmsiTunnelFlags default: ok=%v, err=%v, want (false, nil)", ok, err)
+	}
+
+	// AS_SEQUENCE: starts empty; set / prepend round trip.
+	if s, err := rt.AsSequence(); err != nil || len(s) != 0 {
+		t.Fatalf("AsSequence default: got (%v, %v), want ([], nil)", s, err)
+	}
+	if err := rt.SetAsSequence([]uint32{64512, 64513, 65001}); err != nil {
+		t.Fatalf("SetAsSequence: %v", err)
+	}
+	if s, err := rt.AsSequence(); err != nil || len(s) != 3 || s[0] != 64512 || s[2] != 65001 {
+		t.Fatalf("AsSequence after set: got (%v, %v)", s, err)
+	}
+	if err := rt.PrependAs(64500); err != nil {
+		t.Fatalf("PrependAs: %v", err)
+	}
+	if s, err := rt.AsSequence(); err != nil || len(s) != 4 || s[0] != 64500 || s[1] != 64512 {
+		t.Fatalf("AsSequence after prepend: got (%v, %v)", s, err)
+	}
+	if err := rt.SetAsSequence(nil); err != nil {
+		t.Fatalf("SetAsSequence(nil): %v", err)
+	}
+	if s, err := rt.AsSequence(); err != nil || len(s) != 0 {
+		t.Fatalf("AsSequence after drop: got (%v, %v)", s, err)
+	}
+
+	// COMMUNITIES: add + remove + no-op-on-absent.
+	if c, err := rt.Communities(); err != nil || len(c) != 0 {
+		t.Fatalf("Communities default: got (%v, %v)", c, err)
+	}
+	if err := rt.AddCommunity(64512, 100); err != nil {
+		t.Fatalf("AddCommunity: %v", err)
+	}
+	if c, err := rt.Communities(); err != nil || len(c) != 1 {
+		t.Fatalf("Communities after add: got (%v, %v)", c, err)
+	}
+	if err := rt.RemoveCommunity(64512, 100); err != nil {
+		t.Fatalf("RemoveCommunity: %v", err)
+	}
+	if c, err := rt.Communities(); err != nil || len(c) != 0 {
+		t.Fatalf("Communities after remove: got (%v, %v)", c, err)
+	}
+	// remove_community on an absent community is a no-op.
+	if err := rt.RemoveCommunity(65000, 999); err != nil {
+		t.Fatalf("RemoveCommunity absent: %v", err)
+	}
+
+	// Babel / OSPF attributes: absent on a fresh BGP route.
+	if v, err := rt.HasBabelMetric(); err != nil || v {
+		t.Fatalf("HasBabelMetric default: got (%v, %v)", v, err)
+	}
+	if _, ok, err := rt.BabelMetric(); err != nil || ok {
+		t.Fatalf("BabelMetric default: ok=%v, err=%v", ok, err)
+	}
+	if v, err := rt.HasBabelSeqno(); err != nil || v {
+		t.Fatalf("HasBabelSeqno default: got (%v, %v)", v, err)
+	}
+	if _, ok, err := rt.BabelSeqno(); err != nil || ok {
+		t.Fatalf("BabelSeqno default: ok=%v, err=%v", ok, err)
+	}
+	if v, err := rt.HasBabelRouterID(); err != nil || v {
+		t.Fatalf("HasBabelRouterID default: got (%v, %v)", v, err)
+	}
+	if _, ok, err := rt.BabelRouterID(); err != nil || ok {
+		t.Fatalf("BabelRouterID default: ok=%v, err=%v", ok, err)
+	}
+	if v, err := rt.HasOspfMetric2(); err != nil || v {
+		t.Fatalf("HasOspfMetric2 default: got (%v, %v)", v, err)
+	}
+	if _, ok, err := rt.OspfMetric2(); err != nil || ok {
+		t.Fatalf("OspfMetric2 default: ok=%v, err=%v", ok, err)
+	}
+	if v, err := rt.HasOspfTag(); err != nil || v {
+		t.Fatalf("HasOspfTag default: got (%v, %v)", v, err)
+	}
+	if _, ok, err := rt.OspfTag(); err != nil || ok {
+		t.Fatalf("OspfTag default: ok=%v, err=%v", ok, err)
+	}
+	if v, err := rt.HasOspfRouterID(); err != nil || v {
+		t.Fatalf("HasOspfRouterID default: got (%v, %v)", v, err)
+	}
+	if _, ok, err := rt.OspfRouterID(); err != nil || ok {
+		t.Fatalf("OspfRouterID default: ok=%v, err=%v", ok, err)
+	}
+}
+
 func TestFilterDSL(t *testing.T) {
 	f, err := Compile("go-f", "if bgp.local_pref >= 200 then { accept; } else { reject with \"low\"; }")
 	if err != nil {
@@ -2100,7 +2236,7 @@ func TestSessionCountZeroOnNewRouter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	n, err := r.SessionCount()
 	if err != nil {
 		t.Fatalf("SessionCount: %v", err)
@@ -2122,7 +2258,7 @@ func TestSessionSummaryAtOutOfRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	if _, err := r.SessionSummaryAt(0); err == nil {
 		t.Fatal("expected error on out-of-range index")
 	}
@@ -2133,7 +2269,7 @@ func TestSessionSummariesAfterBGPSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	h, err := r.AddBGPSession(64512, 64513, 0x0a000001, 90, 0, true)
 	if err != nil {
 		t.Fatalf("AddBGPSession: %v", err)
@@ -2168,7 +2304,7 @@ func TestOspfAreaIDsAfterOspfSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	if _, err := r.AddOSPFSession(0x01020304, 0); err != nil {
 		t.Fatalf("AddOSPFSession: %v", err)
 	}
@@ -2186,7 +2322,7 @@ func TestOspfAreaTopologyVersionUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	if _, err := r.OspfAreaTopologyVersion(99); err == nil {
 		t.Fatal("expected error on unknown area")
 	}
@@ -2197,7 +2333,7 @@ func TestOspfAreaLsaUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	if _, err := r.OspfAreaLsa(0, 1, 1, 1); err == nil {
 		t.Fatal("expected error on unknown LSA")
 	}
@@ -2208,7 +2344,7 @@ func TestBgpSessionIdentityHashIsUint64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	h, err := r.BgpSessionIdentityHash()
 	if err != nil {
 		t.Fatalf("BgpSessionIdentityHash: %v", err)
@@ -2223,7 +2359,7 @@ func TestDrainOspfGraceEventsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	
+
 	events, err := r.DrainOspfGraceEvents(32)
 	if err != nil {
 		t.Fatalf("DrainOspfGraceEvents: %v", err)
