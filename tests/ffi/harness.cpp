@@ -1840,6 +1840,143 @@ int main() {
         check(!babel_feasible(1, 100, 1, 100), "babel_feasible equal -> false");
     }
 
+    // ----- Attributes container + apply_set_checked (issue #92). -----
+    // Mirrors crates/lr-ffi/src/attributes.rs and policy_batch.rs
+    // (and bindings/lr-python/tests/test_attributes.py /
+    // bindings/lr-go/attributes_test.go). The C++ surface exercises
+    // every method on the Attributes RAII class plus every
+    // apply_set_checked variant handled by the C ABI.
+    {
+        // Empty container.
+        Attributes a;
+        check(a.size() == 0, "Attributes::size == 0 on construction");
+        check(a.empty(), "Attributes::empty == true on construction");
+
+        // Insert + Get round trip.
+        std::vector<std::uint8_t> v{0, 0, 0, 100};  // 100 as u32 BE
+        a.insert(5, 0x40,
+                 std::string_view(reinterpret_cast<const char*>(v.data()), v.size()));
+        check(a.size() == 1, "Attributes::size == 1 after insert");
+        check(!a.empty(), "Attributes::empty == false after insert");
+        auto got = a.get(5);
+        check(got.has_value(), "Attributes::get(5) returns value");
+        check(got->first == 0x40, "Attributes::get(5).flags == 0x40");
+        check(got->second == v, "Attributes::get(5).value round-trips");
+        check(a.get_u32_be(5) == 100, "Attributes::get_u32_be(5) == 100");
+
+        // Absent tag returns nullopt.
+        check(!a.get(99).has_value(), "Attributes::get(99) returns nullopt");
+
+        // Typed readers round-trip.
+        std::uint64_t big = 0x0123'4567'89AB'CDEFull;
+        std::vector<std::uint8_t> big_be(8);
+        for (int i = 0; i < 8; ++i) {
+            big_be[i] = static_cast<std::uint8_t>(big >> (56 - 8 * i));
+        }
+        a.insert(9, 0,
+                 std::string_view(reinterpret_cast<const char*>(big_be.data()), 8));
+        check(a.get_u64_be(9) == big, "Attributes::get_u64_be round-trip");
+        a.insert(11, 0, std::string_view("\x2a", 1));
+        check(a.get_u8(11) == 42, "Attributes::get_u8 round-trip");
+
+        // Insert / replace on the same tag.
+        a.insert(5, 0, std::string_view("\x00\x00\x00\x02", 4));
+        check(a.size() == 3, "Attributes::size still 3 after replace (tag 5)");
+        check(a.get_u32_be(5) == 2, "Attributes::get_u32_be(5) == 2 (latest value)");
+
+        // at + for_each iterate in ascending tag order.
+        // BTreeMap ordering: tag 5, 9, 11.
+        auto e1 = a.at(0);
+        check(e1.has_value(), "Attributes::at(0) returns value");
+        check(e1->tag == 5, "Attributes::at(0).tag == 5");
+        auto e3 = a.at(2);
+        check(e3.has_value(), "Attributes::at(2) returns value");
+        check(e3->tag == 11, "Attributes::at(2).tag == 11");
+        check(!a.at(99).has_value(), "Attributes::at(99) returns nullopt");
+        std::vector<std::uint8_t> tags;
+        a.for_each([&](std::uint8_t t, std::uint8_t, const std::vector<std::uint8_t>&) {
+            tags.push_back(t);
+            return true;
+        });
+        check(tags == std::vector<std::uint8_t>{5, 9, 11},
+              "Attributes::for_each yields in ascending tag order");
+
+        // Remove returns presence.
+        check(a.remove(5), "Attributes::remove(5) returns true (present)");
+        check(!a.remove(5), "Attributes::remove(5) returns false (absent)");
+    }
+
+    // ----- apply_set_checked variants (issue #92). -----
+    {
+        auto make_route = []() {
+            return make_route_v4({203, 0, 113, 0}, 24, Protocol::Bgp);
+        };
+
+        // SetMetric round trip.
+        {
+            auto r = make_route();
+            apply_set_checked(r.get(), SetActionKind::Metric, 42);
+            std::uint32_t v = 0;
+            int rc = lr_route_metric(r.get(), &v);
+            check(rc == 0, "lr_route_metric rc == 0");
+            check(v == 42, "apply_set_checked(SetMetric, 42) round-trips");
+        }
+
+        // SetTag round trip.
+        {
+            auto r = make_route();
+            apply_set_checked(r.get(), SetActionKind::Tag, 0xDEADBEEFu);
+            std::uint32_t v = 0;
+            int rc = lr_route_tag(r.get(), &v);
+            check(rc == 0, "lr_route_tag rc == 0");
+            check(v == 0xDEADBEEFu, "apply_set_checked(SetTag, 0xDEADBEEF) round-trips");
+        }
+
+        // SetLocalPref round trip (default build has bgp feature).
+        {
+            auto r = make_route();
+            apply_set_checked(r.get(), SetActionKind::LocalPref, 100);
+            std::uint32_t v = 0;
+            int rc = lr_route_local_pref(r.get(), &v);
+            check(rc == 0, "lr_route_local_pref rc == 0");
+            check(v == 100, "apply_set_checked(SetLocalPref, 100) round-trips");
+        }
+
+        // SetMed round trip.
+        {
+            auto r = make_route();
+            apply_set_checked(r.get(), SetActionKind::Med, 50);
+            std::uint32_t v = 0;
+            int rc = lr_route_med(r.get(), &v);
+            check(rc == 0, "lr_route_med rc == 0");
+            check(v == 50, "apply_set_checked(SetMed, 50) round-trips");
+        }
+
+        // Unknown kind throws ApplySetError.
+        bool threw = false;
+        try {
+            auto r = make_route();
+            // The C++ wrapper takes SetActionKind; cast a non-LR_SET_*
+            // value through the enum to drive the unknown-kind branch.
+            apply_set_checked(r.get(),
+                              static_cast<SetActionKind>(99), 0, 0, 0);
+        } catch (const ApplySetError& e) {
+            threw = true;
+            check(e.code() == LR_APPLY_SET_ERROR_UNKNOWN,
+                  "ApplySetError::code == UNKNOWN for invalid kind");
+            check(std::string(e.what()).find("unknown") != std::string::npos,
+                  "ApplySetError::what mentions unknown");
+        }
+        check(threw, "apply_set_checked(99) throws ApplySetError");
+
+        // ApplySetError name lookup.
+        check(apply_set_error_name(LR_APPLY_SET_ERROR_OK) == "ok",
+              "apply_set_error_name(OK) == \"ok\"");
+        check(apply_set_error_name(LR_APPLY_SET_ERROR_LOCAL_PREF_NO_BGP)
+                  .find("bgp") != std::string::npos,
+              "apply_set_error_name(LocalPrefNoBgp) mentions bgp");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

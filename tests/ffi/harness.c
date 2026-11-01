@@ -2445,6 +2445,132 @@ int main(void) {
               "lr_babel_feasible equal -> 0");
     }
 
+    /* ----- Attributes container + apply_set_checked (issue #92). ----- */
+    /* Mirrors the C ABI tests in crates/lr-ffi/src/attributes.rs and
+     * policy_batch.rs. The C harness exercises the raw C ABI surface
+     * so a C embedder's contract is pinned independently of the C++
+     * RAII / Python / Go wrappers. */
+    {
+        lr_attributes_t a = lr_attributes_new();
+        check(a != NULL, "lr_attributes_new returns non-NULL");
+        check(lr_attributes_len(a) == 0, "lr_attributes_len == 0 on construction");
+        check(lr_attributes_is_empty(a) == 1, "lr_attributes_is_empty == 1 on construction");
+
+        /* Insert + Get round trip. */
+        const uint8_t val4[4] = {0, 0, 0, 100};  /* 100 as u32 BE */
+        int rc = lr_attributes_insert(a, 5, 0x40, val4, 4);
+        check(rc == 0, "lr_attributes_insert returns 0");
+        check(lr_attributes_len(a) == 1, "lr_attributes_len == 1 after insert");
+        check(lr_attributes_is_empty(a) == 0, "lr_attributes_is_empty == 0 after insert");
+        uint8_t flags = 0;
+        uint8_t out[8];
+        int64_t n = lr_attributes_get(a, 5, &flags, out, 4);
+        check(n == 4, "lr_attributes_get(5) returns 4 (length)");
+        check(flags == 0x40, "lr_attributes_get(5).flags == 0x40");
+        check(out[3] == 100, "lr_attributes_get(5).value[3] == 100");
+        check(lr_attributes_get_u32_be(a, 5) == 100, "lr_attributes_get_u32_be(5) == 100");
+
+        /* Absent tag returns LR_ERR_INVALID_HANDLE. */
+        n = lr_attributes_get(a, 99, &flags, out, 0);
+        check(n == (int64_t)LR_ERR_INVALID_HANDLE,
+              "lr_attributes_get(99) returns LR_ERR_INVALID_HANDLE");
+
+        /* u64 / u8 round trips. */
+        uint8_t val8[8] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF};
+        lr_attributes_insert(a, 9, 0, val8, 8);
+        check(lr_attributes_get_u64_be(a, 9) == 0x0123456789ABCDEFull,
+              "lr_attributes_get_u64_be(9) round-trips");
+        uint8_t val1[1] = {42};
+        lr_attributes_insert(a, 11, 0, val1, 1);
+        check(lr_attributes_get_u8(a, 11) == 42,
+              "lr_attributes_get_u8(11) == 42");
+
+        /* Insert / replace on the same tag. */
+        uint8_t v2[4] = {0, 0, 0, 2};
+        lr_attributes_insert(a, 5, 0, v2, 4);
+        check(lr_attributes_len(a) == 3, "lr_attributes_len == 3 after replace (tag 5)");
+        check(lr_attributes_get_u32_be(a, 5) == 2,
+              "lr_attributes_get_u32_be(5) == 2 (latest value)");
+
+        /* at + iter in ascending tag order. */
+        uint8_t tag = 0;
+        n = lr_attributes_at(a, 0, &tag, &flags, out, 4);
+        check(n >= 0, "lr_attributes_at(0) returns >= 0");
+        check(tag == 5, "lr_attributes_at(0).tag == 5");
+        n = lr_attributes_at(a, 2, &tag, &flags, out, 8);
+        check(n >= 0, "lr_attributes_at(2) returns >= 0");
+        check(tag == 11, "lr_attributes_at(2).tag == 11");
+        n = lr_attributes_at(a, 99, &tag, &flags, out, 0);
+        check(n == (int64_t)LR_ERR_INVALID_HANDLE,
+              "lr_attributes_at(99) returns LR_ERR_INVALID_HANDLE");
+
+        /* Remove returns presence. */
+        check(lr_attributes_remove(a, 5) == 1, "lr_attributes_remove(5) == 1 (present)");
+        check(lr_attributes_remove(a, 5) == 0, "lr_attributes_remove(5) == 0 (absent)");
+        check(lr_attributes_len(a) == 2, "lr_attributes_len == 2 after remove");
+
+        lr_attributes_free(a);
+        /* Safe on NULL. */
+        lr_attributes_free(NULL);
+    }
+
+    /* ----- apply_set_checked variants (issue #92). ----- */
+    {
+        lr_route_t r = lr_route_new_v4((const uint8_t[]){203, 0, 113, 0}, 24,
+                                       LR_PROTOCOL_BGP);
+        check(r != NULL, "lr_route_new_v4 for apply_set_checked tests");
+
+        /* SetMetric round trip. */
+        uint8_t code = lr_apply_set_checked(r, LR_SET_METRIC, 31337, 0, 0);
+        check(code == LR_APPLY_SET_ERROR_OK, "SetMetric returns OK");
+        uint32_t v = 0;
+        int rc = lr_route_metric(r, &v);
+        check(rc == 0, "lr_route_metric rc == 0");
+        check(v == 31337, "SetMetric 31337 round-trips");
+
+        /* SetTag round trip. */
+        code = lr_apply_set_checked(r, LR_SET_TAG, 0xDEADBEEFu, 0, 0);
+        check(code == LR_APPLY_SET_ERROR_OK, "SetTag returns OK");
+        rc = lr_route_tag(r, &v);
+        check(rc == 0, "lr_route_tag rc == 0");
+        check(v == 0xDEADBEEFu, "SetTag 0xDEADBEEF round-trips");
+
+        /* SetLocalPref round trip (default build has bgp feature). */
+        code = lr_apply_set_checked(r, LR_SET_LOCAL_PREF, 100, 0, 0);
+        check(code == LR_APPLY_SET_ERROR_OK, "SetLocalPref returns OK");
+        rc = lr_route_local_pref(r, &v);
+        check(rc == 0, "lr_route_local_pref rc == 0");
+        check(v == 100, "SetLocalPref 100 round-trips");
+
+        /* SetMed round trip. */
+        code = lr_apply_set_checked(r, LR_SET_MED, 50, 0, 0);
+        check(code == LR_APPLY_SET_ERROR_OK, "SetMed returns OK");
+        rc = lr_route_med(r, &v);
+        check(rc == 0, "lr_route_med rc == 0");
+        check(v == 50, "SetMed 50 round-trips");
+
+        /* Unknown kind returns UNKNOWN. */
+        code = lr_apply_set_checked(r, 99, 0, 0, 0);
+        check(code == LR_APPLY_SET_ERROR_UNKNOWN,
+              "Unknown SetAction kind returns LR_APPLY_SET_ERROR_UNKNOWN");
+
+        /* NULL route returns UNKNOWN (the safe default). */
+        code = lr_apply_set_checked(NULL, LR_SET_METRIC, 0, 0, 0);
+        check(code == LR_APPLY_SET_ERROR_UNKNOWN,
+              "NULL route returns LR_APPLY_SET_ERROR_UNKNOWN");
+
+        /* ApplySetError name lookup. */
+        const char* name = lr_apply_set_error_name(LR_APPLY_SET_ERROR_OK);
+        check(name != NULL, "lr_apply_set_error_name(OK) non-NULL");
+        check(strcmp(name, "ok") == 0, "lr_apply_set_error_name(OK) == \"ok\"");
+        name = lr_apply_set_error_name(LR_APPLY_SET_ERROR_LOCAL_PREF_NO_BGP);
+        check(name != NULL, "lr_apply_set_error_name(LocalPrefNoBgp) non-NULL");
+        check(strstr(name, "bgp") != NULL,
+              "lr_apply_set_error_name(LocalPrefNoBgp) mentions bgp");
+
+        lr_route_free(r);
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

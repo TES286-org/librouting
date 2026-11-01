@@ -5185,6 +5185,213 @@ public:
 };
 
 // =========================================================================
+// Attributes — generic ordered attribute set + apply_set_checked surface.
+//
+// Mirrors `crates/lr-ffi/src/attributes.rs` (lr_attributes_* C ABI) and
+// `crates/lr-ffi/src/policy_batch.rs` (lr_apply_set_checked / error name).
+// The Rust crate split mirrors:
+//   - Attributes     — lr_core::attr::Attributes (BTreeMap by tag)
+//   - apply_set_checked — lr_policy::action::apply_set_checked
+//   - ApplySetError  — lr_policy::action::ApplySetError (RequiresBgpFeature)
+//
+// The C++ shapes follow the existing RAII pattern (unique_ptr with
+// custom deleter, std::optional<T> for Rust Option<T>, throw Error on
+// the LR_APPLY_SET_ERROR_UNKNOWN / NOT_WIRED discriminants).
+// =========================================================================
+
+namespace detail {
+struct AttributesDeleter {
+    void operator()(lr_attributes_t p) const noexcept { if (p) lr_attributes_free(p); }
+};
+} // namespace detail
+
+/// SetAction discriminants (mirror LR_SET_*). The four BGP-specific
+/// variants (SetLocalPref / SetMed / SetPrependAs / SetAddCommunity)
+/// require the `bgp` feature on the underlying `lr-policy` crate; the
+/// cross-protocol SetMetric / SetTag variants apply unconditionally.
+enum class SetActionKind : std::uint8_t {
+    LocalPref    = LR_SET_LOCAL_PREF,
+    Med          = LR_SET_MED,
+    NextHop      = LR_SET_NEXT_HOP,
+    PrependAs    = LR_SET_PREPEND_AS,
+    AddCommunity = LR_SET_ADD_COMMUNITY,
+    Metric       = LR_SET_METRIC,
+    Tag          = LR_SET_TAG,
+};
+
+/// ApplySetError discriminants (mirror LR_APPLY_SET_ERROR_*).
+enum class ApplySetErrorCode : std::uint8_t {
+    Ok                   = LR_APPLY_SET_ERROR_OK,
+    LocalPrefNoBgp       = LR_APPLY_SET_ERROR_LOCAL_PREF_NO_BGP,
+    MedNoBgp             = LR_APPLY_SET_ERROR_MED_NO_BGP,
+    PrependAsNoBgp       = LR_APPLY_SET_ERROR_PREPEND_AS_NO_BGP,
+    AddCommunityNoBgp    = LR_APPLY_SET_ERROR_ADD_COMMUNITY_NO_BGP,
+    NotWired             = LR_APPLY_SET_ERROR_NOT_WIRED,
+    Unknown              = LR_APPLY_SET_ERROR_UNKNOWN,
+};
+
+/// Look up the C ABI's name for an ApplySetError discriminant. The
+/// string is stable across versions for the documented discriminants.
+inline std::string apply_set_error_name(std::uint8_t code) {
+    const char* ptr = lr_apply_set_error_name(code);
+    if (!ptr) return std::string("unknown ApplySetError code ") + std::to_string(code);
+    return std::string(ptr);
+}
+
+/// Exception raised by apply_set_checked when the action cannot be
+/// applied. The `code` field carries the raw LR_APPLY_SET_ERROR_*
+/// discriminant so a C++ caller can `switch` on it; the `what()` string
+/// is the C ABI's name for the discriminant, matching the C / Python
+/// / Go binding's diagnostic exactly.
+class ApplySetError : public Error {
+public:
+    explicit ApplySetError(std::uint8_t code)
+        : Error(apply_set_error_name(code)), code_(code) {}
+    std::uint8_t code() const noexcept { return code_; }
+private:
+    std::uint8_t code_;
+};
+
+/// Apply a SetAction to a route via the fail-closed apply_set_checked
+/// surface. Mirrors lr_policy::action::apply_set_checked.
+///
+/// The per-action payload shape follows the Rust SetAction variant:
+///   - SetActionKind::LocalPref:    arg1 = value (u32)
+///   - SetActionKind::Med:          arg1 = value (u32)
+///   - SetActionKind::PrependAs:    arg1 = asn (u32)
+///   - SetActionKind::AddCommunity: arg1 = asn (u32), arg2 = local (u16)
+///   - SetActionKind::Metric:       arg1 = value (u32)
+///   - SetActionKind::Tag:          arg1 = tag (u32)
+///
+/// SetActionKind::NextHop is not handled here because the variant takes
+/// an IpAddr (16 bytes for IPv6) that does not fit in three u32 slots;
+/// the dedicated `lr_route_set_next_hop` is the surface for that variant.
+///
+/// Throws `ApplySetError` when the action cannot be applied.
+inline void apply_set_checked(lr_route_t route, SetActionKind kind,
+                                std::uint32_t arg1 = 0,
+                                std::uint32_t arg2 = 0,
+                                std::uint32_t arg3 = 0) {
+    std::uint8_t code = lr_apply_set_checked(route,
+        static_cast<std::uint8_t>(kind), arg1, arg2, arg3);
+    if (code != LR_APPLY_SET_ERROR_OK) {
+        throw ApplySetError(code);
+    }
+}
+
+/// RAII handle to a generic attribute set. Wraps the boxed
+/// `lr_core::attr::Attributes` so a C++ embedder can build, populate
+/// and read a typed-attribute container using the same surface the
+/// Rust crate exposes. The container is a BTreeMap keyed by 8-bit tag
+/// — insertion replaces any existing entry for the same tag, iteration
+/// order is ascending by tag.
+class Attributes {
+public:
+    Attributes() : ptr_(lr_attributes_new()) {
+        if (!ptr_) throw Error(std::string("lr_attributes_new: ") + lr_last_error());
+    }
+
+    std::size_t size() const noexcept { return lr_attributes_len(ptr_.get()); }
+    bool empty() const noexcept { return lr_attributes_is_empty(ptr_.get()) != 0; }
+
+    /// Insert / replace one attribute by tag. `value` is the raw
+    /// attribute payload (an empty span inserts the tag with no
+    /// payload).
+    void insert(std::uint8_t tag, std::uint8_t flags, std::string_view value) {
+        const std::uint8_t* ptr = value.empty() ? nullptr
+            : reinterpret_cast<const std::uint8_t*>(value.data());
+        int rc = lr_attributes_insert(ptr_.get(), tag, flags, ptr, value.size());
+        if (rc != 0) {
+            throw Error(std::string("lr_attributes_insert: ") + lr_last_error());
+        }
+    }
+
+    /// Read one attribute by tag. Returns `std::nullopt` when the tag
+    /// is absent; otherwise a pair `(flags, value)`.
+    std::optional<std::pair<std::uint8_t, std::vector<std::uint8_t>>>
+    get(std::uint8_t tag) const {
+        std::uint8_t flags = 0;
+        // Two-pass: discover the length, then read it.
+        std::int64_t n = lr_attributes_get(ptr_.get(), tag, &flags, nullptr, 0);
+        if (n < 0) return std::nullopt;
+        std::vector<std::uint8_t> buf(static_cast<std::size_t>(n));
+        std::int64_t got = 0;
+        if (n > 0) {
+            got = lr_attributes_get(ptr_.get(), tag, &flags, buf.data(), buf.size());
+            if (got < 0) return std::nullopt;
+            buf.resize(static_cast<std::size_t>(got));
+        }
+        return std::make_pair(flags, std::move(buf));
+    }
+
+    /// Read a 4-byte big-endian unsigned integer attribute. Returns 0
+    /// when the tag is absent or the value is not exactly 4 bytes long
+    /// — use `get` when the distinction matters.
+    std::uint32_t get_u32_be(std::uint8_t tag) const noexcept {
+        return lr_attributes_get_u32_be(ptr_.get(), tag);
+    }
+
+    /// Read an 8-byte big-endian unsigned integer attribute. Returns 0
+    /// when the tag is absent or the value is not exactly 8 bytes long.
+    std::uint64_t get_u64_be(std::uint8_t tag) const noexcept {
+        return lr_attributes_get_u64_be(ptr_.get(), tag);
+    }
+
+    /// Read a 1-byte unsigned integer attribute. Returns 0 when the
+    /// tag is absent.
+    std::uint8_t get_u8(std::uint8_t tag) const noexcept {
+        return lr_attributes_get_u8(ptr_.get(), tag);
+    }
+
+    /// Remove one attribute by tag. Returns true when the attribute was
+    /// present (and is now removed), false when it was not in the set.
+    bool remove(std::uint8_t tag) {
+        int rc = lr_attributes_remove(ptr_.get(), tag);
+        if (rc < 0) {
+            throw Error(std::string("lr_attributes_remove: ") + lr_last_error());
+        }
+        return rc != 0;
+    }
+
+    /// Read one attribute by index. Returns `std::nullopt` when the
+    /// index is out of range; otherwise a triple `(tag, flags, value)`.
+    /// Iteration order is ascending by tag (BTreeMap order).
+    struct Entry {
+        std::uint8_t tag;
+        std::uint8_t flags;
+        std::vector<std::uint8_t> value;
+    };
+    std::optional<Entry> at(std::size_t index) const {
+        std::uint8_t tag = 0, flags = 0;
+        std::int64_t n = lr_attributes_at(ptr_.get(), index, &tag, &flags, nullptr, 0);
+        if (n < 0) return std::nullopt;
+        std::vector<std::uint8_t> buf(static_cast<std::size_t>(n));
+        std::int64_t got = 0;
+        if (n > 0) {
+            got = lr_attributes_at(ptr_.get(), index, &tag, &flags, buf.data(), buf.size());
+            if (got < 0) return std::nullopt;
+            buf.resize(static_cast<std::size_t>(got));
+        }
+        return Entry{tag, flags, std::move(buf)};
+    }
+
+    /// Iterate every attribute in ascending tag order. The callback is
+    /// invoked once per attribute; iteration stops early when the
+    /// callback returns false.
+    template <typename F>
+    void for_each(F&& fn) const {
+        for (std::size_t i = 0; i < size(); ++i) {
+            auto e = at(i);
+            if (!e) break;
+            if (!fn(e->tag, e->flags, e->value)) break;
+        }
+    }
+
+private:
+    std::unique_ptr<OpaqueAttributes, detail::AttributesDeleter> ptr_;
+};
+
+// =========================================================================
 // Babel — RFC 8966 (the Babel routing protocol) + RFC 8967 (HMAC auth).
 // =========================================================================
 
