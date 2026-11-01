@@ -1538,6 +1538,53 @@ uint8_t lr_babel_feasible(uint16_t route_seqno,
                          uint32_t route_metric,
                          uint16_t feasible_seqno,
                          uint32_t feasible_metric);
+
+/* RouterInstance session-state + Babel runtime (issue #92, mirrors
+ * crates/lr-ffi/src/router_runtime.rs). */
+const char *lr_router_session_peer_state(lr_router_t r, uint64_t session);
+int32_t lr_router_session_restart_cooldown_remaining(lr_router_t r,
+                                                     uint64_t session,
+                                                     uint64_t *out_ms);
+int32_t lr_router_take_collision_lost(lr_router_t r, uint64_t session);
+int32_t lr_router_session_was_established(lr_router_t r, uint64_t session);
+int64_t lr_router_rib_paths_count(lr_router_t r);
+int32_t lr_router_rib_path_at(lr_router_t r,
+                              uintptr_t idx,
+                              lr_route_t *out_route);
+int32_t lr_router_flush_rib_for_shutdown(lr_router_t r);
+int32_t lr_router_babel_flush_session(lr_router_t r, uint64_t session);
+int32_t lr_router_babel_gc(lr_router_t r, uint64_t now_ms);
+int32_t lr_router_set_babel_own_router_id(lr_router_t r,
+                                         uint64_t session,
+                                         const uint8_t *id);
+int32_t lr_router_set_babel_link_cost_params(lr_router_t r,
+                                            uint64_t session,
+                                            uint32_t rtt_min_us,
+                                            uint32_t rtt_max_us,
+                                            uint16_t rtt_cost);
+int32_t lr_router_babel_note_peer(lr_router_t r,
+                                  uint64_t session,
+                                  uint8_t is_v6,
+                                  const uint8_t *addr);
+int32_t lr_router_babel_rtt_us(lr_router_t r,
+                               uint64_t session,
+                               uint64_t now_ms,
+                               uint32_t *out_us);
+int32_t lr_router_babel_rtt_echo(lr_router_t r,
+                                 uint64_t session,
+                                 uint64_t now_ms,
+                                 uint32_t *out_echo_ts,
+                                 uint32_t *out_recv_us);
+int32_t lr_router_babel_egress_nexthops(lr_router_t r,
+                                        uint64_t session,
+                                        uint8_t *out_v4_present,
+                                        uint8_t *out_v4,
+                                        uint8_t *out_v6_present,
+                                        uint8_t *out_v6);
+int32_t lr_router_babel_take_route_request(lr_router_t r, uint64_t session);
+int32_t lr_router_babel_take_own_seqno_request(lr_router_t r,
+                                               uint64_t session,
+                                               uint16_t *out_seqno);
 """
 
 

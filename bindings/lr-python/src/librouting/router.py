@@ -808,6 +808,355 @@ class Router:
             )
         return [_decode_ospf_grace_event(arr[i]) for i in range(int(n))]
 
+    # ------------------------------------------------------------------
+    # RouterInstance session-state + Babel runtime (issue #92, mirrors
+    # crates/lr-ffi/src/router_runtime.rs). The methods follow the
+    # Rust trait hierarchy one-to-one so an embedder can read the Rust
+    # docstring and translate the call site 1:1. The Python shape
+    # adapts to idioms: ``Optional[T]`` returns ``Optional[T]`` (None
+    # replaces the Rust ``Option::None``); ``Result<T, E>`` raises
+    # ``LrError`` on the ``Err`` arm; the success/cooldown/no-sample
+    # trichotomy returns a 2-tuple of (value, bool).
+    # ------------------------------------------------------------------
+
+    def session_peer_state(self, session: int) -> str | None:
+        """Read the BGP FSM state name of a session by handle (one
+        of ``"Idle"``, ``"Connect"``, ``"Active"``, ``"OpenSent"``,
+        ``"OpenConfirm"``, ``"Established"``). Returns ``None`` for
+        non-BGP / unknown sessions, or when the router handle is
+        invalid.
+
+        The returned string aliases a thread-local C buffer reused
+        by every ``lr_*_name`` entry point; copy it before the next
+        such call.
+        """
+        ptr = get_lib().lr_router_session_peer_state(self._ptr, int(session))
+        if ptr == ffi.NULL:
+            return None
+        return ffi.string(ptr).decode("utf-8", errors="replace")
+
+    def session_restart_cooldown_remaining(self, session: int) -> int | None:
+        """Read the remaining milliseconds of the max-prefix ``Restart``
+        cooldown (BIRD ``restart time``, FRR ``bgp maximum-prefix
+        restart <secs>``). Returns the remaining milliseconds when a
+        cooldown is in effect, ``None`` when no cooldown is in effect
+        (the session never tripped Restart or the configured cooldown
+        has elapsed). Raises :class:`LrError` on FFI errors.
+        """
+        out = ffi.new("uint64_t*")
+        rc = get_lib().lr_router_session_restart_cooldown_remaining(
+            self._ptr, int(session), out
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_session_restart_cooldown_remaining failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        if rc == 1:
+            return int(out[0])
+        return None
+
+    def take_collision_lost(self, session: int) -> bool:
+        """Consume the RFC 4271 §6.8 collision-loss latch of a session.
+        Returns ``True`` exactly once after the session lost a
+        collision (its own resolver closed it, or a Cease /
+        Connection Collision Resolution NOTIFICATION arrived) since
+        the latch was last consumed. The latch is consumed on read.
+        """
+        rc = get_lib().lr_router_take_collision_lost(self._ptr, int(session))
+        if rc < 0:
+            raise LrError(
+                f"lr_router_take_collision_lost failed (rc={rc}): {last_error()}"
+            )
+        return rc == 1
+
+    def session_was_established(self, session: int) -> bool:
+        """Whether the session's CURRENT transport incarnation ever
+        reached Established. Embedders use it to reset reconnect
+        backoff only after a genuinely working session — a handshake
+        that died at OpenConfirm must keep the exponential backoff
+        growing.
+        """
+        rc = get_lib().lr_router_session_was_established(
+            self._ptr, int(session)
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_session_was_established failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def rib_paths_count(self) -> int:
+        """Number of paths in the Loc-RIB's Add-Path view (RFC 7911)
+        — the full multiplicity when Add-Path is configured. The
+        companion :meth:`rib_len` returns the best-path count.
+        """
+        n = get_lib().lr_router_rib_paths_count(self._ptr)
+        if n < 0:
+            raise LrError(f"lr_router_rib_paths_count failed (rc={n})")
+        return int(n)
+
+    def rib_path_at(self, idx: int) -> "Route":
+        """Borrow one path from the Loc-RIB's Add-Path view at index
+        ``idx`` (0-based). Returns an owned :class:`Route` the caller
+        should release (a ``__del__`` finalizer also runs). Raises
+        :class:`LrError` when the index is out of range. The returned
+        :class:`Route` boxes a clone of the underlying route (the
+        inner ``&Route`` cannot outlive the router lock that guards
+        the Loc-RIB).
+        """
+        out = ffi.new("lr_route_t*")
+        rc = get_lib().lr_router_rib_path_at(self._ptr, int(idx), out)
+        if rc != 0:
+            if rc == -6:
+                raise LrError(
+                    f"lr_router_rib_path_at: index {idx} out of range: "
+                    f"{last_error()}"
+                )
+            raise LrError(
+                f"lr_router_rib_path_at failed (rc={rc}): {last_error()}"
+            )
+        # Wrap the C handle in a Route — the Route's __del__ calls
+        # lr_route_free, mirroring the NewRouteV4/V6 path.
+        from .policy import Route
+        r = Route.__new__(Route)
+        r._ptr = out[0]
+        return r
+
+    def flush_rib_for_shutdown(self) -> None:
+        """Flush every Loc-RIB route — the daemon shutdown hook RFC
+        4271 leaves to the implementor. Queues one RouteWithdrawn
+        event per Loc-RIB key (the event consumer / ticker's final
+        drain hands them to the kernel mirror so the routes this
+        daemon installed leave the kernel with it — BIRD's ``krt``
+        parity). Idempotent: calling twice queues the withdrawals
+        twice (the second call sees an empty Loc-RIB and queues
+        nothing).
+        """
+        rc = get_lib().lr_router_flush_rib_for_shutdown(self._ptr)
+        if rc != 0:
+            raise LrError(
+                f"lr_router_flush_rib_for_shutdown failed (rc={rc}): "
+                f"{last_error()}"
+            )
+
+    def babel_flush_session(self, session: int) -> None:
+        """Drop every route learned over the Babel session ``session``
+        and apply the withdrawal delta to Loc-RIB — the ``check
+        link`` response when an interface goes operationally down
+        (BIRD ``check link yes``, RFC 8966 §A.2). The session stays
+        alive for the link's return: routes re-learn from the peer's
+        Updates when the interface comes back. A no-op for non-Babel
+        sessions, matching the Rust trait's default.
+        """
+        rc = get_lib().lr_router_babel_flush_session(self._ptr, int(session))
+        if rc != 0:
+            raise LrError(
+                f"lr_router_babel_flush_session failed (rc={rc}): {last_error()}"
+            )
+
+    def babel_gc(self, now_ms: int) -> None:
+        """One Babel expiry sweep (RFC 8966 §3.2.5): expire routes
+        whose re-announcement hold time lapsed and retract everything
+        a dead neighbour taught us, applying the Loc-RIB deltas. The
+        transport should call this about once a second; ``now_ms``
+        is the same wall-clock milliseconds :meth:`tick` advances.
+        """
+        rc = get_lib().lr_router_babel_gc(self._ptr, int(now_ms))
+        if rc != 0:
+            raise LrError(f"lr_router_babel_gc failed (rc={rc}): {last_error()}")
+
+    def set_babel_own_router_id(self, session: int, router_id: bytes) -> None:
+        """Pin the Babel router-id this node announces on session
+        ``session`` (RFC 8966 §3.3). ``router_id`` must be exactly 8
+        bytes (the Babel router-id, RFC 8966 §3.3.1 — the EUI-64 or
+        any other unique 64-bit value). A no-op for non-Babel
+        sessions.
+        """
+        if len(router_id) != 8:
+            raise LrError(
+                f"set_babel_own_router_id: router_id must be 8 bytes, got "
+                f"{len(router_id)}"
+            )
+        rc = get_lib().lr_router_set_babel_own_router_id(
+            self._ptr, int(session), router_id
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_babel_own_router_id failed (rc={rc}): "
+                f"{last_error()}"
+            )
+
+    def set_babel_link_cost_params(
+        self,
+        session: int,
+        rtt_min_us: int,
+        rtt_max_us: int,
+        rtt_cost: int,
+    ) -> None:
+        """Configure the reception-side link-cost ramp of Babel
+        session ``session`` (RFC 8966 §A.2.4): the RTT penalty bounds
+        and the maximum applied on top of the txcost learned from the
+        peer's IHU when an Update's advertised metric is folded into
+        the local route metric. ``rtt_cost`` 0 (babeld's default)
+        keeps the RTT feature off. All three parameters are
+        microseconds. A no-op for non-Babel sessions.
+        """
+        rc = get_lib().lr_router_set_babel_link_cost_params(
+            self._ptr,
+            int(session),
+            int(rtt_min_us),
+            int(rtt_max_us),
+            int(rtt_cost),
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_babel_link_cost_params failed (rc={rc}): "
+                f"{last_error()}"
+            )
+
+    def babel_note_peer(self, session: int, addr: bytes) -> None:
+        """Tell the Babel runtime the address the peer's datagrams
+        come from (RFC 8966 §3.5.3). ``addr`` must be 4 bytes (IPv4)
+        or 16 bytes (IPv6). The runtime is constructed with the
+        local bind address, so the transport MUST call this per
+        datagram or v6 routes fall back to our own address as the
+        next hop.
+        """
+        if len(addr) not in (4, 16):
+            raise LrError(
+                f"babel_note_peer: addr must be 4 or 16 bytes, got {len(addr)}"
+            )
+        rc = get_lib().lr_router_babel_note_peer(
+            self._ptr, int(session), 1 if len(addr) == 16 else 0, addr
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_babel_note_peer failed (rc={rc}): {last_error()}"
+            )
+
+    def babel_rtt_us(self, session: int, now_ms: int) -> int | None:
+        """The smoothed RTT measured toward the peer of Babel session
+        ``session`` (BABEL-RTT, RFC 8966 §A.2.4). Returns the smoothed
+        RTT in microseconds when a fresh sample is available, ``None``
+        when no fresh sample exists or the session is not a Babel
+        session.
+        """
+        out = ffi.new("uint32_t*")
+        rc = get_lib().lr_router_babel_rtt_us(
+            self._ptr, int(session), int(now_ms), out
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_babel_rtt_us failed (rc={rc}): {last_error()}"
+            )
+        if rc == 1:
+            return int(out[0])
+        return None
+
+    def babel_rtt_echo_pair(
+        self, session: int, now_ms: int
+    ) -> tuple[int, int] | None:
+        """The BABEL-RTT pair the next IHU toward the session's peer
+        should echo — ``(peer Hello timestamp, our receive time)``,
+        valid only while the Hello is fresh (RFC 8966 §A.2.4;
+        babeld's 1 s echo window). Returns the (echo_ts, recv_us)
+        tuple in microseconds when a fresh pair is available, ``None``
+        otherwise.
+        """
+        echo = ffi.new("uint32_t*")
+        recv = ffi.new("uint32_t*")
+        rc = get_lib().lr_router_babel_rtt_echo(
+            self._ptr, int(session), int(now_ms), echo, recv
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_babel_rtt_echo failed (rc={rc}): {last_error()}"
+            )
+        if rc == 1:
+            return (int(echo[0]), int(recv[0]))
+        return None
+
+    def babel_egress_nexthops(
+        self, session: int
+    ) -> tuple[bytes | None, bytes | None] | None:
+        """The current next-hop addresses the Babel peer of session
+        ``session`` advertises in its Update streams —
+        ``(v4, v6)`` as learned from the NextHop TLVs (RFC 8966
+        §4.6.4), plus the implicit peer-address fallbacks once a
+        datagram has been seen.
+
+        Returns a ``(v4, v6)`` tuple of bytes for a Babel session
+        (each may be ``None`` individually when the peer has not
+        advertised a next hop for that family yet), or ``None`` for a
+        non-Babel session or an unknown session handle (the C ABI's
+        "no info" return code).
+        """
+        v4p = ffi.new("uint8_t*")
+        v6p = ffi.new("uint8_t*")
+        v4buf = ffi.new("uint8_t[]", 4)
+        v6buf = ffi.new("uint8_t[]", 16)
+        rc = get_lib().lr_router_babel_egress_nexthops(
+            self._ptr,
+            int(session),
+            v4p,
+            v4buf,
+            v6p,
+            v6buf,
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_babel_egress_nexthops failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        if rc == 1:
+            # Non-Babel session / unknown handle.
+            return None
+        v4 = bytes(ffi.buffer(v4buf, 4)) if v4p[0] != 0 else None
+        v6 = bytes(ffi.buffer(v6buf, 16)) if v6p[0] != 0 else None
+        return (v4, v6)
+
+    def babel_take_route_request(self, session: int) -> bool:
+        """Take the pending "a Route Request arrived" flag (RFC 8966
+        §3.2.6). Returns ``True`` exactly once after any Route
+        Request TLV (wildcard or specific) was seen on the session;
+        the transport answers by announcing immediately instead of
+        waiting for the periodic tick.
+        """
+        rc = get_lib().lr_router_babel_take_route_request(
+            self._ptr, int(session)
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_babel_take_route_request failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def babel_take_own_seqno_request(self, session: int) -> int | None:
+        """Take the pending "a Seqno Request for our own router-id
+        arrived" event (RFC 8966 §3.2.6.2). Returns the requested
+        seqno exactly once after a peer asked us to re-announce with
+        (at least) that seqno — the restart-recovery path when a
+        peer remembers a higher seqno than our fresh boot value. The
+        transport bumps its announcement seqno to at least the
+        returned value and re-announces. ``None`` when no request
+        is pending.
+        """
+        out = ffi.new("uint16_t*")
+        rc = get_lib().lr_router_babel_take_own_seqno_request(
+            self._ptr, int(session), out
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_babel_take_own_seqno_request failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        if rc == 1:
+            return int(out[0])
+        return None
+
     def add_roa_entry(
         self,
         prefix: str,
