@@ -1224,6 +1224,327 @@ struct RouteDeleter {
 /// An owned route handle (a boxed `lr_core::rib::Route`).
 using Route = std::unique_ptr<OpaqueRoute, RouteDeleter>;
 
+// ===== RouterInstance session-state + Babel runtime (issue #92) =====
+//
+// Mirrors `crates/lr-ffi/src/router_runtime.rs` one-to-one so a C++
+// embedder driving the daemon-equivalent runtime can read the BGP
+// FSM state by handle, drive the Babel per-session hooks the daemon
+// already turns, and flush the Loc-RIB at shutdown. The C++ shapes
+// follow the Rust API hierarchy (a free function in the librouting
+// namespace per Rust trait method, taking `Router&` for the router
+// and the same parameter names the Rust trait uses) and adapt to
+// C++ idioms (`std::optional<T>` for the Rust `Option<T>`, throwing
+// `Error` for the Rust `Result<T, E>`).
+
+/// Read the BGP FSM state name of a session by handle. Returns one
+/// of "Idle", "Connect", "Active", "OpenSent", "OpenConfirm",
+/// "Established" for a BGP session, `std::nullopt` for non-BGP /
+/// unknown sessions or when the router handle is invalid. The
+/// returned string aliases a thread-local C buffer reused by every
+/// `lr_*_name` entry point; copy it into a `std::string` before the
+/// next such call.
+inline std::optional<std::string> session_peer_state(Router& r,
+                                                     std::uint64_t session) {
+    const char* ptr = lr_router_session_peer_state(r.get(), session);
+    if (!ptr) return std::nullopt;
+    return std::string(ptr);
+}
+
+/// Read the remaining milliseconds of the max-prefix `Restart`
+/// cooldown (BIRD `restart time`, FRR `bgp maximum-prefix restart
+/// <secs>`). Returns the remaining milliseconds when a cooldown is
+/// in effect, `std::nullopt` when no cooldown is in effect. Throws
+/// `Error` on FFI errors.
+inline std::optional<std::uint64_t> session_restart_cooldown_remaining(
+        Router& r, std::uint64_t session) {
+    std::uint64_t ms = 0;
+    int rc = lr_router_session_restart_cooldown_remaining(r.get(), session, &ms);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_session_restart_cooldown_remaining failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    if (rc == 1) return ms;
+    return std::nullopt;
+}
+
+/// Consume the RFC 4271 §6.8 collision-loss latch of a session.
+/// Returns `true` exactly once after the session lost a collision
+/// (its own resolver closed it, or a Cease / Connection Collision
+/// Resolution NOTIFICATION arrived) since the latch was last
+/// consumed. The latch is consumed on read.
+inline bool take_collision_lost(Router& r, std::uint64_t session) {
+    int rc = lr_router_take_collision_lost(r.get(), session);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_take_collision_lost failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Whether the session's CURRENT transport incarnation ever reached
+/// Established. Embedders use it to reset reconnect backoff only
+/// after a genuinely working session (a handshake that died at
+/// OpenConfirm must keep the exponential backoff growing).
+inline bool session_was_established(Router& r, std::uint64_t session) {
+    int rc = lr_router_session_was_established(r.get(), session);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_session_was_established failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Number of paths in the Loc-RIB's Add-Path view (RFC 7911) — the
+/// full multiplicity when Add-Path is configured. The companion
+/// `rib_len` returns the best-path count (one per prefix).
+inline std::int64_t rib_paths_count(Router& r) {
+    std::int64_t n = lr_router_rib_paths_count(r.get());
+    if (n < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_rib_paths_count failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return n;
+}
+
+/// Borrow one path from the Loc-RIB's Add-Path view at index `idx`
+/// (0-based). Returns an owned `Route` the caller releases by
+/// letting the `unique_ptr` go out of scope. Throws `Error` when the
+/// index is out of range. The returned `Route` boxes a clone of the
+/// underlying route (the inner `&Route` cannot outlive the router
+/// lock that guards the Loc-RIB).
+inline Route rib_path_at(Router& r, std::size_t idx) {
+    lr_route_t raw = nullptr;
+    int rc = lr_router_rib_path_at(r.get(), idx, &raw);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        if (rc == -6) {
+            throw Error("lr_router_rib_path_at: index " +
+                        std::to_string(idx) + " out of range: " +
+                        std::string(err ? err : "unknown"));
+        }
+        throw Error("lr_router_rib_path_at failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return Route(raw);
+}
+
+/// Flush every Loc-RIB route — the daemon shutdown hook RFC 4271
+/// leaves to the implementor. Queues one `RouteWithdrawn` event per
+/// Loc-RIB key (the event consumer / ticker's final drain hands them
+/// to the kernel mirror so the routes this daemon installed leave
+/// the kernel with it — BIRD's `krt` parity). Idempotent: calling
+/// twice queues the withdrawals twice (the second call sees an
+/// empty Loc-RIB and queues nothing).
+inline void flush_rib_for_shutdown(Router& r) {
+    int rc = lr_router_flush_rib_for_shutdown(r.get());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_flush_rib_for_shutdown failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Drop every route learned over the Babel session `session` and
+/// apply the withdrawal delta to Loc-RIB — the `check link`
+/// response when an interface goes operationally down (BIRD
+/// `check link yes`, RFC 8966 §A.2). The session stays alive for
+/// the link's return: routes re-learn from the peer's Updates when
+/// the interface comes back. A no-op for non-Babel sessions,
+/// matching the Rust trait's default.
+inline void babel_flush_session(Router& r, std::uint64_t session) {
+    int rc = lr_router_babel_flush_session(r.get(), session);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_flush_session failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// One Babel expiry sweep (RFC 8966 §3.2.5): expire routes whose
+/// re-announcement hold time lapsed and retract everything a dead
+/// neighbour taught us, applying the Loc-RIB deltas. The transport
+/// should call this about once a second; `now_ms` is the same
+/// wall-clock milliseconds `tick` advances.
+inline void babel_gc(Router& r, std::uint64_t now_ms) {
+    int rc = lr_router_babel_gc(r.get(), now_ms);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_gc failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Pin the Babel router-id this node announces on session `session`
+/// (RFC 8966 §3.3). `id` must be exactly 8 bytes (the Babel
+/// router-id, RFC 8966 §3.3.1 — the EUI-64 or any other unique
+/// 64-bit value). A no-op for non-Babel sessions.
+inline void set_babel_own_router_id(Router& r,
+                                    std::uint64_t session,
+                                    const std::array<std::uint8_t, 8>& id) {
+    int rc = lr_router_set_babel_own_router_id(r.get(), session, id.data());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_set_babel_own_router_id failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Configure the reception-side link-cost ramp of Babel session
+/// `session` (RFC 8966 §A.2.4): the RTT penalty bounds and the
+/// maximum applied on top of the txcost learned from the peer's IHU
+/// when an Update's advertised metric is folded into the local
+/// route metric. `rtt_cost` 0 (babeld's default) keeps the RTT
+/// feature off. All three parameters are microseconds. A no-op for
+/// non-Babel sessions.
+inline void set_babel_link_cost_params(Router& r,
+                                       std::uint64_t session,
+                                       std::uint32_t rtt_min_us,
+                                       std::uint32_t rtt_max_us,
+                                       std::uint16_t rtt_cost) {
+    int rc = lr_router_set_babel_link_cost_params(r.get(), session,
+                                                  rtt_min_us, rtt_max_us,
+                                                  rtt_cost);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_set_babel_link_cost_params failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Tell the Babel runtime the address the peer's datagrams come
+/// from (RFC 8966 §3.5.3). `addr` must be 4 bytes (IPv4) or 16
+/// bytes (IPv6). The runtime is constructed with the local bind
+/// address, so the transport MUST call this per datagram or v6
+/// routes fall back to our own address as the next hop.
+inline void babel_note_peer(Router& r,
+                            std::uint64_t session,
+                            const std::vector<std::uint8_t>& addr) {
+    if (addr.size() != 4 && addr.size() != 16) {
+        throw Error("babel_note_peer: bad address length (want 4 or 16, got " +
+                    std::to_string(addr.size()) + ")");
+    }
+    int rc = lr_router_babel_note_peer(r.get(), session,
+                                       addr.size() == 16 ? 1 : 0,
+                                       addr.data());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_note_peer failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// The smoothed RTT measured toward the peer of Babel session
+/// `session` (BABEL-RTT, RFC 8966 §A.2.4). Returns the smoothed RTT
+/// in microseconds when a fresh sample is available,
+/// `std::nullopt` when no fresh sample exists or the session is not
+/// a Babel session.
+inline std::optional<std::uint32_t> babel_rtt_us(Router& r,
+                                                 std::uint64_t session,
+                                                 std::uint64_t now_ms) {
+    std::uint32_t us = 0;
+    int rc = lr_router_babel_rtt_us(r.get(), session, now_ms, &us);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_rtt_us failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    if (rc == 1) return us;
+    return std::nullopt;
+}
+
+/// The BABEL-RTT pair the next IHU toward the session's peer should
+/// echo — `(peer Hello timestamp, our receive time)`, valid only
+/// while the Hello is fresh (RFC 8966 §A.2.4; babeld's 1 s echo
+/// window). Returns the (echo_ts, recv_us) pair in microseconds when
+/// a fresh pair is available, `std::nullopt` otherwise.
+inline std::optional<std::pair<std::uint32_t, std::uint32_t>>
+babel_rtt_echo_pair(Router& r, std::uint64_t session, std::uint64_t now_ms) {
+    std::uint32_t echo = 0;
+    std::uint32_t recv = 0;
+    int rc = lr_router_babel_rtt_echo(r.get(), session, now_ms, &echo, &recv);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_rtt_echo failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    if (rc == 1) return std::make_pair(echo, recv);
+    return std::nullopt;
+}
+
+/// The current next-hop addresses the Babel peer of session
+/// `session` advertises in its Update streams — `(v4, v6)` as
+/// learned from the NextHop TLVs (RFC 8966 §4.6.4), plus the
+/// implicit peer-address fallbacks once a datagram has been seen.
+/// Returns a pair of optional byte arrays for a Babel session (each
+/// may individually be `std::nullopt` when the peer has not
+/// advertised a next hop for that family yet), `std::nullopt` for a
+/// non-Babel session or an unknown session handle (the C ABI's
+/// "no info" return code).
+inline std::optional<std::pair<std::optional<std::array<std::uint8_t, 4>>,
+                               std::optional<std::array<std::uint8_t, 16>>>>
+babel_egress_nexthops(Router& r, std::uint64_t session) {
+    std::uint8_t v4p = 0;
+    std::uint8_t v6p = 0;
+    std::array<std::uint8_t, 4> v4{};
+    std::array<std::uint8_t, 16> v6{};
+    int rc = lr_router_babel_egress_nexthops(r.get(), session,
+                                             &v4p, v4.data(),
+                                             &v6p, v6.data());
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_egress_nexthops failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    if (rc == 1) {
+        // Non-Babel session / unknown handle.
+        return std::nullopt;
+    }
+    std::optional<std::array<std::uint8_t, 4>> v4_opt;
+    std::optional<std::array<std::uint8_t, 16>> v6_opt;
+    if (v4p != 0) v4_opt = v4;
+    if (v6p != 0) v6_opt = v6;
+    return std::make_pair(std::move(v4_opt), std::move(v6_opt));
+}
+
+/// Take the pending "a Route Request arrived" flag (RFC 8966
+/// §3.2.6). Returns `true` exactly once after any Route Request TLV
+/// (wildcard or specific) was seen on the session; the transport
+/// answers by announcing immediately instead of waiting for the
+/// periodic tick.
+inline bool babel_take_route_request(Router& r, std::uint64_t session) {
+    int rc = lr_router_babel_take_route_request(r.get(), session);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_take_route_request failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Take the pending "a Seqno Request for our own router-id arrived"
+/// event (RFC 8966 §3.2.6.2). Returns the requested seqno exactly
+/// once after a peer asked us to re-announce with (at least) that
+/// seqno — the restart-recovery path when a peer remembers a higher
+/// seqno than our fresh boot value. The transport bumps its
+/// announcement seqno to at least the returned value and
+/// re-announces. `std::nullopt` when no request is pending.
+inline std::optional<std::uint16_t>
+babel_take_own_seqno_request(Router& r, std::uint64_t session) {
+    std::uint16_t seqno = 0;
+    int rc = lr_router_babel_take_own_seqno_request(r.get(), session, &seqno);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_babel_take_own_seqno_request failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    if (rc == 1) return seqno;
+    return std::nullopt;
+}
+
 struct PrefixListDeleter {
     void operator()(lr_prefix_list_t l) const noexcept { lr_prefix_list_free(l); }
 };

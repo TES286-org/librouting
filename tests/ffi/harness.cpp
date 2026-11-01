@@ -621,6 +621,132 @@ int main() {
         check(gr_events.empty(), "drain_ospf_grace_events: empty on fresh router");
     }
 
+    // ---- RouterInstance session-state + Babel runtime (issue #92) ----
+    {
+        auto r = make_router();
+
+        // BGP session: handle-keyed state inspection.
+        auto h = add_bgp_session(r, 65001, 65002, 0x01020304);
+        auto state = session_peer_state(r, h);
+        check(state.has_value(), "session_peer_state: BGP returns a state");
+        check(*state == "Idle" || *state == "Connect" || *state == "Active" ||
+                  *state == "OpenSent" || *state == "OpenConfirm" ||
+                  *state == "Established",
+              "session_peer_state: valid FSM state name");
+        check(!session_was_established(r, h),
+              "session_was_established: false on a fresh session");
+        check(!take_collision_lost(r, h),
+              "take_collision_lost: false on a fresh session");
+        auto cooldown = session_restart_cooldown_remaining(r, h);
+        check(!cooldown.has_value(),
+              "session_restart_cooldown_remaining: nullopt on fresh session");
+
+        // rib_paths_count starts at zero on a fresh router.
+        check(rib_paths_count(r) == 0, "rib_paths_count: 0 on fresh router");
+
+        // rib_path_at on an empty Loc-RIB throws Error.
+        bool threw = false;
+        try {
+            (void)rib_path_at(r, 0);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "rib_path_at: throws on out-of-range index");
+
+        // Originate one route — the Add-Path view should report 1
+        // path, and rib_path_at(0) should return a non-null Route.
+        std::array<std::uint8_t, 4> pfx{10, 0, 0, 1};
+        check(0 == lr_router_originate_v4(r.get(), pfx.data(), 24, nullptr),
+              "lr_router_originate_v4 OK");
+        check(rib_paths_count(r) == 1, "rib_paths_count: 1 after originate");
+        auto route = rib_path_at(r, 0);
+        check(route != nullptr, "rib_path_at(0): non-null Route");
+
+        // Flush the Loc-RIB — the shutdown hook RFC 4271 leaves to
+        // the implementor. Idempotent: a second call sees an empty
+        // Loc-RIB and queues nothing.
+        flush_rib_for_shutdown(r);
+        flush_rib_for_shutdown(r);
+
+        // Babel session: babel_reachable / babel_flush / babel_gc /
+        // babel_egress_nexthops / etc.
+        std::vector<std::uint8_t> v6 = {0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+                                        0, 0, 0, 0, 0, 0, 0, 1};
+        auto hb = add_babel_session(r, v6);
+        babel_gc(r, 1000);
+        babel_flush_session(r, hb);
+
+        // set_babel_own_router_id with an 8-byte router-id.
+        std::array<std::uint8_t, 8> id{1, 2, 3, 4, 5, 6, 7, 8};
+        set_babel_own_router_id(r, hb, id);
+
+        // set_babel_link_cost_params.
+        set_babel_link_cost_params(r, hb, 1000, 100000, 96);
+
+        // babel_rtt_us / babel_rtt_echo_pair return nullopt on a
+        // fresh session (no RTT sample yet).
+        check(!babel_rtt_us(r, hb, 0).has_value(),
+              "babel_rtt_us: nullopt on fresh session");
+        check(!babel_rtt_echo_pair(r, hb, 0).has_value(),
+              "babel_rtt_echo_pair: nullopt on fresh session");
+
+        // babel_egress_nexthops returns a non-nullopt pair for a
+        // Babel session. The session was constructed with a v6 local
+        // address (fe80::1), and the BabelNeighbor initial address
+        // is the local address — so before any peer is noted, the
+        // v6 next hop is the local v6 (peer-address fallback per
+        // RFC 8966 §3.5.3) and the v4 next hop is None.
+        auto nexthops = babel_egress_nexthops(r, hb);
+        check(nexthops.has_value(),
+              "babel_egress_nexthops: Babel session returns a value");
+        check(!nexthops->first.has_value(),
+              "babel_egress_nexthops: v4 absent before note_peer");
+        check(nexthops->second.has_value(),
+              "babel_egress_nexthops: v6 = local address");
+        const auto& v6_nexthop = *nexthops->second;
+        check(std::equal(v6_nexthop.begin(), v6_nexthop.end(), v6.begin()),
+              "babel_egress_nexthops: v6 == local");
+
+        // babel_take_route_request / babel_take_own_seqno_request
+        // are false / nullopt on a fresh session.
+        check(!babel_take_route_request(r, hb),
+              "babel_take_route_request: false on fresh session");
+        check(!babel_take_own_seqno_request(r, hb).has_value(),
+              "babel_take_own_seqno_request: nullopt on fresh session");
+
+        // babel_egress_nexthops on a non-Babel session returns
+        // nullopt (the C ABI's "no info" return code).
+        auto nexthops_bgp = babel_egress_nexthops(r, h);
+        check(!nexthops_bgp.has_value(),
+              "babel_egress_nexthops: nullopt on non-Babel session");
+
+        // babel_note_peer with a v4 address. After this, the v4
+        // next hop is the noted peer (peer_v4 = Some(peer)), and the
+        // v6 next hop falls back to None (the noted peer is v4, so
+        // peer_v6 = None).
+        std::vector<std::uint8_t> v4 = {192, 0, 2, 100};
+        babel_note_peer(r, hb, v4);
+        auto nexthops_after = babel_egress_nexthops(r, hb);
+        check(nexthops_after.has_value(),
+              "babel_egress_nexthops: still returns a value after note_peer");
+        check(nexthops_after->first.has_value(),
+              "babel_egress_nexthops: v4 present after noting v4 peer");
+        const auto& v4_nexthop = *nexthops_after->first;
+        check(std::equal(v4_nexthop.begin(), v4_nexthop.end(), v4.begin()),
+              "babel_egress_nexthops: v4 == noted peer");
+        check(!nexthops_after->second.has_value(),
+              "babel_egress_nexthops: v6 absent after noting v4 peer");
+
+        // babel_note_peer with a bad length throws Error.
+        threw = false;
+        try {
+            babel_note_peer(r, hb, std::vector<std::uint8_t>{1, 2, 3});
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "babel_note_peer: throws on bad address length");
+    }
+
     // ---- MPLS Label / LabelStack (RFC 3032 §2.1, RFC 8277 §2.2/§2.3) ----
     {
         auto l = make_label(100);
