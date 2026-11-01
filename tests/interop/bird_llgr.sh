@@ -160,18 +160,38 @@ done
 # Crash semantics (see phase 2): a SIGTERM would deliver BIRD's own
 # RFC 4486 Cease and the helper correctly purges instead of retaining.
 kill -9 $BIRD_PID 2>/dev/null || true
-sleep 1
-grep -q "graceful-restart retention" "$OUT/lr.log" \
-    || note_fail "lr-daemon did not enter graceful-restart retention"
+# Wait for the daemon to detect the dead peer and enter graceful-restart
+# retention. The daemon's per-session read loop has a 200ms timeout
+# (crates/lr-cli/src/daemon.rs:run_peer_session) and the kernel can
+# take ~1 s to deliver the TCP FIN/RST after SIGKILL on a busy runner,
+# so a fixed `sleep 1` is too tight under load. Retry up to 5 s.
+for i in $(seq 1 20); do
+    sleep 0.25
+    grep -q "graceful-restart retention" "$OUT/lr.log" 2>/dev/null && break
+    [ "$i" = 20 ] && { note_fail "lr-daemon did not enter graceful-restart retention"; }
+done
 grep -q "LLGR" "$OUT/lr.log" || note_fail "lr-daemon retention is not LLGR-aware"
 grep -qF "route withdrawn 198.51.100.0/24" "$OUT/lr.log" \
     && note_fail "lr-daemon purged the peer routes on session loss (no retention)"
-sleep $((RESTART_TIME + 2))
-grep -q "LLGR stale state" "$OUT/lr.log" \
-    || note_fail "lr-daemon did not mark the routes LLGR_STALE after the restart window"
-sleep $((LLST + 3))
-grep -qF "route withdrawn 198.51.100.0/24" "$OUT/lr.log" \
-    || note_fail "lr-daemon kept the stale route past the long-lived stale time"
+# Wait for the LLGR_STALE marker to appear after the RFC 4724 restart
+# window. The daemon logs "LLGR stale state" when the restart timer
+# fires; retry up to twice the restart window so a slow runner does
+# not fail the grep.
+for i in $(seq 1 $(((RESTART_TIME + 2) * 4))); do
+    sleep 0.25
+    grep -q "LLGR stale state" "$OUT/lr.log" 2>/dev/null && break
+    [ "$i" = $(((RESTART_TIME + 2) * 4)) ] && \
+        { note_fail "lr-daemon did not mark the routes LLGR_STALE after the restart window"; }
+done
+# Wait for the long-lived stale time to expire and the daemon to purge
+# the stale routes. Retry up to 1.5x the LLST so a slow kernel timer
+# does not fail the final purge grep.
+for i in $(seq 1 $(((LLST + 3) * 4))); do
+    sleep 0.25
+    grep -qF "route withdrawn 198.51.100.0/24" "$OUT/lr.log" 2>/dev/null && break
+    [ "$i" = $(((LLST + 3) * 4)) ] && \
+        { note_fail "lr-daemon kept the stale route past the long-lived stale time"; }
+done
 echo "== lr-daemon log (phase 3) =="
 cat "$OUT/lr.log"
 
