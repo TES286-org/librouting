@@ -16014,9 +16014,22 @@ void lr_policy_free(lr_policy_t p);
  * action succeeded).
  *
  * `set_kind` is one of `LR_SET_*` (e.g. `LR_SET_LOCAL_PREF`,
- * `LR_SET_MED`, `LR_SET_PREPEND_AS`, `LR_SET_ADD_COMMUNITY`). The
- * per-action arguments are passed via the `arg1` / `arg2` / `arg3`
- * triple — see each `LR_SET_*` for the per-kind argument shape.
+ * `LR_SET_MED`, `LR_SET_PREPEND_AS`, `LR_SET_ADD_COMMUNITY`,
+ * `LR_SET_METRIC`, `LR_SET_TAG`). The per-action arguments are
+ * passed via the `arg1` / `arg2` / `arg3` triple — see each
+ * `LR_SET_*` for the per-kind argument shape:
+ *
+ * - `LR_SET_LOCAL_PREF` — `arg1 = value` (u32)
+ * - `LR_SET_MED` — `arg1 = value` (u32)
+ * - `LR_SET_PREPEND_AS` — `arg1 = asn` (u32)
+ * - `LR_SET_ADD_COMMUNITY` — `arg1 = asn` (u32), `arg2 = local` (u16)
+ * - `LR_SET_METRIC` — `arg1 = value` (u32)
+ * - `LR_SET_TAG` — `arg1 = tag` (u32)
+ *
+ * `LR_SET_NEXT_HOP` is not handled here because the variant takes
+ * an `IpAddr` (16 bytes for IPv6) that does not fit into the three
+ * `u32` payload slots; the dedicated `lr_route_set_next_hop` is the
+ * C ABI surface for that variant.
  *
  * # Safety
  * `route` must be a valid `lr_route_t` handle.

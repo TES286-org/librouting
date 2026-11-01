@@ -97,7 +97,13 @@ pub const LR_APPLY_SET_ERROR_UNKNOWN: u8 = 6;
 
 fn apply_set_error_to_code(e: &ApplySetError) -> u8 {
     match e {
-        ApplySetError::RequiresBgpFeature(_) => LR_APPLY_SET_ERROR_LOCAL_PREF_NO_BGP,
+        ApplySetError::RequiresBgpFeature(name) => match *name {
+            "SetLocalPref" => LR_APPLY_SET_ERROR_LOCAL_PREF_NO_BGP,
+            "SetMed" => LR_APPLY_SET_ERROR_MED_NO_BGP,
+            "PrependAs" => LR_APPLY_SET_ERROR_PREPEND_AS_NO_BGP,
+            "AddCommunity" => LR_APPLY_SET_ERROR_ADD_COMMUNITY_NO_BGP,
+            _ => LR_APPLY_SET_ERROR_UNKNOWN,
+        },
     }
 }
 
@@ -313,9 +319,22 @@ pub unsafe extern "C" fn lr_policy_free(p: lr_policy_t) {
 /// action succeeded).
 ///
 /// `set_kind` is one of `LR_SET_*` (e.g. `LR_SET_LOCAL_PREF`,
-/// `LR_SET_MED`, `LR_SET_PREPEND_AS`, `LR_SET_ADD_COMMUNITY`). The
-/// per-action arguments are passed via the `arg1` / `arg2` / `arg3`
-/// triple — see each `LR_SET_*` for the per-kind argument shape.
+/// `LR_SET_MED`, `LR_SET_PREPEND_AS`, `LR_SET_ADD_COMMUNITY`,
+/// `LR_SET_METRIC`, `LR_SET_TAG`). The per-action arguments are
+/// passed via the `arg1` / `arg2` / `arg3` triple — see each
+/// `LR_SET_*` for the per-kind argument shape:
+///
+/// - `LR_SET_LOCAL_PREF` — `arg1 = value` (u32)
+/// - `LR_SET_MED` — `arg1 = value` (u32)
+/// - `LR_SET_PREPEND_AS` — `arg1 = asn` (u32)
+/// - `LR_SET_ADD_COMMUNITY` — `arg1 = asn` (u32), `arg2 = local` (u16)
+/// - `LR_SET_METRIC` — `arg1 = value` (u32)
+/// - `LR_SET_TAG` — `arg1 = tag` (u32)
+///
+/// `LR_SET_NEXT_HOP` is not handled here because the variant takes
+/// an `IpAddr` (16 bytes for IPv6) that does not fit into the three
+/// `u32` payload slots; the dedicated `lr_route_set_next_hop` is the
+/// C ABI surface for that variant.
 ///
 /// # Safety
 /// `route` must be a valid `lr_route_t` handle.
@@ -347,6 +366,10 @@ pub unsafe extern "C" fn lr_apply_set_checked(
                         arg2 as u16,
                     )
                 }
+                crate::policy_objects::LR_SET_METRIC => {
+                    lr_policy::action::SetAction::SetMetric(arg1)
+                }
+                crate::policy_objects::LR_SET_TAG => lr_policy::action::SetAction::SetTag(arg1),
                 _ => return LR_APPLY_SET_ERROR_UNKNOWN,
             };
             let _ = (arg3,); // unused for these variants
@@ -494,5 +517,50 @@ mod tests {
         // before touching the route.
         let code = unsafe { lr_apply_set_checked(std::ptr::null_mut(), 99, 0, 0, 0) };
         assert_eq!(code, LR_APPLY_SET_ERROR_UNKNOWN);
+    }
+
+    #[test]
+    fn ffi_apply_set_checked_set_metric_round_trips() {
+        // SetMetric is cross-protocol and never fails — pin the new
+        // wiring so a regression that drops it returns UNKNOWN.
+        let route = unsafe {
+            crate::policy_objects::lr_route_new_v4(
+                [203u8, 0, 113, 0].as_ptr(),
+                24,
+                crate::policy::LrProtocol::Bgp as i32,
+            )
+        };
+        assert!(!route.is_null());
+        let code = unsafe {
+            lr_apply_set_checked(route, crate::policy_objects::LR_SET_METRIC, 31337, 0, 0)
+        };
+        assert_eq!(code, LR_APPLY_SET_ERROR_OK);
+        // Read back via the direct C ABI to confirm the side effect.
+        let mut out = 0u32;
+        let rc = unsafe { crate::policy_objects::lr_route_metric(route, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert_eq!(out, 31337);
+        unsafe { crate::policy_objects::lr_route_free(route) };
+    }
+
+    #[test]
+    fn ffi_apply_set_checked_set_tag_round_trips() {
+        let route = unsafe {
+            crate::policy_objects::lr_route_new_v4(
+                [203u8, 0, 113, 0].as_ptr(),
+                24,
+                crate::policy::LrProtocol::Bgp as i32,
+            )
+        };
+        assert!(!route.is_null());
+        let code = unsafe {
+            lr_apply_set_checked(route, crate::policy_objects::LR_SET_TAG, 0xdead_beef, 0, 0)
+        };
+        assert_eq!(code, LR_APPLY_SET_ERROR_OK);
+        let mut out = 0u32;
+        let rc = unsafe { crate::policy_objects::lr_route_tag(route, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert_eq!(out, 0xdead_beef);
+        unsafe { crate::policy_objects::lr_route_free(route) };
     }
 }
