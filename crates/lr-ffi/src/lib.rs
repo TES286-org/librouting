@@ -109,6 +109,7 @@ pub mod roa_table;
 pub mod role_topology;
 pub mod route_attrs;
 pub mod router;
+pub mod router_runtime;
 pub mod rtr_client;
 pub mod rtr_pdu;
 pub mod seg6_route;

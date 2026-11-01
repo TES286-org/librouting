@@ -30,7 +30,7 @@ use lr_srv6::{LocatorParseError, SidParseError};
 
 use crate::guarded;
 
-fn name_ptr(s: &str) -> *const std::os::raw::c_char {
+pub(crate) fn name_ptr(s: &str) -> *const std::os::raw::c_char {
     thread_local! {
         static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }

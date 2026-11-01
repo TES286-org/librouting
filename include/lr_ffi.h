@@ -18398,6 +18398,330 @@ int32_t lr_router_add_roa_entry(lr_router_t r,
 int32_t lr_router_set_roa_validate(lr_router_t r, uint8_t enable);
 
 /**
+ * Read the BGP FSM state name of a session by handle (one of
+ * `"Idle"`, `"Connect"`, `"Active"`, `"OpenSent"`, `"OpenConfirm"`,
+ * `"Established"` for BGP; non-BGP / unknown sessions return NULL).
+ *
+ * The index-based [`lr_router_session_summary_at`] already exposes
+ * the same string, but a transport that owns a single session
+ * handle previously had to walk the whole summary list to find its
+ * own row — the handle-keyed reader makes the common-case O(1).
+ *
+ * Returns a NUL-terminated UTF-8 string (the FSM state name), or
+ * NULL when the router handle is invalid, the session is unknown,
+ * or the session is not a BGP session. The returned pointer aliases
+ * a thread-local buffer reused by every `lr_*_name` entry point in
+ * the C ABI (the same pattern `lr_bfd_auth_type_name`,
+ * `lr_ospf_network_type_name` etc. use); the caller MUST copy the
+ * bytes out before the next such call on the same thread. The
+ * caller MUST NOT free the pointer.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t` (or NULL — NULL returns NULL
+ * rather than panicking).
+ */
+const char *lr_router_session_peer_state(lr_router_t r, uint64_t session);
+
+/**
+ * Read the remaining milliseconds of the max-prefix `Restart`
+ * cooldown for a session (BIRD `restart time`, FRR `bgp maximum-prefix
+ * restart <secs>`). Returns 1 when a cooldown is in effect (the
+ * caller's `*out_ms` is set to the remaining milliseconds), 0 when
+ * the session never tripped `Restart` or the configured cooldown has
+ * elapsed, negative on error.
+ *
+ * The daemon's outbound connector reads this before dialing so a
+ * peer that exceeded its prefix limit cannot re-establish until the
+ * configured cooldown elapses. Driven by the router clock advanced
+ * in [`lr_router_tick`].
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_ms` must point to a
+ * writable `uint64_t` slot when non-null; NULL is an error.
+ */
+int32_t lr_router_session_restart_cooldown_remaining(lr_router_t r,
+                                                     uint64_t session,
+                                                     uint64_t *out_ms);
+
+/**
+ * Consume the §6.8 collision-loss latch of a session: returns 1 when
+ * the session lost an RFC 4271 §6.8 collision — its own resolver
+ * closed it, or a Cease / Connection Collision Resolution
+ * NOTIFICATION (RFC 4486 subcode 7) arrived — since the latch was
+ * last consumed (or the session last started). Returns 0 when no
+ * collision was lost since the last call, negative on error. The
+ * latch is consumed on read: a subsequent call returns 0 until the
+ * next collision.
+ *
+ * Embedders use it to back the connector off instead of redialing
+ * into a peer that already holds a live session (BIRD parity: the
+ * collision loser waits out its ConnectRetry, it does not hammer).
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_take_collision_lost(lr_router_t r, uint64_t session);
+
+/**
+ * Whether the session's CURRENT transport incarnation ever reached
+ * Established. Returns 1 when the session reached Established at
+ * least once on the current transport, 0 otherwise, negative on
+ * error. Used by embedders to reset reconnect backoff only after a
+ * genuinely working session — a handshake that died at OpenConfirm
+ * must keep the exponential backoff growing.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_session_was_established(lr_router_t r, uint64_t session);
+
+/**
+ * Number of paths currently in the Loc-RIB's Add-Path view
+ * ([`RouterInstance::rib_paths_snapshot`]). The default
+ * `lr_router_rib_len` returns the best-path count (one per prefix);
+ * this reader returns the full multiplicity count when Add-Path is
+ * configured (RFC 7911 §2 — "the BGP speaker MAY advertise more than
+ * one path per destination"). Returns the count, or negative on
+ * error.
+ *
+ * Pair with [`lr_router_rib_path_at`] to walk the typed view; the
+ * existing text-only [`lr_router_rib_dump`] is unchanged and still
+ * the cheapest way to render the table for human inspection.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int64_t lr_router_rib_paths_count(lr_router_t r);
+
+/**
+ * Borrow one path from the Loc-RIB's Add-Path view at index `idx`
+ * (0-based). On success, ownership of a fresh [`lr_route_t`] handle
+ * (boxing a `Route` clone) is transferred to the caller; the handle
+ * MUST be released with [`lr_route_free`]. Returns 0 on success,
+ * `LR_ERR_NULL` (-1) on null `out_route`, `LR_ERR_INVALID_HANDLE`
+ * (-2) on an invalid router, `LR_ERR_OTHER` (-6) on out-of-range
+ * index (the last-error string carries the index and the count).
+ *
+ * Routes are returned in `rib_paths_snapshot` order — the same order
+ * `lr_router_rib_dump` walks. The clone is unavoidable across the
+ * C ABI: the inner `&Route` cannot outlive the router lock that
+ * guards the Loc-RIB, so the entry point hands the caller an owned
+ * snapshot.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_route` must point to a
+ * writable `lr_route_t` slot when non-null.
+ */
+int32_t lr_router_rib_path_at(lr_router_t r, uintptr_t idx, lr_route_t *out_route);
+
+/**
+ * Flush every Loc-RIB route — the daemon shutdown hook RFC 4271
+ * leaves to the implementor. Queues one `RouteWithdrawn` event per
+ * Loc-RIB key (the event consumer / ticker's final drain hands them
+ * to the kernel mirror so the routes this daemon installed leave
+ * the kernel with it — BIRD's `krt` parity). Returns 0 on success,
+ * `LR_ERR_INVALID_HANDLE` (-2) on an invalid router.
+ *
+ * Idempotent: calling twice queues the withdrawals twice (the second
+ * call sees an empty Loc-RIB and queues nothing). The intended
+ * sequence is `flush_rib_for_shutdown` → `drain_output` per session
+ * → `lr_router_destroy`.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_flush_rib_for_shutdown(lr_router_t r);
+
+/**
+ * Drop every route learned over the Babel session `h` and apply the
+ * withdrawal delta to Loc-RIB — the `check link` response when an
+ * interface goes operationally down (BIRD `check link yes`,
+ * RFC 8966 §A.2). Returns 0 on success (incl. when the session is not
+ * a Babel session — the no-op matches the Rust trait's default),
+ * `LR_ERR_INVALID_HANDLE` (-2) on an invalid router.
+ *
+ * The session stays alive for the link's return: routes re-learn
+ * from the peer's Updates when the interface comes back.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_babel_flush_session(lr_router_t r, uint64_t session);
+
+/**
+ * One Babel expiry sweep (RFC 8966 §3.2.5): expire routes whose
+ * re-announcement hold time lapsed and retract everything a dead
+ * neighbour taught us, applying the Loc-RIB deltas. Returns 0 on
+ * success, `LR_ERR_INVALID_HANDLE` (-2) on an invalid router. The
+ * transport should call this about once a second (`now_ms` is the
+ * same wall-clock milliseconds `lr_router_tick` advances).
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_babel_gc(lr_router_t r, uint64_t now_ms);
+
+/**
+ * Pin the Babel router-id this node announces on session `h`
+ * (RFC 8966 §3.3). Updates that echo it back — a peer re-advertising
+ * our own claims — are then ignored, exactly like BIRD's
+ * `babel_handle_update` self-router-id guard. Returns 0 on success
+ * (incl. non-Babel session, matching the trait's no-op default),
+ * `LR_ERR_INVALID_HANDLE` (-2) on an invalid router, `LR_ERR_NULL`
+ * (-1) on a NULL `id` pointer.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `id` must point to 8 readable
+ * bytes (the Babel router-id, RFC 8966 §3.3.1 — the EUI-64 or any
+ * other unique 64-bit value).
+ */
+int32_t lr_router_set_babel_own_router_id(lr_router_t r, uint64_t session, const uint8_t *id);
+
+/**
+ * Configure the reception-side link-cost ramp of Babel session `h`
+ * (RFC 8966 §A.2.4): the RTT penalty bounds and the maximum applied
+ * on top of the txcost learned from the peer's IHU when an Update's
+ * advertised metric is folded into the local route metric.
+ * `rtt_cost` 0 (babeld's default) keeps the RTT feature off. Returns
+ * 0 on success (incl. non-Babel session), `LR_ERR_INVALID_HANDLE`
+ * (-2) on an invalid router.
+ *
+ * The three parameters are microseconds: rtt_min_us is the lower
+ * bound below which no penalty is applied, rtt_max_us is the upper
+ * bound above which the penalty saturates at `rtt_cost`.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_set_babel_link_cost_params(lr_router_t r,
+                                             uint64_t session,
+                                             uint32_t rtt_min_us,
+                                             uint32_t rtt_max_us,
+                                             uint16_t rtt_cost);
+
+/**
+ * Tell the Babel runtime the address the peer's datagrams come from.
+ * RFC 8966 §3.5.3: an Update with no preceding NextHop TLV resolves
+ * its next hop to the *sender* — BIRD relies on this and omits the
+ * v6 NextHop TLV for its own announcements. The runtime is
+ * constructed with the local bind address, so the transport MUST
+ * call this per datagram or v6 routes fall back to our own address
+ * as the next hop. Returns 0 on success (incl. non-Babel session),
+ * `LR_ERR_INVALID_HANDLE` (-2) on an invalid router, `LR_ERR_NULL`
+ * (-1) on a NULL `addr` pointer, `LR_ERR_BAD_UTF8` (-3) on an
+ * `is_v6` value other than 0 / 1.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `addr` must point to 4 readable
+ * bytes when `is_v6` is 0, 16 readable bytes when `is_v6` is 1.
+ */
+int32_t lr_router_babel_note_peer(lr_router_t r,
+                                  uint64_t session,
+                                  uint8_t is_v6,
+                                  const uint8_t *addr);
+
+/**
+ * The smoothed RTT measured toward the peer of Babel session `h`
+ * (BABEL-RTT, RFC 8966 §A.2.4), when a fresh sample exists. Returns 1
+ * when a sample is available (the caller's `*out_us` is set to the
+ * smoothed RTT in microseconds), 0 when no fresh sample exists or the
+ * session is not a Babel session, negative on error.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_us` must point to a
+ * writable `uint32_t` slot when non-null.
+ */
+int32_t lr_router_babel_rtt_us(lr_router_t r, uint64_t session, uint64_t now_ms, uint32_t *out_us);
+
+/**
+ * The BABEL-RTT pair the next IHU toward the session's peer should
+ * echo — `(peer Hello timestamp, our receive time)`, valid only
+ * while the Hello is fresh (RFC 8966 §A.2.4; babeld's 1 s echo
+ * window). Returns 1 when a fresh echo pair is available (the
+ * caller's `*out_echo_ts` and `*out_recv_us` are set — the peer's
+ * Hello timestamp and our receive time, both in microseconds),
+ * 0 when no fresh pair exists or the session is not a Babel session,
+ * negative on error.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_echo_ts` and `out_recv_us`
+ * must point to writable `uint32_t` slots when non-null.
+ */
+int32_t lr_router_babel_rtt_echo(lr_router_t r,
+                                 uint64_t session,
+                                 uint64_t now_ms,
+                                 uint32_t *out_echo_ts,
+                                 uint32_t *out_recv_us);
+
+/**
+ * The current next-hop addresses the Babel peer of session `h`
+ * advertises in its Update streams — `(AE 1 v4, AE 2/3 v6)` as
+ * learned from the NextHop TLVs (RFC 8966 §4.6.4), plus the
+ * implicit peer-address fallbacks once a datagram has been seen.
+ *
+ * The egress interface for every route learned on the session is
+ * the session's own interface (babeld installs kernel routes with
+ * `neigh->ifp`; BIRD resolves through the neighbour's iface) —
+ * *not* whatever interface the kernel's own next-hop resolution
+ * prefers. Embedders that mirror the Loc-RIB into the kernel FIB
+ * use these addresses to pin the egress interface per next hop,
+ * especially for v4-in-v6 transport where the v4 next hop is not
+ * on-link anywhere and longest-prefix resolution can land the
+ * route on an unrelated adapter.
+ *
+ * Returns 0 on success (the `*out_v4_present` / `*out_v6_present`
+ * flags are set to 1 / 0; when 1, the corresponding address buffer
+ * is filled — 4 bytes for v4, 16 bytes for v6). Returns
+ * `LR_ERR_NULL` (-1) on a NULL output pointer, `LR_ERR_INVALID_HANDLE`
+ * (-2) on an invalid router, 1 when the session is not a Babel
+ * session or the runtime has no next-hop information — the output
+ * buffers are zeroed in that case so the caller can distinguish
+ * "session not Babel" from "Babel session with no next hops yet".
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_v4_present` /
+ * `out_v4` (4 bytes) / `out_v6_present` / `out_v6` (16 bytes) must
+ * point to writable slots when non-null.
+ */
+int32_t lr_router_babel_egress_nexthops(lr_router_t r,
+                                        uint64_t session,
+                                        uint8_t *out_v4_present,
+                                        uint8_t *out_v4,
+                                        uint8_t *out_v6_present,
+                                        uint8_t *out_v6);
+
+/**
+ * Take the pending "a Route Request arrived" flag (RFC 8966
+ * §3.2.6): returns 1 exactly once after any Route Request TLV
+ * (wildcard or specific) was seen on session `h`. The transport
+ * answers by announcing immediately instead of waiting for the
+ * periodic tick. Returns 0 when no request is pending, 1 when one
+ * was consumed, negative on error.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_babel_take_route_request(lr_router_t r, uint64_t session);
+
+/**
+ * Take the pending "a Seqno Request for *our own* router-id arrived"
+ * event (RFC 8966 §3.2.6.2): returns 1 exactly once after a peer
+ * asked us to re-announce with (at least) the seqno the caller's
+ * `*out_seqno` is set to — the restart-recovery path when a peer
+ * remembers a higher seqno than our fresh boot value. The transport
+ * bumps its announcement seqno to at least `seqno` and re-announces.
+ * Returns 0 when no request is pending, 1 when one was consumed,
+ * negative on error.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_seqno` must point to a
+ * writable `uint16_t` slot when non-null.
+ */
+int32_t lr_router_babel_take_own_seqno_request(lr_router_t r,
+                                               uint64_t session,
+                                               uint16_t *out_seqno);
+
+/**
  * Construct a fresh `RtrClient` (RFC 8210 §8.1 cold start — no
  * session memory, protocol version starts at RTR_VERSION_MAX).
  */

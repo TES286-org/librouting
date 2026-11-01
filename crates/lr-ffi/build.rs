@@ -118,6 +118,7 @@ typedef struct OpaqueIpAddr IpAddr;
     println!("cargo:rerun-if-changed=src/error.rs");
     println!("cargo:rerun-if-changed=src/bytes.rs");
     println!("cargo:rerun-if-changed=src/router.rs");
+    println!("cargo:rerun-if-changed=src/router_runtime.rs");
     println!("cargo:rerun-if-changed=src/policy.rs");
     println!("cargo:rerun-if-changed=src/codec.rs");
     println!("cargo:rerun-if-changed=src/events.rs");
