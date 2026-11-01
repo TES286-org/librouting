@@ -21,6 +21,8 @@ typedef struct OpaqueFilter OpaqueFilter;
 typedef struct OpaqueFilter *lr_filter_t;
 typedef struct OpaqueRoute OpaqueRoute;
 typedef struct OpaqueRoute *lr_route_t;
+typedef struct OpaqueAttributes OpaqueAttributes;
+typedef struct OpaqueAttributes *lr_attributes_t;
 
 const char *lr_last_error(void);
 uint32_t lr_abi_version(void);
@@ -626,6 +628,44 @@ int32_t lr_route_set_metric(lr_route_t route, uint32_t value);
 int32_t lr_route_metric(lr_route_t route, uint32_t *out);
 int32_t lr_route_set_tag(lr_route_t route, int32_t has_tag, uint32_t tag);
 int32_t lr_route_tag(lr_route_t route, uint32_t *out);
+
+/* Attributes container (lr_core::attr::Attributes — the generic
+ * ordered attribute set used by BGP path attributes and OSPF/Babel
+ * extra metadata). Mirrors crates/lr-ffi/src/attributes.rs. */
+lr_attributes_t lr_attributes_new(void);
+void lr_attributes_free(lr_attributes_t a);
+int32_t lr_attributes_insert(lr_attributes_t a,
+                             uint8_t tag,
+                             uint8_t flags,
+                             const uint8_t *value,
+                             uintptr_t value_len);
+int64_t lr_attributes_get(lr_attributes_t a,
+                          uint8_t tag,
+                          uint8_t *out_flags,
+                          uint8_t *out_value,
+                          uintptr_t cap);
+uint32_t lr_attributes_get_u32_be(lr_attributes_t a, uint8_t tag);
+uint64_t lr_attributes_get_u64_be(lr_attributes_t a, uint8_t tag);
+uint8_t lr_attributes_get_u8(lr_attributes_t a, uint8_t tag);
+int32_t lr_attributes_remove(lr_attributes_t a, uint8_t tag);
+uintptr_t lr_attributes_len(lr_attributes_t a);
+uint8_t lr_attributes_is_empty(lr_attributes_t a);
+int64_t lr_attributes_at(lr_attributes_t a,
+                         uintptr_t index,
+                         uint8_t *out_tag,
+                         uint8_t *out_flags,
+                         uint8_t *out_value,
+                         uintptr_t cap);
+
+/* ApplySetError helpers — apply a SetAction to a route via the
+ * fail-closed apply_set_checked surface (lr-policy::action).
+ * Mirrors crates/lr-ffi/src/policy_batch.rs. */
+uint8_t lr_apply_set_checked(lr_route_t route,
+                             uint8_t set_kind,
+                             uint32_t arg1,
+                             uint32_t arg2,
+                             uint32_t arg3);
+const char *lr_apply_set_error_name(uint8_t code);
 
 /* Per-route BGP / Babel / OSPF attribute readers (RFC 4271 §5.1,
  * RFC 4456 §8, RFC 6514 §5, RFC 7311, RFC 9231 §4, RFC 8966 §3.2/§4.6.9,

@@ -238,6 +238,26 @@ from .rib import (
     RouteOrigin,
     RouteSelector,
 )
+from .attributes import (
+    APPLY_SET_ERROR_ADD_COMMUNITY_NO_BGP,
+    APPLY_SET_ERROR_LOCAL_PREF_NO_BGP,
+    APPLY_SET_ERROR_MED_NO_BGP,
+    APPLY_SET_ERROR_NOT_WIRED,
+    APPLY_SET_ERROR_OK,
+    APPLY_SET_ERROR_PREPEND_AS_NO_BGP,
+    APPLY_SET_ERROR_UNKNOWN,
+    SET_ADD_COMMUNITY,
+    SET_LOCAL_PREF,
+    SET_MED,
+    SET_METRIC,
+    SET_NEXT_HOP,
+    SET_PREPEND_AS,
+    SET_TAG,
+    ApplySetError,
+    Attributes,
+    apply_set_checked,
+    apply_set_error_name,
+)
 
 __all__ = [
     "Router",
@@ -418,6 +438,26 @@ __all__ = [
     "SAFI_UNICAST",
     "SAFI_MULTICAST",
     "SAFI_LABELED_UNICAST",
+    # Generic attribute container (lr_core::attr::Attributes) +
+    # apply_set_checked fail-closed surface (lr_policy::action).
+    "Attributes",
+    "ApplySetError",
+    "apply_set_checked",
+    "apply_set_error_name",
+    "SET_LOCAL_PREF",
+    "SET_MED",
+    "SET_NEXT_HOP",
+    "SET_PREPEND_AS",
+    "SET_ADD_COMMUNITY",
+    "SET_METRIC",
+    "SET_TAG",
+    "APPLY_SET_ERROR_OK",
+    "APPLY_SET_ERROR_LOCAL_PREF_NO_BGP",
+    "APPLY_SET_ERROR_MED_NO_BGP",
+    "APPLY_SET_ERROR_PREPEND_AS_NO_BGP",
+    "APPLY_SET_ERROR_ADD_COMMUNITY_NO_BGP",
+    "APPLY_SET_ERROR_NOT_WIRED",
+    "APPLY_SET_ERROR_UNKNOWN",
     # Babel routing protocol (RFC 8966 + RFC 8967 auth). Mirrors lr_babel.
     "BabelFrame",
     "BabelCodec",
