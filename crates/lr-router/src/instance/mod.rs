@@ -5683,6 +5683,22 @@ impl DefaultRouter {
         self.ospf_areas.keys().copied().collect()
     }
 
+    /// Read one area's type policy (RFC 2328 §3.6 / RFC 3101).
+    ///
+    /// Mirrors what [`Self::ospf_set_area_type`] last installed on the
+    /// area, or the type the first session attaching to the area
+    /// pinned (see [`SessionConfig::with_ospf_area_type`]). The
+    /// reader exists so an embedder can inspect the live router state
+    /// — for the daemon's reload path to diff the configured area
+    /// kind against the configured TOML, for a BGP-LS driver to gate
+    /// AS-external projection on stub areas, and for the C ABI to
+    /// surface the same struct-value the Rust API sees. Returns
+    /// `None` for unknown areas (an area not yet attached or already
+    /// torn down).
+    pub fn ospf_area_type(&self, area_id: u32) -> Option<OspfAreaType> {
+        self.ospf_areas.get(&area_id).map(|a| a.kind)
+    }
+
     /// Read one LSA out of an area's LSDB by its exact key
     /// (type, link-state ID, advertising router). The
     /// graceful-restart restarting router uses this to fetch its own

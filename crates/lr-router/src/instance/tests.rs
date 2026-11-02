@@ -914,6 +914,48 @@ fn ospf_area_type_mismatch_rejected_and_runtime_change_allowed() {
 }
 
 #[test]
+fn ospf_area_type_reader_returns_live_value() {
+    let mut r = DefaultRouter::new();
+    let rid = RouterId::from_u32(0x01010101);
+    // Unknown area reads back as None.
+    assert_eq!(r.ospf_area_type(1), None);
+    // Attaching a stub session fixes the area's type.
+    let _h = r
+        .add_session(
+            SessionConfig::ospfv2(rid, 1).with_ospf_area_type(OspfAreaType::stub_no_summary(7)),
+        )
+        .unwrap();
+    assert_eq!(
+        r.ospf_area_type(1),
+        Some(OspfAreaType::Stub {
+            default_metric: 7,
+            no_summary: true,
+        }),
+        "reader must return the live area-kind pinned at attach"
+    );
+    assert_eq!(
+        r.ospf_area_type(1).map(|t| t.is_stubby()),
+        Some(true),
+        "is_stubby() is true for stub"
+    );
+    // Runtime conversion is observable through the same reader.
+    assert!(r.ospf_set_area_type(1, OspfAreaType::nssa(42)));
+    assert_eq!(
+        r.ospf_area_type(1),
+        Some(OspfAreaType::Nssa {
+            default_metric: 42,
+            no_summary: false,
+        }),
+        "reader must reflect the runtime conversion"
+    );
+    assert_eq!(
+        r.ospf_area_type(1).map(|t| t.no_summary()),
+        Some(false),
+        "no_summary() reflects the post-conversion flag"
+    );
+}
+
+#[test]
 fn add_and_remove_bgp_session() {
     let mut r = DefaultRouter::new();
     let h = r
