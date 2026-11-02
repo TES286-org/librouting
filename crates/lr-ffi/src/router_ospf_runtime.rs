@@ -671,6 +671,338 @@ pub unsafe extern "C" fn lr_router_ospf_is_asbr(r: lr_router_t) -> i32 {
 }
 
 // =========================================================================
+// OspfAreaType — value-type C ABI for `lr_router::OspfAreaType`
+// (RFC 2328 §3.6 stub areas; RFC 3101 NSSA). The Rust enum has 3
+// variants (`Normal` / `Stub { default_metric, no_summary }` / `Nssa
+// { default_metric, no_summary }`). The pre-existing C ABI
+// representation — the i32 constants `LR_AREA_NORMAL` / `LR_AREA_STUB`
+// / `LR_AREA_STUB_NO_SUMMARY` / `LR_AREA_NSSA` /
+// `LR_AREA_NSSA_NO_SUMMARY` plus `lr_router_ospf_set_area_type(r,
+// area_id, kind)` — is lossy: the `default_metric` field is dropped
+// at the boundary (the existing `area_kind_from_i32` always fills
+// `default_metric: 0`), so an embedder driving the standalone setter
+// cannot configure the border-router-injected default route's
+// metric. The struct-value surface below mirrors the Rust API
+// one-to-one: each Rust constructor (`OspfAreaType::stub` /
+// `stub_no_summary` / `nssa` / `nssa_no_summary`) gets a C
+// constructor, each Rust reader (`is_stub` / `is_nssa` / `is_stubby`
+// / `no_summary` / `default_metric`) gets a C reader, and the
+// `lr_router_ospf_set_area_type_ext` / `lr_router_ospf_area_type`
+// router entry points round-trip the full value. The pre-existing
+// `lr_router_ospf_set_area_type` is preserved as a back-compat thin
+// wrapper (it constructs a zero-default-metric value) so the ABI
+// freeze stays additive-only.
+// =========================================================================
+
+use lr_router::OspfAreaType;
+
+/// `lr_router::OspfAreaType` projected as a plain C struct value
+/// (no opaque handle — the Rust enum is `Copy`, so a value type is
+/// the natural C ABI shape).
+///
+/// `kind` is one of the `LR_AREA_*` constants defined in
+/// `crates/lr-ffi/src/router.rs` (and re-exported via
+/// `crates/lr-ffi/src/sessions.rs`). `default_metric` carries the
+/// border-router-injected default route's metric for `Stub` /
+/// `Nssa` kinds (0 for `Normal`, unused).
+///
+/// The struct is `#[repr(C)]` and trivially copyable; embedders
+/// pass and return it by value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct lr_ospf_area_type_t {
+    /// One of the `LR_AREA_*` constants (NORMAL=0, STUB=1,
+    /// STUB_NO_SUMMARY=2, NSSA=3, NSSA_NO_SUMMARY=4).
+    pub kind: i32,
+    /// Border-router-injected default-route metric for stub / NSSA
+    /// areas (RFC 2328 §3.6, RFC 3101 §2.7). 0 for `Normal`.
+    pub default_metric: u32,
+}
+
+impl Default for lr_ospf_area_type_t {
+    fn default() -> Self {
+        Self {
+            kind: crate::router::LR_AREA_NORMAL,
+            default_metric: 0,
+        }
+    }
+}
+
+impl From<OspfAreaType> for lr_ospf_area_type_t {
+    fn from(t: OspfAreaType) -> Self {
+        let (kind, default_metric) = match t {
+            OspfAreaType::Normal => (crate::router::LR_AREA_NORMAL, 0),
+            OspfAreaType::Stub {
+                default_metric,
+                no_summary,
+            } => (
+                if no_summary {
+                    crate::router::LR_AREA_STUB_NO_SUMMARY
+                } else {
+                    crate::router::LR_AREA_STUB
+                },
+                default_metric,
+            ),
+            OspfAreaType::Nssa {
+                default_metric,
+                no_summary,
+            } => (
+                if no_summary {
+                    crate::router::LR_AREA_NSSA_NO_SUMMARY
+                } else {
+                    crate::router::LR_AREA_NSSA
+                },
+                default_metric,
+            ),
+        };
+        Self {
+            kind,
+            default_metric,
+        }
+    }
+}
+
+impl From<&lr_ospf_area_type_t> for OspfAreaType {
+    fn from(t: &lr_ospf_area_type_t) -> Self {
+        match t.kind {
+            crate::router::LR_AREA_NORMAL => OspfAreaType::Normal,
+            crate::router::LR_AREA_STUB => OspfAreaType::Stub {
+                default_metric: t.default_metric,
+                no_summary: false,
+            },
+            crate::router::LR_AREA_STUB_NO_SUMMARY => OspfAreaType::Stub {
+                default_metric: t.default_metric,
+                no_summary: true,
+            },
+            crate::router::LR_AREA_NSSA => OspfAreaType::Nssa {
+                default_metric: t.default_metric,
+                no_summary: false,
+            },
+            crate::router::LR_AREA_NSSA_NO_SUMMARY => OspfAreaType::Nssa {
+                default_metric: t.default_metric,
+                no_summary: true,
+            },
+            // Unknown kind falls back to Normal — defensive
+            // default for a malformed struct that came in over the
+            // C ABI. The router still rejects unknown kinds via the
+            // setter entry points below.
+            _ => OspfAreaType::Normal,
+        }
+    }
+}
+
+/// Construct an `OspfAreaType::Normal` value — the regular area
+/// kind where type-3 / type-4 summaries and type-5 externals flow
+/// freely (RFC 2328 §3.6).
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_normal() -> lr_ospf_area_type_t {
+    lr_ospf_area_type_t {
+        kind: crate::router::LR_AREA_NORMAL,
+        default_metric: 0,
+    }
+}
+
+/// Construct an `OspfAreaType::stub(default_metric)` value (RFC 2328
+/// §3.6): no type-5 or type-4 LSAs enter; the border routers inject a
+/// type-3 summary default (`0.0.0.0/0`) with `default_metric`.
+/// Summaries are imported — for the "totally stubby" variant use
+/// [`lr_ospf_area_type_stub_no_summary`].
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_stub(default_metric: u32) -> lr_ospf_area_type_t {
+    lr_ospf_area_type_t {
+        kind: crate::router::LR_AREA_STUB,
+        default_metric,
+    }
+}
+
+/// Construct an `OspfAreaType::stub_no_summary(default_metric)` value
+/// — the totally-stubby variant of [`lr_ospf_area_type_stub`] (no
+/// type-3 summaries except the injected default).
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_stub_no_summary(default_metric: u32) -> lr_ospf_area_type_t {
+    lr_ospf_area_type_t {
+        kind: crate::router::LR_AREA_STUB_NO_SUMMARY,
+        default_metric,
+    }
+}
+
+/// Construct an `OspfAreaType::nssa(default_metric)` value (RFC 3101
+/// §2.7): like stub, but internal ASBRs may redistribute externals as
+/// area-scoped type-7 LSAs, which the elected border router
+/// translates into type-5s for the rest of the AS.
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_nssa(default_metric: u32) -> lr_ospf_area_type_t {
+    lr_ospf_area_type_t {
+        kind: crate::router::LR_AREA_NSSA,
+        default_metric,
+    }
+}
+
+/// Construct an `OspfAreaType::nssa_no_summary(default_metric)` value
+/// — the totally-NSSA variant of [`lr_ospf_area_type_nssa`] (no
+/// type-3 summaries except the type-3 default).
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_nssa_no_summary(default_metric: u32) -> lr_ospf_area_type_t {
+    lr_ospf_area_type_t {
+        kind: crate::router::LR_AREA_NSSA_NO_SUMMARY,
+        default_metric,
+    }
+}
+
+/// Read the kind id (`LR_AREA_*` constant) of an OSPF area type.
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_kind(t: lr_ospf_area_type_t) -> i32 {
+    t.kind
+}
+
+/// `1` when `t` is one of the stub variants (`LR_AREA_STUB` /
+/// `LR_AREA_STUB_NO_SUMMARY`), `0` otherwise. Mirrors
+/// `OspfAreaType::is_stub`.
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_is_stub(t: lr_ospf_area_type_t) -> u8 {
+    u8::from(matches!(
+        t.kind,
+        crate::router::LR_AREA_STUB | crate::router::LR_AREA_STUB_NO_SUMMARY,
+    ))
+}
+
+/// `1` when `t` is one of the NSSA variants (`LR_AREA_NSSA` /
+/// `LR_AREA_NSSA_NO_SUMMARY`), `0` otherwise. Mirrors
+/// `OspfAreaType::is_nssa`.
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_is_nssa(t: lr_ospf_area_type_t) -> u8 {
+    u8::from(matches!(
+        t.kind,
+        crate::router::LR_AREA_NSSA | crate::router::LR_AREA_NSSA_NO_SUMMARY,
+    ))
+}
+
+/// `1` when `t` is stubby (stub or NSSA — type-5 / type-4 LSAs are
+/// refused), `0` otherwise. Mirrors `OspfAreaType::is_stubby`.
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_is_stubby(t: lr_ospf_area_type_t) -> u8 {
+    u8::from(lr_ospf_area_type_is_stub(t) != 0 || lr_ospf_area_type_is_nssa(t) != 0)
+}
+
+/// `1` when `t` carries the `no_summary` flag (the totally-stubby or
+/// totally-NSSA variant), `0` otherwise. Mirrors
+/// `OspfAreaType::no_summary`.
+#[no_mangle]
+pub extern "C" fn lr_ospf_area_type_no_summary(t: lr_ospf_area_type_t) -> u8 {
+    u8::from(matches!(
+        t.kind,
+        crate::router::LR_AREA_STUB_NO_SUMMARY | crate::router::LR_AREA_NSSA_NO_SUMMARY,
+    ))
+}
+
+/// Read the border-router-injected default-route metric of `t`. The
+/// metric is meaningful only for stub / NSSA kinds (0 for `Normal`).
+///
+/// Returns `1` and writes the metric into `*out_default_metric` when
+/// `out_default_metric` is non-NULL and `t` is a stub / NSSA kind;
+/// returns `0` and leaves `*out_default_metric` untouched for `Normal`
+/// (mirroring `OspfAreaType::default_metric` returning `Option<u32>`).
+///
+/// # Safety
+/// `out_default_metric` must be a writable `u32` slot when non-NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_area_type_default_metric(
+    t: lr_ospf_area_type_t,
+    out_default_metric: *mut u32,
+) -> u8 {
+    let rust = OspfAreaType::from(&t);
+    match rust.default_metric() {
+        Some(m) => {
+            if !out_default_metric.is_null() {
+                unsafe { *out_default_metric = m };
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Set an attached OSPF area's type policy using the full
+/// struct-value (RFC 2328 §3.6 / RFC 3101). The struct-value variant
+/// of [`crate::router::lr_router_ospf_set_area_type`]: it accepts the
+/// border-router-injected default-route metric (which the legacy i32
+/// setter drops on the floor). The router refuses to convert the
+/// backbone (`area_id == 0`) to a stub / NSSA kind (RFC 2328 §3.6,
+/// RFC 3101 §2.1) and refuses a no-op conversion (the kind is already
+/// `t`); both return `0`.
+///
+/// Returns `1` when the conversion landed, `0` when refused (no-op
+/// or illegal), `LR_ERR_NULL` (-1) on a NULL router handle,
+/// `LR_ERR_PANIC` on panic.
+///
+/// # Safety
+/// `r` must be a valid `lr_router_t` (NULL is diagnosed as
+/// `LR_ERR_NULL`).
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_ospf_set_area_type_ext(
+    r: lr_router_t,
+    area_id: u32,
+    t: lr_ospf_area_type_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if r.is_null() {
+                return LR_ERR_NULL;
+            }
+            let kind = OspfAreaType::from(&t);
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return LR_ERR_NULL,
+            };
+            i32::from(router.ospf_set_area_type(area_id, kind))
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read one attached OSPF area's type policy (RFC 2328 §3.6 /
+/// RFC 3101). Mirrors `DefaultRouter::ospf_area_type`: writes the
+/// struct-value into `*out` and returns `1` when the area is
+/// attached, returns `0` when the area is unknown (not yet attached
+/// or already torn down — `*out` is left untouched).
+///
+/// Returns `1` (area found, `*out` written), `0` (area not found),
+/// `LR_ERR_NULL` (-1) on a NULL `out` or a NULL / poisoned router
+/// handle, `LR_ERR_PANIC` on panic.
+///
+/// # Safety
+/// `out` must point to a writable `lr_ospf_area_type_t` slot.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_ospf_area_type(
+    r: lr_router_t,
+    area_id: u32,
+    out: *mut lr_ospf_area_type_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            if r.is_null() {
+                return LR_ERR_NULL;
+            }
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return LR_ERR_NULL,
+            };
+            match router.ospf_area_type(area_id) {
+                Some(t) => {
+                    unsafe { *out = lr_ospf_area_type_t::from(t) };
+                    1
+                }
+                None => 0,
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -993,5 +1325,192 @@ mod tests {
         assert_eq!(rc, LR_ERR_NULL);
         let rc = unsafe { lr_router_ospf_is_asbr(std::ptr::null_mut()) };
         assert_eq!(rc, LR_ERR_INVALID_HANDLE);
+    }
+
+    // ----- OspfAreaType value-type ABI tests (issue #92) -----
+
+    /// Round-trip every constructor through its kind id and the
+    /// is_stub / is_nssa / is_stubby / no_summary / default_metric
+    /// readers, so the C ABI surface stays aligned with the Rust
+    /// `OspfAreaType` enum one-to-one.
+    #[test]
+    fn ospf_area_type_constructors_round_trip_through_readers() {
+        // Normal: no stub, no nssa, not stubby, no no_summary,
+        // default_metric returns 0 (Option::None).
+        let t = lr_ospf_area_type_normal();
+        assert_eq!(t.kind, crate::router::LR_AREA_NORMAL);
+        assert_eq!(lr_ospf_area_type_kind(t), crate::router::LR_AREA_NORMAL);
+        assert_eq!(lr_ospf_area_type_is_stub(t), 0);
+        assert_eq!(lr_ospf_area_type_is_nssa(t), 0);
+        assert_eq!(lr_ospf_area_type_is_stubby(t), 0);
+        assert_eq!(lr_ospf_area_type_no_summary(t), 0);
+        let mut dm: u32 = 0xffff_ffff;
+        assert_eq!(unsafe { lr_ospf_area_type_default_metric(t, &mut dm) }, 0);
+        // The reader left `*out` untouched on the None branch —
+        // the contract the C++ / Python / Go wrappers depend on.
+        assert_eq!(dm, 0xffff_ffff);
+
+        // Stub(default_metric=42): is_stub, stubby, not no_summary,
+        // default_metric returns 1 + 42.
+        let t = lr_ospf_area_type_stub(42);
+        assert_eq!(t.kind, crate::router::LR_AREA_STUB);
+        assert_eq!(t.default_metric, 42);
+        assert_eq!(lr_ospf_area_type_is_stub(t), 1);
+        assert_eq!(lr_ospf_area_type_is_nssa(t), 0);
+        assert_eq!(lr_ospf_area_type_is_stubby(t), 1);
+        assert_eq!(lr_ospf_area_type_no_summary(t), 0);
+        let mut dm: u32 = 0;
+        assert_eq!(unsafe { lr_ospf_area_type_default_metric(t, &mut dm) }, 1);
+        assert_eq!(dm, 42);
+
+        // Stub no_summary(7): is_stub, stubby, no_summary, dm=7.
+        let t = lr_ospf_area_type_stub_no_summary(7);
+        assert_eq!(t.kind, crate::router::LR_AREA_STUB_NO_SUMMARY);
+        assert_eq!(t.default_metric, 7);
+        assert_eq!(lr_ospf_area_type_is_stub(t), 1);
+        assert_eq!(lr_ospf_area_type_is_nssa(t), 0);
+        assert_eq!(lr_ospf_area_type_is_stubby(t), 1);
+        assert_eq!(lr_ospf_area_type_no_summary(t), 1);
+        let mut dm: u32 = 0;
+        assert_eq!(unsafe { lr_ospf_area_type_default_metric(t, &mut dm) }, 1);
+        assert_eq!(dm, 7);
+
+        // NSSA(99): is_nssa, stubby, not no_summary, dm=99.
+        let t = lr_ospf_area_type_nssa(99);
+        assert_eq!(t.kind, crate::router::LR_AREA_NSSA);
+        assert_eq!(t.default_metric, 99);
+        assert_eq!(lr_ospf_area_type_is_stub(t), 0);
+        assert_eq!(lr_ospf_area_type_is_nssa(t), 1);
+        assert_eq!(lr_ospf_area_type_is_stubby(t), 1);
+        assert_eq!(lr_ospf_area_type_no_summary(t), 0);
+        let mut dm: u32 = 0;
+        assert_eq!(unsafe { lr_ospf_area_type_default_metric(t, &mut dm) }, 1);
+        assert_eq!(dm, 99);
+
+        // NSSA no_summary(3): is_nssa, stubby, no_summary, dm=3.
+        let t = lr_ospf_area_type_nssa_no_summary(3);
+        assert_eq!(t.kind, crate::router::LR_AREA_NSSA_NO_SUMMARY);
+        assert_eq!(t.default_metric, 3);
+        assert_eq!(lr_ospf_area_type_is_stub(t), 0);
+        assert_eq!(lr_ospf_area_type_is_nssa(t), 1);
+        assert_eq!(lr_ospf_area_type_is_stubby(t), 1);
+        assert_eq!(lr_ospf_area_type_no_summary(t), 1);
+        let mut dm: u32 = 0;
+        assert_eq!(unsafe { lr_ospf_area_type_default_metric(t, &mut dm) }, 1);
+        assert_eq!(dm, 3);
+    }
+
+    #[test]
+    fn ospf_area_type_default_metric_null_out_is_safe() {
+        // Passing a NULL out-pointer must not crash and must still
+        // report presence (`1`) for stub / NSSA kinds.
+        let t = lr_ospf_area_type_stub(7);
+        assert_eq!(
+            unsafe { lr_ospf_area_type_default_metric(t, std::ptr::null_mut()) },
+            1
+        );
+        let t = lr_ospf_area_type_normal();
+        assert_eq!(
+            unsafe { lr_ospf_area_type_default_metric(t, std::ptr::null_mut()) },
+            0
+        );
+    }
+
+    #[test]
+    fn ospf_area_type_round_trip_through_rust_enum() {
+        // The From<OspfAreaType> / From<&lr_ospf_area_type_t> impls
+        // must be inverses — every Rust enum value produces a C
+        // struct that, read back, produces the same Rust enum value.
+        fn round_trip(t: lr_router::OspfAreaType) {
+            let c = lr_ospf_area_type_t::from(t);
+            let back = lr_router::OspfAreaType::from(&c);
+            assert_eq!(t, back);
+        }
+        round_trip(lr_router::OspfAreaType::Normal);
+        round_trip(lr_router::OspfAreaType::stub(1));
+        round_trip(lr_router::OspfAreaType::stub_no_summary(2));
+        round_trip(lr_router::OspfAreaType::nssa(3));
+        round_trip(lr_router::OspfAreaType::nssa_no_summary(4));
+    }
+
+    #[test]
+    fn lr_router_ospf_area_type_reader_returns_pinned_value() {
+        // Attach an OSPFv2 area as NSSA with default_metric=42 and
+        // read it back through the new C ABI reader.
+        let r = ospf_router_with_area(7, crate::sessions::LR_AREA_NSSA, 42);
+        let mut out = lr_ospf_area_type_t::default();
+        let rc = unsafe { lr_router_ospf_area_type(r, 7, &mut out) };
+        assert_eq!(rc, 1, "area 7 must be attached");
+        assert_eq!(out.kind, crate::router::LR_AREA_NSSA);
+        assert_eq!(out.default_metric, 42);
+        assert_eq!(lr_ospf_area_type_is_nssa(out), 1);
+        assert_eq!(lr_ospf_area_type_is_stubby(out), 1);
+        assert_eq!(lr_ospf_area_type_no_summary(out), 0);
+        let mut dm: u32 = 0;
+        assert_eq!(unsafe { lr_ospf_area_type_default_metric(out, &mut dm) }, 1);
+        assert_eq!(dm, 42);
+        // Unknown area returns 0, *out untouched.
+        let sentinel = lr_ospf_area_type_t {
+            kind: 99,
+            default_metric: 0xdead,
+        };
+        let mut out2 = sentinel;
+        let rc = unsafe { lr_router_ospf_area_type(r, 999, &mut out2) };
+        assert_eq!(rc, 0);
+        assert_eq!(out2, sentinel, "reader must leave *out untouched on miss");
+        unsafe { crate::handle::unbox_router(r) };
+    }
+
+    #[test]
+    fn lr_router_ospf_set_area_type_ext_round_trips_default_metric() {
+        // The legacy `lr_router_ospf_set_area_type(r, area, kind)`
+        // drops the default_metric to 0 — that's the gap the
+        // struct-value `_ext` variant closes.
+        let r = ospf_router_with_area(5, crate::sessions::LR_AREA_NORMAL, 0);
+        // Convert area 5 to NSSA(42) through the struct-value setter.
+        let rc = unsafe { lr_router_ospf_set_area_type_ext(r, 5, lr_ospf_area_type_nssa(42)) };
+        assert_eq!(rc, 1, "conversion to NSSA must succeed");
+        // The reader now reports NSSA + default_metric=42.
+        let mut out = lr_ospf_area_type_t::default();
+        let rc = unsafe { lr_router_ospf_area_type(r, 5, &mut out) };
+        assert_eq!(rc, 1);
+        assert_eq!(out.kind, crate::router::LR_AREA_NSSA);
+        assert_eq!(out.default_metric, 42);
+        // Convert to totally-NSSA with default_metric=7.
+        let rc =
+            unsafe { lr_router_ospf_set_area_type_ext(r, 5, lr_ospf_area_type_nssa_no_summary(7)) };
+        assert_eq!(rc, 1);
+        let rc = unsafe { lr_router_ospf_area_type(r, 5, &mut out) };
+        assert_eq!(rc, 1);
+        assert_eq!(out.kind, crate::router::LR_AREA_NSSA_NO_SUMMARY);
+        assert_eq!(out.default_metric, 7);
+        assert_eq!(lr_ospf_area_type_no_summary(out), 1);
+        // No-op conversion returns 0 (already NSSA_NO_SUMMARY).
+        let rc =
+            unsafe { lr_router_ospf_set_area_type_ext(r, 5, lr_ospf_area_type_nssa_no_summary(7)) };
+        assert_eq!(rc, 0);
+        // Backbone cannot become a stub area (RFC 2328 §3.6).
+        // First attach a backbone area on a fresh router.
+        let r2 = ospf_router_with_area(0, crate::sessions::LR_AREA_NORMAL, 0);
+        let rc = unsafe { lr_router_ospf_set_area_type_ext(r2, 0, lr_ospf_area_type_stub(1)) };
+        assert_eq!(rc, 0, "backbone cannot become stub");
+        unsafe { crate::handle::unbox_router(r) };
+        unsafe { crate::handle::unbox_router(r2) };
+    }
+
+    #[test]
+    fn lr_router_ospf_area_type_null_args_diagnosed() {
+        // NULL out pointer.
+        let rc = unsafe { lr_router_ospf_area_type(std::ptr::null_mut(), 0, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_NULL);
+        // NULL router with valid out pointer.
+        let mut out = lr_ospf_area_type_t::default();
+        let rc = unsafe { lr_router_ospf_area_type(std::ptr::null_mut(), 0, &mut out) };
+        assert_eq!(rc, LR_ERR_NULL);
+        // NULL router for the setter.
+        let rc = unsafe {
+            lr_router_ospf_set_area_type_ext(std::ptr::null_mut(), 0, lr_ospf_area_type_normal())
+        };
+        assert_eq!(rc, LR_ERR_NULL);
     }
 }

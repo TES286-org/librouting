@@ -4367,6 +4367,33 @@ typedef struct OpaqueOspfV3ExternalDest {
 typedef struct OpaqueOspfV3ExternalDest *lr_ospf_v3_external_dest_t;
 
 /**
+ * `lr_router::OspfAreaType` projected as a plain C struct value
+ * (no opaque handle — the Rust enum is `Copy`, so a value type is
+ * the natural C ABI shape).
+ *
+ * `kind` is one of the `LR_AREA_*` constants defined in
+ * `crates/lr-ffi/src/router.rs` (and re-exported via
+ * `crates/lr-ffi/src/sessions.rs`). `default_metric` carries the
+ * border-router-injected default route's metric for `Stub` /
+ * `Nssa` kinds (0 for `Normal`, unused).
+ *
+ * The struct is `#[repr(C)]` and trivially copyable; embedders
+ * pass and return it by value.
+ */
+typedef struct lr_ospf_area_type_t {
+  /**
+   * One of the `LR_AREA_*` constants (NORMAL=0, STUB=1,
+   * STUB_NO_SUMMARY=2, NSSA=3, NSSA_NO_SUMMARY=4).
+   */
+  int32_t kind;
+  /**
+   * Border-router-injected default-route metric for stub / NSSA
+   * areas (RFC 2328 §3.6, RFC 3101 §2.7). 0 for `Normal`.
+   */
+  uint32_t default_metric;
+} lr_ospf_area_type_t;
+
+/**
  * Opaque `RtrClient` handle.
  */
 typedef struct OpaqueRtrClient {
@@ -18688,6 +18715,129 @@ int32_t lr_router_ospf_unredistribute_v3(lr_router_t r, struct lr_core_prefix_t 
  * `r` must be a valid `lr_router_t`.
  */
 int32_t lr_router_ospf_is_asbr(lr_router_t r);
+
+/**
+ * Construct an `OspfAreaType::Normal` value — the regular area
+ * kind where type-3 / type-4 summaries and type-5 externals flow
+ * freely (RFC 2328 §3.6).
+ */
+struct lr_ospf_area_type_t lr_ospf_area_type_normal(void);
+
+/**
+ * Construct an `OspfAreaType::stub(default_metric)` value (RFC 2328
+ * §3.6): no type-5 or type-4 LSAs enter; the border routers inject a
+ * type-3 summary default (`0.0.0.0/0`) with `default_metric`.
+ * Summaries are imported — for the "totally stubby" variant use
+ * [`lr_ospf_area_type_stub_no_summary`].
+ */
+struct lr_ospf_area_type_t lr_ospf_area_type_stub(uint32_t default_metric);
+
+/**
+ * Construct an `OspfAreaType::stub_no_summary(default_metric)` value
+ * — the totally-stubby variant of [`lr_ospf_area_type_stub`] (no
+ * type-3 summaries except the injected default).
+ */
+struct lr_ospf_area_type_t lr_ospf_area_type_stub_no_summary(uint32_t default_metric);
+
+/**
+ * Construct an `OspfAreaType::nssa(default_metric)` value (RFC 3101
+ * §2.7): like stub, but internal ASBRs may redistribute externals as
+ * area-scoped type-7 LSAs, which the elected border router
+ * translates into type-5s for the rest of the AS.
+ */
+struct lr_ospf_area_type_t lr_ospf_area_type_nssa(uint32_t default_metric);
+
+/**
+ * Construct an `OspfAreaType::nssa_no_summary(default_metric)` value
+ * — the totally-NSSA variant of [`lr_ospf_area_type_nssa`] (no
+ * type-3 summaries except the type-3 default).
+ */
+struct lr_ospf_area_type_t lr_ospf_area_type_nssa_no_summary(uint32_t default_metric);
+
+/**
+ * Read the kind id (`LR_AREA_*` constant) of an OSPF area type.
+ */
+int32_t lr_ospf_area_type_kind(struct lr_ospf_area_type_t t);
+
+/**
+ * `1` when `t` is one of the stub variants (`LR_AREA_STUB` /
+ * `LR_AREA_STUB_NO_SUMMARY`), `0` otherwise. Mirrors
+ * `OspfAreaType::is_stub`.
+ */
+uint8_t lr_ospf_area_type_is_stub(struct lr_ospf_area_type_t t);
+
+/**
+ * `1` when `t` is one of the NSSA variants (`LR_AREA_NSSA` /
+ * `LR_AREA_NSSA_NO_SUMMARY`), `0` otherwise. Mirrors
+ * `OspfAreaType::is_nssa`.
+ */
+uint8_t lr_ospf_area_type_is_nssa(struct lr_ospf_area_type_t t);
+
+/**
+ * `1` when `t` is stubby (stub or NSSA — type-5 / type-4 LSAs are
+ * refused), `0` otherwise. Mirrors `OspfAreaType::is_stubby`.
+ */
+uint8_t lr_ospf_area_type_is_stubby(struct lr_ospf_area_type_t t);
+
+/**
+ * `1` when `t` carries the `no_summary` flag (the totally-stubby or
+ * totally-NSSA variant), `0` otherwise. Mirrors
+ * `OspfAreaType::no_summary`.
+ */
+uint8_t lr_ospf_area_type_no_summary(struct lr_ospf_area_type_t t);
+
+/**
+ * Read the border-router-injected default-route metric of `t`. The
+ * metric is meaningful only for stub / NSSA kinds (0 for `Normal`).
+ *
+ * Returns `1` and writes the metric into `*out_default_metric` when
+ * `out_default_metric` is non-NULL and `t` is a stub / NSSA kind;
+ * returns `0` and leaves `*out_default_metric` untouched for `Normal`
+ * (mirroring `OspfAreaType::default_metric` returning `Option<u32>`).
+ *
+ * # Safety
+ * `out_default_metric` must be a writable `u32` slot when non-NULL.
+ */
+uint8_t lr_ospf_area_type_default_metric(struct lr_ospf_area_type_t t,
+                                         uint32_t *out_default_metric);
+
+/**
+ * Set an attached OSPF area's type policy using the full
+ * struct-value (RFC 2328 §3.6 / RFC 3101). The struct-value variant
+ * of [`crate::router::lr_router_ospf_set_area_type`]: it accepts the
+ * border-router-injected default-route metric (which the legacy i32
+ * setter drops on the floor). The router refuses to convert the
+ * backbone (`area_id == 0`) to a stub / NSSA kind (RFC 2328 §3.6,
+ * RFC 3101 §2.1) and refuses a no-op conversion (the kind is already
+ * `t`); both return `0`.
+ *
+ * Returns `1` when the conversion landed, `0` when refused (no-op
+ * or illegal), `LR_ERR_NULL` (-1) on a NULL router handle,
+ * `LR_ERR_PANIC` on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t` (NULL is diagnosed as
+ * `LR_ERR_NULL`).
+ */
+int32_t lr_router_ospf_set_area_type_ext(lr_router_t r,
+                                         uint32_t area_id,
+                                         struct lr_ospf_area_type_t t);
+
+/**
+ * Read one attached OSPF area's type policy (RFC 2328 §3.6 /
+ * RFC 3101). Mirrors `DefaultRouter::ospf_area_type`: writes the
+ * struct-value into `*out` and returns `1` when the area is
+ * attached, returns `0` when the area is unknown (not yet attached
+ * or already torn down — `*out` is left untouched).
+ *
+ * Returns `1` (area found, `*out` written), `0` (area not found),
+ * `LR_ERR_NULL` (-1) on a NULL `out` or a NULL / poisoned router
+ * handle, `LR_ERR_PANIC` on panic.
+ *
+ * # Safety
+ * `out` must point to a writable `lr_ospf_area_type_t` slot.
+ */
+int32_t lr_router_ospf_area_type(lr_router_t r, uint32_t area_id, struct lr_ospf_area_type_t *out);
 
 /**
  * Read the BGP FSM state name of a session by handle (one of
