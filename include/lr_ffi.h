@@ -4356,6 +4356,17 @@ typedef struct OpaqueRouteServerConfig {
 typedef struct OpaqueRouteServerConfig *lr_bgp_rs_config_t;
 
 /**
+ * Opaque `V3ExternalDestination` handle. Wraps a boxed
+ * `lr_ospf::lsa::V3ExternalDestination` (the v3 plane's AS-external
+ * / NSSA-LSA origination input). C side never touches internals.
+ */
+typedef struct OpaqueOspfV3ExternalDest {
+  uint8_t _private[0];
+} OpaqueOspfV3ExternalDest;
+
+typedef struct OpaqueOspfV3ExternalDest *lr_ospf_v3_external_dest_t;
+
+/**
  * Opaque `RtrClient` handle.
  */
 typedef struct OpaqueRtrClient {
@@ -18409,6 +18420,274 @@ int32_t lr_router_add_roa_entry(lr_router_t r,
  * `r` must be a valid `lr_router_t`.
  */
 int32_t lr_router_set_roa_validate(lr_router_t r, uint8_t enable);
+
+/**
+ * Construct an `V3ExternalDestination` for OSPFv3 AS-external / NSSA
+ * origination (RFC 5340 §A.4.7). The `prefix_v4` / `prefix_v6` slots
+ * follow the same convention as the rest of the FFI: pass exactly
+ * one of them, the other NULL. `metric_type2` is `1` for a Type-2
+ * external metric (E bit set) or `0` for Type-1; the metric is
+ * capped just below LSInfinity (`0x00ff_fffe`).
+ *
+ * Returns a non-NULL owned handle on success, NULL on a bad
+ * prefix-pointer pair (the last-error string is set). Free with
+ * [`lr_ospf_v3_external_dest_free`].
+ *
+ * # Safety
+ * `prefix_v6` must point to 16 readable bytes when non-NULL; v4 is
+ * rejected because the v3 plane carries IPv6 prefixes only.
+ */
+lr_ospf_v3_external_dest_t lr_ospf_v3_external_dest_new(const uint8_t *prefix_v4,
+                                                        const uint8_t *prefix_v6,
+                                                        uint8_t prefix_len,
+                                                        uint32_t metric,
+                                                        uint8_t metric_type2);
+
+/**
+ * Set the IPv6 forwarding address (RFC 5340 §A.4.7 `F` bit). When
+ * set, traffic for the prefix is forwarded directly to the FA rather
+ * than to the ASBR. The address MUST be a global IPv6 address —
+ * unspecified and link-local values are illegal and rejected by the
+ * router's redistribute entry point. Pass 16 zero bytes to clear.
+ *
+ * # Safety
+ * `d` must be a valid handle; `addr` must point to 16 readable bytes.
+ */
+int32_t lr_ospf_v3_external_dest_set_forwarding_addr(lr_ospf_v3_external_dest_t d,
+                                                     const uint8_t *addr);
+
+/**
+ * Clear the IPv6 forwarding address (the `F` bit drops, traffic
+ * forwards to the ASBR).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+int32_t lr_ospf_v3_external_dest_clear_forwarding_addr(lr_ospf_v3_external_dest_t d);
+
+/**
+ * Set the external route tag (RFC 5340 §A.4.7 `T` bit).
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+int32_t lr_ospf_v3_external_dest_set_route_tag(lr_ospf_v3_external_dest_t d, uint32_t route_tag);
+
+/**
+ * Clear the external route tag.
+ *
+ * # Safety
+ * `d` must be a valid handle.
+ */
+int32_t lr_ospf_v3_external_dest_clear_route_tag(lr_ospf_v3_external_dest_t d);
+
+/**
+ * Read the prefix into `out` (an `lr_core_prefix_t*`). Returns 0 on
+ * success, `LR_ERR_NULL` when the handle is NULL.
+ *
+ * # Safety
+ * `d` must be a valid handle; `out` must point to writable
+ * `lr_core_prefix_t`.
+ */
+int32_t lr_ospf_v3_external_dest_prefix(lr_ospf_v3_external_dest_t d, struct lr_core_prefix_t *out);
+
+/**
+ * Read the configured metric. `0` for a NULL handle (defensive).
+ */
+uint32_t lr_ospf_v3_external_dest_metric(lr_ospf_v3_external_dest_t d);
+
+/**
+ * `1` when the metric is Type-2 (E bit set), `0` for Type-1, `0` for
+ * a NULL handle (defensive — Type-1 is the safer default).
+ */
+uint8_t lr_ospf_v3_external_dest_type2(lr_ospf_v3_external_dest_t d);
+
+/**
+ * Read the configured IPv6 forwarding address. Writes the 16-byte
+ * address into `out_addr` and returns `1` when the F bit is set;
+ * returns `0` (and leaves `out_addr` untouched) when the F bit is
+ * clear or the handle is NULL.
+ *
+ * # Safety
+ * `d` must be a valid handle; `out_addr` must point to 16 writable
+ * bytes when non-NULL (NULL `out_addr` returns `LR_ERR_NULL`).
+ */
+int32_t lr_ospf_v3_external_dest_forwarding_addr(lr_ospf_v3_external_dest_t d, uint8_t *out_addr);
+
+/**
+ * Read the configured external route tag. Writes the tag into
+ * `out_tag` and returns `1` when the T bit is set; returns `0` (and
+ * leaves `out_tag` untouched) when the T bit is clear or the handle
+ * is NULL.
+ *
+ * # Safety
+ * `d` must be a valid handle; `out_tag` must point to a writable
+ * `uint32_t` when non-NULL.
+ */
+int32_t lr_ospf_v3_external_dest_route_tag(lr_ospf_v3_external_dest_t d, uint32_t *out_tag);
+
+/**
+ * Drop a boxed `V3ExternalDestination`. Safe to call with `NULL`.
+ *
+ * # Safety
+ * `d` must have been produced by
+ * [`lr_ospf_v3_external_dest_new`] and not already freed.
+ */
+void lr_ospf_v3_external_dest_free(lr_ospf_v3_external_dest_t d);
+
+/**
+ * Configure a virtual link to the area border router `endpoint`,
+ * riding through `transit_area` (RFC 2328 §15). Both endpoints
+ * must configure each other; the link is up as soon as this
+ * router's transit-area SPF reaches the endpoint. While up it
+ * materializes a backbone (area 0) adjacency.
+ *
+ * Return codes: `1` when the link was added, `0` when OSPF is not
+ * active, the transit area is not attached, runs OSPFv3 or is a
+ * stub/NSSA area (§15: virtual links cannot cross stub areas; RFC
+ * 3101 §2.1 extends this to NSSAs), the endpoint is this router
+ * itself, or the link already exists; `-1` null out pointer,
+ * `-2` invalid handle, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_ospf_add_virtual_link(lr_router_t r, uint32_t transit_area, uint32_t endpoint);
+
+/**
+ * Remove a configured virtual link, tearing down its backbone
+ * adjacency (and the routes it justified) when it was up. Returns
+ * whether the link existed.
+ *
+ * Return codes: `1` when the link existed and was removed, `0`
+ * when no such link was configured, `-2` invalid handle,
+ * [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_ospf_remove_virtual_link(lr_router_t r, uint32_t transit_area, uint32_t endpoint);
+
+/**
+ * Whether the virtual link through `transit_area` to `endpoint` is
+ * currently up (RFC 2328 §15: the endpoint is intra-area reachable
+ * through the transit area).
+ *
+ * Return codes: `1` up, `0` down or unknown, `-2` invalid handle,
+ * [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_ospf_virtual_link_up(lr_router_t r, uint32_t transit_area, uint32_t endpoint);
+
+/**
+ * The backbone session handle of an up virtual link — the embedder
+ * wires its transport: drain it with `lr_router_drain_output` and
+ * deliver the bytes to the peer endpoint's virtual session
+ * (tunnelled through the transit area), feeding what returns the
+ * same way. Writes `0` into `*out_handle` (and returns `0`) when
+ * the link is down.
+ *
+ * Return codes: `1` when `*out_handle` was written (link up), `0`
+ * when the link is down (no session), `-1` null out pointer, `-2`
+ * invalid handle, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`; `out_handle` must point to a
+ * writable `uint64_t` when non-NULL.
+ */
+int32_t lr_router_ospf_virtual_link_session(lr_router_t r,
+                                            uint32_t transit_area,
+                                            uint32_t endpoint,
+                                            uint64_t *out_handle);
+
+/**
+ * Redistribute one external destination on the OSPFv2 plane (RFC
+ * 2328 §12.4.3): originate a type-5 AS-external-LSA (and a type-7
+ * NSSA-LSA in NSSA areas) into every attached OSPFv2 area and
+ * remember the destination so areas that attach later catch up.
+ * The `dest` handle is *borrowed* (the caller still owns it and
+ * must free it via `lr_ospf_external_dest_free`).
+ *
+ * Return codes: `1` when the redistribution intent was recorded
+ * (and the type-5 / type-7 LSA was originated into every attached
+ * area; the LSA may not be installed when no OSPFv2 area is
+ * attached yet — the intent replays when the first area
+ * attaches), `0` when the destination's prefix is not IPv4 (the
+ * v2 plane carries IPv4 prefixes only — use
+ * [`lr_router_ospf_redistribute_v3`] for IPv6), `-1` NULL handle,
+ * `-2` invalid router handle, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`; `dest` must be a valid
+ * `lr_ospf_external_dest_t` (NULL is rejected).
+ */
+int32_t lr_router_ospf_redistribute(lr_router_t r, lr_ospf_external_dest_t dest);
+
+/**
+ * Drop the redistribution intent covering `prefix` on the OSPFv2
+ * plane (RFC 2328 §12.4.3, RFC 3101 §2.4): MaxAge-flush the
+ * self-originated type-5 LSA (regular areas) and type-7 LSA (NSSAs)
+ * from every area and flood the flush. The v3 plane takes over
+ * automatically for IPv6 prefixes.
+ *
+ * Return codes: `1` when a matching redistribution existed and was
+ * flushed, `0` when no matching redistribution exists, `-2`
+ * invalid router handle, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_ospf_unredistribute(lr_router_t r, struct lr_core_prefix_t prefix);
+
+/**
+ * Redistribute one external destination on the OSPFv3 plane (RFC
+ * 5340 §4.4.3.6): originate a 0x4005 AS-external-LSA into every
+ * attached OSPFv3 area. The `dest` handle is *borrowed* (the caller
+ * still owns it and must free it via
+ * [`lr_ospf_v3_external_dest_free`]). The forwarding address, when
+ * set, must be a global IPv6 address — unspecified and link-local
+ * values are illegal (§A.4.7) and the router rejects them with
+ * `0`.
+ *
+ * Return codes: `1` when the redistribution intent was recorded,
+ * `0` when the destination's prefix is not IPv6 (the v3 plane
+ * carries IPv6 prefixes only — use [`lr_router_ospf_redistribute`]
+ * for IPv4) or the forwarding address is illegal, `-1` NULL
+ * handle, `-2` invalid router handle, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`; `dest` must be a valid
+ * `lr_ospf_v3_external_dest_t` (NULL is rejected).
+ */
+int32_t lr_router_ospf_redistribute_v3(lr_router_t r, lr_ospf_v3_external_dest_t dest);
+
+/**
+ * Drop the redistribution intent covering `prefix` on the OSPFv3
+ * plane (RFC 5340 §A.4.7): MaxAge-flush the self-originated 0x4005
+ * AS-external-LSA from every area and flood the flush.
+ *
+ * Return codes: `1` when a matching redistribution existed and was
+ * flushed, `0` when no matching redistribution exists, `-2`
+ * invalid router handle, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_ospf_unredistribute_v3(lr_router_t r, struct lr_core_prefix_t prefix);
+
+/**
+ * `1` while at least one AS-external redistribution intent is
+ * recorded (the `E`-bit condition of the router-LSA flags — lets
+ * the daemon notice the ASBR status flip and re-originate its
+ * Router-LSAs immediately). `0` otherwise. `-2` invalid handle,
+ * [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_ospf_is_asbr(lr_router_t r);
 
 /**
  * Read the BGP FSM state name of a session by handle (one of
