@@ -3521,6 +3521,11 @@ struct OspfExternalDestDeleter {
         if (p) lr_ospf_external_dest_free(p);
     }
 };
+struct OspfV3ExternalDestDeleter {
+    void operator()(lr_ospf_v3_external_dest_t p) const noexcept {
+        if (p) lr_ospf_v3_external_dest_free(p);
+    }
+};
 
 } // namespace detail
 
@@ -3932,10 +3937,252 @@ public:
     }
     std::uint8_t p_bit() const { return lr_ospf_external_dest_p_bit(ptr_.get()); }
 
+    /// Borrow the underlying C handle (does NOT transfer
+    /// ownership). Used by the router-level redistribute entry
+    /// points (`librouting::ospf_redistribute`).
+    lr_ospf_external_dest_t c_handle() const noexcept { return ptr_.get(); }
+
 private:
     std::unique_ptr<std::remove_pointer_t<lr_ospf_external_dest_t>,
                     detail::OspfExternalDestDeleter> ptr_;
 };
+
+/// RAII handle to one OSPFv3 AS-external-LSA destination (RFC 5340
+/// §4.4.3.6 / §A.4.7) — the v3 counterpart of `OspfExternalDest`.
+/// The v3 plane carries IPv6 prefixes only and the forwarding address
+/// is an IPv6 16-byte array (rather than a 32-bit IPv4 word), so the
+/// v2 `OspfExternalDest` handle cannot be reused.
+class OspfV3ExternalDest {
+public:
+    /// Construct a v3 external destination for an IPv6 prefix.
+    /// `metric_type2` selects Type-2 (E bit set) when `true`; the
+    /// metric is capped just below LSInfinity.
+    OspfV3ExternalDest(const unsigned char prefix_v6[16],
+                       std::uint8_t prefix_len, std::uint32_t metric,
+                       bool metric_type2 = false)
+        : ptr_(lr_ospf_v3_external_dest_new(nullptr, prefix_v6, prefix_len,
+                                            metric,
+                                            metric_type2 ? std::uint8_t{1}
+                                                         : std::uint8_t{0})) {
+        if (!ptr_) throw Error("lr_ospf_v3_external_dest_new returned null");
+    }
+
+    static OspfV3ExternalDest v6(const unsigned char prefix[16],
+                                 std::uint8_t prefix_len, std::uint32_t metric,
+                                 bool metric_type2 = false) {
+        return OspfV3ExternalDest(prefix, prefix_len, metric, metric_type2);
+    }
+
+    /// Set the IPv6 forwarding address (RFC 5340 §A.4.7 `F` bit).
+    /// Must be a global IPv6 address — unspecified and link-local
+    /// values are illegal and the router rejects the redistribute
+    /// call when set. Pass 16 zero bytes to clear (use
+    /// `clear_forwarding_addr()` instead for the no-arg form).
+    void set_forwarding_addr(const unsigned char addr[16]) {
+        int rc = lr_ospf_v3_external_dest_set_forwarding_addr(ptr_.get(), addr);
+        if (rc != 0) throw Error(std::string("lr_ospf_v3_external_dest_set_forwarding_addr: ") + lr_last_error());
+    }
+    /// Drop the F bit (forwards to the ASBR).
+    void clear_forwarding_addr() {
+        int rc = lr_ospf_v3_external_dest_clear_forwarding_addr(ptr_.get());
+        if (rc != 0) throw Error(std::string("lr_ospf_v3_external_dest_clear_forwarding_addr: ") + lr_last_error());
+    }
+    /// Set the external route tag (RFC 5340 §A.4.7 `T` bit).
+    void set_route_tag(std::uint32_t tag) {
+        int rc = lr_ospf_v3_external_dest_set_route_tag(ptr_.get(), tag);
+        if (rc != 0) throw Error(std::string("lr_ospf_v3_external_dest_set_route_tag: ") + lr_last_error());
+    }
+    /// Drop the T bit.
+    void clear_route_tag() {
+        int rc = lr_ospf_v3_external_dest_clear_route_tag(ptr_.get());
+        if (rc != 0) throw Error(std::string("lr_ospf_v3_external_dest_clear_route_tag: ") + lr_last_error());
+    }
+
+    /// Read the configured prefix. Throws `Error` on FFI failure.
+    lr_core_prefix_t prefix() const {
+        lr_core_prefix_t out{};
+        int rc = lr_ospf_v3_external_dest_prefix(ptr_.get(), &out);
+        if (rc != 0) throw Error(std::string("lr_ospf_v3_external_dest_prefix: ") + lr_last_error());
+        return out;
+    }
+    /// Read the configured metric.
+    std::uint32_t metric() const { return lr_ospf_v3_external_dest_metric(ptr_.get()); }
+    /// `true` when the metric is Type-2 (E bit set).
+    bool type2() const { return lr_ospf_v3_external_dest_type2(ptr_.get()) != 0; }
+    /// Read the configured IPv6 forwarding address. Returns
+    /// `std::nullopt` when the F bit is clear.
+    std::optional<std::array<std::uint8_t, 16>> forwarding_addr() const {
+        std::array<std::uint8_t, 16> out{};
+        int rc = lr_ospf_v3_external_dest_forwarding_addr(ptr_.get(), out.data());
+        if (rc < 0) throw Error(std::string("lr_ospf_v3_external_dest_forwarding_addr: ") + lr_last_error());
+        if (rc == 1) return out;
+        return std::nullopt;
+    }
+    /// Read the configured external route tag. Returns `std::nullopt`
+    /// when the T bit is clear.
+    std::optional<std::uint32_t> route_tag() const {
+        std::uint32_t tag = 0;
+        int rc = lr_ospf_v3_external_dest_route_tag(ptr_.get(), &tag);
+        if (rc < 0) throw Error(std::string("lr_ospf_v3_external_dest_route_tag: ") + lr_last_error());
+        if (rc == 1) return tag;
+        return std::nullopt;
+    }
+
+    /// Borrow the underlying C handle (does NOT transfer
+    /// ownership). Used by the router-level redistribute-v3 entry
+    /// point (`librouting::ospf_redistribute_v3`).
+    lr_ospf_v3_external_dest_t c_handle() const noexcept { return ptr_.get(); }
+
+private:
+    std::unique_ptr<std::remove_pointer_t<lr_ospf_v3_external_dest_t>,
+                    detail::OspfV3ExternalDestDeleter> ptr_;
+};
+
+// =========================================================================
+// ===== OSPF runtime: virtual links + AS-external redistribution ==========
+// =========================================================================
+//
+// Mirrors `crates/lr-ffi/src/router_ospf_runtime.rs` one-to-one so a
+// C++ embedder driving the daemon-equivalent runtime can configure
+// RFC 2328 §15 virtual links, redistribute external routes on the
+// v2 / v3 plane, and inspect the ASBR flag — the same surface the
+// daemon's OSPF module uses. The functions live here (after the
+// `OspfExternalDest` / `OspfV3ExternalDest` RAII classes) because the
+// redistribute overloads borrow the dest handle.
+
+/// Configure a virtual link to the area border router `endpoint`,
+/// riding through `transit_area` (RFC 2328 §15). Returns `true` when
+/// the link was added; `false` when OSPF is not active, the transit
+/// area is not attached, runs OSPFv3 or is a stub/NSSA area, the
+/// endpoint is this router itself, or the link already exists.
+inline bool ospf_add_virtual_link(Router& r, std::uint32_t transit_area,
+                                  std::uint32_t endpoint) {
+    int rc = lr_router_ospf_add_virtual_link(r.get(), transit_area, endpoint);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_add_virtual_link failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Remove a configured virtual link, tearing down its backbone
+/// adjacency (and the routes it justified) when it was up. Returns
+/// `true` when the link existed and was removed, `false` when no
+/// such link was configured.
+inline bool ospf_remove_virtual_link(Router& r, std::uint32_t transit_area,
+                                      std::uint32_t endpoint) {
+    int rc = lr_router_ospf_remove_virtual_link(r.get(), transit_area, endpoint);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_remove_virtual_link failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Whether the virtual link through `transit_area` to `endpoint` is
+/// currently up (RFC 2328 §15).
+inline bool ospf_virtual_link_up(Router& r, std::uint32_t transit_area,
+                                 std::uint32_t endpoint) {
+    int rc = lr_router_ospf_virtual_link_up(r.get(), transit_area, endpoint);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_virtual_link_up failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// The backbone session handle of an up virtual link (RFC 2328 §15).
+/// Returns `std::nullopt` when the link is down — the embedder wires
+/// the transport: drain it via `drain_output` and deliver the bytes
+/// to the peer endpoint's virtual session (tunnelled through the
+/// transit area), feeding what returns the same way.
+inline std::optional<std::uint64_t> ospf_virtual_link_session(
+        Router& r, std::uint32_t transit_area, std::uint32_t endpoint) {
+    std::uint64_t h = 0;
+    int rc = lr_router_ospf_virtual_link_session(r.get(), transit_area,
+                                                 endpoint, &h);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_virtual_link_session failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    if (rc == 1) return h;
+    return std::nullopt;
+}
+
+/// Redistribute one external destination on the OSPFv2 plane (RFC
+/// 2328 §12.4.3): originate a type-5 AS-external-LSA (and a type-7
+/// NSSA-LSA in NSSA areas) into every attached OSPFv2 area. The
+/// `dest` handle is borrowed (the caller still owns it and frees it
+/// via `OspfExternalDest`'s destructor). Returns `true` when the
+/// redistribution intent was recorded; `false` when the destination's
+/// prefix is not IPv4 — use `ospf_redistribute_v3` for IPv6.
+inline bool ospf_redistribute(Router& r, const OspfExternalDest& dest) {
+    int rc = lr_router_ospf_redistribute(r.get(), dest.c_handle());
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_redistribute failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Drop the redistribution intent covering `prefix` on the OSPFv2
+/// plane (RFC 2328 §12.4.3, RFC 3101 §2.4): MaxAge-flush the
+/// self-originated type-5 / type-7 LSA from every area. Returns
+/// `true` when a matching redistribution existed and was flushed.
+inline bool ospf_unredistribute(Router& r, const lr_core_prefix_t& prefix) {
+    int rc = lr_router_ospf_unredistribute(r.get(), prefix);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_unredistribute failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Redistribute one external destination on the OSPFv3 plane (RFC
+/// 5340 §4.4.3.6). The `dest` handle is borrowed. Returns `true`
+/// when the intent was recorded; `false` when the prefix is not
+/// IPv6 or the forwarding address is illegal.
+inline bool ospf_redistribute_v3(Router& r, const OspfV3ExternalDest& dest) {
+    int rc = lr_router_ospf_redistribute_v3(r.get(), dest.c_handle());
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_redistribute_v3 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Drop the redistribution intent covering `prefix` on the OSPFv3
+/// plane (RFC 5340 §A.4.7).
+inline bool ospf_unredistribute_v3(Router& r, const lr_core_prefix_t& prefix) {
+    int rc = lr_router_ospf_unredistribute_v3(r.get(), prefix);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_unredistribute_v3 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// `true` while at least one AS-external redistribution intent is
+/// recorded (the `E`-bit condition of the router-LSA flags — lets
+/// the daemon notice the ASBR status flip and re-originate its
+/// Router-LSAs immediately). Mirrors `DefaultRouter::ospf_is_asbr`.
+inline bool ospf_is_asbr(Router& r) {
+    int rc = lr_router_ospf_is_asbr(r.get());
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_is_asbr failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
 
 // =========================================================================
 // ===== lr-osroute::seg6_route — Seg6Route / Seg6LocalRoute / Seg6Netlink ==

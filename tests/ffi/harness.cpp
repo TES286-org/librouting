@@ -1323,6 +1323,99 @@ int main() {
         check(ext.route_tag() == 42, "ExternalDest route_tag = 42");
         check(ext.p_bit() == 1, "ExternalDest p_bit = 1");
 
+        // ExternalDest v3 — RFC 5340 §4.4.3.6.
+        std::array<std::uint8_t, 16> v3_pfx = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0x01};
+        auto v3_ext = OspfV3ExternalDest::v6(v3_pfx.data(), 48, 100, false);
+        check(v3_ext.metric() == 100, "V3ExternalDest metric = 100");
+        check(!v3_ext.type2(), "V3ExternalDest type2 = false");
+        std::array<std::uint8_t, 16> fa_v6 = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0xfe};
+        v3_ext.set_forwarding_addr(fa_v6.data());
+        v3_ext.set_route_tag(0xDEADBEEF);
+        check(v3_ext.forwarding_addr().has_value(), "V3ExternalDest FA set");
+        check(v3_ext.route_tag().has_value(), "V3ExternalDest route_tag set");
+        check(v3_ext.route_tag().value() == 0xDEADBEEF, "V3ExternalDest route_tag = 0xDEADBEEF");
+        v3_ext.clear_forwarding_addr();
+        v3_ext.clear_route_tag();
+        check(!v3_ext.forwarding_addr().has_value(), "V3ExternalDest FA cleared");
+        check(!v3_ext.route_tag().has_value(), "V3ExternalDest route_tag cleared");
+        // V3 external dest prefix reader.
+        lr_core_prefix_t pfx_out = v3_ext.prefix();
+        check(pfx_out.prefix_len == 48, "V3ExternalDest prefix_len = 48");
+        check(lr_core_prefix_is_ipv6(pfx_out) == 1, "V3ExternalDest prefix is IPv6");
+
+        // OSPF virtual link + redistribute lifecycle (RFC 2328 §15 +
+        // §12.4.3). Use a fresh Router so the OSPF area map is the
+        // only state. Build an OSPFv2 session through the C ABI so
+        // `ospf_router_id` is set.
+        {
+            auto r2 = make_router();
+            // Attach an OSPFv2 session in area 1 (the C ABI takes the
+            // session's router-id from the `router_id` parameter).
+            std::uint64_t session_h = 0;
+            int rc = lr_router_add_ospf_session_ext(
+                r2.get(), /*version=*/2, /*router_id=*/0xc0a80001,
+                /*area_id=*/1, /*area_kind=*/0 /* normal */,
+                /*default_metric=*/0, /*mtu=*/1500, /*net_type=*/0 /* ptp */,
+                /*has_interface_ip=*/0, /*interface_ip=*/0,
+                /*has_neighbor_ip=*/0, /*neighbor_ip=*/0,
+                &session_h);
+            check(rc == 0, "lr_router_add_ospf_session_ext returns 0 (C ABI)");
+
+            // Before redistribution: not ASBR.
+            check(!ospf_is_asbr(r2), "OSPF router with no externals is not ASBR");
+            // vlink to self refused.
+            check(!ospf_add_virtual_link(r2, /*transit_area=*/1,
+                                         /*endpoint=*/0xc0a80001),
+                  "vlink to self refused");
+            // vlink across normal area accepted.
+            check(ospf_add_virtual_link(r2, 1, 0xc0a80002),
+                  "vlink across normal area accepted");
+            // duplicate add refused.
+            check(!ospf_add_virtual_link(r2, 1, 0xc0a80002),
+                  "duplicate vlink refused");
+            // link down (no SPF reach).
+            check(!ospf_virtual_link_up(r2, 1, 0xc0a80002),
+                  "vlink down before SPF reaches endpoint");
+            check(!ospf_virtual_link_session(r2, 1, 0xc0a80002).has_value(),
+                  "vlink session is std::nullopt when down");
+            // remove.
+            check(ospf_remove_virtual_link(r2, 1, 0xc0a80002),
+                  "vlink remove succeeds");
+            check(!ospf_remove_virtual_link(r2, 1, 0xc0a80002),
+                  "vlink remove again returns false");
+
+            // Redistribute v2.
+            unsigned char v4_pfx[4] = {10, 0, 0, 0};
+            auto ext_v2 = OspfExternalDest::v4(v4_pfx, 24, 100,
+                                              OspfExternalMetricType::Type1);
+            check(ospf_redistribute(r2, ext_v2), "v2 redistribute succeeds");
+            check(ospf_is_asbr(r2), "OSPF router with v2 externals is ASBR");
+            lr_core_prefix_t v2_unred = lr_core_prefix_v4(v4_pfx, 24);
+            check(ospf_unredistribute(r2, v2_unred), "v2 unredistribute succeeds");
+            check(!ospf_is_asbr(r2), "OSPF router with no externals is not ASBR");
+
+            // Redistribute v3.
+            auto ext_v3 = OspfV3ExternalDest::v6(v3_pfx.data(), 48, 100, false);
+            check(ospf_redistribute_v3(r2, ext_v3), "v3 redistribute succeeds");
+            check(ospf_is_asbr(r2), "OSPF router with v3 externals is ASBR");
+            lr_core_prefix_t v3_unred = lr_core_prefix_v6(v3_pfx.data(), 48);
+            ospf_unredistribute_v3(r2, v3_unred);
+            check(!ospf_is_asbr(r2), "OSPF router with no v3 externals is not ASBR");
+
+            // V3 with link-local FA rejected by the router.
+            auto ext_v3_bad = OspfV3ExternalDest::v6(v3_pfx.data(), 48, 100, false);
+            std::array<std::uint8_t, 16> ll_fa = {
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x01};
+            ext_v3_bad.set_forwarding_addr(ll_fa.data());
+            check(!ospf_redistribute_v3(r2, ext_v3_bad),
+                  "v3 redistribute rejects link-local FA");
+        }
+
         // ---- Seg6Route / Seg6LocalRoute / Seg6Netlink (issue #92) ----
         // Build a SID and an SRH for the route constructors.
         std::array<std::uint8_t, 16> sid_octets = {
