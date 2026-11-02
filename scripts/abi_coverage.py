@@ -5,7 +5,7 @@ Surfaces:
 - C ABI:        include/lr_ffi.h           (every `lr_*` symbol name)
 - C++ wrapper:  include/librouting.hpp     (every `lr_*` symbol name)
 - Python cdef:  bindings/lr-python/src/librouting/_ffi.py
-- Go cgo:       bindings/lr-go/librouting.go
+- Go cgo:       bindings/lr-go/*.go        (every `lr_*` symbol name)
 - Rust pub API: crates/lr-ffi/src/*.rs     (extern "C" fn names — same as C ABI)
 
 Goal: surface the *missing* symbols in each binding layer.
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 C_ABI = ROOT / "include" / "lr_ffi.h"
 CPP = ROOT / "include" / "librouting.hpp"
 PY_FFI = ROOT / "bindings" / "lr-python" / "src" / "librouting" / "_ffi.py"
-GO = ROOT / "bindings" / "lr-go" / "librouting.go"
+GO_DIR = ROOT / "bindings" / "lr-go"
 
 
 # Match function-name tokens that begin with `lr_`. We capture
@@ -72,7 +72,20 @@ def collect_python() -> set[str]:
 
 
 def collect_go() -> set[str]:
-    return _collect_decl_or_call(GO)
+    """Collect every `lr_*` token used across all .go files in the
+    lr-go binding (librouting.go + per-protocol split files)."""
+    out: set[str] = set()
+    if not GO_DIR.exists():
+        return out
+    for path in sorted(GO_DIR.glob("*.go")):
+        # Skip test files — they exercise the API but the coverage
+        # audit is about the binding's *exports*.
+        if path.name.endswith("_test.go"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"\blr_([A-Za-z0-9_]+)\s*\(", text):
+            out.add("lr_" + m.group(1))
+    return out
 
 
 def categorise(syms: set[str]) -> dict[str, list[str]]:
