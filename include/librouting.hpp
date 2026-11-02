@@ -13,11 +13,13 @@ extern "C" {
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace librouting {
@@ -6681,6 +6683,629 @@ inline bool babel_feasible(std::uint16_t route_seqno, std::uint32_t route_metric
                            std::uint16_t feasible_seqno, std::uint32_t feasible_metric) {
     return lr_babel_feasible(route_seqno, route_metric,
                               feasible_seqno, feasible_metric) != 0;
+}
+
+// =========================================================================
+// BGP Path Attributes — RFC 4271 §5.1 PathAttributes container.
+//
+// Mirrors `crates/lr-ffi/src/bgp_path.rs` (lr_bgp_path_attrs_* C ABI)
+// plus the minimal lr_bgp_large_community / lr_bgp_as_path helpers
+// required to construct / free the handles the readers return. The
+// full lr_bgp_as_path_* (21 entry points) and lr_bgp_large_community
+// encode/decode set entry points are a separate follow-up commit.
+//
+// The C++ shapes follow the existing RAII pattern (unique_ptr with
+// custom deleter, std::optional<T> for Rust Option<T>, throw Error on
+// FFI errors). The IANA attribute type codes mirror `lr_bgp::path::AttrType`
+// as a scoped enum so a C++ caller can write BgpAttrType::LocalPref
+// instead of the bare u8.
+// =========================================================================
+
+namespace detail {
+struct BgpPathAttrsDeleter {
+    void operator()(lr_bgp_path_attrs_t p) const noexcept {
+        if (p) lr_bgp_path_attrs_free(p);
+    }
+};
+struct BgpLargeCommunityDeleter {
+    void operator()(lr_bgp_large_community_t p) const noexcept {
+        if (p) lr_bgp_large_community_free(p);
+    }
+};
+struct BgpAsPathDeleter {
+    void operator()(lr_bgp_as_path_t p) const noexcept {
+        if (p) lr_bgp_as_path_free(p);
+    }
+};
+} // namespace detail
+
+/// RAII handle to a boxed PathAttributes set (RFC 4271 §5.1).
+using BgpPathAttrsHandle = std::unique_ptr<OpaqueBgpPathAttrs, detail::BgpPathAttrsDeleter>;
+/// RAII handle to one RFC 8097 Large Community (three 32-bit fields).
+using BgpLargeCommunityHandle = std::unique_ptr<OpaqueBgpLargeCommunity, detail::BgpLargeCommunityDeleter>;
+/// RAII handle to an opaque AS_PATH. The full BgpAsPath surface (decode
+/// / encode / prepend / segment iteration / loop-check) is a separate
+/// follow-up commit; this RAII wrapper only owns the handle's lifetime.
+using BgpAsPathHandle = std::unique_ptr<OpaqueBgpAsPath, detail::BgpAsPathDeleter>;
+
+/// IANA BGP path attribute type codes (RFC 4271 §5.1 + extensions).
+/// Mirrors `lr_bgp::path::AttrType` so a C++ caller can drive
+/// `bgp_path_attrs_get` / `bgp_path_attrs_remove` / `bgp_path_attrs_at`
+/// with the same constants the C ABI and the Rust crate use.
+enum class BgpAttrType : std::uint8_t {
+    Origin            = 1,
+    AsPath            = 2,
+    NextHop           = 3,
+    MultiExitDisc     = 4,
+    LocalPref         = 5,
+    AtomicAggregate   = 6,
+    Aggregator        = 7,
+    Communities       = 8,
+    OriginatorId      = 9,
+    ClusterList       = 10,
+    MpReachNlri       = 14,
+    MpUnreachNlri     = 15,
+    ExtendedCommunities = 16,
+    As4Path           = 17,
+    PmsiTunnel        = 22,
+    Aigp              = 26,
+    LargeCommunities  = 32,
+    Otc               = 35,
+    // librouting-private tags — never transmitted on the wire;
+    // used by the Loc-RIB / policy DSL to carry metadata the
+    // best-path selector reads.
+    LrOspfMetric2     = 253,
+    LrOspfRouterId    = 252,
+    LrBabelRouterId   = 250,
+    LrBabelSeqno      = 249,
+    LrIgpMetric       = 246,
+    LrPeerSourceAddress = 245,
+    LrMplsLabelStack  = 255,
+};
+
+/// NEXT_HOP kind values (lr_bgp_next_hop_t::kind).
+enum class BgpNextHopKind : std::uint8_t {
+    V4          = 0,
+    V6          = 1,
+    V4OverV6    = 2,  // RFC 5549 IPv4-over-IPv6.
+};
+
+/// ORIGIN attribute values (RFC 4271 §5.1.1).
+enum class BgpOrigin : std::uint8_t {
+    Igp         = 0,
+    Egp         = 1,
+    Incomplete  = 2,
+};
+
+/// One IPv4/IPv6 next-hop value (RFC 4271 §5.1.3 / RFC 4760 §3 /
+/// RFC 5549 IPv4-over-IPv6). `addr` is always 16 bytes — the first
+/// 4 bytes are used when `kind == BgpNextHopKind::V4`. `present` is
+/// `true` when the attribute is set on the underlying PathAttributes.
+struct BgpNextHop {
+    std::array<std::uint8_t, 16> addr{};
+    BgpNextHopKind kind{BgpNextHopKind::V4};
+    bool present{false};
+
+    /// Return the next-hop as a 4-byte IPv4 array (when V4 / V4-over-V6)
+    /// or a 16-byte IPv6 array (when V6). Returns `std::nullopt` when
+    /// the attribute is absent.
+    std::optional<std::array<std::uint8_t, 16>> ip_bytes() const {
+        if (!present) return std::nullopt;
+        return addr;
+    }
+};
+
+/// Construct an empty BgpPathAttrs set. Throws `Error` on allocation
+/// failure.
+inline BgpPathAttrsHandle make_bgp_path_attrs() {
+    auto p = lr_bgp_path_attrs_new();
+    if (!p) throw Error("lr_bgp_path_attrs_new returned null");
+    return BgpPathAttrsHandle(p);
+}
+
+/// Number of typed attribute readers wired on this set (the
+/// `PathAttributes::len` counter — distinct from `count`, which is
+/// the raw attribute count including unknown / unparsed entries).
+inline std::size_t bgp_path_attrs_len(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_len(a.get());
+}
+
+/// True when no typed attribute is set. A non-typed-attr set may
+/// still have a non-zero `bgp_path_attrs_count`.
+inline bool bgp_path_attrs_is_empty(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_is_empty(a.get()) != 0;
+}
+
+/// Raw attribute count — the number of entries in the underlying
+/// ordered map, including unknown / unparsed attributes the typed
+/// readers do not surface.
+inline std::size_t bgp_path_attrs_count(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_count(a.get());
+}
+
+/// Read the attribute at `index` in insertion order. Returns
+/// `std::nullopt` when out of range.
+inline std::optional<PathAttr> bgp_path_attrs_at(const BgpPathAttrsHandle& a,
+                                                 std::size_t index) {
+    std::uint8_t flags = 0;
+    std::uint8_t ty = 0;
+    auto b = std::make_unique<lr_bytes_t>();
+    std::uint8_t present = lr_bgp_path_attrs_at(a.get(), index,
+                                                &flags, &ty, b.get());
+    if (!present) return std::nullopt;
+    PathAttr out;
+    out.flags = flags;
+    out.attr_type = ty;
+    out.value = to_vec(Bytes(b.release()));
+    return out;
+}
+
+/// Read the attribute with IANA type code `ty`. Returns
+/// `std::nullopt` when absent.
+inline std::optional<PathAttr> bgp_path_attrs_get(const BgpPathAttrsHandle& a,
+                                                  BgpAttrType ty) {
+    std::uint8_t flags = 0;
+    std::uint8_t out_ty = 0;
+    auto b = std::make_unique<lr_bytes_t>();
+    std::uint8_t present = lr_bgp_path_attrs_get(a.get(),
+        static_cast<std::uint8_t>(ty), &flags, &out_ty, b.get());
+    if (!present) return std::nullopt;
+    PathAttr out;
+    out.flags = flags;
+    out.attr_type = out_ty;
+    out.value = to_vec(Bytes(b.release()));
+    return out;
+}
+
+/// Remove the attribute with IANA type code `ty`. Returns `true`
+/// when the attribute was present (and is now gone), `false` when
+/// it was absent.
+inline bool bgp_path_attrs_remove(const BgpPathAttrsHandle& a, BgpAttrType ty) {
+    return lr_bgp_path_attrs_remove(a.get(), static_cast<std::uint8_t>(ty)) != 0;
+}
+
+/// Insert a raw attribute `value` with the given `flags` and `ty`
+/// (IANA code). Throws `Error` on FFI errors.
+inline void bgp_path_attrs_insert_raw(const BgpPathAttrsHandle& a,
+                                      std::uint8_t flags, BgpAttrType ty,
+                                      const std::vector<std::uint8_t>& value) {
+    check_rc(lr_bgp_path_attrs_insert_raw(a.get(), flags,
+        static_cast<std::uint8_t>(ty),
+        value.empty() ? nullptr : value.data(), value.size()),
+        "lr_bgp_path_attrs_insert_raw");
+}
+
+// ---- RFC 4271 §5.1 — well-known mandatory + discretionary ----
+
+/// Read the ORIGIN attribute (RFC 4271 §5.1.1). Returns `std::nullopt`
+/// when absent.
+inline std::optional<BgpOrigin> bgp_path_attrs_origin(const BgpPathAttrsHandle& a) {
+    std::uint8_t out = 0;
+    if (lr_bgp_path_attrs_origin(a.get(), &out))
+        return static_cast<BgpOrigin>(out);
+    return std::nullopt;
+}
+
+/// Read the MULTI_EXIT_DISC attribute (RFC 4271 §5.1.4).
+inline std::optional<std::uint32_t> bgp_path_attrs_med(const BgpPathAttrsHandle& a) {
+    std::uint32_t out = 0;
+    if (lr_bgp_path_attrs_med(a.get(), &out)) return out;
+    return std::nullopt;
+}
+
+/// Read the LOCAL_PREF attribute (RFC 4271 §5.1.5).
+inline std::optional<std::uint32_t> bgp_path_attrs_local_pref(const BgpPathAttrsHandle& a) {
+    std::uint32_t out = 0;
+    if (lr_bgp_path_attrs_local_pref(a.get(), &out)) return out;
+    return std::nullopt;
+}
+
+/// Set the LOCAL_PREF attribute (RFC 4271 §5.1.5). Throws on FFI error.
+inline void bgp_path_attrs_set_local_pref(const BgpPathAttrsHandle& a,
+                                           std::uint32_t value) {
+    check_rc(lr_bgp_path_attrs_set_local_pref(a.get(), value),
+             "lr_bgp_path_attrs_set_local_pref");
+}
+
+/// True when the ATOMIC_AGGREGATE attribute is present (RFC 4271 §5.1.6).
+inline bool bgp_path_attrs_atomic_aggregate(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_atomic_aggregate(a.get()) != 0;
+}
+
+/// Read the AGGREGATOR attribute (RFC 4271 §5.1.7). Returns
+/// `(asn, speaker)` or `std::nullopt` when absent.
+inline std::optional<std::pair<std::uint32_t, std::uint32_t>>
+bgp_path_attrs_aggregator(const BgpPathAttrsHandle& a) {
+    std::uint32_t asn = 0, spk = 0;
+    if (lr_bgp_path_attrs_aggregator(a.get(), &asn, &spk))
+        return std::make_pair(asn, spk);
+    return std::nullopt;
+}
+
+/// Read the NEXT_HOP attribute (RFC 4271 §5.1.3). The returned
+/// BgpNextHop carries `present=false` when the attribute is absent.
+inline BgpNextHop bgp_path_attrs_next_hop(const BgpPathAttrsHandle& a) {
+    lr_bgp_next_hop_t c{};
+    if (!lr_bgp_path_attrs_next_hop(a.get(), &c)) {
+        return BgpNextHop{};
+    }
+    BgpNextHop out;
+    out.kind = static_cast<BgpNextHopKind>(c.kind);
+    out.present = c.present != 0;
+    std::memcpy(out.addr.data(), c.addr, 16);
+    return out;
+}
+
+// ---- RFC 4271 §5.1.2 + RFC 6793 — AS_PATH ----
+
+/// Read the AS_PATH attribute (RFC 4271 §5.1.2). Returns a RAII
+/// handle (caller frees via scope exit) or `nullptr` when absent.
+inline BgpAsPathHandle bgp_path_attrs_as_path(const BgpPathAttrsHandle& a) {
+    return BgpAsPathHandle(lr_bgp_path_attrs_as_path(a.get()));
+}
+
+/// Read the AS_PATH attribute in the explicit 2-byte or 4-byte AS
+/// form (RFC 6793 §4 — when `asn4` is true the path carries 4-byte
+/// AS numbers). Returns `nullptr` when absent.
+inline BgpAsPathHandle bgp_path_attrs_as_path_wire(const BgpPathAttrsHandle& a,
+                                                   bool asn4) {
+    return BgpAsPathHandle(lr_bgp_path_attrs_as_path_wire(a.get(), asn4 ? 1 : 0));
+}
+
+/// Read the AS4_PATH attribute (RFC 6793 §3). Returns `nullptr` when
+/// absent.
+inline BgpAsPathHandle bgp_path_attrs_as4_path(const BgpPathAttrsHandle& a) {
+    return BgpAsPathHandle(lr_bgp_path_attrs_as4_path(a.get()));
+}
+
+// ---- RFC 4456 — Route Reflection ----
+
+/// Read the ORIGINATOR_ID attribute (RFC 4456 §5).
+inline std::optional<std::uint32_t>
+bgp_path_attrs_originator_id(const BgpPathAttrsHandle& a) {
+    std::uint32_t out = 0;
+    if (lr_bgp_path_attrs_originator_id(a.get(), &out)) return out;
+    return std::nullopt;
+}
+
+/// True when the CLUSTER_LIST attribute is present (RFC 4456 §8).
+inline bool bgp_path_attrs_has_cluster_list(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_cluster_list(a.get()) != 0;
+}
+
+/// Read the CLUSTER_LIST attribute (RFC 4456 §8) as the raw byte
+/// stream — one 4-byte cluster-id per entry, in network byte order.
+/// Returns an empty vector when absent.
+inline std::vector<std::uint8_t>
+bgp_path_attrs_cluster_list(const BgpPathAttrsHandle& a) {
+    auto b = std::make_unique<lr_bytes_t>();
+    lr_bgp_path_attrs_cluster_list(a.get(), b.get());
+    return to_vec(Bytes(b.release()));
+}
+
+// ---- RFC 1997 / 4360 / 8097 — Communities ----
+
+/// Read the COMMUNITIES attribute (RFC 1997) as a vector of u32
+/// values — each `asn<<16 | value`. Returns an empty vector when
+/// absent.
+inline std::vector<std::uint32_t>
+bgp_path_attrs_communities(const BgpPathAttrsHandle& a) {
+    auto b = std::make_unique<lr_bytes_t>();
+    std::size_t n = lr_bgp_path_attrs_communities(a.get(), b.get());
+    std::vector<std::uint32_t> out;
+    if (n == 0) {
+        Bytes(b.release());  // free the empty bytes struct
+        return out;
+    }
+    auto raw = to_vec(Bytes(b.release()));
+    if (raw.size() < n * 4) return out;
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        std::uint32_t v = (std::uint32_t(raw[i * 4]) << 24) |
+                          (std::uint32_t(raw[i * 4 + 1]) << 16) |
+                          (std::uint32_t(raw[i * 4 + 2]) << 8) |
+                          std::uint32_t(raw[i * 4 + 3]);
+        out.push_back(v);
+    }
+    return out;
+}
+
+/// Read the EXTENDED COMMUNITIES attribute (RFC 4360) as the raw
+/// 8-octet-per-entry byte stream. Returns an empty vector when absent.
+inline std::vector<std::uint8_t>
+bgp_path_attrs_ext_communities(const BgpPathAttrsHandle& a) {
+    auto b = std::make_unique<lr_bytes_t>();
+    lr_bgp_path_attrs_ext_communities(a.get(), b.get());
+    return to_vec(Bytes(b.release()));
+}
+
+/// One RFC 8097 Large Community value (global admin + two local
+/// data words), read by `bgp_path_attrs_large_communities`. The
+/// struct is plain data so callers can copy / compare freely.
+struct BgpLargeCommunityValue {
+    std::uint32_t global_admin;
+    std::uint32_t local_data1;
+    std::uint32_t local_data2;
+};
+
+/// Read the LARGE COMMUNITIES attribute (RFC 8097) as a vector of
+/// value triples. Returns an empty vector when absent.
+inline std::vector<BgpLargeCommunityValue>
+bgp_path_attrs_large_communities(const BgpPathAttrsHandle& a) {
+    auto b = std::make_unique<lr_bytes_t>();
+    std::size_t n = lr_bgp_path_attrs_large_communities(a.get(), b.get());
+    std::vector<BgpLargeCommunityValue> out;
+    if (n == 0) {
+        Bytes(b.release());
+        return out;
+    }
+    auto raw = to_vec(Bytes(b.release()));
+    if (raw.size() < n * 12) return out;
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto* p = raw.data() + i * 12;
+        BgpLargeCommunityValue v;
+        v.global_admin = (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) |
+                         (std::uint32_t(p[2]) << 8) | std::uint32_t(p[3]);
+        v.local_data1  = (std::uint32_t(p[4]) << 24) | (std::uint32_t(p[5]) << 16) |
+                         (std::uint32_t(p[6]) << 8) | std::uint32_t(p[7]);
+        v.local_data2  = (std::uint32_t(p[8]) << 24) | (std::uint32_t(p[9]) << 16) |
+                         (std::uint32_t(p[10]) << 8) | std::uint32_t(p[11]);
+        out.push_back(v);
+    }
+    return out;
+}
+
+/// True when the COMMUNITIES attribute contains the given u32
+/// community value (RFC 1997).
+inline bool bgp_path_attrs_has_community(const BgpPathAttrsHandle& a,
+                                          std::uint32_t community) {
+    return lr_bgp_path_attrs_has_community(a.get(), community) != 0;
+}
+
+/// Insert one u32 community value into the COMMUNITIES attribute
+/// (RFC 1997). Throws on FFI error.
+inline void bgp_path_attrs_insert_community(const BgpPathAttrsHandle& a,
+                                            std::uint32_t community) {
+    check_rc(lr_bgp_path_attrs_insert_community(a.get(), community),
+             "lr_bgp_path_attrs_insert_community");
+}
+
+/// Construct a Large Community from its three 32-bit fields
+/// (RFC 8097). Throws on allocation failure.
+inline BgpLargeCommunityHandle make_bgp_large_community(std::uint32_t global_admin,
+                                                          std::uint32_t local_data1,
+                                                          std::uint32_t local_data2) {
+    auto p = lr_bgp_large_community_new(global_admin, local_data1, local_data2);
+    if (!p) throw Error("lr_bgp_large_community_new returned null");
+    return BgpLargeCommunityHandle(p);
+}
+
+inline std::uint32_t bgp_large_community_global_admin(const BgpLargeCommunityHandle& c) {
+    return lr_bgp_large_community_global_admin(c.get());
+}
+inline std::uint32_t bgp_large_community_local_data1(const BgpLargeCommunityHandle& c) {
+    return lr_bgp_large_community_local_data1(c.get());
+}
+inline std::uint32_t bgp_large_community_local_data2(const BgpLargeCommunityHandle& c) {
+    return lr_bgp_large_community_local_data2(c.get());
+}
+
+/// Insert one Large Community into the LARGE COMMUNITIES attribute
+/// (RFC 8097). Throws on FFI error.
+inline void bgp_path_attrs_insert_large_community(const BgpPathAttrsHandle& a,
+                                                   const BgpLargeCommunityHandle& c) {
+    check_rc(lr_bgp_path_attrs_insert_large_community(a.get(), c.get()),
+             "lr_bgp_path_attrs_insert_large_community");
+}
+
+// ---- RFC 7311 / 8124 — AIGP ----
+
+inline bool bgp_path_attrs_has_aigp(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_aigp(a.get()) != 0;
+}
+inline std::optional<std::uint64_t> bgp_path_attrs_aigp(const BgpPathAttrsHandle& a) {
+    std::uint64_t out = 0;
+    if (lr_bgp_path_attrs_aigp(a.get(), &out)) return out;
+    return std::nullopt;
+}
+
+// ---- RFC 9655 — OTC (Only To Customer) ----
+
+inline bool bgp_path_attrs_has_otc(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_otc(a.get()) != 0;
+}
+inline std::optional<std::uint32_t> bgp_path_attrs_otc(const BgpPathAttrsHandle& a) {
+    std::uint32_t out = 0;
+    if (lr_bgp_path_attrs_otc(a.get(), &out)) return out;
+    return std::nullopt;
+}
+
+// ---- RFC 6514 — PMSI Tunnel ----
+
+inline bool bgp_path_attrs_has_pmsi_tunnel(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_pmsi_tunnel(a.get()) != 0;
+}
+
+// ---- RFC 8277 — MPLS Label Stack ----
+
+inline MplsLabelStack bgp_path_attrs_label_stack(const BgpPathAttrsHandle& a) {
+    return MplsLabelStack(lr_bgp_path_attrs_label_stack(a.get()));
+}
+inline void bgp_path_attrs_set_label_stack(const BgpPathAttrsHandle& a,
+                                            const MplsLabelStack& stack) {
+    check_rc(lr_bgp_path_attrs_set_label_stack(a.get(), stack.get()),
+             "lr_bgp_path_attrs_set_label_stack");
+}
+
+// ---- MP-BGP (RFC 4760) ----
+
+/// MP_REACH_NLRI attribute (RFC 4760 §3) parsed into a struct.
+struct BgpMpReach {
+    std::uint16_t family_afi;
+    std::uint8_t  family_safi;
+    BgpNextHop    next_hop;
+    std::vector<std::uint8_t> nlri_bytes;
+};
+
+/// MP_UNREACH_NLRI attribute (RFC 4760 §3) parsed into a struct.
+struct BgpMpUnreach {
+    std::uint16_t family_afi;
+    std::uint8_t  family_safi;
+    std::vector<std::uint8_t> nlri_bytes;
+};
+
+inline std::optional<BgpMpReach>
+bgp_path_attrs_mp_reach(const BgpPathAttrsHandle& a) {
+    std::uint16_t afi = 0;
+    std::uint8_t safi = 0;
+    lr_bgp_next_hop_t nh{};
+    auto b = std::make_unique<lr_bytes_t>();
+    std::uint8_t present = lr_bgp_path_attrs_mp_reach(a.get(), &afi, &safi, &nh, b.get());
+    if (!present) {
+        Bytes(b.release());
+        return std::nullopt;
+    }
+    BgpMpReach out;
+    out.family_afi = afi;
+    out.family_safi = safi;
+    out.next_hop.kind = static_cast<BgpNextHopKind>(nh.kind);
+    out.next_hop.present = nh.present != 0;
+    std::memcpy(out.next_hop.addr.data(), nh.addr, 16);
+    out.nlri_bytes = to_vec(Bytes(b.release()));
+    return out;
+}
+
+inline std::optional<BgpMpUnreach>
+bgp_path_attrs_mp_unreach(const BgpPathAttrsHandle& a) {
+    std::uint16_t afi = 0;
+    std::uint8_t safi = 0;
+    auto b = std::make_unique<lr_bytes_t>();
+    std::uint8_t present = lr_bgp_path_attrs_mp_unreach(a.get(), &afi, &safi, b.get());
+    if (!present) {
+        Bytes(b.release());
+        return std::nullopt;
+    }
+    BgpMpUnreach out;
+    out.family_afi = afi;
+    out.family_safi = safi;
+    out.nlri_bytes = to_vec(Bytes(b.release()));
+    return out;
+}
+
+// ---- OSPF redistrib (RFC 4577 §3) ----
+
+inline void bgp_path_attrs_set_ospf_metric2(const BgpPathAttrsHandle& a,
+                                            std::uint32_t metric) {
+    check_rc(lr_bgp_path_attrs_set_ospf_metric2(a.get(), metric),
+             "lr_bgp_path_attrs_set_ospf_metric2");
+}
+inline std::optional<std::uint32_t>
+bgp_path_attrs_ospf_metric2(const BgpPathAttrsHandle& a) {
+    std::uint32_t out = 0;
+    if (lr_bgp_path_attrs_ospf_metric2(a.get(), &out)) return out;
+    return std::nullopt;
+}
+inline bool bgp_path_attrs_has_ospf_metric2(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_ospf_metric2(a.get()) != 0;
+}
+
+inline void bgp_path_attrs_set_ospf_router_id(const BgpPathAttrsHandle& a,
+                                               std::uint32_t router_id) {
+    check_rc(lr_bgp_path_attrs_set_ospf_router_id(a.get(), router_id),
+             "lr_bgp_path_attrs_set_ospf_router_id");
+}
+inline std::optional<std::uint32_t>
+bgp_path_attrs_ospf_router_id(const BgpPathAttrsHandle& a) {
+    std::uint32_t out = 0;
+    if (lr_bgp_path_attrs_ospf_router_id(a.get(), &out)) return out;
+    return std::nullopt;
+}
+inline bool bgp_path_attrs_has_ospf_router_id(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_ospf_router_id(a.get()) != 0;
+}
+
+// ---- Babel redistrib (RFC 7999 + babel-ext) ----
+
+inline void bgp_path_attrs_set_babel_seqno(const BgpPathAttrsHandle& a,
+                                            std::uint16_t seqno) {
+    check_rc(lr_bgp_path_attrs_set_babel_seqno(a.get(), seqno),
+             "lr_bgp_path_attrs_set_babel_seqno");
+}
+inline std::optional<std::uint16_t>
+bgp_path_attrs_babel_seqno(const BgpPathAttrsHandle& a) {
+    std::uint16_t out = 0;
+    if (lr_bgp_path_attrs_babel_seqno(a.get(), &out)) return out;
+    return std::nullopt;
+}
+inline bool bgp_path_attrs_has_babel_seqno(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_babel_seqno(a.get()) != 0;
+}
+
+inline void bgp_path_attrs_set_babel_router_id(const BgpPathAttrsHandle& a,
+                                                std::uint64_t router_id) {
+    check_rc(lr_bgp_path_attrs_set_babel_router_id(a.get(), router_id),
+             "lr_bgp_path_attrs_set_babel_router_id");
+}
+inline std::optional<std::uint64_t>
+bgp_path_attrs_babel_router_id(const BgpPathAttrsHandle& a) {
+    std::uint64_t out = 0;
+    if (lr_bgp_path_attrs_babel_router_id(a.get(), &out)) return out;
+    return std::nullopt;
+}
+inline bool bgp_path_attrs_has_babel_router_id(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_babel_router_id(a.get()) != 0;
+}
+
+// ---- IGP metric (RFC 4271 §9.1.2.2 step 7) ----
+
+inline void bgp_path_attrs_set_igp_metric(const BgpPathAttrsHandle& a,
+                                           std::uint32_t metric) {
+    check_rc(lr_bgp_path_attrs_set_igp_metric(a.get(), metric),
+             "lr_bgp_path_attrs_set_igp_metric");
+}
+inline std::optional<std::uint32_t>
+bgp_path_attrs_igp_metric(const BgpPathAttrsHandle& a) {
+    std::uint32_t out = 0;
+    if (lr_bgp_path_attrs_igp_metric(a.get(), &out)) return out;
+    return std::nullopt;
+}
+inline bool bgp_path_attrs_has_igp_metric(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_igp_metric(a.get()) != 0;
+}
+
+// ---- Peer source address (RFC 4271 §6.3) ----
+
+/// Set the peer-source-address attribute (RFC 4271 §6.3). `addr`
+/// must be 4 bytes for IPv4 or 16 bytes for IPv6; throws
+/// `Error` on a length mismatch or FFI failure.
+inline void bgp_path_attrs_set_peer_source_address(const BgpPathAttrsHandle& a,
+                                                   const std::vector<std::uint8_t>& addr,
+                                                   bool is_ipv6) {
+    std::size_t expected = is_ipv6 ? 16 : 4;
+    if (addr.size() != expected) {
+        throw Error("bgp_path_attrs_set_peer_source_address: addr must be " +
+                    std::to_string(expected) + " bytes");
+    }
+    check_rc(lr_bgp_path_attrs_set_peer_source_address(a.get(),
+        addr.data(), is_ipv6 ? 1 : 0), "lr_bgp_path_attrs_set_peer_source_address");
+}
+
+/// Read the peer-source-address attribute (RFC 4271 §6.3). Returns
+/// `(addr, is_ipv6)` or `std::nullopt` when absent.
+inline std::optional<std::pair<std::vector<std::uint8_t>, bool>>
+bgp_path_attrs_peer_source_address(const BgpPathAttrsHandle& a) {
+    std::array<std::uint8_t, 16> buf{};
+    std::uint8_t is_v6 = 0;
+    if (!lr_bgp_path_attrs_peer_source_address(a.get(), buf.data(), &is_v6))
+        return std::nullopt;
+    std::size_t n = is_v6 ? 16 : 4;
+    std::vector<std::uint8_t> out(buf.begin(), buf.begin() + n);
+    return std::make_pair(std::move(out), is_v6 != 0);
+}
+
+inline bool bgp_path_attrs_has_peer_source_address(const BgpPathAttrsHandle& a) {
+    return lr_bgp_path_attrs_has_peer_source_address(a.get()) != 0;
 }
 
 } // namespace librouting

@@ -2260,6 +2260,194 @@ int main() {
               "apply_set_error_name(LocalPrefNoBgp) mentions bgp");
     }
 
+    // =================================================================
+    // BgpPathAttrs — RFC 4271 §5.1 PathAttributes RAII surface.
+    // Mirrors the FFI tests in crates/lr-ffi/src/bgp_path.rs.
+    // =================================================================
+    {
+        auto a = make_bgp_path_attrs();
+        check(bgp_path_attrs_len(a) == 0, "fresh BgpPathAttrs len == 0");
+        check(bgp_path_attrs_is_empty(a), "fresh BgpPathAttrs is_empty");
+        check(bgp_path_attrs_count(a) == 0, "fresh BgpPathAttrs count == 0");
+
+        // LOCAL_PREF round-trip.
+        bgp_path_attrs_set_local_pref(a, 100);
+        check(bgp_path_attrs_count(a) == 1, "count == 1 after set_local_pref");
+        auto lp = bgp_path_attrs_local_pref(a);
+        check(lp.has_value() && *lp == 100, "local_pref round-trip 100");
+
+        // at(0) returns the LOCAL_PREF entry.
+        auto p = bgp_path_attrs_at(a, 0);
+        check(p.has_value(), "at(0) has value");
+        check(p->attr_type == static_cast<std::uint8_t>(BgpAttrType::LocalPref),
+              "at(0) attr_type == LocalPref");
+        check(p->flags == 0x40, "at(0) flags == 0x40 (transitive)");
+        check(p->value.size() == 4 && p->value[3] == 100,
+              "at(0) value == 100 BE");
+
+        // at(99) out of range.
+        check(!bgp_path_attrs_at(a, 99).has_value(), "at(99) returns nullopt");
+
+        // get(LocalPref).
+        auto g = bgp_path_attrs_get(a, BgpAttrType::LocalPref);
+        check(g.has_value() && g->attr_type == static_cast<std::uint8_t>(BgpAttrType::LocalPref),
+              "get(LocalPref) returns the attr");
+
+        // get(Origin) absent on a fresh+LocalPref set.
+        check(!bgp_path_attrs_get(a, BgpAttrType::Origin).has_value(),
+              "get(Origin) returns nullopt");
+
+        // remove(LocalPref) returns true; remove again returns false.
+        check(bgp_path_attrs_remove(a, BgpAttrType::LocalPref),
+              "remove(LocalPref) returns true");
+        check(!bgp_path_attrs_local_pref(a).has_value(),
+              "local_pref after remove is nullopt");
+        check(!bgp_path_attrs_remove(a, BgpAttrType::LocalPref),
+              "remove(LocalPref) twice returns false");
+
+        // insert_raw round-trip — LOCAL_PREF, flags 0x40, value 250 BE.
+        bgp_path_attrs_insert_raw(a, 0x40, BgpAttrType::LocalPref,
+                                  {0, 0, 0, 250});
+        auto lp2 = bgp_path_attrs_local_pref(a);
+        check(lp2.has_value() && *lp2 == 250,
+              "insert_raw LOCAL_PREF round-trip 250");
+    }
+
+    // BgpPathAttrs — well-known readers absent on fresh attrs.
+    {
+        auto a = make_bgp_path_attrs();
+        check(!bgp_path_attrs_med(a).has_value(), "med absent");
+        check(!bgp_path_attrs_origin(a).has_value(), "origin absent");
+        check(!bgp_path_attrs_atomic_aggregate(a), "atomic_aggregate absent");
+        check(!bgp_path_attrs_aggregator(a).has_value(), "aggregator absent");
+
+        auto nh = bgp_path_attrs_next_hop(a);
+        check(!nh.present, "next_hop absent on fresh attrs");
+
+        check(bgp_path_attrs_as_path(a) == nullptr, "as_path absent");
+        check(bgp_path_attrs_as_path_wire(a, true) == nullptr, "as_path_wire(true) absent");
+        check(bgp_path_attrs_as_path_wire(a, false) == nullptr, "as_path_wire(false) absent");
+        check(bgp_path_attrs_as4_path(a) == nullptr, "as4_path absent");
+
+        check(!bgp_path_attrs_originator_id(a).has_value(), "originator_id absent");
+        check(!bgp_path_attrs_has_cluster_list(a), "has_cluster_list absent");
+        check(bgp_path_attrs_cluster_list(a).empty(), "cluster_list empty");
+
+        check(bgp_path_attrs_communities(a).empty(), "communities empty");
+        check(bgp_path_attrs_ext_communities(a).empty(), "ext_communities empty");
+        check(bgp_path_attrs_large_communities(a).empty(), "large_communities empty");
+
+        check(!bgp_path_attrs_has_aigp(a), "has_aigp absent");
+        check(!bgp_path_attrs_aigp(a).has_value(), "aigp absent");
+        check(!bgp_path_attrs_has_otc(a), "has_otc absent");
+        check(!bgp_path_attrs_otc(a).has_value(), "otc absent");
+        check(!bgp_path_attrs_has_pmsi_tunnel(a), "has_pmsi_tunnel absent");
+
+        check(bgp_path_attrs_label_stack(a) == nullptr, "label_stack absent");
+        check(!bgp_path_attrs_mp_reach(a).has_value(), "mp_reach absent");
+        check(!bgp_path_attrs_mp_unreach(a).has_value(), "mp_unreach absent");
+
+        check(!bgp_path_attrs_has_ospf_metric2(a), "has_ospf_metric2 absent");
+        check(!bgp_path_attrs_has_ospf_router_id(a), "has_ospf_router_id absent");
+        check(!bgp_path_attrs_has_babel_seqno(a), "has_babel_seqno absent");
+        check(!bgp_path_attrs_has_babel_router_id(a), "has_babel_router_id absent");
+        check(!bgp_path_attrs_has_igp_metric(a), "has_igp_metric absent");
+        check(!bgp_path_attrs_has_peer_source_address(a), "has_peer_source_address absent");
+    }
+
+    // BgpPathAttrs — communities round-trip.
+    {
+        auto a = make_bgp_path_attrs();
+        std::uint32_t c = (64512u << 16) | 100u;
+        bgp_path_attrs_insert_community(a, c);
+        auto v = bgp_path_attrs_communities(a);
+        check(v.size() == 1 && v[0] == c, "insert_community round-trips one community");
+        check(bgp_path_attrs_has_community(a, c), "has_community after insert");
+        check(!bgp_path_attrs_has_community(a, c + 1), "has_community(c+1) false");
+
+        // Large community round-trip.
+        auto lc = make_bgp_large_community(65001, 1, 2);
+        check(bgp_large_community_global_admin(lc) == 65001, "lc.global_admin == 65001");
+        check(bgp_large_community_local_data1(lc) == 1, "lc.local_data1 == 1");
+        check(bgp_large_community_local_data2(lc) == 2, "lc.local_data2 == 2");
+        bgp_path_attrs_insert_large_community(a, lc);
+        auto large = bgp_path_attrs_large_communities(a);
+        check(large.size() == 1, "large_communities size == 1");
+        check(large[0].global_admin == 65001 &&
+              large[0].local_data1 == 1 &&
+              large[0].local_data2 == 2, "large_communities[0] == 65001:1:2");
+    }
+
+    // BgpPathAttrs — OSPF / Babel / IGP / peer source address round-trips.
+    {
+        auto a = make_bgp_path_attrs();
+        bgp_path_attrs_set_ospf_metric2(a, 123);
+        check(bgp_path_attrs_has_ospf_metric2(a), "has_ospf_metric2 after set");
+        auto m2 = bgp_path_attrs_ospf_metric2(a);
+        check(m2.has_value() && *m2 == 123, "ospf_metric2 round-trip 123");
+
+        bgp_path_attrs_set_ospf_router_id(a, 0x01020304);
+        check(bgp_path_attrs_has_ospf_router_id(a), "has_ospf_router_id after set");
+        auto rid = bgp_path_attrs_ospf_router_id(a);
+        check(rid.has_value() && *rid == 0x01020304, "ospf_router_id round-trip");
+
+        bgp_path_attrs_set_babel_seqno(a, 65535);
+        check(bgp_path_attrs_has_babel_seqno(a), "has_babel_seqno after set");
+        auto bs = bgp_path_attrs_babel_seqno(a);
+        check(bs.has_value() && *bs == 65535, "babel_seqno round-trip 65535");
+
+        bgp_path_attrs_set_babel_router_id(a, 0x0123456789ABCDEFULL);
+        check(bgp_path_attrs_has_babel_router_id(a), "has_babel_router_id after set");
+        auto brid = bgp_path_attrs_babel_router_id(a);
+        check(brid.has_value() && *brid == 0x0123456789ABCDEFULL,
+              "babel_router_id round-trip");
+
+        bgp_path_attrs_set_igp_metric(a, 1000);
+        check(bgp_path_attrs_has_igp_metric(a), "has_igp_metric after set");
+        auto im = bgp_path_attrs_igp_metric(a);
+        check(im.has_value() && *im == 1000, "igp_metric round-trip 1000");
+
+        // Peer source address v4 round-trip.
+        std::vector<std::uint8_t> v4_addr = {0xc0, 0xa8, 0x01, 0x01};
+        bgp_path_attrs_set_peer_source_address(a, v4_addr, false);
+        check(bgp_path_attrs_has_peer_source_address(a),
+              "has_peer_source_address after v4 set");
+        auto psa = bgp_path_attrs_peer_source_address(a);
+        check(psa.has_value(), "peer_source_address returns value after set");
+        check(psa->second == false, "peer_source_address is_ipv6 == false");
+        check(psa->first == v4_addr, "peer_source_address v4 round-trips");
+
+        // Peer source address v6 round-trip.
+        std::vector<std::uint8_t> v6_addr(16, 0);
+        v6_addr[15] = 1;
+        bgp_path_attrs_set_peer_source_address(a, v6_addr, true);
+        auto psa6 = bgp_path_attrs_peer_source_address(a);
+        check(psa6.has_value() && psa6->second == true,
+              "peer_source_address v6 returns is_ipv6=true");
+        check(psa6->first == v6_addr, "peer_source_address v6 round-trips");
+
+        // Length-mismatch throws.
+        bool threw = false;
+        try {
+            std::vector<std::uint8_t> bad = {0, 1};
+            bgp_path_attrs_set_peer_source_address(a, bad, false);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "set_peer_source_address(v4 with 2 bytes) throws");
+    }
+
+    // BgpPathAttrs — RFC 8277 label stack round-trip via the existing
+    // MplsLabelStack RAII.
+    {
+        auto a = make_bgp_path_attrs();
+        auto stack = make_label_stack_from_values({16, 17});
+        bgp_path_attrs_set_label_stack(a, stack);
+        auto out = bgp_path_attrs_label_stack(a);
+        check(out != nullptr, "label_stack returns non-null after set");
+        check(label_stack_len(out) == 2, "label_stack_len == 2");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");
