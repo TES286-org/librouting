@@ -969,6 +969,49 @@ class Router:
             )
         return rc == 1
 
+    def ospf_set_area_type(self, area_id: int, t: "OspfAreaType") -> bool:
+        """Set an attached OSPF area's type policy (RFC 2328 §3.6 /
+        RFC 3101) using the full struct-value (carries the
+        border-router-injected default-route metric). The router
+        refuses to convert the backbone (``area_id == 0``) to a
+        stub / NSSA kind and refuses a no-op conversion; both
+        return ``False``. ``True`` means the conversion landed.
+
+        Mirrors ``DefaultRouter::ospf_set_area_type`` (via the
+        C ABI's ``lr_router_ospf_set_area_type_ext`` entry point
+        that takes the full ``lr_ospf_area_type_t`` struct).
+        """
+        from .ospf import OspfAreaType
+        if not isinstance(t, OspfAreaType):
+            raise LrError("t must be an OspfAreaType")
+        rc = get_lib().lr_router_ospf_set_area_type_ext(
+            self._ptr, int(area_id), t.c_handle())
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_set_area_type_ext failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_area_type(self, area_id: int) -> "OspfAreaType | None":
+        """Read one attached OSPF area's type policy (RFC 2328 §3.6 /
+        RFC 3101). Returns ``None`` when the area is unknown (not
+        yet attached or already torn down).
+
+        Mirrors ``DefaultRouter::ospf_area_type``.
+        """
+        from .ospf import OspfAreaType
+        out = ffi.new("struct lr_ospf_area_type_t*")
+        rc = get_lib().lr_router_ospf_area_type(self._ptr, int(area_id), out)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_area_type failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        if rc == 1:
+            return OspfAreaType._from_c_struct(out)
+        return None
+
     # ------------------------------------------------------------------
     # RouterInstance session-state + Babel runtime (issue #92, mirrors
     # crates/lr-ffi/src/router_runtime.rs). The methods follow the

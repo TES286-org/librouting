@@ -661,3 +661,175 @@ class OspfV3ExternalDest:
         if rc == 1:
             return int(out[0])
         return None
+
+
+# ----------------------------------------------------------------------
+# OSPF area type — value type mirroring lr_router::OspfAreaType
+# (RFC 2328 §3.6 stub areas; RFC 3101 NSSA). The Rust enum is ``Copy``
+# and the C ABI represents it as a small ``#[repr(C)]`` struct passed
+# by value, so the Python wrapper is a plain value class (no opaque
+# handle, no finaliser). Construct via the classmethod factories
+# (:meth:`OspfAreaType.normal`, :meth:`OspfAreaType.stub`,
+# :meth:`OspfAreaType.stub_no_summary`, :meth:`OspfAreaType.nssa`,
+# :meth:`OspfAreaType.nssa_no_summary`) and inspect via
+# :attr:`kind`, :attr:`is_stub`, :attr:`is_nssa`, :attr:`is_stubby`,
+# :attr:`no_summary`, :attr:`default_metric`.
+# ----------------------------------------------------------------------
+
+# Area-kind ids (mirror the C ABI LR_AREA_* constants).
+AREA_NORMAL = 0
+AREA_STUB = 1
+AREA_STUB_NO_SUMMARY = 2
+AREA_NSSA = 3
+AREA_NSSA_NO_SUMMARY = 4
+
+# Friendly kind names for `kind` reader.
+_AREA_KIND_NAMES = {
+    AREA_NORMAL: "normal",
+    AREA_STUB: "stub",
+    AREA_STUB_NO_SUMMARY: "stub_no_summary",
+    AREA_NSSA: "nssa",
+    AREA_NSSA_NO_SUMMARY: "nssa_no_summary",
+}
+
+
+class OspfAreaType:
+    """OSPF area type policy (RFC 2328 §3.6 / RFC 3101) — value type
+    wrapping ``lr_ospf_area_type_t``.
+
+    The class is a thin Python value wrapper: every instance holds an
+    ``lr_ospf_area_type_t`` C struct obtained from one of the
+    classmethod factories and never frees anything. Use the
+    :meth:`Router.ospf_set_area_type` and :meth:`Router.ospf_area_type`
+    methods (see :mod:`librouting.router`) to drive the live router.
+    """
+
+    __slots__ = ("_t",)
+
+    def __init__(self, kind: int = AREA_NORMAL, default_metric: int = 0) -> None:
+        # Always store a *pointer* to the C struct in `_t`. CFFI's
+        # auto-dereference means `self._t.kind` reads the field and
+        # `self._t[0]` yields the struct-by-value the C ABI functions
+        # taking `struct lr_ospf_area_type_t` by value expect.
+        self._t = ffi.new("struct lr_ospf_area_type_t*")
+        self._t.kind = int(kind)
+        self._t.default_metric = int(default_metric)
+
+    @classmethod
+    def _from_c(cls, c_struct) -> "OspfAreaType":
+        """Wrap an existing C struct (either returned by value from a
+        C ABI constructor or filled into a caller-allocated out
+        pointer by a reader). Normalizes both sources to a
+        freshly-allocated pointer so the rest of the wrapper can
+        treat ``self._t`` uniformly as a struct pointer."""
+        out = cls.__new__(cls)
+        out._t = ffi.new("struct lr_ospf_area_type_t*")
+        out._t.kind = int(c_struct.kind)
+        out._t.default_metric = int(c_struct.default_metric)
+        return out
+
+    # Back-compat alias used by the router reader path: the same
+    # wrapping logic applies to either source of an owned CFFI
+    # struct.
+    _from_c_struct = _from_c
+
+    @classmethod
+    def normal(cls) -> "OspfAreaType":
+        """Regular area — type-3 / type-4 summaries and type-5
+        externals flow freely (RFC 2328 §3.6)."""
+        return cls._from_c(get_lib().lr_ospf_area_type_normal())
+
+    @classmethod
+    def stub(cls, default_metric: int) -> "OspfAreaType":
+        """Stub area (RFC 2328 §3.6): no type-5 / type-4 LSAs enter;
+        border routers inject a type-3 summary default
+        (``0.0.0.0/0``) with ``default_metric``. Summaries are
+        imported — for the "totally stubby" variant use
+        :meth:`stub_no_summary`."""
+        return cls._from_c(get_lib().lr_ospf_area_type_stub(int(default_metric)))
+
+    @classmethod
+    def stub_no_summary(cls, default_metric: int) -> "OspfAreaType":
+        """Totally-stubby stub area (no type-3 summaries except the
+        injected default)."""
+        return cls._from_c(get_lib().lr_ospf_area_type_stub_no_summary(int(default_metric)))
+
+    @classmethod
+    def nssa(cls, default_metric: int) -> "OspfAreaType":
+        """Not-So-Stubby area (RFC 3101 §2.7): like stub, but
+        internal ASBRs may redistribute externals as area-scoped
+        type-7 LSAs, which the elected border router translates into
+        type-5s for the rest of the AS."""
+        return cls._from_c(get_lib().lr_ospf_area_type_nssa(int(default_metric)))
+
+    @classmethod
+    def nssa_no_summary(cls, default_metric: int) -> "OspfAreaType":
+        """Totally-NSSA (no type-3 summaries except the type-3
+        default)."""
+        return cls._from_c(get_lib().lr_ospf_area_type_nssa_no_summary(int(default_metric)))
+
+    @property
+    def kind(self) -> int:
+        """The area-kind id (one of the ``AREA_*`` constants in
+        this module: ``AREA_NORMAL``, ``AREA_STUB``,
+        ``AREA_STUB_NO_SUMMARY``, ``AREA_NSSA``,
+        ``AREA_NSSA_NO_SUMMARY``)."""
+        return int(self._t.kind)
+
+    @property
+    def kind_name(self) -> str:
+        """Lower-case ASCII kind name (``"normal"``, ``"stub"``,
+        ``"stub_no_summary"``, ``"nssa"``, ``"nssa_no_summary"``)."""
+        return _AREA_KIND_NAMES.get(int(self._t.kind), "unknown")
+
+    @property
+    def is_stub(self) -> bool:
+        """``True`` for the stub variants (``stub`` or
+        ``stub_no_summary``)."""
+        return bool(get_lib().lr_ospf_area_type_is_stub(self._t[0]))
+
+    @property
+    def is_nssa(self) -> bool:
+        """``True`` for the NSSA variants (``nssa`` or
+        ``nssa_no_summary``)."""
+        return bool(get_lib().lr_ospf_area_type_is_nssa(self._t[0]))
+
+    @property
+    def is_stubby(self) -> bool:
+        """``True`` for stub or NSSA — type-5 / type-4 LSAs are
+        refused."""
+        return bool(get_lib().lr_ospf_area_type_is_stubby(self._t[0]))
+
+    @property
+    def no_summary(self) -> bool:
+        """``True`` for the totally-stubby / totally-NSSA variants
+        (no type-3 summaries except the injected default)."""
+        return bool(get_lib().lr_ospf_area_type_no_summary(self._t[0]))
+
+    @property
+    def default_metric(self) -> Optional[int]:
+        """Border-router-injected default-route metric (``None`` for
+        ``Normal``; the metric for stub / NSSA)."""
+        out = ffi.new("uint32_t*")
+        if get_lib().lr_ospf_area_type_default_metric(self._t[0], out):
+            return int(out[0])
+        return None
+
+    def c_handle(self):
+        """Borrow the underlying C struct (for internal use by the
+        :class:`Router` methods)."""
+        return self._t[0]
+
+    def __repr__(self) -> str:
+        if self.default_metric is None:
+            return f"OspfAreaType(kind={self.kind_name!r})"
+        return (f"OspfAreaType(kind={self.kind_name!r}, "
+                f"default_metric={self.default_metric})")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, OspfAreaType):
+            return NotImplemented
+        return self.kind == other.kind and self.default_metric == other.default_metric
+
+    def __hash__(self) -> int:
+        return hash((self.kind, self.default_metric))

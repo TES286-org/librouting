@@ -420,6 +420,33 @@ int32_t lr_router_ospf_unredistribute_v3(lr_router_t r,
                                         struct lr_core_prefix_t prefix);
 int32_t lr_router_ospf_is_asbr(lr_router_t r);
 
+/* OSPF area type — value struct mirroring lr_router::OspfAreaType
+ * (RFC 2328 §3.6 stub areas; RFC 3101 NSSA). Mirrors the Rust pub
+ * API one-to-one: constructors, readers, router set/get entry
+ * points. The struct is passed and returned by value. */
+struct lr_ospf_area_type_t {
+    int32_t kind;
+    uint32_t default_metric;
+};
+struct lr_ospf_area_type_t lr_ospf_area_type_normal(void);
+struct lr_ospf_area_type_t lr_ospf_area_type_stub(uint32_t default_metric);
+struct lr_ospf_area_type_t lr_ospf_area_type_stub_no_summary(uint32_t default_metric);
+struct lr_ospf_area_type_t lr_ospf_area_type_nssa(uint32_t default_metric);
+struct lr_ospf_area_type_t lr_ospf_area_type_nssa_no_summary(uint32_t default_metric);
+int32_t lr_ospf_area_type_kind(struct lr_ospf_area_type_t t);
+uint8_t lr_ospf_area_type_is_stub(struct lr_ospf_area_type_t t);
+uint8_t lr_ospf_area_type_is_nssa(struct lr_ospf_area_type_t t);
+uint8_t lr_ospf_area_type_is_stubby(struct lr_ospf_area_type_t t);
+uint8_t lr_ospf_area_type_no_summary(struct lr_ospf_area_type_t t);
+uint8_t lr_ospf_area_type_default_metric(struct lr_ospf_area_type_t t,
+                                         uint32_t *out_default_metric);
+int32_t lr_router_ospf_set_area_type_ext(lr_router_t r,
+                                         uint32_t area_id,
+                                         struct lr_ospf_area_type_t t);
+int32_t lr_router_ospf_area_type(lr_router_t r,
+                                 uint32_t area_id,
+                                 struct lr_ospf_area_type_t *out);
+
 uintptr_t lr_router_session_count(lr_router_t r);
 int32_t lr_router_session_summary_at(lr_router_t r,
                                      uintptr_t index,

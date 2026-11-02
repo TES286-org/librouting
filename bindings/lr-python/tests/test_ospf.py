@@ -408,3 +408,100 @@ def test_ospf_redistribute_v2_rejects_v6_prefix_via_dest_handle():
         assert r.ospf_redistribute(dest) is False
     finally:
         dest.close()
+
+
+# ----- OspfAreaType value-type wrapper tests (issue #92) -----
+
+
+def test_ospf_area_type_constructors_round_trip_through_readers():
+    normal = librouting.OspfAreaType.normal()
+    assert normal.kind == librouting.AREA_NORMAL
+    assert normal.kind_name == "normal"
+    assert normal.is_stub is False
+    assert normal.is_nssa is False
+    assert normal.is_stubby is False
+    assert normal.no_summary is False
+    assert normal.default_metric is None
+
+    stub = librouting.OspfAreaType.stub(42)
+    assert stub.kind == librouting.AREA_STUB
+    assert stub.kind_name == "stub"
+    assert stub.is_stub is True
+    assert stub.is_nssa is False
+    assert stub.is_stubby is True
+    assert stub.no_summary is False
+    assert stub.default_metric == 42
+
+    stub_ns = librouting.OspfAreaType.stub_no_summary(7)
+    assert stub_ns.kind == librouting.AREA_STUB_NO_SUMMARY
+    assert stub_ns.kind_name == "stub_no_summary"
+    assert stub_ns.is_stub is True
+    assert stub_ns.is_stubby is True
+    assert stub_ns.no_summary is True
+    assert stub_ns.default_metric == 7
+
+    nssa = librouting.OspfAreaType.nssa(99)
+    assert nssa.kind == librouting.AREA_NSSA
+    assert nssa.kind_name == "nssa"
+    assert nssa.is_stub is False
+    assert nssa.is_nssa is True
+    assert nssa.is_stubby is True
+    assert nssa.no_summary is False
+    assert nssa.default_metric == 99
+
+    nssa_ns = librouting.OspfAreaType.nssa_no_summary(3)
+    assert nssa_ns.kind == librouting.AREA_NSSA_NO_SUMMARY
+    assert nssa_ns.kind_name == "nssa_no_summary"
+    assert nssa_ns.is_nssa is True
+    assert nssa_ns.is_stubby is True
+    assert nssa_ns.no_summary is True
+    assert nssa_ns.default_metric == 3
+
+
+def test_ospf_area_type_eq_and_hash():
+    a = librouting.OspfAreaType.stub(7)
+    b = librouting.OspfAreaType.stub(7)
+    c = librouting.OspfAreaType.stub(8)
+    assert a == b
+    assert a != c
+    assert hash(a) == hash(b)
+    assert hash(a) != hash(c)
+    # Different kind is not equal.
+    assert librouting.OspfAreaType.normal() != librouting.OspfAreaType.stub(0)
+
+
+def test_ospf_area_type_reader_round_trip_via_router():
+    # Attach an NSSA area with default_metric=42 and read it back.
+    r = _router_with_ospf_area(area_id=7, area_kind=3, default_metric=42)
+    t = r.ospf_area_type(7)
+    assert t is not None
+    assert t.kind == librouting.AREA_NSSA
+    assert t.is_nssa is True
+    assert t.is_stubby is True
+    assert t.no_summary is False
+    assert t.default_metric == 42
+    # Unknown area returns None.
+    assert r.ospf_area_type(999) is None
+
+
+def test_ospf_set_area_type_round_trips_default_metric():
+    # Start with a Normal area; the struct-value setter carries the
+    # new default_metric through.
+    r = _router_with_ospf_area(area_id=5, area_kind=0, default_metric=0)
+    assert r.ospf_set_area_type(5, librouting.OspfAreaType.nssa(42)) is True
+    t = r.ospf_area_type(5)
+    assert t is not None
+    assert t.kind == librouting.AREA_NSSA
+    assert t.default_metric == 42
+    # Convert to totally-NSSA(7).
+    assert r.ospf_set_area_type(5, librouting.OspfAreaType.nssa_no_summary(7)) is True
+    t = r.ospf_area_type(5)
+    assert t is not None
+    assert t.kind == librouting.AREA_NSSA_NO_SUMMARY
+    assert t.no_summary is True
+    assert t.default_metric == 7
+    # No-op conversion returns False.
+    assert r.ospf_set_area_type(5, librouting.OspfAreaType.nssa_no_summary(7)) is False
+    # Backbone cannot become stub.
+    bb = _router_with_ospf_area(area_id=0, area_kind=0, default_metric=0)
+    assert bb.ospf_set_area_type(0, librouting.OspfAreaType.stub(1)) is False

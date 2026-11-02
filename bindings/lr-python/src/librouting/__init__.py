@@ -147,8 +147,14 @@ from .srv6 import (
     SrhError,
 )
 from .ospf import (
+    AREA_NORMAL,
+    AREA_NSSA,
+    AREA_NSSA_NO_SUMMARY,
+    AREA_STUB,
+    AREA_STUB_NO_SUMMARY,
     EXTERNAL_METRIC_TYPE1,
     EXTERNAL_METRIC_TYPE2,
+    OspfAreaType,
     OspfExternalDest,
     OspfLsa,
     OspfLsaArray,
@@ -404,6 +410,13 @@ __all__ = [
     "OspfV3ExternalDest",
     "EXTERNAL_METRIC_TYPE1",
     "EXTERNAL_METRIC_TYPE2",
+    # OSPF area type (RFC 2328 §3.6 / RFC 3101).
+    "OspfAreaType",
+    "AREA_NORMAL",
+    "AREA_STUB",
+    "AREA_STUB_NO_SUMMARY",
+    "AREA_NSSA",
+    "AREA_NSSA_NO_SUMMARY",
     # SRv6 netlink route-table (RFC 8754 §2 + RFC 8986 §4).
     "Seg6Route",
     "Seg6LocalRoute",
