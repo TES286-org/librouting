@@ -429,3 +429,76 @@ fn add_roa_entry_rejects_max_length_below_prefix_len() {
     assert!(last_error().contains("max_length"), "{}", last_error());
     unsafe { unbox_router(r) };
 }
+
+/// Reader for `lr_router_set_enforce_first_as`. Mirrors
+/// `DefaultRouter::enforce_first_as`: starts off (0), flips on (1)
+/// after `set_enforce_first_as(1)`, flips back off (0) after
+/// `set_enforce_first_as(0)`. The reader must never observe a panic
+/// through this surface (returns `0` on a NULL handle).
+#[test]
+fn enforce_first_as_reader_round_trips() {
+    let r = lr_router_new();
+    // Default: off.
+    assert_eq!(
+        lr_router_enforce_first_as(r),
+        0,
+        "enforce_first_as default = 0"
+    );
+    // On.
+    assert_eq!(lr_router_set_enforce_first_as(r, 1), 0);
+    assert_eq!(lr_router_enforce_first_as(r), 1, "enforce_first_as(1) → 1");
+    // Off.
+    assert_eq!(lr_router_set_enforce_first_as(r, 0), 0);
+    assert_eq!(lr_router_enforce_first_as(r), 0, "enforce_first_as(0) → 0");
+    // NULL handle: reader returns 0, never panics.
+    assert_eq!(lr_router_enforce_first_as(std::ptr::null_mut()), 0);
+    unsafe { unbox_router(r) };
+}
+
+/// Reader for `lr_router_set_add_path_max_paths`. Mirrors
+/// `DefaultRouter::add_path_max_paths`: defaults to `1` for a fresh
+/// router, takes the configured value after `set_add_path_max_paths`.
+#[test]
+fn add_path_max_paths_reader_round_trips() {
+    let r = lr_router_new();
+    // The Rust API's default is 1 (single-path). The reader must
+    // return that value before any setter is called.
+    assert_eq!(
+        lr_router_add_path_max_paths(r),
+        1,
+        "add_path_max_paths default = 1"
+    );
+    // Set 4, read back 4.
+    assert_eq!(lr_router_set_add_path_max_paths(r, 4), 0);
+    assert_eq!(lr_router_add_path_max_paths(r), 4, "set(4) → 4");
+    // The setter clamps values below 1 to 1.
+    assert_eq!(lr_router_set_add_path_max_paths(r, 0), 0);
+    assert_eq!(lr_router_add_path_max_paths(r), 1, "set(0) clamped to 1");
+    // NULL handle: reader returns 0.
+    assert_eq!(lr_router_add_path_max_paths(std::ptr::null_mut()), 0);
+    unsafe { unbox_router(r) };
+}
+
+/// Reader for `lr_router_set_roa_validate`. Mirrors
+/// `DefaultRouter::roa_validate_enabled`: starts off, flips on after
+/// `set_roa_validate(1)`, flips back off after `set_roa_validate(0)`.
+#[test]
+fn roa_validate_enabled_reader_round_trips() {
+    let r = lr_router_new();
+    assert_eq!(lr_router_roa_validate_enabled(r), 0, "default off");
+    assert_eq!(unsafe { lr_router_set_roa_validate(r, 1) }, 0);
+    assert_eq!(
+        lr_router_roa_validate_enabled(r),
+        1,
+        "after set_roa_validate(1) → 1"
+    );
+    assert_eq!(unsafe { lr_router_set_roa_validate(r, 0) }, 0);
+    assert_eq!(
+        lr_router_roa_validate_enabled(r),
+        0,
+        "after set_roa_validate(0) → 0"
+    );
+    // NULL handle: reader returns 0, never panics.
+    assert_eq!(lr_router_roa_validate_enabled(std::ptr::null_mut()), 0);
+    unsafe { unbox_router(r) };
+}

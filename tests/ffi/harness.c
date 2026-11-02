@@ -762,6 +762,144 @@ int main(void) {
         lr_bytes_free(&dump);
     }
     {
+        /* OSPF runtime: DR/BDR election reporting + Router-LSA flags
+         * reader (RFC 2328 §9.4 step 7 / §A.4.2). Build an OSPFv2
+         * router with one area, exercise the DR/BDR setter (no-op +
+         * first change + same-pair again), and read the V/E/B flags
+         * before / after a redistribution that flips the E-bit. */
+        lr_router_t r = lr_router_new();
+        check(r != NULL, "router_new for ospf runtime");
+        uint64_t session_h = 0;
+        rc = lr_router_add_ospf_session_ext(r, LR_OSPF_V2, 0xc0a80001u,
+                                            1, LR_AREA_NORMAL, 0, 1500,
+                                            LR_NET_PTP, 0, 0, 0, 0,
+                                            &session_h);
+        check(rc == 0, "add_ospf_session_ext for DR/BDR test");
+
+        /* V/E/B flags reader: empty area is V=0, E=0, B=0. */
+        uint8_t v = 9, e = 9, b = 9;
+        rc = lr_router_ospf_router_lsa_flags(r, 1, &v, &e, &b);
+        check(rc == 0, "ospf_router_lsa_flags area 1 rc=0");
+        check(v == 0 && e == 0 && b == 0, "empty area V/E/B = 0/0/0");
+
+        /* Unknown area: -6 with last_error, slots untouched. */
+        v = 9; e = 9; b = 9;
+        rc = lr_router_ospf_router_lsa_flags(r, 999, &v, &e, &b);
+        check(rc == -6, "ospf_router_lsa_flags unknown area rc=-6");
+        check(v == 9 && e == 9 && b == 9, "unknown area out slots untouched");
+
+        /* NULL out pointer is rejected with -1 (LR_ERR_NULL). */
+        rc = lr_router_ospf_router_lsa_flags(r, 1, NULL, &e, &b);
+        check(rc == -1, "ospf_router_lsa_flags NULL v out rc=-1");
+        rc = lr_router_ospf_router_lsa_flags(r, 1, &v, NULL, &b);
+        check(rc == -1, "ospf_router_lsa_flags NULL e out rc=-1");
+        rc = lr_router_ospf_router_lsa_flags(r, 1, &v, &e, NULL);
+        check(rc == -1, "ospf_router_lsa_flags NULL b out rc=-1");
+
+        /* NULL router: -2 (LR_ERR_INVALID_HANDLE). */
+        rc = lr_router_ospf_router_lsa_flags(NULL, 1, &v, &e, &b);
+        check(rc == -2, "ospf_router_lsa_flags NULL router rc=-2");
+
+        /* DR/BDR setter: no-op (0/0) → changed=0. */
+        uint8_t changed = 9;
+        rc = lr_router_set_ospf_dr_state(r, session_h, 0, 0, &changed);
+        check(rc == 0 && changed == 0, "set_ospf_dr_state(0,0) no-op");
+
+        /* First real DR/BDR pair → changed=1. */
+        rc = lr_router_set_ospf_dr_state(r, session_h, 0xc0a80001u,
+                                         0xc0a80002u, &changed);
+        check(rc == 0 && changed == 1, "set_ospf_dr_state first real → changed=1");
+        /* Same pair again → changed=0. */
+        rc = lr_router_set_ospf_dr_state(r, session_h, 0xc0a80001u,
+                                         0xc0a80002u, &changed);
+        check(rc == 0 && changed == 0, "set_ospf_dr_state same again → changed=0");
+
+        /* Unknown session → -6 (LR_ERR_OTHER), *out_changed cleared. */
+        changed = 9;
+        rc = lr_router_set_ospf_dr_state(r, 999, 1, 2, &changed);
+        check(rc == -6, "set_ospf_dr_state unknown session rc=-6");
+        check(changed == 0, "set_ospf_dr_state unknown session clears *out_changed");
+
+        /* NULL out_changed is permitted (changed flag discarded). */
+        rc = lr_router_set_ospf_dr_state(r, session_h, 0, 0, NULL);
+        check(rc == 0, "set_ospf_dr_state NULL out_changed is allowed");
+
+        /* NULL router: -2 (LR_ERR_INVALID_HANDLE). */
+        rc = lr_router_set_ospf_dr_state(NULL, 0, 0, 0, &changed);
+        check(rc == -2, "set_ospf_dr_state NULL router rc=-2");
+
+        /* After redistribute: E-bit must flip on. */
+        unsigned char v4_pfx[4] = {10, 0, 0, 0};
+        lr_ospf_external_dest_t ext =
+            lr_ospf_external_dest_new(v4_pfx, NULL, 24, 100,
+                                      LR_OSPF_METRIC_TYPE_1);
+        check(ext != NULL, "external_dest_new v4");
+        rc = lr_router_ospf_redistribute(r, ext);
+        check(rc == 1, "ospf_redistribute lands");
+        v = 9; e = 9; b = 9;
+        rc = lr_router_ospf_router_lsa_flags(r, 1, &v, &e, &b);
+        check(rc == 0, "ospf_router_lsa_flags after redist rc=0");
+        check(v == 0, "V-bit still 0 after redistribute");
+        check(e == 1, "E-bit set after redistribute");
+        check(b == 0, "B-bit still 0 (single area)");
+        lr_ospf_external_dest_free(ext);
+
+        lr_router_destroy(r);
+    }
+    {
+        /* Simple router-wide readers (issue #92). Round-trip the
+         * readers against their setters. */
+        lr_router_t r = lr_router_new();
+        check(r != NULL, "router_new for readers");
+
+        /* enforce_first_as: default off (0). */
+        check(lr_router_enforce_first_as(r) == 0,
+              "enforce_first_as default = 0");
+        rc = lr_router_set_enforce_first_as(r, 1);
+        check(rc == 0, "set_enforce_first_as(1)");
+        check(lr_router_enforce_first_as(r) == 1,
+              "enforce_first_as(1) → 1");
+        rc = lr_router_set_enforce_first_as(r, 0);
+        check(rc == 0, "set_enforce_first_as(0)");
+        check(lr_router_enforce_first_as(r) == 0,
+              "enforce_first_as(0) → 0");
+        /* NULL handle: reader returns 0. */
+        check(lr_router_enforce_first_as(NULL) == 0,
+              "enforce_first_as(NULL) = 0");
+
+        /* add_path_max_paths: default 1. */
+        check(lr_router_add_path_max_paths(r) == 1,
+              "add_path_max_paths default = 1");
+        rc = lr_router_set_add_path_max_paths(r, 4);
+        check(rc == 0, "set_add_path_max_paths(4)");
+        check(lr_router_add_path_max_paths(r) == 4,
+              "add_path_max_paths(4) → 4");
+        rc = lr_router_set_add_path_max_paths(r, 0);
+        check(rc == 0, "set_add_path_max_paths(0)");
+        check(lr_router_add_path_max_paths(r) == 1,
+              "add_path_max_paths(0) clamped to 1");
+        /* NULL handle: reader returns 0. */
+        check(lr_router_add_path_max_paths(NULL) == 0,
+              "add_path_max_paths(NULL) = 0");
+
+        /* roa_validate_enabled: default off. */
+        check(lr_router_roa_validate_enabled(r) == 0,
+              "roa_validate_enabled default = 0");
+        rc = lr_router_set_roa_validate(r, 1);
+        check(rc == 0, "set_roa_validate(1)");
+        check(lr_router_roa_validate_enabled(r) == 1,
+              "roa_validate_enabled(1) → 1");
+        rc = lr_router_set_roa_validate(r, 0);
+        check(rc == 0, "set_roa_validate(0)");
+        check(lr_router_roa_validate_enabled(r) == 0,
+              "roa_validate_enabled(0) → 0");
+        /* NULL handle: reader returns 0. */
+        check(lr_router_roa_validate_enabled(NULL) == 0,
+              "roa_validate_enabled(NULL) = 0");
+
+        lr_router_destroy(r);
+    }
+    {
         /* Policy objects (ROADMAP-v3 D5.3): route handle round trip,
          * prefix-list first-match semantics, the FRR route-map flow
          * (resolver + match + set + verdict) and the rejection

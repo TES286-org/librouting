@@ -46,6 +46,7 @@ use crate::ospf_external::borrow_dest;
 
 const LR_ERR_NULL: i32 = LrError::Null as i32;
 const LR_ERR_INVALID_HANDLE: i32 = LrError::InvalidHandle as i32;
+const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
 // =========================================================================
 // V3ExternalDestination — opaque handle (RFC 5340 §4.4.3.6 / §A.4.7).
@@ -665,6 +666,145 @@ pub unsafe extern "C" fn lr_router_ospf_is_asbr(r: lr_router_t) -> i32 {
                 None => return LR_ERR_INVALID_HANDLE,
             };
             i32::from(router.ospf_is_asbr())
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// =========================================================================
+// OSPF DR/BDR election reporting (RFC 2328 §9.4 step 7) + Router-LSA
+// flags reader (RFC 2328 §A.4.2 V/E/B bits). These mirror the Rust
+// `DefaultRouter::set_ospf_dr_state` and `ospf_router_lsa_flags` so a
+// C embedder running its own DR/BDR election over bidirectional
+// neighbors can report the result, and read the V/E/B bits the
+// router-LSA originator should advertise for a given area without
+// having to re-derive them from the LSDB.
+// =========================================================================
+
+/// Push the current DR/BDR election result (RFC 2328 §9.4) for the
+/// OSPF segment a session's interface attaches to. The embedder (the
+/// daemon or an OSPF-speaking embedder) runs the election over the
+/// bidirectional neighbors — `lr_ospf::interface::elect` is the
+/// reference algorithm — and reports the elected routers here as
+/// their IP interface addresses (§A.3.2 wire identity). Mirrors
+/// `DefaultRouter::set_ospf_dr_state` one-to-one.
+///
+/// `session` is the handle returned by `lr_router_add_ospf_session*`
+/// / `lr_router_add_ospfv3_session`. `dr` / `bdr` are the elected
+/// routers' IP interface addresses (0.0.0.0 when none is elected —
+/// §9.4 permits a no-DR / no-BDR outcome on a stub segment).
+///
+/// On a successful call, `*out_changed` is set to `1` when the DR/BDR
+/// pair changed (the §10.4 adjacency decision was re-run for the
+/// session's neighbor) and `0` when it did not. The pointer may be
+/// NULL — the changed flag is then discarded.
+///
+/// Returns `0` on success, [`LR_ERR_INVALID_HANDLE`] (-2) on a NULL
+/// router handle, [`LR_ERR_OTHER`] (-6) on an unknown session or a
+/// non-OSPF session (the last-error string is set), [`LR_ERR_PANIC`]
+/// (-4) on panic.
+///
+/// # Safety
+/// `r` must be a valid `lr_router_t`. `out_changed` (when non-NULL)
+/// must point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_set_ospf_dr_state(
+    r: lr_router_t,
+    session: u64,
+    dr: u32,
+    bdr: u32,
+    out_changed: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if !out_changed.is_null() {
+                *out_changed = 0;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return LR_ERR_INVALID_HANDLE,
+            };
+            match router.set_ospf_dr_state(lr_router::SessionHandle(session), dr, bdr) {
+                Ok(changed) => {
+                    if !out_changed.is_null() {
+                        *out_changed = u8::from(changed);
+                    }
+                    0
+                }
+                Err(e) => {
+                    set_last_error(e);
+                    LR_ERR_OTHER
+                }
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Read the Router-LSA body flags (RFC 2328 §A.4.2 V/E/B bits) the
+/// router should advertise for `area_id`, derived from the router's
+/// current state — mirrors `DefaultRouter::ospf_router_lsa_flags`
+/// one-to-one. The daemon's re-originate path consults this on every
+/// Router-LSA; embedders doing their own origination should too.
+///
+/// On a successful call:
+/// * `*out_v` is `1` when this router is an endpoint of a virtual
+///   link whose transit area is `area_id` (§15: the V-bit rides the
+///   transit area's Router-LSA), `0` otherwise.
+/// * `*out_e` is `1` when at least one AS-external redistribution
+///   intent exists (the ASBR condition — §12.4.1.1), `0` otherwise.
+/// * `*out_b` is `1` when the router is attached to more than one
+///   OSPFv2 area (the ABR condition — §12.4.1), `0` otherwise.
+///
+/// Returns `0` on success, [`LR_ERR_INVALID_HANDLE`] (-2) on a NULL
+/// router handle, [`LR_ERR_OTHER`] (-6) when `area_id` is unknown to
+/// the router (the last-error string is set), [`LR_ERR_PANIC`] (-4)
+/// on panic.
+///
+/// # Safety
+/// `r` must be a valid `lr_router_t`. `out_v` / `out_e` / `out_b`
+/// must each be NULL or point to a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_ospf_router_lsa_flags(
+    r: lr_router_t,
+    area_id: u32,
+    out_v: *mut u8,
+    out_e: *mut u8,
+    out_b: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out_v.is_null() || out_e.is_null() || out_b.is_null() {
+                set_last_error(
+                    "lr_router_ospf_router_lsa_flags: out_v / out_e / out_b must be non-NULL"
+                        .into(),
+                );
+                return LR_ERR_NULL;
+            }
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return LR_ERR_INVALID_HANDLE,
+            };
+            // Unknown area → mirror the Rust API's "no-area" outcome.
+            // The Rust reader does not error on an unknown area — it
+            // returns the empty-LSDB flags (`{ virtual_link: false,
+            // asbr: <whatever>, border: <v2 areas > 1> }`). But the
+            // C ABI surface should surface a miss so the embedder
+            // knows the area is not attached (the Rust reader is a
+            // pure function of the area map + vlink map; the embedder
+            // can construct the same answer themselves when they
+            // know the area is missing).
+            if !router.ospf_area_ids().contains(&area_id) {
+                set_last_error(format!(
+                    "lr_router_ospf_router_lsa_flags: unknown area {area_id}"
+                ));
+                return LR_ERR_OTHER;
+            }
+            let flags = router.ospf_router_lsa_flags(area_id);
+            *out_v = u8::from(flags.virtual_link);
+            *out_e = u8::from(flags.asbr);
+            *out_b = u8::from(flags.border);
+            0
         },
         LR_ERR_PANIC,
     )
@@ -1512,5 +1652,193 @@ mod tests {
             lr_router_ospf_set_area_type_ext(std::ptr::null_mut(), 0, lr_ospf_area_type_normal())
         };
         assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    // ----- lr_router_ospf_router_lsa_flags -----
+
+    #[test]
+    fn lr_router_ospf_router_lsa_flags_reads_empty_area() {
+        // A router with one attached area, no externals, no vlinks: the
+        // E-bit is off (no AS-external intent), the V-bit is off (no
+        // vlink uses this area as transit), and the B-bit is off (the
+        // router is attached to a single area).
+        let r = ospf_router_with_area(7, crate::sessions::LR_AREA_NORMAL, 0);
+        let mut v = 9u8;
+        let mut e = 9u8;
+        let mut b = 9u8;
+        let rc =
+            unsafe { lr_router_ospf_router_lsa_flags(r, 7, &raw mut v, &raw mut e, &raw mut b) };
+        assert_eq!(rc, 0);
+        assert_eq!(v, 0, "no vlink → V=0");
+        assert_eq!(e, 0, "no externals → E=0");
+        assert_eq!(b, 0, "single area → B=0");
+        unsafe { crate::handle::unbox_router(r) };
+    }
+
+    #[test]
+    fn lr_router_ospf_router_lsa_flags_sets_e_bit_after_redistribute() {
+        // Redistribute one v2 external route → the E-bit must flip on.
+        let r = ospf_router_with_area(5, crate::sessions::LR_AREA_NORMAL, 0);
+        // Before redistribution: E=0.
+        let mut v = 9u8;
+        let mut e = 9u8;
+        let mut b = 9u8;
+        let rc =
+            unsafe { lr_router_ospf_router_lsa_flags(r, 5, &raw mut v, &raw mut e, &raw mut b) };
+        assert_eq!(rc, 0);
+        assert_eq!(e, 0);
+        // Redistribute one /24.
+        let addr: [u8; 4] = [10, 0, 0, 0];
+        let dest = unsafe {
+            crate::ospf_external::lr_ospf_external_dest_new(
+                addr.as_ptr(),
+                std::ptr::null(),
+                24,
+                100,
+                crate::ospf_external::LR_OSPF_METRIC_TYPE_1,
+            )
+        };
+        assert!(!dest.is_null(), "v2 external dest allocation succeeds");
+        let rc = unsafe { lr_router_ospf_redistribute(r, dest) };
+        assert_eq!(rc, 1, "v2 redistribute lands");
+        // After redistribution: E=1 (ASBR bit on, per RFC 2328 §12.4.1.1).
+        let rc =
+            unsafe { lr_router_ospf_router_lsa_flags(r, 5, &raw mut v, &raw mut e, &raw mut b) };
+        assert_eq!(rc, 0);
+        assert_eq!(e, 1, "AS-external intent → E=1");
+        // V/B unchanged.
+        assert_eq!(v, 0);
+        assert_eq!(b, 0);
+        unsafe {
+            crate::ospf_external::lr_ospf_external_dest_free(dest);
+            crate::handle::unbox_router(r);
+        }
+    }
+
+    #[test]
+    fn lr_router_ospf_router_lsa_flags_unknown_area_errors() {
+        let r = ospf_router_with_area(7, crate::sessions::LR_AREA_NORMAL, 0);
+        let mut v = 9u8;
+        let mut e = 9u8;
+        let mut b = 9u8;
+        let rc =
+            unsafe { lr_router_ospf_router_lsa_flags(r, 999, &raw mut v, &raw mut e, &raw mut b) };
+        assert_eq!(rc, LR_ERR_OTHER, "unknown area → -6");
+        // Out slots untouched on the miss path.
+        assert_eq!(v, 9);
+        assert_eq!(e, 9);
+        assert_eq!(b, 9);
+        unsafe { crate::handle::unbox_router(r) };
+    }
+
+    #[test]
+    fn lr_router_ospf_router_lsa_flags_null_args_diagnosed() {
+        // NULL router.
+        let mut v = 0u8;
+        let mut e = 0u8;
+        let mut b = 0u8;
+        let rc = unsafe {
+            lr_router_ospf_router_lsa_flags(
+                std::ptr::null_mut(),
+                0,
+                &raw mut v,
+                &raw mut e,
+                &raw mut b,
+            )
+        };
+        assert_eq!(rc, LR_ERR_INVALID_HANDLE);
+        // NULL out pointer (any of v/e/b).
+        let r = ospf_router_with_area(0, crate::sessions::LR_AREA_NORMAL, 0);
+        let rc = unsafe {
+            lr_router_ospf_router_lsa_flags(r, 0, std::ptr::null_mut(), &raw mut e, &raw mut b)
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+        let rc = unsafe {
+            lr_router_ospf_router_lsa_flags(r, 0, &raw mut v, std::ptr::null_mut(), &raw mut b)
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+        let rc = unsafe {
+            lr_router_ospf_router_lsa_flags(r, 0, &raw mut v, &raw mut e, std::ptr::null_mut())
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+        unsafe { crate::handle::unbox_router(r) };
+    }
+
+    // ----- lr_router_set_ospf_dr_state -----
+
+    #[test]
+    fn lr_router_set_ospf_dr_state_unknown_session_errors() {
+        // A fresh router without any OSPF session — any session handle
+        // is unknown. The Rust API rejects with "no session".
+        let router = lr_router::DefaultRouter::new();
+        let r = box_router(router);
+        let mut changed = 9u8;
+        let rc = unsafe {
+            lr_router_set_ospf_dr_state(r, 999, 0xc0a80001, 0xc0a80002, &raw mut changed)
+        };
+        assert_eq!(rc, LR_ERR_OTHER, "unknown session → -6 with last_error");
+        assert_eq!(changed, 0, "out_changed written to 0 before the error path");
+        unsafe { crate::handle::unbox_router(r) };
+    }
+
+    #[test]
+    fn lr_router_set_ospf_dr_state_null_router_diagnosed() {
+        let mut changed = 0u8;
+        let rc =
+            unsafe { lr_router_set_ospf_dr_state(std::ptr::null_mut(), 0, 0, 0, &raw mut changed) };
+        assert_eq!(rc, LR_ERR_INVALID_HANDLE);
+    }
+
+    #[test]
+    fn lr_router_set_ospf_dr_state_null_out_changed_is_allowed() {
+        // NULL out_changed is permitted — the changed flag is then
+        // discarded. The call still has to return through the error
+        // path (unknown session) without writing through NULL.
+        let router = lr_router::DefaultRouter::new();
+        let r = box_router(router);
+        let rc = unsafe { lr_router_set_ospf_dr_state(r, 999, 0, 0, std::ptr::null_mut()) };
+        assert_eq!(rc, LR_ERR_OTHER, "unknown session still diagnosed");
+        unsafe { crate::handle::unbox_router(r) };
+    }
+
+    #[test]
+    fn lr_router_set_ospf_dr_state_no_op_returns_changed_zero() {
+        // Build an OSPF router with one session. The runtime starts
+        // with dr=bdr=0 (the OSPF runtime's `dr`/`bdr` fields are
+        // 0-initialized by `OspfRuntime::new`). Pushing dr=0/bdr=0 is
+        // a no-op — `set_ospf_dr_state` returns Ok(false), and
+        // `*out_changed` is 0.
+        let r = ospf_router_with_area(0, crate::sessions::LR_AREA_NORMAL, 0);
+        // The `ospf_router_with_area` helper attached a session and
+        // returned its handle through the C ABI; we recover the handle
+        // from `session_summaries()` — the helper did not surface it,
+        // but `lr_router_session_count` is `1` so the session is at
+        // index 0. Use the inspection surface's `session_summary_at`
+        // to read the handle.
+        let count = unsafe { crate::inspection::lr_router_session_count(r) };
+        assert_eq!(count, 1, "ospf_router_with_area attaches one session");
+        let mut summary: crate::inspection::lr_session_summary_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe { crate::inspection::lr_router_session_summary_at(r, 0, &raw mut summary) };
+        assert_eq!(rc, 0, "session_summary_at returns 0");
+        let session = summary.handle;
+        // Push dr=0/bdr=0 — no-op, changed=0.
+        let mut changed = 9u8;
+        let rc = unsafe { lr_router_set_ospf_dr_state(r, session, 0, 0, &raw mut changed) };
+        assert_eq!(rc, 0);
+        assert_eq!(changed, 0, "no-op DR/BDR push → changed=0");
+        // Push a real DR/BDR pair — changed=1 (the runtime fields
+        // moved from 0 to the new values).
+        let rc = unsafe {
+            lr_router_set_ospf_dr_state(r, session, 0xc0a80001, 0xc0a80002, &raw mut changed)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(changed, 1, "first real DR/BDR → changed=1");
+        // Push the same pair again — no-op, changed=0.
+        let rc = unsafe {
+            lr_router_set_ospf_dr_state(r, session, 0xc0a80001, 0xc0a80002, &raw mut changed)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(changed, 0, "same DR/BDR again → changed=0");
+        unsafe { crate::handle::unbox_router(r) };
     }
 }

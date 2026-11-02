@@ -18055,6 +18055,33 @@ int32_t lr_router_set_ebgp_requires_policy(lr_router_t r, uint8_t enabled);
 int32_t lr_router_set_enforce_first_as(lr_router_t r, uint8_t enabled);
 
 /**
+ * Reader for [`lr_router_set_enforce_first_as`]. Mirrors
+ * `DefaultRouter::enforce_first_as`. Returns `1` when the
+ * enforce-first-as check is on, `0` when off (or on a NULL / panicked
+ * handle — both fall back to the `0` default the router constructs
+ * with, so a panic cannot be observed through this reader).
+ */
+uint8_t lr_router_enforce_first_as(lr_router_t r);
+
+/**
+ * Reader for [`lr_router_set_add_path_max_paths`]. Mirrors
+ * `DefaultRouter::add_path_max_paths`. Returns the router-wide
+ * Add-Path cap (>= 1; default `1` for a freshly-constructed router).
+ * Returns `0` on a NULL / panicked handle so a panic cannot be
+ * observed through this reader.
+ */
+uint32_t lr_router_add_path_max_paths(lr_router_t r);
+
+/**
+ * Reader for [`lr_router_set_roa_validate`]. Mirrors
+ * `DefaultRouter::roa_validate_enabled`. Returns `1` when the RFC 6811
+ * §2 prefix-origin validation hook is installed at import time, `0`
+ * when off. Returns `0` on a NULL / panicked handle so a panic cannot
+ * be observed through this reader.
+ */
+uint8_t lr_router_roa_validate_enabled(lr_router_t r);
+
+/**
  * Declare which directions of a BGP session carry an explicit policy
  * (RFC 8212 §3).
  *
@@ -18715,6 +18742,71 @@ int32_t lr_router_ospf_unredistribute_v3(lr_router_t r, struct lr_core_prefix_t 
  * `r` must be a valid `lr_router_t`.
  */
 int32_t lr_router_ospf_is_asbr(lr_router_t r);
+
+/**
+ * Push the current DR/BDR election result (RFC 2328 §9.4) for the
+ * OSPF segment a session's interface attaches to. The embedder (the
+ * daemon or an OSPF-speaking embedder) runs the election over the
+ * bidirectional neighbors — `lr_ospf::interface::elect` is the
+ * reference algorithm — and reports the elected routers here as
+ * their IP interface addresses (§A.3.2 wire identity). Mirrors
+ * `DefaultRouter::set_ospf_dr_state` one-to-one.
+ *
+ * `session` is the handle returned by `lr_router_add_ospf_session*`
+ * / `lr_router_add_ospfv3_session`. `dr` / `bdr` are the elected
+ * routers' IP interface addresses (0.0.0.0 when none is elected —
+ * §9.4 permits a no-DR / no-BDR outcome on a stub segment).
+ *
+ * On a successful call, `*out_changed` is set to `1` when the DR/BDR
+ * pair changed (the §10.4 adjacency decision was re-run for the
+ * session's neighbor) and `0` when it did not. The pointer may be
+ * NULL — the changed flag is then discarded.
+ *
+ * Returns `0` on success, [`LR_ERR_INVALID_HANDLE`] (-2) on a NULL
+ * router handle, [`LR_ERR_OTHER`] (-6) on an unknown session or a
+ * non-OSPF session (the last-error string is set), [`LR_ERR_PANIC`]
+ * (-4) on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_changed` (when non-NULL)
+ * must point to a writable `uint8_t`.
+ */
+int32_t lr_router_set_ospf_dr_state(lr_router_t r,
+                                    uint64_t session,
+                                    uint32_t dr,
+                                    uint32_t bdr,
+                                    uint8_t *out_changed);
+
+/**
+ * Read the Router-LSA body flags (RFC 2328 §A.4.2 V/E/B bits) the
+ * router should advertise for `area_id`, derived from the router's
+ * current state — mirrors `DefaultRouter::ospf_router_lsa_flags`
+ * one-to-one. The daemon's re-originate path consults this on every
+ * Router-LSA; embedders doing their own origination should too.
+ *
+ * On a successful call:
+ * * `*out_v` is `1` when this router is an endpoint of a virtual
+ *   link whose transit area is `area_id` (§15: the V-bit rides the
+ *   transit area's Router-LSA), `0` otherwise.
+ * * `*out_e` is `1` when at least one AS-external redistribution
+ *   intent exists (the ASBR condition — §12.4.1.1), `0` otherwise.
+ * * `*out_b` is `1` when the router is attached to more than one
+ *   OSPFv2 area (the ABR condition — §12.4.1), `0` otherwise.
+ *
+ * Returns `0` on success, [`LR_ERR_INVALID_HANDLE`] (-2) on a NULL
+ * router handle, [`LR_ERR_OTHER`] (-6) when `area_id` is unknown to
+ * the router (the last-error string is set), [`LR_ERR_PANIC`] (-4)
+ * on panic.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `out_v` / `out_e` / `out_b`
+ * must each be NULL or point to a writable `uint8_t`.
+ */
+int32_t lr_router_ospf_router_lsa_flags(lr_router_t r,
+                                        uint32_t area_id,
+                                        uint8_t *out_v,
+                                        uint8_t *out_e,
+                                        uint8_t *out_b);
 
 /**
  * Construct an `OspfAreaType::Normal` value — the regular area

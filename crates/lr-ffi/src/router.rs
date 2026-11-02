@@ -648,6 +648,63 @@ pub extern "C" fn lr_router_set_enforce_first_as(r: lr_router_t, enabled: u8) ->
     )
 }
 
+/// Reader for [`lr_router_set_enforce_first_as`]. Mirrors
+/// `DefaultRouter::enforce_first_as`. Returns `1` when the
+/// enforce-first-as check is on, `0` when off (or on a NULL / panicked
+/// handle — both fall back to the `0` default the router constructs
+/// with, so a panic cannot be observed through this reader).
+#[no_mangle]
+pub extern "C" fn lr_router_enforce_first_as(r: lr_router_t) -> u8 {
+    guarded(
+        || {
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return 0,
+            };
+            u8::from(router.enforce_first_as())
+        },
+        0,
+    )
+}
+
+/// Reader for [`lr_router_set_add_path_max_paths`]. Mirrors
+/// `DefaultRouter::add_path_max_paths`. Returns the router-wide
+/// Add-Path cap (>= 1; default `1` for a freshly-constructed router).
+/// Returns `0` on a NULL / panicked handle so a panic cannot be
+/// observed through this reader.
+#[no_mangle]
+pub extern "C" fn lr_router_add_path_max_paths(r: lr_router_t) -> u32 {
+    guarded(
+        || {
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return 0,
+            };
+            router.add_path_max_paths() as u32
+        },
+        0,
+    )
+}
+
+/// Reader for [`lr_router_set_roa_validate`]. Mirrors
+/// `DefaultRouter::roa_validate_enabled`. Returns `1` when the RFC 6811
+/// §2 prefix-origin validation hook is installed at import time, `0`
+/// when off. Returns `0` on a NULL / panicked handle so a panic cannot
+/// be observed through this reader.
+#[no_mangle]
+pub extern "C" fn lr_router_roa_validate_enabled(r: lr_router_t) -> u8 {
+    guarded(
+        || {
+            let router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return 0,
+            };
+            u8::from(router.roa_validate_enabled())
+        },
+        0,
+    )
+}
+
 /// Declare which directions of a BGP session carry an explicit policy
 /// (RFC 8212 §3).
 ///
