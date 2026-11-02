@@ -1191,6 +1191,108 @@ func (r *Router) OspfAreaType(areaID uint32) (OspfAreaType, bool, error) {
 	return OspfAreaType{}, false, nil
 }
 
+// OspfRouterLsaFlags carries the Router-LSA body flags (RFC 2328
+// §A.4.2 V/E/B bits) the router should advertise for an area,
+// derived from its current state. Mirrors
+// lr_ospf::origination::RouterLsaFlags (and
+// DefaultRouter::ospf_router_lsa_flags).
+type OspfRouterLsaFlags struct {
+	// V — the router is an endpoint of a virtual link whose
+	// transit area is `areaID` (§15: the V-bit rides the transit
+	// area's Router-LSA).
+	VirtualLink bool
+	// E — at least one AS-external redistribution intent exists
+	// (the ASBR condition — §12.4.1.1).
+	Asbr bool
+	// B — the router is attached to more than one OSPFv2 area
+	// (the ABR condition — §12.4.1).
+	Border bool
+}
+
+// OspfRouterLsaFlags reads the Router-LSA body flags (RFC 2328
+// §A.4.2 V/E/B bits) the router should advertise for `areaID`,
+// derived from the router's current state. Mirrors
+// DefaultRouter::ospf_router_lsa_flags one-to-one. The daemon's
+// re-originate path consults this on every Router-LSA; embedders
+// doing their own origination should too.
+//
+// Returns (flags, true, nil) when `areaID` is attached, (zero, false,
+// nil) when the area is unknown (not yet attached), or (zero, false,
+// err) on a NULL router handle / NULL out pointer / panic.
+func (r *Router) OspfRouterLsaFlags(areaID uint32) (OspfRouterLsaFlags, bool, error) {
+	var v, e, b C.uint8_t
+	rc := C.lr_router_ospf_router_lsa_flags(r.ptr, C.uint32_t(areaID), &v, &e, &b)
+	if rc < 0 {
+		// -6 (LR_ERR_OTHER) on an unknown area: surface as
+		// (zero, false, nil) to mirror OspfAreaType's contract.
+		if rc == -6 {
+			return OspfRouterLsaFlags{}, false, nil
+		}
+		return OspfRouterLsaFlags{}, false, fmt.Errorf("lr_router_ospf_router_lsa_flags: %s (rc=%d)", LastError(), int(rc))
+	}
+	return OspfRouterLsaFlags{
+		VirtualLink: v != 0,
+		Asbr:        e != 0,
+		Border:      b != 0,
+	}, true, nil
+}
+
+// SetOspfDrState pushes the current DR/BDR election result (RFC 2328
+// §9.4) for the OSPF segment a session's interface attaches to.
+// Mirrors DefaultRouter::set_ospf_dr_state. The embedder (the daemon
+// or an OSPF-speaking embedder) runs the election over the
+// bidirectional neighbors — lr_ospf::interface::elect is the
+// reference algorithm — and reports the elected routers here as
+// their IP interface addresses (§A.3.2 wire identity).
+//
+// `session` is the handle returned by AddOspfSession* /
+// AddOspfv3Session. `dr` / `bdr` are the elected routers' IP
+// interface addresses (0.0.0.0 when none is elected — §9.4 permits a
+// no-DR / no-BDR outcome on a stub segment).
+//
+// Returns (changed, nil) where `changed` is true when the DR/BDR
+// pair changed (the §10.4 adjacency decision was re-run for the
+// session's neighbor) and false when it did not. Returns (false, err)
+// on an unknown session, a non-OSPF session, or a NULL router handle.
+func (r *Router) SetOspfDrState(session uint64, dr, bdr uint32) (bool, error) {
+	var changed C.uint8_t
+	rc := C.lr_router_set_ospf_dr_state(r.ptr, C.uint64_t(session), C.uint32_t(dr), C.uint32_t(bdr), &changed)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_set_ospf_dr_state: %s (rc=%d)", LastError(), int(rc))
+	}
+	return changed != 0, nil
+}
+
+// EnforceFirstAs reports whether the FRR `bgp enforce-first-as` check
+// is on. Mirrors DefaultRouter::enforce_first_as. When on, an UPDATE
+// received from an external BGP peer whose AS_PATH leftmost sequence
+// segment's first AS is not the peer's negotiated AS is rejected
+// before the Adj-RIB-In. Returns false on a NULL router handle (the
+// reader cannot observe a panic).
+func (r *Router) EnforceFirstAs() bool {
+	return C.lr_router_enforce_first_as(r.ptr) != 0
+}
+
+// AddPathMaxPaths returns the router-wide Add-Path cap (RFC 7911):
+// how many paths per prefix the decision process keeps in Loc-RIB and
+// advertises to Add-Path peers. Mirrors DefaultRouter::add_path_max_paths.
+// Defaults to 1 (single-path) for a freshly-constructed router.
+// Returns 0 on a NULL router handle (the reader cannot observe a
+// panic).
+func (r *Router) AddPathMaxPaths() uint32 {
+	return uint32(C.lr_router_add_path_max_paths(r.ptr))
+}
+
+// RoaValidateEnabled reports whether the RFC 6811 §2 prefix-origin
+// validation hook is installed at import time. Mirrors
+// DefaultRouter::roa_validate_enabled. When on, every received BGP
+// UPDATE is validated against the router's ROA table at import time;
+// routes whose origin AS is not authorized are rejected. Returns
+// false on a NULL router handle (the reader cannot observe a panic).
+func (r *Router) RoaValidateEnabled() bool {
+	return C.lr_router_roa_validate_enabled(r.ptr) != 0
+}
+
 // decodeSessionSummary translates one C struct into the Go form.
 // Returns a value, not a pointer — the caller already has its own
 // copy of the C struct on the stack.

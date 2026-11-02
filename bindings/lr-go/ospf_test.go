@@ -692,3 +692,144 @@ func TestOspfSetAreaTypeRoundTripsDefaultMetric(t *testing.T) {
                 t.Fatalf("backbone to stub: ok=%v err=%v", ok, err)
         }
 }
+
+// TestOspfRouterLsaFlagsReaderRoundTrip covers the C ABI reader for
+// `DefaultRouter::ospf_router_lsa_flags` (RFC 2328 §A.4.2 V/E/B bits):
+// empty area reads back V=0/E=0/B=0; unknown area reads back (_, false, nil);
+// redistribute flips the E-bit on.
+func TestOspfRouterLsaFlagsReaderRoundTrip(t *testing.T) {
+        r := routerWithOspfArea(t, 1, AreaNormal, 0)
+        // Empty area: V=0, E=0, B=0.
+        flags, ok, err := r.OspfRouterLsaFlags(1)
+        if err != nil || !ok {
+                t.Fatalf("OspfRouterLsaFlags(1): ok=%v err=%v", ok, err)
+        }
+        if flags.VirtualLink || flags.Asbr || flags.Border {
+                t.Fatalf("empty area flags = %+v, want all false", flags)
+        }
+        // Unknown area: (_, false, nil).
+        if _, ok, err := r.OspfRouterLsaFlags(999); err != nil || ok {
+                t.Fatalf("OspfRouterLsaFlags(999): ok=%v err=%v", ok, err)
+        }
+        // Redistribute one v2 /24: E-bit flips on.
+        addr := [4]byte{10, 0, 0, 0}
+        dest, err := NewOspfExternalDestV4(addr, 24, 100, OspfExternalType1)
+        if err != nil {
+                t.Fatalf("NewOspfExternalDestV4: %v", err)
+        }
+        defer dest.Free()
+        if ok, err := r.OspfRedistribute(dest); err != nil || !ok {
+                t.Fatalf("OspfRedistribute: ok=%v err=%v", ok, err)
+        }
+        flags, ok, err = r.OspfRouterLsaFlags(1)
+        if err != nil || !ok {
+                t.Fatalf("OspfRouterLsaFlags after redist: ok=%v err=%v", ok, err)
+        }
+        if flags.VirtualLink {
+                t.Fatalf("V-bit still set: %+v", flags)
+        }
+        if !flags.Asbr {
+                t.Fatalf("E-bit not set after redistribute: %+v", flags)
+        }
+        if flags.Border {
+                t.Fatalf("B-bit set on single-area router: %+v", flags)
+        }
+}
+
+// TestSetOspfDrStateRoundTrip exercises the DR/BDR election reporting
+// (RFC 2328 §9.4 step 7): the no-op push (dr=bdr=0, matching the
+// runtime's initialised state) returns changed=false; a real first
+// push returns changed=true; the same pair again returns changed=false;
+// an unknown session returns an error.
+func TestSetOspfDrStateRoundTrip(t *testing.T) {
+        r := routerWithOspfArea(t, 0, AreaNormal, 0)
+        // Recover the session handle via the inspection surface.
+        summaries, err := r.SessionSummaries()
+        if err != nil {
+                t.Fatalf("SessionSummaries: %v", err)
+        }
+        if len(summaries) != 1 {
+                t.Fatalf("SessionSummaries len = %d, want 1", len(summaries))
+        }
+        session := summaries[0].Handle
+        // No-op push (0/0): changed=false.
+        if changed, err := r.SetOspfDrState(session, 0, 0); err != nil || changed {
+                t.Fatalf("SetOspfDrState(0,0): changed=%v err=%v", changed, err)
+        }
+        // First real pair: changed=true.
+        if changed, err := r.SetOspfDrState(session, 0xC0A80001, 0xC0A80002); err != nil || !changed {
+                t.Fatalf("SetOspfDrState(0xC0A80001, 0xC0A80002): changed=%v err=%v", changed, err)
+        }
+        // Same pair again: changed=false.
+        if changed, err := r.SetOspfDrState(session, 0xC0A80001, 0xC0A80002); err != nil || changed {
+                t.Fatalf("SetOspfDrState(again): changed=%v err=%v", changed, err)
+        }
+        // Unknown session: error.
+        if _, err := r.SetOspfDrState(999, 1, 2); err == nil {
+                t.Fatalf("SetOspfDrState(999, ...): err=nil, want error")
+        }
+}
+
+// TestRouterReadersRoundTrip covers the simple router-wide readers
+// (`EnforceFirstAs`, `AddPathMaxPaths`, `RoaValidateEnabled`) — the
+// reader side of the existing setters. Each reader defaults to the
+// documented value (false / 1 / false) and tracks the setter's
+// changes.
+func TestRouterReadersRoundTrip(t *testing.T) {
+        r, err := NewRouter()
+        if err != nil {
+                t.Fatalf("NewRouter: %v", err)
+        }
+
+        // EnforceFirstAs: default false.
+        if r.EnforceFirstAs() {
+                t.Fatalf("EnforceFirstAs default = true, want false")
+        }
+        if err := r.SetEnforceFirstAs(true); err != nil {
+                t.Fatalf("SetEnforceFirstAs(true): %v", err)
+        }
+        if !r.EnforceFirstAs() {
+                t.Fatalf("EnforceFirstAs after SetEnforceFirstAs(true) = false, want true")
+        }
+        if err := r.SetEnforceFirstAs(false); err != nil {
+                t.Fatalf("SetEnforceFirstAs(false): %v", err)
+        }
+        if r.EnforceFirstAs() {
+                t.Fatalf("EnforceFirstAs after SetEnforceFirstAs(false) = true, want false")
+        }
+
+        // AddPathMaxPaths: default 1.
+        if got := r.AddPathMaxPaths(); got != 1 {
+                t.Fatalf("AddPathMaxPaths default = %d, want 1", got)
+        }
+        if err := r.SetAddPathMaxPaths(4); err != nil {
+                t.Fatalf("SetAddPathMaxPaths(4): %v", err)
+        }
+        if got := r.AddPathMaxPaths(); got != 4 {
+                t.Fatalf("AddPathMaxPaths after SetAddPathMaxPaths(4) = %d, want 4", got)
+        }
+        // Setter clamps 0 to 1.
+        if err := r.SetAddPathMaxPaths(0); err != nil {
+                t.Fatalf("SetAddPathMaxPaths(0): %v", err)
+        }
+        if got := r.AddPathMaxPaths(); got != 1 {
+                t.Fatalf("AddPathMaxPaths after SetAddPathMaxPaths(0) = %d, want 1 (clamped)", got)
+        }
+
+        // RoaValidateEnabled: default false.
+        if r.RoaValidateEnabled() {
+                t.Fatalf("RoaValidateEnabled default = true, want false")
+        }
+        if err := r.SetROAValidate(true); err != nil {
+                t.Fatalf("SetROAValidate(true): %v", err)
+        }
+        if !r.RoaValidateEnabled() {
+                t.Fatalf("RoaValidateEnabled after SetROAValidate(true) = false, want true")
+        }
+        if err := r.SetROAValidate(false); err != nil {
+                t.Fatalf("SetROAValidate(false): %v", err)
+        }
+        if r.RoaValidateEnabled() {
+                t.Fatalf("RoaValidateEnabled after SetROAValidate(false) = true, want false")
+        }
+}
