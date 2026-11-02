@@ -35,7 +35,7 @@ from librouting import (
     PseudoHeader,
     ReplayProtection,
     RouteRequest,
-    RouterId,
+    BabelRouterId,
     SeqnoRequest,
     Tlv,
     TLV_ACK,
@@ -479,14 +479,14 @@ def test_next_hop_rejects_bad_addr():
 
 
 def test_router_id_round_trip():
-    rid = RouterId.new(bytes([1] * 8))
+    rid = BabelRouterId.new(bytes([1] * 8))
     assert rid.bytes_ == bytes([1] * 8)
     rid.close()
 
 
 def test_router_id_rejects_bad_length():
     with pytest.raises(librouting.LrError):
-        RouterId.new(b"\x00" * 7)
+        BabelRouterId.new(b"\x00" * 7)
 
 
 def test_route_request_wildcard_lifecycle():

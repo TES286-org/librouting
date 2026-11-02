@@ -1319,10 +1319,15 @@ class NextHop:
         self.close()
 
 
-class RouterId:
-    """A Router-Id TLV (RFC 8966 §4.4.10) — the 8-byte router
+class BabelRouterId:
+    """A Babel Router-Id TLV (RFC 8966 §4.4.10) — the 8-byte router
     identifier in effect for the *following* Update TLVs in the same
-    frame."""
+    frame.
+
+    Distinct from the 32-bit OSPF/BGP ``RouterId`` (see
+    :mod:`librouting.core_types`); the Babel wire TLV carries 8 bytes
+    and is prefixed by 2 reserved bytes on the wire.
+    """
 
     __slots__ = ("_r", "_freed")
 
@@ -1331,7 +1336,7 @@ class RouterId:
         self._freed = False
 
     @classmethod
-    def new(cls, router_id: bytes) -> "RouterId":
+    def new(cls, router_id: bytes) -> "BabelRouterId":
         if len(router_id) != 8:
             raise LrError("router_id must be exactly 8 bytes")
         rid = _copy_to_c(router_id, 8)
@@ -1342,7 +1347,7 @@ class RouterId:
         # The C ABI copies 10 bytes out (2 reserved + 8 router_id).
         out = ffi.new("uint8_t[10]")
         rc = get_lib().lr_babel_router_id_bytes(self._r, out)
-        _check_rc(rc, "RouterId.bytes")
+        _check_rc(rc, "BabelRouterId.bytes")
         # The router_id occupies bytes 2..10 (RFC 8966 §4.4.10 — the
         # first 2 bytes are reserved/zero).
         return bytes(out[i] for i in range(2, 10))
@@ -1355,11 +1360,15 @@ class RouterId:
     def __del__(self):
         self.close()
 
-    def __enter__(self) -> "RouterId":
+    def __enter__(self) -> "BabelRouterId":
         return self
 
     def __exit__(self, *_):
         self.close()
+
+
+# Backwards-compatible alias (deprecated; use BabelRouterId for new code).
+RouterId = BabelRouterId
 
 
 class RouteRequest:

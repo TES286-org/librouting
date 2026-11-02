@@ -1223,7 +1223,7 @@ uintptr_t lr_rtr_client_step_log_at(const lr_rtr_client_step_t *step,
                                     uintptr_t cap);
 void lr_rtr_client_step_free(lr_rtr_client_step_t *step);
 
-/* ---- RIB (lr-rib mirror) ---- */
+/* ---- Foundational types (lr-core mirror) ---- */
 
 typedef struct lr_ip_addr_t {
   uint8_t is_ipv6;
@@ -1242,10 +1242,182 @@ typedef struct lr_route_key_t {
   struct lr_core_prefix_t source_prefix;
 } lr_route_key_t;
 
+typedef struct lr_asn_t {
+  uint32_t value;
+} lr_asn_t;
+
+typedef struct lr_router_id_t {
+  uint32_t value;
+} lr_router_id_t;
+
+typedef struct lr_preference_t {
+  uint32_t admin_distance;
+  uint32_t metric;
+} lr_preference_t;
+
+typedef struct lr_afi_safi_t {
+  uint16_t afi;
+  uint8_t safi;
+} lr_afi_safi_t;
+
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+
 typedef struct lr_route_origin_t {
   uint8_t protocol;
   uint64_t peer;
 } lr_route_origin_t;
+
+typedef struct OpaqueIpAddr IpAddr;
+typedef struct OpaqueReadBuf *lr_read_buf_t;
+typedef struct OpaqueWriteBuf *lr_write_buf_t;
+typedef struct OpaqueTimerQueue *lr_timer_queue_t;
+typedef uint32_t lr_timer_id_t;
+typedef struct lr_timer_spec_t {
+  uint64_t after_ms;
+  uint64_t periodic_ms;
+} lr_timer_spec_t;
+typedef struct OpaqueMemoryConn *lr_memory_conn_t;
+
+struct lr_ip_addr_t lr_ip_addr_v4(const uint8_t *octets);
+struct lr_ip_addr_t lr_ip_addr_v6(const uint8_t *octets);
+uint8_t lr_ip_addr_is_ipv4(struct lr_ip_addr_t addr);
+uint8_t lr_ip_addr_is_ipv6(struct lr_ip_addr_t addr);
+uint8_t lr_ip_addr_is_unspecified(struct lr_ip_addr_t addr);
+uint8_t lr_ip_addr_is_multicast(struct lr_ip_addr_t addr);
+uintptr_t lr_ip_addr_octets(struct lr_ip_addr_t addr, uint8_t *out, uintptr_t cap);
+
+struct lr_core_prefix_t lr_core_prefix_v4(const uint8_t *octets, uint8_t prefix_len);
+struct lr_core_prefix_t lr_core_prefix_v6(const uint8_t *octets, uint8_t prefix_len);
+uint8_t lr_core_prefix_is_ipv4(struct lr_core_prefix_t prefix);
+uint8_t lr_core_prefix_is_ipv6(struct lr_core_prefix_t prefix);
+uint8_t lr_core_prefix_contains(struct lr_core_prefix_t prefix, struct lr_ip_addr_t addr);
+uint8_t lr_core_prefix_contains_prefix(struct lr_core_prefix_t outer,
+                                        struct lr_core_prefix_t inner);
+int32_t lr_core_prefix_network(struct lr_core_prefix_t prefix, struct lr_ip_addr_t *out);
+
+struct lr_asn_t lr_asn_new(uint32_t value);
+uint8_t lr_asn_is_private(struct lr_asn_t asn);
+uint8_t lr_asn_is_as_trans(struct lr_asn_t asn);
+uint8_t lr_asn_is_as23456(struct lr_asn_t asn);
+
+struct lr_router_id_t lr_router_id_from_u32(uint32_t value);
+struct lr_router_id_t lr_router_id_from_v4(const uint8_t *octets);
+int32_t lr_router_id_to_v4_bytes(struct lr_router_id_t rid, uint8_t *out_octets);
+
+uintptr_t lr_protocol_bird_name(uint8_t proto, char *out_name, uintptr_t name_cap);
+uint32_t lr_protocol_default_admin_distance(uint8_t proto);
+
+uint64_t lr_instant_from_millis(uint64_t millis);
+uint64_t lr_instant_from_secs(uint64_t secs);
+uint64_t lr_instant_as_millis(uint64_t instant);
+uint64_t lr_instant_as_secs(uint64_t instant);
+uint64_t lr_instant_saturating_sub(uint64_t earlier, uint64_t later);
+uint64_t lr_instant_checked_add(uint64_t instant, uint64_t duration_ms);
+int32_t lr_instant_checked_sub(uint64_t instant, uint64_t other, uint64_t *out);
+
+uint64_t lr_duration_from_millis(uint64_t millis);
+uint64_t lr_duration_from_secs(uint64_t secs);
+uint64_t lr_duration_as_millis(uint64_t duration_ms);
+uint64_t lr_duration_as_secs(uint64_t duration_ms);
+uint64_t lr_duration_checked_add(uint64_t a, uint64_t b);
+
+int32_t lr_route_key_new(struct lr_core_prefix_t prefix,
+                         uint16_t afi_safi,
+                         struct lr_route_key_t *out);
+int32_t lr_route_key_with_source(struct lr_core_prefix_t prefix,
+                                 uint16_t afi_safi,
+                                 struct lr_core_prefix_t source,
+                                 struct lr_route_key_t *out);
+struct lr_preference_t lr_preference_new(uint32_t admin_distance, uint32_t metric);
+
+lr_nlri_family_t lr_nlri_family_ipv4_unicast(void);
+lr_nlri_family_t lr_nlri_family_ipv6_unicast(void);
+lr_nlri_family_t lr_nlri_family_ipv4_multicast(void);
+lr_nlri_family_t lr_nlri_family_ipv4_mpls_vpn(void);
+lr_nlri_family_t lr_nlri_family_ipv6_mpls_vpn(void);
+lr_nlri_family_t lr_nlri_family_ipv4_labeled_unicast(void);
+lr_nlri_family_t lr_nlri_family_ipv6_labeled_unicast(void);
+lr_nlri_family_t lr_nlri_family_bgp_ls(void);
+lr_nlri_family_t lr_nlri_family_bgp_ls_vpn(void);
+uint8_t lr_nlri_family_is_ipv4(lr_nlri_family_t f);
+uint8_t lr_nlri_family_is_ipv6(lr_nlri_family_t f);
+uint8_t lr_nlri_family_is_labeled_unicast(lr_nlri_family_t f);
+uint8_t lr_nlri_family_is_bgp_ls(lr_nlri_family_t f);
+uint8_t lr_nlri_family_is_bgp_ls_vpn(lr_nlri_family_t f);
+int32_t lr_nlri_family_from_addr(const IpAddr *addr, lr_nlri_family_t *out);
+
+IpAddr *lr_ip_addr_from_v4_bytes(const uint8_t *bytes);
+IpAddr *lr_ip_addr_from_v6_bytes(const uint8_t *bytes);
+IpAddr *lr_ip_addr_from_bytes(const uint8_t *bytes, uintptr_t len);
+void lr_ip_addr_free(IpAddr *a);
+uint8_t lr_ip_addr_is_ipv4_mapped_ipv6(const IpAddr *a);
+IpAddr *lr_ip_addr_to_ipv4_mapped(const IpAddr *a);
+uint32_t lr_asn_as_u32(uint32_t asn);
+uint16_t lr_asn_as_u16(uint32_t asn);
+
+uint16_t lr_crc16_arc(const uint8_t *bytes, uintptr_t len);
+uint32_t lr_crc32c(const uint8_t *bytes, uintptr_t len);
+uint16_t lr_ospf_lsa_checksum(const uint8_t *lsa, uintptr_t len);
+uint8_t lr_ospf_lsa_checksum_ok(const uint8_t *lsa, uintptr_t len);
+uint32_t lr_fletcher32(const uint8_t *bytes, uintptr_t len);
+
+/* ReadBuf / WriteBuf */
+lr_read_buf_t lr_read_buf_new(const uint8_t *data, uintptr_t len);
+void lr_read_buf_free(lr_read_buf_t r);
+uintptr_t lr_read_buf_remaining(lr_read_buf_t r);
+uintptr_t lr_read_buf_position(lr_read_buf_t r);
+int32_t lr_read_buf_advance(lr_read_buf_t r, uintptr_t n);
+int32_t lr_read_buf_peek_u8(lr_read_buf_t r, uint8_t *out);
+int32_t lr_read_buf_get_u8(lr_read_buf_t r, uint8_t *out);
+int32_t lr_read_buf_get_u16_be(lr_read_buf_t r, uint16_t *out);
+int32_t lr_read_buf_get_u32_be(lr_read_buf_t r, uint32_t *out);
+int32_t lr_read_buf_get_u64_be(lr_read_buf_t r, uint64_t *out);
+int32_t lr_read_buf_get_bytes(lr_read_buf_t r, uintptr_t n, lr_bytes_t *out);
+int32_t lr_read_buf_chunk(lr_read_buf_t r, lr_bytes_t *out);
+
+lr_write_buf_t lr_write_buf_new(uintptr_t cap);
+void lr_write_buf_free(lr_write_buf_t w);
+uintptr_t lr_write_buf_position(lr_write_buf_t w);
+uintptr_t lr_write_buf_remaining_mut(lr_write_buf_t w);
+int32_t lr_write_buf_put_u8(lr_write_buf_t w, uint8_t v);
+int32_t lr_write_buf_put_bytes(lr_write_buf_t w, const uint8_t *b, uintptr_t len);
+int32_t lr_write_buf_put_u16_be(lr_write_buf_t w, uint16_t v);
+int32_t lr_write_buf_put_u32_be(lr_write_buf_t w, uint32_t v);
+int32_t lr_write_buf_put_u64_be(lr_write_buf_t w, uint64_t v);
+int32_t lr_write_buf_take_bytes(lr_write_buf_t w, lr_bytes_t *out);
+int32_t lr_write_buf_patch(lr_write_buf_t w, uintptr_t at, const uint8_t *data, uintptr_t len);
+int32_t lr_write_buf_reserve(lr_write_buf_t w, uintptr_t additional);
+uintptr_t lr_write_buf_capacity(lr_write_buf_t w);
+int32_t lr_write_buf_written(lr_write_buf_t w, lr_bytes_t *out);
+
+/* TimerQueue */
+lr_timer_queue_t lr_timer_queue_new(void);
+void lr_timer_queue_free(lr_timer_queue_t q);
+int32_t lr_timer_queue_arm(lr_timer_queue_t q,
+                           uint64_t now_ms,
+                           lr_timer_id_t id,
+                           struct lr_timer_spec_t spec);
+int32_t lr_timer_queue_cancel(lr_timer_queue_t q, lr_timer_id_t id);
+int32_t lr_timer_queue_cancel_all(lr_timer_queue_t q);
+int32_t lr_timer_queue_tick(lr_timer_queue_t q,
+                            uint64_t now_ms,
+                            lr_timer_id_t **out_array,
+                            uintptr_t *out_count);
+uint8_t lr_timer_queue_is_empty(lr_timer_queue_t q);
+uintptr_t lr_timer_queue_len(lr_timer_queue_t q);
+uint64_t lr_timer_queue_next_fire_ms(lr_timer_queue_t q);
+void lr_timer_queue_drain_free(lr_timer_id_t *array, uintptr_t count);
+struct lr_timer_spec_t lr_timer_spec_once(uint64_t after_ms);
+struct lr_timer_spec_t lr_timer_spec_periodic(uint64_t after_ms, uint64_t periodic_ms);
+
+/* MemoryConn */
+lr_memory_conn_t lr_memory_conn_new(void);
+int32_t lr_memory_conn_pair(lr_memory_conn_t *out_a, lr_memory_conn_t *out_b);
+int32_t lr_memory_conn_push_input(lr_memory_conn_t c, const uint8_t *bytes, uintptr_t len);
+int32_t lr_memory_conn_take_input(lr_memory_conn_t c, lr_bytes_t *out);
+int32_t lr_memory_conn_put_output(lr_memory_conn_t c, const uint8_t *bytes, uintptr_t len);
+int32_t lr_memory_conn_drain_output(lr_memory_conn_t c, lr_bytes_t *out);
+void lr_memory_conn_free(lr_memory_conn_t c);
 
 typedef struct OpaqueLocRib *lr_loc_rib_t;
 typedef struct OpaqueAdjRibIn *lr_adj_rib_in_t;
