@@ -833,3 +833,24 @@ class OspfAreaType:
 
     def __hash__(self) -> int:
         return hash((self.kind, self.default_metric))
+
+
+@dataclass(frozen=True)
+class OspfRouterLsaFlags:
+    """The Router-LSA body flags (RFC 2328 §A.4.2 V/E/B bits) the
+    router should advertise for an area, derived from its current
+    state. Mirrors ``lr_ospf::origination::RouterLsaFlags`` (and
+    ``DefaultRouter::ospf_router_lsa_flags``).
+
+    * :attr:`virtual_link` — the router is an endpoint of a virtual
+      link whose transit area is the queried area (§15: the V-bit
+      rides the transit area's Router-LSA).
+    * :attr:`asbr` — at least one AS-external redistribution intent
+      exists (the ASBR condition — §12.4.1.1).
+    * :attr:`border` — the router is attached to more than one
+      OSPFv2 area (the ABR condition — §12.4.1).
+    """
+
+    virtual_link: bool
+    asbr: bool
+    border: bool

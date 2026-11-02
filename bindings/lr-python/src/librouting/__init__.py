@@ -162,6 +162,7 @@ from .ospf import (
     OspfLsaKey,
     OspfLsdb,
     OspfRetransmitList,
+    OspfRouterLsaFlags,
     OspfV3ExternalDest,
 )
 from .seg6route import (
@@ -417,6 +418,8 @@ __all__ = [
     "AREA_STUB_NO_SUMMARY",
     "AREA_NSSA",
     "AREA_NSSA_NO_SUMMARY",
+    # OSPF Router-LSA V/E/B flags (RFC 2328 §A.4.2).
+    "OspfRouterLsaFlags",
     # SRv6 netlink route-table (RFC 8754 §2 + RFC 8986 §4).
     "Seg6Route",
     "Seg6LocalRoute",

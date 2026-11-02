@@ -447,6 +447,34 @@ int32_t lr_router_ospf_area_type(lr_router_t r,
                                  uint32_t area_id,
                                  struct lr_ospf_area_type_t *out);
 
+/* OSPF DR/BDR election reporting + Router-LSA flags reader (issue #92).
+ * Mirrors DefaultRouter::set_ospf_dr_state (RFC 2328 §9.4 step 7) and
+ * DefaultRouter::ospf_router_lsa_flags (§A.4.2 V/E/B bits). The setter
+ * returns 0 on success with *out_changed written to 1/0; -2 invalid
+ * handle; -6 unknown / non-OSPF session; -4 panic. The reader returns
+ * 0 on success with the 3 boolean slots written; -2 invalid handle;
+ * -6 unknown area; -1 NULL out pointer; -4 panic. */
+int32_t lr_router_set_ospf_dr_state(lr_router_t r,
+                                    uint64_t session,
+                                    uint32_t dr,
+                                    uint32_t bdr,
+                                    uint8_t *out_changed);
+int32_t lr_router_ospf_router_lsa_flags(lr_router_t r,
+                                        uint32_t area_id,
+                                        uint8_t *out_v,
+                                        uint8_t *out_e,
+                                        uint8_t *out_b);
+
+/* Simple router-wide readers (issue #92). Mirrors
+ * DefaultRouter::enforce_first_as / add_path_max_paths /
+ * roa_validate_enabled — the reader side of the existing setters.
+ * Each returns the router-wide configuration value; a NULL router
+ * handle falls back to the documented default (0 / 1 / 0) so a panic
+ * cannot be observed through these readers. */
+uint8_t lr_router_enforce_first_as(lr_router_t r);
+uint32_t lr_router_add_path_max_paths(lr_router_t r);
+uint8_t lr_router_roa_validate_enabled(lr_router_t r);
+
 uintptr_t lr_router_session_count(lr_router_t r);
 int32_t lr_router_session_summary_at(lr_router_t r,
                                      uintptr_t index,

@@ -1013,6 +1013,109 @@ class Router:
         return None
 
     # ------------------------------------------------------------------
+    # OSPF DR/BDR election reporting + Router-LSA flags reader
+    # (RFC 2328 §9.4 step 7 / §A.4.2). Mirrors
+    # ``DefaultRouter::set_ospf_dr_state`` and
+    # ``DefaultRouter::ospf_router_lsa_flags`` one-to-one.
+    # ------------------------------------------------------------------
+
+    def set_ospf_dr_state(
+        self, session: int, dr: int, bdr: int
+    ) -> bool:
+        """Push the current DR/BDR election result (RFC 2328 §9.4) for
+        the OSPF segment a session's interface attaches to. Mirrors
+        ``DefaultRouter::set_ospf_dr_state``.
+
+        ``session`` is the handle returned by ``add_ospf_session*`` /
+        ``add_ospfv3_session``. ``dr`` / ``bdr`` are the elected
+        routers' IP interface addresses (0 when none is elected —
+        §9.4 permits a no-DR / no-BDR outcome on a stub segment).
+
+        Returns ``True`` when the DR/BDR pair changed (the §10.4
+        adjacency decision was re-run for the session's neighbor),
+        ``False`` when it did not. Raises :class:`LrError` on an
+        unknown session, a non-OSPF session, or a NULL router handle.
+        """
+        changed = ffi.new("uint8_t*")
+        rc = get_lib().lr_router_set_ospf_dr_state(
+            self._ptr, int(session), int(dr), int(bdr), changed
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_set_ospf_dr_state failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return bool(changed[0])
+
+    def ospf_router_lsa_flags(self, area_id: int) -> "OspfRouterLsaFlags | None":
+        """Read the Router-LSA body flags (RFC 2328 §A.4.2 V/E/B bits)
+        the router should advertise for ``area_id``, derived from the
+        router's current state. Mirrors
+        ``DefaultRouter::ospf_router_lsa_flags``.
+
+        Returns an :class:`OspfRouterLsaFlags` when ``area_id`` is
+        attached, ``None`` when the area is unknown (not attached).
+        Raises :class:`LrError` on a NULL router handle or a NULL out
+        pointer.
+        """
+        from .ospf import OspfRouterLsaFlags
+        v = ffi.new("uint8_t*")
+        e = ffi.new("uint8_t*")
+        b = ffi.new("uint8_t*")
+        rc = get_lib().lr_router_ospf_router_lsa_flags(
+            self._ptr, int(area_id), v, e, b
+        )
+        if rc < 0:
+            # -6 (LR_ERR_OTHER) on an unknown area: surface as None to
+            # mirror ``ospf_area_type``'s contract.
+            if rc == -6:
+                return None
+            raise LrError(
+                f"lr_router_ospf_router_lsa_flags failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return OspfRouterLsaFlags(
+            virtual_link=bool(v[0]),
+            asbr=bool(e[0]),
+            border=bool(b[0]),
+        )
+
+    # ------------------------------------------------------------------
+    # Simple router-wide readers (issue #92). Mirror
+    # ``DefaultRouter::enforce_first_as`` / ``add_path_max_paths`` /
+    # ``roa_validate_enabled`` — the reader side of the existing
+    # setters. Each returns the router-wide configuration value; a
+    # NULL router handle falls back to the documented default
+    # (False / 1 / False) so a panic cannot be observed through these
+    # readers.
+    # ------------------------------------------------------------------
+
+    def enforce_first_as(self) -> bool:
+        """Whether the FRR ``bgp enforce-first-as`` check is on.
+        Mirrors ``DefaultRouter::enforce_first_as``. Returns ``False``
+        on a NULL router handle (the reader cannot observe a panic).
+        """
+        return bool(get_lib().lr_router_enforce_first_as(self._ptr))
+
+    def add_path_max_paths(self) -> int:
+        """The router-wide Add-Path cap (RFC 7911): how many paths per
+        prefix the decision process keeps in Loc-RIB and advertises to
+        Add-Path peers. Mirrors ``DefaultRouter::add_path_max_paths``.
+        Defaults to 1 (single-path) for a freshly-constructed router.
+        Returns 0 on a NULL router handle (the reader cannot observe a
+        panic).
+        """
+        return int(get_lib().lr_router_add_path_max_paths(self._ptr))
+
+    def roa_validate_enabled(self) -> bool:
+        """Whether the RFC 6811 §2 prefix-origin validation hook is
+        installed at import time. Mirrors
+        ``DefaultRouter::roa_validate_enabled``. Returns ``False`` on
+        a NULL router handle (the reader cannot observe a panic).
+        """
+        return bool(get_lib().lr_router_roa_validate_enabled(self._ptr))
+
+    # ------------------------------------------------------------------
     # RouterInstance session-state + Babel runtime (issue #92, mirrors
     # crates/lr-ffi/src/router_runtime.rs). The methods follow the
     # Rust trait hierarchy one-to-one so an embedder can read the Rust

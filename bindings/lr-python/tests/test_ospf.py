@@ -7,6 +7,8 @@ import os
 import pathlib
 import sys
 
+import pytest
+
 _HERE = pathlib.Path(__file__).resolve().parent
 _ROOT = _HERE
 for _ in range(8):
@@ -505,3 +507,80 @@ def test_ospf_set_area_type_round_trips_default_metric():
     # Backbone cannot become stub.
     bb = _router_with_ospf_area(area_id=0, area_kind=0, default_metric=0)
     assert bb.ospf_set_area_type(0, librouting.OspfAreaType.stub(1)) is False
+
+
+def test_ospf_router_lsa_flags_reader_round_trip():
+    # Mirrors `DefaultRouter::ospf_router_lsa_flags` (RFC 2328 §A.4.2
+    # V/E/B bits). Empty area reads back V=0/E=0/B=0; unknown area
+    # reads back None; redistribute flips the E-bit on.
+    r = _router_with_ospf_area(area_id=1, area_kind=0, default_metric=0)
+    flags = r.ospf_router_lsa_flags(1)
+    assert flags is not None
+    assert flags.virtual_link is False
+    assert flags.asbr is False
+    assert flags.border is False
+    # Unknown area returns None.
+    assert r.ospf_router_lsa_flags(999) is None
+    # Redistribute one v2 /24: E-bit flips on.
+    dest = librouting.OspfExternalDest.new_v4(
+        bytes([10, 0, 0, 0]), 24, 100,
+        librouting.EXTERNAL_METRIC_TYPE1,
+    )
+    try:
+        assert r.ospf_redistribute(dest) is True
+        flags2 = r.ospf_router_lsa_flags(1)
+        assert flags2 is not None
+        assert flags2.virtual_link is False
+        assert flags2.asbr is True, "E-bit set after redistribute"
+        assert flags2.border is False
+    finally:
+        dest.close()
+
+
+def test_set_ospf_dr_state_round_trip():
+    # Mirrors `DefaultRouter::set_ospf_dr_state` (RFC 2328 §9.4 step 7).
+    # The no-op push (dr=bdr=0, matching the runtime's initialised
+    # state) returns changed=False; a real first push returns
+    # changed=True; the same pair again returns changed=False; an
+    # unknown session raises LrError.
+    r = _router_with_ospf_area(area_id=0, area_kind=0, default_metric=0)
+    # Recover the session handle via the inspection surface.
+    summaries = r.session_summaries()
+    assert len(summaries) == 1
+    session = summaries[0]["handle"]
+    # No-op push (0/0): changed=False.
+    assert r.set_ospf_dr_state(session, 0, 0) is False
+    # First real pair: changed=True.
+    assert r.set_ospf_dr_state(session, 0xC0A80001, 0xC0A80002) is True
+    # Same pair again: changed=False.
+    assert r.set_ospf_dr_state(session, 0xC0A80001, 0xC0A80002) is False
+    # Unknown session: LrError.
+    with pytest.raises(librouting.LrError):
+        r.set_ospf_dr_state(999, 1, 2)
+
+
+def test_router_readers_round_trip():
+    # Mirrors the simple router-wide readers `enforce_first_as`,
+    # `add_path_max_paths`, `roa_validate_enabled`. Each defaults to
+    # the documented value (False / 1 / False) and tracks the
+    # setter's changes.
+    r = librouting.Router()
+    # enforce_first_as: default False.
+    assert r.enforce_first_as() is False
+    r.set_enforce_first_as(True)
+    assert r.enforce_first_as() is True
+    r.set_enforce_first_as(False)
+    assert r.enforce_first_as() is False
+    # add_path_max_paths: default 1.
+    assert r.add_path_max_paths() == 1
+    r.set_add_path_max_paths(4)
+    assert r.add_path_max_paths() == 4
+    # Setter clamps 0 to 1.
+    r.set_add_path_max_paths(0)
+    assert r.add_path_max_paths() == 1
+    # roa_validate_enabled: default False.
+    assert r.roa_validate_enabled() is False
+    r.set_roa_validate(True)
+    assert r.roa_validate_enabled() is True
+    r.set_roa_validate(False)
+    assert r.roa_validate_enabled() is False
