@@ -640,3 +640,130 @@ func (d *OspfExternalDest) RouteTag() uint32 {
 func (d *OspfExternalDest) PBit() uint8 {
         return uint8(C.lr_ospf_external_dest_p_bit(d.ptr))
 }
+
+// ----------------------------------------------------------------------
+// OSPFv3 external destination (RFC 5340 §4.4.3.6 / §A.4.7) — the v3
+// counterpart of OspfExternalDest. The v3 plane carries IPv6 prefixes
+// only and the forwarding address is an IPv6 16-byte array.
+// ----------------------------------------------------------------------
+
+// OspfV3ExternalDest is an owned handle to one OSPFv3 AS-external-LSA
+// destination (RFC 5340 §4.4.3.6 / §A.4.7).
+type OspfV3ExternalDest struct {
+        ptr C.lr_ospf_v3_external_dest_t
+}
+
+// NewOspfV3ExternalDestV6 constructs a v3 external destination for an
+// IPv6 prefix. type2 selects a Type-2 external metric (E bit set).
+func NewOspfV3ExternalDestV6(prefixAddr [16]byte, prefixLen uint8, metric uint32, type2 bool) (*OspfV3ExternalDest, error) {
+        var type2Byte C.uint8_t
+        if type2 {
+                type2Byte = 1
+        }
+        ptr := C.lr_ospf_v3_external_dest_new(
+                nil,
+                (*C.uint8_t)(unsafe.Pointer(&prefixAddr[0])),
+                C.uint8_t(prefixLen),
+                C.uint32_t(metric),
+                type2Byte)
+        if ptr == nil {
+                return nil, fmt.Errorf("lr_ospf_v3_external_dest_new returned null")
+        }
+        d := &OspfV3ExternalDest{ptr: ptr}
+        runtime.SetFinalizer(d, (*OspfV3ExternalDest).destroy)
+        return d, nil
+}
+
+func (d *OspfV3ExternalDest) destroy() {
+        if d.ptr != nil {
+                C.lr_ospf_v3_external_dest_free(d.ptr)
+                d.ptr = nil
+        }
+}
+
+// Free releases the handle.
+func (d *OspfV3ExternalDest) Free() {
+        runtime.SetFinalizer(d, nil)
+        d.destroy()
+}
+
+// SetForwardingAddr sets the IPv6 forwarding address (RFC 5340 §A.4.7
+// F bit). Must be a global IPv6 address — unspecified and link-local
+// values are illegal and the router rejects the redistribute call
+// when set.
+func (d *OspfV3ExternalDest) SetForwardingAddr(addr [16]byte) error {
+        rc := C.lr_ospf_v3_external_dest_set_forwarding_addr(
+                d.ptr, (*C.uint8_t)(unsafe.Pointer(&addr[0])))
+        if rc != 0 {
+                return fmt.Errorf("lr_ospf_v3_external_dest_set_forwarding_addr: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// ClearForwardingAddr drops the F bit (forwards to the ASBR).
+func (d *OspfV3ExternalDest) ClearForwardingAddr() error {
+        rc := C.lr_ospf_v3_external_dest_clear_forwarding_addr(d.ptr)
+        if rc != 0 {
+                return fmt.Errorf("lr_ospf_v3_external_dest_clear_forwarding_addr: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// SetRouteTag sets the external route tag (RFC 5340 §A.4.7 T bit).
+func (d *OspfV3ExternalDest) SetRouteTag(tag uint32) error {
+        rc := C.lr_ospf_v3_external_dest_set_route_tag(d.ptr, C.uint32_t(tag))
+        if rc != 0 {
+                return fmt.Errorf("lr_ospf_v3_external_dest_set_route_tag: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// ClearRouteTag drops the T bit.
+func (d *OspfV3ExternalDest) ClearRouteTag() error {
+        rc := C.lr_ospf_v3_external_dest_clear_route_tag(d.ptr)
+        if rc != 0 {
+                return fmt.Errorf("lr_ospf_v3_external_dest_clear_route_tag: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// Metric reads the configured metric.
+func (d *OspfV3ExternalDest) Metric() uint32 {
+        return uint32(C.lr_ospf_v3_external_dest_metric(d.ptr))
+}
+
+// Type2 reports whether the metric is Type-2 (E bit set).
+func (d *OspfV3ExternalDest) Type2() bool {
+        return C.lr_ospf_v3_external_dest_type2(d.ptr) != 0
+}
+
+// ForwardingAddr reads the configured IPv6 forwarding address. The
+// returned values are (addr, true) when the F bit is set, or
+// ([16]byte{}, false) when the F bit is clear.
+func (d *OspfV3ExternalDest) ForwardingAddr() ([16]byte, bool, error) {
+        var out [16]byte
+        rc := C.lr_ospf_v3_external_dest_forwarding_addr(d.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&out[0])))
+        if rc < 0 {
+                return [16]byte{}, false, fmt.Errorf("lr_ospf_v3_external_dest_forwarding_addr: %s (rc=%d)", LastError(), int(rc))
+        }
+        if rc == 1 {
+                return out, true, nil
+        }
+        return [16]byte{}, false, nil
+}
+
+// RouteTag reads the configured external route tag. The returned
+// values are (tag, true) when the T bit is set, or (0, false) when
+// the T bit is clear.
+func (d *OspfV3ExternalDest) RouteTag() (uint32, bool, error) {
+        var out C.uint32_t
+        rc := C.lr_ospf_v3_external_dest_route_tag(d.ptr, &out)
+        if rc < 0 {
+                return 0, false, fmt.Errorf("lr_ospf_v3_external_dest_route_tag: %s (rc=%d)", LastError(), int(rc))
+        }
+        if rc == 1 {
+                return uint32(out), true, nil
+        }
+        return 0, false, nil
+}

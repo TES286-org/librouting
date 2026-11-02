@@ -316,3 +316,217 @@ func TestOspfExternalDestV4(t *testing.T) {
                 t.Fatalf("PBit = %d, want 1", d.PBit())
         }
 }
+
+// TestOspfV3ExternalDest exercises the v3 external-LSA destination
+// builder + readers (RFC 5340 §4.4.3.6 / §A.4.7).
+func TestOspfV3ExternalDest(t *testing.T) {
+        pfx := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x01}
+        d, err := NewOspfV3ExternalDestV6(pfx, 48, 100, false)
+        if err != nil {
+                t.Fatalf("NewOspfV3ExternalDestV6: %v", err)
+        }
+        defer d.Free()
+        if d.Metric() != 100 {
+                t.Fatalf("Metric = %d, want 100", d.Metric())
+        }
+        if d.Type2() {
+                t.Fatalf("Type2 = true, want false")
+        }
+        fa := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0xfe}
+        if err := d.SetForwardingAddr(fa); err != nil {
+                t.Fatalf("SetForwardingAddr: %v", err)
+        }
+        if err := d.SetRouteTag(0xDEADBEEF); err != nil {
+                t.Fatalf("SetRouteTag: %v", err)
+        }
+        outFA, ok, err := d.ForwardingAddr()
+        if err != nil {
+                t.Fatalf("ForwardingAddr: %v", err)
+        }
+        if !ok {
+                t.Fatalf("ForwardingAddr ok=false, want true")
+        }
+        if outFA != fa {
+                t.Fatalf("ForwardingAddr = %x, want %x", outFA, fa)
+        }
+        outTag, ok, err := d.RouteTag()
+        if err != nil {
+                t.Fatalf("RouteTag: %v", err)
+        }
+        if !ok {
+                t.Fatalf("RouteTag ok=false, want true")
+        }
+        if outTag != 0xDEADBEEF {
+                t.Fatalf("RouteTag = %x, want DEADBEEF", outTag)
+        }
+        if err := d.ClearForwardingAddr(); err != nil {
+                t.Fatalf("ClearForwardingAddr: %v", err)
+        }
+        if err := d.ClearRouteTag(); err != nil {
+                t.Fatalf("ClearRouteTag: %v", err)
+        }
+        if _, ok, err := d.ForwardingAddr(); err != nil || ok {
+                t.Fatalf("ForwardingAddr after clear: ok=%v err=%v", ok, err)
+        }
+        if _, ok, err := d.RouteTag(); err != nil || ok {
+                t.Fatalf("RouteTag after clear: ok=%v err=%v", ok, err)
+        }
+}
+
+// helper: build a Router and attach an OSPFv2 area so the OSPF
+// runtime methods have somewhere to land.
+func routerWithOspfArea(t *testing.T, areaID uint32, areaKind uint32, defaultMetric uint32) *Router {
+        r, err := NewRouter()
+        if err != nil {
+                t.Fatalf("NewRouter: %v", err)
+        }
+        _, err = r.AddOSPFSessionExt(OspfV2, // OSPFv2
+                0xC0A80001, // router_id
+                areaID,
+                areaKind,
+                defaultMetric,
+                1500, // mtu
+                NetPtp, // network_type=PTP
+                false, 0, // no interface_ip
+                false, 0, // no neighbor_ip
+        )
+        if err != nil {
+                t.Fatalf("AddOSPFSessionExt: %v", err)
+        }
+        return r
+}
+
+func TestOspfVirtualLinkLifecycle(t *testing.T) {
+        r := routerWithOspfArea(t, 1, 0, 0)
+        // vlink to self refused.
+        if ok, err := r.OspfAddVirtualLink(1, 0xC0A80001); err != nil || ok {
+                t.Fatalf("vlink to self: ok=%v err=%v", ok, err)
+        }
+        // vlink across normal area accepted.
+        if ok, err := r.OspfAddVirtualLink(1, 0xC0A80002); err != nil || !ok {
+                t.Fatalf("vlink across normal area: ok=%v err=%v", ok, err)
+        }
+        // duplicate add refused.
+        if ok, err := r.OspfAddVirtualLink(1, 0xC0A80002); err != nil || ok {
+                t.Fatalf("duplicate vlink: ok=%v err=%v", ok, err)
+        }
+        // link down (no SPF reach).
+        if ok, err := r.OspfVirtualLinkUp(1, 0xC0A80002); err != nil || ok {
+                t.Fatalf("vlink up before SPF: ok=%v err=%v", ok, err)
+        }
+        if _, ok, err := r.OspfVirtualLinkSession(1, 0xC0A80002); err != nil || ok {
+                t.Fatalf("vlink session before SPF: ok=%v err=%v", ok, err)
+        }
+        // remove.
+        if ok, err := r.OspfRemoveVirtualLink(1, 0xC0A80002); err != nil || !ok {
+                t.Fatalf("vlink remove: ok=%v err=%v", ok, err)
+        }
+        // remove again — no-op.
+        if ok, err := r.OspfRemoveVirtualLink(1, 0xC0A80002); err != nil || ok {
+                t.Fatalf("vlink remove again: ok=%v err=%v", ok, err)
+        }
+}
+
+func TestOspfVirtualLinkAcrossStubAreaRefused(t *testing.T) {
+        // areaKind=1 is a stub area; virtual links cannot cross stub
+        // areas (RFC 2328 §15).
+        r := routerWithOspfArea(t, 2, 1, 100)
+        if ok, err := r.OspfAddVirtualLink(2, 0xC0A80002); err != nil || ok {
+                t.Fatalf("vlink across stub: ok=%v err=%v", ok, err)
+        }
+}
+
+func TestOspfRedistributeV2AndAsbr(t *testing.T) {
+        r := routerWithOspfArea(t, 1, 0, 0)
+        if ok, err := r.OspfIsAsbr(); err != nil || ok {
+                t.Fatalf("IsAsbr before: ok=%v err=%v", ok, err)
+        }
+        addr := [4]byte{10, 0, 0, 0}
+        dest, err := NewOspfExternalDestV4(addr, 24, 100, OspfExternalType1)
+        if err != nil {
+                t.Fatalf("NewOspfExternalDestV4: %v", err)
+        }
+        defer dest.Free()
+        if ok, err := r.OspfRedistribute(dest); err != nil || !ok {
+                t.Fatalf("Redistribute: ok=%v err=%v", ok, err)
+        }
+        if ok, err := r.OspfIsAsbr(); err != nil || !ok {
+                t.Fatalf("IsAsbr after redistribute: ok=%v err=%v", ok, err)
+        }
+        if ok, err := r.OspfUnredistribute(addr[:], 24); err != nil || !ok {
+                t.Fatalf("Unredistribute: ok=%v err=%v", ok, err)
+        }
+        if ok, err := r.OspfIsAsbr(); err != nil || ok {
+                t.Fatalf("IsAsbr after unredistribute: ok=%v err=%v", ok, err)
+        }
+        // Unredistribute again is a no-op.
+        if ok, err := r.OspfUnredistribute(addr[:], 24); err != nil || ok {
+                t.Fatalf("Unredistribute again: ok=%v err=%v", ok, err)
+        }
+}
+
+func TestOspfRedistributeV3AndAsbr(t *testing.T) {
+        r := routerWithOspfArea(t, 1, 0, 0)
+        pfx := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x01}
+        dest, err := NewOspfV3ExternalDestV6(pfx, 48, 100, false)
+        if err != nil {
+                t.Fatalf("NewOspfV3ExternalDestV6: %v", err)
+        }
+        defer dest.Free()
+        if ok, err := r.OspfRedistributeV3(dest); err != nil || !ok {
+                t.Fatalf("RedistributeV3: ok=%v err=%v", ok, err)
+        }
+        if ok, err := r.OspfIsAsbr(); err != nil || !ok {
+                t.Fatalf("IsAsbr after v3 redistribute: ok=%v err=%v", ok, err)
+        }
+        // With only a v2 area attached, no v3 LSA was ever originated, so
+        // unredistribute_v3 returns false (nothing was flushed) — the
+        // ASBR flag flipping back to false confirms the intent was in
+        // fact dropped.
+        if _, err := r.OspfUnredistributeV3(pfx[:], 48); err != nil {
+                t.Fatalf("UnredistributeV3: %v", err)
+        }
+        if ok, err := r.OspfIsAsbr(); err != nil || ok {
+                t.Fatalf("IsAsbr after v3 unredistribute: ok=%v err=%v", ok, err)
+        }
+}
+
+func TestOspfRedistributeV3RejectsLinkLocalFA(t *testing.T) {
+        r := routerWithOspfArea(t, 1, 0, 0)
+        pfx := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x01}
+        llFA := [16]byte{0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x01}
+        dest, err := NewOspfV3ExternalDestV6(pfx, 48, 100, false)
+        if err != nil {
+                t.Fatalf("NewOspfV3ExternalDestV6: %v", err)
+        }
+        defer dest.Free()
+        if err := dest.SetForwardingAddr(llFA); err != nil {
+                t.Fatalf("SetForwardingAddr: %v", err)
+        }
+        // The router rejects link-local FA per RFC 5340 §A.4.7.
+        if ok, err := r.OspfRedistributeV3(dest); err != nil || ok {
+                t.Fatalf("RedistributeV3 with link-local FA: ok=%v err=%v", ok, err)
+        }
+}
+
+func TestOspfRedistributeV2RejectsV6Prefix(t *testing.T) {
+        r := routerWithOspfArea(t, 1, 0, 0)
+        pfx := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0x01}
+        // OspfExternalDestV6 succeeds at construction (the C ABI
+        // accepts the v6 prefix pointer), but the v2 redistribute plane
+        // only carries IPv4 prefixes — passing a v6 dest returns false.
+        dest, err := NewOspfExternalDestV6(pfx, 48, 100, OspfExternalType1)
+        if err != nil {
+                t.Fatalf("NewOspfExternalDestV6: %v", err)
+        }
+        defer dest.Free()
+        if ok, err := r.OspfRedistribute(dest); err != nil || ok {
+                t.Fatalf("Redistribute v6 dest: ok=%v err=%v", ok, err)
+        }
+}

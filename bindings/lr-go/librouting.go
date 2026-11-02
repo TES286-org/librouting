@@ -1019,6 +1019,144 @@ func (r *Router) DrainOspfGraceEvents(capacity int) ([]OspfGraceEvent, error) {
 	return out, nil
 }
 
+// ----------------------------------------------------------------------
+// OSPF runtime: virtual links + AS-external redistribution (issue
+// #92, mirrors crates/lr-ffi/src/router_ospf_runtime.rs).
+// ----------------------------------------------------------------------
+
+// OspfAddVirtualLink configures a virtual link to the area border
+// router endpoint, riding through transitArea (RFC 2328 §15).
+// Returns (true, nil) when the link was added; (false, nil) when OSPF
+// is not active, the transit area is not attached, runs OSPFv3 or is
+// a stub/NSSA area, the endpoint is this router itself, or the link
+// already exists.
+func (r *Router) OspfAddVirtualLink(transitArea uint32, endpoint uint32) (bool, error) {
+	rc := C.lr_router_ospf_add_virtual_link(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_add_virtual_link: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfRemoveVirtualLink removes a configured virtual link, tearing
+// down its backbone adjacency (and the routes it justified) when it
+// was up. Returns (true, nil) when the link existed and was removed;
+// (false, nil) when no such link was configured.
+func (r *Router) OspfRemoveVirtualLink(transitArea uint32, endpoint uint32) (bool, error) {
+	rc := C.lr_router_ospf_remove_virtual_link(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_remove_virtual_link: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfVirtualLinkUp reports whether the virtual link through
+// transitArea to endpoint is currently up (RFC 2328 §15).
+func (r *Router) OspfVirtualLinkUp(transitArea uint32, endpoint uint32) (bool, error) {
+	rc := C.lr_router_ospf_virtual_link_up(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_virtual_link_up: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfVirtualLinkSession returns the backbone session handle of an
+// up virtual link (RFC 2328 §15). Returns (handle, true, nil) when
+// the link is up; (0, false, nil) when the link is down — the embedder
+// wires the transport: drain it via DrainOutput and deliver the
+// bytes to the peer endpoint's virtual session (tunnelled through
+// the transit area), feeding what returns the same way.
+func (r *Router) OspfVirtualLinkSession(transitArea uint32, endpoint uint32) (uint64, bool, error) {
+	var out C.uint64_t
+	rc := C.lr_router_ospf_virtual_link_session(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint), &out)
+	if rc < 0 {
+		return 0, false, fmt.Errorf("lr_router_ospf_virtual_link_session: %s (rc=%d)", LastError(), int(rc))
+	}
+	if rc == 1 {
+		return uint64(out), true, nil
+	}
+	return 0, false, nil
+}
+
+// OspfRedistribute redistributes one external destination on the
+// OSPFv2 plane (RFC 2328 §12.4.3). The dest handle is borrowed (the
+// caller still owns it and frees it via OspfExternalDest.Free).
+// Returns (true, nil) when the redistribution intent was recorded;
+// (false, nil) when the destination's prefix is not IPv4 — use
+// OspfRedistributeV3 for IPv6.
+func (r *Router) OspfRedistribute(dest *OspfExternalDest) (bool, error) {
+	if dest == nil || dest.ptr == nil {
+		return false, fmt.Errorf("OspfRedistribute: dest is nil")
+	}
+	rc := C.lr_router_ospf_redistribute(r.ptr, dest.ptr)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_redistribute: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfUnredistribute drops the redistribution intent covering
+// (addr/prefixLen) on the OSPFv2 plane (RFC 2328 §12.4.3, RFC 3101
+// §2.4): MaxAge-flush the self-originated type-5 / type-7 LSA from
+// every area. Returns (true, nil) when a matching redistribution
+// existed and was flushed. addr must be 4 bytes for IPv4 (use
+// OspfUnredistributeV3 for IPv6).
+func (r *Router) OspfUnredistribute(addr []byte, prefixLen uint8) (bool, error) {
+	if len(addr) != 4 {
+		return false, fmt.Errorf("OspfUnredistribute: addr must be 4 bytes for v4, got %d", len(addr))
+	}
+	var cP C.struct_lr_core_prefix_t
+	writeCorePrefix(&cP, addr, prefixLen)
+	rc := C.lr_router_ospf_unredistribute(r.ptr, cP)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_unredistribute: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfRedistributeV3 redistributes one external destination on the
+// OSPFv3 plane (RFC 5340 §4.4.3.6). The dest handle is borrowed.
+// Returns (true, nil) when the intent was recorded; (false, nil)
+// when the prefix is not IPv6 or the forwarding address is illegal.
+func (r *Router) OspfRedistributeV3(dest *OspfV3ExternalDest) (bool, error) {
+	if dest == nil || dest.ptr == nil {
+		return false, fmt.Errorf("OspfRedistributeV3: dest is nil")
+	}
+	rc := C.lr_router_ospf_redistribute_v3(r.ptr, dest.ptr)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_redistribute_v3: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfUnredistributeV3 drops the redistribution intent covering
+// (addr/prefixLen) on the OSPFv3 plane (RFC 5340 §A.4.7). addr must
+// be 16 bytes for IPv6.
+func (r *Router) OspfUnredistributeV3(addr []byte, prefixLen uint8) (bool, error) {
+	if len(addr) != 16 {
+		return false, fmt.Errorf("OspfUnredistributeV3: addr must be 16 bytes for v6, got %d", len(addr))
+	}
+	var cP C.struct_lr_core_prefix_t
+	writeCorePrefix(&cP, addr, prefixLen)
+	rc := C.lr_router_ospf_unredistribute_v3(r.ptr, cP)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_unredistribute_v3: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfIsAsbr reports whether at least one AS-external redistribution
+// intent is recorded (the E-bit condition of the router-LSA flags —
+// lets the daemon notice the ASBR status flip and re-originate its
+// Router-LSAs immediately). Mirrors DefaultRouter::ospf_is_asbr.
+func (r *Router) OspfIsAsbr() (bool, error) {
+	rc := C.lr_router_ospf_is_asbr(r.ptr)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_is_asbr: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
 // decodeSessionSummary translates one C struct into the Go form.
 // Returns a value, not a pointer — the caller already has its own
 // copy of the C struct on the stack.
