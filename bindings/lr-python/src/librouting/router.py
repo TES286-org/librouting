@@ -809,6 +809,167 @@ class Router:
         return [_decode_ospf_grace_event(arr[i]) for i in range(int(n))]
 
     # ------------------------------------------------------------------
+    # OSPF runtime: virtual links + AS-external redistribution (issue
+    # #92, mirrors crates/lr-ffi/src/router_ospf_runtime.rs). The
+    # methods mirror the Rust DefaultRouter trait surface one-to-one.
+    # ------------------------------------------------------------------
+
+    def ospf_add_virtual_link(self, transit_area: int, endpoint: int) -> bool:
+        """Configure a virtual link to the area border router
+        ``endpoint``, riding through ``transit_area`` (RFC 2328 §15).
+        Returns ``True`` when the link was added; ``False`` when OSPF
+        is not active, the transit area is not attached, runs OSPFv3
+        or is a stub/NSSA area, the endpoint is this router itself, or
+        the link already exists.
+        """
+        rc = get_lib().lr_router_ospf_add_virtual_link(
+            self._ptr, int(transit_area), int(endpoint)
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_add_virtual_link failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_remove_virtual_link(self, transit_area: int, endpoint: int) -> bool:
+        """Remove a configured virtual link, tearing down its
+        backbone adjacency (and the routes it justified) when it was
+        up. Returns ``True`` when the link existed and was removed,
+        ``False`` when no such link was configured.
+        """
+        rc = get_lib().lr_router_ospf_remove_virtual_link(
+            self._ptr, int(transit_area), int(endpoint)
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_remove_virtual_link failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_virtual_link_up(self, transit_area: int, endpoint: int) -> bool:
+        """Whether the virtual link through ``transit_area`` to
+        ``endpoint`` is currently up (RFC 2328 §15)."""
+        rc = get_lib().lr_router_ospf_virtual_link_up(
+            self._ptr, int(transit_area), int(endpoint)
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_virtual_link_up failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_virtual_link_session(
+        self, transit_area: int, endpoint: int
+    ) -> int | None:
+        """The backbone session handle of an up virtual link (RFC
+        2328 §15). Returns ``None`` when the link is down — the
+        embedder wires the transport: drain it via
+        :meth:`drain_output` and deliver the bytes to the peer
+        endpoint's virtual session (tunnelled through the transit
+        area), feeding what returns the same way.
+        """
+        out = ffi.new("uint64_t*")
+        rc = get_lib().lr_router_ospf_virtual_link_session(
+            self._ptr, int(transit_area), int(endpoint), out
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_virtual_link_session failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        if rc == 1:
+            return int(out[0])
+        return None
+
+    def ospf_redistribute(self, dest: "OspfExternalDest") -> bool:
+        """Redistribute one external destination on the OSPFv2 plane
+        (RFC 2328 §12.4.3): originate a type-5 AS-external-LSA (and a
+        type-7 NSSA-LSA in NSSA areas) into every attached OSPFv2
+        area. The ``dest`` handle is borrowed (the caller still owns
+        it). Returns ``True`` when the redistribution intent was
+        recorded; ``False`` when the destination's prefix is not
+        IPv4 — use :meth:`ospf_redistribute_v3` for IPv6.
+        """
+        from .ospf import OspfExternalDest
+        if not isinstance(dest, OspfExternalDest):
+            raise LrError("dest must be an OspfExternalDest")
+        rc = get_lib().lr_router_ospf_redistribute(self._ptr, dest._ptr)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_redistribute failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_unredistribute(self, prefix: str) -> bool:
+        """Drop the redistribution intent covering ``prefix`` on the
+        OSPFv2 plane (RFC 2328 §12.4.3, RFC 3101 §2.4): MaxAge-flush
+        the self-originated type-5 / type-7 LSA from every area.
+        Returns ``True`` when a matching redistribution existed and
+        was flushed.
+
+        ``prefix`` accepts an IPv4 or IPv6 literal with a prefix
+        length (``"10.0.0.0/24"``, ``"2001:db8::/48"``). IPv6
+        prefixes route to :meth:`ospf_unredistribute_v3`.
+        """
+        c_prefix = _prefix_to_core(prefix)
+        rc = get_lib().lr_router_ospf_unredistribute(self._ptr, c_prefix)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_unredistribute failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_redistribute_v3(self, dest: "OspfV3ExternalDest") -> bool:
+        """Redistribute one external destination on the OSPFv3 plane
+        (RFC 5340 §4.4.3.6). The ``dest`` handle is borrowed. Returns
+        ``True`` when the intent was recorded; ``False`` when the
+        prefix is not IPv6 or the forwarding address is illegal.
+        """
+        from .ospf import OspfV3ExternalDest
+        if not isinstance(dest, OspfV3ExternalDest):
+            raise LrError("dest must be an OspfV3ExternalDest")
+        rc = get_lib().lr_router_ospf_redistribute_v3(self._ptr, dest._ptr)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_redistribute_v3 failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_unredistribute_v3(self, prefix: str) -> bool:
+        """Drop the redistribution intent covering ``prefix`` on the
+        OSPFv3 plane (RFC 5340 §A.4.7).
+        """
+        c_prefix = _prefix_to_core(prefix)
+        rc = get_lib().lr_router_ospf_unredistribute_v3(self._ptr, c_prefix)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_unredistribute_v3 failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    def ospf_is_asbr(self) -> bool:
+        """``True`` while at least one AS-external redistribution
+        intent is recorded (the ``E``-bit condition of the
+        router-LSA flags — lets the daemon notice the ASBR status
+        flip and re-originate its Router-LSAs immediately). Mirrors
+        ``DefaultRouter::ospf_is_asbr``.
+        """
+        rc = get_lib().lr_router_ospf_is_asbr(self._ptr)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_ospf_is_asbr failed (rc={rc}): "
+                f"{last_error()}"
+            )
+        return rc == 1
+
+    # ------------------------------------------------------------------
     # RouterInstance session-state + Babel runtime (issue #92, mirrors
     # crates/lr-ffi/src/router_runtime.rs). The methods follow the
     # Rust trait hierarchy one-to-one so an embedder can read the Rust
@@ -1304,6 +1465,36 @@ def _make_prefix(prefix: str):
     p.is_ipv6 = 1 if net.version == 6 else 0
     p.prefix_len = net.prefixlen
     return p
+
+
+def _prefix_to_core(prefix: str):
+    """Build an lr_core_prefix_t (the structured layout
+    `{lr_ip_addr_t addr; uint8_t prefix_len}`) from an
+    'a.b.c.d/len' or 'v6::/len' string.
+
+    Used by the OSPF runtime redistribute-v2 / unredistribute /
+    redistribute-v3 / unredistribute_v3 entry points that take the
+    `lr_core_prefix_t` structured type rather than the legacy
+    `lr_prefix_t` layout.
+    """
+    import ipaddress
+    net = ipaddress.ip_network(prefix, strict=False)
+    p = ffi.new("lr_core_prefix_t*")
+    packed = net.network_address.packed
+    # lr_ip_addr_t carries `is_ipv6` first, then `octets[16]`. For v4,
+    # the 4 address bytes occupy octets[12..16] (the last 4) and the
+    # first 12 stay zero — matches the Rust `IpAddr::V4([u8;4])` to
+    # `lr_ip_addr_t` conversion in `crates/lr-ffi/src/core.rs`. For v6
+    # the 16 address bytes fill the whole array.
+    p.addr.is_ipv6 = 1 if net.version == 6 else 0
+    if net.version == 6:
+        for i, octet in enumerate(packed):
+            p.addr.octets[i] = octet
+    else:
+        for i, octet in enumerate(packed):
+            p.addr.octets[12 + i] = octet
+    p.prefix_len = net.prefixlen
+    return p[0]
 
 
 def last_error() -> str:

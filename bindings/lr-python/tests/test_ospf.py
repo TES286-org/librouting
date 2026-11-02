@@ -243,3 +243,168 @@ def test_context_manager_closes_handle():
     # is null by attempting a fresh operation that would crash if it
     # weren't.
     assert l.is_empty()  # is_empty on a NULL handle returns 1 (treated as "empty").
+
+
+def test_v3_external_dest_round_trip():
+    pfx = bytes([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0x01,
+    ])
+    d = librouting.OspfV3ExternalDest.new_v6(pfx, 48, 100, type2=False)
+    try:
+        assert d.metric() == 100
+        assert d.type2() is False
+        fa = bytes([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0xfe,
+        ])
+        d.set_forwarding_addr(fa)
+        d.set_route_tag(0xDEADBEEF)
+        out_fa = d.forwarding_addr()
+        assert out_fa is not None
+        assert out_fa == fa
+        assert d.route_tag() == 0xDEADBEEF
+        d.clear_forwarding_addr()
+        d.clear_route_tag()
+        assert d.forwarding_addr() is None
+        assert d.route_tag() is None
+    finally:
+        d.close()
+
+
+def test_v3_external_dest_new_v6_wrong_size():
+    try:
+        librouting.OspfV3ExternalDest.new_v6(bytes(8), 48, 100, type2=False)
+        assert False, "expected LrError on short prefix"
+    except librouting.LrError:
+        pass
+
+
+def test_v3_external_dest_context_manager():
+    pfx = bytes([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0x01,
+    ])
+    with librouting.OspfV3ExternalDest.new_v6(pfx, 48, 100, type2=True) as d:
+        assert d.metric() == 100
+        assert d.type2() is True
+    # After the with-block, the handle is closed; accessing it again
+    # would fail. We just verify the constructor accepted type2=True.
+
+
+def _router_with_ospf_area(area_id=1, area_kind=0, default_metric=0):
+    """Helper: build a fresh Router and attach an OSPFv2 area via the
+    C ABI's `lr_router_add_ospf_session_ext` so `ospf_router_id` is
+    set."""
+    r = librouting.Router()
+    r.add_ospf_session_ext(
+        version=2,
+        router_id=0xC0A80001,
+        area_id=area_id,
+        area_kind=area_kind,
+        default_metric=default_metric,
+        mtu=1500,
+        network_type=0,  # PTP
+        interface_ip=None,
+        neighbor_ip=None,
+    )
+    return r
+
+
+def test_ospf_virtual_link_lifecycle():
+    r = _router_with_ospf_area()
+    # vlink to self refused.
+    assert r.ospf_add_virtual_link(1, 0xC0A80001) is False
+    # vlink across normal area accepted.
+    assert r.ospf_add_virtual_link(1, 0xC0A80002) is True
+    # duplicate add refused.
+    assert r.ospf_add_virtual_link(1, 0xC0A80002) is False
+    # link down (no SPF reach).
+    assert r.ospf_virtual_link_up(1, 0xC0A80002) is False
+    assert r.ospf_virtual_link_session(1, 0xC0A80002) is None
+    # remove.
+    assert r.ospf_remove_virtual_link(1, 0xC0A80002) is True
+    # remove again — no-op.
+    assert r.ospf_remove_virtual_link(1, 0xC0A80002) is False
+
+
+def test_ospf_virtual_link_across_stub_area_refused():
+    # area_kind=1 is a stub area; virtual links cannot cross stub
+    # areas (RFC 2328 §15).
+    r = _router_with_ospf_area(area_id=2, area_kind=1, default_metric=100)
+    assert r.ospf_add_virtual_link(2, 0xC0A80002) is False
+
+
+def test_ospf_redistribute_v2_marks_asbr_and_unredistribute():
+    r = _router_with_ospf_area()
+    assert r.ospf_is_asbr() is False
+    dest = librouting.OspfExternalDest.new_v4(
+        bytes([10, 0, 0, 0]), 24, 100,
+        librouting.EXTERNAL_METRIC_TYPE1,
+    )
+    try:
+        assert r.ospf_redistribute(dest) is True
+        assert r.ospf_is_asbr() is True
+        assert r.ospf_unredistribute("10.0.0.0/24") is True
+        assert r.ospf_is_asbr() is False
+        # Unredistribute again is a no-op.
+        assert r.ospf_unredistribute("10.0.0.0/24") is False
+    finally:
+        dest.close()
+
+
+def test_ospf_redistribute_v3_marks_asbr_and_unredistribute():
+    r = _router_with_ospf_area()
+    pfx = bytes([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0x01,
+    ])
+    dest = librouting.OspfV3ExternalDest.new_v6(pfx, 48, 100, type2=False)
+    try:
+        assert r.ospf_redistribute_v3(dest) is True
+        assert r.ospf_is_asbr() is True
+        # With only a v2 area attached, no v3 LSA was ever originated,
+        # so unredistribute_v3 returns False (nothing was flushed);
+        # the ASBR flag flipping back to False confirms the intent was
+        # in fact dropped.
+        r.ospf_unredistribute_v3("2001:db8::/48")
+        assert r.ospf_is_asbr() is False
+    finally:
+        dest.close()
+
+
+def test_ospf_redistribute_v3_rejects_link_local_forwarding_addr():
+    r = _router_with_ospf_area()
+    pfx = bytes([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0x01,
+    ])
+    ll_fa = bytes([
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0x01,
+    ])
+    dest = librouting.OspfV3ExternalDest.new_v6(pfx, 48, 100, type2=False)
+    try:
+        dest.set_forwarding_addr(ll_fa)
+        # The router rejects link-local FA per RFC 5340 §A.4.7.
+        assert r.ospf_redistribute_v3(dest) is False
+    finally:
+        dest.close()
+
+
+def test_ospf_redistribute_v2_rejects_v6_prefix_via_dest_handle():
+    r = _router_with_ospf_area()
+    pfx = bytes([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0x01,
+    ])
+    # OspfExternalDest.new_v6 succeeds at construction (the C ABI
+    # accepts the v6 prefix pointer), but the v2 redistribute plane
+    # only carries IPv4 prefixes — passing a v6 dest returns False.
+    dest = librouting.OspfExternalDest.new_v6(
+        pfx, 48, 100, librouting.EXTERNAL_METRIC_TYPE1,
+    )
+    try:
+        assert r.ospf_redistribute(dest) is False
+    finally:
+        dest.close()

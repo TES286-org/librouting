@@ -258,6 +258,8 @@ typedef struct OpaqueOspfLsaHdrBox OpaqueOspfLsaHdrBox;
 typedef struct OpaqueOspfLsaHdrBox *lr_ospf_lsa_hdr_box_t;
 typedef struct OpaqueOspfExternalDest OpaqueOspfExternalDest;
 typedef struct OpaqueOspfExternalDest *lr_ospf_external_dest_t;
+typedef struct OpaqueOspfV3ExternalDest OpaqueOspfV3ExternalDest;
+typedef struct OpaqueOspfV3ExternalDest *lr_ospf_v3_external_dest_t;
 
 /* OSPF LSA header — fixed-layout 20-byte struct (RFC 2328 §A.4.1). */
 typedef struct lr_ospf_lsa_hdr_t {
@@ -371,6 +373,52 @@ int32_t lr_ospf_external_dest_metric_type(lr_ospf_external_dest_t d);
 uint32_t lr_ospf_external_dest_forwarding_addr(lr_ospf_external_dest_t d);
 uint32_t lr_ospf_external_dest_route_tag(lr_ospf_external_dest_t d);
 uint8_t lr_ospf_external_dest_p_bit(lr_ospf_external_dest_t d);
+
+/* OSPFv3 external destination (RFC 5340 §4.4.3.6 / §A.4.7). */
+lr_ospf_v3_external_dest_t lr_ospf_v3_external_dest_new(const uint8_t *prefix_v4,
+                                                       const uint8_t *prefix_v6,
+                                                       uint8_t prefix_len,
+                                                       uint32_t metric,
+                                                       uint8_t metric_type2);
+int32_t lr_ospf_v3_external_dest_set_forwarding_addr(lr_ospf_v3_external_dest_t d,
+                                                    const uint8_t *addr);
+int32_t lr_ospf_v3_external_dest_clear_forwarding_addr(lr_ospf_v3_external_dest_t d);
+int32_t lr_ospf_v3_external_dest_set_route_tag(lr_ospf_v3_external_dest_t d,
+                                              uint32_t route_tag);
+int32_t lr_ospf_v3_external_dest_clear_route_tag(lr_ospf_v3_external_dest_t d);
+int32_t lr_ospf_v3_external_dest_prefix(lr_ospf_v3_external_dest_t d,
+                                       struct lr_core_prefix_t *out);
+uint32_t lr_ospf_v3_external_dest_metric(lr_ospf_v3_external_dest_t d);
+uint8_t lr_ospf_v3_external_dest_type2(lr_ospf_v3_external_dest_t d);
+int32_t lr_ospf_v3_external_dest_forwarding_addr(lr_ospf_v3_external_dest_t d,
+                                                uint8_t *out_addr);
+int32_t lr_ospf_v3_external_dest_route_tag(lr_ospf_v3_external_dest_t d,
+                                          uint32_t *out_tag);
+void lr_ospf_v3_external_dest_free(lr_ospf_v3_external_dest_t d);
+
+/* OSPF runtime: virtual links + AS-external redistribution. */
+int32_t lr_router_ospf_add_virtual_link(lr_router_t r,
+                                        uint32_t transit_area,
+                                        uint32_t endpoint);
+int32_t lr_router_ospf_remove_virtual_link(lr_router_t r,
+                                           uint32_t transit_area,
+                                           uint32_t endpoint);
+int32_t lr_router_ospf_virtual_link_up(lr_router_t r,
+                                       uint32_t transit_area,
+                                       uint32_t endpoint);
+int32_t lr_router_ospf_virtual_link_session(lr_router_t r,
+                                            uint32_t transit_area,
+                                            uint32_t endpoint,
+                                            uint64_t *out_handle);
+int32_t lr_router_ospf_redistribute(lr_router_t r,
+                                    lr_ospf_external_dest_t dest);
+int32_t lr_router_ospf_unredistribute(lr_router_t r,
+                                     struct lr_core_prefix_t prefix);
+int32_t lr_router_ospf_redistribute_v3(lr_router_t r,
+                                       lr_ospf_v3_external_dest_t dest);
+int32_t lr_router_ospf_unredistribute_v3(lr_router_t r,
+                                        struct lr_core_prefix_t prefix);
+int32_t lr_router_ospf_is_asbr(lr_router_t r);
 
 uintptr_t lr_router_session_count(lr_router_t r);
 int32_t lr_router_session_summary_at(lr_router_t r,

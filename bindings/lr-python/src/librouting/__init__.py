@@ -156,6 +156,7 @@ from .ospf import (
     OspfLsaKey,
     OspfLsdb,
     OspfRetransmitList,
+    OspfV3ExternalDest,
 )
 from .seg6route import (
     ENCAP_INLINE,
@@ -400,6 +401,7 @@ __all__ = [
     "OspfLsdb",
     "OspfRetransmitList",
     "OspfExternalDest",
+    "OspfV3ExternalDest",
     "EXTERNAL_METRIC_TYPE1",
     "EXTERNAL_METRIC_TYPE2",
     # SRv6 netlink route-table (RFC 8754 §2 + RFC 8986 §4).

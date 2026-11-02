@@ -557,3 +557,107 @@ class OspfExternalDest:
 
     def p_bit(self) -> int:
         return int(get_lib().lr_ospf_external_dest_p_bit(self._ptr))
+
+
+class OspfV3ExternalDest:
+    """An owned handle to one OSPFv3 AS-external-LSA destination
+    (RFC 5340 §4.4.3.6 / §A.4.7) — the v3 counterpart of
+    :class:`OspfExternalDest`. The v3 plane carries IPv6 prefixes
+    only and the forwarding address is an IPv6 16-byte array."""
+
+    def __init__(self) -> None:
+        self._ptr = ffi.NULL
+
+    def __del__(self) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._ptr != ffi.NULL:
+            get_lib().lr_ospf_v3_external_dest_free(self._ptr)
+            self._ptr = ffi.NULL
+
+    def __enter__(self) -> "OspfV3ExternalDest":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    @classmethod
+    def new_v6(cls, prefix_addr: bytes, prefix_len: int, metric: int,
+               type2: bool = False) -> "OspfV3ExternalDest":
+        """Construct a v3 external destination for an IPv6 prefix.
+        ``prefix_addr`` must be 16 bytes. ``type2`` selects a Type-2
+        external metric (E bit set) when ``True``."""
+        if len(prefix_addr) != 16:
+            raise LrError(f"prefix_addr must be 16 bytes for v3, got {len(prefix_addr)}")
+        buf = ffi.from_buffer(prefix_addr)
+        ptr = get_lib().lr_ospf_v3_external_dest_new(
+            ffi.NULL, buf, int(prefix_len), int(metric), 1 if type2 else 0)
+        if ptr == ffi.NULL:
+            raise LrError("lr_ospf_v3_external_dest_new returned NULL")
+        out = cls.__new__(cls)
+        out._ptr = ptr
+        return out
+
+    def set_forwarding_addr(self, addr: bytes) -> None:
+        """Set the IPv6 forwarding address (RFC 5340 §A.4.7 ``F``
+        bit). Must be a global IPv6 address — unspecified and
+        link-local values are illegal and the router rejects the
+        redistribute call when set. ``addr`` must be 16 bytes. Pass
+        16 zero bytes to clear (or use :meth:`clear_forwarding_addr`
+        for the no-arg form)."""
+        if len(addr) != 16:
+            raise LrError(f"forwarding_addr must be 16 bytes, got {len(addr)}")
+        buf = ffi.from_buffer(addr)
+        _check_rc(get_lib().lr_ospf_v3_external_dest_set_forwarding_addr(
+            self._ptr, buf),
+            "lr_ospf_v3_external_dest_set_forwarding_addr")
+
+    def clear_forwarding_addr(self) -> None:
+        """Drop the F bit (forwards to the ASBR)."""
+        _check_rc(get_lib().lr_ospf_v3_external_dest_clear_forwarding_addr(
+            self._ptr),
+            "lr_ospf_v3_external_dest_clear_forwarding_addr")
+
+    def set_route_tag(self, tag: int) -> None:
+        """Set the external route tag (RFC 5340 §A.4.7 ``T`` bit)."""
+        _check_rc(get_lib().lr_ospf_v3_external_dest_set_route_tag(
+            self._ptr, int(tag)),
+            "lr_ospf_v3_external_dest_set_route_tag")
+
+    def clear_route_tag(self) -> None:
+        """Drop the T bit."""
+        _check_rc(get_lib().lr_ospf_v3_external_dest_clear_route_tag(
+            self._ptr),
+            "lr_ospf_v3_external_dest_clear_route_tag")
+
+    def metric(self) -> int:
+        return int(get_lib().lr_ospf_v3_external_dest_metric(self._ptr))
+
+    def type2(self) -> bool:
+        """``True`` when the metric is Type-2 (E bit set)."""
+        return bool(get_lib().lr_ospf_v3_external_dest_type2(self._ptr))
+
+    def forwarding_addr(self) -> Optional[bytes]:
+        """Read the configured IPv6 forwarding address. Returns
+        ``None`` when the F bit is clear; otherwise a 16-byte
+        ``bytes`` object."""
+        out = ffi.new("uint8_t[16]")
+        rc = get_lib().lr_ospf_v3_external_dest_forwarding_addr(
+            self._ptr, out)
+        if rc < 0:
+            raise LrError(f"lr_ospf_v3_external_dest_forwarding_addr: {last_error()}")
+        if rc == 1:
+            return bytes(ffi.buffer(out, 16))
+        return None
+
+    def route_tag(self) -> Optional[int]:
+        """Read the configured external route tag. Returns ``None``
+        when the T bit is clear."""
+        out = ffi.new("uint32_t*")
+        rc = get_lib().lr_ospf_v3_external_dest_route_tag(self._ptr, out)
+        if rc < 0:
+            raise LrError(f"lr_ospf_v3_external_dest_route_tag: {last_error()}")
+        if rc == 1:
+            return int(out[0])
+        return None
