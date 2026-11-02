@@ -4185,6 +4185,130 @@ inline bool ospf_is_asbr(Router& r) {
 }
 
 // =========================================================================
+// ===== OSPF area type — value wrapper around `lr_ospf_area_type_t` =======
+// =========================================================================
+//
+// Mirrors `lr_router::OspfAreaType` (RFC 2328 §3.6 stub areas;
+// RFC 3101 NSSA) one-to-one. The C struct `lr_ospf_area_type_t` is
+// already `#[repr(C)]` and trivially copyable, so the C++ wrapper
+// is a thin value class with static factories — no unique_ptr, no
+// deleter. The `kind` / `default_metric` fields and the reader
+// methods line up with the Rust enum's `is_stub` / `is_nssa` /
+// `is_stubby` / `no_summary` / `default_metric` accessors.
+
+/// OSPF area type policy (RFC 2328 §3.6 / RFC 3101).
+///
+/// Value type wrapping `lr_ospf_area_type_t`. Construct via the
+/// static factories (`OspfAreaType::normal()`, `stub(dm)`,
+/// `stub_no_summary(dm)`, `nssa(dm)`, `nssa_no_summary(dm)`) and
+/// inspect via `kind()`, `is_stub()`, `is_nssa()`, `is_stubby()`,
+/// `no_summary()`, `default_metric()`.
+class OspfAreaType {
+public:
+    /// The area-kind enum (mirrors `LR_AREA_*`).
+    enum class Kind : std::int32_t {
+        Normal           = 0,
+        Stub             = 1,
+        StubNoSummary    = 2,
+        Nssa             = 3,
+        NssaNoSummary    = 4,
+    };
+
+    OspfAreaType() = default;
+    /* implicit */ OspfAreaType(lr_ospf_area_type_t t) noexcept : t_(t) {}
+
+    /// Convert to the underlying C struct (implicit by value).
+    operator lr_ospf_area_type_t() const noexcept { return t_; }
+
+    // ----- factories (mirror Rust constructors) -----
+
+    static OspfAreaType normal() noexcept {
+        return OspfAreaType(lr_ospf_area_type_normal());
+    }
+    static OspfAreaType stub(std::uint32_t default_metric) noexcept {
+        return OspfAreaType(lr_ospf_area_type_stub(default_metric));
+    }
+    static OspfAreaType stub_no_summary(std::uint32_t default_metric) noexcept {
+        return OspfAreaType(lr_ospf_area_type_stub_no_summary(default_metric));
+    }
+    static OspfAreaType nssa(std::uint32_t default_metric) noexcept {
+        return OspfAreaType(lr_ospf_area_type_nssa(default_metric));
+    }
+    static OspfAreaType nssa_no_summary(std::uint32_t default_metric) noexcept {
+        return OspfAreaType(lr_ospf_area_type_nssa_no_summary(default_metric));
+    }
+
+    // ----- readers (mirror Rust accessors) -----
+
+    /// The area-kind enum value (one of `OspfAreaType::Kind::*`).
+    Kind kind() const noexcept {
+        return static_cast<Kind>(lr_ospf_area_type_kind(t_));
+    }
+    /// `true` when this is a stub variant (`Stub` or `StubNoSummary`).
+    bool is_stub() const noexcept {
+        return lr_ospf_area_type_is_stub(t_) != 0;
+    }
+    /// `true` when this is an NSSA variant (`Nssa` or `NssaNoSummary`).
+    bool is_nssa() const noexcept {
+        return lr_ospf_area_type_is_nssa(t_) != 0;
+    }
+    /// `true` when type-5 / type-4 LSAs are refused (stub or NSSA).
+    bool is_stubby() const noexcept {
+        return lr_ospf_area_type_is_stubby(t_) != 0;
+    }
+    /// `true` when this is a totally-stubby / totally-NSSA variant
+    /// (no type-3 summaries except the injected default).
+    bool no_summary() const noexcept {
+        return lr_ospf_area_type_no_summary(t_) != 0;
+    }
+    /// Border-router-injected default-route metric
+    /// (`std::nullopt` for `Normal`; the metric for stub / NSSA).
+    std::optional<std::uint32_t> default_metric() const noexcept {
+        std::uint32_t dm = 0;
+        if (lr_ospf_area_type_default_metric(t_, &dm) != 0) return dm;
+        return std::nullopt;
+    }
+
+    /// Borrow the underlying C struct (does not transfer ownership).
+    lr_ospf_area_type_t c_handle() const noexcept { return t_; }
+
+private:
+    lr_ospf_area_type_t t_{};
+};
+
+/// Set an attached OSPF area's type policy (RFC 2328 §3.6 /
+/// RFC 3101) using the full struct-value (carries the
+/// border-router-injected default-route metric). The router refuses
+/// to convert the backbone (`area_id == 0`) to a stub / NSSA kind
+/// and refuses a no-op conversion; both return `false`.
+inline bool ospf_set_area_type(Router& r, std::uint32_t area_id,
+                               const OspfAreaType& t) {
+    int rc = lr_router_ospf_set_area_type_ext(r.get(), area_id, t.c_handle());
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_set_area_type_ext failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 1;
+}
+
+/// Read one attached OSPF area's type policy (RFC 2328 §3.6 /
+/// RFC 3101). Returns `std::nullopt` when the area is unknown (not
+/// yet attached or already torn down).
+inline std::optional<OspfAreaType> ospf_area_type(Router& r,
+                                                  std::uint32_t area_id) {
+    lr_ospf_area_type_t out{};
+    int rc = lr_router_ospf_area_type(r.get(), area_id, &out);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_area_type failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    if (rc == 1) return OspfAreaType(out);
+    return std::nullopt;
+}
+
+// =========================================================================
 // ===== lr-osroute::seg6_route — Seg6Route / Seg6LocalRoute / Seg6Netlink ==
 // =========================================================================
 //

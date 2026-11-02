@@ -1416,6 +1416,111 @@ int main() {
                   "v3 redistribute rejects link-local FA");
         }
 
+        // ---- OspfAreaType value-type wrapper (issue #92) ----
+        {
+            // Constructors round-trip through readers.
+            auto normal = OspfAreaType::normal();
+            check(normal.kind() == OspfAreaType::Kind::Normal,
+                  "OspfAreaType::normal kind == Normal");
+            check(!normal.is_stub() && !normal.is_nssa() && !normal.is_stubby(),
+                  "Normal is not stubby");
+            check(!normal.no_summary(), "Normal does not set no_summary");
+            check(!normal.default_metric().has_value(),
+                  "Normal default_metric is std::nullopt");
+
+            auto stub = OspfAreaType::stub(42);
+            check(stub.kind() == OspfAreaType::Kind::Stub,
+                  "OspfAreaType::stub(42) kind == Stub");
+            check(stub.is_stub() && !stub.is_nssa() && stub.is_stubby(),
+                  "Stub is stubby");
+            check(!stub.no_summary(), "Stub (not no_summary) is false");
+            check(stub.default_metric().has_value() &&
+                  stub.default_metric().value() == 42,
+                  "Stub default_metric == 42");
+
+            auto stub_ns = OspfAreaType::stub_no_summary(7);
+            check(stub_ns.kind() == OspfAreaType::Kind::StubNoSummary,
+                  "stub_no_summary kind == StubNoSummary");
+            check(stub_ns.is_stub() && stub_ns.is_stubby() && stub_ns.no_summary(),
+                  "stub_no_summary has all the stub flags");
+            check(stub_ns.default_metric().has_value() &&
+                  stub_ns.default_metric().value() == 7,
+                  "stub_no_summary default_metric == 7");
+
+            auto nssa = OspfAreaType::nssa(99);
+            check(nssa.kind() == OspfAreaType::Kind::Nssa,
+                  "OspfAreaType::nssa(99) kind == Nssa");
+            check(!nssa.is_stub() && nssa.is_nssa() && nssa.is_stubby(),
+                  "Nssa is stubby");
+            check(!nssa.no_summary(), "Nssa (not no_summary) is false");
+            check(nssa.default_metric().has_value() &&
+                  nssa.default_metric().value() == 99,
+                  "Nssa default_metric == 99");
+
+            auto nssa_ns = OspfAreaType::nssa_no_summary(3);
+            check(nssa_ns.kind() == OspfAreaType::Kind::NssaNoSummary,
+                  "nssa_no_summary kind == NssaNoSummary");
+            check(nssa_ns.is_nssa() && nssa_ns.is_stubby() && nssa_ns.no_summary(),
+                  "nssa_no_summary has all the nssa flags");
+            check(nssa_ns.default_metric().has_value() &&
+                  nssa_ns.default_metric().value() == 3,
+                  "nssa_no_summary default_metric == 3");
+
+            // Router with an attached NSSA area reads back the
+            // pinned struct-value (with default_metric).
+            auto r2 = make_router();
+            std::uint64_t session_h = 0;
+            int rc = lr_router_add_ospf_session_ext(
+                r2.get(), /*version=*/2, /*router_id=*/0xc0a80001,
+                /*area_id=*/7, /*area_kind=*/3 /* nssa */,
+                /*default_metric=*/42, /*mtu=*/1500, /*net_type=*/0,
+                /*has_interface_ip=*/0, /*interface_ip=*/0,
+                /*has_neighbor_ip=*/0, /*neighbor_ip=*/0,
+                &session_h);
+            check(rc == 0, "lr_router_add_ospf_session_ext (NSSA) returns 0");
+            auto t = ospf_area_type(r2, /*area_id=*/7);
+            check(t.has_value(), "ospf_area_type returns the attached area");
+            check(t->is_nssa(), "attached area is NSSA");
+            check(t->kind() == OspfAreaType::Kind::Nssa,
+                  "attached area kind == Nssa");
+            check(t->default_metric().has_value() &&
+                  t->default_metric().value() == 42,
+                  "attached area default_metric == 42");
+            // Unknown area reads back as std::nullopt.
+            check(!ospf_area_type(r2, /*area_id=*/999).has_value(),
+                  "ospf_area_type unknown area is std::nullopt");
+
+            // Runtime conversion via the struct-value setter carries
+            // the new default_metric.
+            check(ospf_set_area_type(r2, /*area_id=*/7,
+                                     OspfAreaType::nssa_no_summary(7)),
+                  "convert area 7 to totally-NSSA(7) succeeds");
+            auto t2 = ospf_area_type(r2, /*area_id=*/7);
+            check(t2.has_value() &&
+                  t2->kind() == OspfAreaType::Kind::NssaNoSummary,
+                  "area 7 kind is now NssaNoSummary");
+            check(t2->no_summary(), "area 7 no_summary flag set");
+            check(t2->default_metric().has_value() &&
+                  t2->default_metric().value() == 7,
+                  "area 7 default_metric is 7");
+            // No-op conversion returns false.
+            check(!ospf_set_area_type(r2, /*area_id=*/7,
+                                      OspfAreaType::nssa_no_summary(7)),
+                  "no-op conversion returns false");
+            // Backbone cannot become stub.
+            auto r3 = make_router();
+            std::uint64_t bb_h = 0;
+            int rc2 = lr_router_add_ospf_session_ext(
+                r3.get(), /*version=*/2, /*router_id=*/0xc0a80002,
+                /*area_id=*/0, /*area_kind=*/0 /* normal */,
+                /*default_metric=*/0, /*mtu=*/1500, /*net_type=*/0,
+                0, 0, 0, 0, &bb_h);
+            check(rc2 == 0, "backbone area attaches");
+            check(!ospf_set_area_type(r3, /*area_id=*/0,
+                                       OspfAreaType::stub(1)),
+                  "backbone cannot become stub");
+        }
+
         // ---- Seg6Route / Seg6LocalRoute / Seg6Netlink (issue #92) ----
         // Build a SID and an SRH for the route constructors.
         std::array<std::uint8_t, 16> sid_octets = {
