@@ -2448,6 +2448,359 @@ int main() {
         check(label_stack_len(out) == 2, "label_stack_len == 2");
     }
 
+    // ---- Foundational lr-core value types + owned buffer / timer /
+    // memory conn (issue #92). Mirrors the new sections in
+    // include/librouting.hpp. ----
+
+    // IpAddress — v4 round-trip.
+    {
+        IpAddress a = IpAddress::v4({10, 0, 0, 1});
+        check(a.is_ipv4(), "IpAddress v4 is_ipv4");
+        check(!a.is_ipv6(), "IpAddress v4 not is_ipv6");
+        auto o = a.octets();
+        check(o.size() == 4 && o[0] == 10 && o[3] == 1,
+              "IpAddress v4 octets == [10,0,0,1]");
+        auto o4 = a.octets4();
+        check(o4[0] == 10 && o4[3] == 1, "IpAddress v4 octets4");
+    }
+
+    // IpAddress — v6 unspecified.
+    {
+        IpAddress a = IpAddress::v6({});
+        check(a.is_ipv6(), "IpAddress v6 is_ipv6");
+        check(a.is_unspecified(), "IpAddress v6 zero is_unspecified");
+    }
+
+    // IpAddress — multicast detection.
+    {
+        IpAddress v4 = IpAddress::v4({224, 0, 0, 1});
+        check(v4.is_multicast(), "IpAddress v4 224.0.0.1 is_multicast");
+        std::array<std::uint8_t, 16> v6buf{};
+        v6buf[0] = 0xff;
+        v6buf[1] = 0x02;
+        IpAddress v6 = IpAddress::v6(v6buf);
+        check(v6.is_multicast(), "IpAddress v6 ff02:: is_multicast");
+    }
+
+    // IpAddress — equality.
+    {
+        IpAddress a = IpAddress::v4({10, 0, 0, 1});
+        IpAddress b = IpAddress::v4({10, 0, 0, 1});
+        IpAddress c = IpAddress::v4({10, 0, 0, 2});
+        check(a == b, "IpAddress equality (equal)");
+        check(!(a == c), "IpAddress equality (different)");
+    }
+
+    // BoxedIpAddr — IPv4-mapped IPv6 round-trip.
+    {
+        auto a = make_boxed_ipv4({10, 0, 0, 1});
+        check(static_cast<bool>(a), "make_boxed_ipv4 returns non-null");
+        check(!ip_addr_is_ipv4_mapped_ipv6(a), "V4 not IPv4-mapped IPv6");
+        auto mapped = ip_addr_to_ipv4_mapped(a);
+        check(static_cast<bool>(mapped), "to_ipv4_mapped returns non-null for V4 input");
+        check(ip_addr_is_ipv4_mapped_ipv6(mapped),
+              "mapped is IPv4-mapped IPv6");
+    }
+
+    // BoxedIpAddr — V6 input returns null from to_ipv4_mapped.
+    {
+        std::array<std::uint8_t, 16> buf{};
+        buf[0] = 0xfe;
+        buf[1] = 0x80;
+        auto a = make_boxed_ipv6(buf);
+        auto mapped = ip_addr_to_ipv4_mapped(a);
+        check(!static_cast<bool>(mapped), "to_ipv4_mapped returns null for V6 input");
+    }
+
+    // BoxedIpAddr — make_boxed_ip_from_bytes dispatch.
+    {
+        auto a = make_boxed_ip_from_bytes({10, 0, 0, 1});
+        check(static_cast<bool>(a), "make_boxed_ip_from_bytes(v4)");
+        auto b = make_boxed_ip_from_bytes(
+            {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
+        check(static_cast<bool>(b), "make_boxed_ip_from_bytes(v6)");
+        bool threw = false;
+        try { make_boxed_ip_from_bytes({1, 2, 3}); }
+        catch (const Error&) { threw = true; }
+        check(threw, "make_boxed_ip_from_bytes(bad length) throws");
+    }
+
+    // CorePrefix — v4 network + contains bit-level.
+    {
+        CorePrefix p = CorePrefix::v4({10, 0, 0, 5}, 24);
+        check(p.is_ipv4(), "CorePrefix v4 is_ipv4");
+        check(p.prefix_len() == 24, "CorePrefix prefix_len == 24");
+        IpAddress net = p.network();
+        auto o = net.octets4();
+        check(o[0] == 10 && o[3] == 0, "CorePrefix network == 10.0.0.0");
+        check(p.contains(IpAddress::v4({10, 0, 0, 5})),
+              "CorePrefix /24 contains 10.0.0.5");
+        check(!p.contains(IpAddress::v4({10, 0, 1, 1})),
+              "CorePrefix /24 NOT contains 10.0.1.1");
+    }
+
+    // CorePrefix — contains_prefix.
+    {
+        CorePrefix outer = CorePrefix::v4({10, 0, 0, 0}, 16);
+        CorePrefix inner = CorePrefix::v4({10, 0, 5, 0}, 24);
+        CorePrefix notInner = CorePrefix::v4({10, 1, 0, 0}, 24);
+        check(outer.contains_prefix(inner), "outer contains inner");
+        check(!outer.contains_prefix(notInner), "outer NOT contains notInner");
+    }
+
+    // Asn — private + AS_TRANS + as_u16.
+    {
+        Asn a(65001);
+        check(a.value() == 65001, "Asn value");
+        check(a.is_private(), "Asn 65001 is_private");
+        Asn trans(23456);
+        check(trans.is_as_trans(), "Asn 23456 is_as_trans");
+        check(trans.is_as23456(), "Asn 23456 is_as23456");
+        Asn big(70000);
+        check(big.as_u16() == 0, "Asn 70000 as_u16 == 0 (AS_TRANS)");
+        check(big.as_u32() == 70000, "Asn 70000 as_u32 == 70000");
+    }
+
+    // RouterId — round-trip.
+    {
+        RouterId r = RouterId::from_v4({10, 0, 0, 1});
+        auto o = r.to_v4_bytes();
+        check(o[0] == 10 && o[3] == 1, "RouterId from_v4 round-trip");
+        RouterId r2(0x0a000001);
+        check(r.value() == r2.value(), "RouterId value equality");
+    }
+
+    // Protocol helpers — bird_name + admin distance.
+    {
+        check(protocol_bird_name(protocol::bgp) == "bgp",
+              "protocol_bird_name(bgp) == bgp");
+        check(protocol_bird_name(protocol::ospfv2) == "ospf",
+              "protocol_bird_name(ospfv2) == ospf");
+        check(protocol_bird_name(protocol::ospfv3) == "ospf3",
+              "protocol_bird_name(ospfv3) == ospf3");
+        check(protocol_bird_name(protocol::babel) == "babel",
+              "protocol_bird_name(babel) == babel");
+        check(protocol_bird_name(protocol::other) == "unknown",
+              "protocol_bird_name(other) == unknown");
+        check(protocol_default_admin_distance(protocol::bgp) == 20,
+              "BGP admin distance == 20");
+        check(protocol_default_admin_distance(protocol::ospfv2) == 110,
+              "OSPF admin distance == 110");
+    }
+
+    // Instant / Duration — round-trip + checked_sub.
+    {
+        std::uint64_t i = instant_from_secs(5);
+        check(instant_as_secs(i) == 5, "instant_from_secs -> instant_as_secs");
+        check(instant_as_millis(i) == 5000, "instant_as_millis == 5000");
+        check(instant_saturating_sub(i, instant_from_secs(8)) == 3000,
+              "instant_saturating_sub clamps to 0");
+        auto sub = instant_checked_sub(instant_from_secs(8),
+                                        instant_from_secs(5));
+        check(sub.has_value() && *sub == 3000, "instant_checked_sub success");
+        auto under = instant_checked_sub(instant_from_secs(5),
+                                          instant_from_secs(8));
+        check(!under.has_value(), "instant_checked_sub underflow -> nullopt");
+        std::uint64_t d = duration_from_secs(5);
+        check(duration_as_secs(d) == 5, "duration_from_secs -> duration_as_secs");
+        check(duration_as_millis(d) == 5000, "duration_as_millis == 5000");
+    }
+
+    // RawRouteKey — with + without source.
+    {
+        CorePrefix p = CorePrefix::v4({10, 0, 0, 0}, 24);
+        auto k = RawRouteKey::make(p, 0x0101);
+        check(k.afi_safi() == 0x0101, "RawRouteKey afi_safi == 0x0101");
+        check(!k.has_source(), "RawRouteKey no source");
+        CorePrefix s = CorePrefix::v4({192, 168, 0, 0}, 24);
+        auto ks = RawRouteKey::make_with_source(p, 0x0101, s);
+        check(ks.has_source(), "RawRouteKey with source has_source");
+        check(ks.source_prefix().is_ipv4(), "RawRouteKey source is_ipv4");
+    }
+
+    // Preference — round-trip.
+    {
+        Preference p(20, 100);
+        check(p.admin_distance() == 20, "Preference admin_distance");
+        check(p.metric() == 100, "Preference metric");
+    }
+
+    // NlriFamily — all 9 constructors.
+    {
+        check(nlri_family_ipv4_unicast().afi() == 1 &&
+              nlri_family_ipv4_unicast().safi() == 1,
+              "nlri_family_ipv4_unicast (1, 1)");
+        check(nlri_family_ipv6_unicast().afi() == 2 &&
+              nlri_family_ipv6_unicast().safi() == 1,
+              "nlri_family_ipv6_unicast (2, 1)");
+        check(nlri_family_ipv4_multicast().safi() == 2,
+              "nlri_family_ipv4_multicast safi == 2");
+        check(nlri_family_ipv4_mpls_vpn().safi() == 128,
+              "nlri_family_ipv4_mpls_vpn safi == 128");
+        check(nlri_family_ipv4_labeled_unicast().is_labeled_unicast(),
+              "ipv4_labeled_unicast is_labeled_unicast");
+        check(nlri_family_bgp_ls().is_bgp_ls(), "bgp_ls is_bgp_ls");
+        check(!nlri_family_bgp_ls().is_bgp_ls_vpn(),
+              "bgp_ls NOT is_bgp_ls_vpn");
+        check(nlri_family_bgp_ls_vpn().is_bgp_ls(),
+              "bgp_ls_vpn is_bgp_ls (matches both)");
+        check(nlri_family_bgp_ls_vpn().is_bgp_ls_vpn(),
+              "bgp_ls_vpn is_bgp_ls_vpn");
+    }
+
+    // NlriFamily — from_addr.
+    {
+        auto a = make_boxed_ipv4({10, 0, 0, 1});
+        auto f = nlri_family_from_addr(a);
+        check(f.afi() == 1 && f.safi() == 1,
+              "nlri_family_from_addr(v4) == (1, 1)");
+        std::array<std::uint8_t, 16> buf{};
+        buf[0] = 0xfe;
+        buf[1] = 0x80;
+        auto b = make_boxed_ipv6(buf);
+        auto g = nlri_family_from_addr(b);
+        check(g.afi() == 2 && g.safi() == 1,
+              "nlri_family_from_addr(v6) == (2, 1)");
+    }
+
+    // CRC / Fletcher / OSPF LSA checksum.
+    {
+        std::vector<std::uint8_t> data = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+        check(crc16_arc(data) == 0xBB3D, "crc16_arc(123456789) == 0xBB3D");
+        check(crc32c(data) == 0xE3069283, "crc32c(123456789) == 0xE3069283");
+        check(crc16_arc(std::vector<std::uint8_t>{}) == 0,
+              "crc16_arc(empty) == 0");
+        check(crc32c(std::vector<std::uint8_t>{}) == 0,
+              "crc32c(empty) == 0");
+        check(fletcher32(std::vector<std::uint8_t>{}) == 0,
+              "fletcher32(empty) == 0");
+        // OSPF LSA checksum round-trip on a 20-byte header.
+        std::vector<std::uint8_t> lsa(20, 0);
+        lsa[0] = 0x01;
+        std::uint16_t cs = ospf_lsa_checksum(lsa);
+        lsa[16] = static_cast<std::uint8_t>((cs >> 8) & 0xFF);
+        lsa[17] = static_cast<std::uint8_t>(cs & 0xFF);
+        check(ospf_lsa_checksum_ok(lsa), "ospf_lsa_checksum round-trip");
+        // Short LSA — checksum 0, ok false.
+        std::vector<std::uint8_t> short_lsa(19, 0);
+        check(ospf_lsa_checksum(short_lsa) == 0, "ospf_lsa_checksum(short) == 0");
+        check(!ospf_lsa_checksum_ok(short_lsa), "ospf_lsa_checksum_ok(short) false");
+    }
+
+    // ReadBuf — get_u8 / get_u16_be / chunk.
+    {
+        std::vector<std::uint8_t> data = {1, 2, 3, 4};
+        auto rb = make_read_buf(data);
+        check(read_buf_position(rb) == 0, "read_buf_position == 0");
+        check(read_buf_remaining(rb) == 4, "read_buf_remaining == 4");
+        auto v = read_buf_get_u8(rb);
+        check(v.has_value() && *v == 1, "read_buf_get_u8 == 1");
+        auto w = read_buf_get_u16_be(rb);
+        check(w.has_value() && *w == 0x0203, "read_buf_get_u16_be == 0x0203");
+        read_buf_advance(rb, 1);
+        check(read_buf_position(rb) == 4, "read_buf_position == 4 after advance");
+        auto empty = read_buf_get_u8(rb);
+        check(!empty.has_value(), "read_buf_get_u8 exhausted -> nullopt");
+    }
+
+    // ReadBuf — chunk does not advance.
+    {
+        std::vector<std::uint8_t> data = {'h', 'e', 'l', 'l', 'o'};
+        auto rb = make_read_buf(data);
+        auto chunk = read_buf_chunk(rb);
+        check(chunk.size() == 5 && chunk[0] == 'h' && chunk[4] == 'o',
+              "read_buf_chunk == 'hello'");
+        check(read_buf_position(rb) == 0, "read_buf_chunk does not advance");
+    }
+
+    // WriteBuf — put / patch / take_bytes.
+    {
+        auto wb = make_write_buf(64);
+        write_buf_put_u16_be(wb, 0);  // placeholder length
+        write_buf_put_bytes(wb, {'p', 'a', 'y', 'l', 'o', 'a', 'd'});
+        write_buf_patch(wb, 0, {0x00, 0x07});
+        auto out = write_buf_written(wb);
+        check(out.size() == 9 && out[0] == 0x00 && out[1] == 0x07 &&
+              out[2] == 'p' && out[8] == 'd',
+              "write_buf_written == 0x00 0x07 payload");
+        auto taken = write_buf_take_bytes(wb);
+        check(taken == out, "write_buf_take_bytes == written");
+        check(write_buf_position(wb) == 0, "write_buf_position reset after take");
+    }
+
+    // WriteBuf — u32 / u64 BE.
+    {
+        auto wb = make_write_buf(16);
+        write_buf_put_u32_be(wb, 0x12345678);
+        auto o = write_buf_written(wb);
+        check(o.size() == 4 && o[0] == 0x12 && o[3] == 0x78,
+              "write_buf_put_u32_be == 12 34 56 78");
+        auto wb2 = make_write_buf(16);
+        write_buf_put_u64_be(wb2, 0x0102030405060708);
+        auto o2 = write_buf_written(wb2);
+        check(o2.size() == 8 && o2[0] == 1 && o2[7] == 8,
+              "write_buf_put_u64_be == 1..8");
+    }
+
+    // TimerQueue — arm + tick + cancel.
+    {
+        auto tq = make_timer_queue();
+        check(timer_queue_is_empty(tq), "timer_queue_is_empty");
+        check(timer_queue_len(tq) == 0, "timer_queue_len == 0");
+        timer_queue_arm(tq, 0, 1, TimerSpec::once(100));
+        check(timer_queue_len(tq) == 1, "timer_queue_len == 1 after arm");
+        check(timer_queue_next_fire_ms(tq) == 100,
+              "timer_queue_next_fire_ms == 100");
+        auto fired1 = timer_queue_tick(tq, 50);
+        check(fired1.empty(), "tick(50) no fire");
+        auto fired2 = timer_queue_tick(tq, 150);
+        check(fired2.size() == 1 && fired2[0] == 1, "tick(150) fires [1]");
+        check(timer_queue_is_empty(tq), "timer_queue_is_empty after fire");
+
+        timer_queue_arm(tq, 0, 2, TimerSpec::once(100));
+        timer_queue_arm(tq, 0, 3, TimerSpec::once(200));
+        timer_queue_cancel(tq, 2);
+        check(timer_queue_len(tq) == 1, "timer_queue_len == 1 after cancel");
+        timer_queue_cancel_all(tq);
+        check(timer_queue_is_empty(tq), "timer_queue_is_empty after cancel_all");
+    }
+
+    // TimerQueue — periodic refires.
+    {
+        auto tq = make_timer_queue();
+        timer_queue_arm(tq, 0, 1, TimerSpec::periodic(100, 50));
+        auto f1 = timer_queue_tick(tq, 100);
+        check(f1.size() == 1 && f1[0] == 1, "periodic tick(100) fires [1]");
+        auto f2 = timer_queue_tick(tq, 150);
+        check(f2.size() == 1 && f2[0] == 1, "periodic tick(150) fires [1]");
+    }
+
+    // MemoryConn — push_input + take_input + put_output + drain_output.
+    {
+        auto c = make_memory_conn();
+        memory_conn_push_input(c, {'h', 'e', 'l', 'l', 'o'});
+        auto in = memory_conn_take_input(c);
+        check(in.size() == 5 && in[0] == 'h' && in[4] == 'o',
+              "memory_conn_take_input == 'hello'");
+        auto in2 = memory_conn_take_input(c);
+        check(in2.empty(), "memory_conn_take_input empty after drain");
+        memory_conn_put_output(c, {'w', 'o', 'r', 'l', 'd'});
+        auto out = memory_conn_drain_output(c);
+        check(out.size() == 5 && out[0] == 'w' && out[4] == 'd',
+              "memory_conn_drain_output == 'world'");
+    }
+
+    // MemoryConn — pair returns two independent conns.
+    {
+        auto pr = make_memory_conn_pair();
+        memory_conn_push_input(pr.first, {'f', 'o', 'o'});
+        auto in = memory_conn_take_input(pr.first);
+        check(in.size() == 3 && in[0] == 'f', "pair a.take_input == 'foo'");
+        memory_conn_put_output(pr.second, {'b', 'a', 'r'});
+        auto out = memory_conn_drain_output(pr.second);
+        check(out.size() == 3 && out[0] == 'b', "pair b.drain_output == 'bar'");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

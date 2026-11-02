@@ -7308,5 +7308,772 @@ inline bool bgp_path_attrs_has_peer_source_address(const BgpPathAttrsHandle& a) 
     return lr_bgp_path_attrs_has_peer_source_address(a.get()) != 0;
 }
 
+// ===========================================================================
+// ===== Foundational lr-core value types + owned buffer / timer / memory ====
+// ===========================================================================
+//
+// Mirrors `lr_core::addr::{IpAddr, Prefix, Asn, RouterId}`,
+// `lr_core::nlri::NlriFamily`, `lr_core::rib::{Preference, Protocol,
+// RouteKey}`, `lr_core::buf::{ReadBuf, WriteBuf}`,
+// `lr_core::timer::{TimerQueue, TimerSpec}`,
+// `lr_core::checksum::{crc16_arc, crc32c, fletcher32,
+// ospf_lsa_checksum}`, `lr_core::time::{Instant, Duration}`, and
+// `lr_ffi::memory_conn::MemoryConn`.
+//
+// Value types (IpAddr, CorePrefix, Asn, RouterId, Preference,
+// NlriFamily, RawRouteKey) are returned by value across the C ABI
+// and are cheap to copy. Owned handles (BoxedIpAddr, ReadBuf,
+// WriteBuf, TimerQueue, MemoryConn) wrap opaque pointers via
+// std::unique_ptr with custom deleters.
+
+namespace detail {
+
+struct BoxedIpAddrDeleter {
+    void operator()(::IpAddr* a) const noexcept {
+        if (a) lr_ip_addr_free(a);
+    }
+};
+
+struct ReadBufDeleter {
+    void operator()(OpaqueReadBuf* r) const noexcept {
+        if (r) lr_read_buf_free(r);
+    }
+};
+
+struct WriteBufDeleter {
+    void operator()(OpaqueWriteBuf* w) const noexcept {
+        if (w) lr_write_buf_free(w);
+    }
+};
+
+struct TimerQueueDeleter {
+    void operator()(OpaqueTimerQueue* q) const noexcept {
+        if (q) lr_timer_queue_free(q);
+    }
+};
+
+struct MemoryConnDeleter {
+    void operator()(OpaqueMemoryConn* c) const noexcept {
+        if (c) lr_memory_conn_free(c);
+    }
+};
+
+} // namespace detail
+
+// ---- IpAddress (RFC 4291 / RFC 4001) ----
+//
+// Named `IpAddress` (not `IpAddr`) to avoid shadowing the C ABI's
+// global `IpAddr` typedef (the boxed `OpaqueIpAddr *` returned by
+// `lr_ip_addr_from_v4_bytes`). The boxed handle is exposed as
+// `BoxedIpAddr` below; the value-type inline struct is `IpAddress`.
+
+/// Repr-C IP address — v4 or v6. The C ABI stores it as a 1-byte
+/// is_ipv6 flag + 16 octets (IPv4 occupies the last 4 in
+/// ::ffff:a.b.c.d form).
+class IpAddress {
+public:
+    IpAddress() : c_{} {}
+    /* implicit */ IpAddress(lr_ip_addr_t c) : c_(c) {}
+
+    static IpAddress v4(const std::array<std::uint8_t, 4>& octets) {
+        return IpAddress(lr_ip_addr_v4(octets.data()));
+    }
+    static IpAddress v6(const std::array<std::uint8_t, 16>& octets) {
+        return IpAddress(lr_ip_addr_v6(octets.data()));
+    }
+    static IpAddress from_bytes(const std::vector<std::uint8_t>& b) {
+        if (b.size() == 4) {
+            std::array<std::uint8_t, 4> a{};
+            std::copy(b.begin(), b.end(), a.begin());
+            return v4(a);
+        }
+        if (b.size() == 16) {
+            std::array<std::uint8_t, 16> a{};
+            std::copy(b.begin(), b.end(), a.begin());
+            return v6(a);
+        }
+        throw Error("IpAddress::from_bytes: bad length (want 4 or 16)");
+    }
+
+    bool is_ipv4() const noexcept { return lr_ip_addr_is_ipv4(c_) != 0; }
+    bool is_ipv6() const noexcept { return lr_ip_addr_is_ipv6(c_) != 0; }
+    bool is_unspecified() const noexcept { return lr_ip_addr_is_unspecified(c_) != 0; }
+    bool is_multicast() const noexcept { return lr_ip_addr_is_multicast(c_) != 0; }
+
+    /// Read the address as 4 (V4) or 16 (V6) bytes.
+    std::vector<std::uint8_t> octets() const {
+        std::array<std::uint8_t, 16> buf{};
+        std::size_t n = lr_ip_addr_octets(c_, buf.data(), buf.size());
+        return std::vector<std::uint8_t>(buf.begin(), buf.begin() + n);
+    }
+
+    /// Read the 4 IPv4 octets. Throws when the address is IPv6.
+    std::array<std::uint8_t, 4> octets4() const {
+        if (!is_ipv4()) throw Error("octets4 on IPv6 address");
+        auto o = octets();
+        std::array<std::uint8_t, 4> out{};
+        std::copy(o.begin(), o.end(), out.begin());
+        return out;
+    }
+
+    const lr_ip_addr_t& raw() const noexcept { return c_; }
+
+private:
+    lr_ip_addr_t c_;
+};
+
+inline bool operator==(const IpAddress& a, const IpAddress& b) {
+    return a.is_ipv4() == b.is_ipv4() && a.octets() == b.octets();
+}
+
+// ---- BoxedIpAddr (RFC 4291 §2.5.5.2 IPv4-mapped IPv6) ----
+//
+// The C ABI has a second IpAddr surface — boxed `IpAddr *` returned
+// by `lr_ip_addr_from_v4_bytes` / `lr_ip_addr_from_v6_bytes` /
+// `lr_ip_addr_from_bytes`, freed via `lr_ip_addr_free`. This is the
+// surface that supports `lr_ip_addr_to_ipv4_mapped` and the
+// `lr_nlri_family_from_addr` derivation. `IpAddr` here is the global
+// `OpaqueIpAddr *` typedef from `lr_ffi.h`.
+
+using BoxedIpAddr = std::unique_ptr<::IpAddr, detail::BoxedIpAddrDeleter>;
+
+inline BoxedIpAddr make_boxed_ipv4(const std::array<std::uint8_t, 4>& octets) {
+    ::IpAddr* p = lr_ip_addr_from_v4_bytes(octets.data());
+    if (!p) throw Error("lr_ip_addr_from_v4_bytes returned null");
+    return BoxedIpAddr(p);
+}
+
+inline BoxedIpAddr make_boxed_ipv6(const std::array<std::uint8_t, 16>& octets) {
+    ::IpAddr* p = lr_ip_addr_from_v6_bytes(octets.data());
+    if (!p) throw Error("lr_ip_addr_from_v6_bytes returned null");
+    return BoxedIpAddr(p);
+}
+
+inline BoxedIpAddr make_boxed_ip_from_bytes(const std::vector<std::uint8_t>& b) {
+    if (b.size() == 4) {
+        std::array<std::uint8_t, 4> a{};
+        std::copy(b.begin(), b.end(), a.begin());
+        return make_boxed_ipv4(a);
+    }
+    if (b.size() == 16) {
+        std::array<std::uint8_t, 16> a{};
+        std::copy(b.begin(), b.end(), a.begin());
+        return make_boxed_ipv6(a);
+    }
+    throw Error("make_boxed_ip_from_bytes: bad length (want 4 or 16)");
+}
+
+inline bool ip_addr_is_ipv4_mapped_ipv6(const BoxedIpAddr& a) {
+    return a && lr_ip_addr_is_ipv4_mapped_ipv6(a.get()) != 0;
+}
+
+inline BoxedIpAddr ip_addr_to_ipv4_mapped(const BoxedIpAddr& a) {
+    if (!a) return BoxedIpAddr();
+    ::IpAddr* p = lr_ip_addr_to_ipv4_mapped(a.get());
+    return BoxedIpAddr(p);  // p may be null for V6 input
+}
+
+// ---- CorePrefix (RFC 4632 / RFC 4291) ----
+
+class CorePrefix {
+public:
+    CorePrefix() : c_{} {}
+    /* implicit */ CorePrefix(lr_core_prefix_t c) : c_(c) {}
+
+    static CorePrefix v4(const std::array<std::uint8_t, 4>& octets,
+                          std::uint8_t prefix_len) {
+        return CorePrefix(lr_core_prefix_v4(octets.data(), prefix_len));
+    }
+    static CorePrefix v6(const std::array<std::uint8_t, 16>& octets,
+                          std::uint8_t prefix_len) {
+        return CorePrefix(lr_core_prefix_v6(octets.data(), prefix_len));
+    }
+
+    bool is_ipv4() const noexcept { return lr_core_prefix_is_ipv4(c_) != 0; }
+    bool is_ipv6() const noexcept { return lr_core_prefix_is_ipv6(c_) != 0; }
+    std::uint8_t prefix_len() const noexcept { return c_.prefix_len; }
+    IpAddress addr() const noexcept { return IpAddress(c_.addr); }
+
+    bool contains(const IpAddress& a) const noexcept {
+        return lr_core_prefix_contains(c_, a.raw()) != 0;
+    }
+    bool contains_prefix(const CorePrefix& inner) const noexcept {
+        return lr_core_prefix_contains_prefix(c_, inner.c_) != 0;
+    }
+    IpAddress network() const {
+        lr_ip_addr_t out{};
+        int rc = lr_core_prefix_network(c_, &out);
+        if (rc != 0)
+            throw Error(std::string("lr_core_prefix_network: ") + lr_last_error());
+        return IpAddress(out);
+    }
+
+    const lr_core_prefix_t& raw() const noexcept { return c_; }
+
+private:
+    lr_core_prefix_t c_;
+};
+
+// ---- Asn (RFC 6996 / RFC 6793) ----
+
+class Asn {
+public:
+    explicit Asn(std::uint32_t value) : c_{value} {}
+    /* implicit */ Asn(lr_asn_t c) : c_(c) {}
+
+    std::uint32_t value() const noexcept { return c_.value; }
+
+    bool is_private() const noexcept { return lr_asn_is_private(c_) != 0; }
+    bool is_as_trans() const noexcept { return lr_asn_is_as_trans(c_) != 0; }
+    bool is_as23456() const noexcept { return lr_asn_is_as23456(c_) != 0; }
+
+    std::uint32_t as_u32() const noexcept { return lr_asn_as_u32(c_.value); }
+    std::uint16_t as_u16() const noexcept { return lr_asn_as_u16(c_.value); }
+
+private:
+    lr_asn_t c_;
+};
+
+// ---- RouterId ----
+
+class RouterId {
+public:
+    explicit RouterId(std::uint32_t value) : c_{value} {}
+    /* implicit */ RouterId(lr_router_id_t c) : c_(c) {}
+
+    static RouterId from_v4(const std::array<std::uint8_t, 4>& octets) {
+        return RouterId(lr_router_id_from_v4(octets.data()));
+    }
+
+    std::uint32_t value() const noexcept { return c_.value; }
+    std::array<std::uint8_t, 4> to_v4_bytes() const {
+        std::array<std::uint8_t, 4> out{};
+        int rc = lr_router_id_to_v4_bytes(c_, out.data());
+        if (rc != 0)
+            throw Error(std::string("lr_router_id_to_v4_bytes: ") + lr_last_error());
+        return out;
+    }
+
+private:
+    lr_router_id_t c_;
+};
+
+// ---- Protocol helpers ----
+
+inline std::string protocol_bird_name(std::uint8_t proto) {
+    std::array<char, 32> buf{};
+    std::size_t n = lr_protocol_bird_name(proto, buf.data(), buf.size());
+    return std::string(buf.begin(), buf.begin() + n);
+}
+
+inline std::uint32_t protocol_default_admin_distance(std::uint8_t proto) {
+    return lr_protocol_default_admin_distance(proto);
+}
+
+// Protocol constant enum — mirrors LR_PROTOCOL_* in lr_ffi.h.
+namespace protocol {
+constexpr std::uint8_t bgp = 0;
+constexpr std::uint8_t ospfv2 = 1;
+constexpr std::uint8_t ospfv3 = 2;
+constexpr std::uint8_t babel = 3;
+constexpr std::uint8_t rt_static = 4;
+constexpr std::uint8_t connected = 5;
+constexpr std::uint8_t other = 6;
+} // namespace protocol
+
+// ---- Instant / Duration ----
+
+inline std::uint64_t instant_from_millis(std::uint64_t ms) {
+    return lr_instant_from_millis(ms);
+}
+inline std::uint64_t instant_from_secs(std::uint64_t s) {
+    return lr_instant_from_secs(s);
+}
+inline std::uint64_t instant_as_millis(std::uint64_t instant) {
+    return lr_instant_as_millis(instant);
+}
+inline std::uint64_t instant_as_secs(std::uint64_t instant) {
+    return lr_instant_as_secs(instant);
+}
+inline std::uint64_t instant_saturating_sub(std::uint64_t earlier,
+                                             std::uint64_t later) {
+    return lr_instant_saturating_sub(earlier, later);
+}
+inline std::uint64_t instant_checked_add(std::uint64_t instant,
+                                          std::uint64_t duration_ms) {
+    return lr_instant_checked_add(instant, duration_ms);
+}
+/// Returns std::nullopt when the subtraction would underflow.
+inline std::optional<std::uint64_t>
+instant_checked_sub(std::uint64_t instant, std::uint64_t other) {
+    std::uint64_t out{};
+    int rc = lr_instant_checked_sub(instant, other, &out);
+    if (rc == -2) return std::nullopt;  // LR_ERR_INVALID_HANDLE = underflow
+    if (rc != 0)
+        throw Error(std::string("lr_instant_checked_sub: ") + lr_last_error());
+    return out;
+}
+
+inline std::uint64_t duration_from_millis(std::uint64_t ms) {
+    return lr_duration_from_millis(ms);
+}
+inline std::uint64_t duration_from_secs(std::uint64_t s) {
+    return lr_duration_from_secs(s);
+}
+inline std::uint64_t duration_as_millis(std::uint64_t d) {
+    return lr_duration_as_millis(d);
+}
+inline std::uint64_t duration_as_secs(std::uint64_t d) {
+    return lr_duration_as_secs(d);
+}
+inline std::uint64_t duration_checked_add(std::uint64_t a, std::uint64_t b) {
+    return lr_duration_checked_add(a, b);
+}
+
+// ---- RawRouteKey ----
+//
+// The existing RouteKey used elsewhere in this header is the
+// high-level form; RawRouteKey is the direct wrapper around the C
+// ABI's lr_route_key_new / lr_route_key_with_source constructors.
+
+class RawRouteKey {
+public:
+    RawRouteKey() : c_{} {}
+
+    static RawRouteKey make(const CorePrefix& prefix, std::uint16_t afi_safi) {
+        RawRouteKey out;
+        int rc = lr_route_key_new(prefix.raw(), afi_safi, &out.c_);
+        if (rc != 0)
+            throw Error(std::string("lr_route_key_new: ") + lr_last_error());
+        return out;
+    }
+    static RawRouteKey make_with_source(const CorePrefix& prefix,
+                                          std::uint16_t afi_safi,
+                                          const CorePrefix& source) {
+        RawRouteKey out;
+        int rc = lr_route_key_with_source(prefix.raw(), afi_safi,
+                                          source.raw(), &out.c_);
+        if (rc != 0)
+            throw Error(std::string("lr_route_key_with_source: ") + lr_last_error());
+        return out;
+    }
+
+    CorePrefix prefix() const noexcept { return CorePrefix(c_.prefix); }
+    std::uint16_t afi_safi() const noexcept { return c_.afi_safi; }
+    bool has_source() const noexcept { return c_.has_source != 0; }
+    CorePrefix source_prefix() const noexcept { return CorePrefix(c_.source_prefix); }
+
+    const lr_route_key_t& raw() const noexcept { return c_; }
+
+private:
+    lr_route_key_t c_;
+};
+
+// ---- Preference ----
+
+class Preference {
+public:
+    Preference(std::uint32_t admin_distance, std::uint32_t metric)
+        : c_(lr_preference_new(admin_distance, metric)) {}
+
+    std::uint32_t admin_distance() const noexcept { return c_.admin_distance; }
+    std::uint32_t metric() const noexcept { return c_.metric; }
+
+private:
+    lr_preference_t c_;
+};
+
+// ---- NlriFamily (RFC 4760) ----
+
+class NlriFamily {
+public:
+    NlriFamily() : c_{} {}
+    /* implicit */ NlriFamily(lr_nlri_family_t c) : c_(c) {}
+
+    std::uint16_t afi() const noexcept { return c_.afi; }
+    std::uint8_t safi() const noexcept { return c_.safi; }
+    bool is_ipv4() const noexcept { return lr_nlri_family_is_ipv4(c_) != 0; }
+    bool is_ipv6() const noexcept { return lr_nlri_family_is_ipv6(c_) != 0; }
+    bool is_labeled_unicast() const noexcept {
+        return lr_nlri_family_is_labeled_unicast(c_) != 0;
+    }
+    bool is_bgp_ls() const noexcept { return lr_nlri_family_is_bgp_ls(c_) != 0; }
+    bool is_bgp_ls_vpn() const noexcept {
+        return lr_nlri_family_is_bgp_ls_vpn(c_) != 0;
+    }
+
+    const lr_nlri_family_t& raw() const noexcept { return c_; }
+
+private:
+    lr_nlri_family_t c_;
+};
+
+inline NlriFamily nlri_family_ipv4_unicast() {
+    return NlriFamily(lr_nlri_family_ipv4_unicast());
+}
+inline NlriFamily nlri_family_ipv6_unicast() {
+    return NlriFamily(lr_nlri_family_ipv6_unicast());
+}
+inline NlriFamily nlri_family_ipv4_multicast() {
+    return NlriFamily(lr_nlri_family_ipv4_multicast());
+}
+inline NlriFamily nlri_family_ipv4_mpls_vpn() {
+    return NlriFamily(lr_nlri_family_ipv4_mpls_vpn());
+}
+inline NlriFamily nlri_family_ipv6_mpls_vpn() {
+    return NlriFamily(lr_nlri_family_ipv6_mpls_vpn());
+}
+inline NlriFamily nlri_family_ipv4_labeled_unicast() {
+    return NlriFamily(lr_nlri_family_ipv4_labeled_unicast());
+}
+inline NlriFamily nlri_family_ipv6_labeled_unicast() {
+    return NlriFamily(lr_nlri_family_ipv6_labeled_unicast());
+}
+inline NlriFamily nlri_family_bgp_ls() {
+    return NlriFamily(lr_nlri_family_bgp_ls());
+}
+inline NlriFamily nlri_family_bgp_ls_vpn() {
+    return NlriFamily(lr_nlri_family_bgp_ls_vpn());
+}
+inline NlriFamily nlri_family_from_addr(const BoxedIpAddr& a) {
+    if (!a) throw Error("nlri_family_from_addr: null addr");
+    lr_nlri_family_t out{};
+    int rc = lr_nlri_family_from_addr(a.get(), &out);
+    if (rc != 0)
+        throw Error(std::string("lr_nlri_family_from_addr: ") + lr_last_error());
+    return NlriFamily(out);
+}
+
+// ---- CRC / Fletcher / OSPF LSA checksum ----
+
+inline std::uint16_t crc16_arc(const std::uint8_t* data, std::size_t len) {
+    return lr_crc16_arc(data, len);
+}
+inline std::uint16_t crc16_arc(const std::vector<std::uint8_t>& v) {
+    return v.empty() ? lr_crc16_arc(nullptr, 0)
+                     : lr_crc16_arc(v.data(), v.size());
+}
+inline std::uint32_t crc32c(const std::uint8_t* data, std::size_t len) {
+    return lr_crc32c(data, len);
+}
+inline std::uint32_t crc32c(const std::vector<std::uint8_t>& v) {
+    return v.empty() ? lr_crc32c(nullptr, 0) : lr_crc32c(v.data(), v.size());
+}
+inline std::uint32_t fletcher32(const std::uint8_t* data, std::size_t len) {
+    return lr_fletcher32(data, len);
+}
+inline std::uint32_t fletcher32(const std::vector<std::uint8_t>& v) {
+    return v.empty() ? lr_fletcher32(nullptr, 0) : lr_fletcher32(v.data(), v.size());
+}
+inline std::uint16_t ospf_lsa_checksum(const std::uint8_t* lsa, std::size_t len) {
+    return lr_ospf_lsa_checksum(lsa, len);
+}
+inline std::uint16_t ospf_lsa_checksum(const std::vector<std::uint8_t>& v) {
+    return v.size() < 20 ? 0 : lr_ospf_lsa_checksum(v.data(), v.size());
+}
+inline bool ospf_lsa_checksum_ok(const std::uint8_t* lsa, std::size_t len) {
+    return len < 20 ? false : lr_ospf_lsa_checksum_ok(lsa, len) != 0;
+}
+inline bool ospf_lsa_checksum_ok(const std::vector<std::uint8_t>& v) {
+    return v.size() < 20 ? false : lr_ospf_lsa_checksum_ok(v.data(), v.size()) != 0;
+}
+
+// ---- ReadBuf ----
+
+using ReadBuf = std::unique_ptr<OpaqueReadBuf, detail::ReadBufDeleter>;
+
+inline ReadBuf make_read_buf(const std::uint8_t* data, std::size_t len) {
+    OpaqueReadBuf* p = lr_read_buf_new(data, len);
+    if (!p) throw Error("lr_read_buf_new returned null");
+    return ReadBuf(p);
+}
+inline ReadBuf make_read_buf(const std::vector<std::uint8_t>& v) {
+    return v.empty() ? make_read_buf(nullptr, 0)
+                     : make_read_buf(v.data(), v.size());
+}
+
+inline std::size_t read_buf_remaining(const ReadBuf& r) {
+    return lr_read_buf_remaining(r.get());
+}
+inline std::size_t read_buf_position(const ReadBuf& r) {
+    return lr_read_buf_position(r.get());
+}
+inline void read_buf_advance(const ReadBuf& r, std::size_t n) {
+    int rc = lr_read_buf_advance(r.get(), n);
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_advance: ") + lr_last_error());
+}
+inline std::optional<std::uint8_t> read_buf_peek_u8(const ReadBuf& r) {
+    std::uint8_t out{};
+    int rc = lr_read_buf_peek_u8(r.get(), &out);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_peek_u8: ") + lr_last_error());
+    return out;
+}
+inline std::optional<std::uint8_t> read_buf_get_u8(const ReadBuf& r) {
+    std::uint8_t out{};
+    int rc = lr_read_buf_get_u8(r.get(), &out);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_get_u8: ") + lr_last_error());
+    return out;
+}
+inline std::optional<std::uint16_t> read_buf_get_u16_be(const ReadBuf& r) {
+    std::uint16_t out{};
+    int rc = lr_read_buf_get_u16_be(r.get(), &out);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_get_u16_be: ") + lr_last_error());
+    return out;
+}
+inline std::optional<std::uint32_t> read_buf_get_u32_be(const ReadBuf& r) {
+    std::uint32_t out{};
+    int rc = lr_read_buf_get_u32_be(r.get(), &out);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_get_u32_be: ") + lr_last_error());
+    return out;
+}
+inline std::optional<std::uint64_t> read_buf_get_u64_be(const ReadBuf& r) {
+    std::uint64_t out{};
+    int rc = lr_read_buf_get_u64_be(r.get(), &out);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_get_u64_be: ") + lr_last_error());
+    return out;
+}
+inline std::optional<std::vector<std::uint8_t>>
+read_buf_get_bytes(const ReadBuf& r, std::size_t n) {
+    lr_bytes_t b{};
+    int rc = lr_read_buf_get_bytes(r.get(), n, &b);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_get_bytes: ") + lr_last_error());
+    Bytes owned(&b);
+    const std::uint8_t* p = lr_bytes_ptr(owned.get());
+    std::size_t len = lr_bytes_len(owned.get());
+    return std::vector<std::uint8_t>(p, p + len);
+}
+inline std::vector<std::uint8_t> read_buf_chunk(const ReadBuf& r) {
+    lr_bytes_t b{};
+    int rc = lr_read_buf_chunk(r.get(), &b);
+    if (rc != 0)
+        throw Error(std::string("lr_read_buf_chunk: ") + lr_last_error());
+    Bytes owned(&b);
+    const std::uint8_t* p = lr_bytes_ptr(owned.get());
+    std::size_t len = lr_bytes_len(owned.get());
+    return std::vector<std::uint8_t>(p, p + len);
+}
+
+// ---- WriteBuf ----
+
+using WriteBuf = std::unique_ptr<OpaqueWriteBuf, detail::WriteBufDeleter>;
+
+inline WriteBuf make_write_buf(std::size_t cap) {
+    OpaqueWriteBuf* p = lr_write_buf_new(cap);
+    if (!p) throw Error("lr_write_buf_new returned null");
+    return WriteBuf(p);
+}
+
+inline std::size_t write_buf_position(const WriteBuf& w) {
+    return lr_write_buf_position(w.get());
+}
+inline std::size_t write_buf_remaining_mut(const WriteBuf& w) {
+    return lr_write_buf_remaining_mut(w.get());
+}
+inline std::size_t write_buf_capacity(const WriteBuf& w) {
+    return lr_write_buf_capacity(w.get());
+}
+inline void write_buf_put_u8(const WriteBuf& w, std::uint8_t v) {
+    int rc = lr_write_buf_put_u8(w.get(), v);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_put_u8: ") + lr_last_error());
+}
+inline void write_buf_put_bytes(const WriteBuf& w, const std::uint8_t* b,
+                                 std::size_t len) {
+    int rc = lr_write_buf_put_bytes(w.get(), b, len);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_put_bytes: ") + lr_last_error());
+}
+inline void write_buf_put_bytes(const WriteBuf& w,
+                                 const std::vector<std::uint8_t>& v) {
+    write_buf_put_bytes(w, v.empty() ? nullptr : v.data(), v.size());
+}
+inline void write_buf_put_u16_be(const WriteBuf& w, std::uint16_t v) {
+    int rc = lr_write_buf_put_u16_be(w.get(), v);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_put_u16_be: ") + lr_last_error());
+}
+inline void write_buf_put_u32_be(const WriteBuf& w, std::uint32_t v) {
+    int rc = lr_write_buf_put_u32_be(w.get(), v);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_put_u32_be: ") + lr_last_error());
+}
+inline void write_buf_put_u64_be(const WriteBuf& w, std::uint64_t v) {
+    int rc = lr_write_buf_put_u64_be(w.get(), v);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_put_u64_be: ") + lr_last_error());
+}
+inline void write_buf_patch(const WriteBuf& w, std::size_t at,
+                              const std::uint8_t* data, std::size_t len) {
+    int rc = lr_write_buf_patch(w.get(), at, data, len);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_patch: ") + lr_last_error());
+}
+inline void write_buf_patch(const WriteBuf& w, std::size_t at,
+                              const std::vector<std::uint8_t>& v) {
+    write_buf_patch(w, at, v.empty() ? nullptr : v.data(), v.size());
+}
+inline void write_buf_reserve(const WriteBuf& w, std::size_t additional) {
+    int rc = lr_write_buf_reserve(w.get(), additional);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_reserve: ") + lr_last_error());
+}
+inline std::vector<std::uint8_t> write_buf_written(const WriteBuf& w) {
+    lr_bytes_t b{};
+    int rc = lr_write_buf_written(w.get(), &b);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_written: ") + lr_last_error());
+    Bytes owned(&b);
+    const std::uint8_t* p = lr_bytes_ptr(owned.get());
+    std::size_t len = lr_bytes_len(owned.get());
+    return std::vector<std::uint8_t>(p, p + len);
+}
+inline std::vector<std::uint8_t> write_buf_take_bytes(const WriteBuf& w) {
+    lr_bytes_t b{};
+    int rc = lr_write_buf_take_bytes(w.get(), &b);
+    if (rc != 0)
+        throw Error(std::string("lr_write_buf_take_bytes: ") + lr_last_error());
+    Bytes owned(&b);
+    const std::uint8_t* p = lr_bytes_ptr(owned.get());
+    std::size_t len = lr_bytes_len(owned.get());
+    return std::vector<std::uint8_t>(p, p + len);
+}
+
+// ---- TimerQueue / TimerSpec ----
+
+class TimerSpec {
+public:
+    TimerSpec() : c_{} {}
+    /* implicit */ TimerSpec(lr_timer_spec_t c) : c_(c) {}
+
+    static TimerSpec once(std::uint64_t after_ms) {
+        return TimerSpec(lr_timer_spec_once(after_ms));
+    }
+    static TimerSpec periodic(std::uint64_t after_ms, std::uint64_t periodic_ms) {
+        return TimerSpec(lr_timer_spec_periodic(after_ms, periodic_ms));
+    }
+
+    std::uint64_t after_ms() const noexcept { return c_.after_ms; }
+    std::uint64_t periodic_ms() const noexcept { return c_.periodic_ms; }
+    const lr_timer_spec_t& raw() const noexcept { return c_; }
+
+private:
+    lr_timer_spec_t c_;
+};
+
+using TimerQueue = std::unique_ptr<OpaqueTimerQueue, detail::TimerQueueDeleter>;
+
+inline TimerQueue make_timer_queue() {
+    OpaqueTimerQueue* p = lr_timer_queue_new();
+    if (!p) throw Error("lr_timer_queue_new returned null");
+    return TimerQueue(p);
+}
+
+inline void timer_queue_arm(const TimerQueue& q, std::uint64_t now_ms,
+                             std::uint32_t id, const TimerSpec& spec) {
+    int rc = lr_timer_queue_arm(q.get(), now_ms, id, spec.raw());
+    if (rc != 0)
+        throw Error(std::string("lr_timer_queue_arm: ") + lr_last_error());
+}
+inline void timer_queue_cancel(const TimerQueue& q, std::uint32_t id) {
+    int rc = lr_timer_queue_cancel(q.get(), id);
+    if (rc != 0)
+        throw Error(std::string("lr_timer_queue_cancel: ") + lr_last_error());
+}
+inline void timer_queue_cancel_all(const TimerQueue& q) {
+    int rc = lr_timer_queue_cancel_all(q.get());
+    if (rc != 0)
+        throw Error(std::string("lr_timer_queue_cancel_all: ") + lr_last_error());
+}
+inline std::vector<std::uint32_t>
+timer_queue_tick(const TimerQueue& q, std::uint64_t now_ms) {
+    lr_timer_id_t* arr = nullptr;
+    std::uintptr_t count = 0;
+    int rc = lr_timer_queue_tick(q.get(), now_ms, &arr, &count);
+    if (rc != 0)
+        throw Error(std::string("lr_timer_queue_tick: ") + lr_last_error());
+    std::vector<std::uint32_t> out(arr, arr + count);
+    if (arr && count > 0) lr_timer_queue_drain_free(arr, count);
+    return out;
+}
+inline bool timer_queue_is_empty(const TimerQueue& q) {
+    return lr_timer_queue_is_empty(q.get()) != 0;
+}
+inline std::size_t timer_queue_len(const TimerQueue& q) {
+    return lr_timer_queue_len(q.get());
+}
+inline std::uint64_t timer_queue_next_fire_ms(const TimerQueue& q) {
+    return lr_timer_queue_next_fire_ms(q.get());
+}
+
+// ---- MemoryConn ----
+
+using MemoryConn = std::unique_ptr<OpaqueMemoryConn, detail::MemoryConnDeleter>;
+
+inline MemoryConn make_memory_conn() {
+    OpaqueMemoryConn* p = lr_memory_conn_new();
+    if (!p) throw Error("lr_memory_conn_new returned null");
+    return MemoryConn(p);
+}
+inline std::pair<MemoryConn, MemoryConn> make_memory_conn_pair() {
+    lr_memory_conn_t a{}, b{};
+    int rc = lr_memory_conn_pair(&a, &b);
+    if (rc != 0)
+        throw Error(std::string("lr_memory_conn_pair: ") + lr_last_error());
+    return {MemoryConn(a), MemoryConn(b)};
+}
+inline void memory_conn_push_input(const MemoryConn& c, const std::uint8_t* b,
+                                     std::size_t len) {
+    int rc = lr_memory_conn_push_input(c.get(), b, len);
+    if (rc != 0)
+        throw Error(std::string("lr_memory_conn_push_input: ") + lr_last_error());
+}
+inline void memory_conn_push_input(const MemoryConn& c,
+                                     const std::vector<std::uint8_t>& v) {
+    memory_conn_push_input(c, v.empty() ? nullptr : v.data(), v.size());
+}
+inline std::vector<std::uint8_t> memory_conn_take_input(const MemoryConn& c) {
+    lr_bytes_t b{};
+    int rc = lr_memory_conn_take_input(c.get(), &b);
+    if (rc != 0)
+        throw Error(std::string("lr_memory_conn_take_input: ") + lr_last_error());
+    Bytes owned(&b);
+    const std::uint8_t* p = lr_bytes_ptr(owned.get());
+    std::size_t len = lr_bytes_len(owned.get());
+    return std::vector<std::uint8_t>(p, p + len);
+}
+inline void memory_conn_put_output(const MemoryConn& c, const std::uint8_t* b,
+                                     std::size_t len) {
+    int rc = lr_memory_conn_put_output(c.get(), b, len);
+    if (rc != 0)
+        throw Error(std::string("lr_memory_conn_put_output: ") + lr_last_error());
+}
+inline void memory_conn_put_output(const MemoryConn& c,
+                                     const std::vector<std::uint8_t>& v) {
+    memory_conn_put_output(c, v.empty() ? nullptr : v.data(), v.size());
+}
+inline std::vector<std::uint8_t> memory_conn_drain_output(const MemoryConn& c) {
+    lr_bytes_t b{};
+    int rc = lr_memory_conn_drain_output(c.get(), &b);
+    if (rc != 0)
+        throw Error(std::string("lr_memory_conn_drain_output: ") + lr_last_error());
+    Bytes owned(&b);
+    const std::uint8_t* p = lr_bytes_ptr(owned.get());
+    std::size_t len = lr_bytes_len(owned.get());
+    return std::vector<std::uint8_t>(p, p + len);
+}
+
 } // namespace librouting
 
