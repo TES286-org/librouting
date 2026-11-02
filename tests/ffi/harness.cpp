@@ -1521,6 +1521,91 @@ int main() {
                   "backbone cannot become stub");
         }
 
+        // ---- OSPF DR/BDR election reporting + Router-LSA flags reader ----
+        // Mirrors `DefaultRouter::set_ospf_dr_state` (RFC 2328 §9.4 step 7)
+        // and `DefaultRouter::ospf_router_lsa_flags` (RFC 2328 §A.4.2
+        // V/E/B bits). The router-LSA flags reader must report the empty
+        // (V=0, E=0, B=0) shape before any redistribution / vlink
+        // activity, and the E-bit must flip on after one v2 redistribution.
+        {
+            auto r = make_router();
+            std::uint64_t session_h = 0;
+            int rc = lr_router_add_ospf_session_ext(
+                r.get(), /*version=*/2, /*router_id=*/0xc0a80001,
+                /*area_id=*/1, /*area_kind=*/0 /* normal */,
+                /*default_metric=*/0, /*mtu=*/1500, /*net_type=*/0,
+                0, 0, 0, 0, &session_h);
+            check(rc == 0, "lr_router_add_ospf_session_ext returns 0");
+
+            // Reader before any state change: V=0, E=0, B=0.
+            auto flags = ospf_router_lsa_flags(r, /*area_id=*/1);
+            check(flags.has_value(), "ospf_router_lsa_flags area 1 present");
+            if (flags) {
+                check(!flags->virtual_link, "V-bit empty area = false");
+                check(!flags->asbr, "E-bit empty area = false");
+                check(!flags->border, "B-bit single area = false");
+            }
+
+            // Unknown area: std::nullopt.
+            check(!ospf_router_lsa_flags(r, /*area_id=*/999).has_value(),
+                  "ospf_router_lsa_flags unknown area is std::nullopt");
+
+            // DR/BDR no-op: pushing 0/0 against a freshly-attached
+            // session (the runtime starts with dr=bdr=0) returns
+            // changed=false.
+            check(!set_ospf_dr_state(r, session_h, /*dr=*/0, /*bdr=*/0),
+                  "no-op DR/BDR push returns false");
+
+            // Push a real DR/BDR pair: changed=true (the runtime
+            // fields move from 0 to the new values).
+            check(set_ospf_dr_state(r, session_h, /*dr=*/0xc0a80001,
+                                    /*bdr=*/0xc0a80002),
+                  "first real DR/BDR push returns true");
+            // Push the same pair again: changed=false.
+            check(!set_ospf_dr_state(r, session_h, /*dr=*/0xc0a80001,
+                                     /*bdr=*/0xc0a80002),
+                  "same DR/BDR again returns false");
+
+            // After redistribution: E-bit must flip on.
+            unsigned char v4_pfx[4] = {10, 0, 0, 0};
+            auto ext_v2 = OspfExternalDest::v4(v4_pfx, 24, 100,
+                                              OspfExternalMetricType::Type1);
+            check(ospf_redistribute(r, ext_v2), "v2 redistribute succeeds");
+            auto flags2 = ospf_router_lsa_flags(r, /*area_id=*/1);
+            check(flags2.has_value(), "ospf_router_lsa_flags after redist");
+            if (flags2) {
+                check(!flags2->virtual_link, "V-bit still 0");
+                check(flags2->asbr, "E-bit set after redistribute");
+                check(!flags2->border, "B-bit still 0");
+            }
+        }
+
+        // ---- Simple router-wide readers (issue #92) ----
+        // Round-trip the readers against their setters.
+        {
+            auto r = make_router();
+            // enforce_first_as: default off.
+            check(!enforce_first_as(r), "enforce_first_as default = false");
+            lr_router_set_enforce_first_as(r.get(), 1);
+            check(enforce_first_as(r), "enforce_first_as(1) → true");
+            lr_router_set_enforce_first_as(r.get(), 0);
+            check(!enforce_first_as(r), "enforce_first_as(0) → false");
+
+            // add_path_max_paths: default 1.
+            check(add_path_max_paths(r) == 1, "add_path_max_paths default = 1");
+            lr_router_set_add_path_max_paths(r.get(), 4);
+            check(add_path_max_paths(r) == 4, "set(4) → 4");
+            lr_router_set_add_path_max_paths(r.get(), 0);
+            check(add_path_max_paths(r) == 1, "set(0) clamped to 1");
+
+            // roa_validate_enabled: default off.
+            check(!roa_validate_enabled(r), "roa_validate default = false");
+            lr_router_set_roa_validate(r.get(), 1);
+            check(roa_validate_enabled(r), "set_roa_validate(1) → true");
+            lr_router_set_roa_validate(r.get(), 0);
+            check(!roa_validate_enabled(r), "set_roa_validate(0) → false");
+        }
+
         // ---- Seg6Route / Seg6LocalRoute / Seg6Netlink (issue #92) ----
         // Build a SID and an SRH for the route constructors.
         std::array<std::uint8_t, 16> sid_octets = {

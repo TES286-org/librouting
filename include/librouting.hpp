@@ -4309,6 +4309,112 @@ inline std::optional<OspfAreaType> ospf_area_type(Router& r,
 }
 
 // =========================================================================
+// ===== OSPF DR/BDR election reporting + Router-LSA flags reader ========
+// =========================================================================
+//
+// Mirrors `DefaultRouter::set_ospf_dr_state` (RFC 2328 §9.4 step 7) and
+// `DefaultRouter::ospf_router_lsa_flags` (RFC 2328 §A.4.2 V/E/B bits).
+// An embedder running its own DR/BDR election over bidirectional
+// neighbors (the daemon's OSPF module, or an OSPF-speaking embedder)
+// reports the elected routers via `set_ospf_dr_state`; the reader
+// exposes the V/E/B bits the router-LSA originator should advertise
+// for a given area without having to re-derive them from the LSDB.
+
+/// Push the current DR/BDR election result (RFC 2328 §9.4) for the
+/// OSPF segment a session's interface attaches to. Mirrors
+/// `DefaultRouter::set_ospf_dr_state`. Returns `true` when the DR/BDR
+/// pair changed (the §10.4 adjacency decision was re-run for the
+/// session's neighbor), `false` when it did not.
+///
+/// `session` is the handle returned by `add_ospf_session*` /
+/// `add_ospfv3_session`. `dr` / `bdr` are the elected routers' IP
+/// interface addresses (0.0.0.0 when none is elected — §9.4 permits a
+/// no-DR / no-BDR outcome on a stub segment).
+///
+/// Throws `Error` on an unknown session, a non-OSPF session, or a
+/// NULL router handle.
+inline bool set_ospf_dr_state(Router& r, std::uint64_t session,
+                              std::uint32_t dr, std::uint32_t bdr) {
+    std::uint8_t changed = 0;
+    int rc = lr_router_set_ospf_dr_state(r.get(), session, dr, bdr, &changed);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_set_ospf_dr_state failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return changed != 0;
+}
+
+/// The Router-LSA body flags (RFC 2328 §A.4.2 V/E/B bits) the router
+/// should advertise for `area_id`, derived from the router's current
+/// state. Mirrors `DefaultRouter::ospf_router_lsa_flags` one-to-one.
+struct OspfRouterLsaFlags {
+    /// `V` — the router is an endpoint of a virtual link whose
+    /// transit area is `area_id` (§15: the V-bit rides the transit
+    /// area's Router-LSA).
+    bool virtual_link;
+    /// `E` — at least one AS-external redistribution intent exists
+    /// (the ASBR condition — §12.4.1.1).
+    bool asbr;
+    /// `B` — the router is attached to more than one OSPFv2 area
+    /// (the ABR condition — §12.4.1).
+    bool border;
+};
+
+/// Read the Router-LSA body flags (RFC 2328 §A.4.2 V/E/B bits) for
+/// `area_id`. Returns `std::nullopt` when `area_id` is unknown to
+/// the router (not attached); throws `Error` on a NULL router handle
+/// or a NULL output pointer.
+inline std::optional<OspfRouterLsaFlags> ospf_router_lsa_flags(
+    Router& r, std::uint32_t area_id) {
+    std::uint8_t v = 0, e = 0, b = 0;
+    int rc = lr_router_ospf_router_lsa_flags(r.get(), area_id, &v, &e, &b);
+    if (rc < 0) {
+        // -6 (LR_ERR_OTHER) on an unknown area: surface as
+        // std::nullopt to match `ospf_area_type`'s contract.
+        if (rc == -6) return std::nullopt;
+        const char* err = lr_last_error();
+        throw Error("lr_router_ospf_router_lsa_flags failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return OspfRouterLsaFlags{
+        .virtual_link = v != 0,
+        .asbr = e != 0,
+        .border = b != 0,
+    };
+}
+
+// =========================================================================
+// ===== Simple router-wide readers (mirror Rust boolean / usize readers) ==
+// =========================================================================
+//
+// Mirror `DefaultRouter::enforce_first_as` / `add_path_max_paths` /
+// `roa_validate_enabled` — the reader side of the existing setters.
+// Each returns the router-wide configuration value; a NULL router
+// handle falls back to the documented default (0 / 1) the router
+// constructs with, so a panic cannot be observed through these
+// readers.
+
+/// Reader for `set_enforce_first_as`. Returns `true` when the
+/// enforce-first-as check is on, `false` when off.
+inline bool enforce_first_as(Router& r) noexcept {
+    return lr_router_enforce_first_as(r.get()) != 0;
+}
+
+/// Reader for `set_add_path_max_paths`. Returns the router-wide
+/// Add-Path cap (>= 1; default `1` for a freshly-constructed router).
+inline std::uint32_t add_path_max_paths(Router& r) noexcept {
+    return lr_router_add_path_max_paths(r.get());
+}
+
+/// Reader for `set_roa_validate`. Returns `true` when the RFC 6811 §2
+/// prefix-origin validation hook is installed at import time, `false`
+/// when off.
+inline bool roa_validate_enabled(Router& r) noexcept {
+    return lr_router_roa_validate_enabled(r.get()) != 0;
+}
+
+// =========================================================================
 // ===== lr-osroute::seg6_route — Seg6Route / Seg6LocalRoute / Seg6Netlink ==
 // =========================================================================
 //
