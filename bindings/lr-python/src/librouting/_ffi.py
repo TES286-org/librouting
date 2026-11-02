@@ -1728,6 +1728,126 @@ int32_t lr_router_babel_take_route_request(lr_router_t r, uint64_t session);
 int32_t lr_router_babel_take_own_seqno_request(lr_router_t r,
                                                uint64_t session,
                                                uint16_t *out_seqno);
+
+/* ===== BGP PathAttributes (RFC 4271 §5.1) ============================
+ * Mirrors crates/lr-ffi/src/bgp_path.rs (lr_bgp_path_attrs_* C ABI)
+ * plus the minimal lr_bgp_large_community / lr_bgp_as_path helpers
+ * required to construct / free the handles the readers return. The
+ * full lr_bgp_as_path_* (21 entry points) and lr_bgp_large_community
+ * encode/decode set entry points are a separate follow-up commit;
+ * here we expose only the surface an embedder needs to drive the
+ * PathAttributes container from Python.
+ */
+typedef struct OpaqueBgpPathAttrs OpaqueBgpPathAttrs;
+typedef struct OpaqueBgpPathAttrs *lr_bgp_path_attrs_t;
+typedef struct OpaqueBgpAsPath OpaqueBgpAsPath;
+typedef struct OpaqueBgpAsPath *lr_bgp_as_path_t;
+typedef struct OpaqueBgpLargeCommunity OpaqueBgpLargeCommunity;
+typedef struct OpaqueBgpLargeCommunity *lr_bgp_large_community_t;
+
+typedef struct lr_bgp_next_hop_t {
+    uint8_t addr[16];
+    uint8_t kind;     /* 0=IPv4, 1=IPv6, 2=V4-over-V6 (RFC 5549) */
+    uint8_t present;  /* 1 when attribute is present, 0 when absent */
+} lr_bgp_next_hop_t;
+
+lr_bgp_path_attrs_t lr_bgp_path_attrs_new(void);
+void lr_bgp_path_attrs_free(lr_bgp_path_attrs_t a);
+uintptr_t lr_bgp_path_attrs_len(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_is_empty(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_origin(lr_bgp_path_attrs_t a, uint8_t *out_origin);
+uint8_t lr_bgp_path_attrs_med(lr_bgp_path_attrs_t a, uint32_t *out_med);
+uint8_t lr_bgp_path_attrs_local_pref(lr_bgp_path_attrs_t a, uint32_t *out_lp);
+int32_t lr_bgp_path_attrs_set_local_pref(lr_bgp_path_attrs_t a, uint32_t value);
+uint8_t lr_bgp_path_attrs_atomic_aggregate(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_aggregator(lr_bgp_path_attrs_t a,
+                                     uint32_t *out_asn,
+                                     uint32_t *out_speaker);
+uint8_t lr_bgp_path_attrs_originator_id(lr_bgp_path_attrs_t a, uint32_t *out_originator);
+uint8_t lr_bgp_path_attrs_has_cluster_list(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_has_otc(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_otc(lr_bgp_path_attrs_t a, uint32_t *out_otc);
+uint8_t lr_bgp_path_attrs_has_aigp(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_aigp(lr_bgp_path_attrs_t a, uint64_t *out_aigp);
+uint8_t lr_bgp_path_attrs_has_pmsi_tunnel(lr_bgp_path_attrs_t a);
+uintptr_t lr_bgp_path_attrs_communities(lr_bgp_path_attrs_t a, lr_bytes_t *out);
+uintptr_t lr_bgp_path_attrs_ext_communities(lr_bgp_path_attrs_t a, lr_bytes_t *out);
+uintptr_t lr_bgp_path_attrs_large_communities(lr_bgp_path_attrs_t a, lr_bytes_t *out);
+int32_t lr_bgp_path_attrs_insert_community(lr_bgp_path_attrs_t a, uint32_t community);
+uint8_t lr_bgp_path_attrs_next_hop(lr_bgp_path_attrs_t a, lr_bgp_next_hop_t *out);
+lr_bgp_as_path_t lr_bgp_path_attrs_as_path(lr_bgp_path_attrs_t a);
+lr_bgp_as_path_t lr_bgp_path_attrs_as_path_wire(lr_bgp_path_attrs_t a, uint8_t asn4);
+lr_bgp_as_path_t lr_bgp_path_attrs_as4_path(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_cluster_list(lr_bgp_path_attrs_t a, lr_bytes_t *out);
+lr_mpls_label_stack_t lr_bgp_path_attrs_label_stack(lr_bgp_path_attrs_t a);
+int32_t lr_bgp_path_attrs_set_label_stack(lr_bgp_path_attrs_t a, lr_mpls_label_stack_t stack);
+uint8_t lr_bgp_path_attrs_mp_reach(lr_bgp_path_attrs_t a,
+                                   uint16_t *out_family_afi,
+                                   uint8_t *out_family_safi,
+                                   lr_bgp_next_hop_t *out_next_hop,
+                                   lr_bytes_t *out_nlri_bytes);
+uint8_t lr_bgp_path_attrs_mp_unreach(lr_bgp_path_attrs_t a,
+                                     uint16_t *out_family_afi,
+                                     uint8_t *out_family_safi,
+                                     lr_bytes_t *out_nlri_bytes);
+int32_t lr_bgp_path_attrs_set_ospf_metric2(lr_bgp_path_attrs_t a, uint32_t metric);
+uint8_t lr_bgp_path_attrs_ospf_metric2(lr_bgp_path_attrs_t a, uint32_t *out_metric);
+uint8_t lr_bgp_path_attrs_has_ospf_metric2(lr_bgp_path_attrs_t a);
+int32_t lr_bgp_path_attrs_set_ospf_router_id(lr_bgp_path_attrs_t a, uint32_t router_id);
+uint8_t lr_bgp_path_attrs_ospf_router_id(lr_bgp_path_attrs_t a, uint32_t *out_router_id);
+uint8_t lr_bgp_path_attrs_has_ospf_router_id(lr_bgp_path_attrs_t a);
+int32_t lr_bgp_path_attrs_set_babel_seqno(lr_bgp_path_attrs_t a, uint16_t seqno);
+uint8_t lr_bgp_path_attrs_babel_seqno(lr_bgp_path_attrs_t a, uint16_t *out_seqno);
+uint8_t lr_bgp_path_attrs_has_babel_seqno(lr_bgp_path_attrs_t a);
+int32_t lr_bgp_path_attrs_set_babel_router_id(lr_bgp_path_attrs_t a, uint64_t router_id);
+uint8_t lr_bgp_path_attrs_babel_router_id(lr_bgp_path_attrs_t a, uint64_t *out_router_id);
+uint8_t lr_bgp_path_attrs_has_babel_router_id(lr_bgp_path_attrs_t a);
+int32_t lr_bgp_path_attrs_set_igp_metric(lr_bgp_path_attrs_t a, uint32_t metric);
+uint8_t lr_bgp_path_attrs_igp_metric(lr_bgp_path_attrs_t a, uint32_t *out_metric);
+uint8_t lr_bgp_path_attrs_has_igp_metric(lr_bgp_path_attrs_t a);
+int32_t lr_bgp_path_attrs_set_peer_source_address(lr_bgp_path_attrs_t a,
+                                                  const uint8_t *addr,
+                                                  uint8_t is_ipv6);
+uint8_t lr_bgp_path_attrs_peer_source_address(lr_bgp_path_attrs_t a,
+                                              uint8_t *out_addr,
+                                              uint8_t *out_is_ipv6);
+uint8_t lr_bgp_path_attrs_has_peer_source_address(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_has_community(lr_bgp_path_attrs_t a, uint32_t community);
+int32_t lr_bgp_path_attrs_insert_large_community(lr_bgp_path_attrs_t a,
+                                                 lr_bgp_large_community_t c);
+uint8_t lr_bgp_path_attrs_remove(lr_bgp_path_attrs_t a, uint8_t attr_type);
+uint8_t lr_bgp_path_attrs_get(lr_bgp_path_attrs_t a,
+                              uint8_t attr_type,
+                              uint8_t *out_flags,
+                              uint8_t *out_type,
+                              lr_bytes_t *out_value);
+int32_t lr_bgp_path_attrs_insert_raw(lr_bgp_path_attrs_t a,
+                                     uint8_t flags,
+                                     uint8_t attr_type,
+                                     const uint8_t *value,
+                                     uintptr_t value_len);
+uintptr_t lr_bgp_path_attrs_count(lr_bgp_path_attrs_t a);
+uint8_t lr_bgp_path_attrs_at(lr_bgp_path_attrs_t a,
+                             uintptr_t index,
+                             uint8_t *out_flags,
+                             uint8_t *out_type,
+                             lr_bytes_t *out_value);
+
+/* Minimal lr_bgp_large_community surface: construct + read + free
+ * (enough to drive insert_large_community from Python). The full
+ * encode_set / decode_set entry points are a follow-up. */
+lr_bgp_large_community_t lr_bgp_large_community_new(uint32_t global_admin,
+                                                    uint32_t local_data1,
+                                                    uint32_t local_data2);
+uint32_t lr_bgp_large_community_global_admin(lr_bgp_large_community_t c);
+uint32_t lr_bgp_large_community_local_data1(lr_bgp_large_community_t c);
+uint32_t lr_bgp_large_community_local_data2(lr_bgp_large_community_t c);
+void lr_bgp_large_community_free(lr_bgp_large_community_t c);
+
+/* Free the lr_bgp_as_path_t handle returned by as_path/as_path_wire/
+ * as4_path. The full BgpAsPath surface (decode/encode/prepend/etc)
+ * is a separate follow-up. */
+void lr_bgp_as_path_free(lr_bgp_as_path_t p);
 """
 
 
