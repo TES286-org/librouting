@@ -530,3 +530,165 @@ func TestOspfRedistributeV2RejectsV6Prefix(t *testing.T) {
                 t.Fatalf("Redistribute v6 dest: ok=%v err=%v", ok, err)
         }
 }
+
+// ----- OspfAreaType value-type wrapper tests (issue #92) -----
+
+func TestOspfAreaTypeConstructorsRoundTrip(t *testing.T) {
+        normal := NewOspfAreaTypeNormal()
+        if normal.Kind() != AreaNormal {
+                t.Fatalf("normal.Kind() = %d, want %d", normal.Kind(), AreaNormal)
+        }
+        if normal.KindName() != "normal" {
+                t.Fatalf("normal.KindName() = %q, want %q", normal.KindName(), "normal")
+        }
+        if normal.IsStub() || normal.IsNssa() || normal.IsStubby() {
+                t.Fatalf("normal: stub=%v nssa=%v stubby=%v", normal.IsStub(), normal.IsNssa(), normal.IsStubby())
+        }
+        if normal.NoSummary() {
+                t.Fatalf("normal.NoSummary() = true, want false")
+        }
+        if dm, ok := normal.DefaultMetric(); ok {
+                t.Fatalf("normal.DefaultMetric() = (%d, true), want (0, false)", dm)
+        }
+
+        stub := NewOspfAreaTypeStub(42)
+        if stub.Kind() != AreaStub {
+                t.Fatalf("stub.Kind() = %d, want %d", stub.Kind(), AreaStub)
+        }
+        if !stub.IsStub() || stub.IsNssa() || !stub.IsStubby() {
+                t.Fatalf("stub: stub=%v nssa=%v stubby=%v", stub.IsStub(), stub.IsNssa(), stub.IsStubby())
+        }
+        if stub.NoSummary() {
+                t.Fatalf("stub.NoSummary() = true, want false")
+        }
+        if dm, ok := stub.DefaultMetric(); !ok || dm != 42 {
+                t.Fatalf("stub.DefaultMetric() = (%d, %v), want (42, true)", dm, ok)
+        }
+
+        stubNs := NewOspfAreaTypeStubNoSummary(7)
+        if stubNs.Kind() != AreaStubNoSummary {
+                t.Fatalf("stubNs.Kind() = %d, want %d", stubNs.Kind(), AreaStubNoSummary)
+        }
+        if !stubNs.IsStub() || !stubNs.IsStubby() || !stubNs.NoSummary() {
+                t.Fatalf("stubNs: stub=%v stubby=%v no_summary=%v", stubNs.IsStub(), stubNs.IsStubby(), stubNs.NoSummary())
+        }
+        if dm, ok := stubNs.DefaultMetric(); !ok || dm != 7 {
+                t.Fatalf("stubNs.DefaultMetric() = (%d, %v), want (7, true)", dm, ok)
+        }
+
+        nssa := NewOspfAreaTypeNssa(99)
+        if nssa.Kind() != AreaNssa {
+                t.Fatalf("nssa.Kind() = %d, want %d", nssa.Kind(), AreaNssa)
+        }
+        if nssa.IsStub() || !nssa.IsNssa() || !nssa.IsStubby() {
+                t.Fatalf("nssa: stub=%v nssa=%v stubby=%v", nssa.IsStub(), nssa.IsNssa(), nssa.IsStubby())
+        }
+        if nssa.NoSummary() {
+                t.Fatalf("nssa.NoSummary() = true, want false")
+        }
+        if dm, ok := nssa.DefaultMetric(); !ok || dm != 99 {
+                t.Fatalf("nssa.DefaultMetric() = (%d, %v), want (99, true)", dm, ok)
+        }
+
+        nssaNs := NewOspfAreaTypeNssaNoSummary(3)
+        if nssaNs.Kind() != AreaNssaNoSummary {
+                t.Fatalf("nssaNs.Kind() = %d, want %d", nssaNs.Kind(), AreaNssaNoSummary)
+        }
+        if !nssaNs.IsNssa() || !nssaNs.IsStubby() || !nssaNs.NoSummary() {
+                t.Fatalf("nssaNs: nssa=%v stubby=%v no_summary=%v", nssaNs.IsNssa(), nssaNs.IsStubby(), nssaNs.NoSummary())
+        }
+        if dm, ok := nssaNs.DefaultMetric(); !ok || dm != 3 {
+                t.Fatalf("nssaNs.DefaultMetric() = (%d, %v), want (3, true)", dm, ok)
+        }
+}
+
+func TestOspfAreaTypeEqual(t *testing.T) {
+        a := NewOspfAreaTypeStub(7)
+        b := NewOspfAreaTypeStub(7)
+        c := NewOspfAreaTypeStub(8)
+        if !a.Equal(b) {
+                t.Fatalf("a.Equal(b) = false, want true")
+        }
+        if a.Equal(c) {
+                t.Fatalf("a.Equal(c) = true, want false")
+        }
+        if NewOspfAreaTypeNormal().Equal(NewOspfAreaTypeStub(0)) {
+                t.Fatalf("normal.Equal(stub(0)) = true, want false")
+        }
+}
+
+func TestOspfAreaTypeReaderRoundTripViaRouter(t *testing.T) {
+        // Attach an NSSA area with default_metric=42 and read it back.
+        r := routerWithOspfArea(t, 7, AreaNssa, 42)
+        areaType, ok, err := r.OspfAreaType(7)
+        if err != nil {
+                t.Fatalf("OspfAreaType(7): %v", err)
+        }
+        if !ok {
+                t.Fatalf("OspfAreaType(7): not attached")
+        }
+        if areaType.Kind() != AreaNssa {
+                t.Fatalf("areaType.Kind() = %d, want %d", areaType.Kind(), AreaNssa)
+        }
+        if !areaType.IsNssa() {
+                t.Fatalf("areaType.IsNssa() = false, want true")
+        }
+        if !areaType.IsStubby() {
+                t.Fatalf("areaType.IsStubby() = false, want true")
+        }
+        if areaType.NoSummary() {
+                t.Fatalf("areaType.NoSummary() = true, want false")
+        }
+        if dm, ok := areaType.DefaultMetric(); !ok || dm != 42 {
+                t.Fatalf("areaType.DefaultMetric() = (%d, %v), want (42, true)", dm, ok)
+        }
+        // Unknown area returns (_, false, nil).
+        if _, ok, err := r.OspfAreaType(999); err != nil || ok {
+                t.Fatalf("OspfAreaType(999): ok=%v err=%v", ok, err)
+        }
+}
+
+func TestOspfSetAreaTypeRoundTripsDefaultMetric(t *testing.T) {
+        // Start with a Normal area; the struct-value setter carries
+        // the new default_metric through.
+        r := routerWithOspfArea(t, 5, AreaNormal, 0)
+        if ok, err := r.OspfSetAreaType(5, NewOspfAreaTypeNssa(42)); err != nil || !ok {
+                t.Fatalf("OspfSetAreaType(5, nssa(42)): ok=%v err=%v", ok, err)
+        }
+        areaType, ok, err := r.OspfAreaType(5)
+        if err != nil || !ok {
+                t.Fatalf("OspfAreaType(5): ok=%v err=%v", ok, err)
+        }
+        if areaType.Kind() != AreaNssa {
+                t.Fatalf("areaType.Kind() = %d, want %d", areaType.Kind(), AreaNssa)
+        }
+        if dm, ok := areaType.DefaultMetric(); !ok || dm != 42 {
+                t.Fatalf("areaType.DefaultMetric() = (%d, %v), want (42, true)", dm, ok)
+        }
+        // Convert to totally-NSSA(7).
+        if ok, err := r.OspfSetAreaType(5, NewOspfAreaTypeNssaNoSummary(7)); err != nil || !ok {
+                t.Fatalf("OspfSetAreaType(5, nssa_no_summary(7)): ok=%v err=%v", ok, err)
+        }
+        areaType, ok, err = r.OspfAreaType(5)
+        if err != nil || !ok {
+                t.Fatalf("OspfAreaType(5): ok=%v err=%v", ok, err)
+        }
+        if areaType.Kind() != AreaNssaNoSummary {
+                t.Fatalf("areaType.Kind() = %d, want %d", areaType.Kind(), AreaNssaNoSummary)
+        }
+        if !areaType.NoSummary() {
+                t.Fatalf("areaType.NoSummary() = false, want true")
+        }
+        if dm, ok := areaType.DefaultMetric(); !ok || dm != 7 {
+                t.Fatalf("areaType.DefaultMetric() = (%d, %v), want (7, true)", dm, ok)
+        }
+        // No-op conversion returns false.
+        if ok, err := r.OspfSetAreaType(5, NewOspfAreaTypeNssaNoSummary(7)); err != nil || ok {
+                t.Fatalf("no-op conversion: ok=%v err=%v", ok, err)
+        }
+        // Backbone cannot become stub.
+        bb := routerWithOspfArea(t, 0, AreaNormal, 0)
+        if ok, err := bb.OspfSetAreaType(0, NewOspfAreaTypeStub(1)); err != nil || ok {
+                t.Fatalf("backbone to stub: ok=%v err=%v", ok, err)
+        }
+}

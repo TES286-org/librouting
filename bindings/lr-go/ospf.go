@@ -767,3 +767,174 @@ func (d *OspfV3ExternalDest) RouteTag() (uint32, bool, error) {
         }
         return 0, false, nil
 }
+
+// ----------------------------------------------------------------------
+// OSPF area type (RFC 2328 §3.6 stub areas; RFC 3101 NSSA) — value
+// type mirroring lr_router::OspfAreaType and the C ABI's
+// `lr_ospf_area_type_t`. The Rust enum is `Copy` and the C ABI
+// represents it as a small #[repr(C)] struct passed by value, so the
+// Go wrapper is a plain value type (no opaque handle, no finaliser).
+//
+// Construct via the NewOspfAreaType* constructors and inspect via
+// the Kind / IsStub / IsNssa / IsStubby / NoSummary / DefaultMetric
+// methods. Use (*Router).OspfSetAreaType and (*Router).OspfAreaType
+// (in librouting.go) to drive the live router.
+//
+// The area-kind constants (AreaNormal, AreaStub, AreaStubNoSummary,
+// AreaNssa, AreaNssaNoSummary) are declared in librouting.go and
+// shared with (*Router).AddOSPFSessionExt.
+// ----------------------------------------------------------------------
+
+// OspfAreaType is the OSPF area type policy (RFC 2328 §3.6 / RFC 3101)
+// — a value type wrapping `lr_ospf_area_type_t`.
+//
+// The zero value is a Normal area (kind=0, default_metric=0). Use the
+// NewOspfAreaType* constructors to build one of the stub / NSSA
+// variants. The struct is safe to copy by value.
+type OspfAreaType struct {
+        kind          int32
+        defaultMetric uint32
+}
+
+// NewOspfAreaTypeNormal constructs a regular area — type-3 / type-4
+// summaries and type-5 externals flow freely (RFC 2328 §3.6).
+func NewOspfAreaTypeNormal() OspfAreaType {
+        t := C.lr_ospf_area_type_normal()
+        return OspfAreaType{kind: int32(t.kind), defaultMetric: uint32(t.default_metric)}
+}
+
+// NewOspfAreaTypeStub constructs a stub area (RFC 2328 §3.6): no
+// type-5 / type-4 LSAs enter; the border routers inject a type-3
+// summary default (0.0.0.0/0) with defaultMetric. Summaries are
+// imported — for the "totally stubby" variant use
+// NewOspfAreaTypeStubNoSummary.
+func NewOspfAreaTypeStub(defaultMetric uint32) OspfAreaType {
+        t := C.lr_ospf_area_type_stub(C.uint32_t(defaultMetric))
+        return OspfAreaType{kind: int32(t.kind), defaultMetric: uint32(t.default_metric)}
+}
+
+// NewOspfAreaTypeStubNoSummary constructs a totally-stubby stub area
+// (no type-3 summaries except the injected default).
+func NewOspfAreaTypeStubNoSummary(defaultMetric uint32) OspfAreaType {
+        t := C.lr_ospf_area_type_stub_no_summary(C.uint32_t(defaultMetric))
+        return OspfAreaType{kind: int32(t.kind), defaultMetric: uint32(t.default_metric)}
+}
+
+// NewOspfAreaTypeNssa constructs an NSSA area (RFC 3101 §2.7): like
+// stub, but internal ASBRs may redistribute externals as area-scoped
+// type-7 LSAs, which the elected border router translates into
+// type-5s for the rest of the AS.
+func NewOspfAreaTypeNssa(defaultMetric uint32) OspfAreaType {
+        t := C.lr_ospf_area_type_nssa(C.uint32_t(defaultMetric))
+        return OspfAreaType{kind: int32(t.kind), defaultMetric: uint32(t.default_metric)}
+}
+
+// NewOspfAreaTypeNssaNoSummary constructs a totally-NSSA area (no
+// type-3 summaries except the type-3 default).
+func NewOspfAreaTypeNssaNoSummary(defaultMetric uint32) OspfAreaType {
+        t := C.lr_ospf_area_type_nssa_no_summary(C.uint32_t(defaultMetric))
+        return OspfAreaType{kind: int32(t.kind), defaultMetric: uint32(t.default_metric)}
+}
+
+// Kind returns the area-kind id (one of the Area* constants in
+// this module: AreaNormal, AreaStub, AreaStubNoSummary, AreaNssa,
+// AreaNssaNoSummary).
+func (t OspfAreaType) Kind() int32 { return t.kind }
+
+// KindName returns the lower-case ASCII kind name ("normal", "stub",
+// "stub_no_summary", "nssa", "nssa_no_summary", or "unknown" for an
+// out-of-range kind).
+func (t OspfAreaType) KindName() string {
+        switch t.kind {
+        case AreaNormal:
+                return "normal"
+        case AreaStub:
+                return "stub"
+        case AreaStubNoSummary:
+                return "stub_no_summary"
+        case AreaNssa:
+                return "nssa"
+        case AreaNssaNoSummary:
+                return "nssa_no_summary"
+        }
+        return "unknown"
+}
+
+// IsStub reports whether t is one of the stub variants (stub or
+// stub_no_summary).
+func (t OspfAreaType) IsStub() bool {
+        c := C.struct_lr_ospf_area_type_t{
+                kind:           C.int32_t(t.kind),
+                default_metric: C.uint32_t(t.defaultMetric),
+        }
+        return C.lr_ospf_area_type_is_stub(c) != 0
+}
+
+// IsNssa reports whether t is one of the NSSA variants (nssa or
+// nssa_no_summary).
+func (t OspfAreaType) IsNssa() bool {
+        c := C.struct_lr_ospf_area_type_t{
+                kind:           C.int32_t(t.kind),
+                default_metric: C.uint32_t(t.defaultMetric),
+        }
+        return C.lr_ospf_area_type_is_nssa(c) != 0
+}
+
+// IsStubby reports whether type-5 / type-4 LSAs are refused (stub
+// or NSSA — RFC 2328 §3.6, RFC 3101).
+func (t OspfAreaType) IsStubby() bool {
+        c := C.struct_lr_ospf_area_type_t{
+                kind:           C.int32_t(t.kind),
+                default_metric: C.uint32_t(t.defaultMetric),
+        }
+        return C.lr_ospf_area_type_is_stubby(c) != 0
+}
+
+// NoSummary reports whether t is a totally-stubby / totally-NSSA
+// variant (no type-3 summaries except the injected default).
+func (t OspfAreaType) NoSummary() bool {
+        c := C.struct_lr_ospf_area_type_t{
+                kind:           C.int32_t(t.kind),
+                default_metric: C.uint32_t(t.defaultMetric),
+        }
+        return C.lr_ospf_area_type_no_summary(c) != 0
+}
+
+// DefaultMetric returns the border-router-injected default-route
+// metric. The returned values are (metric, true) for stub / NSSA
+// kinds, or (0, false) for Normal.
+func (t OspfAreaType) DefaultMetric() (uint32, bool) {
+        c := C.struct_lr_ospf_area_type_t{
+                kind:           C.int32_t(t.kind),
+                default_metric: C.uint32_t(t.defaultMetric),
+        }
+        var out C.uint32_t
+        if C.lr_ospf_area_type_default_metric(c, &out) != 0 {
+                return uint32(out), true
+        }
+        return 0, false
+}
+
+// cHandle returns the C struct value for the FFI entry points in
+// librouting.go that take `struct lr_ospf_area_type_t` by value.
+func (t OspfAreaType) cHandle() C.struct_lr_ospf_area_type_t {
+        return C.struct_lr_ospf_area_type_t{
+                kind:           C.int32_t(t.kind),
+                default_metric: C.uint32_t(t.defaultMetric),
+        }
+}
+
+// String implements fmt.Stringer — debug-friendly representation
+// "OspfAreaType{kind=..., defaultMetric=...}".
+func (t OspfAreaType) String() string {
+        if dm, ok := t.DefaultMetric(); ok {
+                return fmt.Sprintf("OspfAreaType{kind=%s, defaultMetric=%d}", t.KindName(), dm)
+        }
+        return fmt.Sprintf("OspfAreaType{kind=%s}", t.KindName())
+}
+
+// Equal reports whether two area types are the same kind with the
+// same default metric.
+func (t OspfAreaType) Equal(other OspfAreaType) bool {
+        return t.kind == other.kind && t.defaultMetric == other.defaultMetric
+}

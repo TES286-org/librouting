@@ -1157,6 +1157,40 @@ func (r *Router) OspfIsAsbr() (bool, error) {
 	return rc == 1, nil
 }
 
+
+// OspfSetAreaType sets an attached OSPF area's type policy (RFC 2328
+// §3.6 / RFC 3101) using the full struct-value (carries the
+// border-router-injected default-route metric). The router refuses
+// to convert the backbone (areaID == 0) to a stub / NSSA kind and
+// refuses a no-op conversion; both return (false, nil). Mirrors
+// DefaultRouter::ospf_set_area_type (via the C ABI's
+// lr_router_ospf_set_area_type_ext entry point that takes the full
+// lr_ospf_area_type_t struct).
+func (r *Router) OspfSetAreaType(areaID uint32, t OspfAreaType) (bool, error) {
+	rc := C.lr_router_ospf_set_area_type_ext(r.ptr, C.uint32_t(areaID), t.cHandle())
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_set_area_type_ext: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfAreaType reads one attached OSPF area's type policy (RFC 2328
+// §3.6 / RFC 3101). The returned values are (areaType, true, nil)
+// when the area is attached, or (OspfAreaType{}, false, nil) when the
+// area is unknown (not yet attached or already torn down). Mirrors
+// DefaultRouter::ospf_area_type.
+func (r *Router) OspfAreaType(areaID uint32) (OspfAreaType, bool, error) {
+	var out C.struct_lr_ospf_area_type_t
+	rc := C.lr_router_ospf_area_type(r.ptr, C.uint32_t(areaID), &out)
+	if rc < 0 {
+		return OspfAreaType{}, false, fmt.Errorf("lr_router_ospf_area_type: %s (rc=%d)", LastError(), int(rc))
+	}
+	if rc == 1 {
+		return OspfAreaType{kind: int32(out.kind), defaultMetric: uint32(out.default_metric)}, true, nil
+	}
+	return OspfAreaType{}, false, nil
+}
+
 // decodeSessionSummary translates one C struct into the Go form.
 // Returns a value, not a pointer — the caller already has its own
 // copy of the C struct on the stack.
