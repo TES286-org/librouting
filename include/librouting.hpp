@@ -8075,5 +8075,5911 @@ inline std::vector<std::uint8_t> memory_conn_drain_output(const MemoryConn& c) {
     return std::vector<std::uint8_t>(p, p + len);
 }
 
+// ===== GENERATED ADDITIONS - do not edit by hand. =====
+
+namespace gen {
+
+using ::librouting::Error;
+
+struct AdjRibInDeleter {
+    void operator()(lr_adj_rib_in_t h) const noexcept { if (h) lr_adj_rib_in_free(h); }
+};
+using AdjRibInHandle = std::unique_ptr<OpaqueAdjRibIn, AdjRibInDeleter>;
+
+struct AdjRibOutDeleter {
+    void operator()(lr_adj_rib_out_t h) const noexcept { if (h) lr_adj_rib_out_free(h); }
+};
+using AdjRibOutHandle = std::unique_ptr<OpaqueAdjRibOut, AdjRibOutDeleter>;
+
+struct AttributesDeleter {
+    void operator()(lr_attributes_t h) const noexcept { if (h) lr_attributes_free(h); }
+};
+using AttributesHandle = std::unique_ptr<OpaqueAttributes, AttributesDeleter>;
+
+struct BabelAckReqDeleter {
+    void operator()(lr_babel_ack_req_t h) const noexcept { if (h) lr_babel_ack_req_free(h); }
+};
+using BabelAckReqHandle = std::unique_ptr<OpaqueBabelAckReq, BabelAckReqDeleter>;
+
+struct BabelAckDeleter {
+    void operator()(lr_babel_ack_t h) const noexcept { if (h) lr_babel_ack_free(h); }
+};
+using BabelAckHandle = std::unique_ptr<OpaqueBabelAck, BabelAckDeleter>;
+
+struct BabelCodecDeleter {
+    void operator()(lr_babel_codec_t h) const noexcept { if (h) lr_babel_codec_free(h); }
+};
+using BabelCodecHandle = std::unique_ptr<OpaqueBabelCodec, BabelCodecDeleter>;
+
+struct BabelFrameDeleter {
+    void operator()(lr_babel_frame_t h) const noexcept { if (h) lr_babel_frame_free(h); }
+};
+using BabelFrameHandle = std::unique_ptr<OpaqueBabelFrame, BabelFrameDeleter>;
+
+struct BabelHelloDeleter {
+    void operator()(lr_babel_hello_t h) const noexcept { if (h) lr_babel_hello_free(h); }
+};
+using BabelHelloHandle = std::unique_ptr<OpaqueBabelHello, BabelHelloDeleter>;
+
+struct BabelIhuDeleter {
+    void operator()(lr_babel_ihu_t h) const noexcept { if (h) lr_babel_ihu_free(h); }
+};
+using BabelIhuHandle = std::unique_ptr<OpaqueBabelIhu, BabelIhuDeleter>;
+
+struct BabelMacKeyDeleter {
+    void operator()(lr_babel_mac_key_t h) const noexcept { if (h) lr_babel_mac_key_free(h); }
+};
+using BabelMacKeyHandle = std::unique_ptr<OpaqueBabelMacKey, BabelMacKeyDeleter>;
+
+struct BabelNeighborDeleter {
+    void operator()(lr_babel_neighbor_t h) const noexcept { if (h) lr_babel_neighbor_free(h); }
+};
+using BabelNeighborHandle = std::unique_ptr<OpaqueBabelNeighbor, BabelNeighborDeleter>;
+
+struct BabelNextHopDeleter {
+    void operator()(lr_babel_next_hop_t h) const noexcept { if (h) lr_babel_next_hop_free(h); }
+};
+using BabelNextHopHandle = std::unique_ptr<OpaqueBabelNextHop, BabelNextHopDeleter>;
+
+struct BabelPacketCounterDeleter {
+    void operator()(lr_babel_packet_counter_t h) const noexcept { if (h) lr_babel_packet_counter_free(h); }
+};
+using BabelPacketCounterHandle = std::unique_ptr<OpaqueBabelPacketCounter, BabelPacketCounterDeleter>;
+
+struct BabelPseudoHeaderDeleter {
+    void operator()(lr_babel_pseudo_header_t h) const noexcept { if (h) lr_babel_pseudo_header_free(h); }
+};
+using BabelPseudoHeaderHandle = std::unique_ptr<OpaqueBabelPseudoHeader, BabelPseudoHeaderDeleter>;
+
+struct BabelReplayProtectionDeleter {
+    void operator()(lr_babel_replay_protection_t h) const noexcept { if (h) lr_babel_replay_protection_free(h); }
+};
+using BabelReplayProtectionHandle = std::unique_ptr<OpaqueBabelReplayProtection, BabelReplayProtectionDeleter>;
+
+struct BabelRouteKeyDeleter {
+    void operator()(lr_babel_route_key_t h) const noexcept { if (h) lr_babel_route_key_free(h); }
+};
+using BabelRouteKeyHandle = std::unique_ptr<OpaqueBabelRouteKey, BabelRouteKeyDeleter>;
+
+struct BabelRouteRequestDeleter {
+    void operator()(lr_babel_route_request_t h) const noexcept { if (h) lr_babel_route_request_free(h); }
+};
+using BabelRouteRequestHandle = std::unique_ptr<OpaqueBabelRouteRequest, BabelRouteRequestDeleter>;
+
+struct BabelRouteDeleter {
+    void operator()(lr_babel_route_t h) const noexcept { if (h) lr_babel_route_free(h); }
+};
+using BabelRouteHandle = std::unique_ptr<OpaqueBabelRoute, BabelRouteDeleter>;
+
+struct BabelRouteTableDeleter {
+    void operator()(lr_babel_route_table_t h) const noexcept { if (h) lr_babel_route_table_free(h); }
+};
+using BabelRouteTableHandle = std::unique_ptr<OpaqueBabelRouteTable, BabelRouteTableDeleter>;
+
+struct BabelRouterIdDeleter {
+    void operator()(lr_babel_router_id_t h) const noexcept { if (h) lr_babel_router_id_free(h); }
+};
+using BabelRouterIdHandle = std::unique_ptr<OpaqueBabelRouterId, BabelRouterIdDeleter>;
+
+struct BabelSeqnoRequestDeleter {
+    void operator()(lr_babel_seqno_request_t h) const noexcept { if (h) lr_babel_seqno_request_free(h); }
+};
+using BabelSeqnoRequestHandle = std::unique_ptr<OpaqueBabelSeqnoRequest, BabelSeqnoRequestDeleter>;
+
+struct BabelTlvDeleter {
+    void operator()(lr_babel_tlv_t h) const noexcept { if (h) lr_babel_tlv_free(h); }
+};
+using BabelTlvHandle = std::unique_ptr<OpaqueBabelTlv, BabelTlvDeleter>;
+
+struct BabelUpdateDeleter {
+    void operator()(lr_babel_update_t h) const noexcept { if (h) lr_babel_update_free(h); }
+};
+using BabelUpdateHandle = std::unique_ptr<OpaqueBabelUpdate, BabelUpdateDeleter>;
+
+struct BfdAuthKeyDeleter {
+    void operator()(lr_bfd_auth_key_t h) const noexcept { if (h) lr_bfd_auth_key_free(h); }
+};
+using BfdAuthKeyHandle = std::unique_ptr<OpaqueBfdAuthKey, BfdAuthKeyDeleter>;
+
+struct BfdAuthSectionDeleter {
+    void operator()(lr_bfd_auth_section_t h) const noexcept { if (h) lr_bfd_auth_section_free(h); }
+};
+using BfdAuthSectionHandle = std::unique_ptr<OpaqueBfdAuthSection, BfdAuthSectionDeleter>;
+
+struct BfdConfigDeleter {
+    void operator()(lr_bfd_config_t h) const noexcept { if (h) lr_bfd_config_free(h); }
+};
+using BfdConfigHandle = std::unique_ptr<OpaqueBfdConfig, BfdConfigDeleter>;
+
+struct BfdKeyedAuthDeleter {
+    void operator()(lr_bfd_keyed_auth_t h) const noexcept { if (h) lr_bfd_keyed_auth_free(h); }
+};
+using BfdKeyedAuthHandle = std::unique_ptr<OpaqueBfdKeyedAuth, BfdKeyedAuthDeleter>;
+
+struct BfdPacketDeleter {
+    void operator()(lr_bfd_packet_t h) const noexcept { if (h) lr_bfd_packet_free(h); }
+};
+using BfdPacketHandle = std::unique_ptr<OpaqueBfdPacket, BfdPacketDeleter>;
+
+struct BfdSessionEventDeleter {
+    void operator()(lr_bfd_session_event_t h) const noexcept { if (h) lr_bfd_session_event_free(h); }
+};
+using BfdSessionEventHandle = std::unique_ptr<OpaqueBfdSessionEvent, BfdSessionEventDeleter>;
+
+struct BfdSessionDeleter {
+    void operator()(lr_bfd_session_t h) const noexcept { if (h) lr_bfd_session_free(h); }
+};
+using BfdSessionHandle = std::unique_ptr<OpaqueBfdSession, BfdSessionDeleter>;
+
+struct BgpAsPathDeleter {
+    void operator()(lr_bgp_as_path_t h) const noexcept { if (h) lr_bgp_as_path_free(h); }
+};
+using BgpAsPathHandle = std::unique_ptr<OpaqueBgpAsPath, BgpAsPathDeleter>;
+
+struct BgpCapabilityArrayDeleter {
+    void operator()(lr_bgp_capability_array_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using BgpCapabilityArrayHandle = std::unique_ptr<OpaqueBgpCapArray, BgpCapabilityArrayDeleter>;
+
+struct BgpCapabilityDeleter {
+    void operator()(lr_bgp_capability_t h) const noexcept { if (h) lr_bgp_cap_free(h); }
+};
+using BgpCapabilityHandle = std::unique_ptr<OpaqueBgpCapability, BgpCapabilityDeleter>;
+
+struct BgpCodecDeleter {
+    void operator()(lr_bgp_codec_t h) const noexcept { if (h) lr_bgp_codec_free(h); }
+};
+using BgpCodecHandle = std::unique_ptr<OpaqueBgpCodec, BgpCodecDeleter>;
+
+struct BgpCommunityDeleter {
+    void operator()(lr_bgp_community_t h) const noexcept { if (h) lr_bgp_community_free(h); }
+};
+using BgpCommunityHandle = std::unique_ptr<OpaqueBgpCommunity, BgpCommunityDeleter>;
+
+struct BgpConfedConfigDeleter {
+    void operator()(lr_bgp_confed_config_t h) const noexcept { if (h) lr_bgp_confed_config_free(h); }
+};
+using BgpConfedConfigHandle = std::unique_ptr<OpaqueConfederationConfig, BgpConfedConfigDeleter>;
+
+struct BgpExtCommunityDeleter {
+    void operator()(lr_bgp_ext_community_t h) const noexcept { if (h) lr_bgp_ext_community_free(h); }
+};
+using BgpExtCommunityHandle = std::unique_ptr<OpaqueBgpExtCommunity, BgpExtCommunityDeleter>;
+
+struct BgpLargeCommunityDeleter {
+    void operator()(lr_bgp_large_community_t h) const noexcept { if (h) lr_bgp_large_community_free(h); }
+};
+using BgpLargeCommunityHandle = std::unique_ptr<OpaqueBgpLargeCommunity, BgpLargeCommunityDeleter>;
+
+struct BgpLsAttrDeleter {
+    void operator()(lr_bgp_ls_attr_t h) const noexcept { if (h) lr_bgp_ls_attr_free(h); }
+};
+using BgpLsAttrHandle = std::unique_ptr<OpaqueBgpLsAttr, BgpLsAttrDeleter>;
+
+struct BgpLsTlvVecDeleter {
+    void operator()(lr_bgp_ls_tlv_vec_t h) const noexcept { if (h) lr_bgp_ls_tlv_vec_free(h); }
+};
+using BgpLsTlvVecHandle = std::unique_ptr<OpaqueBgpLsTlvVec, BgpLsTlvVecDeleter>;
+
+struct BgpMessageDeleter {
+    void operator()(lr_bgp_message_t h) const noexcept { if (h) lr_bgp_message_free(h); }
+};
+using BgpMessageHandle = std::unique_ptr<OpaqueBgpMessage, BgpMessageDeleter>;
+
+struct BgpOtcDeleter {
+    void operator()(lr_bgp_otc_t h) const noexcept { if (h) lr_bgp_otc_free(h); }
+};
+using BgpOtcHandle = std::unique_ptr<OpaqueOtc, BgpOtcDeleter>;
+
+struct BgpPathAttrsDeleter {
+    void operator()(lr_bgp_path_attrs_t h) const noexcept { if (h) lr_bgp_path_attrs_free(h); }
+};
+using BgpPathAttrsHandle = std::unique_ptr<OpaqueBgpPathAttrs, BgpPathAttrsDeleter>;
+
+struct BgpPeerConfigDeleter {
+    void operator()(lr_bgp_peer_config_t h) const noexcept { if (h) lr_bgp_peer_config_free(h); }
+};
+using BgpPeerConfigHandle = std::unique_ptr<OpaquePeerConfig, BgpPeerConfigDeleter>;
+
+struct BgpPeerDeleter {
+    void operator()(lr_bgp_peer_t h) const noexcept { if (h) lr_bgp_peer_free(h); }
+};
+using BgpPeerHandle = std::unique_ptr<OpaqueBgpPeer, BgpPeerDeleter>;
+
+struct BgpPeerTopologyDeleter {
+    void operator()(lr_bgp_peer_topology_t h) const noexcept { if (h) lr_bgp_peer_topology_free(h); }
+};
+using BgpPeerTopologyHandle = std::unique_ptr<OpaquePeerTopology, BgpPeerTopologyDeleter>;
+
+struct BgpRrConfigDeleter {
+    void operator()(lr_bgp_rr_config_t h) const noexcept { if (h) lr_bgp_rr_config_free(h); }
+};
+using BgpRrConfigHandle = std::unique_ptr<OpaqueRouteReflectorConfig, BgpRrConfigDeleter>;
+
+struct BgpRsConfigDeleter {
+    void operator()(lr_bgp_rs_config_t h) const noexcept { if (h) lr_bgp_rs_config_free(h); }
+};
+using BgpRsConfigHandle = std::unique_ptr<OpaqueRouteServerConfig, BgpRsConfigDeleter>;
+
+struct BmpCodecDeleter {
+    void operator()(lr_bmp_codec_t h) const noexcept { if (h) lr_bmp_codec_free(h); }
+};
+using BmpCodecHandle = std::unique_ptr<OpaqueBmpCodec, BmpCodecDeleter>;
+
+struct BmpMessageDeleter {
+    void operator()(lr_bmp_message_t h) const noexcept { if (h) lr_bmp_message_free(h); }
+};
+using BmpMessageHandle = std::unique_ptr<OpaqueBmpMessage, BmpMessageDeleter>;
+
+struct BytesTDeleter {
+    void operator()(lr_bytes_t_handle h) const noexcept { if (h) lr_bgp_cap_bytes_free(h); }
+};
+using BytesTHandle = std::unique_ptr<OpaqueBgpCapBytes, BytesTDeleter>;
+
+struct DampingDeleter {
+    void operator()(lr_damping_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using DampingHandle = std::unique_ptr<OpaqueDamping, DampingDeleter>;
+
+struct DampingTableDeleter {
+    void operator()(lr_damping_table_t h) const noexcept { if (h) lr_damping_table_free(h); }
+};
+using DampingTableHandle = std::unique_ptr<OpaqueDampingTable, DampingTableDeleter>;
+
+struct FilterDeleter {
+    void operator()(lr_filter_t h) const noexcept { if (h) lr_filter_free(h); }
+};
+using FilterHandle = std::unique_ptr<OpaqueFilter, FilterDeleter>;
+
+struct LdpDiscoveryConfigDeleter {
+    void operator()(lr_ldp_discovery_config_t h) const noexcept { if (h) lr_ldp_discovery_config_free(h); }
+};
+using LdpDiscoveryConfigHandle = std::unique_ptr<OpaqueLdpDiscoveryConfig, LdpDiscoveryConfigDeleter>;
+
+struct LdpDiscoveryDeleter {
+    void operator()(lr_ldp_discovery_t h) const noexcept { if (h) lr_ldp_discovery_free(h); }
+};
+using LdpDiscoveryHandle = std::unique_ptr<OpaqueLdpDiscovery, LdpDiscoveryDeleter>;
+
+struct LdpEngineConfigDeleter {
+    void operator()(lr_ldp_engine_config_t h) const noexcept { if (h) lr_ldp_engine_config_free(h); }
+};
+using LdpEngineConfigHandle = std::unique_ptr<OpaqueLdpEngineConfig, LdpEngineConfigDeleter>;
+
+struct LdpEngineDeleter {
+    void operator()(lr_ldp_engine_t h) const noexcept { if (h) lr_ldp_engine_free(h); }
+};
+using LdpEngineHandle = std::unique_ptr<OpaqueLdpEngine, LdpEngineDeleter>;
+
+struct LdpFecDeleter {
+    void operator()(lr_ldp_fec_t h) const noexcept { if (h) lr_ldp_fec_free(h); }
+};
+using LdpFecHandle = std::unique_ptr<OpaqueLdpFec, LdpFecDeleter>;
+
+struct LdpLabelStoreDeleter {
+    void operator()(lr_ldp_label_store_t h) const noexcept { if (h) lr_ldp_label_store_free(h); }
+};
+using LdpLabelStoreHandle = std::unique_ptr<OpaqueLdpLabelStore, LdpLabelStoreDeleter>;
+
+struct LdpLabelDeleter {
+    void operator()(lr_ldp_label_t h) const noexcept { if (h) lr_ldp_label_free(h); }
+};
+using LdpLabelHandle = std::unique_ptr<OpaqueLdpGenericLabel, LdpLabelDeleter>;
+
+struct LdpPduDeleter {
+    void operator()(lr_ldp_pdu_t h) const noexcept { if (h) lr_ldp_pdu_free(h); }
+};
+using LdpPduHandle = std::unique_ptr<OpaqueLdpPdu, LdpPduDeleter>;
+
+struct LdpSessionDeleter {
+    void operator()(lr_ldp_session_t h) const noexcept { if (h) lr_ldp_session_free(h); }
+};
+using LdpSessionHandle = std::unique_ptr<OpaqueLdpSession, LdpSessionDeleter>;
+
+struct LdpTransitDeleter {
+    void operator()(lr_ldp_transit_t h) const noexcept { if (h) lr_ldp_transit_free(h); }
+};
+using LdpTransitHandle = std::unique_ptr<OpaqueLdpTransit, LdpTransitDeleter>;
+
+struct LocRibDeleter {
+    void operator()(lr_loc_rib_t h) const noexcept { if (h) lr_loc_rib_free(h); }
+};
+using LocRibHandle = std::unique_ptr<OpaqueLocRib, LocRibDeleter>;
+
+struct MemoryConnDeleter {
+    void operator()(lr_memory_conn_t h) const noexcept { if (h) lr_memory_conn_free(h); }
+};
+using MemoryConnHandle = std::unique_ptr<OpaqueMemoryConn, MemoryConnDeleter>;
+
+struct MplsLabelStackDeleter {
+    void operator()(lr_mpls_label_stack_t h) const noexcept { if (h) lr_mpls_label_stack_free(h); }
+};
+using MplsLabelStackHandle = std::unique_ptr<OpaqueMplsLabelStack, MplsLabelStackDeleter>;
+
+struct MplsLabelDeleter {
+    void operator()(lr_mpls_label_t h) const noexcept { if (h) lr_mpls_label_free(h); }
+};
+using MplsLabelHandle = std::unique_ptr<OpaqueMplsLabel, MplsLabelDeleter>;
+
+struct MrtReaderDeleter {
+    void operator()(lr_mrt_reader_t h) const noexcept { if (h) lr_mrt_reader_free(h); }
+};
+using MrtReaderHandle = std::unique_ptr<OpaqueMrtReader, MrtReaderDeleter>;
+
+struct MrtRecordDeleter {
+    void operator()(lr_mrt_record_t h) const noexcept { if (h) lr_mrt_record_free(h); }
+};
+using MrtRecordHandle = std::unique_ptr<OpaqueMrtRecord, MrtRecordDeleter>;
+
+struct MrtRibDumpDeleter {
+    void operator()(lr_mrt_rib_dump_t h) const noexcept { if (h) lr_mrt_rib_dump_free(h); }
+};
+using MrtRibDumpHandle = std::unique_ptr<OpaqueMrtRibDump, MrtRibDumpDeleter>;
+
+struct OspfAsbrDestDeleter {
+    void operator()(lr_ospf_asbr_dest_t h) const noexcept { if (h) lr_ospf_asbr_dest_free(h); }
+};
+using OspfAsbrDestHandle = std::unique_ptr<OpaqueOspfAsbrDest, OspfAsbrDestDeleter>;
+
+struct OspfCryptoAuthDeleter {
+    void operator()(lr_ospf_crypto_auth_t h) const noexcept { if (h) lr_ospf_crypto_auth_free(h); }
+};
+using OspfCryptoAuthHandle = std::unique_ptr<OpaqueOspfCryptoAuth, OspfCryptoAuthDeleter>;
+
+struct OspfDbExchangeDeleter {
+    void operator()(lr_ospf_db_exchange_t h) const noexcept { if (h) lr_ospf_db_exchange_free(h); }
+};
+using OspfDbExchangeHandle = std::unique_ptr<OpaqueOspfDbExchange, OspfDbExchangeDeleter>;
+
+struct OspfExternalDestDeleter {
+    void operator()(lr_ospf_external_dest_t h) const noexcept { if (h) lr_ospf_external_dest_free(h); }
+};
+using OspfExternalDestHandle = std::unique_ptr<OpaqueOspfExternalDest, OspfExternalDestDeleter>;
+
+struct OspfExternalRouteDeleter {
+    void operator()(lr_ospf_external_route_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using OspfExternalRouteHandle = std::unique_ptr<OpaqueOspfExternalRoute, OspfExternalRouteDeleter>;
+
+struct OspfExternalRouteV3Deleter {
+    void operator()(lr_ospf_external_route_v3_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using OspfExternalRouteV3Handle = std::unique_ptr<OpaqueOspfExternalRouteV3, OspfExternalRouteV3Deleter>;
+
+struct OspfExternalRouteV3VecDeleter {
+    void operator()(lr_ospf_external_route_v3_vec_t h) const noexcept { if (h) lr_ospf_external_route_v3_vec_free(h); }
+};
+using OspfExternalRouteV3VecHandle = std::unique_ptr<OpaqueOspfExternalRouteV3Vec, OspfExternalRouteV3VecDeleter>;
+
+struct OspfExternalRouteVecDeleter {
+    void operator()(lr_ospf_external_route_vec_t h) const noexcept { if (h) lr_ospf_external_route_vec_free(h); }
+};
+using OspfExternalRouteVecHandle = std::unique_ptr<OpaqueOspfExternalRouteVec, OspfExternalRouteVecDeleter>;
+
+struct OspfHelperEntryDeleter {
+    void operator()(lr_ospf_helper_entry_t h) const noexcept { if (h) lr_ospf_helper_entry_free(h); }
+};
+using OspfHelperEntryHandle = std::unique_ptr<OpaqueOspfHelperEntry, OspfHelperEntryDeleter>;
+
+struct OspfIfActionDeleter {
+    void operator()(lr_ospf_if_action_t h) const noexcept { if (h) lr_ospf_interface_action_free(h); }
+};
+using OspfIfActionHandle = std::unique_ptr<OpaqueOspfIfAction, OspfIfActionDeleter>;
+
+struct OspfInterfaceDeleter {
+    void operator()(lr_ospf_interface_t h) const noexcept { if (h) lr_ospf_interface_free(h); }
+};
+using OspfInterfaceHandle = std::unique_ptr<OpaqueOspfInterface, OspfInterfaceDeleter>;
+
+struct OspfLsaBoxDeleter {
+    void operator()(lr_ospf_lsa_box_t h) const noexcept { if (h) lr_ospf_lsa_free(h); }
+};
+using OspfLsaBoxHandle = std::unique_ptr<OpaqueOspfLsaBox, OspfLsaBoxDeleter>;
+
+struct OspfLsaHdrBoxDeleter {
+    void operator()(lr_ospf_lsa_hdr_box_t h) const noexcept { if (h) lr_ospf_lsa_header_free(h); }
+};
+using OspfLsaHdrBoxHandle = std::unique_ptr<OpaqueOspfLsaHdrBox, OspfLsaHdrBoxDeleter>;
+
+struct OspfLsdbDeleter {
+    void operator()(lr_ospf_lsdb_t h) const noexcept { if (h) lr_ospf_lsdb_free(h); }
+};
+using OspfLsdbHandle = std::unique_ptr<OpaqueOspfLsdb, OspfLsdbDeleter>;
+
+struct OspfNeighborDeleter {
+    void operator()(lr_ospf_neighbor_t h) const noexcept { if (h) lr_ospf_neighbor_free(h); }
+};
+using OspfNeighborHandle = std::unique_ptr<OpaqueOspfNeighbor, OspfNeighborDeleter>;
+
+struct OspfNssaDefaultDeleter {
+    void operator()(lr_ospf_nssa_default_t h) const noexcept { if (h) lr_ospf_nssa_default_free(h); }
+};
+using OspfNssaDefaultHandle = std::unique_ptr<OpaqueOspfNssaDefault, OspfNssaDefaultDeleter>;
+
+struct OspfNssaRouteVecDeleter {
+    void operator()(lr_ospf_nssa_route_vec_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using OspfNssaRouteVecHandle = std::unique_ptr<OpaqueOspfExternalRouteVec, OspfNssaRouteVecDeleter>;
+
+struct OspfPacketDeleter {
+    void operator()(lr_ospf_packet_t h) const noexcept { if (h) lr_ospf_packet_free(h); }
+};
+using OspfPacketHandle = std::unique_ptr<OpaqueOspfPacket, OspfPacketDeleter>;
+
+struct OspfRestartTrackerDeleter {
+    void operator()(lr_ospf_restart_tracker_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using OspfRestartTrackerHandle = std::unique_ptr<OpaqueOspfRestartTracker, OspfRestartTrackerDeleter>;
+
+struct OspfRetransmitDeleter {
+    void operator()(lr_ospf_retransmit_t h) const noexcept { if (h) lr_ospf_retransmit_free(h); }
+};
+using OspfRetransmitHandle = std::unique_ptr<OpaqueOspfRetransmitList, OspfRetransmitDeleter>;
+
+struct OspfRouterLsaLinkDeleter {
+    void operator()(lr_ospf_router_lsa_link_t h) const noexcept { if (h) lr_ospf_router_lsa_link_free(h); }
+};
+using OspfRouterLsaLinkHandle = std::unique_ptr<OpaqueOspfRouterLsaLink, OspfRouterLsaLinkDeleter>;
+
+struct OspfSimplePasswordDeleter {
+    void operator()(lr_ospf_simple_password_t h) const noexcept { if (h) lr_ospf_simple_password_free(h); }
+};
+using OspfSimplePasswordHandle = std::unique_ptr<OpaqueOspfSimplePassword, OspfSimplePasswordDeleter>;
+
+struct OspfSpfResultDeleter {
+    void operator()(lr_ospf_spf_result_t h) const noexcept { if (h) lr_ospf_spf_result_free(h); }
+};
+using OspfSpfResultHandle = std::unique_ptr<OpaqueOspfSpfResult, OspfSpfResultDeleter>;
+
+struct OspfSpfV3ResultDeleter {
+    void operator()(lr_ospf_spf_v3_result_t h) const noexcept { if (h) lr_ospf_spf_v3_result_free(h); }
+};
+using OspfSpfV3ResultHandle = std::unique_ptr<OpaqueOspfSpfResultV3, OspfSpfV3ResultDeleter>;
+
+struct OspfSrDbDeleter {
+    void operator()(lr_ospf_sr_db_t h) const noexcept { if (h) lr_ospf_sr_db_free(h); }
+};
+using OspfSrDbHandle = std::unique_ptr<OpaqueOspfSrDb, OspfSrDbDeleter>;
+
+struct OspfSrv6DbDeleter {
+    void operator()(lr_ospf_srv6_db_t h) const noexcept { if (h) lr_ospf_srv6_db_free(h); }
+};
+using OspfSrv6DbHandle = std::unique_ptr<OpaqueOspfSrv6Db, OspfSrv6DbDeleter>;
+
+struct OspfSummaryDestDeleter {
+    void operator()(lr_ospf_summary_dest_t h) const noexcept { if (h) lr_ospf_summary_dest_free(h); }
+};
+using OspfSummaryDestHandle = std::unique_ptr<OpaqueOspfSummaryDest, OspfSummaryDestDeleter>;
+
+struct OspfV3AuthDeleter {
+    void operator()(lr_ospf_v3_auth_t h) const noexcept { if (h) lr_ospf_v3_auth_free(h); }
+};
+using OspfV3AuthHandle = std::unique_ptr<OpaqueOspfV3Auth, OspfV3AuthDeleter>;
+
+struct OspfV3ExternalDestDeleter {
+    void operator()(lr_ospf_v3_external_dest_t h) const noexcept { if (h) lr_ospf_v3_external_dest_free(h); }
+};
+using OspfV3ExternalDestHandle = std::unique_ptr<OpaqueOspfV3ExternalDest, OspfV3ExternalDestDeleter>;
+
+struct OsrouteDeleter {
+    void operator()(lr_osroute_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using OsrouteHandle = std::unique_ptr<OpaqueOsRouteTable, OsrouteDeleter>;
+
+struct PolicyChainDeleter {
+    void operator()(lr_policy_chain_t h) const noexcept { if (h) lr_policy_chain_free(h); }
+};
+using PolicyChainHandle = std::unique_ptr<OpaquePolicyChain, PolicyChainDeleter>;
+
+struct PolicyDeleter {
+    void operator()(lr_policy_t h) const noexcept { if (h) lr_policy_free(h); }
+};
+using PolicyHandle = std::unique_ptr<OpaquePolicy, PolicyDeleter>;
+
+struct PrefixListDeleter {
+    void operator()(lr_prefix_list_t h) const noexcept { if (h) lr_prefix_list_free(h); }
+};
+using PrefixListHandle = std::unique_ptr<OpaquePrefixList, PrefixListDeleter>;
+
+struct ReadBufDeleter {
+    void operator()(lr_read_buf_t h) const noexcept { if (h) lr_read_buf_free(h); }
+};
+using ReadBufHandle = std::unique_ptr<OpaqueReadBuf, ReadBufDeleter>;
+
+struct ResolverDeleter {
+    void operator()(lr_resolver_t h) const noexcept { if (h) lr_resolver_free(h); }
+};
+using ResolverHandle = std::unique_ptr<OpaqueResolver, ResolverDeleter>;
+
+struct RibMuxDeleter {
+    void operator()(lr_rib_mux_t h) const noexcept { if (h) lr_rib_mux_free(h); }
+};
+using RibMuxHandle = std::unique_ptr<OpaqueRibMux, RibMuxDeleter>;
+
+struct RoaStoreDeleter {
+    void operator()(lr_roa_store_t h) const noexcept { if (h) lr_roa_store_free(h); }
+};
+using RoaStoreHandle = std::unique_ptr<OpaqueRoaStore, RoaStoreDeleter>;
+
+struct RoaTableBuilderDeleter {
+    void operator()(lr_roa_table_builder_t h) const noexcept { if (h) lr_roa_table_builder_free(h); }
+};
+using RoaTableBuilderHandle = std::unique_ptr<OpaqueRoaTableBuilder, RoaTableBuilderDeleter>;
+
+struct RoaTableDeleter {
+    void operator()(lr_roa_table_t h) const noexcept { if (h) lr_roa_table_free(h); }
+};
+using RoaTableHandle = std::unique_ptr<OpaqueRoaTable, RoaTableDeleter>;
+
+struct RouteMapDeleter {
+    void operator()(lr_route_map_t h) const noexcept { if (h) lr_route_map_free(h); }
+};
+using RouteMapHandle = std::unique_ptr<OpaqueRouteMap, RouteMapDeleter>;
+
+struct RouteDeleter {
+    void operator()(lr_route_t h) const noexcept { if (h) lr_route_free(h); }
+};
+using RouteHandle = std::unique_ptr<OpaqueRoute, RouteDeleter>;
+
+struct RouterDeleter {
+    void operator()(lr_router_t /*h*/) const noexcept { /* no free — owned by parent */ }
+};
+using RouterHandle = std::unique_ptr<OpaqueRouter, RouterDeleter>;
+
+struct RtrClientDeleter {
+    void operator()(lr_rtr_client_t h) const noexcept { if (h) lr_rtr_client_free(h); }
+};
+using RtrClientHandle = std::unique_ptr<OpaqueRtrClient, RtrClientDeleter>;
+
+struct RtrPduDeleter {
+    void operator()(lr_rtr_pdu_t h) const noexcept { if (h) lr_rtr_pdu_free(h); }
+};
+using RtrPduHandle = std::unique_ptr<OpaqueRtrPdu, RtrPduDeleter>;
+
+struct SafetyNetDeleter {
+    void operator()(lr_safety_net_t h) const noexcept { if (h) lr_safety_net_free(h); }
+};
+using SafetyNetHandle = std::unique_ptr<OpaqueSafetyNet, SafetyNetDeleter>;
+
+struct Seg6LocalRouteDeleter {
+    void operator()(lr_seg6_local_route_t h) const noexcept { if (h) lr_seg6_local_route_free(h); }
+};
+using Seg6LocalRouteHandle = std::unique_ptr<OpaqueSeg6LocalRoute, Seg6LocalRouteDeleter>;
+
+struct Seg6NetlinkDeleter {
+    void operator()(lr_seg6_netlink_t h) const noexcept { if (h) lr_seg6_netlink_free(h); }
+};
+using Seg6NetlinkHandle = std::unique_ptr<OpaqueSeg6Netlink, Seg6NetlinkDeleter>;
+
+struct Seg6RouteDeleter {
+    void operator()(lr_seg6_route_t h) const noexcept { if (h) lr_seg6_route_free(h); }
+};
+using Seg6RouteHandle = std::unique_ptr<OpaqueSeg6Route, Seg6RouteDeleter>;
+
+struct SessionConfigDeleter {
+    void operator()(lr_session_config_t h) const noexcept { if (h) lr_session_config_free(h); }
+};
+using SessionConfigHandle = std::unique_ptr<OpaqueSessionConfig, SessionConfigDeleter>;
+
+struct Srv6LocatorDeleter {
+    void operator()(lr_srv6_locator_t h) const noexcept { if (h) lr_srv6_locator_free(h); }
+};
+using Srv6LocatorHandle = std::unique_ptr<OpaqueSrv6Locator, Srv6LocatorDeleter>;
+
+struct Srv6SidDeleter {
+    void operator()(lr_srv6_sid_t h) const noexcept { if (h) lr_srv6_sid_free(h); }
+};
+using Srv6SidHandle = std::unique_ptr<OpaqueSrv6Sid, Srv6SidDeleter>;
+
+struct Srv6SrhDeleter {
+    void operator()(lr_srv6_srh_t h) const noexcept { if (h) lr_srv6_srh_free(h); }
+};
+using Srv6SrhHandle = std::unique_ptr<OpaqueSrv6Srh, Srv6SrhDeleter>;
+
+struct TcpAuthDeleter {
+    void operator()(lr_tcp_auth_t h) const noexcept { if (h) lr_tcp_auth_free(h); }
+};
+using TcpAuthHandle = std::unique_ptr<OpaqueTcpAuth, TcpAuthDeleter>;
+
+struct TimerQueueDeleter {
+    void operator()(lr_timer_queue_t h) const noexcept { if (h) lr_timer_queue_free(h); }
+};
+using TimerQueueHandle = std::unique_ptr<OpaqueTimerQueue, TimerQueueDeleter>;
+
+struct WriteBufDeleter {
+    void operator()(lr_write_buf_t h) const noexcept { if (h) lr_write_buf_free(h); }
+};
+using WriteBufHandle = std::unique_ptr<OpaqueWriteBuf, WriteBufDeleter>;
+
+inline std::uint8_t babel_tlv_type_from_u8(std::uint8_t wire) {
+    return lr_babel_tlv_type_from_u8(wire);
+}
+
+inline std::uint8_t babel_tlv_type_to_u8(std::uint8_t value) {
+    return lr_babel_tlv_type_to_u8(value);
+}
+
+inline const char* babel_tlv_type_name(std::uint8_t value) {
+    return lr_babel_tlv_type_name(value);
+}
+
+inline struct lr_best_path_config_t best_path_config_default() {
+    return lr_best_path_config_default();
+}
+
+inline struct lr_best_path_config_t best_path_config_new(std::uint8_t always_compare_med, std::uint8_t missing_med_as_infinity, std::uint8_t deterministic_router_id, std::uint8_t prefer_externals, std::uint8_t count_confed_in_path_len, std::uint32_t multipath, std::uint8_t multipath_relax, std::uint8_t graceful_shutdown_least_preferred, std::uint8_t compare_igp_metric, std::uint8_t prefer_next_hop_self) {
+    return lr_best_path_config_new(always_compare_med, missing_med_as_infinity, deterministic_router_id, prefer_externals, count_confed_in_path_len, multipath, multipath_relax, graceful_shutdown_least_preferred, compare_igp_metric, prefer_next_hop_self);
+}
+
+inline std::int32_t best_path_compare(lr_route_t a, lr_route_t b, struct lr_best_path_config_t cfg) {
+    std::int32_t rc = lr_best_path_compare(a, b, cfg);
+    if (rc < 0) throw Error(std::string("lr_best_path_compare failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_route_t best_path_select(const lr_route_t* routes, std::uintptr_t count, struct lr_best_path_config_t cfg) {
+    return lr_best_path_select(routes, count, cfg);
+}
+
+inline std::int32_t best_path_rank(const lr_route_t* routes, std::uintptr_t count, struct lr_best_path_config_t cfg, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_best_path_rank(routes, count, cfg, out);
+    if (rc < 0) throw Error(std::string("lr_best_path_rank failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t best_path_multipath(const lr_route_t* routes, std::uintptr_t count, struct lr_best_path_config_t cfg, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_best_path_multipath(routes, count, cfg, out);
+    if (rc < 0) throw Error(std::string("lr_best_path_multipath failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t best_path_compare_multipath(lr_route_t a, lr_route_t b, struct lr_best_path_config_t cfg) {
+    std::int32_t rc = lr_best_path_compare_multipath(a, b, cfg);
+    if (rc < 0) throw Error(std::string("lr_best_path_compare_multipath failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void bfd_session_event_array_free(lr_bfd_session_event_t* array, std::uintptr_t count) {
+    lr_bfd_session_event_array_free(array, count);
+}
+
+inline lr_bgp_codec_t bgp_codec_with_asn4(std::uint8_t asn4) {
+    return lr_bgp_codec_with_asn4(asn4);
+}
+
+inline std::int32_t bgp_reconcile_as4(std::uint8_t wire_present, const std::uint8_t* wire_data, std::uintptr_t wire_len, std::uint8_t as4_present, const std::uint8_t* as4_data, std::uintptr_t as4_len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_reconcile_as4(wire_present, wire_data, wire_len, as4_present, as4_data, as4_len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_reconcile_as4 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_decode_tlv_stream(const std::uint8_t* data, std::uintptr_t len, std::uintptr_t* out_count, struct lr_bgp_ls_tlv_t ** out_array) {
+    std::int32_t rc = lr_bgp_decode_tlv_stream(data, len, out_count, out_array);
+    if (rc < 0) throw Error(std::string("lr_bgp_decode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_encode_tlv_stream(const struct lr_bgp_ls_tlv_t* tlvs, std::uintptr_t count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_encode_tlv_stream(tlvs, count, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_encode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_t* arr, std::uintptr_t count) {
+    lr_bgp_ls_tlv_array_free(arr, count);
+}
+
+inline std::int32_t bgp_labeled_nlri_encode_list(const std::uint8_t* data, std::uintptr_t len, std::uint8_t add_path, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_labeled_nlri_encode_list(data, len, add_path, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_labeled_nlri_encode_list failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_bgp_community_t bgp_community_from_u32(std::uint32_t value) {
+    return lr_bgp_community_from_u32(value);
+}
+
+inline lr_bgp_community_t bgp_community_new_well_known(std::int32_t kind) {
+    return lr_bgp_community_new_well_known(kind);
+}
+
+inline std::int32_t bgp_community_encode_set(const std::uint32_t* values, std::uintptr_t count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_community_encode_set(values, count, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_community_encode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_community_decode_set(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out_values, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bgp_community_decode_set(data, len, out_values, out_count);
+    if (rc < 0) throw Error(std::string("lr_bgp_community_decode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_large_community_encode_set(const std::uint32_t* triples, std::uintptr_t count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_large_community_encode_set(triples, count, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_large_community_encode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_large_community_decode_set(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out_values, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bgp_large_community_decode_set(data, len, out_values, out_count);
+    if (rc < 0) throw Error(std::string("lr_bgp_large_community_decode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_ext_community_encode_set(const std::uint32_t* specs, std::uintptr_t count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_ext_community_encode_set(specs, count, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_ext_community_encode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_ext_community_decode_set(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out_values, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bgp_ext_community_decode_set(data, len, out_values, out_count);
+    if (rc < 0) throw Error(std::string("lr_bgp_ext_community_decode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t bgp_error_code_from_u8(std::uint8_t v) {
+    return lr_bgp_error_code_from_u8(v);
+}
+
+inline std::uint8_t bgp_error_code_to_u8(std::uint8_t v) {
+    return lr_bgp_error_code_to_u8(v);
+}
+
+inline const char* bgp_error_code_name(std::uint8_t v) {
+    return lr_bgp_error_code_name(v);
+}
+
+inline std::uint8_t bgp_open_error_subcode_from_u8(std::uint8_t v) {
+    return lr_bgp_open_error_subcode_from_u8(v);
+}
+
+inline std::uint8_t bgp_open_error_subcode_to_u8(std::uint8_t v) {
+    return lr_bgp_open_error_subcode_to_u8(v);
+}
+
+inline const char* bgp_open_error_subcode_name(std::uint8_t v) {
+    return lr_bgp_open_error_subcode_name(v);
+}
+
+inline std::uint8_t bgp_update_error_subcode_from_u8(std::uint8_t v) {
+    return lr_bgp_update_error_subcode_from_u8(v);
+}
+
+inline std::uint8_t bgp_update_error_subcode_to_u8(std::uint8_t v) {
+    return lr_bgp_update_error_subcode_to_u8(v);
+}
+
+inline const char* bgp_update_error_subcode_name(std::uint8_t v) {
+    return lr_bgp_update_error_subcode_name(v);
+}
+
+inline std::uint8_t bgp_header_error_subcode_from_u8(std::uint8_t v) {
+    return lr_bgp_header_error_subcode_from_u8(v);
+}
+
+inline std::uint8_t bgp_header_error_subcode_to_u8(std::uint8_t v) {
+    return lr_bgp_header_error_subcode_to_u8(v);
+}
+
+inline const char* bgp_header_error_subcode_name(std::uint8_t v) {
+    return lr_bgp_header_error_subcode_name(v);
+}
+
+inline std::uint8_t bgp_cease_subcode_from_u8(std::uint8_t v) {
+    return lr_bgp_cease_subcode_from_u8(v);
+}
+
+inline std::uint8_t bgp_cease_subcode_to_u8(std::uint8_t v) {
+    return lr_bgp_cease_subcode_to_u8(v);
+}
+
+inline const char* bgp_cease_subcode_name(std::uint8_t v) {
+    return lr_bgp_cease_subcode_name(v);
+}
+
+inline std::uint8_t bgp_message_type_from_u8(std::uint8_t v) {
+    return lr_bgp_message_type_from_u8(v);
+}
+
+inline std::uint8_t bgp_message_type_to_u8(std::uint8_t v) {
+    return lr_bgp_message_type_to_u8(v);
+}
+
+inline const char* bgp_message_type_name(std::uint8_t v) {
+    return lr_bgp_message_type_name(v);
+}
+
+inline std::uint8_t bgp_capability_code_from_u8(std::uint8_t v) {
+    return lr_bgp_capability_code_from_u8(v);
+}
+
+inline std::uint8_t bgp_capability_code_to_u8(std::uint8_t v) {
+    return lr_bgp_capability_code_to_u8(v);
+}
+
+inline const char* bgp_capability_code_name(std::uint8_t v) {
+    return lr_bgp_capability_code_name(v);
+}
+
+inline std::uint16_t bgp_ls_nlri_type_from_u16(std::uint16_t v) {
+    return lr_bgp_ls_nlri_type_from_u16(v);
+}
+
+inline std::uint16_t bgp_ls_nlri_type_to_u16(std::uint16_t v) {
+    return lr_bgp_ls_nlri_type_to_u16(v);
+}
+
+inline const char* bgp_ls_nlri_type_name(std::uint16_t v) {
+    return lr_bgp_ls_nlri_type_name(v);
+}
+
+inline std::uint8_t bgp_as_path_type_from_u8(std::uint8_t v) {
+    return lr_bgp_as_path_type_from_u8(v);
+}
+
+inline std::uint8_t bgp_as_path_type_to_u8(std::uint8_t v) {
+    return lr_bgp_as_path_type_to_u8(v);
+}
+
+inline const char* bgp_as_path_type_name(std::uint8_t v) {
+    return lr_bgp_as_path_type_name(v);
+}
+
+inline std::uint8_t bgp_origin_kind_from_u8(std::uint8_t v) {
+    return lr_bgp_origin_kind_from_u8(v);
+}
+
+inline std::uint8_t bgp_origin_kind_to_u8(std::uint8_t v) {
+    return lr_bgp_origin_kind_to_u8(v);
+}
+
+inline const char* bgp_origin_kind_name(std::uint8_t v) {
+    return lr_bgp_origin_kind_name(v);
+}
+
+inline std::uint8_t bgp_community_kind_from_u8(std::uint8_t v) {
+    return lr_bgp_community_kind_from_u8(v);
+}
+
+inline std::uint8_t bgp_community_kind_to_u8(std::uint8_t v) {
+    return lr_bgp_community_kind_to_u8(v);
+}
+
+inline const char* bgp_community_kind_name(std::uint8_t v) {
+    return lr_bgp_community_kind_name(v);
+}
+
+inline std::uint8_t bgp_route_refresh_subtype_from_u8(std::uint8_t v) {
+    return lr_bgp_route_refresh_subtype_from_u8(v);
+}
+
+inline std::uint8_t bgp_route_refresh_subtype_to_u8(std::uint8_t v) {
+    return lr_bgp_route_refresh_subtype_to_u8(v);
+}
+
+inline const char* bgp_route_refresh_subtype_name(std::uint8_t v) {
+    return lr_bgp_route_refresh_subtype_name(v);
+}
+
+inline struct lr_bgp_ls_tlv_t bgp_ls_tlv_new(std::uint16_t tlv_type, const std::uint8_t* value, std::uintptr_t value_len) {
+    return lr_bgp_ls_tlv_new(tlv_type, value, value_len);
+}
+
+inline std::uint16_t bgp_ls_tlv_type(struct lr_bgp_ls_tlv_t t) {
+    return lr_bgp_ls_tlv_type(t);
+}
+
+inline std::uintptr_t bgp_ls_tlv_value_len(struct lr_bgp_ls_tlv_t t) {
+    return lr_bgp_ls_tlv_value_len(t);
+}
+
+inline std::int32_t bgp_ls_tlv_value(struct lr_bgp_ls_tlv_t t, std::uint8_t* out, std::uintptr_t cap) {
+    std::int32_t rc = lr_bgp_ls_tlv_value(t, out, cap);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_tlv_value failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void bgp_ls_tlv_free(struct lr_bgp_ls_tlv_t t) {
+    lr_bgp_ls_tlv_free(t);
+}
+
+inline std::int32_t bgp_ls_decode_tlv_stream(const std::uint8_t* data, std::uintptr_t len, lr_bgp_ls_tlv_vec_t* out) {
+    std::int32_t rc = lr_bgp_ls_decode_tlv_stream(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_decode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_ls_encode_tlv_stream(lr_bgp_ls_tlv_vec_t vec, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_ls_encode_tlv_stream(vec, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_encode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_ls_attr_decode(const std::uint8_t* data, std::uintptr_t len, lr_bgp_ls_attr_t* out) {
+    std::int32_t rc = lr_bgp_ls_attr_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_attr_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_bgp_message_t bgp_message_new_open(std::uint32_t my_as, std::uint16_t hold_time, std::uint32_t bgp_id, std::uint8_t as4) {
+    return lr_bgp_message_new_open(my_as, hold_time, bgp_id, as4);
+}
+
+inline lr_bgp_message_t bgp_message_new_update() {
+    return lr_bgp_message_new_update();
+}
+
+inline lr_bgp_message_t bgp_message_new_notification(std::uint8_t error_code, std::uint8_t error_subcode, const std::uint8_t* data, std::uintptr_t data_len) {
+    return lr_bgp_message_new_notification(error_code, error_subcode, data, data_len);
+}
+
+inline lr_bgp_message_t bgp_message_new_notification_from_code(std::uint8_t error_code, std::uint8_t error_subcode, const std::uint8_t* data, std::uintptr_t data_len) {
+    return lr_bgp_message_new_notification_from_code(error_code, error_subcode, data, data_len);
+}
+
+inline lr_bgp_message_t bgp_message_new_keepalive() {
+    return lr_bgp_message_new_keepalive();
+}
+
+inline lr_bgp_message_t bgp_message_new_route_refresh(std::uint16_t afi, std::uint8_t safi, std::uint8_t subtype) {
+    return lr_bgp_message_new_route_refresh(afi, safi, subtype);
+}
+
+inline lr_bgp_message_t bgp_message_new_begin_of_rib(std::uint16_t afi, std::uint8_t safi) {
+    return lr_bgp_message_new_begin_of_rib(afi, safi);
+}
+
+inline lr_bgp_message_t bgp_message_new_end_of_rib(std::uint16_t afi, std::uint8_t safi) {
+    return lr_bgp_message_new_end_of_rib(afi, safi);
+}
+
+inline lr_bgp_message_t bgp_message_new_open_auto_as4(std::uint32_t my_as, std::uint16_t hold_time, std::uint32_t bgp_id) {
+    return lr_bgp_message_new_open_auto_as4(my_as, hold_time, bgp_id);
+}
+
+inline std::uint8_t bgp_attr_type_to_u8(std::uint8_t t) {
+    return lr_bgp_attr_type_to_u8(t);
+}
+
+inline std::int32_t bgp_attr_type_from_u8(std::uint8_t wire, std::uint8_t* out_canonical) {
+    std::int32_t rc = lr_bgp_attr_type_from_u8(wire, out_canonical);
+    if (rc < 0) throw Error(std::string("lr_bgp_attr_type_from_u8 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_bgp_as_path_t bgp_as_path_from_sequence(const std::uint32_t* ases, std::uintptr_t count) {
+    return lr_bgp_as_path_from_sequence(ases, count);
+}
+
+inline lr_bgp_as_path_t bgp_as_path_decode_2(const std::uint8_t* data, std::uintptr_t len) {
+    return lr_bgp_as_path_decode_2(data, len);
+}
+
+inline lr_bgp_as_path_t bgp_as_path_decode_4(const std::uint8_t* data, std::uintptr_t len) {
+    return lr_bgp_as_path_decode_4(data, len);
+}
+
+inline std::int32_t bgp_compute_originator_id(std::uint8_t existing_present, const std::uint8_t* existing_addr, std::uint32_t local_bgp_id, std::uint8_t* out_addr, std::uint8_t* out_present) {
+    std::int32_t rc = lr_bgp_compute_originator_id(existing_present, existing_addr, local_bgp_id, out_addr, out_present);
+    if (rc < 0) throw Error(std::string("lr_bgp_compute_originator_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t bgp_cluster_list_has_loop(const std::uint8_t* cluster_list, std::uintptr_t count, std::uint32_t local_cluster) {
+    return lr_bgp_cluster_list_has_loop(cluster_list, count, local_cluster);
+}
+
+inline std::int32_t bgp_prepend_cluster_id(const std::uint8_t* cluster_list, std::uintptr_t count, std::uint32_t local_cluster, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_prepend_cluster_id(cluster_list, count, local_cluster, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_prepend_cluster_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_otc_on_receive(std::uint8_t existing_present, std::uint32_t existing_value, std::uint8_t local_role, std::uint32_t peer_as, std::uint32_t* out_value, std::uint8_t* out_present) {
+    std::int32_t rc = lr_bgp_otc_on_receive(existing_present, existing_value, local_role, peer_as, out_value, out_present);
+    if (rc < 0) throw Error(std::string("lr_bgp_otc_on_receive failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t bgp_otc_can_advertise(std::uint32_t route_otc, std::uint8_t local_role) {
+    return lr_bgp_otc_can_advertise(route_otc, local_role);
+}
+
+inline void bgp_ext_next_hop_tuple_array_free(struct lr_bgp_ext_next_hop_tuple_t* arr, std::uintptr_t count) {
+    lr_bgp_ext_next_hop_tuple_array_free(arr, count);
+}
+
+inline std::uint8_t bgp_ext_next_hop_supports(const struct lr_bgp_ext_next_hop_tuple_t* tuples, std::uintptr_t count, std::uint16_t nlri_afi, std::uint8_t nlri_safi, std::uint16_t nh_afi) {
+    return lr_bgp_ext_next_hop_supports(tuples, count, nlri_afi, nlri_safi, nh_afi);
+}
+
+inline std::int32_t bgp_labeled_nlri_ipv4_implicit_null(const std::uint8_t* prefix_addr, std::uint8_t prefix_len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_labeled_nlri_ipv4_implicit_null(prefix_addr, prefix_len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_labeled_nlri_ipv4_implicit_null failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bmp_decode(const std::uint8_t* data, std::uintptr_t len, lr_bmp_message_t* out) {
+    std::int32_t rc = lr_bmp_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bmp_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bmp_encode(lr_bmp_message_t message, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bmp_encode(message, out);
+    if (rc < 0) throw Error(std::string("lr_bmp_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_bmp_message_t bmp_message_route_monitoring(const struct lr_bmp_peer_header_t* peer, const std::uint8_t* bgp_update, std::uintptr_t bgp_len) {
+    return lr_bmp_message_route_monitoring(peer, bgp_update, bgp_len);
+}
+
+inline lr_bmp_message_t bmp_message_termination(const struct lr_bmp_tlv_t* info, std::uintptr_t count) {
+    return lr_bmp_message_termination(info, count);
+}
+
+inline lr_bmp_message_t bmp_message_initiation(const struct lr_bmp_tlv_t* info, std::uintptr_t count) {
+    return lr_bmp_message_initiation(info, count);
+}
+
+inline lr_bmp_message_t bmp_message_peer_down(const struct lr_bmp_peer_header_t* peer, std::uint8_t reason, const std::uint8_t* data, std::uintptr_t data_len) {
+    return lr_bmp_message_peer_down(peer, reason, data, data_len);
+}
+
+inline lr_bmp_message_t bmp_message_peer_up(const struct lr_bmp_peer_header_t* peer, const std::uint8_t* local_addr, std::uintptr_t local_addr_len, std::uint16_t local_port, std::uint16_t remote_port, const std::uint8_t* sent_open, std::uintptr_t sent_open_len, const std::uint8_t* received_open, std::uintptr_t received_open_len) {
+    return lr_bmp_message_peer_up(peer, local_addr, local_addr_len, local_port, remote_port, sent_open, sent_open_len, received_open, received_open_len);
+}
+
+inline std::uint8_t bmp_peer_flags_is_ipv6(std::uint8_t peer_flags) {
+    return lr_bmp_peer_flags_is_ipv6(peer_flags);
+}
+
+inline std::uint8_t bmp_peer_flags_is_post_policy(std::uint8_t peer_flags) {
+    return lr_bmp_peer_flags_is_post_policy(peer_flags);
+}
+
+inline std::uint8_t bmp_peer_flags_is_legacy_as_path(std::uint8_t peer_flags) {
+    return lr_bmp_peer_flags_is_legacy_as_path(peer_flags);
+}
+
+inline std::uint8_t bgp_cap_code_from_wire(std::uint8_t wire) {
+    return lr_bgp_cap_code_from_wire(wire);
+}
+
+inline lr_bgp_capability_t bgp_cap_four_octet_as(std::uint32_t asn) {
+    return lr_bgp_cap_four_octet_as(asn);
+}
+
+inline std::uint8_t bgp_cap_code(lr_bgp_capability_t cap) {
+    return lr_bgp_cap_code(cap);
+}
+
+inline std::uintptr_t bgp_cap_value_len(lr_bgp_capability_t cap) {
+    return lr_bgp_cap_value_len(cap);
+}
+
+inline std::uintptr_t bgp_cap_value(lr_bgp_capability_t cap, std::uint8_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_value(cap, out, cap_size);
+}
+
+inline std::uint32_t bgp_cap_as_four_octet(lr_bgp_capability_t cap) {
+    return lr_bgp_cap_as_four_octet(cap);
+}
+
+inline lr_bgp_capability_t bgp_cap_multiprotocol(std::uint16_t afi, std::uint8_t safi) {
+    return lr_bgp_cap_multiprotocol(afi, safi);
+}
+
+inline std::uint8_t bgp_cap_as_multiprotocol(lr_bgp_capability_t cap, std::uint16_t* out_afi, std::uint8_t* out_safi) {
+    return lr_bgp_cap_as_multiprotocol(cap, out_afi, out_safi);
+}
+
+inline lr_bgp_capability_t bgp_cap_extended_next_hop(const struct lr_bgp_ext_next_hop_tuple_t* tuples, std::uintptr_t count) {
+    return lr_bgp_cap_extended_next_hop(tuples, count);
+}
+
+inline std::uintptr_t bgp_cap_extended_next_hop_len(lr_bgp_capability_t cap) {
+    return lr_bgp_cap_extended_next_hop_len(cap);
+}
+
+inline std::uintptr_t bgp_cap_extended_next_hop_tuples(lr_bgp_capability_t cap, struct lr_bgp_ext_next_hop_tuple_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_extended_next_hop_tuples(cap, out, cap_size);
+}
+
+inline lr_bgp_capability_t bgp_cap_new(std::uint8_t code, const std::uint8_t* value, std::uintptr_t value_len) {
+    return lr_bgp_cap_new(code, value, value_len);
+}
+
+inline void bgp_cap_free(lr_bgp_capability_t cap) {
+    lr_bgp_cap_free(cap);
+}
+
+inline lr_bgp_capability_t bgp_cap_route_refresh() {
+    return lr_bgp_cap_route_refresh();
+}
+
+inline lr_bgp_capability_t bgp_cap_add_path(const struct lr_bgp_cap_add_path_family_t* families, std::uintptr_t count) {
+    return lr_bgp_cap_add_path(families, count);
+}
+
+inline std::uintptr_t bgp_cap_as_add_path_len(lr_bgp_capability_t cap) {
+    return lr_bgp_cap_as_add_path_len(cap);
+}
+
+inline std::uintptr_t bgp_cap_as_add_path(lr_bgp_capability_t cap, struct lr_bgp_cap_add_path_family_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_as_add_path(cap, out, cap_size);
+}
+
+inline lr_bgp_capability_t bgp_cap_enhanced_rr() {
+    return lr_bgp_cap_enhanced_rr();
+}
+
+inline lr_bgp_capability_t bgp_cap_graceful_restart(std::uint8_t restart_flags, std::uint16_t restart_time_secs, const struct lr_bgp_cap_gr_family_t* families, std::uintptr_t count) {
+    return lr_bgp_cap_graceful_restart(restart_flags, restart_time_secs, families, count);
+}
+
+inline std::uint8_t bgp_cap_as_graceful_restart(lr_bgp_capability_t cap, std::uint8_t* out_flags, std::uint16_t* out_time) {
+    return lr_bgp_cap_as_graceful_restart(cap, out_flags, out_time);
+}
+
+inline std::uintptr_t bgp_cap_as_graceful_restart_families_len(lr_bgp_capability_t cap) {
+    return lr_bgp_cap_as_graceful_restart_families_len(cap);
+}
+
+inline std::uintptr_t bgp_cap_as_graceful_restart_families(lr_bgp_capability_t cap, struct lr_bgp_cap_gr_family_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_as_graceful_restart_families(cap, out, cap_size);
+}
+
+inline lr_bgp_capability_t bgp_cap_long_lived_gr(const struct lr_bgp_cap_llgr_family_t* families, std::uintptr_t count) {
+    return lr_bgp_cap_long_lived_gr(families, count);
+}
+
+inline std::uintptr_t bgp_cap_as_long_lived_gr_len(lr_bgp_capability_t cap) {
+    return lr_bgp_cap_as_long_lived_gr_len(cap);
+}
+
+inline std::uintptr_t bgp_cap_as_long_lived_gr(lr_bgp_capability_t cap, struct lr_bgp_cap_llgr_family_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_as_long_lived_gr(cap, out, cap_size);
+}
+
+inline std::int32_t bgp_cap_encode_set(const lr_bgp_capability_t* caps, std::uintptr_t count, lr_bytes_t_handle* out) {
+    std::int32_t rc = lr_bgp_cap_encode_set(caps, count, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_cap_encode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_cap_decode_set(const std::uint8_t* data, std::uintptr_t len, lr_bgp_capability_array_t* out_caps, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bgp_cap_decode_set(data, len, out_caps, out_count);
+    if (rc < 0) throw Error(std::string("lr_bgp_cap_decode_set failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void bgp_cap_bytes_free(lr_bytes_t_handle b) {
+    lr_bgp_cap_bytes_free(b);
+}
+
+inline std::uintptr_t bgp_cap_bytes_len(lr_bytes_t_handle b) {
+    return lr_bgp_cap_bytes_len(b);
+}
+
+inline const std::uint8_t* bgp_cap_bytes_ptr(lr_bytes_t_handle b) {
+    return lr_bgp_cap_bytes_ptr(b);
+}
+
+inline void bgp_cap_array_free(lr_bgp_capability_array_t arr, std::uintptr_t count) {
+    lr_bgp_cap_array_free(arr, count);
+}
+
+inline std::int32_t bgp_decode(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_decode_v2(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ospf_decode_v2(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_decode_v2 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t babel_decode(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_babel_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_babel_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_encode_ipv4_nlri(const struct lr_prefix_t* prefixes, std::uintptr_t count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_encode_ipv4_nlri(prefixes, count, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_encode_ipv4_nlri failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_decode_ipv4_nlri(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_decode_ipv4_nlri(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_decode_ipv4_nlri failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline struct lr_asn_t asn_new(std::uint32_t value) {
+    return lr_asn_new(value);
+}
+
+inline struct lr_router_id_t router_id_from_u32(std::uint32_t value) {
+    return lr_router_id_from_u32(value);
+}
+
+inline IpAddr* ip_addr_from_bytes(const std::uint8_t* bytes, std::uintptr_t len) {
+    return lr_ip_addr_from_bytes(bytes, len);
+}
+
+inline std::int32_t damping_default_config(struct lr_damping_config_t* out) {
+    std::int32_t rc = lr_damping_default_config(out);
+    if (rc < 0) throw Error(std::string("lr_damping_default_config failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t damping_config_new(std::uint32_t additive_incr, std::uint32_t suppress_threshold, std::uint32_t reuse_threshold, std::uint32_t upper_limit, std::uint64_t decay_interval_s, double decay_factor_active, double decay_factor_withdrawn, struct lr_damping_config_t* out) {
+    std::int32_t rc = lr_damping_config_new(additive_incr, suppress_threshold, reuse_threshold, upper_limit, decay_interval_s, decay_factor_active, decay_factor_withdrawn, out);
+    if (rc < 0) throw Error(std::string("lr_damping_config_new failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t damping_config_validate(const struct lr_damping_config_t* cfg) {
+    std::int32_t rc = lr_damping_config_validate(cfg);
+    if (rc < 0) throw Error(std::string("lr_damping_config_validate failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void damping_config_free(struct lr_damping_config_t _cfg) {
+    lr_damping_config_free(_cfg);
+}
+
+inline std::uint8_t bfd_auth_type_from_u8(std::uint8_t v) {
+    return lr_bfd_auth_type_from_u8(v);
+}
+
+inline std::uint8_t bfd_auth_type_to_u8(std::uint8_t v) {
+    return lr_bfd_auth_type_to_u8(v);
+}
+
+inline const char* bfd_auth_type_name(std::uint8_t v) {
+    return lr_bfd_auth_type_name(v);
+}
+
+inline std::uint8_t bfd_diagnostic_from_u8(std::uint8_t v) {
+    return lr_bfd_diagnostic_from_u8(v);
+}
+
+inline std::uint8_t bfd_diagnostic_to_u8(std::uint8_t v) {
+    return lr_bfd_diagnostic_to_u8(v);
+}
+
+inline const char* bfd_diagnostic_name(std::uint8_t v) {
+    return lr_bfd_diagnostic_name(v);
+}
+
+inline std::uint8_t bfd_state_from_u8(std::uint8_t v) {
+    return lr_bfd_state_from_u8(v);
+}
+
+inline std::uint8_t bfd_state_to_u8(std::uint8_t v) {
+    return lr_bfd_state_to_u8(v);
+}
+
+inline const char* bfd_state_name(std::uint8_t v) {
+    return lr_bfd_state_name(v);
+}
+
+inline std::uint8_t bfd_keyed_auth_algorithm_from_u8(std::uint8_t v) {
+    return lr_bfd_keyed_auth_algorithm_from_u8(v);
+}
+
+inline std::uint8_t bfd_keyed_auth_algorithm_to_u8(std::uint8_t v) {
+    return lr_bfd_keyed_auth_algorithm_to_u8(v);
+}
+
+inline const char* bfd_keyed_auth_algorithm_name(std::uint8_t v) {
+    return lr_bfd_keyed_auth_algorithm_name(v);
+}
+
+inline std::uint8_t bmp_msg_type_from_u8(std::uint8_t v) {
+    return lr_bmp_msg_type_from_u8(v);
+}
+
+inline std::uint8_t bmp_msg_type_to_u8(std::uint8_t v) {
+    return lr_bmp_msg_type_to_u8(v);
+}
+
+inline const char* bmp_msg_type_name(std::uint8_t v) {
+    return lr_bmp_msg_type_name(v);
+}
+
+inline std::uint8_t bmp_peer_type_from_u8(std::uint8_t v) {
+    return lr_bmp_peer_type_from_u8(v);
+}
+
+inline std::uint8_t bmp_peer_type_to_u8(std::uint8_t v) {
+    return lr_bmp_peer_type_to_u8(v);
+}
+
+inline const char* bmp_peer_type_name(std::uint8_t v) {
+    return lr_bmp_peer_type_name(v);
+}
+
+inline std::uint8_t bmp_peer_down_reason_from_u8(std::uint8_t v) {
+    return lr_bmp_peer_down_reason_from_u8(v);
+}
+
+inline std::uint8_t bmp_peer_down_reason_to_u8(std::uint8_t v) {
+    return lr_bmp_peer_down_reason_to_u8(v);
+}
+
+inline const char* bmp_peer_down_reason_name(std::uint8_t v) {
+    return lr_bmp_peer_down_reason_name(v);
+}
+
+inline std::uint8_t ospf_lsa_type_v2_from_u8(std::uint8_t v) {
+    return lr_ospf_lsa_type_v2_from_u8(v);
+}
+
+inline std::uint8_t ospf_lsa_type_v2_to_u8(std::uint8_t v) {
+    return lr_ospf_lsa_type_v2_to_u8(v);
+}
+
+inline const char* ospf_lsa_type_v2_name(std::uint8_t v) {
+    return lr_ospf_lsa_type_v2_name(v);
+}
+
+inline std::uint16_t ospf_lsa_type_v3_from_u16(std::uint16_t v) {
+    return lr_ospf_lsa_type_v3_from_u16(v);
+}
+
+inline std::uint16_t ospf_lsa_type_v3_to_u16(std::uint16_t v) {
+    return lr_ospf_lsa_type_v3_to_u16(v);
+}
+
+inline const char* ospf_lsa_type_v3_name(std::uint16_t v) {
+    return lr_ospf_lsa_type_v3_name(v);
+}
+
+inline std::uint8_t ospf_router_link_type_from_u8(std::uint8_t v) {
+    return lr_ospf_router_link_type_from_u8(v);
+}
+
+inline std::uint8_t ospf_router_link_type_to_u8(std::uint8_t v) {
+    return lr_ospf_router_link_type_to_u8(v);
+}
+
+inline const char* ospf_router_link_type_name(std::uint8_t v) {
+    return lr_ospf_router_link_type_name(v);
+}
+
+inline std::uint16_t ldp_message_type_from_u16(std::uint16_t v) {
+    return lr_ldp_message_type_from_u16(v);
+}
+
+inline std::uint16_t ldp_message_type_to_u16(std::uint16_t v) {
+    return lr_ldp_message_type_to_u16(v);
+}
+
+inline const char* ldp_message_type_name(std::uint16_t v) {
+    return lr_ldp_message_type_name(v);
+}
+
+inline std::uint16_t ldp_tlv_type_from_u16(std::uint16_t v) {
+    return lr_ldp_tlv_type_from_u16(v);
+}
+
+inline std::uint16_t ldp_tlv_type_to_u16(std::uint16_t v) {
+    return lr_ldp_tlv_type_to_u16(v);
+}
+
+inline const char* ldp_tlv_type_name(std::uint16_t v) {
+    return lr_ldp_tlv_type_name(v);
+}
+
+inline std::uint8_t ldp_advertisement_mode_from_u8(std::uint8_t v) {
+    return lr_ldp_advertisement_mode_from_u8(v);
+}
+
+inline std::uint8_t ldp_advertisement_mode_to_u8(std::uint8_t v) {
+    return lr_ldp_advertisement_mode_to_u8(v);
+}
+
+inline const char* ldp_advertisement_mode_name(std::uint8_t v) {
+    return lr_ldp_advertisement_mode_name(v);
+}
+
+inline const char* router_ospf_network_type_name(std::int32_t v) {
+    return lr_router_ospf_network_type_name(v);
+}
+
+inline const char* router_session_error_kind_name(std::int32_t v) {
+    return lr_router_session_error_kind_name(v);
+}
+
+inline const char* srv6_sid_parse_error_name(std::int32_t v) {
+    return lr_srv6_sid_parse_error_name(v);
+}
+
+inline const char* srv6_locator_parse_error_name(std::int32_t v) {
+    return lr_srv6_locator_parse_error_name(v);
+}
+
+inline const char* mpls_label_stack_error_name(std::int32_t v) {
+    return lr_mpls_label_stack_error_name(v);
+}
+
+inline std::uint32_t abi_version() {
+    return lr_abi_version();
+}
+
+inline lr_mpls_label_t mpls_label_new_value(std::uint32_t value) {
+    return lr_mpls_label_new_value(value);
+}
+
+inline std::uint8_t mpls_label_is_valid_value(std::uint32_t value) {
+    return lr_mpls_label_is_valid_value(value);
+}
+
+inline lr_mpls_label_stack_t mpls_label_stack_from_vec(const lr_mpls_label_t* labels, std::uintptr_t count) {
+    return lr_mpls_label_stack_from_vec(labels, count);
+}
+
+inline std::int32_t bfd_auth_type_from_algorithm(std::int32_t algorithm) {
+    std::int32_t rc = lr_bfd_auth_type_from_algorithm(algorithm);
+    if (rc < 0) throw Error(std::string("lr_bfd_auth_type_from_algorithm failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_session_config_t session_config_bgp(std::uint32_t local_as, std::uint32_t peer_as, std::uint32_t local_bgp_id) {
+    return lr_session_config_bgp(local_as, peer_as, local_bgp_id);
+}
+
+inline lr_session_config_t session_config_ospfv2(std::uint32_t router_id, std::uint32_t area_id) {
+    return lr_session_config_ospfv2(router_id, area_id);
+}
+
+inline lr_session_config_t session_config_ospfv3(std::uint32_t router_id, std::uint32_t area_id) {
+    return lr_session_config_ospfv3(router_id, area_id);
+}
+
+inline lr_session_config_t session_config_babel(const std::uint8_t* addr, std::uintptr_t addr_len) {
+    return lr_session_config_babel(addr, addr_len);
+}
+
+inline std::uint8_t gtsm_error_is_kernel_unsupported(std::int32_t err_code) {
+    return lr_gtsm_error_is_kernel_unsupported(err_code);
+}
+
+inline std::uint8_t tcp_auth_error_is_kernel_unsupported(std::int32_t err_code) {
+    return lr_tcp_auth_error_is_kernel_unsupported(err_code);
+}
+
+inline std::int32_t policy_peephole_optimize(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_policy_peephole_optimize(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_policy_peephole_optimize failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t policy_lexer_tokenize(const char* src, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_policy_lexer_tokenize(src, out);
+    if (rc < 0) throw Error(std::string("lr_policy_lexer_tokenize failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_filter_t policy_parse_filter(const char* name, const char* src) {
+    return lr_policy_parse_filter(name, src);
+}
+
+inline std::uint8_t policy_value_truthy(std::int32_t value_kind) {
+    return lr_policy_value_truthy(value_kind);
+}
+
+inline std::uint8_t policy_binary_op_precedence(std::int32_t op) {
+    return lr_policy_binary_op_precedence(op);
+}
+
+inline std::uint8_t policy_route_field_is_settable(std::int32_t kind) {
+    return lr_policy_route_field_is_settable(kind);
+}
+
+inline std::int32_t ip_net_into_inner(const struct lr_prefix_t* net, struct lr_prefix_t* out) {
+    std::int32_t rc = lr_ip_net_into_inner(net, out);
+    if (rc < 0) throw Error(std::string("lr_ip_net_into_inner failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline struct lr_ldp_id_t ldp_id_new(const std::uint8_t* lsr_id, std::uint16_t label_space) {
+    return lr_ldp_id_new(lsr_id, label_space);
+}
+
+inline std::int32_t ldp_id_to_bytes(struct lr_ldp_id_t id, std::uint8_t* out) {
+    std::int32_t rc = lr_ldp_id_to_bytes(id, out);
+    if (rc < 0) throw Error(std::string("lr_ldp_id_to_bytes failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline struct lr_ldp_id_t ldp_id_from_bytes(const std::uint8_t* bytes) {
+    return lr_ldp_id_from_bytes(bytes);
+}
+
+inline std::int32_t ldp_encode_hello_pdu(struct lr_ldp_id_t sender, std::uint32_t message_id, std::uint16_t hold_time, std::uint8_t target, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ldp_encode_hello_pdu(sender, message_id, hold_time, target, out);
+    if (rc < 0) throw Error(std::string("lr_ldp_encode_hello_pdu failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ldp_decode(const std::uint8_t* data, std::uintptr_t len, lr_ldp_pdu_t* out) {
+    std::int32_t rc = lr_ldp_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_ldp_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ldp_fec_t ldp_fec_new_wildcard() {
+    return lr_ldp_fec_new_wildcard();
+}
+
+inline lr_ldp_fec_t ldp_fec_new_prefix(const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len) {
+    return lr_ldp_fec_new_prefix(prefix_v4, prefix_v6, prefix_len);
+}
+
+inline std::uint32_t ldp_status_code_new(std::uint32_t code) {
+    return lr_ldp_status_code_new(code);
+}
+
+inline std::uint8_t ldp_status_code_is_fatal(std::uint32_t code) {
+    return lr_ldp_status_code_is_fatal(code);
+}
+
+inline std::uint8_t ldp_status_code_is_forward(std::uint32_t code) {
+    return lr_ldp_status_code_is_forward(code);
+}
+
+inline std::uint32_t babel_link_cost(std::uint16_t rxcost) {
+    return lr_babel_link_cost(rxcost);
+}
+
+inline std::int32_t ldp_compare_transport_addrs(std::uint8_t a_is_v6, const std::uint8_t* a, std::uint8_t b_is_v6, const std::uint8_t* b) {
+    std::int32_t rc = lr_ldp_compare_transport_addrs(a_is_v6, a, b_is_v6, b);
+    if (rc < 0) throw Error(std::string("lr_ldp_compare_transport_addrs failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ldp_role_for(std::uint8_t local_is_v6, const std::uint8_t* local, std::uint8_t remote_is_v6, const std::uint8_t* remote) {
+    std::int32_t rc = lr_ldp_role_for(local_is_v6, local, remote_is_v6, remote);
+    if (rc < 0) throw Error(std::string("lr_ldp_role_for failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_sr_remote_label(std::uint32_t srgb_base, std::uint32_t srgb_range, std::uint32_t sid, std::uint8_t flags, std::uint32_t* out, std::uint8_t* out_present) {
+    std::int32_t rc = lr_ospf_sr_remote_label(srgb_base, srgb_range, sid, flags, out, out_present);
+    if (rc < 0) throw Error(std::string("lr_ospf_sr_remote_label failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_sr_encode_ri_lsa_body(std::uint32_t srgb_base, std::uint32_t srgb_range, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ospf_sr_encode_ri_lsa_body(srgb_base, srgb_range, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_sr_encode_ri_lsa_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_sr_decode_ri_lsa_body(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out_srgb_base, std::uint32_t* out_srgb_range, std::uint8_t* out_present) {
+    std::int32_t rc = lr_ospf_sr_decode_ri_lsa_body(data, len, out_srgb_base, out_srgb_range, out_present);
+    if (rc < 0) throw Error(std::string("lr_ospf_sr_decode_ri_lsa_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_sr_opaque_type_from_lsid(std::uint32_t link_state_id) {
+    return lr_ospf_sr_opaque_type_from_lsid(link_state_id);
+}
+
+inline std::int32_t mpls_label_stack_decode_3octet_count(const std::uint8_t* data, std::uintptr_t len, std::uintptr_t count, lr_mpls_label_stack_t* out) {
+    std::int32_t rc = lr_mpls_label_stack_decode_3octet_count(data, len, count, out);
+    if (rc < 0) throw Error(std::string("lr_mpls_label_stack_decode_3octet_count failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t mpls_stack_last_err_code() {
+    std::int32_t rc = lr_mpls_stack_last_err_code();
+    if (rc < 0) throw Error(std::string("lr_mpls_stack_last_err_code failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t mrt_decode(const std::uint8_t* data, std::uintptr_t len, lr_mrt_record_t* out) {
+    std::int32_t rc = lr_mrt_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_mrt_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t mrt_encode_peer_index_table(std::uint32_t timestamp, std::uint32_t collector_bgp_id, const char* view_name, const struct lr_mrt_peer_entry_t* peers, std::uintptr_t peer_count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_mrt_encode_peer_index_table(timestamp, collector_bgp_id, view_name, peers, peer_count, out);
+    if (rc < 0) throw Error(std::string("lr_mrt_encode_peer_index_table failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t mrt_encode_rib_table(std::uint32_t timestamp, std::uint32_t sequence, const std::uint8_t* prefix_addr, std::uint8_t prefix_len, std::uint8_t is_ipv6, std::uint8_t add_path, const struct lr_mrt_rib_entry_t* entries, std::uintptr_t entry_count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_mrt_encode_rib_table(timestamp, sequence, prefix_addr, prefix_len, is_ipv6, add_path, entries, entry_count, out);
+    if (rc < 0) throw Error(std::string("lr_mrt_encode_rib_table failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t mrt_walk_attributes(const struct lr_mrt_rib_entry_t* entry, struct lr_mrt_attr_summary_t* out_summary, std::uint8_t* as_path_buf, std::uintptr_t as_path_cap, std::uint8_t* communities_buf, std::uintptr_t communities_cap) {
+    std::int32_t rc = lr_mrt_walk_attributes(entry, out_summary, as_path_buf, as_path_cap, communities_buf, communities_cap);
+    if (rc < 0) throw Error(std::string("lr_mrt_walk_attributes failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_mrt_record_t mrt_record_bgp4mp_message(std::uint32_t peer_as, std::uint32_t local_as, std::uint16_t ifindex, std::uint16_t af, const std::uint8_t* peer_addr, std::uintptr_t peer_addr_len, const std::uint8_t* local_addr, std::uintptr_t local_addr_len, const std::uint8_t* message, std::uintptr_t message_len) {
+    return lr_mrt_record_bgp4mp_message(peer_as, local_as, ifindex, af, peer_addr, peer_addr_len, local_addr, local_addr_len, message, message_len);
+}
+
+inline lr_mrt_record_t mrt_record_bgp4mp_state_change(std::uint32_t peer_as, std::uint32_t local_as, std::uint16_t ifindex, std::uint16_t af, const std::uint8_t* peer_addr, std::uintptr_t peer_addr_len, const std::uint8_t* local_addr, std::uintptr_t local_addr_len, std::uint16_t old_state, std::uint16_t new_state) {
+    return lr_mrt_record_bgp4mp_state_change(peer_as, local_as, ifindex, af, peer_addr, peer_addr_len, local_addr, local_addr_len, old_state, new_state);
+}
+
+inline std::int32_t mrt_encode_attributes(lr_attributes_t attrs, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_mrt_encode_attributes(attrs, out);
+    if (rc < 0) throw Error(std::string("lr_mrt_encode_attributes failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_decode_v2_packet(const std::uint8_t* data, std::uintptr_t len, lr_ospf_packet_t* out) {
+    std::int32_t rc = lr_ospf_decode_v2_packet(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_decode_v2_packet failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_decode_v3_packet(const std::uint8_t* data, std::uintptr_t len, lr_ospf_packet_t* out) {
+    std::int32_t rc = lr_ospf_decode_v3_packet(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_decode_v3_packet failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_encode_packet(lr_ospf_packet_t packet, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ospf_encode_packet(packet, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_encode_packet failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_finalize_v2_packet(std::uint8_t* bytes, std::uintptr_t len) {
+    return lr_ospf_finalize_v2_packet(bytes, len);
+}
+
+inline std::uintptr_t ospf_finalize_v2_stream(std::uint8_t* bytes, std::uintptr_t len) {
+    return lr_ospf_finalize_v2_stream(bytes, len);
+}
+
+inline std::uint8_t ospf_v2_packet_checksum_ok(const std::uint8_t* bytes, std::uintptr_t len) {
+    return lr_ospf_v2_packet_checksum_ok(bytes, len);
+}
+
+inline std::uint8_t ospf_finalize_v3_packet(std::uint8_t* bytes, std::uintptr_t len, const std::uint8_t* src, const std::uint8_t* dst) {
+    return lr_ospf_finalize_v3_packet(bytes, len, src, dst);
+}
+
+inline std::uintptr_t ospf_finalize_v3_stream(std::uint8_t* bytes, std::uintptr_t len, const std::uint8_t* src, const std::uint8_t* dst) {
+    return lr_ospf_finalize_v3_stream(bytes, len, src, dst);
+}
+
+inline std::int32_t ospf_summary_lsa_id_for(const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, const std::uint32_t* existing, std::uintptr_t count, std::uint32_t* out) {
+    std::int32_t rc = lr_ospf_summary_lsa_id_for(prefix_v4, prefix_v6, prefix_len, existing, count, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_summary_lsa_id_for failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_originate_summary_lsa(std::uint32_t router_id, lr_ospf_summary_dest_t dest, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_summary_lsa(router_id, dest, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_summary_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_flush_summary_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_flush_summary_lsa(existing, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_flush_summary_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_originate_v3_inter_area_prefix_lsa(std::uint32_t router_id, std::uint32_t ls_id, lr_ospf_summary_dest_t dest, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_v3_inter_area_prefix_lsa(router_id, ls_id, dest, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_v3_inter_area_prefix_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_originate_nssa_lsa(std::uint32_t router_id, lr_ospf_external_dest_t dest, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_nssa_lsa(router_id, dest, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_nssa_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_flush_nssa_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_flush_nssa_lsa(existing, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_flush_nssa_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_originate_nssa_default_lsa(std::uint32_t router_id, lr_ospf_nssa_default_t default_dest, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_nssa_default_lsa(router_id, default_dest, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_nssa_default_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_is_elected_translator(lr_ospf_lsdb_t lsdb, std::uint32_t router_id) {
+    return lr_ospf_is_elected_translator(lsdb, router_id);
+}
+
+inline std::uint8_t ospf_nssa_p_bit_set(lr_ospf_lsa_box_t lsa) {
+    return lr_ospf_nssa_p_bit_set(lsa);
+}
+
+inline lr_ospf_nssa_route_vec_t ospf_nssa_routes(lr_ospf_lsdb_t lsdb, lr_ospf_spf_result_t spf_result, struct lr_ospf_nssa_calc_opts_t opts) {
+    return lr_ospf_nssa_routes(lsdb, spf_result, opts);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_nssa_routes_v3(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t spf_result, struct lr_ospf_nssa_calc_opts_t opts) {
+    return lr_ospf_nssa_routes_v3(lsdb, spf_result, opts);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_nssa_routes_v3_extended(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t spf_result, struct lr_ospf_nssa_calc_opts_t opts) {
+    return lr_ospf_nssa_routes_v3_extended(lsdb, spf_result, opts);
+}
+
+inline std::uint16_t ospf_au_type_from_u16(std::uint16_t wire) {
+    return lr_ospf_au_type_from_u16(wire);
+}
+
+inline std::uint16_t ospf_au_type_to_u16(std::uint16_t value) {
+    return lr_ospf_au_type_to_u16(value);
+}
+
+inline const char* ospf_au_type_name(std::uint16_t value) {
+    return lr_ospf_au_type_name(value);
+}
+
+inline std::uint8_t ospf_crypto_algorithm_to_u8(std::uint8_t value) {
+    return lr_ospf_crypto_algorithm_to_u8(value);
+}
+
+inline std::uint8_t ospf_crypto_algorithm_from_u8(std::uint8_t value) {
+    return lr_ospf_crypto_algorithm_from_u8(value);
+}
+
+inline const char* ospf_crypto_algorithm_name(std::uint8_t value) {
+    return lr_ospf_crypto_algorithm_name(value);
+}
+
+inline std::uintptr_t ospf_crypto_algorithm_digest_len(std::uint8_t value) {
+    return lr_ospf_crypto_algorithm_digest_len(value);
+}
+
+inline std::uintptr_t ospf_crypto_algorithm_trailer_len(std::uint8_t value) {
+    return lr_ospf_crypto_algorithm_trailer_len(value);
+}
+
+inline std::uint32_t ospf_hello_network_mask(lr_ospf_packet_t p) {
+    return lr_ospf_hello_network_mask(p);
+}
+
+inline std::uint16_t ospf_hello_interval(lr_ospf_packet_t p) {
+    return lr_ospf_hello_interval(p);
+}
+
+inline std::uint32_t ospf_hello_options(lr_ospf_packet_t p) {
+    return lr_ospf_hello_options(p);
+}
+
+inline std::uint8_t ospf_hello_priority(lr_ospf_packet_t p) {
+    return lr_ospf_hello_priority(p);
+}
+
+inline std::uint32_t ospf_hello_dead_interval(lr_ospf_packet_t p) {
+    return lr_ospf_hello_dead_interval(p);
+}
+
+inline std::uint32_t ospf_hello_dr(lr_ospf_packet_t p) {
+    return lr_ospf_hello_dr(p);
+}
+
+inline std::uint32_t ospf_hello_bdr(lr_ospf_packet_t p) {
+    return lr_ospf_hello_bdr(p);
+}
+
+inline std::uintptr_t ospf_hello_neighbor_count(lr_ospf_packet_t p) {
+    return lr_ospf_hello_neighbor_count(p);
+}
+
+inline std::uint32_t ospf_hello_neighbor_at(lr_ospf_packet_t p, std::uintptr_t index) {
+    return lr_ospf_hello_neighbor_at(p, index);
+}
+
+inline std::uint16_t ospf_db_desc_mtu(lr_ospf_packet_t p) {
+    return lr_ospf_db_desc_mtu(p);
+}
+
+inline std::uint32_t ospf_db_desc_options(lr_ospf_packet_t p) {
+    return lr_ospf_db_desc_options(p);
+}
+
+inline std::uint8_t ospf_db_desc_flags(lr_ospf_packet_t p) {
+    return lr_ospf_db_desc_flags(p);
+}
+
+inline std::uint32_t ospf_db_desc_seq(lr_ospf_packet_t p) {
+    return lr_ospf_db_desc_seq(p);
+}
+
+inline std::uintptr_t ospf_db_desc_lsa_header_count(lr_ospf_packet_t p) {
+    return lr_ospf_db_desc_lsa_header_count(p);
+}
+
+inline std::int32_t ospf_db_desc_lsa_header_at(lr_ospf_packet_t p, std::uintptr_t index, struct lr_ospf_lsa_hdr_t* out) {
+    std::int32_t rc = lr_ospf_db_desc_lsa_header_at(p, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_desc_lsa_header_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t ospf_ls_update_lsa_count(lr_ospf_packet_t p) {
+    return lr_ospf_ls_update_lsa_count(p);
+}
+
+inline std::uintptr_t ospf_ls_update_lsa_len(lr_ospf_packet_t p) {
+    return lr_ospf_ls_update_lsa_len(p);
+}
+
+inline lr_ospf_db_exchange_t ospf_db_exchange_with_version(std::uint32_t router_id, std::uint32_t area_id, std::uint16_t iface_mtu, std::uint8_t version) {
+    return lr_ospf_db_exchange_with_version(router_id, area_id, iface_mtu, version);
+}
+
+inline void ospf_db_exchange_packet_array_free(lr_ospf_packet_t* packets, std::uintptr_t count) {
+    lr_ospf_db_exchange_packet_array_free(packets, count);
+}
+
+inline void ospf_db_exchange_step_free(struct lr_ospf_exchange_step_t* step) {
+    lr_ospf_db_exchange_step_free(step);
+}
+
+inline std::int32_t ospf_packet_type_from_u8(std::uint8_t v) {
+    std::int32_t rc = lr_ospf_packet_type_from_u8(v);
+    if (rc < 0) throw Error(std::string("lr_ospf_packet_type_from_u8 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline const char* ospf_packet_type_name(std::uint8_t v) {
+    return lr_ospf_packet_type_name(v);
+}
+
+inline std::int32_t ospf_version_from_u8(std::uint8_t v) {
+    std::int32_t rc = lr_ospf_version_from_u8(v);
+    if (rc < 0) throw Error(std::string("lr_ospf_version_from_u8 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline const char* ospf_neighbor_state_name(std::uint8_t state) {
+    return lr_ospf_neighbor_state_name(state);
+}
+
+inline const char* ospf_if_state_name(std::uint8_t state) {
+    return lr_ospf_if_state_name(state);
+}
+
+inline const char* ospf_db_exchange_phase_name(std::uint8_t phase) {
+    return lr_ospf_db_exchange_phase_name(phase);
+}
+
+inline std::uint8_t ospf_external_metric_type_e_bit(std::uint8_t t) {
+    return lr_ospf_external_metric_type_e_bit(t);
+}
+
+inline std::uint8_t ospf_external_metric_type_from_e_bit(std::uint8_t e_bit) {
+    return lr_ospf_external_metric_type_from_e_bit(e_bit);
+}
+
+inline std::int32_t ospf_grace_tlv_type_from_u16(std::uint16_t v) {
+    std::int32_t rc = lr_ospf_grace_tlv_type_from_u16(v);
+    if (rc < 0) throw Error(std::string("lr_ospf_grace_tlv_type_from_u16 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_grace_reason_from_u8(std::uint8_t v) {
+    std::int32_t rc = lr_ospf_grace_reason_from_u8(v);
+    if (rc < 0) throw Error(std::string("lr_ospf_grace_reason_from_u8 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint16_t ospf_router_lsa_flags_to_word(std::uint8_t virtual_link, std::uint8_t asbr, std::uint8_t border) {
+    return lr_ospf_router_lsa_flags_to_word(virtual_link, asbr, border);
+}
+
+inline std::int32_t ospf_router_lsa_flags_from_word(std::uint16_t word, std::uint8_t* out_v, std::uint8_t* out_e, std::uint8_t* out_b) {
+    std::int32_t rc = lr_ospf_router_lsa_flags_from_word(word, out_v, out_e, out_b);
+    if (rc < 0) throw Error(std::string("lr_ospf_router_lsa_flags_from_word failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_originate_external_lsa(std::uint32_t router_id, lr_ospf_external_dest_t dest, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_external_lsa(router_id, dest, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_external_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_flush_external_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_flush_external_lsa(existing, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_flush_external_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_originate_summary_asbr_lsa(std::uint32_t router_id, lr_ospf_asbr_dest_t asbr_dest, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_summary_asbr_lsa(router_id, asbr_dest, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_summary_asbr_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ospf_external_route_vec_t ospf_external_routes(lr_ospf_lsdb_t lsdb, lr_ospf_spf_result_t spf_result) {
+    return lr_ospf_external_routes(lsdb, spf_result);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_external_routes_v3(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t spf_result) {
+    return lr_ospf_external_routes_v3(lsdb, spf_result);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_external_routes_v3_extended(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t spf_result) {
+    return lr_ospf_external_routes_v3_extended(lsdb, spf_result);
+}
+
+inline std::uint8_t ospf_interface_action_kind(lr_ospf_if_action_t a) {
+    return lr_ospf_interface_action_kind(a);
+}
+
+inline std::int32_t ospf_interface_action_peer_state_name(lr_ospf_if_action_t a, std::uint8_t* out, std::uintptr_t cap) {
+    std::int32_t rc = lr_ospf_interface_action_peer_state_name(a, out, cap);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_action_peer_state_name failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void ospf_interface_action_free(lr_ospf_if_action_t a) {
+    lr_ospf_interface_action_free(a);
+}
+
+inline void ospf_interface_action_array_free(lr_ospf_if_action_t* array, std::uintptr_t count) {
+    lr_ospf_interface_action_array_free(array, count);
+}
+
+inline std::int32_t ospf_elect(const struct lr_ospf_elector_t* electors, std::uintptr_t count, std::uint32_t self_router_id, std::uint32_t self_ip, std::uint8_t self_priority, std::uint32_t self_stated_dr, std::uint32_t self_stated_bdr, std::uint32_t* out_dr, std::uint32_t* out_bdr) {
+    std::int32_t rc = lr_ospf_elect(electors, count, self_router_id, self_ip, self_priority, self_stated_dr, self_stated_bdr, out_dr, out_bdr);
+    if (rc < 0) throw Error(std::string("lr_ospf_elect failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_elect_v3(const struct lr_ospf_v3_elector_t* electors, std::uintptr_t count, std::uint32_t self_router_id, std::uint8_t self_priority, std::uint32_t self_stated_dr, std::uint32_t self_stated_bdr, std::uint32_t* out_dr, std::uint32_t* out_bdr) {
+    std::int32_t rc = lr_ospf_elect_v3(electors, count, self_router_id, self_priority, self_stated_dr, self_stated_bdr, out_dr, out_bdr);
+    if (rc < 0) throw Error(std::string("lr_ospf_elect_v3 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t ospf_clamp_grace_period(std::uint32_t secs) {
+    return lr_ospf_clamp_grace_period(secs);
+}
+
+inline std::uint32_t ospf_mask_to_prefix_len(std::uint32_t mask) {
+    return lr_ospf_mask_to_prefix_len(mask);
+}
+
+inline std::uint32_t ospf_prefix_len_to_mask(std::uint8_t len) {
+    return lr_ospf_prefix_len_to_mask(len);
+}
+
+inline std::uint16_t ospf_grace_lsa_type() {
+    return lr_ospf_grace_lsa_type();
+}
+
+inline std::uint32_t ospf_opaque_lsa_id(std::uint8_t opaque_type, std::uint32_t opaque_id) {
+    return lr_ospf_opaque_lsa_id(opaque_type, opaque_id);
+}
+
+inline std::int32_t ospf_unpack_opaque_lsa_id(std::uint32_t link_state_id, std::uint8_t* out_type, std::uint32_t* out_id) {
+    std::int32_t rc = lr_ospf_unpack_opaque_lsa_id(link_state_id, out_type, out_id);
+    if (rc < 0) throw Error(std::string("lr_ospf_unpack_opaque_lsa_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_with_grace_restart_capable(std::uint8_t options) {
+    return lr_ospf_with_grace_restart_capable(options);
+}
+
+inline std::uint8_t ospf_is_grace_restart_capable(std::uint8_t options) {
+    return lr_ospf_is_grace_restart_capable(options);
+}
+
+inline std::int32_t ospf_interface_address_tlv(std::uint8_t is_v6, const std::uint8_t* addr, std::uint8_t* out_v4_present, std::uint8_t* out_v4, std::uint8_t* out_v6_present, std::uint8_t* out_v6) {
+    std::int32_t rc = lr_ospf_interface_address_tlv(is_v6, addr, out_v4_present, out_v4, out_v6_present, out_v6);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_address_tlv failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_encode_summary_lsa_body(std::uint32_t network_mask, std::uint32_t metric, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ospf_encode_summary_lsa_body(network_mask, metric, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_encode_summary_lsa_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_decode_summary_lsa_body(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out_mask, std::uint32_t* out_metric) {
+    std::int32_t rc = lr_ospf_decode_summary_lsa_body(data, len, out_mask, out_metric);
+    if (rc < 0) throw Error(std::string("lr_ospf_decode_summary_lsa_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_encode_as_external_body(std::uint32_t network_mask, std::uint32_t metric, std::uint8_t external_type2, const std::uint8_t* forwarding_addr_v4, std::uint32_t external_route_tag, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ospf_encode_as_external_body(network_mask, metric, external_type2, forwarding_addr_v4, external_route_tag, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_encode_as_external_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_decode_as_external_body(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out_mask, std::uint32_t* out_metric, std::uint8_t* out_external_type2, std::uint8_t* out_forwarding_addr_v4, std::uint32_t* out_external_route_tag) {
+    std::int32_t rc = lr_ospf_decode_as_external_body(data, len, out_mask, out_metric, out_external_type2, out_forwarding_addr_v4, out_external_route_tag);
+    if (rc < 0) throw Error(std::string("lr_ospf_decode_as_external_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_decode_router_links(const std::uint8_t* data, std::uintptr_t len, std::uintptr_t* out_count, struct lr_ospf_router_link_t ** out_array) {
+    std::int32_t rc = lr_ospf_decode_router_links(data, len, out_count, out_array);
+    if (rc < 0) throw Error(std::string("lr_ospf_decode_router_links failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void ospf_router_link_array_free(struct lr_ospf_router_link_t* arr, std::uintptr_t count) {
+    lr_ospf_router_link_array_free(arr, count);
+}
+
+inline std::int32_t ospf_router_lsa_flags_byte(const std::uint8_t* data, std::uintptr_t len, std::uint8_t* out) {
+    std::int32_t rc = lr_ospf_router_lsa_flags_byte(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_router_lsa_flags_byte failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_encode_v3_inter_area_prefix_body(std::uint8_t is_v6, const std::uint8_t* prefix_addr, std::uint8_t prefix_len, std::uint32_t metric, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ospf_encode_v3_inter_area_prefix_body(is_v6, prefix_addr, prefix_len, metric, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_encode_v3_inter_area_prefix_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_decode_v3_inter_area_prefix_body(const std::uint8_t* data, std::uintptr_t len, std::uint8_t* out_prefix_len, std::uint32_t* out_metric, std::uint8_t* out_prefix_addr) {
+    std::int32_t rc = lr_ospf_decode_v3_inter_area_prefix_body(data, len, out_prefix_len, out_metric, out_prefix_addr);
+    if (rc < 0) throw Error(std::string("lr_ospf_decode_v3_inter_area_prefix_body failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_is_e_lsa_type(std::uint16_t ls_type) {
+    return lr_ospf_is_e_lsa_type(ls_type);
+}
+
+inline std::int32_t ospf_walk_e_lsa_tlvs(const std::uint8_t* data, std::uintptr_t len, std::uintptr_t* out_count, struct lr_ospf_e_lsa_tlv_t ** out_array) {
+    std::int32_t rc = lr_ospf_walk_e_lsa_tlvs(data, len, out_count, out_array);
+    if (rc < 0) throw Error(std::string("lr_ospf_walk_e_lsa_tlvs failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void ospf_e_lsa_tlv_array_free(struct lr_ospf_e_lsa_tlv_t* arr, std::uintptr_t count) {
+    lr_ospf_e_lsa_tlv_array_free(arr, count);
+}
+
+inline std::uint8_t ospf_srv6_behavior_valid_for_end_sid(std::uint16_t behavior) {
+    return lr_ospf_srv6_behavior_valid_for_end_sid(behavior);
+}
+
+inline std::uint8_t ospf_lsa_maxage_flush(lr_ospf_lsa_box_t lsa, lr_ospf_lsa_box_t* out) {
+    return lr_ospf_lsa_maxage_flush(lsa, out);
+}
+
+inline void ospf_lsa_header_free(lr_ospf_lsa_hdr_box_t h) {
+    lr_ospf_lsa_header_free(h);
+}
+
+inline std::int32_t ospf_originate_router_lsa(std::uint32_t router_id, std::uint8_t flags_byte, const lr_ospf_router_lsa_link_t* links, std::uintptr_t count, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_router_lsa(router_id, flags_byte, links, count, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_router_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_originate_network_lsa(std::uint32_t dr_router_id, std::uint32_t dr_addr, std::uint32_t mask, const std::uint32_t* attached_routers, std::uintptr_t count, const std::uint32_t* prev_seq, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_originate_network_lsa(dr_router_id, dr_addr, mask, attached_routers, count, prev_seq, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_originate_network_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ospf_spf_result_t ospf_spf_run(lr_ospf_lsdb_t lsdb, std::uint32_t router_id) {
+    return lr_ospf_spf_run(lsdb, router_id);
+}
+
+inline std::uintptr_t ospf_spf_route_count(lr_ospf_spf_result_t r) {
+    return lr_ospf_spf_route_count(r);
+}
+
+inline std::int32_t ospf_spf_route_at(lr_ospf_spf_result_t r, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_route_at(r, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_route_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t ospf_spf_summary_count(lr_ospf_lsdb_t lsdb, lr_ospf_spf_result_t r) {
+    return lr_ospf_spf_summary_count(lsdb, r);
+}
+
+inline std::int32_t ospf_spf_summary_at(lr_ospf_lsdb_t lsdb, lr_ospf_spf_result_t r, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_summary_at(lsdb, r, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_summary_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ospf_spf_v3_result_t ospf_spf_v3_run(lr_ospf_lsdb_t lsdb, std::uint32_t router_id) {
+    return lr_ospf_spf_v3_run(lsdb, router_id);
+}
+
+inline lr_ospf_spf_v3_result_t ospf_spf_v3_extended_run(lr_ospf_lsdb_t lsdb, std::uint32_t router_id) {
+    return lr_ospf_spf_v3_extended_run(lsdb, router_id);
+}
+
+inline std::uintptr_t ospf_spf_v3_route_count(lr_ospf_spf_v3_result_t r) {
+    return lr_ospf_spf_v3_route_count(r);
+}
+
+inline std::int32_t ospf_spf_v3_route_at(lr_ospf_spf_v3_result_t r, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_v3_route_at(r, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_v3_route_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t ospf_spf_v3_summary_count(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t r) {
+    return lr_ospf_spf_v3_summary_count(lsdb, r);
+}
+
+inline std::int32_t ospf_spf_v3_summary_at(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t r, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_v3_summary_at(lsdb, r, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_v3_summary_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t ospf_spf_v3_locator_count(lr_ospf_spf_v3_result_t r) {
+    return lr_ospf_spf_v3_locator_count(r);
+}
+
+inline std::int32_t ospf_spf_v3_locator_at(lr_ospf_spf_v3_result_t r, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_v3_locator_at(r, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_v3_locator_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_osroute_t osroute_connect() {
+    return lr_osroute_connect();
+}
+
+inline lr_osroute_t osroute_connect_stub() {
+    return lr_osroute_connect_stub();
+}
+
+inline const char* osroute_platform_name() {
+    return lr_osroute_platform_name();
+}
+
+inline struct lr_gtsm_t gtsm_single_hop() {
+    return lr_gtsm_single_hop();
+}
+
+inline struct lr_gtsm_t gtsm_multihop(std::uint8_t hops) {
+    return lr_gtsm_multihop(hops);
+}
+
+inline struct lr_gtsm_t gtsm_disabled() {
+    return lr_gtsm_disabled();
+}
+
+inline std::uint8_t gtsm_outbound_ttl(struct lr_gtsm_t g) {
+    return lr_gtsm_outbound_ttl(g);
+}
+
+inline std::uint8_t gtsm_min_ttl(struct lr_gtsm_t g) {
+    return lr_gtsm_min_ttl(g);
+}
+
+inline std::uint8_t gtsm_is_disabled(struct lr_gtsm_t g) {
+    return lr_gtsm_is_disabled(g);
+}
+
+inline std::int32_t gtsm_mode(struct lr_gtsm_t g) {
+    std::int32_t rc = lr_gtsm_mode(g);
+    if (rc < 0) throw Error(std::string("lr_gtsm_mode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t tcp_ao_key_symmetric(std::uint8_t id, const std::uint8_t* key, std::uintptr_t key_len, struct lr_tcp_ao_key_t* out) {
+    std::int32_t rc = lr_tcp_ao_key_symmetric(id, key, key_len, out);
+    if (rc < 0) throw Error(std::string("lr_tcp_ao_key_symmetric failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t tcp_ao_key_new(std::uint8_t send_id, std::uint8_t recv_id, const std::uint8_t* key, std::uintptr_t key_len, struct lr_tcp_ao_key_t* out) {
+    std::int32_t rc = lr_tcp_ao_key_new(send_id, recv_id, key, key_len, out);
+    if (rc < 0) throw Error(std::string("lr_tcp_ao_key_new failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t tcp_ao_key_read(const struct lr_tcp_ao_key_t* key, std::uint8_t* out_send_id, std::uint8_t* out_recv_id, std::uintptr_t* out_key_len) {
+    std::int32_t rc = lr_tcp_ao_key_read(key, out_send_id, out_recv_id, out_key_len);
+    if (rc < 0) throw Error(std::string("lr_tcp_ao_key_read failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int64_t tcp_ao_key_copy(const struct lr_tcp_ao_key_t* key, std::uint8_t* out_buf, std::uintptr_t cap) {
+    return lr_tcp_ao_key_copy(key, out_buf, cap);
+}
+
+inline lr_tcp_auth_t tcp_auth_new_none() {
+    return lr_tcp_auth_new_none();
+}
+
+inline lr_tcp_auth_t tcp_auth_new_md5(const std::uint8_t* key, std::uintptr_t key_len) {
+    return lr_tcp_auth_new_md5(key, key_len);
+}
+
+inline lr_tcp_auth_t tcp_auth_new_ao(const struct lr_tcp_ao_key_t* keys, std::uintptr_t keys_count, std::int32_t algorithm, std::uint8_t mac_len) {
+    return lr_tcp_auth_new_ao(keys, keys_count, algorithm, mac_len);
+}
+
+inline std::uint32_t osroute_prefix_mask(std::uint8_t prefix_len) {
+    return lr_osroute_prefix_mask(prefix_len);
+}
+
+inline std::int32_t osroute_check_source_compatibility(std::uint8_t local_is_v6, const std::uint8_t* local, std::uint8_t peer_is_v6, const std::uint8_t* peer, std::uint8_t* out_kind) {
+    std::int32_t rc = lr_osroute_check_source_compatibility(local_is_v6, local, peer_is_v6, peer, out_kind);
+    if (rc < 0) throw Error(std::string("lr_osroute_check_source_compatibility failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t osroute_ifindex_of(const char* interface) {
+    return lr_osroute_ifindex_of(interface);
+}
+
+inline std::uint32_t osroute_ipv6_ifindex_of(const char* interface) {
+    return lr_osroute_ipv6_ifindex_of(interface);
+}
+
+inline std::int32_t osroute_interface_v4_addrs(const char* interface, std::uintptr_t* out_count, struct lr_osroute_interface_v4_addr_t ** out_array) {
+    std::int32_t rc = lr_osroute_interface_v4_addrs(interface, out_count, out_array);
+    if (rc < 0) throw Error(std::string("lr_osroute_interface_v4_addrs failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void osroute_interface_v4_addr_array_free(struct lr_osroute_interface_v4_addr_t* arr, std::uintptr_t count) {
+    lr_osroute_interface_v4_addr_array_free(arr, count);
+}
+
+inline std::int32_t osroute_interface_v6_addrs(const char* interface, std::uintptr_t* out_count, struct lr_osroute_interface_v6_addr_t ** out_array) {
+    std::int32_t rc = lr_osroute_interface_v6_addrs(interface, out_count, out_array);
+    if (rc < 0) throw Error(std::string("lr_osroute_interface_v6_addrs failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void osroute_interface_v6_addr_array_free(struct lr_osroute_interface_v6_addr_t* arr, std::uintptr_t count) {
+    lr_osroute_interface_v6_addr_array_free(arr, count);
+}
+
+inline std::uint8_t osroute_mpls_enabled() {
+    return lr_osroute_mpls_enabled();
+}
+
+inline std::uint8_t osroute_seg6_enabled() {
+    return lr_osroute_seg6_enabled();
+}
+
+inline std::uint8_t osroute_ttl_check_enforced() {
+    return lr_osroute_ttl_check_enforced();
+}
+
+inline lr_policy_chain_t policy_chain(lr_policy_t p) {
+    return lr_policy_chain(p);
+}
+
+inline std::int32_t policy_set_bind_import(lr_resolver_t r, std::uint64_t session, const char* map_name) {
+    std::int32_t rc = lr_policy_set_bind_import(r, session, map_name);
+    if (rc < 0) throw Error(std::string("lr_policy_set_bind_import failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t policy_set_bind_export(lr_resolver_t r, std::uint64_t session, const char* map_name) {
+    std::int32_t rc = lr_policy_set_bind_export(r, session, map_name);
+    if (rc < 0) throw Error(std::string("lr_policy_set_bind_export failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t policy_set_validate(lr_resolver_t r) {
+    std::int32_t rc = lr_policy_set_validate(r);
+    if (rc < 0) throw Error(std::string("lr_policy_set_validate failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t bgp_otc_role_from_u8(std::uint8_t v) {
+    return lr_bgp_otc_role_from_u8(v);
+}
+
+inline std::uint8_t bgp_otc_role_to_u8(std::uint8_t role) {
+    return lr_bgp_otc_role_to_u8(role);
+}
+
+inline std::uint8_t bgp_otc_role_is_upstream(std::uint8_t role) {
+    return lr_bgp_otc_role_is_upstream(role);
+}
+
+inline std::uint8_t bgp_otc_role_is_route_server(std::uint8_t role) {
+    return lr_bgp_otc_role_is_route_server(role);
+}
+
+inline lr_bgp_otc_t bgp_otc_decode(const std::uint8_t* data, std::uintptr_t len) {
+    return lr_bgp_otc_decode(data, len);
+}
+
+inline std::uint8_t bgp_peer_role_from_asns(std::uint32_t local_as, std::uint32_t peer_as, const std::uint32_t* confed, std::uintptr_t confed_count) {
+    return lr_bgp_peer_role_from_asns(local_as, peer_as, confed, confed_count);
+}
+
+inline std::uint8_t bgp_peer_role_is_internal(std::uint8_t role) {
+    return lr_bgp_peer_role_is_internal(role);
+}
+
+inline std::uint8_t bgp_peer_role_is_external(std::uint8_t role) {
+    return lr_bgp_peer_role_is_external(role);
+}
+
+inline std::uint8_t bgp_peer_role_prepends_as_path(std::uint8_t role) {
+    return lr_bgp_peer_role_prepends_as_path(role);
+}
+
+inline std::uint8_t bgp_peer_role_rewrites_next_hop(std::uint8_t role) {
+    return lr_bgp_peer_role_rewrites_next_hop(role);
+}
+
+inline std::uint32_t bgp_cluster_id_from_u32(std::uint32_t v) {
+    return lr_bgp_cluster_id_from_u32(v);
+}
+
+inline std::int32_t bgp_cluster_id_to_v4_bytes(std::uint32_t cluster_id, std::uint8_t* out) {
+    std::int32_t rc = lr_bgp_cluster_id_to_v4_bytes(cluster_id, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_cluster_id_to_v4_bytes failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t mpls_platform_labels() {
+    return lr_mpls_platform_labels();
+}
+
+inline std::int32_t rtr_pdu_decode(const std::uint8_t* data, std::uintptr_t len, lr_rtr_pdu_t* out_pdu, std::uint8_t* out_version, std::uintptr_t* out_consumed) {
+    std::int32_t rc = lr_rtr_pdu_decode(data, len, out_pdu, out_version, out_consumed);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_rtr_pdu_t rtr_pdu_serial_notify(std::uint16_t session_id, std::uint32_t serial) {
+    return lr_rtr_pdu_serial_notify(session_id, serial);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_serial_query(std::uint16_t session_id, std::uint32_t serial) {
+    return lr_rtr_pdu_serial_query(session_id, serial);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_reset_query() {
+    return lr_rtr_pdu_reset_query();
+}
+
+inline lr_rtr_pdu_t rtr_pdu_cache_response(std::uint16_t session_id) {
+    return lr_rtr_pdu_cache_response(session_id);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_cache_reset() {
+    return lr_rtr_pdu_cache_reset();
+}
+
+inline lr_rtr_pdu_t rtr_pdu_ipv4_prefix(std::uint8_t announce, const std::uint8_t* prefix_v4, std::uint8_t prefix_len, std::uint8_t max_length, std::uint32_t asn) {
+    return lr_rtr_pdu_ipv4_prefix(announce, prefix_v4, prefix_len, max_length, asn);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_ipv6_prefix(std::uint8_t announce, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint8_t max_length, std::uint32_t asn) {
+    return lr_rtr_pdu_ipv6_prefix(announce, prefix_v6, prefix_len, max_length, asn);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_end_of_data(std::uint16_t session_id, std::uint32_t serial, std::uint32_t refresh_interval, std::uint32_t retry_interval, std::uint32_t expire_interval) {
+    return lr_rtr_pdu_end_of_data(session_id, serial, refresh_interval, retry_interval, expire_interval);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_router_key(std::uint8_t announce, const std::uint8_t* ski, std::uint32_t asn, const std::uint8_t* spki, std::uintptr_t spki_len) {
+    return lr_rtr_pdu_router_key(announce, ski, asn, spki, spki_len);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_error_report(std::uint16_t error_code, const std::uint8_t* erroneous_pdu, std::uintptr_t erroneous_pdu_len, const char* error_text) {
+    return lr_rtr_pdu_error_report(error_code, erroneous_pdu, erroneous_pdu_len, error_text);
+}
+
+inline lr_rtr_pdu_t rtr_pdu_aspa(std::uint8_t announce, std::uint32_t customer_asn, const std::uint32_t* providers, std::uintptr_t providers_count) {
+    return lr_rtr_pdu_aspa(announce, customer_asn, providers, providers_count);
+}
+
+inline std::int32_t rtr_pdu_type_name(std::uint8_t ty, const char ** out_name) {
+    std::int32_t rc = lr_rtr_pdu_type_name(ty, out_name);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_type_name failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t rtr_pdu_type_min_len(std::uint8_t ty, std::uintptr_t* out) {
+    std::int32_t rc = lr_rtr_pdu_type_min_len(ty, out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_type_min_len failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t rtr_pdu_type_from_u8(std::uint8_t ty, std::uint8_t* out) {
+    std::int32_t rc = lr_rtr_pdu_type_from_u8(ty, out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_type_from_u8 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t rtr_error_code_name(std::uint16_t code, const char ** out_name) {
+    std::int32_t rc = lr_rtr_error_code_name(code, out_name);
+    if (rc < 0) throw Error(std::string("lr_rtr_error_code_name failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t rtr_error_code_is_fatal(std::uint16_t code, std::uint8_t* out) {
+    std::int32_t rc = lr_rtr_error_code_is_fatal(code, out);
+    if (rc < 0) throw Error(std::string("lr_rtr_error_code_is_fatal failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t rtr_error_code_from_u16(std::uint16_t code) {
+    std::int32_t rc = lr_rtr_error_code_from_u16(code);
+    if (rc < 0) throw Error(std::string("lr_rtr_error_code_from_u16 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline const char* seg6_route_err_name(std::int32_t code) {
+    return lr_seg6_route_err_name(code);
+}
+
+inline std::int32_t srv6_encode_srh(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_srv6_encode_srh(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_srv6_encode_srh failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t srv6_decode_srh(const std::uint8_t* data, std::uintptr_t len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_srv6_decode_srh(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_srv6_decode_srh failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t srv6_behavior_name(std::uint16_t wire, char* out_name, std::uintptr_t name_cap) {
+    return lr_srv6_behavior_name(wire, out_name, name_cap);
+}
+
+inline std::int32_t srv6_srh_err_code() {
+    std::int32_t rc = lr_srv6_srh_err_code();
+    if (rc < 0) throw Error(std::string("lr_srv6_srh_err_code failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_origin_decode(const std::uint8_t* data, std::uintptr_t len, std::uint8_t* out) {
+    std::int32_t rc = lr_bgp_well_known_origin_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_origin_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_origin_encode(std::uint8_t kind, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_origin_encode(kind, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_origin_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_next_hop_decode(const std::uint8_t* data, std::uintptr_t len, std::uint8_t* out_is_ipv6, std::uint8_t* out_addr) {
+    std::int32_t rc = lr_bgp_well_known_next_hop_decode(data, len, out_is_ipv6, out_addr);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_next_hop_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_next_hop_encode(std::uint8_t is_ipv6, const std::uint8_t* addr, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_next_hop_encode(is_ipv6, addr, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_next_hop_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_med_decode(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out) {
+    std::int32_t rc = lr_bgp_well_known_med_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_med_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_med_encode(std::uint32_t value, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_med_encode(value, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_med_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_local_pref_decode(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out) {
+    std::int32_t rc = lr_bgp_well_known_local_pref_decode(data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_local_pref_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_local_pref_encode(std::uint32_t value, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_local_pref_encode(value, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_local_pref_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_aggregator_decode(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out_asn, std::uint8_t* out_speaker) {
+    std::int32_t rc = lr_bgp_well_known_aggregator_decode(data, len, out_asn, out_speaker);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_aggregator_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_aggregator_encode_4(std::uint32_t asn, const std::uint8_t* speaker, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_aggregator_encode_4(asn, speaker, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_aggregator_encode_4 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_originator_id_decode(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out_bgp_id) {
+    std::int32_t rc = lr_bgp_well_known_originator_id_decode(data, len, out_bgp_id);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_originator_id_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_originator_id_encode(std::uint32_t bgp_id, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_originator_id_encode(bgp_id, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_originator_id_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_cluster_list_decode(const std::uint8_t* data, std::uintptr_t len, std::uint32_t* out_clusters, std::uintptr_t cap, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bgp_well_known_cluster_list_decode(data, len, out_clusters, cap, out_count);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_cluster_list_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_cluster_list_encode(const std::uint32_t* clusters, std::uintptr_t count, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_cluster_list_encode(clusters, count, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_cluster_list_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_aigp_decode(const std::uint8_t* data, std::uintptr_t len, std::uint64_t* out_metric) {
+    std::int32_t rc = lr_bgp_well_known_aigp_decode(data, len, out_metric);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_aigp_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_aigp_encode(std::uint64_t metric, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_aigp_encode(metric, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_aigp_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_pmsi_tunnel_decode(const std::uint8_t* data, std::uintptr_t len, std::uint8_t* out_flags, std::uint8_t* out_tunnel_type, std::uint32_t* out_label, struct lr_bytes_t* out_tunnel_id) {
+    std::int32_t rc = lr_bgp_well_known_pmsi_tunnel_decode(data, len, out_flags, out_tunnel_type, out_label, out_tunnel_id);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_pmsi_tunnel_decode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_well_known_pmsi_tunnel_encode(std::uint8_t flags, std::uint8_t tunnel_type, std::uint32_t label, const std::uint8_t* tunnel_id, std::uintptr_t tunnel_id_len, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_well_known_pmsi_tunnel_encode(flags, tunnel_type, label, tunnel_id, tunnel_id_len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_well_known_pmsi_tunnel_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline AdjRibInHandle make_adjribin_new() {
+    auto p = lr_adj_rib_in_new();
+    if (!p) throw Error(std::string("lr_adj_rib_in_new returned null"));
+    return AdjRibInHandle(p);
+}
+
+inline AdjRibOutHandle make_adjribout_new() {
+    auto p = lr_adj_rib_out_new();
+    if (!p) throw Error(std::string("lr_adj_rib_out_new returned null"));
+    return AdjRibOutHandle(p);
+}
+
+inline AttributesHandle make_attributes_new() {
+    auto p = lr_attributes_new();
+    if (!p) throw Error(std::string("lr_attributes_new returned null"));
+    return AttributesHandle(p);
+}
+
+inline BabelAckReqHandle make_babelackreq_new(std::uint16_t nonce, std::uint16_t interval_cs) {
+    auto p = lr_babel_ack_req_new(nonce, interval_cs);
+    if (!p) throw Error(std::string("lr_babel_ack_req_new returned null"));
+    return BabelAckReqHandle(p);
+}
+
+inline BabelAckHandle make_babelack_new(std::uint16_t opaque) {
+    auto p = lr_babel_ack_new(opaque);
+    if (!p) throw Error(std::string("lr_babel_ack_new returned null"));
+    return BabelAckHandle(p);
+}
+
+inline BabelCodecHandle make_babelcodec_new() {
+    auto p = lr_babel_codec_new();
+    if (!p) throw Error(std::string("lr_babel_codec_new returned null"));
+    return BabelCodecHandle(p);
+}
+
+inline BabelHelloHandle make_babelhello_new(std::uint16_t seqno, std::uint16_t interval_cs) {
+    auto p = lr_babel_hello_new(seqno, interval_cs);
+    if (!p) throw Error(std::string("lr_babel_hello_new returned null"));
+    return BabelHelloHandle(p);
+}
+
+inline BabelIhuHandle make_babelihu_new(std::uint16_t rxcost, std::uint16_t interval_cs) {
+    auto p = lr_babel_ihu_new(rxcost, interval_cs);
+    if (!p) throw Error(std::string("lr_babel_ihu_new returned null"));
+    return BabelIhuHandle(p);
+}
+
+inline BabelMacKeyHandle make_babelmackey_new(std::int32_t algorithm, const std::uint8_t* secret, std::uintptr_t secret_len) {
+    auto p = lr_babel_mac_key_new(algorithm, secret, secret_len);
+    if (!p) throw Error(std::string("lr_babel_mac_key_new returned null"));
+    return BabelMacKeyHandle(p);
+}
+
+inline BabelNeighborHandle make_babelneighbor_new(const std::uint8_t* addr_v4, const std::uint8_t* addr_v6, std::uint64_t now_ms) {
+    auto p = lr_babel_neighbor_new(addr_v4, addr_v6, now_ms);
+    if (!p) throw Error(std::string("lr_babel_neighbor_new returned null"));
+    return BabelNeighborHandle(p);
+}
+
+inline BabelPacketCounterHandle make_babelpacketcounter_new(const std::uint8_t* index, std::uintptr_t index_len, std::uint32_t initial) {
+    auto p = lr_babel_packet_counter_new(index, index_len, initial);
+    if (!p) throw Error(std::string("lr_babel_packet_counter_new returned null"));
+    return BabelPacketCounterHandle(p);
+}
+
+inline BabelReplayProtectionHandle make_babelreplayprotection_new() {
+    auto p = lr_babel_replay_protection_new();
+    if (!p) throw Error(std::string("lr_babel_replay_protection_new returned null"));
+    return BabelReplayProtectionHandle(p);
+}
+
+inline BabelRouteKeyHandle make_babelroutekey_new(std::uint8_t dest_is_ipv6, const std::uint8_t* dest_addr, std::uint8_t dest_prefix_len, std::uint8_t source_present, std::uint8_t source_is_ipv6, const std::uint8_t* source_addr, std::uint8_t source_prefix_len, const std::uint8_t* router_id) {
+    auto p = lr_babel_route_key_new(dest_is_ipv6, dest_addr, dest_prefix_len, source_present, source_is_ipv6, source_addr, source_prefix_len, router_id);
+    if (!p) throw Error(std::string("lr_babel_route_key_new returned null"));
+    return BabelRouteKeyHandle(p);
+}
+
+inline BabelRouteTableHandle make_babelroutetable_new() {
+    auto p = lr_babel_route_table_new();
+    if (!p) throw Error(std::string("lr_babel_route_table_new returned null"));
+    return BabelRouteTableHandle(p);
+}
+
+inline BabelRouterIdHandle make_babelrouterid_new(const std::uint8_t* bytes) {
+    auto p = lr_babel_router_id_new(bytes);
+    if (!p) throw Error(std::string("lr_babel_router_id_new returned null"));
+    return BabelRouterIdHandle(p);
+}
+
+inline BabelSeqnoRequestHandle make_babelseqnorequest_new(const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint16_t seqno, const std::uint8_t* router_id, std::uint8_t hop_count) {
+    auto p = lr_babel_seqno_request_new(prefix_v4, prefix_v6, prefix_len, seqno, router_id, hop_count);
+    if (!p) throw Error(std::string("lr_babel_seqno_request_new returned null"));
+    return BabelSeqnoRequestHandle(p);
+}
+
+inline BabelTlvHandle make_babeltlv_new(std::uint8_t kind, const std::uint8_t* value, std::uintptr_t value_len) {
+    auto p = lr_babel_tlv_new(kind, value, value_len);
+    if (!p) throw Error(std::string("lr_babel_tlv_new returned null"));
+    return BabelTlvHandle(p);
+}
+
+inline BabelUpdateHandle make_babelupdate_new(std::uint8_t prefix_len_bits, const std::uint8_t* prefix, std::uintptr_t prefix_len_bytes, std::uint16_t seqno, std::uint16_t metric) {
+    auto p = lr_babel_update_new(prefix_len_bits, prefix, prefix_len_bytes, seqno, metric);
+    if (!p) throw Error(std::string("lr_babel_update_new returned null"));
+    return BabelUpdateHandle(p);
+}
+
+inline BfdAuthKeyHandle make_bfdauthkey_new(std::uint8_t key_id, const std::uint8_t* secret, std::uintptr_t secret_len) {
+    auto p = lr_bfd_auth_key_new(key_id, secret, secret_len);
+    if (!p) throw Error(std::string("lr_bfd_auth_key_new returned null"));
+    return BfdAuthKeyHandle(p);
+}
+
+inline BfdConfigHandle make_bfdconfig_new(std::uint8_t detect_mult, std::uint32_t desired_min_tx_interval_us, std::uint32_t required_min_rx_interval_us, std::uint32_t required_min_echo_interval_us, std::uint8_t role) {
+    auto p = lr_bfd_config_new(detect_mult, desired_min_tx_interval_us, required_min_rx_interval_us, required_min_echo_interval_us, role);
+    if (!p) throw Error(std::string("lr_bfd_config_new returned null"));
+    return BfdConfigHandle(p);
+}
+
+inline BfdKeyedAuthHandle make_bfdkeyedauth_new(std::int32_t algorithm, std::uint8_t key_id, const std::uint8_t* secret, std::uintptr_t secret_len) {
+    auto p = lr_bfd_keyed_auth_new(algorithm, key_id, secret, secret_len);
+    if (!p) throw Error(std::string("lr_bfd_keyed_auth_new returned null"));
+    return BfdKeyedAuthHandle(p);
+}
+
+inline BfdPacketHandle make_bfdpacket_new() {
+    auto p = lr_bfd_packet_new();
+    if (!p) throw Error(std::string("lr_bfd_packet_new returned null"));
+    return BfdPacketHandle(p);
+}
+
+inline BgpAsPathHandle make_bgpaspath_new() {
+    auto p = lr_bgp_as_path_new();
+    if (!p) throw Error(std::string("lr_bgp_as_path_new returned null"));
+    return BgpAsPathHandle(p);
+}
+
+inline BgpCodecHandle make_bgpcodec_new() {
+    auto p = lr_bgp_codec_new();
+    if (!p) throw Error(std::string("lr_bgp_codec_new returned null"));
+    return BgpCodecHandle(p);
+}
+
+inline BgpCommunityHandle make_bgpcommunity_new(std::uint16_t asn, std::uint16_t value) {
+    auto p = lr_bgp_community_new(asn, value);
+    if (!p) throw Error(std::string("lr_bgp_community_new returned null"));
+    return BgpCommunityHandle(p);
+}
+
+inline BgpConfedConfigHandle make_bgpconfedconfig_new(const std::uint32_t* members, std::uintptr_t count, std::uint32_t confederation_id) {
+    auto p = lr_bgp_confed_config_new(members, count, confederation_id);
+    if (!p) throw Error(std::string("lr_bgp_confed_config_new returned null"));
+    return BgpConfedConfigHandle(p);
+}
+
+inline BgpExtCommunityHandle make_bgpextcommunity_new(std::uint8_t kind, std::uint8_t subtype, std::uint32_t global, std::uint16_t local) {
+    auto p = lr_bgp_ext_community_new(kind, subtype, global, local);
+    if (!p) throw Error(std::string("lr_bgp_ext_community_new returned null"));
+    return BgpExtCommunityHandle(p);
+}
+
+inline BgpLargeCommunityHandle make_bgplargecommunity_new(std::uint32_t global_admin, std::uint32_t local_data1, std::uint32_t local_data2) {
+    auto p = lr_bgp_large_community_new(global_admin, local_data1, local_data2);
+    if (!p) throw Error(std::string("lr_bgp_large_community_new returned null"));
+    return BgpLargeCommunityHandle(p);
+}
+
+inline BgpLsAttrHandle make_bgplsattr_new() {
+    auto p = lr_bgp_ls_attr_new();
+    if (!p) throw Error(std::string("lr_bgp_ls_attr_new returned null"));
+    return BgpLsAttrHandle(p);
+}
+
+inline BgpOtcHandle make_bgpotc_new(std::uint32_t asn) {
+    auto p = lr_bgp_otc_new(asn);
+    if (!p) throw Error(std::string("lr_bgp_otc_new returned null"));
+    return BgpOtcHandle(p);
+}
+
+inline BgpPathAttrsHandle make_bgppathattrs_new() {
+    auto p = lr_bgp_path_attrs_new();
+    if (!p) throw Error(std::string("lr_bgp_path_attrs_new returned null"));
+    return BgpPathAttrsHandle(p);
+}
+
+inline BgpPeerConfigHandle make_bgppeerconfig_new(std::uint32_t local_as, std::uint32_t peer_as, const std::uint8_t* local_bgp_id) {
+    auto p = lr_bgp_peer_config_new(local_as, peer_as, local_bgp_id);
+    if (!p) throw Error(std::string("lr_bgp_peer_config_new returned null"));
+    return BgpPeerConfigHandle(p);
+}
+
+inline BgpPeerHandle make_bgppeer_new(std::uint32_t local_as, std::uint32_t peer_as, std::uint32_t local_bgp_id, std::uint16_t hold_time, std::uint16_t keepalive, std::uint8_t asn4) {
+    auto p = lr_bgp_peer_new(local_as, peer_as, local_bgp_id, hold_time, keepalive, asn4);
+    if (!p) throw Error(std::string("lr_bgp_peer_new returned null"));
+    return BgpPeerHandle(p);
+}
+
+inline BgpPeerTopologyHandle make_bgppeertopology_new(std::uint8_t role, std::uint8_t rr_client, std::uint8_t rs_client, std::uint8_t otc_role) {
+    auto p = lr_bgp_peer_topology_new(role, rr_client, rs_client, otc_role);
+    if (!p) throw Error(std::string("lr_bgp_peer_topology_new returned null"));
+    return BgpPeerTopologyHandle(p);
+}
+
+inline BgpRrConfigHandle make_bgprrconfig_new(std::uint32_t cluster_id, std::uint8_t enabled) {
+    auto p = lr_bgp_rr_config_new(cluster_id, enabled);
+    if (!p) throw Error(std::string("lr_bgp_rr_config_new returned null"));
+    return BgpRrConfigHandle(p);
+}
+
+inline BgpRsConfigHandle make_bgprsconfig_new(std::uint8_t client, const char* inbound_policy, const char* outbound_policy) {
+    auto p = lr_bgp_rs_config_new(client, inbound_policy, outbound_policy);
+    if (!p) throw Error(std::string("lr_bgp_rs_config_new returned null"));
+    return BgpRsConfigHandle(p);
+}
+
+inline BmpCodecHandle make_bmpcodec_new() {
+    auto p = lr_bmp_codec_new();
+    if (!p) throw Error(std::string("lr_bmp_codec_new returned null"));
+    return BmpCodecHandle(p);
+}
+
+inline DampingTableHandle make_dampingtable_new(const struct lr_damping_config_t* cfg) {
+    auto p = lr_damping_table_new(cfg);
+    if (!p) throw Error(std::string("lr_damping_table_new returned null"));
+    return DampingTableHandle(p);
+}
+
+inline LdpDiscoveryConfigHandle make_ldpdiscoveryconfig_new(std::uint32_t local_lsr_id, std::uint16_t local_label_space) {
+    auto p = lr_ldp_discovery_config_new(local_lsr_id, local_label_space);
+    if (!p) throw Error(std::string("lr_ldp_discovery_config_new returned null"));
+    return LdpDiscoveryConfigHandle(p);
+}
+
+inline LdpLabelStoreHandle make_ldplabelstore_new() {
+    auto p = lr_ldp_label_store_new();
+    if (!p) throw Error(std::string("lr_ldp_label_store_new returned null"));
+    return LdpLabelStoreHandle(p);
+}
+
+inline LdpLabelHandle make_ldplabel_new(std::uint32_t value) {
+    auto p = lr_ldp_label_new(value);
+    if (!p) throw Error(std::string("lr_ldp_label_new returned null"));
+    return LdpLabelHandle(p);
+}
+
+inline LdpSessionHandle make_ldpsession_new(std::uint32_t local_lsr_id, std::uint16_t local_label_space, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space, std::uint16_t keepalive_time, std::uint16_t max_pdu_len) {
+    auto p = lr_ldp_session_new(local_lsr_id, local_label_space, peer_lsr_id, peer_label_space, keepalive_time, max_pdu_len);
+    if (!p) throw Error(std::string("lr_ldp_session_new returned null"));
+    return LdpSessionHandle(p);
+}
+
+inline LdpTransitHandle make_ldptransit_new(std::uint32_t label_min, std::uint32_t label_max, const std::uint32_t* reserved, std::uintptr_t reserved_count) {
+    auto p = lr_ldp_transit_new(label_min, label_max, reserved, reserved_count);
+    if (!p) throw Error(std::string("lr_ldp_transit_new returned null"));
+    return LdpTransitHandle(p);
+}
+
+inline LocRibHandle make_locrib_new() {
+    auto p = lr_loc_rib_new();
+    if (!p) throw Error(std::string("lr_loc_rib_new returned null"));
+    return LocRibHandle(p);
+}
+
+inline MemoryConnHandle make_memoryconn_new() {
+    auto p = lr_memory_conn_new();
+    if (!p) throw Error(std::string("lr_memory_conn_new returned null"));
+    return MemoryConnHandle(p);
+}
+
+inline MplsLabelStackHandle make_mplslabelstack_new() {
+    auto p = lr_mpls_label_stack_new();
+    if (!p) throw Error(std::string("lr_mpls_label_stack_new returned null"));
+    return MplsLabelStackHandle(p);
+}
+
+inline MplsLabelHandle make_mplslabel_try_new(std::uint32_t value) {
+    auto p = lr_mpls_label_try_new(value);
+    if (!p) throw Error(std::string("lr_mpls_label_try_new returned null"));
+    return MplsLabelHandle(p);
+}
+
+inline MplsLabelHandle make_mplslabel_new(std::uint32_t value) {
+    auto p = lr_mpls_label_new(value);
+    if (!p) throw Error(std::string("lr_mpls_label_new returned null"));
+    return MplsLabelHandle(p);
+}
+
+inline MrtReaderHandle make_mrtreader_new() {
+    auto p = lr_mrt_reader_new();
+    if (!p) throw Error(std::string("lr_mrt_reader_new returned null"));
+    return MrtReaderHandle(p);
+}
+
+inline MrtRibDumpHandle make_mrtribdump_new(std::uint32_t collector_bgp_id, const char* view_name) {
+    auto p = lr_mrt_rib_dump_new(collector_bgp_id, view_name);
+    if (!p) throw Error(std::string("lr_mrt_rib_dump_new returned null"));
+    return MrtRibDumpHandle(p);
+}
+
+inline OspfAsbrDestHandle make_ospfasbrdest_new(std::uint32_t asbr, std::uint32_t metric) {
+    auto p = lr_ospf_asbr_dest_new(asbr, metric);
+    if (!p) throw Error(std::string("lr_ospf_asbr_dest_new returned null"));
+    return OspfAsbrDestHandle(p);
+}
+
+inline OspfCryptoAuthHandle make_ospfcryptoauth_new(std::uint8_t key_id, const std::uint8_t* key, std::uintptr_t key_len) {
+    auto p = lr_ospf_crypto_auth_new(key_id, key, key_len);
+    if (!p) throw Error(std::string("lr_ospf_crypto_auth_new returned null"));
+    return OspfCryptoAuthHandle(p);
+}
+
+inline OspfDbExchangeHandle make_ospfdbexchange_new(std::uint32_t router_id, std::uint32_t area_id, std::uint16_t iface_mtu) {
+    auto p = lr_ospf_db_exchange_new(router_id, area_id, iface_mtu);
+    if (!p) throw Error(std::string("lr_ospf_db_exchange_new returned null"));
+    return OspfDbExchangeHandle(p);
+}
+
+inline OspfExternalDestHandle make_ospfexternaldest_new(const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint32_t metric, std::int32_t metric_type) {
+    auto p = lr_ospf_external_dest_new(prefix_v4, prefix_v6, prefix_len, metric, metric_type);
+    if (!p) throw Error(std::string("lr_ospf_external_dest_new returned null"));
+    return OspfExternalDestHandle(p);
+}
+
+inline OspfHelperEntryHandle make_ospfhelperentry_new() {
+    auto p = lr_ospf_helper_entry_new();
+    if (!p) throw Error(std::string("lr_ospf_helper_entry_new returned null"));
+    return OspfHelperEntryHandle(p);
+}
+
+inline OspfInterfaceHandle make_ospfinterface_new(std::uint32_t area_id) {
+    auto p = lr_ospf_interface_new(area_id);
+    if (!p) throw Error(std::string("lr_ospf_interface_new returned null"));
+    return OspfInterfaceHandle(p);
+}
+
+inline OspfLsdbHandle make_ospflsdb_new() {
+    auto p = lr_ospf_lsdb_new();
+    if (!p) throw Error(std::string("lr_ospf_lsdb_new returned null"));
+    return OspfLsdbHandle(p);
+}
+
+inline OspfNeighborHandle make_ospfneighbor_new(std::uint32_t router_id) {
+    auto p = lr_ospf_neighbor_new(router_id);
+    if (!p) throw Error(std::string("lr_ospf_neighbor_new returned null"));
+    return OspfNeighborHandle(p);
+}
+
+inline OspfNssaDefaultHandle make_ospfnssadefault_new(std::uint32_t metric) {
+    auto p = lr_ospf_nssa_default_new(metric);
+    if (!p) throw Error(std::string("lr_ospf_nssa_default_new returned null"));
+    return OspfNssaDefaultHandle(p);
+}
+
+inline OspfRetransmitHandle make_ospfretransmit_new() {
+    auto p = lr_ospf_retransmit_new();
+    if (!p) throw Error(std::string("lr_ospf_retransmit_new returned null"));
+    return OspfRetransmitHandle(p);
+}
+
+inline OspfRouterLsaLinkHandle make_ospfrouterlsalink_new(std::int32_t link_kind, std::uint32_t field1, std::uint32_t field2, std::uint8_t field3, std::uint16_t metric) {
+    auto p = lr_ospf_router_lsa_link_new(link_kind, field1, field2, field3, metric);
+    if (!p) throw Error(std::string("lr_ospf_router_lsa_link_new returned null"));
+    return OspfRouterLsaLinkHandle(p);
+}
+
+inline OspfSimplePasswordHandle make_ospfsimplepassword_new(const std::uint8_t* password, std::uintptr_t password_len) {
+    auto p = lr_ospf_simple_password_new(password, password_len);
+    if (!p) throw Error(std::string("lr_ospf_simple_password_new returned null"));
+    return OspfSimplePasswordHandle(p);
+}
+
+inline OspfSummaryDestHandle make_ospfsummarydest_new(const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint32_t metric) {
+    auto p = lr_ospf_summary_dest_new(prefix_v4, prefix_v6, prefix_len, metric);
+    if (!p) throw Error(std::string("lr_ospf_summary_dest_new returned null"));
+    return OspfSummaryDestHandle(p);
+}
+
+inline OspfV3AuthHandle make_ospfv3auth_new(std::uint16_t sa_id, const std::uint8_t* key, std::uintptr_t key_len) {
+    auto p = lr_ospf_v3_auth_new(sa_id, key, key_len);
+    if (!p) throw Error(std::string("lr_ospf_v3_auth_new returned null"));
+    return OspfV3AuthHandle(p);
+}
+
+inline OspfV3ExternalDestHandle make_ospfv3externaldest_new(const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint32_t metric, std::uint8_t metric_type2) {
+    auto p = lr_ospf_v3_external_dest_new(prefix_v4, prefix_v6, prefix_len, metric, metric_type2);
+    if (!p) throw Error(std::string("lr_ospf_v3_external_dest_new returned null"));
+    return OspfV3ExternalDestHandle(p);
+}
+
+inline PolicyChainHandle make_policychain_new() {
+    auto p = lr_policy_chain_new();
+    if (!p) throw Error(std::string("lr_policy_chain_new returned null"));
+    return PolicyChainHandle(p);
+}
+
+inline PolicyHandle make_policy_new(const char* name) {
+    auto p = lr_policy_new(name);
+    if (!p) throw Error(std::string("lr_policy_new returned null"));
+    return PolicyHandle(p);
+}
+
+inline PrefixListHandle make_prefixlist_new() {
+    auto p = lr_prefix_list_new();
+    if (!p) throw Error(std::string("lr_prefix_list_new returned null"));
+    return PrefixListHandle(p);
+}
+
+inline ReadBufHandle make_readbuf_new(const std::uint8_t* data, std::uintptr_t len) {
+    auto p = lr_read_buf_new(data, len);
+    if (!p) throw Error(std::string("lr_read_buf_new returned null"));
+    return ReadBufHandle(p);
+}
+
+inline ResolverHandle make_resolver_new() {
+    auto p = lr_resolver_new();
+    if (!p) throw Error(std::string("lr_resolver_new returned null"));
+    return ResolverHandle(p);
+}
+
+inline RibMuxHandle make_ribmux_new() {
+    auto p = lr_rib_mux_new();
+    if (!p) throw Error(std::string("lr_rib_mux_new returned null"));
+    return RibMuxHandle(p);
+}
+
+inline RoaStoreHandle make_roastore_new() {
+    auto p = lr_roa_store_new();
+    if (!p) throw Error(std::string("lr_roa_store_new returned null"));
+    return RoaStoreHandle(p);
+}
+
+inline RoaTableBuilderHandle make_roatablebuilder_new() {
+    auto p = lr_roa_table_builder_new();
+    if (!p) throw Error(std::string("lr_roa_table_builder_new returned null"));
+    return RoaTableBuilderHandle(p);
+}
+
+inline RoaTableHandle make_roatable_new() {
+    auto p = lr_roa_table_new();
+    if (!p) throw Error(std::string("lr_roa_table_new returned null"));
+    return RoaTableHandle(p);
+}
+
+inline RouteMapHandle make_routemap_new() {
+    auto p = lr_route_map_new();
+    if (!p) throw Error(std::string("lr_route_map_new returned null"));
+    return RouteMapHandle(p);
+}
+
+inline RouterHandle make_router_new() {
+    auto p = lr_router_new();
+    if (!p) throw Error(std::string("lr_router_new returned null"));
+    return RouterHandle(p);
+}
+
+inline RtrClientHandle make_rtrclient_new() {
+    auto p = lr_rtr_client_new();
+    if (!p) throw Error(std::string("lr_rtr_client_new returned null"));
+    return RtrClientHandle(p);
+}
+
+inline SafetyNetHandle make_safetynet_new(std::uint32_t local_as) {
+    auto p = lr_safety_net_new(local_as);
+    if (!p) throw Error(std::string("lr_safety_net_new returned null"));
+    return SafetyNetHandle(p);
+}
+
+inline Seg6RouteHandle make_seg6route_new(struct lr_prefix_t prefix, lr_srv6_srh_t srh) {
+    auto p = lr_seg6_route_new(prefix, srh);
+    if (!p) throw Error(std::string("lr_seg6_route_new returned null"));
+    return Seg6RouteHandle(p);
+}
+
+inline Srv6LocatorHandle make_srv6locator_new(const std::uint8_t* addr, std::uint8_t block_bits) {
+    auto p = lr_srv6_locator_new(addr, block_bits);
+    if (!p) throw Error(std::string("lr_srv6_locator_new returned null"));
+    return Srv6LocatorHandle(p);
+}
+
+inline Srv6SrhHandle make_srv6srh_new(const std::uint8_t* data, std::uintptr_t count) {
+    auto p = lr_srv6_srh_new(data, count);
+    if (!p) throw Error(std::string("lr_srv6_srh_new returned null"));
+    return Srv6SrhHandle(p);
+}
+
+inline TimerQueueHandle make_timerqueue_new() {
+    auto p = lr_timer_queue_new();
+    if (!p) throw Error(std::string("lr_timer_queue_new returned null"));
+    return TimerQueueHandle(p);
+}
+
+inline WriteBufHandle make_writebuf_new(std::uintptr_t cap) {
+    auto p = lr_write_buf_new(cap);
+    if (!p) throw Error(std::string("lr_write_buf_new returned null"));
+    return WriteBufHandle(p);
+}
+
+inline BgpCapabilityHandle make_bgpcapnew(std::uint8_t code, const std::uint8_t* value, std::uintptr_t value_len) {
+    auto p = lr_bgp_cap_new(code, value, value_len);
+    if (!p) throw Error(std::string("lr_bgp_cap_new returned null"));
+    return BgpCapabilityHandle(p);
+}
+
+inline std::int32_t mrt_encode_attributes(AttributesHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_mrt_encode_attributes(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_mrt_encode_attributes failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode_authenticated(BabelCodecHandle const& h, lr_babel_frame_t frame, lr_babel_pseudo_header_t pseudo_header, lr_babel_mac_key_t key, lr_babel_packet_counter_t counter, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_babel_codec_encode_authenticated(h.get(), frame, pseudo_header, key, counter, out);
+    if (rc < 0) throw Error(std::string("lr_babel_codec_encode_authenticated failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t decode_authenticated_slice(BabelCodecHandle const& h, const std::uint8_t* packet, std::uintptr_t len, lr_babel_pseudo_header_t pseudo_header, const lr_babel_mac_key_t* keys, std::uintptr_t keys_count, lr_babel_replay_protection_t replay, lr_babel_frame_t* out) {
+    std::int32_t rc = lr_babel_codec_decode_authenticated_slice(h.get(), packet, len, pseudo_header, keys, keys_count, replay, out);
+    if (rc < 0) throw Error(std::string("lr_babel_codec_decode_authenticated_slice failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t address(BabelIhuHandle const& h, std::uint8_t* octets_out, std::uint8_t* present_out) {
+    std::int32_t rc = lr_babel_ihu_address(h.get(), octets_out, present_out);
+    if (rc < 0) throw Error(std::string("lr_babel_ihu_address failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t insert_timed(BabelRouteTableHandle const& h, lr_babel_route_t route, std::uint16_t interval_cs, std::uint64_t now_ms) {
+    std::int32_t rc = lr_babel_route_table_insert_timed(h.get(), route, interval_cs, now_ms);
+    if (rc < 0) throw Error(std::string("lr_babel_route_table_insert_timed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ae(BabelUpdateHandle const& h) {
+    return lr_babel_update_ae(h.get());
+}
+
+inline std::uint8_t flags(BabelUpdateHandle const& h) {
+    return lr_babel_update_flags(h.get());
+}
+
+inline std::uint8_t prefix_len(BabelUpdateHandle const& h) {
+    return lr_babel_update_prefix_len(h.get());
+}
+
+inline std::uint8_t omitted(BabelUpdateHandle const& h) {
+    return lr_babel_update_omitted(h.get());
+}
+
+inline std::uint16_t interval_cs(BabelUpdateHandle const& h) {
+    return lr_babel_update_interval_cs(h.get());
+}
+
+inline std::uint16_t seqno(BabelUpdateHandle const& h) {
+    return lr_babel_update_seqno(h.get());
+}
+
+inline std::uint16_t metric(BabelUpdateHandle const& h) {
+    return lr_babel_update_metric(h.get());
+}
+
+inline std::uintptr_t prefix(BabelUpdateHandle const& h, std::uint8_t* out, std::uintptr_t out_len) {
+    return lr_babel_update_prefix(h.get(), out, out_len);
+}
+
+inline std::uintptr_t prefix_len_bytes(BabelUpdateHandle const& h) {
+    return lr_babel_update_prefix_len_bytes(h.get());
+}
+
+inline std::uint8_t src_prefix_len(BabelUpdateHandle const& h) {
+    return lr_babel_update_src_prefix_len(h.get());
+}
+
+inline std::uintptr_t src_prefix(BabelUpdateHandle const& h, std::uint8_t* out, std::uintptr_t out_len) {
+    return lr_babel_update_src_prefix(h.get(), out, out_len);
+}
+
+inline std::int32_t set_ae(BabelUpdateHandle const& h, std::uint8_t ae) {
+    std::int32_t rc = lr_babel_update_set_ae(h.get(), ae);
+    if (rc < 0) throw Error(std::string("lr_babel_update_set_ae failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_flags(BabelUpdateHandle const& h, std::uint8_t flags) {
+    std::int32_t rc = lr_babel_update_set_flags(h.get(), flags);
+    if (rc < 0) throw Error(std::string("lr_babel_update_set_flags failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_omitted(BabelUpdateHandle const& h, std::uint8_t omitted) {
+    std::int32_t rc = lr_babel_update_set_omitted(h.get(), omitted);
+    if (rc < 0) throw Error(std::string("lr_babel_update_set_omitted failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_interval_cs(BabelUpdateHandle const& h, std::uint16_t interval_cs) {
+    std::int32_t rc = lr_babel_update_set_interval_cs(h.get(), interval_cs);
+    if (rc < 0) throw Error(std::string("lr_babel_update_set_interval_cs failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode(BabelUpdateHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_babel_update_encode(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_babel_update_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t detect_mult(BfdConfigHandle const& h) {
+    return lr_bfd_config_detect_mult(h.get());
+}
+
+inline std::uint8_t role(BfdConfigHandle const& h) {
+    return lr_bfd_config_role(h.get());
+}
+
+inline std::uint32_t desired_min_tx_interval(BfdConfigHandle const& h) {
+    return lr_bfd_config_desired_min_tx_interval(h.get());
+}
+
+inline std::uint32_t required_min_rx_interval(BfdConfigHandle const& h) {
+    return lr_bfd_config_required_min_rx_interval(h.get());
+}
+
+inline std::uint32_t required_min_echo_interval(BfdConfigHandle const& h) {
+    return lr_bfd_config_required_min_echo_interval(h.get());
+}
+
+inline std::int32_t set_detect_mult(BfdConfigHandle const& h, std::uint8_t value) {
+    std::int32_t rc = lr_bfd_config_set_detect_mult(h.get(), value);
+    if (rc < 0) throw Error(std::string("lr_bfd_config_set_detect_mult failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_desired_min_tx_interval(BfdConfigHandle const& h, std::uint32_t value) {
+    std::int32_t rc = lr_bfd_config_set_desired_min_tx_interval(h.get(), value);
+    if (rc < 0) throw Error(std::string("lr_bfd_config_set_desired_min_tx_interval failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_required_min_rx_interval(BfdConfigHandle const& h, std::uint32_t value) {
+    std::int32_t rc = lr_bfd_config_set_required_min_rx_interval(h.get(), value);
+    if (rc < 0) throw Error(std::string("lr_bfd_config_set_required_min_rx_interval failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_required_min_echo_interval(BfdConfigHandle const& h, std::uint32_t value) {
+    std::int32_t rc = lr_bfd_config_set_required_min_echo_interval(h.get(), value);
+    if (rc < 0) throw Error(std::string("lr_bfd_config_set_required_min_echo_interval failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_role(BfdConfigHandle const& h, std::uint8_t role) {
+    std::int32_t rc = lr_bfd_config_set_role(h.get(), role);
+    if (rc < 0) throw Error(std::string("lr_bfd_config_set_role failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_auth_key(BfdConfigHandle const& h, const std::uint8_t* password, std::uintptr_t password_len) {
+    std::int32_t rc = lr_bfd_config_set_auth_key(h.get(), password, password_len);
+    if (rc < 0) throw Error(std::string("lr_bfd_config_set_auth_key failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t has_auth_key(BfdConfigHandle const& h) {
+    return lr_bfd_config_has_auth_key(h.get());
+}
+
+inline lr_bfd_session_t bfd_session_new(BfdConfigHandle const& h, std::uint32_t my_disc) {
+    return lr_bfd_session_new(h.get(), my_disc);
+}
+
+inline std::uint8_t kind(BfdSessionEventHandle const& h) {
+    return lr_bfd_session_event_kind(h.get());
+}
+
+inline std::int32_t state_change_fields(BfdSessionEventHandle const& h, std::uint8_t* out_from, std::uint8_t* out_to, std::uint8_t* out_diag) {
+    std::int32_t rc = lr_bfd_session_event_state_change_fields(h.get(), out_from, out_to, out_diag);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_event_state_change_fields failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_keyed_auth(BfdSessionHandle const& h, lr_bfd_keyed_auth_t auth) {
+    std::int32_t rc = lr_bfd_session_set_keyed_auth(h.get(), auth);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_set_keyed_auth failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t keyed_auth_present(BfdSessionHandle const& h) {
+    return lr_bfd_session_keyed_auth_present(h.get());
+}
+
+inline std::int32_t update_timers(BfdSessionHandle const& h, std::uint64_t now_ms, std::uint32_t desired_min_tx, std::uint32_t required_min_rx, lr_bfd_session_event_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bfd_session_update_timers(h.get(), now_ms, desired_min_tx, required_min_rx, out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_update_timers failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t remote_detect_mult(BfdSessionHandle const& h) {
+    return lr_bfd_session_remote_detect_mult(h.get());
+}
+
+inline std::uint8_t poll_active(BfdSessionHandle const& h) {
+    return lr_bfd_session_poll_active(h.get());
+}
+
+inline std::uint8_t remote_diag(BfdSessionHandle const& h) {
+    return lr_bfd_session_remote_diag(h.get());
+}
+
+inline std::uint8_t state(BfdSessionHandle const& h) {
+    return lr_bfd_session_state(h.get());
+}
+
+inline std::uint8_t is_up(BfdSessionHandle const& h) {
+    return lr_bfd_session_is_up(h.get());
+}
+
+inline std::uint32_t my_discriminator(BfdSessionHandle const& h) {
+    return lr_bfd_session_my_discriminator(h.get());
+}
+
+inline std::uint32_t remote_discriminator(BfdSessionHandle const& h) {
+    return lr_bfd_session_remote_discriminator(h.get());
+}
+
+inline std::uint8_t local_diag(BfdSessionHandle const& h) {
+    return lr_bfd_session_local_diag(h.get());
+}
+
+inline std::uint8_t remote_state(BfdSessionHandle const& h) {
+    return lr_bfd_session_remote_state(h.get());
+}
+
+inline std::uint32_t tx_interval_us(BfdSessionHandle const& h) {
+    return lr_bfd_session_tx_interval_us(h.get());
+}
+
+inline std::uint64_t detection_time_us(BfdSessionHandle const& h) {
+    return lr_bfd_session_detection_time_us(h.get());
+}
+
+inline std::int32_t drain_outgoing(BfdSessionHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bfd_session_drain_outgoing(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_drain_outgoing failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t feed_bytes(BfdSessionHandle const& h, std::uint64_t now_ms, const std::uint8_t* data, std::uintptr_t len, lr_bfd_session_event_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bfd_session_feed_bytes(h.get(), now_ms, data, len, out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_feed_bytes failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t tick(BfdSessionHandle const& h, std::uint64_t now_ms, lr_bfd_session_event_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bfd_session_tick(h.get(), now_ms, out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_tick failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t start(BfdSessionHandle const& h, std::uint64_t now_ms, lr_bfd_session_event_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bfd_session_start(h.get(), now_ms, out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_start failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t admin_down(BfdSessionHandle const& h, lr_bfd_session_event_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bfd_session_admin_down(h.get(), out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_bfd_session_admin_down failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t length(BgpAsPathHandle const& h) {
+    return lr_bgp_as_path_length(h.get());
+}
+
+inline std::uintptr_t length_with_confed(BgpAsPathHandle const& h) {
+    return lr_bgp_as_path_length_with_confed(h.get());
+}
+
+inline std::uintptr_t as_sequence(BgpAsPathHandle const& h, std::uint32_t* out, std::uintptr_t cap) {
+    return lr_bgp_as_path_as_sequence(h.get(), out, cap);
+}
+
+inline std::uintptr_t segment_count(BgpAsPathHandle const& h) {
+    return lr_bgp_as_path_segment_count(h.get());
+}
+
+inline std::int32_t segment_at(BgpAsPathHandle const& h, std::uintptr_t index, std::uint8_t* out_kind, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_bgp_as_path_segment_at(h.get(), index, out_kind, out_count);
+    if (rc < 0) throw Error(std::string("lr_bgp_as_path_segment_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t segment_ases(BgpAsPathHandle const& h, std::uintptr_t index, std::uint32_t* out, std::uintptr_t cap) {
+    return lr_bgp_as_path_segment_ases(h.get(), index, out, cap);
+}
+
+inline std::int32_t prepend(BgpAsPathHandle const& h, std::uint32_t as_) {
+    std::int32_t rc = lr_bgp_as_path_prepend(h.get(), as_);
+    if (rc < 0) throw Error(std::string("lr_bgp_as_path_prepend failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t prepend_confed(BgpAsPathHandle const& h, std::uint32_t as_) {
+    std::int32_t rc = lr_bgp_as_path_prepend_confed(h.get(), as_);
+    if (rc < 0) throw Error(std::string("lr_bgp_as_path_prepend_confed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t strip_confed(BgpAsPathHandle const& h) {
+    std::int32_t rc = lr_bgp_as_path_strip_confed(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_as_path_strip_confed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t has_confed(BgpAsPathHandle const& h) {
+    return lr_bgp_as_path_has_confed(h.get());
+}
+
+inline std::uint8_t loop_check(BgpAsPathHandle const& h, std::uint32_t my_as) {
+    return lr_bgp_as_path_loop_check(h.get(), my_as);
+}
+
+inline std::int32_t encode_2(BgpAsPathHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_as_path_encode_2(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_as_path_encode_2 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode_4(BgpAsPathHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_as_path_encode_4(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_as_path_encode_4 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void bgp_cap_array_free(BgpCapabilityArrayHandle const& h, std::uintptr_t count) {
+    lr_bgp_cap_array_free(h.get(), count);
+}
+
+inline std::uint8_t bgp_cap_code(BgpCapabilityHandle const& h) {
+    return lr_bgp_cap_code(h.get());
+}
+
+inline std::uintptr_t bgp_cap_value_len(BgpCapabilityHandle const& h) {
+    return lr_bgp_cap_value_len(h.get());
+}
+
+inline std::uintptr_t bgp_cap_value(BgpCapabilityHandle const& h, std::uint8_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_value(h.get(), out, cap_size);
+}
+
+inline std::uint32_t bgp_cap_as_four_octet(BgpCapabilityHandle const& h) {
+    return lr_bgp_cap_as_four_octet(h.get());
+}
+
+inline std::uint8_t bgp_cap_as_multiprotocol(BgpCapabilityHandle const& h, std::uint16_t* out_afi, std::uint8_t* out_safi) {
+    return lr_bgp_cap_as_multiprotocol(h.get(), out_afi, out_safi);
+}
+
+inline std::uintptr_t bgp_cap_extended_next_hop_len(BgpCapabilityHandle const& h) {
+    return lr_bgp_cap_extended_next_hop_len(h.get());
+}
+
+inline std::uintptr_t bgp_cap_extended_next_hop_tuples(BgpCapabilityHandle const& h, struct lr_bgp_ext_next_hop_tuple_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_extended_next_hop_tuples(h.get(), out, cap_size);
+}
+
+inline void bgp_cap_free(BgpCapabilityHandle const& h) {
+    lr_bgp_cap_free(h.get());
+}
+
+inline std::uintptr_t bgp_cap_as_add_path_len(BgpCapabilityHandle const& h) {
+    return lr_bgp_cap_as_add_path_len(h.get());
+}
+
+inline std::uintptr_t bgp_cap_as_add_path(BgpCapabilityHandle const& h, struct lr_bgp_cap_add_path_family_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_as_add_path(h.get(), out, cap_size);
+}
+
+inline std::uint8_t bgp_cap_as_graceful_restart(BgpCapabilityHandle const& h, std::uint8_t* out_flags, std::uint16_t* out_time) {
+    return lr_bgp_cap_as_graceful_restart(h.get(), out_flags, out_time);
+}
+
+inline std::uintptr_t bgp_cap_as_graceful_restart_families_len(BgpCapabilityHandle const& h) {
+    return lr_bgp_cap_as_graceful_restart_families_len(h.get());
+}
+
+inline std::uintptr_t bgp_cap_as_graceful_restart_families(BgpCapabilityHandle const& h, struct lr_bgp_cap_gr_family_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_as_graceful_restart_families(h.get(), out, cap_size);
+}
+
+inline std::uintptr_t bgp_cap_as_long_lived_gr_len(BgpCapabilityHandle const& h) {
+    return lr_bgp_cap_as_long_lived_gr_len(h.get());
+}
+
+inline std::uintptr_t bgp_cap_as_long_lived_gr(BgpCapabilityHandle const& h, struct lr_bgp_cap_llgr_family_t* out, std::uintptr_t cap_size) {
+    return lr_bgp_cap_as_long_lived_gr(h.get(), out, cap_size);
+}
+
+inline std::int32_t set_asn4(BgpCodecHandle const& h, std::uint8_t asn4) {
+    std::int32_t rc = lr_bgp_codec_set_asn4(h.get(), asn4);
+    if (rc < 0) throw Error(std::string("lr_bgp_codec_set_asn4 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t asn4_active(BgpCodecHandle const& h) {
+    return lr_bgp_codec_asn4_active(h.get());
+}
+
+inline std::int32_t set_add_path(BgpCodecHandle const& h, const struct lr_afi_safi_t* tx, std::uintptr_t tx_count, const struct lr_afi_safi_t* rx, std::uintptr_t rx_count) {
+    std::int32_t rc = lr_bgp_codec_set_add_path(h.get(), tx, tx_count, rx, rx_count);
+    if (rc < 0) throw Error(std::string("lr_bgp_codec_set_add_path failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t decode_slice(BgpCodecHandle const& h, const std::uint8_t* data, std::uintptr_t len, lr_bgp_message_t* out) {
+    std::int32_t rc = lr_bgp_codec_decode_slice(h.get(), data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_codec_decode_slice failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode_vec(BgpCodecHandle const& h, lr_bgp_message_t msg, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_codec_encode_vec(h.get(), msg, out);
+    if (rc < 0) throw Error(std::string("lr_bgp_codec_encode_vec failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t as_u32(BgpCommunityHandle const& h) {
+    return lr_bgp_community_as_u32(h.get());
+}
+
+inline std::uint16_t asn(BgpCommunityHandle const& h) {
+    return lr_bgp_community_asn(h.get());
+}
+
+inline std::uint16_t value(BgpCommunityHandle const& h) {
+    return lr_bgp_community_value(h.get());
+}
+
+inline std::int32_t kind(BgpCommunityHandle const& h) {
+    std::int32_t rc = lr_bgp_community_kind(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_community_kind failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t contains(BgpConfedConfigHandle const& h, std::uint32_t asn) {
+    return lr_bgp_confed_config_contains(h.get(), asn);
+}
+
+inline std::uint32_t external_as(BgpConfedConfigHandle const& h) {
+    return lr_bgp_confed_config_external_as(h.get());
+}
+
+inline std::uintptr_t member_count(BgpConfedConfigHandle const& h) {
+    return lr_bgp_confed_config_member_count(h.get());
+}
+
+inline std::uint32_t member_at(BgpConfedConfigHandle const& h, std::uintptr_t index) {
+    return lr_bgp_confed_config_member_at(h.get(), index);
+}
+
+inline std::uint8_t kind(BgpExtCommunityHandle const& h) {
+    return lr_bgp_ext_community_kind(h.get());
+}
+
+inline std::uint8_t subtype(BgpExtCommunityHandle const& h) {
+    return lr_bgp_ext_community_subtype(h.get());
+}
+
+inline std::uint32_t global(BgpExtCommunityHandle const& h) {
+    return lr_bgp_ext_community_global(h.get());
+}
+
+inline std::uint16_t local(BgpExtCommunityHandle const& h) {
+    return lr_bgp_ext_community_local(h.get());
+}
+
+inline std::uintptr_t len(BgpLsAttrHandle const& h) {
+    return lr_bgp_ls_attr_len(h.get());
+}
+
+inline std::uint8_t is_empty(BgpLsAttrHandle const& h) {
+    return lr_bgp_ls_attr_is_empty(h.get());
+}
+
+inline std::uintptr_t value_len(BgpLsAttrHandle const& h) {
+    return lr_bgp_ls_attr_value_len(h.get());
+}
+
+inline std::int32_t encode(BgpLsAttrHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_ls_attr_encode(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_attr_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t find(BgpLsAttrHandle const& h, std::uint16_t ty, std::uintptr_t* out_index) {
+    std::int32_t rc = lr_bgp_ls_attr_find(h.get(), ty, out_index);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_attr_find failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bgp_ls_encode_tlv_stream(BgpLsTlvVecHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_ls_encode_tlv_stream(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_encode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t len(BgpLsTlvVecHandle const& h) {
+    return lr_bgp_ls_tlv_vec_len(h.get());
+}
+
+inline struct lr_bgp_ls_tlv_t at(BgpLsTlvVecHandle const& h, std::uintptr_t index) {
+    return lr_bgp_ls_tlv_vec_at(h.get(), index);
+}
+
+inline std::int32_t encode(BgpOtcHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_bgp_otc_encode(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_otc_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t value(BgpOtcHandle const& h) {
+    return lr_bgp_otc_value(h.get());
+}
+
+inline std::uint8_t is_set(BgpOtcHandle const& h) {
+    return lr_bgp_otc_is_set(h.get());
+}
+
+inline std::uint32_t local_as(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_local_as(h.get());
+}
+
+inline std::uint32_t peer_as(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_peer_as(h.get());
+}
+
+inline std::int32_t local_bgp_id(BgpPeerConfigHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_bgp_peer_config_local_bgp_id(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_config_local_bgp_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint16_t hold_time(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_hold_time(h.get());
+}
+
+inline std::uint16_t keepalive(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_keepalive(h.get());
+}
+
+inline std::uint8_t asn4(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_asn4(h.get());
+}
+
+inline std::uint8_t route_refresh(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_route_refresh(h.get());
+}
+
+inline std::uint8_t enhanced_rr(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_enhanced_rr(h.get());
+}
+
+inline std::uint8_t graceful_restart(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_graceful_restart(h.get());
+}
+
+inline std::uint16_t graceful_restart_time(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_graceful_restart_time(h.get());
+}
+
+inline std::uint8_t long_lived(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_long_lived(h.get());
+}
+
+inline std::uint32_t long_lived_stale_time(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_long_lived_stale_time(h.get());
+}
+
+inline std::uint8_t is_rr_client(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_is_rr_client(h.get());
+}
+
+inline std::uint8_t is_rs_client(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_is_rs_client(h.get());
+}
+
+inline std::uint8_t default_ipv4_unicast(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_default_ipv4_unicast(h.get());
+}
+
+inline std::uint8_t add_path(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_add_path(h.get());
+}
+
+inline std::uint8_t is_ebgp(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_is_ebgp(h.get());
+}
+
+inline std::uint16_t keepalive_interval(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_keepalive_interval(h.get());
+}
+
+inline std::uint8_t ipv4_unicast_active(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_ipv4_unicast_active(h.get());
+}
+
+inline std::uint8_t peer_role(BgpPeerConfigHandle const& h) {
+    return lr_bgp_peer_config_peer_role(h.get());
+}
+
+inline std::int32_t set_hold_time(BgpPeerConfigHandle const& h, std::uint16_t hold_time) {
+    std::int32_t rc = lr_bgp_peer_config_set_hold_time(h.get(), hold_time);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_config_set_hold_time failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_keepalive(BgpPeerConfigHandle const& h, std::uint16_t keepalive) {
+    std::int32_t rc = lr_bgp_peer_config_set_keepalive(h.get(), keepalive);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_config_set_keepalive failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_asn4(BgpPeerConfigHandle const& h, std::uint8_t asn4) {
+    std::int32_t rc = lr_bgp_peer_config_set_asn4(h.get(), asn4);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_config_set_asn4 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_rr_client(BgpPeerConfigHandle const& h, std::uint8_t enabled) {
+    std::int32_t rc = lr_bgp_peer_config_set_rr_client(h.get(), enabled);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_config_set_rr_client failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_graceful_restart(BgpPeerConfigHandle const& h, std::uint8_t enabled) {
+    std::int32_t rc = lr_bgp_peer_config_set_graceful_restart(h.get(), enabled);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_config_set_graceful_restart failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t state(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_state(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_state failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t is_established(BgpPeerHandle const& h) {
+    return lr_bgp_peer_is_established(h.get());
+}
+
+inline std::int32_t peer_bgp_id(BgpPeerHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_bgp_peer_peer_bgp_id(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_peer_bgp_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t peer_as(BgpPeerHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_bgp_peer_peer_as(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_peer_as failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint16_t negotiated_hold_time(BgpPeerHandle const& h) {
+    return lr_bgp_peer_negotiated_hold_time(h.get());
+}
+
+inline std::int32_t feed_bytes(BgpPeerHandle const& h, const std::uint8_t* data, std::uintptr_t len) {
+    std::int32_t rc = lr_bgp_peer_feed_bytes(h.get(), data, len);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_feed_bytes failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t drain_outgoing(BgpPeerHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bgp_peer_drain_outgoing(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_drain_outgoing failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_manual_start(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_manual_start(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_manual_start failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_manual_stop(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_manual_stop(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_manual_stop failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_transport_open(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_transport_open(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_transport_open failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_transport_fatal(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_transport_fatal(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_transport_fatal failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_transport_close(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_transport_close(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_transport_close failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_timer_connect_retry(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_timer_connect_retry(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_timer_connect_retry failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_timer_hold_expired(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_timer_hold_expired(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_timer_hold_expired failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_timer_keepalive(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_timer_keepalive(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_timer_keepalive failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_timer_idle_hold(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_step_timer_idle_hold(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_step_timer_idle_hold failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t advertise(BgpPeerHandle const& h, lr_route_t route) {
+    std::int32_t rc = lr_bgp_peer_advertise(h.get(), route);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_advertise failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t withdraw(BgpPeerHandle const& h, const struct lr_prefix_t* prefixes, std::uintptr_t count, std::uint16_t family_afi, std::uint8_t family_safi) {
+    std::int32_t rc = lr_bgp_peer_withdraw(h.get(), prefixes, count, family_afi, family_safi);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_withdraw failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t send_end_of_rib(BgpPeerHandle const& h, std::uint16_t family_afi, std::uint8_t family_safi) {
+    std::int32_t rc = lr_bgp_peer_send_end_of_rib(h.get(), family_afi, family_safi);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_send_end_of_rib failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t message_stats(BgpPeerHandle const& h, struct lr_bgp_peer_message_stats_t* out) {
+    std::int32_t rc = lr_bgp_peer_message_stats(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_message_stats failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint16_t hold_time(BgpPeerHandle const& h) {
+    return lr_bgp_peer_hold_time(h.get());
+}
+
+inline std::uint16_t keepalive(BgpPeerHandle const& h) {
+    return lr_bgp_peer_keepalive(h.get());
+}
+
+inline std::uint32_t local_as(BgpPeerHandle const& h) {
+    return lr_bgp_peer_local_as(h.get());
+}
+
+inline std::uint8_t asn4(BgpPeerHandle const& h) {
+    return lr_bgp_peer_asn4(h.get());
+}
+
+inline std::uint8_t ipv4_unicast_active(BgpPeerHandle const& h) {
+    return lr_bgp_peer_ipv4_unicast_active(h.get());
+}
+
+inline std::uint8_t is_rr_client(BgpPeerHandle const& h) {
+    return lr_bgp_peer_is_rr_client(h.get());
+}
+
+inline std::uint8_t is_rs_client(BgpPeerHandle const& h) {
+    return lr_bgp_peer_is_rs_client(h.get());
+}
+
+inline std::int32_t role(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_role(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_role failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t route_refresh_negotiated(BgpPeerHandle const& h) {
+    return lr_bgp_peer_route_refresh_negotiated(h.get());
+}
+
+inline std::uint8_t enhanced_route_refresh_negotiated(BgpPeerHandle const& h) {
+    return lr_bgp_peer_enhanced_route_refresh_negotiated(h.get());
+}
+
+inline std::uint8_t add_path_negotiated(BgpPeerHandle const& h) {
+    return lr_bgp_peer_add_path_negotiated(h.get());
+}
+
+inline std::uint8_t add_path_tx_for(BgpPeerHandle const& h, lr_nlri_family_t family) {
+    return lr_bgp_peer_add_path_tx_for(h.get(), family);
+}
+
+inline std::uint8_t add_path_rx_for(BgpPeerHandle const& h, lr_nlri_family_t family) {
+    return lr_bgp_peer_add_path_rx_for(h.get(), family);
+}
+
+inline std::uint8_t extended_next_hop_for(BgpPeerHandle const& h, std::uint16_t nlri_afi, std::uint8_t nlri_safi, std::uint16_t nexthop_afi) {
+    return lr_bgp_peer_extended_next_hop_for(h.get(), nlri_afi, nlri_safi, nexthop_afi);
+}
+
+inline std::int32_t negotiated_graceful_restart_time(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_negotiated_graceful_restart_time(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_negotiated_graceful_restart_time failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t llgr_negotiated(BgpPeerHandle const& h) {
+    return lr_bgp_peer_llgr_negotiated(h.get());
+}
+
+inline std::uint32_t negotiated_llgr_stale_time(BgpPeerHandle const& h, lr_nlri_family_t family) {
+    return lr_bgp_peer_negotiated_llgr_stale_time(h.get(), family);
+}
+
+inline std::uint8_t received_cease_collision(BgpPeerHandle const& h) {
+    return lr_bgp_peer_received_cease_collision(h.get());
+}
+
+inline std::uint8_t notification_received(BgpPeerHandle const& h) {
+    return lr_bgp_peer_notification_received(h.get());
+}
+
+inline std::uint8_t request_route_refresh(BgpPeerHandle const& h, lr_nlri_family_t family) {
+    return lr_bgp_peer_request_route_refresh(h.get(), family);
+}
+
+inline std::uint8_t begin_enhanced_route_refresh(BgpPeerHandle const& h, lr_nlri_family_t family) {
+    return lr_bgp_peer_begin_enhanced_route_refresh(h.get(), family);
+}
+
+inline std::uint8_t end_enhanced_route_refresh(BgpPeerHandle const& h, lr_nlri_family_t family) {
+    return lr_bgp_peer_end_enhanced_route_refresh(h.get(), family);
+}
+
+inline std::int32_t enqueue_notification(BgpPeerHandle const& h, std::uint8_t code, std::uint8_t subcode) {
+    std::int32_t rc = lr_bgp_peer_enqueue_notification(h.get(), code, subcode);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_enqueue_notification failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t reset(BgpPeerHandle const& h) {
+    std::int32_t rc = lr_bgp_peer_reset(h.get());
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_reset failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t advertised_tuples(BgpPeerHandle const& h, std::uintptr_t* out_count, struct lr_bgp_ext_next_hop_tuple_t ** out_array) {
+    std::int32_t rc = lr_bgp_peer_advertised_tuples(h.get(), out_count, out_array);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_advertised_tuples failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t role(BgpPeerTopologyHandle const& h) {
+    return lr_bgp_peer_topology_role(h.get());
+}
+
+inline std::uint8_t rr_client(BgpPeerTopologyHandle const& h) {
+    return lr_bgp_peer_topology_rr_client(h.get());
+}
+
+inline std::uint8_t rs_client(BgpPeerTopologyHandle const& h) {
+    return lr_bgp_peer_topology_rs_client(h.get());
+}
+
+inline std::uint8_t otc_role(BgpPeerTopologyHandle const& h) {
+    return lr_bgp_peer_topology_otc_role(h.get());
+}
+
+inline std::uint8_t can_advertise(BgpPeerTopologyHandle const& h, lr_bgp_peer_topology_t from, lr_bgp_otc_t route_otc) {
+    return lr_bgp_peer_topology_can_advertise(h.get(), from, route_otc);
+}
+
+inline std::uint32_t cluster_id(BgpRrConfigHandle const& h) {
+    return lr_bgp_rr_config_cluster_id(h.get());
+}
+
+inline std::uint8_t enabled(BgpRrConfigHandle const& h) {
+    return lr_bgp_rr_config_enabled(h.get());
+}
+
+inline std::uint8_t client(BgpRsConfigHandle const& h) {
+    return lr_bgp_rs_config_client(h.get());
+}
+
+inline std::uintptr_t strip_count(BgpRsConfigHandle const& h) {
+    return lr_bgp_rs_config_strip_count(h.get());
+}
+
+inline std::uint32_t strip_at(BgpRsConfigHandle const& h, std::uintptr_t index) {
+    return lr_bgp_rs_config_strip_at(h.get(), index);
+}
+
+inline std::uintptr_t add_count(BgpRsConfigHandle const& h) {
+    return lr_bgp_rs_config_add_count(h.get());
+}
+
+inline std::uint32_t add_at(BgpRsConfigHandle const& h, std::uintptr_t index) {
+    return lr_bgp_rs_config_add_at(h.get(), index);
+}
+
+inline std::int32_t decode_slice(BmpCodecHandle const& h, const std::uint8_t* data, std::uintptr_t len, lr_bmp_message_t* out) {
+    std::int32_t rc = lr_bmp_codec_decode_slice(h.get(), data, len, out);
+    if (rc < 0) throw Error(std::string("lr_bmp_codec_decode_slice failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t feed(BmpCodecHandle const& h, const std::uint8_t* data, std::uintptr_t len) {
+    std::int32_t rc = lr_bmp_codec_feed(h.get(), data, len);
+    if (rc < 0) throw Error(std::string("lr_bmp_codec_feed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t next_message(BmpCodecHandle const& h, lr_bmp_message_t* out) {
+    std::int32_t rc = lr_bmp_codec_next_message(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bmp_codec_next_message failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode_vec(BmpCodecHandle const& h, lr_bmp_message_t m, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bmp_codec_encode_vec(h.get(), m, out);
+    if (rc < 0) throw Error(std::string("lr_bmp_codec_encode_vec failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t bmp_encode(BmpMessageHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bmp_encode(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bmp_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t type(BmpMessageHandle const& h) {
+    return lr_bmp_message_type(h.get());
+}
+
+inline std::uint8_t peer_present(BmpMessageHandle const& h) {
+    return lr_bmp_message_peer_present(h.get());
+}
+
+inline std::int32_t peer_header(BmpMessageHandle const& h, struct lr_bmp_peer_header_t* out) {
+    std::int32_t rc = lr_bmp_message_peer_header(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bmp_message_peer_header failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t payload_len(BmpMessageHandle const& h) {
+    return lr_bmp_message_payload_len(h.get());
+}
+
+inline std::int32_t payload(BmpMessageHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_bmp_message_payload(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_bmp_message_payload failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void bgp_cap_bytes_free(BytesTHandle const& h) {
+    lr_bgp_cap_bytes_free(h.get());
+}
+
+inline std::uintptr_t bgp_cap_bytes_len(BytesTHandle const& h) {
+    return lr_bgp_cap_bytes_len(h.get());
+}
+
+inline const std::uint8_t* bgp_cap_bytes_ptr(BytesTHandle const& h) {
+    return lr_bgp_cap_bytes_ptr(h.get());
+}
+
+inline std::int32_t config(DampingTableHandle const& h, struct lr_damping_config_t* out) {
+    std::int32_t rc = lr_damping_table_config(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_damping_table_config failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t on_withdraw(DampingTableHandle const& h, const struct lr_prefix_t* prefix, std::uint64_t now_s) {
+    std::int32_t rc = lr_damping_table_on_withdraw(h.get(), prefix, now_s);
+    if (rc < 0) throw Error(std::string("lr_damping_table_on_withdraw failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t on_announce(DampingTableHandle const& h, const struct lr_prefix_t* prefix, std::uint64_t now_s) {
+    std::int32_t rc = lr_damping_table_on_announce(h.get(), prefix, now_s);
+    if (rc < 0) throw Error(std::string("lr_damping_table_on_announce failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t is_suppressed(DampingTableHandle const& h, const struct lr_prefix_t* prefix) {
+    std::int32_t rc = lr_damping_table_is_suppressed(h.get(), prefix);
+    if (rc < 0) throw Error(std::string("lr_damping_table_is_suppressed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int64_t decay_all(DampingTableHandle const& h, std::uint64_t now_s, struct lr_prefix_t* out_reactivated, std::uintptr_t cap) {
+    return lr_damping_table_decay_all(h.get(), now_s, out_reactivated, cap);
+}
+
+inline std::int32_t forget(DampingTableHandle const& h, const struct lr_prefix_t* prefix) {
+    std::int32_t rc = lr_damping_table_forget(h.get(), prefix);
+    if (rc < 0) throw Error(std::string("lr_damping_table_forget failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t len(DampingTableHandle const& h) {
+    return lr_damping_table_len(h.get());
+}
+
+inline std::int32_t at(DampingTableHandle const& h, std::uintptr_t index, struct lr_damping_entry_t* out) {
+    std::int32_t rc = lr_damping_table_at(h.get(), index, out);
+    if (rc < 0) throw Error(std::string("lr_damping_table_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_transport_v4(LdpDiscoveryConfigHandle const& h, const std::uint8_t* addr) {
+    std::int32_t rc = lr_ldp_discovery_config_set_transport_v4(h.get(), addr);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_config_set_transport_v4 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_transport_v6(LdpDiscoveryConfigHandle const& h, const std::uint8_t* addr) {
+    std::int32_t rc = lr_ldp_discovery_config_set_transport_v6(h.get(), addr);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_config_set_transport_v6 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_link_hello_hold(LdpDiscoveryConfigHandle const& h, std::uint16_t hold) {
+    std::int32_t rc = lr_ldp_discovery_config_set_link_hello_hold(h.get(), hold);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_config_set_link_hello_hold failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_targeted_hello_hold(LdpDiscoveryConfigHandle const& h, std::uint16_t hold) {
+    std::int32_t rc = lr_ldp_discovery_config_set_targeted_hello_hold(h.get(), hold);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_config_set_targeted_hello_hold failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_prefer_ipv6(LdpDiscoveryConfigHandle const& h, std::uint8_t prefer_ipv6) {
+    std::int32_t rc = lr_ldp_discovery_config_set_prefer_ipv6(h.get(), prefer_ipv6);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_config_set_prefer_ipv6 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_accept_targeted(LdpDiscoveryConfigHandle const& h, std::uint8_t accept) {
+    std::int32_t rc = lr_ldp_discovery_config_set_accept_targeted(h.get(), accept);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_config_set_accept_targeted failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ldp_discovery_t ldp_discovery_new(LdpDiscoveryConfigHandle const& h) {
+    return lr_ldp_discovery_new(h.get());
+}
+
+inline std::uintptr_t adjacency_count(LdpDiscoveryHandle const& h) {
+    return lr_ldp_discovery_adjacency_count(h.get());
+}
+
+inline std::int32_t adjacency_at(LdpDiscoveryHandle const& h, std::uintptr_t index, struct lr_ldp_hello_adjacency_t* out) {
+    std::int32_t rc = lr_ldp_discovery_adjacency_at(h.get(), index, out);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_adjacency_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t adjacency_for_peer(LdpDiscoveryHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space, struct lr_ldp_hello_adjacency_t* out) {
+    std::int32_t rc = lr_ldp_discovery_adjacency_for_peer(h.get(), peer_lsr_id, peer_label_space, out);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_adjacency_for_peer failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t remove_adjacencies_for_peer(LdpDiscoveryHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space) {
+    std::int32_t rc = lr_ldp_discovery_remove_adjacencies_for_peer(h.get(), peer_lsr_id, peer_label_space);
+    if (rc < 0) throw Error(std::string("lr_ldp_discovery_remove_adjacencies_for_peer failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t tick(LdpDiscoveryHandle const& h, std::uint64_t now_ms) {
+    return lr_ldp_discovery_tick(h.get(), now_ms);
+}
+
+inline std::uintptr_t outgoing_count(LdpDiscoveryHandle const& h) {
+    return lr_ldp_discovery_outgoing_count(h.get());
+}
+
+inline std::int32_t set_transport_addr_v6(LdpEngineConfigHandle const& h, const std::uint8_t* transport_addr_v6) {
+    std::int32_t rc = lr_ldp_engine_config_set_transport_addr_v6(h.get(), transport_addr_v6);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_transport_addr_v6 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_prefer_ipv6(LdpEngineConfigHandle const& h, std::uint8_t prefer_ipv6) {
+    std::int32_t rc = lr_ldp_engine_config_set_prefer_ipv6(h.get(), prefer_ipv6);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_prefer_ipv6 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_keepalive_time(LdpEngineConfigHandle const& h, std::uint16_t keepalive_time) {
+    std::int32_t rc = lr_ldp_engine_config_set_keepalive_time(h.get(), keepalive_time);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_keepalive_time failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_max_pdu_len(LdpEngineConfigHandle const& h, std::uint16_t max_pdu_len) {
+    std::int32_t rc = lr_ldp_engine_config_set_max_pdu_len(h.get(), max_pdu_len);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_max_pdu_len failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_advertisement(LdpEngineConfigHandle const& h, std::int32_t advertisement) {
+    std::int32_t rc = lr_ldp_engine_config_set_advertisement(h.get(), advertisement);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_advertisement failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_link_hello_hold(LdpEngineConfigHandle const& h, std::uint16_t hold) {
+    std::int32_t rc = lr_ldp_engine_config_set_link_hello_hold(h.get(), hold);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_link_hello_hold failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_targeted_hello_hold(LdpEngineConfigHandle const& h, std::uint16_t hold) {
+    std::int32_t rc = lr_ldp_engine_config_set_targeted_hello_hold(h.get(), hold);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_targeted_hello_hold failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_accept_targeted(LdpEngineConfigHandle const& h, std::uint8_t accept) {
+    std::int32_t rc = lr_ldp_engine_config_set_accept_targeted(h.get(), accept);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_accept_targeted failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_loop_detection(LdpEngineConfigHandle const& h, std::uint8_t enabled, std::uint8_t path_vector_limit) {
+    std::int32_t rc = lr_ldp_engine_config_set_loop_detection(h.get(), enabled, path_vector_limit);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_loop_detection failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_label_range(LdpEngineConfigHandle const& h, std::uint32_t label_min, std::uint32_t label_max) {
+    std::int32_t rc = lr_ldp_engine_config_set_label_range(h.get(), label_min, label_max);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_set_label_range failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add_reserved_label(LdpEngineConfigHandle const& h, std::uint32_t label) {
+    std::int32_t rc = lr_ldp_engine_config_add_reserved_label(h.get(), label);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_add_reserved_label failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ldp_engine_t ldp_engine_new(LdpEngineConfigHandle const& h) {
+    return lr_ldp_engine_new(h.get());
+}
+
+inline std::int32_t on_connected(LdpEngineHandle const& h, std::uint64_t now_ms, std::uint64_t conn, std::uint32_t peer_lsr, std::uint16_t peer_label_space) {
+    std::int32_t rc = lr_ldp_engine_on_connected(h.get(), now_ms, conn, peer_lsr, peer_label_space);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_on_connected failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t on_connect_failed(LdpEngineHandle const& h, std::uint32_t peer_lsr, std::uint16_t peer_label_space) {
+    std::int32_t rc = lr_ldp_engine_on_connect_failed(h.get(), peer_lsr, peer_label_space);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_on_connect_failed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t feed_tcp(LdpEngineHandle const& h, std::uint64_t now_ms, std::uint64_t conn, const std::uint8_t* data, std::uintptr_t len) {
+    std::int32_t rc = lr_ldp_engine_feed_tcp(h.get(), now_ms, conn, data, len);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_feed_tcp failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t on_closed(LdpEngineHandle const& h, std::uint64_t now_ms, std::uint64_t conn) {
+    std::int32_t rc = lr_ldp_engine_on_closed(h.get(), now_ms, conn);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_on_closed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t tick(LdpEngineHandle const& h, std::uint64_t now_ms) {
+    std::int32_t rc = lr_ldp_engine_tick(h.get(), now_ms);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_tick failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t shutdown_peer(LdpEngineHandle const& h, std::uint64_t now_ms, std::uint32_t peer_lsr, std::uint16_t peer_label_space) {
+    std::int32_t rc = lr_ldp_engine_shutdown_peer(h.get(), now_ms, peer_lsr, peer_label_space);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_shutdown_peer failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t drain_udp(LdpEngineHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ldp_engine_drain_udp(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_drain_udp failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t drain_tcp(LdpEngineHandle const& h, std::uint64_t conn, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ldp_engine_drain_tcp(h.get(), conn, out);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_drain_tcp failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t drain_tcp_all(LdpEngineHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ldp_engine_drain_tcp_all(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_drain_tcp_all failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t transit_label_count(LdpEngineHandle const& h) {
+    return lr_ldp_engine_transit_label_count(h.get());
+}
+
+inline std::uintptr_t adjacency_count(LdpEngineHandle const& h) {
+    return lr_ldp_engine_adjacency_count(h.get());
+}
+
+inline std::int32_t adjacency_at(LdpEngineHandle const& h, std::uintptr_t index, std::uint32_t* out_peer_lsr, std::uint16_t* out_peer_label_space, std::int32_t* out_kind, std::uint8_t* out_source_is_ipv6, std::uint8_t* source_addr, std::uint8_t* out_transport_is_ipv6, std::uint8_t* transport_addr, std::uint32_t* out_hold_time_secs, std::uint64_t* out_last_seen_ms, std::uint8_t* out_config_seq_present, std::uint32_t* out_config_seq, std::uint8_t* out_dual_stack_present, std::uint8_t* out_dual_stack_prefer_ipv6) {
+    std::int32_t rc = lr_ldp_engine_adjacency_at(h.get(), index, out_peer_lsr, out_peer_label_space, out_kind, out_source_is_ipv6, source_addr, out_transport_is_ipv6, transport_addr, out_hold_time_secs, out_last_seen_ms, out_config_seq_present, out_config_seq, out_dual_stack_present, out_dual_stack_prefer_ipv6);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_adjacency_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t session_state(LdpEngineHandle const& h, std::uint32_t peer_lsr, std::uint16_t peer_label_space) {
+    std::int32_t rc = lr_ldp_engine_session_state(h.get(), peer_lsr, peer_label_space);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_session_state failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t take_events(LdpEngineHandle const& h, struct lr_ldp_engine_event_t* out, std::uintptr_t cap) {
+    return lr_ldp_engine_take_events(h.get(), out, cap);
+}
+
+inline std::uint8_t is_wildcard(LdpFecHandle const& h) {
+    return lr_ldp_fec_is_wildcard(h.get());
+}
+
+inline std::int32_t single_prefix(LdpFecHandle const& h, std::uint8_t* octets_out, std::uint8_t* prefix_len_out, std::uint8_t* present_out) {
+    std::int32_t rc = lr_ldp_fec_single_prefix(h.get(), octets_out, prefix_len_out, present_out);
+    if (rc < 0) throw Error(std::string("lr_ldp_fec_single_prefix failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t learn(LdpLabelStoreHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t label) {
+    return lr_ldp_label_store_learn(h.get(), peer_lsr_id, peer_label_space, prefix_addr, is_ipv6, prefix_len, label);
+}
+
+inline std::uint8_t unlearn(LdpLabelStoreHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    return lr_ldp_label_store_unlearn(h.get(), peer_lsr_id, peer_label_space, prefix_addr, is_ipv6, prefix_len, out_label);
+}
+
+inline std::uint8_t label_from(LdpLabelStoreHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    return lr_ldp_label_store_label_from(h.get(), peer_lsr_id, peer_label_space, prefix_addr, is_ipv6, prefix_len, out_label);
+}
+
+inline std::uintptr_t unlearn_peer(LdpLabelStoreHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space) {
+    return lr_ldp_label_store_unlearn_peer(h.get(), peer_lsr_id, peer_label_space);
+}
+
+inline std::uintptr_t unlearn_by_label(LdpLabelStoreHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space, std::uint32_t label, struct lr_ldp_prefix_t* out_prefixes, std::uintptr_t cap) {
+    return lr_ldp_label_store_unlearn_by_label(h.get(), peer_lsr_id, peer_label_space, label, out_prefixes, cap);
+}
+
+inline std::uintptr_t unlearn_all_from(LdpLabelStoreHandle const& h, std::uint32_t peer_lsr_id, std::uint16_t peer_label_space, struct lr_ldp_prefix_t* out_prefixes, std::uintptr_t cap) {
+    return lr_ldp_label_store_unlearn_all_from(h.get(), peer_lsr_id, peer_label_space, out_prefixes, cap);
+}
+
+inline std::uint8_t advertise(LdpLabelStoreHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t label, std::uint32_t* out_previous) {
+    return lr_ldp_label_store_advertise(h.get(), prefix_addr, is_ipv6, prefix_len, label, out_previous);
+}
+
+inline std::uint8_t withdraw_advertised(LdpLabelStoreHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    return lr_ldp_label_store_withdraw_advertised(h.get(), prefix_addr, is_ipv6, prefix_len, out_label);
+}
+
+inline std::uint8_t advertised_label(LdpLabelStoreHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    return lr_ldp_label_store_advertised_label(h.get(), prefix_addr, is_ipv6, prefix_len, out_label);
+}
+
+inline std::uint32_t value(LdpLabelHandle const& h) {
+    return lr_ldp_label_value(h.get());
+}
+
+inline std::uint8_t is_valid(LdpLabelHandle const& h) {
+    return lr_ldp_label_is_valid(h.get());
+}
+
+inline struct lr_ldp_id_t sender(LdpPduHandle const& h) {
+    return lr_ldp_pdu_sender(h.get());
+}
+
+inline std::uint16_t version(LdpPduHandle const& h) {
+    return lr_ldp_pdu_version(h.get());
+}
+
+inline std::uintptr_t message_count(LdpPduHandle const& h) {
+    return lr_ldp_pdu_message_count(h.get());
+}
+
+inline std::uint16_t message_type_at(LdpPduHandle const& h, std::uintptr_t index) {
+    return lr_ldp_pdu_message_type_at(h.get(), index);
+}
+
+inline std::uint32_t message_id_at(LdpPduHandle const& h, std::uintptr_t index) {
+    return lr_ldp_pdu_message_id_at(h.get(), index);
+}
+
+inline std::uint8_t message_u_bit_at(LdpPduHandle const& h, std::uintptr_t index) {
+    return lr_ldp_pdu_message_u_bit_at(h.get(), index);
+}
+
+inline std::int32_t state(LdpSessionHandle const& h) {
+    std::int32_t rc = lr_ldp_session_state(h.get());
+    if (rc < 0) throw Error(std::string("lr_ldp_session_state failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t is_operational(LdpSessionHandle const& h) {
+    return lr_ldp_session_is_operational(h.get());
+}
+
+inline std::int32_t start(LdpSessionHandle const& h, std::uint64_t now_ms) {
+    std::int32_t rc = lr_ldp_session_start(h.get(), now_ms);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_start failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t drain_outgoing(LdpSessionHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ldp_session_drain_outgoing(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_drain_outgoing failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t peer(LdpSessionHandle const& h, struct lr_ldp_id_t* out) {
+    std::int32_t rc = lr_ldp_session_peer(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_peer failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t negotiated(LdpSessionHandle const& h, std::uint16_t* out_keepalive, std::uint16_t* out_max_pdu_len) {
+    std::int32_t rc = lr_ldp_session_negotiated(h.get(), out_keepalive, out_max_pdu_len);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_negotiated failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t tick(LdpSessionHandle const& h, std::uint64_t now_ms) {
+    std::int32_t rc = lr_ldp_session_tick(h.get(), now_ms);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_tick failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t transport_closed(LdpSessionHandle const& h) {
+    std::int32_t rc = lr_ldp_session_transport_closed(h.get());
+    if (rc < 0) throw Error(std::string("lr_ldp_session_transport_closed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t shutdown(LdpSessionHandle const& h, std::uint64_t now_ms) {
+    std::int32_t rc = lr_ldp_session_shutdown(h.get(), now_ms);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_shutdown failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t feed_pdu(LdpSessionHandle const& h, lr_ldp_pdu_t pdu, std::uint64_t now_ms) {
+    std::int32_t rc = lr_ldp_session_feed_pdu(h.get(), pdu, now_ms);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_feed_pdu failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t send_label_mapping(LdpSessionHandle const& h, std::uint32_t message_id, lr_ldp_fec_t fec, lr_ldp_label_t label) {
+    std::int32_t rc = lr_ldp_session_send_label_mapping(h.get(), message_id, fec, label);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_send_label_mapping failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t send_label_withdraw(LdpSessionHandle const& h, std::uint32_t message_id, lr_ldp_fec_t fec, lr_ldp_label_t label) {
+    std::int32_t rc = lr_ldp_session_send_label_withdraw(h.get(), message_id, fec, label);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_send_label_withdraw failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t send_label_request(LdpSessionHandle const& h, std::uint32_t message_id, lr_ldp_fec_t fec) {
+    std::int32_t rc = lr_ldp_session_send_label_request(h.get(), message_id, fec);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_send_label_request failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t send_label_release(LdpSessionHandle const& h, std::uint32_t message_id, lr_ldp_fec_t fec, lr_ldp_label_t label, std::uint32_t status_code) {
+    std::int32_t rc = lr_ldp_session_send_label_release(h.get(), message_id, fec, label, status_code);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_send_label_release failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t send_address_message(LdpSessionHandle const& h, const std::uint8_t* addrs, std::uintptr_t count, std::uint8_t is_ipv6) {
+    std::int32_t rc = lr_ldp_session_send_address_message(h.get(), addrs, count, is_ipv6);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_send_address_message failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t enqueue_notification(LdpSessionHandle const& h, std::uint32_t status_code, std::uint32_t msg_id, std::uint16_t msg_type) {
+    std::int32_t rc = lr_ldp_session_enqueue_notification(h.get(), status_code, msg_id, msg_type);
+    if (rc < 0) throw Error(std::string("lr_ldp_session_enqueue_notification failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t label_of(LdpTransitHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    return lr_ldp_transit_label_of(h.get(), prefix_addr, is_ipv6, prefix_len, out_label);
+}
+
+inline std::uint8_t is_allocated(LdpTransitHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len) {
+    return lr_ldp_transit_is_allocated(h.get(), prefix_addr, is_ipv6, prefix_len);
+}
+
+inline std::uintptr_t allocated_count(LdpTransitHandle const& h) {
+    return lr_ldp_transit_allocated_count(h.get());
+}
+
+inline std::uint8_t allocate(LdpTransitHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    return lr_ldp_transit_allocate(h.get(), prefix_addr, is_ipv6, prefix_len, out_label);
+}
+
+inline std::uint8_t release(LdpTransitHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    return lr_ldp_transit_release(h.get(), prefix_addr, is_ipv6, prefix_len, out_label);
+}
+
+inline std::int32_t into_vec(MplsLabelStackHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_mpls_label_stack_into_vec(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_mpls_label_stack_into_vec failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t all_reserved(MplsLabelStackHandle const& h) {
+    return lr_mpls_label_stack_all_reserved(h.get());
+}
+
+inline std::uint8_t contains(MplsLabelStackHandle const& h, lr_mpls_label_t label) {
+    return lr_mpls_label_stack_contains(h.get(), label);
+}
+
+inline std::int32_t decode_slice(MrtReaderHandle const& h, const std::uint8_t* data, std::uintptr_t len, lr_mrt_record_t* out) {
+    std::int32_t rc = lr_mrt_reader_decode_slice(h.get(), data, len, out);
+    if (rc < 0) throw Error(std::string("lr_mrt_reader_decode_slice failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t feed(MrtReaderHandle const& h, const std::uint8_t* data, std::uintptr_t len) {
+    std::int32_t rc = lr_mrt_reader_feed(h.get(), data, len);
+    if (rc < 0) throw Error(std::string("lr_mrt_reader_feed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t next_record(MrtReaderHandle const& h, lr_mrt_record_t* out) {
+    std::int32_t rc = lr_mrt_reader_next_record(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_mrt_reader_next_record failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t type(MrtRecordHandle const& h) {
+    return lr_mrt_record_type(h.get());
+}
+
+inline std::uint8_t is_rib(MrtRecordHandle const& h) {
+    return lr_mrt_record_is_rib(h.get());
+}
+
+inline std::int32_t unknown_subtype(MrtRecordHandle const& h, std::uint16_t* out_msg_type, std::uint16_t* out_subtype) {
+    std::int32_t rc = lr_mrt_record_unknown_subtype(h.get(), out_msg_type, out_subtype);
+    if (rc < 0) throw Error(std::string("lr_mrt_record_unknown_subtype failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t peer_index_table_summary(MrtRecordHandle const& h, std::uint32_t* out_collector_bgp_id, std::uintptr_t* out_view_name_len, std::uintptr_t* out_peer_count) {
+    return lr_mrt_record_peer_index_table_summary(h.get(), out_collector_bgp_id, out_view_name_len, out_peer_count);
+}
+
+inline std::uintptr_t peer_index_table_view_name(MrtRecordHandle const& h, std::uint8_t* out, std::uintptr_t out_len) {
+    return lr_mrt_record_peer_index_table_view_name(h.get(), out, out_len);
+}
+
+inline std::uint8_t peer_index_table_peer_at(MrtRecordHandle const& h, std::uintptr_t index, struct lr_mrt_peer_entry_t* out) {
+    return lr_mrt_record_peer_index_table_peer_at(h.get(), index, out);
+}
+
+inline std::uint8_t rib_table_summary(MrtRecordHandle const& h, std::uint32_t* out_sequence, struct lr_prefix_t* out_prefix, std::uint8_t* out_add_path, std::uintptr_t* out_entry_count) {
+    return lr_mrt_record_rib_table_summary(h.get(), out_sequence, out_prefix, out_add_path, out_entry_count);
+}
+
+inline std::uint8_t rib_table_entry_at(MrtRecordHandle const& h, std::uintptr_t index, struct lr_mrt_rib_entry_t* out) {
+    return lr_mrt_record_rib_table_entry_at(h.get(), index, out);
+}
+
+inline std::uint16_t add_peer(MrtRibDumpHandle const& h, struct lr_mrt_peer_entry_t peer) {
+    return lr_mrt_rib_dump_add_peer(h.get(), peer);
+}
+
+inline std::int32_t add_table(MrtRibDumpHandle const& h, std::uint32_t sequence, const std::uint8_t* prefix_addr, std::uint8_t prefix_len, std::uint8_t is_ipv6, std::uint8_t add_path, const struct lr_mrt_rib_entry_t* entries, std::uintptr_t entry_count) {
+    std::int32_t rc = lr_mrt_rib_dump_add_table(h.get(), sequence, prefix_addr, prefix_len, is_ipv6, add_path, entries, entry_count);
+    if (rc < 0) throw Error(std::string("lr_mrt_rib_dump_add_table failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode(MrtRibDumpHandle const& h, std::uint32_t timestamp, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_mrt_rib_dump_encode(h.get(), timestamp, out);
+    if (rc < 0) throw Error(std::string("lr_mrt_rib_dump_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t asbr(OspfAsbrDestHandle const& h) {
+    return lr_ospf_asbr_dest_asbr(h.get());
+}
+
+inline std::uint32_t metric(OspfAsbrDestHandle const& h) {
+    return lr_ospf_asbr_dest_metric(h.get());
+}
+
+inline std::int32_t with_sha1(OspfCryptoAuthHandle const& h) {
+    std::int32_t rc = lr_ospf_crypto_auth_with_sha1(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_crypto_auth_with_sha1 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t key_id(OspfCryptoAuthHandle const& h) {
+    return lr_ospf_crypto_auth_key_id(h.get());
+}
+
+inline std::uint8_t algorithm(OspfCryptoAuthHandle const& h) {
+    return lr_ospf_crypto_auth_algorithm(h.get());
+}
+
+inline std::uint32_t crypto_seq(OspfCryptoAuthHandle const& h) {
+    return lr_ospf_crypto_auth_crypto_seq(h.get());
+}
+
+inline std::int32_t advance_seq(OspfCryptoAuthHandle const& h) {
+    std::int32_t rc = lr_ospf_crypto_auth_advance_seq(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_crypto_auth_advance_seq failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t key(OspfCryptoAuthHandle const& h, std::uint8_t* out, std::uintptr_t out_len) {
+    return lr_ospf_crypto_auth_key(h.get(), out, out_len);
+}
+
+inline std::uintptr_t key_len(OspfCryptoAuthHandle const& h) {
+    return lr_ospf_crypto_auth_key_len(h.get());
+}
+
+inline std::int32_t with_rxmt_interval(OspfDbExchangeHandle const& h, std::uint64_t ms) {
+    std::int32_t rc = lr_ospf_db_exchange_with_rxmt_interval(h.get(), ms);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_exchange_with_rxmt_interval failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint64_t rxmt_interval_ms(OspfDbExchangeHandle const& h) {
+    return lr_ospf_db_exchange_rxmt_interval_ms(h.get());
+}
+
+inline std::int32_t phase(OspfDbExchangeHandle const& h) {
+    std::int32_t rc = lr_ospf_db_exchange_phase(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_db_exchange_phase failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t is_full(OspfDbExchangeHandle const& h) {
+    return lr_ospf_db_exchange_is_full(h.get());
+}
+
+inline std::uint8_t started(OspfDbExchangeHandle const& h) {
+    return lr_ospf_db_exchange_started(h.get());
+}
+
+inline std::int32_t restart(OspfDbExchangeHandle const& h, std::uint32_t seq) {
+    std::int32_t rc = lr_ospf_db_exchange_restart(h.get(), seq);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_exchange_restart failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ospf_packet_t initial_db_desc(OspfDbExchangeHandle const& h, std::uint32_t seq, std::uint64_t now_ms) {
+    return lr_ospf_db_exchange_initial_db_desc(h.get(), seq, now_ms);
+}
+
+inline std::int32_t poll(OspfDbExchangeHandle const& h, std::uint64_t now_ms, lr_ospf_packet_t ** out_packets, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_ospf_db_exchange_poll(h.get(), now_ms, out_packets, out_count);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_exchange_poll failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ospf_packet_t take_ls_request(OspfDbExchangeHandle const& h, std::uint64_t now_ms) {
+    return lr_ospf_db_exchange_take_ls_request(h.get(), now_ms);
+}
+
+inline std::uintptr_t pending_requests(OspfDbExchangeHandle const& h) {
+    return lr_ospf_db_exchange_pending_requests(h.get());
+}
+
+inline std::int32_t on_db_desc_packet(OspfDbExchangeHandle const& h, lr_ospf_neighbor_t neighbor, lr_ospf_lsdb_t lsdb, const std::uint8_t* data, std::uintptr_t len, std::uint64_t now_ms, struct lr_ospf_exchange_step_t* out) {
+    std::int32_t rc = lr_ospf_db_exchange_on_db_desc_packet(h.get(), neighbor, lsdb, data, len, now_ms, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_exchange_on_db_desc_packet failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t on_ls_request_packet(OspfDbExchangeHandle const& h, lr_ospf_neighbor_t neighbor, lr_ospf_lsdb_t lsdb, const std::uint8_t* data, std::uintptr_t len, std::uint64_t now_ms, struct lr_ospf_exchange_step_t* out) {
+    std::int32_t rc = lr_ospf_db_exchange_on_ls_request_packet(h.get(), neighbor, lsdb, data, len, now_ms, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_exchange_on_ls_request_packet failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t on_ls_update_packet(OspfDbExchangeHandle const& h, lr_ospf_neighbor_t neighbor, const std::uint8_t* data, std::uintptr_t len, struct lr_ospf_exchange_step_t* out) {
+    std::int32_t rc = lr_ospf_db_exchange_on_ls_update_packet(h.get(), neighbor, data, len, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_exchange_on_ls_update_packet failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t prefix(OspfExternalDestHandle const& h, std::uint8_t* octets_out, std::uint8_t* prefix_len_out) {
+    std::int32_t rc = lr_ospf_external_dest_prefix(h.get(), octets_out, prefix_len_out);
+    if (rc < 0) throw Error(std::string("lr_ospf_external_dest_prefix failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t prefix(OspfExternalRouteHandle const& h, std::uint8_t* octets_out, std::uint8_t* prefix_len_out) {
+    std::int32_t rc = lr_ospf_external_route_prefix(h.get(), octets_out, prefix_len_out);
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_prefix failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint64_t metric(OspfExternalRouteHandle const& h) {
+    return lr_ospf_external_route_metric(h.get());
+}
+
+inline std::int32_t metric_type(OspfExternalRouteHandle const& h) {
+    std::int32_t rc = lr_ospf_external_route_metric_type(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_metric_type failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint64_t internal_cost(OspfExternalRouteHandle const& h) {
+    return lr_ospf_external_route_internal_cost(h.get());
+}
+
+inline std::uint32_t asbr(OspfExternalRouteHandle const& h) {
+    return lr_ospf_external_route_asbr(h.get());
+}
+
+inline std::int32_t border_router(OspfExternalRouteHandle const& h, std::uint8_t* present, std::uint32_t* border_router) {
+    std::int32_t rc = lr_ospf_external_route_border_router(h.get(), present, border_router);
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_border_router failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t forwarding_addr(OspfExternalRouteHandle const& h) {
+    return lr_ospf_external_route_forwarding_addr(h.get());
+}
+
+inline std::uint32_t tag(OspfExternalRouteHandle const& h) {
+    return lr_ospf_external_route_tag(h.get());
+}
+
+inline std::int32_t prefix(OspfExternalRouteV3Handle const& h, std::uint8_t* octets_out, std::uint8_t* prefix_len_out) {
+    std::int32_t rc = lr_ospf_external_route_v3_prefix(h.get(), octets_out, prefix_len_out);
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_v3_prefix failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint64_t metric(OspfExternalRouteV3Handle const& h) {
+    return lr_ospf_external_route_v3_metric(h.get());
+}
+
+inline std::int32_t metric_type(OspfExternalRouteV3Handle const& h) {
+    std::int32_t rc = lr_ospf_external_route_v3_metric_type(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_v3_metric_type failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint64_t internal_cost(OspfExternalRouteV3Handle const& h) {
+    return lr_ospf_external_route_v3_internal_cost(h.get());
+}
+
+inline std::uint32_t asbr(OspfExternalRouteV3Handle const& h) {
+    return lr_ospf_external_route_v3_asbr(h.get());
+}
+
+inline std::int32_t border_router(OspfExternalRouteV3Handle const& h, std::uint8_t* present, std::uint32_t* border_router) {
+    std::int32_t rc = lr_ospf_external_route_v3_border_router(h.get(), present, border_router);
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_v3_border_router failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t next_hop(OspfExternalRouteV3Handle const& h, std::uint8_t* octets_out, std::uint8_t* present_out) {
+    std::int32_t rc = lr_ospf_external_route_v3_next_hop(h.get(), octets_out, present_out);
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_v3_next_hop failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t route_tag(OspfExternalRouteV3Handle const& h, std::uint8_t* present, std::uint32_t* tag) {
+    std::int32_t rc = lr_ospf_external_route_v3_route_tag(h.get(), present, tag);
+    if (rc < 0) throw Error(std::string("lr_ospf_external_route_v3_route_tag failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t len(OspfExternalRouteV3VecHandle const& h) {
+    return lr_ospf_external_route_v3_vec_len(h.get());
+}
+
+inline lr_ospf_external_route_v3_t at(OspfExternalRouteV3VecHandle const& h, std::uintptr_t index) {
+    return lr_ospf_external_route_v3_vec_at(h.get(), index);
+}
+
+inline std::uintptr_t len(OspfExternalRouteVecHandle const& h) {
+    return lr_ospf_external_route_vec_len(h.get());
+}
+
+inline lr_ospf_external_route_t at(OspfExternalRouteVecHandle const& h, std::uintptr_t index) {
+    return lr_ospf_external_route_vec_at(h.get(), index);
+}
+
+inline std::uint8_t is_active(OspfHelperEntryHandle const& h) {
+    return lr_ospf_helper_entry_is_active(h.get());
+}
+
+inline std::uint64_t grace_deadline_ms(OspfHelperEntryHandle const& h) {
+    return lr_ospf_helper_entry_grace_deadline_ms(h.get());
+}
+
+inline std::uint32_t last_period_secs(OspfHelperEntryHandle const& h) {
+    return lr_ospf_helper_entry_last_period_secs(h.get());
+}
+
+inline std::uint8_t ospf_interface_action_kind(OspfIfActionHandle const& h) {
+    return lr_ospf_interface_action_kind(h.get());
+}
+
+inline std::int32_t ospf_interface_action_peer_state_name(OspfIfActionHandle const& h, std::uint8_t* out, std::uintptr_t cap) {
+    std::int32_t rc = lr_ospf_interface_action_peer_state_name(h.get(), out, cap);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_action_peer_state_name failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void ospf_interface_action_free(OspfIfActionHandle const& h) {
+    lr_ospf_interface_action_free(h.get());
+}
+
+inline std::uint8_t state(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_state(h.get());
+}
+
+inline std::uint8_t priority(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_priority(h.get());
+}
+
+inline std::uint16_t hello_interval(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_hello_interval(h.get());
+}
+
+inline std::uint32_t dead_interval(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_dead_interval(h.get());
+}
+
+inline std::uint32_t dr(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_dr(h.get());
+}
+
+inline std::uint32_t bdr(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_bdr(h.get());
+}
+
+inline std::uint32_t area_id(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_area_id(h.get());
+}
+
+inline std::uint32_t router_id(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_router_id(h.get());
+}
+
+inline std::uint32_t ip(OspfInterfaceHandle const& h) {
+    return lr_ospf_interface_ip(h.get());
+}
+
+inline std::int32_t set_priority(OspfInterfaceHandle const& h, std::uint8_t priority) {
+    std::int32_t rc = lr_ospf_interface_set_priority(h.get(), priority);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_set_priority failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_hello_interval(OspfInterfaceHandle const& h, std::uint16_t hello_interval) {
+    std::int32_t rc = lr_ospf_interface_set_hello_interval(h.get(), hello_interval);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_set_hello_interval failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_dead_interval(OspfInterfaceHandle const& h, std::uint32_t dead_interval) {
+    std::int32_t rc = lr_ospf_interface_set_dead_interval(h.get(), dead_interval);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_set_dead_interval failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_router_id(OspfInterfaceHandle const& h, std::uint32_t router_id) {
+    std::int32_t rc = lr_ospf_interface_set_router_id(h.get(), router_id);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_set_router_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_ip(OspfInterfaceHandle const& h, std::uint32_t ip) {
+    std::int32_t rc = lr_ospf_interface_set_ip(h.get(), ip);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_set_ip failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_interface_up(OspfInterfaceHandle const& h, lr_ospf_if_action_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_ospf_interface_step_interface_up(h.get(), out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_step_interface_up failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_interface_down(OspfInterfaceHandle const& h, lr_ospf_if_action_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_ospf_interface_step_interface_down(h.get(), out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_step_interface_down failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_wait_timer(OspfInterfaceHandle const& h, lr_ospf_if_action_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_ospf_interface_step_wait_timer(h.get(), out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_step_wait_timer failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_backup_seen(OspfInterfaceHandle const& h, lr_ospf_if_action_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_ospf_interface_step_backup_seen(h.get(), out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_step_backup_seen failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_neighbor_change(OspfInterfaceHandle const& h, const struct lr_ospf_elector_t* electors, std::uintptr_t count, lr_ospf_if_action_t ** out_array, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_ospf_interface_step_neighbor_change(h.get(), electors, count, out_array, out_count);
+    if (rc < 0) throw Error(std::string("lr_ospf_interface_step_neighbor_change failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_flush_summary_lsa(OspfLsaBoxHandle const& h, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_flush_summary_lsa(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ospf_flush_summary_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_flush_nssa_lsa(OspfLsaBoxHandle const& h, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_flush_nssa_lsa(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ospf_flush_nssa_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_nssa_p_bit_set(OspfLsaBoxHandle const& h) {
+    return lr_ospf_nssa_p_bit_set(h.get());
+}
+
+inline std::int32_t ospf_flush_external_lsa(OspfLsaBoxHandle const& h, lr_ospf_lsa_box_t* out) {
+    std::int32_t rc = lr_ospf_flush_external_lsa(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ospf_flush_external_lsa failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_lsa_maxage_flush(OspfLsaBoxHandle const& h, lr_ospf_lsa_box_t* out) {
+    return lr_ospf_lsa_maxage_flush(h.get(), out);
+}
+
+inline void ospf_lsa_header_free(OspfLsaHdrBoxHandle const& h) {
+    lr_ospf_lsa_header_free(h.get());
+}
+
+inline std::uint8_t ospf_is_elected_translator(OspfLsdbHandle const& h, std::uint32_t router_id) {
+    return lr_ospf_is_elected_translator(h.get(), router_id);
+}
+
+inline lr_ospf_nssa_route_vec_t ospf_nssa_routes(OspfLsdbHandle const& h, lr_ospf_spf_result_t spf_result, struct lr_ospf_nssa_calc_opts_t opts) {
+    return lr_ospf_nssa_routes(h.get(), spf_result, opts);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_nssa_routes_v3(OspfLsdbHandle const& h, lr_ospf_spf_v3_result_t spf_result, struct lr_ospf_nssa_calc_opts_t opts) {
+    return lr_ospf_nssa_routes_v3(h.get(), spf_result, opts);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_nssa_routes_v3_extended(OspfLsdbHandle const& h, lr_ospf_spf_v3_result_t spf_result, struct lr_ospf_nssa_calc_opts_t opts) {
+    return lr_ospf_nssa_routes_v3_extended(h.get(), spf_result, opts);
+}
+
+inline lr_ospf_external_route_vec_t ospf_external_routes(OspfLsdbHandle const& h, lr_ospf_spf_result_t spf_result) {
+    return lr_ospf_external_routes(h.get(), spf_result);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_external_routes_v3(OspfLsdbHandle const& h, lr_ospf_spf_v3_result_t spf_result) {
+    return lr_ospf_external_routes_v3(h.get(), spf_result);
+}
+
+inline lr_ospf_external_route_v3_vec_t ospf_external_routes_v3_extended(OspfLsdbHandle const& h, lr_ospf_spf_v3_result_t spf_result) {
+    return lr_ospf_external_routes_v3_extended(h.get(), spf_result);
+}
+
+inline lr_ospf_spf_result_t ospf_spf_run(OspfLsdbHandle const& h, std::uint32_t router_id) {
+    return lr_ospf_spf_run(h.get(), router_id);
+}
+
+inline std::uintptr_t ospf_spf_summary_count(OspfLsdbHandle const& h, lr_ospf_spf_result_t r) {
+    return lr_ospf_spf_summary_count(h.get(), r);
+}
+
+inline std::int32_t ospf_spf_summary_at(OspfLsdbHandle const& h, lr_ospf_spf_result_t r, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_summary_at(h.get(), r, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_summary_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ospf_spf_v3_result_t ospf_spf_v3_run(OspfLsdbHandle const& h, std::uint32_t router_id) {
+    return lr_ospf_spf_v3_run(h.get(), router_id);
+}
+
+inline lr_ospf_spf_v3_result_t ospf_spf_v3_extended_run(OspfLsdbHandle const& h, std::uint32_t router_id) {
+    return lr_ospf_spf_v3_extended_run(h.get(), router_id);
+}
+
+inline std::uintptr_t ospf_spf_v3_summary_count(OspfLsdbHandle const& h, lr_ospf_spf_v3_result_t r) {
+    return lr_ospf_spf_v3_summary_count(h.get(), r);
+}
+
+inline std::int32_t ospf_spf_v3_summary_at(OspfLsdbHandle const& h, lr_ospf_spf_v3_result_t r, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_v3_summary_at(h.get(), r, index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_v3_summary_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_ospf_sr_db_t ospf_sr_db_new(OspfLsdbHandle const& h) {
+    return lr_ospf_sr_db_new(h.get());
+}
+
+inline lr_ospf_srv6_db_t ospf_srv6_db_new(OspfLsdbHandle const& h) {
+    return lr_ospf_srv6_db_new(h.get());
+}
+
+inline std::int32_t state(OspfNeighborHandle const& h) {
+    std::int32_t rc = lr_ospf_neighbor_state(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_neighbor_state failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_hello_seen(OspfNeighborHandle const& h, std::uint32_t dr, std::uint32_t bdr, std::uint8_t priority) {
+    std::int32_t rc = lr_ospf_neighbor_step_hello_seen(h.get(), dr, bdr, priority);
+    if (rc < 0) throw Error(std::string("lr_ospf_neighbor_step_hello_seen failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_adj_ok(OspfNeighborHandle const& h, std::uint8_t proceed) {
+    std::int32_t rc = lr_ospf_neighbor_step_adj_ok(h.get(), proceed);
+    if (rc < 0) throw Error(std::string("lr_ospf_neighbor_step_adj_ok failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t step_kill(OspfNeighborHandle const& h) {
+    std::int32_t rc = lr_ospf_neighbor_step_kill(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_neighbor_step_kill failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_encode_packet(OspfPacketHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_ospf_encode_packet(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_ospf_encode_packet failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t version(OspfPacketHandle const& h) {
+    return lr_ospf_packet_version(h.get());
+}
+
+inline std::uint8_t type(OspfPacketHandle const& h) {
+    return lr_ospf_packet_type(h.get());
+}
+
+inline std::uint32_t router_id(OspfPacketHandle const& h) {
+    return lr_ospf_packet_router_id(h.get());
+}
+
+inline std::uint32_t area_id(OspfPacketHandle const& h) {
+    return lr_ospf_packet_area_id(h.get());
+}
+
+inline std::uint8_t body_kind(OspfPacketHandle const& h) {
+    return lr_ospf_packet_body_kind(h.get());
+}
+
+inline std::uint32_t ospf_hello_network_mask(OspfPacketHandle const& h) {
+    return lr_ospf_hello_network_mask(h.get());
+}
+
+inline std::uint16_t ospf_hello_interval(OspfPacketHandle const& h) {
+    return lr_ospf_hello_interval(h.get());
+}
+
+inline std::uint32_t ospf_hello_options(OspfPacketHandle const& h) {
+    return lr_ospf_hello_options(h.get());
+}
+
+inline std::uint8_t ospf_hello_priority(OspfPacketHandle const& h) {
+    return lr_ospf_hello_priority(h.get());
+}
+
+inline std::uint32_t ospf_hello_dead_interval(OspfPacketHandle const& h) {
+    return lr_ospf_hello_dead_interval(h.get());
+}
+
+inline std::uint32_t ospf_hello_dr(OspfPacketHandle const& h) {
+    return lr_ospf_hello_dr(h.get());
+}
+
+inline std::uint32_t ospf_hello_bdr(OspfPacketHandle const& h) {
+    return lr_ospf_hello_bdr(h.get());
+}
+
+inline std::uintptr_t ospf_hello_neighbor_count(OspfPacketHandle const& h) {
+    return lr_ospf_hello_neighbor_count(h.get());
+}
+
+inline std::uint32_t ospf_hello_neighbor_at(OspfPacketHandle const& h, std::uintptr_t index) {
+    return lr_ospf_hello_neighbor_at(h.get(), index);
+}
+
+inline std::uint16_t ospf_db_desc_mtu(OspfPacketHandle const& h) {
+    return lr_ospf_db_desc_mtu(h.get());
+}
+
+inline std::uint32_t ospf_db_desc_options(OspfPacketHandle const& h) {
+    return lr_ospf_db_desc_options(h.get());
+}
+
+inline std::uint8_t ospf_db_desc_flags(OspfPacketHandle const& h) {
+    return lr_ospf_db_desc_flags(h.get());
+}
+
+inline std::uint32_t ospf_db_desc_seq(OspfPacketHandle const& h) {
+    return lr_ospf_db_desc_seq(h.get());
+}
+
+inline std::uintptr_t ospf_db_desc_lsa_header_count(OspfPacketHandle const& h) {
+    return lr_ospf_db_desc_lsa_header_count(h.get());
+}
+
+inline std::int32_t ospf_db_desc_lsa_header_at(OspfPacketHandle const& h, std::uintptr_t index, struct lr_ospf_lsa_hdr_t* out) {
+    std::int32_t rc = lr_ospf_db_desc_lsa_header_at(h.get(), index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_db_desc_lsa_header_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t ospf_ls_update_lsa_count(OspfPacketHandle const& h) {
+    return lr_ospf_ls_update_lsa_count(h.get());
+}
+
+inline std::uintptr_t ospf_ls_update_lsa_len(OspfPacketHandle const& h) {
+    return lr_ospf_ls_update_lsa_len(h.get());
+}
+
+inline std::uint8_t recovering(OspfRestartTrackerHandle const& h) {
+    return lr_ospf_restart_tracker_recovering(h.get());
+}
+
+inline std::uint64_t grace_deadline_ms(OspfRestartTrackerHandle const& h) {
+    return lr_ospf_restart_tracker_grace_deadline_ms(h.get());
+}
+
+inline std::uintptr_t password(OspfSimplePasswordHandle const& h, std::uint8_t* out) {
+    return lr_ospf_simple_password_password(h.get(), out);
+}
+
+inline std::uintptr_t ospf_spf_route_count(OspfSpfResultHandle const& h) {
+    return lr_ospf_spf_route_count(h.get());
+}
+
+inline std::int32_t ospf_spf_route_at(OspfSpfResultHandle const& h, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_route_at(h.get(), index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_route_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t ospf_spf_v3_route_count(OspfSpfV3ResultHandle const& h) {
+    return lr_ospf_spf_v3_route_count(h.get());
+}
+
+inline std::int32_t ospf_spf_v3_route_at(OspfSpfV3ResultHandle const& h, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_v3_route_at(h.get(), index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_v3_route_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t ospf_spf_v3_locator_count(OspfSpfV3ResultHandle const& h) {
+    return lr_ospf_spf_v3_locator_count(h.get());
+}
+
+inline std::int32_t ospf_spf_v3_locator_at(OspfSpfV3ResultHandle const& h, std::uintptr_t index, struct lr_ospf_spf_route_t* out) {
+    std::int32_t rc = lr_ospf_spf_v3_locator_at(h.get(), index, out);
+    if (rc < 0) throw Error(std::string("lr_ospf_spf_v3_locator_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint32_t metric(OspfSummaryDestHandle const& h) {
+    return lr_ospf_summary_dest_metric(h.get());
+}
+
+inline std::int32_t prefix(OspfSummaryDestHandle const& h, std::uint8_t* octets_out, std::uint8_t* prefix_len_out) {
+    std::int32_t rc = lr_ospf_summary_dest_prefix(h.get(), octets_out, prefix_len_out);
+    if (rc < 0) throw Error(std::string("lr_ospf_summary_dest_prefix failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t with_sha1(OspfV3AuthHandle const& h) {
+    std::int32_t rc = lr_ospf_v3_auth_with_sha1(h.get());
+    if (rc < 0) throw Error(std::string("lr_ospf_v3_auth_with_sha1 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t with_source(OspfV3AuthHandle const& h, const std::uint8_t* source) {
+    std::int32_t rc = lr_ospf_v3_auth_with_source(h.get(), source);
+    if (rc < 0) throw Error(std::string("lr_ospf_v3_auth_with_source failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint16_t sa_id(OspfV3AuthHandle const& h) {
+    return lr_ospf_v3_auth_sa_id(h.get());
+}
+
+inline std::uint8_t algorithm(OspfV3AuthHandle const& h) {
+    return lr_ospf_v3_auth_algorithm(h.get());
+}
+
+inline std::uintptr_t trailer_len(OspfV3AuthHandle const& h) {
+    return lr_ospf_v3_auth_trailer_len(h.get());
+}
+
+inline std::uintptr_t key(OspfV3AuthHandle const& h, std::uint8_t* out, std::uintptr_t out_len) {
+    return lr_ospf_v3_auth_key(h.get(), out, out_len);
+}
+
+inline std::uintptr_t key_len(OspfV3AuthHandle const& h) {
+    return lr_ospf_v3_auth_key_len(h.get());
+}
+
+inline std::int32_t add_route(OsrouteHandle const& h, const struct lr_prefix_t* prefix, const std::uint8_t* next_hop, std::uintptr_t next_hop_len, std::uint32_t if_index) {
+    std::int32_t rc = lr_osroute_add_route(h.get(), prefix, next_hop, next_hop_len, if_index);
+    if (rc < 0) throw Error(std::string("lr_osroute_add_route failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add_route_tagged(OsrouteHandle const& h, const struct lr_prefix_t* prefix, const std::uint8_t* next_hop, std::uintptr_t next_hop_len, std::uint32_t if_index, std::int32_t protocol) {
+    std::int32_t rc = lr_osroute_add_route_tagged(h.get(), prefix, next_hop, next_hop_len, if_index, protocol);
+    if (rc < 0) throw Error(std::string("lr_osroute_add_route_tagged failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add_blackhole_route(OsrouteHandle const& h, const struct lr_prefix_t* prefix) {
+    std::int32_t rc = lr_osroute_add_blackhole_route(h.get(), prefix);
+    if (rc < 0) throw Error(std::string("lr_osroute_add_blackhole_route failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t delete_route(OsrouteHandle const& h, const struct lr_prefix_t* prefix) {
+    std::int32_t rc = lr_osroute_delete_route(h.get(), prefix);
+    if (rc < 0) throw Error(std::string("lr_osroute_delete_route failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int64_t list_routes_count(OsrouteHandle const& h) {
+    return lr_osroute_list_routes_count(h.get());
+}
+
+inline std::int64_t list_routes(OsrouteHandle const& h, struct lr_kernel_route_t* out, std::uintptr_t cap) {
+    return lr_osroute_list_routes(h.get(), out, cap);
+}
+
+inline std::int32_t has_route(OsrouteHandle const& h, const struct lr_prefix_t* prefix) {
+    std::int32_t rc = lr_osroute_has_route(h.get(), prefix);
+    if (rc < 0) throw Error(std::string("lr_osroute_has_route failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline void destroy(OsrouteHandle const& h) {
+    lr_osroute_destroy(h.get());
+}
+
+inline std::int32_t push(PolicyChainHandle const& h, lr_route_map_t map) {
+    std::int32_t rc = lr_policy_chain_push(h.get(), map);
+    if (rc < 0) throw Error(std::string("lr_policy_chain_push failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t evaluate(PolicyChainHandle const& h, lr_route_t route, lr_resolver_t resolver) {
+    return lr_policy_chain_evaluate(h.get(), route, resolver);
+}
+
+inline std::uintptr_t len(PolicyChainHandle const& h) {
+    return lr_policy_chain_len(h.get());
+}
+
+inline const char* name(PolicyHandle const& h) {
+    return lr_policy_name(h.get());
+}
+
+inline lr_policy_chain_t chain(PolicyHandle const& h) {
+    return lr_policy_chain(h.get());
+}
+
+inline std::int32_t list_id(ResolverHandle const& h, std::int32_t kind, const char* name) {
+    std::int32_t rc = lr_resolver_list_id(h.get(), kind, name);
+    if (rc < 0) throw Error(std::string("lr_resolver_list_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t route_map_count(ResolverHandle const& h) {
+    return lr_resolver_route_map_count(h.get());
+}
+
+inline std::uintptr_t route_map_names(ResolverHandle const& h, char* out_buf, std::uintptr_t* out_offsets, std::uintptr_t* out_lens, std::uintptr_t cap) {
+    return lr_resolver_route_map_names(h.get(), out_buf, out_offsets, out_lens, cap);
+}
+
+inline std::int32_t push_route_map_entry(ResolverHandle const& h, const char* name, lr_route_map_t map) {
+    std::int32_t rc = lr_resolver_push_route_map_entry(h.get(), name, map);
+    if (rc < 0) throw Error(std::string("lr_resolver_push_route_map_entry failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t policy_set_bind_import(ResolverHandle const& h, std::uint64_t session, const char* map_name) {
+    std::int32_t rc = lr_policy_set_bind_import(h.get(), session, map_name);
+    if (rc < 0) throw Error(std::string("lr_policy_set_bind_import failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t policy_set_bind_export(ResolverHandle const& h, std::uint64_t session, const char* map_name) {
+    std::int32_t rc = lr_policy_set_bind_export(h.get(), session, map_name);
+    if (rc < 0) throw Error(std::string("lr_policy_set_bind_export failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t policy_set_validate(ResolverHandle const& h) {
+    std::int32_t rc = lr_policy_set_validate(h.get());
+    if (rc < 0) throw Error(std::string("lr_policy_set_validate failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t clear_rtr(RoaStoreHandle const& h) {
+    std::int32_t rc = lr_roa_store_clear_rtr(h.get());
+    if (rc < 0) throw Error(std::string("lr_roa_store_clear_rtr failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t len(RoaStoreHandle const& h) {
+    return lr_roa_store_len(h.get());
+}
+
+inline std::int32_t add_static(RoaStoreHandle const& h, const struct lr_roa_entry_t* entry) {
+    std::int32_t rc = lr_roa_store_add_static(h.get(), entry);
+    if (rc < 0) throw Error(std::string("lr_roa_store_add_static failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t remove_static(RoaStoreHandle const& h, const struct lr_roa_entry_t* entry) {
+    std::int32_t rc = lr_roa_store_remove_static(h.get(), entry);
+    if (rc < 0) throw Error(std::string("lr_roa_store_remove_static failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t static_len(RoaStoreHandle const& h) {
+    return lr_roa_store_static_len(h.get());
+}
+
+inline std::uintptr_t rtr_len(RoaStoreHandle const& h) {
+    return lr_roa_store_rtr_len(h.get());
+}
+
+inline std::int32_t provenance_of(RoaStoreHandle const& h, const struct lr_roa_entry_t* entry, std::uint8_t* out) {
+    std::int32_t rc = lr_roa_store_provenance_of(h.get(), entry, out);
+    if (rc < 0) throw Error(std::string("lr_roa_store_provenance_of failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t provenance_of_checked(RoaStoreHandle const& h, const struct lr_roa_entry_t* entry, std::uint8_t* out) {
+    std::int32_t rc = lr_roa_store_provenance_of_checked(h.get(), entry, out);
+    if (rc < 0) throw Error(std::string("lr_roa_store_provenance_of_checked failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add(RoaTableBuilderHandle const& h, const char* prefix, std::uint8_t max_length, std::uint32_t asn) {
+    std::int32_t rc = lr_roa_table_builder_add(h.get(), prefix, max_length, asn);
+    if (rc < 0) throw Error(std::string("lr_roa_table_builder_add failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add_entry(RoaTableBuilderHandle const& h, struct lr_roa_entry_t entry) {
+    std::int32_t rc = lr_roa_table_builder_add_entry(h.get(), entry);
+    if (rc < 0) throw Error(std::string("lr_roa_table_builder_add_entry failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_roa_table_t build(RoaTableBuilderHandle const& h) {
+    return lr_roa_table_builder_build(h.get());
+}
+
+inline std::uintptr_t len(RoaTableHandle const& h) {
+    return lr_roa_table_len(h.get());
+}
+
+inline std::uint8_t is_empty(RoaTableHandle const& h) {
+    return lr_roa_table_is_empty(h.get());
+}
+
+inline std::uint8_t validate(RoaTableHandle const& h, const std::uint8_t* addr, std::uint8_t is_ipv6, std::uint8_t prefix_len, std::uint32_t origin_as, std::uint8_t has_origin) {
+    return lr_roa_table_validate(h.get(), addr, is_ipv6, prefix_len, origin_as, has_origin);
+}
+
+inline std::int32_t entry_at(RoaTableHandle const& h, std::uintptr_t index, std::uint8_t* out_addr, std::uint8_t* out_is_ipv6, std::uint8_t* out_prefix_len, std::uint8_t* out_max_length, std::uint32_t* out_asn) {
+    std::int32_t rc = lr_roa_table_entry_at(h.get(), index, out_addr, out_is_ipv6, out_prefix_len, out_max_length, out_asn);
+    if (rc < 0) throw Error(std::string("lr_roa_table_entry_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t best_path_compare(RouteHandle const& h, lr_route_t b, struct lr_best_path_config_t cfg) {
+    std::int32_t rc = lr_best_path_compare(h.get(), b, cfg);
+    if (rc < 0) throw Error(std::string("lr_best_path_compare failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t best_path_compare_multipath(RouteHandle const& h, lr_route_t b, struct lr_best_path_config_t cfg) {
+    std::int32_t rc = lr_best_path_compare_multipath(h.get(), b, cfg);
+    if (rc < 0) throw Error(std::string("lr_best_path_compare_multipath failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_store_kind(RouteHandle const& h, std::uint8_t* out, std::uint8_t* out_present) {
+    std::int32_t rc = lr_route_lrxp_store_kind(h.get(), out, out_present);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_store_kind failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_verified(RouteHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_route_lrxp_verified(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_verified failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_partial_transit(RouteHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_route_lrxp_partial_transit(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_partial_transit failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_hint_rank(RouteHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_route_lrxp_hint_rank(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_hint_rank failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_hint_damp_fom(RouteHandle const& h, std::uint16_t* out) {
+    std::int32_t rc = lr_route_lrxp_hint_damp_fom(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_hint_damp_fom failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_hint_igp_cost(RouteHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_route_lrxp_hint_igp_cost(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_hint_igp_cost failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_policy_role(RouteHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_route_lrxp_policy_role(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_policy_role failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_origin_as(RouteHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_route_lrxp_origin_as(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_origin_as failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_origin_max_valid_len(RouteHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_route_lrxp_origin_max_valid_len(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_origin_max_valid_len failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t lrxp_origin_expiry(RouteHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_route_lrxp_origin_expiry(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_route_lrxp_origin_expiry failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add_bgp_session(RouterHandle const& h, std::uint32_t local_as, std::uint32_t peer_as, std::uint32_t local_bgp_id, std::uint16_t hold_time, std::uint16_t keepalive, std::uint8_t asn4, std::uint64_t* out_handle) {
+    std::int32_t rc = lr_router_add_bgp_session(h.get(), local_as, peer_as, local_bgp_id, hold_time, keepalive, asn4, out_handle);
+    if (rc < 0) throw Error(std::string("lr_router_add_bgp_session failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t start_session(RouterHandle const& h, std::uint64_t session) {
+    std::int32_t rc = lr_router_start_session(h.get(), session);
+    if (rc < 0) throw Error(std::string("lr_router_start_session failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t close_session(RouterHandle const& h, std::uint64_t session) {
+    std::int32_t rc = lr_router_close_session(h.get(), session);
+    if (rc < 0) throw Error(std::string("lr_router_close_session failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t shutdown_session(RouterHandle const& h, std::uint64_t session) {
+    std::int32_t rc = lr_router_shutdown_session(h.get(), session);
+    if (rc < 0) throw Error(std::string("lr_router_shutdown_session failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t remove_redistribution_pipe(RouterHandle const& h, std::int32_t source, std::int32_t target) {
+    std::int32_t rc = lr_router_remove_redistribution_pipe(h.get(), source, target);
+    if (rc < 0) throw Error(std::string("lr_router_remove_redistribution_pipe failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t adj_rib_in_snapshot(RouterHandle const& h, std::uint64_t session, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_router_adj_rib_in_snapshot(h.get(), session, out);
+    if (rc < 0) throw Error(std::string("lr_router_adj_rib_in_snapshot failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ospf_set_area_type(RouterHandle const& h, std::uint32_t area_id, std::int32_t kind) {
+    std::int32_t rc = lr_router_ospf_set_area_type(h.get(), area_id, kind);
+    if (rc < 0) throw Error(std::string("lr_router_ospf_set_area_type failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_ospf_sr_receive(RouterHandle const& h, std::uint8_t on) {
+    std::int32_t rc = lr_router_set_ospf_sr_receive(h.get(), on);
+    if (rc < 0) throw Error(std::string("lr_router_set_ospf_sr_receive failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_sr_receive(RouterHandle const& h) {
+    return lr_router_ospf_sr_receive(h.get());
+}
+
+inline std::int32_t set_ospf_srv6_receive(RouterHandle const& h, std::uint8_t on) {
+    std::int32_t rc = lr_router_set_ospf_srv6_receive(h.get(), on);
+    if (rc < 0) throw Error(std::string("lr_router_set_ospf_srv6_receive failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_srv6_receive(RouterHandle const& h) {
+    return lr_router_ospf_srv6_receive(h.get());
+}
+
+inline std::int32_t set_ospf_v3_extended_lsas(RouterHandle const& h, std::uint8_t on) {
+    std::int32_t rc = lr_router_set_ospf_v3_extended_lsas(h.get(), on);
+    if (rc < 0) throw Error(std::string("lr_router_set_ospf_v3_extended_lsas failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t ospf_v3_extended_lsas(RouterHandle const& h) {
+    return lr_router_ospf_v3_extended_lsas(h.get());
+}
+
+inline std::int32_t set_mrai(RouterHandle const& h, std::uint64_t session, std::uint64_t interval_ms) {
+    std::int32_t rc = lr_router_set_mrai(h.get(), session, interval_ms);
+    if (rc < 0) throw Error(std::string("lr_router_set_mrai failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_add_path(RouterHandle const& h, std::uint64_t session, std::uint8_t enabled) {
+    std::int32_t rc = lr_router_set_add_path(h.get(), session, enabled);
+    if (rc < 0) throw Error(std::string("lr_router_set_add_path failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_add_path_max_paths(RouterHandle const& h, std::uint32_t max_paths) {
+    std::int32_t rc = lr_router_set_add_path_max_paths(h.get(), max_paths);
+    if (rc < 0) throw Error(std::string("lr_router_set_add_path_max_paths failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_ebgp_requires_policy(RouterHandle const& h, std::uint8_t enabled) {
+    std::int32_t rc = lr_router_set_ebgp_requires_policy(h.get(), enabled);
+    if (rc < 0) throw Error(std::string("lr_router_set_ebgp_requires_policy failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_enforce_first_as(RouterHandle const& h, std::uint8_t enabled) {
+    std::int32_t rc = lr_router_set_enforce_first_as(h.get(), enabled);
+    if (rc < 0) throw Error(std::string("lr_router_set_enforce_first_as failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_session_policy(RouterHandle const& h, std::uint64_t session, std::uint8_t import, std::uint8_t export_) {
+    std::int32_t rc = lr_router_set_session_policy(h.get(), session, import, export_);
+    if (rc < 0) throw Error(std::string("lr_router_set_session_policy failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_default_ipv4_unicast(RouterHandle const& h, std::uint64_t session, std::uint8_t enabled) {
+    std::int32_t rc = lr_router_set_default_ipv4_unicast(h.get(), session, enabled);
+    if (rc < 0) throw Error(std::string("lr_router_set_default_ipv4_unicast failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_local_as_tolerance(RouterHandle const& h, std::uint64_t session, std::uint32_t tolerance) {
+    std::int32_t rc = lr_router_set_local_as_tolerance(h.get(), session, tolerance);
+    if (rc < 0) throw Error(std::string("lr_router_set_local_as_tolerance failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_soft_reconfig_inbound(RouterHandle const& h, std::uint64_t session, std::uint8_t enabled) {
+    std::int32_t rc = lr_router_set_soft_reconfig_inbound(h.get(), session, enabled);
+    if (rc < 0) throw Error(std::string("lr_router_set_soft_reconfig_inbound failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int64_t soft_reconfig_inbound(RouterHandle const& h, std::uint64_t session) {
+    return lr_router_soft_reconfig_inbound(h.get(), session);
+}
+
+inline std::int32_t request_route_refresh(RouterHandle const& h, std::uint64_t session, std::uint16_t afi, std::uint8_t safi) {
+    std::int32_t rc = lr_router_request_route_refresh(h.get(), session, afi, safi);
+    if (rc < 0) throw Error(std::string("lr_router_request_route_refresh failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t originate_labeled_v4(RouterHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t prefix_len, const std::uint32_t* labels, std::uintptr_t n_labels, const std::uint8_t* next_hop) {
+    std::int32_t rc = lr_router_originate_labeled_v4(h.get(), prefix_addr, prefix_len, labels, n_labels, next_hop);
+    if (rc < 0) throw Error(std::string("lr_router_originate_labeled_v4 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t originate_labeled_v6(RouterHandle const& h, const std::uint8_t* prefix_addr, std::uint8_t prefix_len, const std::uint32_t* labels, std::uintptr_t n_labels, const std::uint8_t* next_hop) {
+    std::int32_t rc = lr_router_originate_labeled_v6(h.get(), prefix_addr, prefix_len, labels, n_labels, next_hop);
+    if (rc < 0) throw Error(std::string("lr_router_originate_labeled_v6 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int64_t rib_len(RouterHandle const& h) {
+    return lr_router_rib_len(h.get());
+}
+
+inline std::int32_t rib_dump(RouterHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_router_rib_dump(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_router_rib_dump failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t sessions_dump(RouterHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_router_sessions_dump(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_router_sessions_dump failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add_roa_entry(RouterHandle const& h, const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint8_t max_length, std::uint32_t asn) {
+    std::int32_t rc = lr_router_add_roa_entry(h.get(), prefix_v4, prefix_v6, prefix_len, max_length, asn);
+    if (rc < 0) throw Error(std::string("lr_router_add_roa_entry failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t set_roa_validate(RouterHandle const& h, std::uint8_t enable) {
+    std::int32_t rc = lr_router_set_roa_validate(h.get(), enable);
+    if (rc < 0) throw Error(std::string("lr_router_set_roa_validate failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode(RtrPduHandle const& h, std::uint8_t version, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_rtr_pdu_encode(h.get(), version, out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_encode failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t encode_vec(RtrPduHandle const& h, std::uint8_t version, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_rtr_pdu_encode_vec(h.get(), version, out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_encode_vec failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t type(RtrPduHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_rtr_pdu_type(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_type failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t min_version(RtrPduHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_rtr_pdu_min_version(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_min_version failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t session_id(RtrPduHandle const& h, std::uint16_t* out) {
+    std::int32_t rc = lr_rtr_pdu_session_id(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_session_id failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t serial(RtrPduHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_rtr_pdu_serial(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_serial failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t announce(RtrPduHandle const& h, std::uint8_t* out) {
+    std::int32_t rc = lr_rtr_pdu_announce(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_announce failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ipv4_prefix_fields(RtrPduHandle const& h, std::uint8_t* out_prefix_v4, std::uint8_t* out_prefix_len, std::uint8_t* out_max_length, std::uint32_t* out_asn) {
+    std::int32_t rc = lr_rtr_pdu_ipv4_prefix_fields(h.get(), out_prefix_v4, out_prefix_len, out_max_length, out_asn);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_ipv4_prefix_fields failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t ipv6_prefix_fields(RtrPduHandle const& h, std::uint8_t* out_prefix_v6, std::uint8_t* out_prefix_len, std::uint8_t* out_max_length, std::uint32_t* out_asn) {
+    std::int32_t rc = lr_rtr_pdu_ipv6_prefix_fields(h.get(), out_prefix_v6, out_prefix_len, out_max_length, out_asn);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_ipv6_prefix_fields failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t end_of_data_intervals(RtrPduHandle const& h, std::uint8_t* out_present, std::uint32_t* out_refresh, std::uint32_t* out_retry, std::uint32_t* out_expire) {
+    std::int32_t rc = lr_rtr_pdu_end_of_data_intervals(h.get(), out_present, out_refresh, out_retry, out_expire);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_end_of_data_intervals failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t router_key_fields(RtrPduHandle const& h, std::uint8_t* out_ski, std::uint32_t* out_asn, struct lr_bytes_t* out_spki) {
+    std::int32_t rc = lr_rtr_pdu_router_key_fields(h.get(), out_ski, out_asn, out_spki);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_router_key_fields failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t error_code(RtrPduHandle const& h, std::uint16_t* out) {
+    std::int32_t rc = lr_rtr_pdu_error_code(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_error_code failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t erroneous_pdu(RtrPduHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_rtr_pdu_erroneous_pdu(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_erroneous_pdu failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t error_text(RtrPduHandle const& h, struct lr_bytes_t* out) {
+    std::int32_t rc = lr_rtr_pdu_error_text(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_error_text failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t customer_asn(RtrPduHandle const& h, std::uint32_t* out) {
+    std::int32_t rc = lr_rtr_pdu_customer_asn(h.get(), out);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_customer_asn failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t providers(RtrPduHandle const& h, std::uint32_t* out_providers, std::uintptr_t cap, std::uintptr_t* out_count) {
+    std::int32_t rc = lr_rtr_pdu_providers(h.get(), out_providers, cap, out_count);
+    if (rc < 0) throw Error(std::string("lr_rtr_pdu_providers failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_safety_net_t with_local_addr(SafetyNetHandle const& h, const std::uint8_t* addr_v4, const std::uint8_t* addr_v6) {
+    return lr_safety_net_with_local_addr(h.get(), addr_v4, addr_v6);
+}
+
+inline std::int32_t check(SafetyNetHandle const& h, lr_route_t route, std::uint8_t is_ebgp) {
+    std::int32_t rc = lr_safety_net_check(h.get(), route, is_ebgp);
+    if (rc < 0) throw Error(std::string("lr_safety_net_check failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t config_enabled(SafetyNetHandle const& h) {
+    std::int32_t rc = lr_safety_net_config_enabled(h.get());
+    if (rc < 0) throw Error(std::string("lr_safety_net_config_enabled failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t config_set_enabled(SafetyNetHandle const& h, std::uint8_t enabled) {
+    std::int32_t rc = lr_safety_net_config_set_enabled(h.get(), enabled);
+    if (rc < 0) throw Error(std::string("lr_safety_net_config_set_enabled failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t config_get_bool(SafetyNetHandle const& h, std::int32_t field) {
+    std::int32_t rc = lr_safety_net_config_get_bool(h.get(), field);
+    if (rc < 0) throw Error(std::string("lr_safety_net_config_get_bool failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t config_set_bool(SafetyNetHandle const& h, std::int32_t field, std::uint8_t value) {
+    std::int32_t rc = lr_safety_net_config_set_bool(h.get(), field, value);
+    if (rc < 0) throw Error(std::string("lr_safety_net_config_set_bool failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint64_t config_get_u64(SafetyNetHandle const& h, std::int32_t field) {
+    return lr_safety_net_config_get_u64(h.get(), field);
+}
+
+inline std::int32_t config_set_u64(SafetyNetHandle const& h, std::int32_t field, std::uint64_t value) {
+    std::int32_t rc = lr_safety_net_config_set_u64(h.get(), field, value);
+    if (rc < 0) throw Error(std::string("lr_safety_net_config_set_u64 failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t check_violation(SafetyNetHandle const& h, lr_route_t route, std::uint8_t is_ebgp) {
+    std::int32_t rc = lr_safety_net_check_violation(h.get(), route, is_ebgp);
+    if (rc < 0) throw Error(std::string("lr_safety_net_check_violation failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline lr_session_config_t with_mp_families(SessionConfigHandle const& h, const struct lr_afi_safi_t* families, std::uintptr_t count) {
+    return lr_session_config_with_mp_families(h.get(), families, count);
+}
+
+inline lr_session_config_t with_add_path(SessionConfigHandle const& h) {
+    return lr_session_config_with_add_path(h.get());
+}
+
+inline lr_session_config_t with_extended_next_hop(SessionConfigHandle const& h) {
+    return lr_session_config_with_extended_next_hop(h.get());
+}
+
+inline lr_session_config_t with_extended_next_hop_tuple(SessionConfigHandle const& h, std::uint16_t nlri_afi, std::uint8_t nlri_safi, std::uint16_t nexthop_afi) {
+    return lr_session_config_with_extended_next_hop_tuple(h.get(), nlri_afi, nlri_safi, nexthop_afi);
+}
+
+inline lr_session_config_t with_graceful_restart(SessionConfigHandle const& h, std::uint16_t restart_time_secs) {
+    return lr_session_config_with_graceful_restart(h.get(), restart_time_secs);
+}
+
+inline lr_session_config_t with_long_lived_gr(SessionConfigHandle const& h, std::uint32_t stale_time_secs) {
+    return lr_session_config_with_long_lived_gr(h.get(), stale_time_secs);
+}
+
+inline lr_session_config_t with_llgr_max_stale_time(SessionConfigHandle const& h, std::uint32_t cap_secs) {
+    return lr_session_config_with_llgr_max_stale_time(h.get(), cap_secs);
+}
+
+inline lr_session_config_t with_mrai_ms(SessionConfigHandle const& h, std::uint64_t mrai_ms) {
+    return lr_session_config_with_mrai_ms(h.get(), mrai_ms);
+}
+
+inline lr_session_config_t with_route_reflector_client(SessionConfigHandle const& h) {
+    return lr_session_config_with_route_reflector_client(h.get());
+}
+
+inline lr_session_config_t with_maximum_prefix(SessionConfigHandle const& h, std::uint32_t limit, std::int32_t action) {
+    return lr_session_config_with_maximum_prefix(h.get(), limit, action);
+}
+
+inline lr_session_config_t with_maximum_prefix_threshold(SessionConfigHandle const& h, std::uint8_t pct) {
+    return lr_session_config_with_maximum_prefix_threshold(h.get(), pct);
+}
+
+inline lr_session_config_t with_maximum_prefix_restart_time(SessionConfigHandle const& h, std::uint32_t secs) {
+    return lr_session_config_with_maximum_prefix_restart_time(h.get(), secs);
+}
+
+inline const std::uint8_t* as_ptr(Srv6SidHandle const& h) {
+    return lr_srv6_sid_as_ptr(h.get());
+}
+
+inline std::int32_t kind(TcpAuthHandle const& h) {
+    std::int32_t rc = lr_tcp_auth_kind(h.get());
+    if (rc < 0) throw Error(std::string("lr_tcp_auth_kind failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uint8_t is_none(TcpAuthHandle const& h) {
+    return lr_tcp_auth_is_none(h.get());
+}
+
+} // namespace gen
+
+// ===== END GENERATED ADDITIONS =====
+
 } // namespace librouting
 
