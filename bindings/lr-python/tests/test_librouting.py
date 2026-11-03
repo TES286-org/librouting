@@ -719,6 +719,21 @@ def test_route_d5_4_attribute_readers():
     assert rt.has_ospf_router_id() is False
     assert rt.ospf_router_id() is None
 
+    # LRXP exchange-plane readers (design §4–§5). The lr_route_lrxp_*
+    # C ABI surface is always compiled; without the exchange-plane
+    # feature every reader returns the "absent / 0 / false" defaults
+    # a route with no LRXP attribute would yield.
+    assert rt.lrxp_store_kind() is None
+    assert rt.lrxp_verified() is False
+    assert rt.lrxp_partial_transit() is False
+    assert rt.lrxp_hint_rank() == 0
+    assert rt.lrxp_hint_damp_fom() == 0
+    assert rt.lrxp_hint_igp_cost() == 0
+    assert rt.lrxp_policy_role() == 255
+    assert rt.lrxp_origin_as() == 0
+    assert rt.lrxp_origin_max_valid_len() == 0
+    assert rt.lrxp_origin_expiry() == 0
+
 
 def test_filter_context_roa_override():
     """FilterContext lets Python supply a custom roa_state callback,

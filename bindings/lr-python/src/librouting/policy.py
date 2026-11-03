@@ -639,6 +639,118 @@ class Route:
             return None
         return int(out[0])
 
+    # ----- LRXP exchange-plane record access (design §4–§5) -----
+    #
+    # The lr_route_lrxp_* C ABI surface is always compiled (the C ABI
+    # header declares it unconditionally). When the underlying
+    # `exchange-plane` feature is off, every reader returns the same
+    # "absent / 0 / false" defaults it would return for a route that
+    # simply carries no LRXP attribute — see
+    # crates/lr-ffi/src/route_attrs.rs.
+
+    def lrxp_store_kind(self) -> int | None:
+        """The LRXP store-kind tag (design §4): 1 = verified record
+        set, 2 = partial-raw. Returns ``None`` when the route carries
+        no LRXP attribute at all."""
+        out = ffi.new("uint8_t*")
+        present = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_lrxp_store_kind(self._ptr, out, present)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_store_kind (rc={rc}): {last_error()}")
+        if not present[0]:
+            return None
+        return int(out[0])
+
+    def lrxp_verified(self) -> bool:
+        """True when the route carries a verified LRXP record set
+        (design §4)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_lrxp_verified(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_verified (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def lrxp_partial_transit(self) -> bool:
+        """True when the route carries partial-transit LRXP forwarding
+        material (design §4)."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_lrxp_partial_transit(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_partial_transit (rc={rc}): {last_error()}")
+        return bool(out[0])
+
+    def lrxp_hint_rank(self) -> int:
+        """The sender's best-path rank for this path among its
+        alternates (design §5.1: 1 = the path the sender itself uses).
+        ``0`` when the route carries no verified hint record."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_lrxp_hint_rank(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_hint_rank (rc={rc}): {last_error()}")
+        return int(out[0])
+
+    def lrxp_hint_damp_fom(self) -> int:
+        """The sender's route-flap figure of merit for the prefix
+        (design §5.1: 0 when damping is off). ``0`` when the route
+        carries no verified hint record."""
+        out = ffi.new("uint16_t*")
+        rc = get_lib().lr_route_lrxp_hint_damp_fom(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_hint_damp_fom (rc={rc}): {last_error()}")
+        return int(out[0])
+
+    def lrxp_hint_igp_cost(self) -> int:
+        """The sender's IGP cost from its decision point to this path's
+        next hop (design §5.1). ``0`` when the route carries no
+        verified hint record."""
+        out = ffi.new("uint32_t*")
+        rc = get_lib().lr_route_lrxp_hint_igp_cost(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_hint_igp_cost (rc={rc}): {last_error()}")
+        return int(out[0])
+
+    def lrxp_policy_role(self) -> int:
+        """The sender's RFC 9234 role claim for this session (design
+        §5.2): 0 = provider, 1 = customer, 2 = RS, 3 = RS-client, 4
+        = peer, 255 = unspecified. ``255`` when the route carries no
+        verified policy record."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_lrxp_policy_role(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_policy_role (rc={rc}): {last_error()}")
+        return int(out[0])
+
+    def lrxp_origin_as(self) -> int:
+        """The origin AS the attestation authorises for this
+        announcement set (design §5.3). ``0`` when the route carries
+        no verified origin record."""
+        out = ffi.new("uint32_t*")
+        rc = get_lib().lr_route_lrxp_origin_as(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_origin_as (rc={rc}): {last_error()}")
+        return int(out[0])
+
+    def lrxp_origin_max_valid_len(self) -> int:
+        """The maximum prefix length the origin authorises for this
+        announcement set (design §5.3: the ROA maxLength idea, RFC
+        6811 §3, without the PKI). ``0`` when the route carries no
+        verified origin record."""
+        out = ffi.new("uint8_t*")
+        rc = get_lib().lr_route_lrxp_origin_max_valid_len(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_origin_max_valid_len (rc={rc}): {last_error()}")
+        return int(out[0])
+
+    def lrxp_origin_expiry(self) -> int:
+        """The absolute timestamp after which downstream speakers stop
+        trusting the record (design §5.3). ``0`` when the route
+        carries no verified origin record."""
+        out = ffi.new("uint32_t*")
+        rc = get_lib().lr_route_lrxp_origin_expiry(self._ptr, out)
+        if rc != 0:
+            raise LrError(f"lr_route_lrxp_origin_expiry (rc={rc}): {last_error()}")
+        return int(out[0])
+
 
 class PrefixList:
     """An owned prefix-list handle (FRR ge/le semantics, first-match
