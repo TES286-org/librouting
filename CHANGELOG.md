@@ -636,6 +636,56 @@ could not (the `LrOspfMetric2` tag has no C ABI setter).
   the PSP/USP/USD flavor combinations remain rejected — the kernel
   has no `seg6_action_table` descriptor for them.
 
+### `templates/bgp-rr`: working iBGP route-reflector scaffold (issue #92)
+
+`templates/bgp-rr/src/main.rs` was a stub — it parsed `--local-as`,
+`--router-id` and `--client` argv flags, printed
+`"BGP RR cluster scaffold"` and pointed the reader at
+`docs/examples/bgp_route_reflector.md`. `templates/README.md`
+advertised the template as an "iBGP route reflector cluster (RFC
+4456)" scaffold, so the stub fell short of the advertised behaviour
+— a downstream user running `cp -r templates/bgp-rr ~/projects/`
+got a binary that did not actually reflect routes.
+
+The template is now a working in-process RR demo:
+
+- Parses `--local-as N`, `--router-id A.B.C.D`,
+  `--cluster-id A.B.C.D` and `--client A.B.C.D[:port]` (the first
+  `--client` replaces the defaults; subsequent ones append).
+- Builds one `BgpPeer` per client with `route_reflector_client =
+  true` and `route_reflector.enabled = true` (cluster-id from the
+  argv). Each RR-side session has a far-side dummy BgpPeer that
+  stands in for the client's actual router.
+- Drives the OPEN/KEEPALIVE handshake between each RR-side session
+  and its far-side dummy so every session reaches `Established`.
+- Advertises a sample iBGP-learned route (origin.proto = 1) to the
+  second client, drains the resulting UPDATE bytes and decodes
+  them to confirm the `ORIGINATOR_ID` and `CLUSTER_LIST`
+  attributes the reflector stamps per RFC 4456 §3 are present on
+  the wire.
+
+Six unit tests pin the new helpers: `parse_v4_accepts_quad`,
+`parse_v4_rejects_bad`, `parse_client_strips_port`,
+`args_default_has_two_clients`,
+`rr_cluster_reflects_to_client` (full in-process reflection
+round-trip), and `rr_attributes_suppressed_when_not_reflector`
+(RFC 4456 §3 gating — a non-reflector with an accidentally set
+`rr_client` flag must not stamp `ORIGINATOR_ID` / `CLUSTER_LIST`).
+
+The other three templates (`analyzer`, `bfd-integration`,
+`os-integration`) were already working scaffolds; this round
+brings `bgp-rr` to parity with them. The new `templates` CI job
+(`.github/workflows/ci.yml`) loops through every
+`templates/<name>/Cargo.toml` and runs `cargo build && cargo test`
+in that directory so a regression in any template's main.rs or
+its in-process demo fails CI here, not in a downstream user's
+`cp -r` copy. The job runs in parallel with the existing `lint`,
+`unit-tests`, `ffi-bindings` and `msrv` jobs and uses the same
+`Swatinem/rust-cache@v2` action keyed `templates` for incremental
+builds.
+
+No public Rust API change, no C ABI change, no version bump.
+
 ### Fixed
 
 **`lr-ffi` non-Linux build of the `osroute_helpers` module** (`ffi`,
