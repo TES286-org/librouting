@@ -36,9 +36,6 @@ use lr_core::addr::{Asn, IpAddr};
 use lr_core::rib::Route;
 use lr_policy::{babel as policy_babel, bgp as policy_bgp, ospf as policy_ospf};
 
-#[cfg(feature = "exchange-plane")]
-use lr_policy::lrxp as policy_lrxp;
-
 use crate::error::{set_last_error, LR_ERR_PANIC};
 use crate::guarded;
 use crate::handle::lr_route_t;
@@ -941,11 +938,23 @@ pub unsafe extern "C" fn lr_route_ospf_router_id(
     )
 }
 
-// ---- LRXP exchange-plane record access (feature `exchange-plane`) ----
+// ---- LRXP exchange-plane record access ----
+//
+// The C ABI header (`include/lr_ffi.h`) declares the
+// `lr_route_lrxp_*` surface unconditionally, so the FFI symbols must
+// always be exported — otherwise the binding-side linkers (cgo in
+// particular) fail when a wrapper references one of these entry
+// points against a build that was compiled without the
+// `exchange-plane` feature. The underlying `lr_policy::lrxp` module
+// is still feature-gated; when the feature is off, every reader
+// returns the same "absent / 0 / false" defaults it would return for
+// a route that simply carries no LRXP attribute.
 
-#[cfg(feature = "exchange-plane")]
 mod lrxp_ffi {
     use super::*;
+
+    #[cfg(feature = "exchange-plane")]
+    use lr_policy::lrxp as policy_lrxp;
 
     /// The LRXP store kind tag (0 = absent, 1 = verified, 2 =
     /// partial-raw). Writes `0` to `*out` when the route carries no
@@ -964,12 +973,21 @@ mod lrxp_ffi {
                 if out.is_null() || out_present.is_null() {
                     return LR_ERR_NULL;
                 }
-                match policy_lrxp::store_kind(r) {
-                    Some(v) => unsafe {
-                        *out = v;
-                        *out_present = 1;
-                    },
-                    None => unsafe { *out_present = 0 },
+                #[cfg(feature = "exchange-plane")]
+                {
+                    match policy_lrxp::store_kind(r) {
+                        Some(v) => unsafe {
+                            *out = v;
+                            *out_present = 1;
+                        },
+                        None => unsafe { *out_present = 0 },
+                    }
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                    unsafe { *out_present = 0 };
                 }
                 0
             },
@@ -988,7 +1006,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::verified(r) as u8 };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::verified(r) as u8 };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1007,7 +1033,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::partial_transit(r) as u8 };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::partial_transit(r) as u8 };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1027,7 +1061,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::hint_rank(r) };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::hint_rank(r) };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1047,7 +1089,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::hint_damp_fom(r) };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::hint_damp_fom(r) };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1067,7 +1117,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::hint_igp_cost(r) };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::hint_igp_cost(r) };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1089,7 +1147,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::policy_role(r) };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::policy_role(r) };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 255 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1109,7 +1175,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::origin_as(r) };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::origin_as(r) };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1133,7 +1207,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::origin_max_valid_len(r) };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::origin_max_valid_len(r) };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1153,7 +1235,15 @@ mod lrxp_ffi {
                 if out.is_null() {
                     return LR_ERR_NULL;
                 }
-                unsafe { *out = policy_lrxp::origin_expiry(r) };
+                #[cfg(feature = "exchange-plane")]
+                {
+                    unsafe { *out = policy_lrxp::origin_expiry(r) };
+                }
+                #[cfg(not(feature = "exchange-plane"))]
+                {
+                    let _ = r;
+                    unsafe { *out = 0 };
+                }
                 0
             },
             LR_ERR_PANIC,
@@ -1163,9 +1253,11 @@ mod lrxp_ffi {
 
 // Re-export the LRXP FFI symbols at the crate root level so they
 // appear in the same flat `lr_route_lrxp_*` namespace as the rest of
-// the route-attribute surface. The cfg-gated mod keeps the symbols
-// out of the build when `exchange-plane` is off.
-#[cfg(feature = "exchange-plane")]
+// the route-attribute surface. The FFI symbols are always present
+// (the C ABI header declares them unconditionally); when the
+// `exchange-plane` feature is off, every reader returns the
+// "absent / 0 / false" defaults — exactly what a route that simply
+// carries no LRXP attribute would yield.
 pub use lrxp_ffi::*;
 
 #[cfg(test)]
@@ -1394,6 +1486,63 @@ mod tests {
         let rc = unsafe { lr_route_lrxp_hint_rank(r, &raw mut rank) };
         assert_eq!(rc, 0);
         assert_eq!(rank, 0, "absent hint yields 0");
+        unsafe { free_route(r) };
+    }
+
+    /// The LRXP FFI symbols are always compiled (the C ABI header
+    /// declares them unconditionally). When the `exchange-plane`
+    /// feature is off, every reader returns the same "absent / 0 /
+    /// false" defaults it would return for a route that simply
+    /// carries no LRXP attribute. This test pins the fallback
+    /// behaviour so a binding-side linker can rely on the symbols
+    /// always being present without having to know about the
+    /// `exchange-plane` feature.
+    #[cfg(not(feature = "exchange-plane"))]
+    #[test]
+    fn lrxp_ffi_symbols_present_without_feature() {
+        let r = new_v4_route();
+        let mut present = 1u8;
+        let mut kind = 9u8;
+        let rc = unsafe { lr_route_lrxp_store_kind(r, &raw mut kind, &raw mut present) };
+        assert_eq!(rc, 0);
+        assert_eq!(present, 0, "no LRXP attribute on a fresh route");
+        assert_eq!(kind, 0);
+        let mut verified = 1u8;
+        let rc = unsafe { lr_route_lrxp_verified(r, &raw mut verified) };
+        assert_eq!(rc, 0);
+        assert_eq!(verified, 0);
+        let mut pt = 1u8;
+        let rc = unsafe { lr_route_lrxp_partial_transit(r, &raw mut pt) };
+        assert_eq!(rc, 0);
+        assert_eq!(pt, 0);
+        let mut rank = 9u8;
+        let rc = unsafe { lr_route_lrxp_hint_rank(r, &raw mut rank) };
+        assert_eq!(rc, 0);
+        assert_eq!(rank, 0);
+        let mut fom = 9u16;
+        let rc = unsafe { lr_route_lrxp_hint_damp_fom(r, &raw mut fom) };
+        assert_eq!(rc, 0);
+        assert_eq!(fom, 0);
+        let mut cost = 9u32;
+        let rc = unsafe { lr_route_lrxp_hint_igp_cost(r, &raw mut cost) };
+        assert_eq!(rc, 0);
+        assert_eq!(cost, 0);
+        let mut role = 9u8;
+        let rc = unsafe { lr_route_lrxp_policy_role(r, &raw mut role) };
+        assert_eq!(rc, 0);
+        assert_eq!(role, 255, "unspecified role without feature");
+        let mut asn = 9u32;
+        let rc = unsafe { lr_route_lrxp_origin_as(r, &raw mut asn) };
+        assert_eq!(rc, 0);
+        assert_eq!(asn, 0);
+        let mut max_len = 9u8;
+        let rc = unsafe { lr_route_lrxp_origin_max_valid_len(r, &raw mut max_len) };
+        assert_eq!(rc, 0);
+        assert_eq!(max_len, 0);
+        let mut expiry = 9u32;
+        let rc = unsafe { lr_route_lrxp_origin_expiry(r, &raw mut expiry) };
+        assert_eq!(rc, 0);
+        assert_eq!(expiry, 0);
         unsafe { free_route(r) };
     }
 }
