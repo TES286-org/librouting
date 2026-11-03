@@ -695,3 +695,9 @@ __all__ = [
 # this value (`dynamic = ["version"]`). Keep it equal to the workspace
 # version in Cargo.toml; tests/test_librouting.py fails if they diverge.
 __version__ = "1.8.0"
+
+# Importing _extras patches the hand-written classes (Router, Route,
+# BgpAsPath, OspfExternalDest, OspfLsdb, Resolver, RoaStore) with
+# idiomatic wrappers for C ABI methods not exposed by the hand-written
+# layer. Re-run scripts/gen_methods_extras.py to regenerate.
+from . import _extras  # noqa: F401  (import for side effects)
