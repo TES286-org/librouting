@@ -191,10 +191,14 @@ func NlriFamilyIPv4MplsVpn() NlriFamily { return NlriFamily{c: C.lr_nlri_family_
 func NlriFamilyIPv6MplsVpn() NlriFamily { return NlriFamily{c: C.lr_nlri_family_ipv6_mpls_vpn()} }
 
 // NlriFamilyIPv4LabeledUnicast returns NlriFamily{AFI=1, SAFI=4} (RFC 8277).
-func NlriFamilyIPv4LabeledUnicast() NlriFamily { return NlriFamily{c: C.lr_nlri_family_ipv4_labeled_unicast()} }
+func NlriFamilyIPv4LabeledUnicast() NlriFamily {
+	return NlriFamily{c: C.lr_nlri_family_ipv4_labeled_unicast()}
+}
 
 // NlriFamilyIPv6LabeledUnicast returns NlriFamily{AFI=2, SAFI=4} (RFC 8277).
-func NlriFamilyIPv6LabeledUnicast() NlriFamily { return NlriFamily{c: C.lr_nlri_family_ipv6_labeled_unicast()} }
+func NlriFamilyIPv6LabeledUnicast() NlriFamily {
+	return NlriFamily{c: C.lr_nlri_family_ipv6_labeled_unicast()}
+}
 
 // NlriFamilyBgpLs returns NlriFamily{AFI=16388, SAFI=71} (RFC 7752).
 func NlriFamilyBgpLs() NlriFamily { return NlriFamily{c: C.lr_nlri_family_bgp_ls()} }
@@ -296,13 +300,17 @@ func NewPreference(adminDistance, metric uint32) Preference {
 // wrapping them in a struct — the u64 is the wire form.
 
 // InstantFromMillis constructs an Instant from a u64 milliseconds value.
-func InstantFromMillis(millis uint64) uint64 { return uint64(C.lr_instant_from_millis(C.uint64_t(millis))) }
+func InstantFromMillis(millis uint64) uint64 {
+	return uint64(C.lr_instant_from_millis(C.uint64_t(millis)))
+}
 
 // InstantFromSecs constructs an Instant from a u64 seconds value.
 func InstantFromSecs(secs uint64) uint64 { return uint64(C.lr_instant_from_secs(C.uint64_t(secs))) }
 
 // InstantAsMillis reads an Instant as milliseconds.
-func InstantAsMillis(instant uint64) uint64 { return uint64(C.lr_instant_as_millis(C.uint64_t(instant))) }
+func InstantAsMillis(instant uint64) uint64 {
+	return uint64(C.lr_instant_as_millis(C.uint64_t(instant)))
+}
 
 // InstantAsSecs reads an Instant as seconds.
 func InstantAsSecs(instant uint64) uint64 { return uint64(C.lr_instant_as_secs(C.uint64_t(instant))) }
@@ -333,19 +341,27 @@ func InstantCheckedSub(instant, other uint64) (uint64, bool) {
 }
 
 // DurationFromMillis constructs a Duration from a u64 milliseconds value.
-func DurationFromMillis(millis uint64) uint64 { return uint64(C.lr_duration_from_millis(C.uint64_t(millis))) }
+func DurationFromMillis(millis uint64) uint64 {
+	return uint64(C.lr_duration_from_millis(C.uint64_t(millis)))
+}
 
 // DurationFromSecs constructs a Duration from a u64 seconds value.
 func DurationFromSecs(secs uint64) uint64 { return uint64(C.lr_duration_from_secs(C.uint64_t(secs))) }
 
 // DurationAsMillis reads a Duration as milliseconds.
-func DurationAsMillis(durationMs uint64) uint64 { return uint64(C.lr_duration_as_millis(C.uint64_t(durationMs))) }
+func DurationAsMillis(durationMs uint64) uint64 {
+	return uint64(C.lr_duration_as_millis(C.uint64_t(durationMs)))
+}
 
 // DurationAsSecs reads a Duration as seconds.
-func DurationAsSecs(durationMs uint64) uint64 { return uint64(C.lr_duration_as_secs(C.uint64_t(durationMs))) }
+func DurationAsSecs(durationMs uint64) uint64 {
+	return uint64(C.lr_duration_as_secs(C.uint64_t(durationMs)))
+}
 
 // DurationCheckedAdd adds two Durations with overflow check.
-func DurationCheckedAdd(a, b uint64) uint64 { return uint64(C.lr_duration_checked_add(C.uint64_t(a), C.uint64_t(b))) }
+func DurationCheckedAdd(a, b uint64) uint64 {
+	return uint64(C.lr_duration_checked_add(C.uint64_t(a), C.uint64_t(b)))
+}
 
 // ---- CRC / Fletcher / OSPF LSA checksum ----
 
