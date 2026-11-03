@@ -116,6 +116,19 @@ def parse_function_decl(decl: str) -> dict:
     if not m:
         raise ValueError(f"cannot parse: {decl!r}")
     ret = m.group("ret").strip()
+    # cbindgen sometimes emits `struct OpaqueFoo *` instead of the
+    # public typedef name `lr_foo_t` for the return type (e.g.
+    # `lr_srv6_sid_new` in include/lr_ffi.h). Normalize to the typedef
+    # form so the downstream by_handle owner-detection picks the entry
+    # up — otherwise the wrapper generator misses the constructor.
+    ret_struct_m = re.match(r"^struct\s+(Opaque\w+)\s*\*$", ret)
+    if ret_struct_m:
+        opaque_name = ret_struct_m.group(1)
+        # Walk the global opaque_typedef_map (populated by main()).
+        for handle, info in _OPAQUE_HANDLE_MAP.items():
+            if info.get("c_struct") == opaque_name:
+                ret = handle
+                break
     name = m.group("name")
     args = m.group("args").strip()
     if args == "void" or args == "":
@@ -127,6 +140,12 @@ def parse_function_decl(decl: str) -> dict:
         "return_type": ret,
         "params": params,
     }
+
+
+# Reverse map: OpaqueStructName -> handle name (e.g. "OpaqueSrv6Sid" ->
+# "lr_srv6_sid_t"). Populated by main() after collect_opaque_typedefs()
+# runs; parse_function_decl reads it via this global.
+_OPAQUE_HANDLE_MAP: dict[str, dict] = {}
 
 
 def collect_function_decls(text: str) -> list[dict]:
@@ -276,10 +295,15 @@ def collect_enums(text: str) -> list[dict]:
 
 
 def main() -> int:
+    global _OPAQUE_HANDLE_MAP
     text = HEADER.read_text(encoding="utf-8")
     cleaned = _strip_comments(text)
-    funcs = collect_function_decls(text)
+    # Collect opaques FIRST so parse_function_decl (called inside
+    # collect_function_decls) can normalize `struct OpaqueFoo *`
+    # return types to their `lr_foo_t` typedef names.
     opaques = collect_opaque_typedefs(text)
+    _OPAQUE_HANDLE_MAP = opaques
+    funcs = collect_function_decls(text)
     structs = collect_value_structs(text)
     defines = collect_defines(cleaned)
     enums = collect_enums(cleaned)

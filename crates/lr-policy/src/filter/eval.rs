@@ -50,7 +50,13 @@ pub struct EvalError {
     pub col: u32,
 }
 
+/// Categorisation of filter evaluation errors.
+///
+/// `#[non_exhaustive]` allows new variants (e.g. `InternalInvariant`)
+/// to land on `main` between releases without forcing every
+/// `match EvalErrorKind { … }` site to grow a new arm at every minor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EvalErrorKind {
     /// Undefined variable referenced.
     UndefinedVar(String),

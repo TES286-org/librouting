@@ -1688,6 +1688,15 @@ fn engine_event_to_c(ev: EngineEvent) -> lr_ldp_engine_event_t {
             out.request_message_id = request_message_id.0;
             write_prefix_list(&mut out, &prefixes);
         }
+        // `EngineEvent` is `#[non_exhaustive]` so a wildcard arm is
+        // required. Future variants carry no C-side representation
+        // until the FFI surface explicitly learns them; an unknown
+        // variant is dropped here (kind=0 leaves the embedder with
+        // nothing to consume — the event is effectively swallowed,
+        // matching the daemon's no-op for unknown events).
+        _ => {
+            out.kind = 0;
+        }
     }
     out
 }

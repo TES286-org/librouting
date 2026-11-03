@@ -132,6 +132,14 @@ impl From<Event> for RouterEvent {
                 "bgp: end-of-rib received from session {session} for afi={} safi={}",
                 family.afi, family.safi
             )),
+            // `Event` is `#[non_exhaustive]` so future variants can
+            // land on `main` without forcing this match to grow an
+            // arm at every minor. An unknown event carries no
+            // structured data the daemon can act on, so it surfaces
+            // as a `Log` line and the embedder can pattern-match on
+            // the source `Event` directly if it needs the structured
+            // form.
+            _ => Self::Log("lr-core: unknown event variant".to_string()),
         }
     }
 }

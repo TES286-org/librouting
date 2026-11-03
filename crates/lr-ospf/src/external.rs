@@ -210,7 +210,12 @@ pub fn originate_summary_asbr_lsa(
 }
 
 /// One external route candidate produced by the §16.4 calculation.
+///
+/// `#[non_exhaustive]` allows new fields (e.g. `route_tag`) to land
+/// on `main` between releases without forcing every literal
+/// `ExternalRoute { … }` site to add the new field at every minor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalRoute {
     pub prefix: Prefix,
     /// Type 1: cost-to-ASBR + external metric. Type 2: external metric
@@ -447,7 +452,12 @@ use crate::spf::{SpfResultV3, V3VertexId};
 /// The v3 mirror of [`ExternalRoute`]: the forwarding address is a full
 /// IPv6 address gated by the F bit (§A.4.7) instead of a 0.0.0.0
 /// sentinel.
+///
+/// `#[non_exhaustive]` mirrors `ExternalRoute` — new fields (e.g.
+/// `route_tag`) land without forcing every literal site to add the
+/// new field at every minor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalRouteV3 {
     pub prefix: Prefix,
     /// Type 1: cost-to-ASBR + external metric. Type 2: external metric

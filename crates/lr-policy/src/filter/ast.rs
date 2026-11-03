@@ -573,7 +573,16 @@ impl RouteField {
 /// The kind of a route field. The other variants directly name the
 /// field; assignment is restricted by the parser to the settable
 /// subset (see [`RouteFieldKind::is_settable`]).
+///
+/// `#[non_exhaustive]` allows new fields (e.g. `BgpPmsiTunnel`,
+/// `LrxpVerified`, `LrxpPartialTransit`, `LrxpHintRank`,
+/// `LrxpHintDampFom`, `UnknownOspfField`, `UnknownBabelField`) to
+/// land on `main` between releases without forcing every
+/// `match RouteFieldKind { … }` site to grow a new arm at every
+/// minor. The `Other` catch-all remains for forward-compat with
+/// user-defined filter DSL extensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteFieldKind {
     /// `net` — the route's prefix. Read-only.
     Net,

@@ -36468,7 +36468,7 @@
     },
     {
       "name": "lr_srv6_sid_new",
-      "return_type": "struct OpaqueSrv6Sid *",
+      "return_type": "lr_srv6_sid_t",
       "params": [
         {
           "name": "octets",
@@ -59690,7 +59690,7 @@
       },
       {
         "name": "lr_srv6_sid_new",
-        "return_type": "struct OpaqueSrv6Sid *",
+        "return_type": "lr_srv6_sid_t",
         "params": [
           {
             "name": "octets",

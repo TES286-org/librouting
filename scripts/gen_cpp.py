@@ -27,21 +27,30 @@ GEN_BEGIN = "// ===== GENERATED ADDITIONS - do not edit by hand. ====="
 GEN_END = "// ===== END GENERATED ADDITIONS ====="
 
 
-def existing_cpp_symbols() -> set[str]:
-    text = HPP.read_text(encoding="utf-8")
+def existing_cpp_symbols(text: str | None = None) -> set[str]:
+    """Set of ``lr_*`` C ABI entry points already called by the hand-written
+    C++ surface. Pass the file content with the generated ``namespace gen``
+    block stripped so re-running the generator is idempotent; otherwise the
+    previously-emitted wrappers would be detected as "hand-written" and
+    dropped from the regeneration.
+    """
+    if text is None:
+        text = HPP.read_text(encoding="utf-8")
     return set(re.findall(r"\b(lr_\w+)\s*\(", text))
 
 
-def existing_cpp_typedefs() -> set[str]:
-    text = HPP.read_text(encoding="utf-8")
+def existing_cpp_typedefs(text: str | None = None) -> set[str]:
+    if text is None:
+        text = HPP.read_text(encoding="utf-8")
     handles = set()
     for m in re.finditer(r"using\s+(\w+Handle)\s*=\s*std::unique_ptr<(Opaque\w+),\s*detail::(\w+)>", text):
         handles.add(m.group(1))
     return handles
 
 
-def existing_cpp_deleters() -> set[str]:
-    text = HPP.read_text(encoding="utf-8")
+def existing_cpp_deleters(text: str | None = None) -> set[str]:
+    if text is None:
+        text = HPP.read_text(encoding="utf-8")
     return set(re.findall(r"struct\s+(\w+Deleter)\s*{", text))
 
 
@@ -255,9 +264,9 @@ def patch_hpp(abi: dict) -> None:
         insertion_point = len(text_clean)
     else:
         insertion_point = ns_close
-    present_syms = existing_cpp_symbols()
-    present_typedefs = existing_cpp_typedefs()
-    present_deleters = existing_cpp_deleters()
+    present_syms = existing_cpp_symbols(text_clean)
+    present_typedefs = existing_cpp_typedefs(text_clean)
+    present_deleters = existing_cpp_deleters(text_clean)
     print(f"CPP present: syms={len(present_syms)}, typedefs={len(present_typedefs)}, deleters={len(present_deleters)}")
     out_lines = [GEN_BEGIN, ""]
     out_lines.append("namespace gen {")

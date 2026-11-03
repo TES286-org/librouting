@@ -175,7 +175,13 @@ impl LdpEngineConfig {
 }
 
 /// Events the engine surfaces to the embedder.
+///
+/// `#[non_exhaustive]` allows new event variants (e.g.
+/// `AddressWithdrawn`, `LabelAbortReceived`) to land on `main`
+/// between releases without forcing every `match EngineEvent { … }`
+/// site to grow a new arm at every minor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EngineEvent {
     AdjacencyUp(HelloAdjacency),
     AdjacencyDown {

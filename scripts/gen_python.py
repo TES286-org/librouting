@@ -66,8 +66,16 @@ def existing_python_structs(cdef: str) -> set[str]:
 
 
 def existing_python_classes() -> set[str]:
+    """Return the set of class names defined by hand-written modules.
+
+    Excludes ``generated.py`` itself so re-running the generator is
+    idempotent: previously-emitted classes are regenerated rather than
+    skipped as if they were hand-written.
+    """
     out: set[str] = set()
     for path in (ROOT / "bindings" / "lr-python" / "src" / "librouting").glob("*.py"):
+        if path.name == "generated.py":
+            continue
         text = path.read_text(encoding="utf-8")
         for m in re.finditer(r"^class\s+(\w+)\b", text, re.MULTILINE):
             out.add(m.group(1))
@@ -397,6 +405,16 @@ def render_generated_module(abi: dict, existing_classes: set[str]) -> str:
     n_classes = 0
     n_methods = 0
     n_free = 0
+    # Skip C ABI functions that the generated module already imports by
+    # a friendlier Python name. Emitting a thin `_lib.lr_X()` wrapper for
+    # them would shadow the imported helper — `last_error` in particular
+    # must remain the string-decoding helper from `_ffi.py`, otherwise
+    # `LrError(last_error())` ends up wrapping a raw `char *` cdata and
+    # the exception's `str()` is a useless `<cdata 'char *' 0x...>` repr.
+    SKIP_FREE_FUNCS: set[str] = {
+        "lr_last_error",   # imported as last_error() — decodes to str
+        "lr_abi_version",  # exposed via librouting.__init__ as abi_version()
+    }
     for handle, info in sorted(abi["opaque_types"].items()):
         methods = abi["by_handle"].get(handle, [])
         rendered = render_class(handle, info, methods, existing_classes)
@@ -410,6 +428,8 @@ def render_generated_module(abi: dict, existing_classes: set[str]) -> str:
                              and not f["name"].endswith("_vec_free"))
     for f in abi["free_functions"]:
         if f["params"] and "raw" in f["params"][0]:
+            continue
+        if f["name"] in SKIP_FREE_FUNCS:
             continue
         lines.append(render_method(f, None))
         lines.append("")

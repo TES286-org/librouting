@@ -30,7 +30,14 @@ pub struct ParseError {
     pub kind: ParseErrorKind,
 }
 
+/// Categorisation of filter parser errors.
+///
+/// `#[non_exhaustive]` allows new variants (e.g. `UnknownOspfField`,
+/// `UnknownBabelField`) to land on `main` between releases without
+/// forcing every `match ParseErrorKind { … }` site to grow a new arm
+/// at every minor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseErrorKind {
     Lexer(LexerError),
     UnexpectedToken {

@@ -533,7 +533,12 @@ impl Seg6Route {
 /// contracts, and [`Seg6Netlink::add_seg6local_route`] fails fast
 /// with [`Seg6RouteError::UnsupportedAction`] for behaviors or
 /// parameter sets the kernel would reject with a bare `EINVAL`.
+///
+/// `#[non_exhaustive]` allows new fields (e.g. `vrf_table`, `srh`) to
+/// land on `main` between releases without forcing every literal
+/// `Seg6LocalRoute { … }` site to add the new field at every minor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Seg6LocalRoute {
     /// The SID this endpoint matches (RFC 8754 §3 — becomes the IPv6
     /// destination address, /128).

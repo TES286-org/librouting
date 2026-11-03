@@ -76,6 +76,7 @@ use core::fmt;
 /// behavior opcode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum Behavior {
     /// The End behavior (RFC 8986 §4.1). The simplest endpoint: the
     /// node decrements `segments_left`, sets the destination to the

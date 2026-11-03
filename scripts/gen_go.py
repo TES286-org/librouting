@@ -48,9 +48,14 @@ _EXCHANGE_PLANE_PREFIXES = (
 
 
 def existing_go_symbols() -> set[str]:
+    """Set of ``lr_*`` C ABI entry points already called by hand-written
+    Go files. Excludes ``generated.go`` so that re-running the generator
+    is idempotent — previously-emitted wrappers are regenerated rather
+    than skipped as if they were hand-written.
+    """
     out: set[str] = set()
     for path in sorted(GO_DIR.glob("*.go")):
-        if path.name.endswith("_test.go"):
+        if path.name.endswith("_test.go") or path.name == "generated.go":
             continue
         text = path.read_text(encoding="utf-8")
         for m in re.finditer(r"\b(lr_\w+)\s*\(", text):
@@ -59,9 +64,12 @@ def existing_go_symbols() -> set[str]:
 
 
 def existing_go_types() -> set[str]:
+    """Set of Go struct type names already declared by hand-written files.
+    Excludes ``generated.go`` so the generator stays idempotent.
+    """
     out: set[str] = set()
     for path in sorted(GO_DIR.glob("*.go")):
-        if path.name.endswith("_test.go"):
+        if path.name.endswith("_test.go") or path.name == "generated.go":
             continue
         text = path.read_text(encoding="utf-8")
         for m in re.finditer(r"^type\s+(\w+)\s+struct\s*{", text, re.MULTILINE):
@@ -456,7 +464,7 @@ def render_method(f: dict, handle: str) -> str:
     sig_returns = " (" + ", ".join(returns) + ")" if returns else ""
     sig = f"func (x *{struct_name}) {method_name}({', '.join(params)}){sig_returns} {{"
     body = render_method_body(name, ret, call_args)
-    return sig + "\n" + body + "\n}\n\n"
+    return sig + "\n" + body + "\n}\n"
 
 
 def render_constructor(f: dict, handle: str, free_standing: bool = False) -> str:
@@ -499,7 +507,7 @@ def render_constructor(f: dict, handle: str, free_standing: bool = False) -> str
             f"\tx := &{struct_name}{{ptr: p}}\n"
             f"\truntime.SetFinalizer(x, (*{struct_name}).destroy)\n"
             f"\treturn x, nil")
-    return sig + "\n" + body + "\n}\n\n"
+    return sig + "\n" + body + "\n}\n"
 
 
 def render_struct_and_free(handle: str, info: dict, methods: list[dict]) -> str:
@@ -548,7 +556,7 @@ def render_free_function(f: dict) -> str:
     sig_returns = " (" + ", ".join(returns) + ")" if returns else ""
     sig = f"func {go_name}({', '.join(params)}){sig_returns} {{"
     body = render_method_body(name, ret, call_args)
-    return sig + "\n" + body + "\n}\n\n"
+    return sig + "\n" + body + "\n}\n"
 
 
 def main() -> int:

@@ -2801,6 +2801,53 @@ int main() {
         check(out.size() == 3 && out[0] == 'b', "pair b.drain_output == 'bar'");
     }
 
+    // -----------------------------------------------------------------
+    // namespace gen — auto-generated C++ RAII wrappers (issue #92).
+    // Every handle in the C ABI gets a `XHandle = unique_ptr<OpaqueX, XDeleter>`
+    // typedef + a `make_X_new(...)` factory function. These tests exercise
+    // a representative sample to confirm the generated block compiles and
+    // the wrappers round-trip through the C ABI.
+    // -----------------------------------------------------------------
+    {
+        using namespace librouting::gen;
+
+        // BgpCommunity — value-typed constructor + readers (RFC 1997).
+        auto c = make_bgpcommunity_new(64512, 100);
+        check(static_cast<bool>(c), "gen::make_bgpcommunity_new returns non-null");
+        check(asn(c) == 64512, "gen::BgpCommunity.asn() == 64512");
+        check(value(c) == 100, "gen::BgpCommunity.value() == 100");
+
+        // BabelHello — value-typed constructor (RFC 8967 §2.3). The
+        // per-handle readers (`lr_babel_hello_seqno` etc.) are NOT
+        // emitted as wrapper methods in the gen namespace — the C++
+        // generator emits only constructors and free functions for
+        // non-handle-attached functions. Direct C ABI calls still
+        // work via the handle's `.get()` accessor.
+        auto h = make_babelhello_new(0xABCD, 200);
+        check(static_cast<bool>(h), "gen::make_babelhello_new returns non-null");
+        check(lr_babel_hello_seqno(h.get()) == 0xABCD,
+              "lr_babel_hello_seqno(BabelHelloHandle) == 0xABCD");
+
+        // BgpCodec — no-arg constructor; handle is freed by RAII on scope exit.
+        auto codec = make_bgpcodec_new();
+        check(static_cast<bool>(codec), "gen::make_bgpcodec_new returns non-null");
+
+        // LdpLabel — value-typed constructor + reader (called via the
+        // raw C ABI; gen namespace doesn't emit handle-attached methods).
+        auto lbl = make_ldplabel_new(100);
+        check(static_cast<bool>(lbl), "gen::make_ldplabel_new returns non-null");
+        check(lr_ldp_label_value(lbl.get()) == 100,
+              "lr_ldp_label_value(LdpLabelHandle) == 100");
+
+        // Srv6Sid — uses the struct OpaqueSrv6Sid * -> lr_srv6_sid_t
+        // return-type normalization in abi_parse.py. Without that
+        // normalization, gen_cpp would not emit the constructor and
+        // this line would not compile.
+        std::uint8_t sid_bytes[16] = {0x20, 0x01, 0x0d, 0xb8, 0};
+        auto sid = make_srv6sid_new(sid_bytes);
+        check(static_cast<bool>(sid), "gen::make_srv6sid_new returns non-null");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

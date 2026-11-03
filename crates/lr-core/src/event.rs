@@ -15,7 +15,15 @@ use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+/// Router event surfaced to the embedder.
+///
+/// `#[non_exhaustive]` allows new event variants (e.g.
+/// `RouteRefreshRequested`, `EndOfRib`) to land on `main` between
+/// releases without forcing every `match Event { … }` site to grow
+/// a new arm at every minor. Embedders that exhaustively match
+/// must add a `_ => {}` arm to stay source-compatible.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Event {
     /// Peer / neighbor state changed. `peer_state` is a short string like
     /// `"Established"` or `"Full"` or `"2-Way"`.

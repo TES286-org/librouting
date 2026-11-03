@@ -102,7 +102,12 @@ impl Phase {
 
 /// One exchange step's output: packets to transmit plus the LSAs that
 /// arrived (the caller installs them into the LSDB and floods).
+///
+/// `#[non_exhaustive]` allows new fields (e.g. `actions`) to land on
+/// `main` between releases without forcing every literal
+/// `ExchangeStep { … }` site to add the new field at every minor.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct ExchangeStep {
     /// Complete packets ready for the wire.
     pub outbound: Vec<OspfPacket>,

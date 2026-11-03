@@ -11173,6 +11173,12 @@ inline Srv6LocatorHandle make_srv6locator_new(const std::uint8_t* addr, std::uin
     return Srv6LocatorHandle(p);
 }
 
+inline Srv6SidHandle make_srv6sid_new(const std::uint8_t* octets) {
+    auto p = lr_srv6_sid_new(octets);
+    if (!p) throw Error(std::string("lr_srv6_sid_new returned null"));
+    return Srv6SidHandle(p);
+}
+
 inline Srv6SrhHandle make_srv6srh_new(const std::uint8_t* data, std::uintptr_t count) {
     auto p = lr_srv6_srh_new(data, count);
     if (!p) throw Error(std::string("lr_srv6_srh_new returned null"));

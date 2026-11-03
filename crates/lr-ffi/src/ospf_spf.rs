@@ -591,14 +591,16 @@ pub unsafe extern "C" fn lr_ospf_spf_v3_locator_at(
                 return LrError::InvalidHandle as i32;
             };
             // Project the locator route through the same SpfRoute
-            // shape so the embedder reuses one struct.
-            let route = SpfRoute {
-                prefix: loc.prefix,
-                metric: loc.metric,
-                next_hop: loc.next_hop.clone(),
-                border_router: None,
-                router_id: Some(loc.advertising_router),
-            };
+            // shape so the embedder reuses one struct. The
+            // `from_locator` constructor is the public API; the
+            // literal `SpfRoute { … }` form is not available across
+            // crate boundaries because `SpfRoute` is `#[non_exhaustive]`.
+            let route = SpfRoute::from_locator(
+                loc.prefix,
+                loc.metric,
+                loc.next_hop.clone(),
+                loc.advertising_router,
+            );
             unsafe { *out = spf_route_to_c(&route) };
             0
         },

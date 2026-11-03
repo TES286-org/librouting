@@ -61,7 +61,19 @@ pub struct SpfResult {
     pub transit_routes: Vec<SpfRoute>,
 }
 
+/// One SPF result route (a vertex-edge pair installed into the
+/// area's Loc-RIB after the §16.1 calculation).
+///
+/// `#[non_exhaustive]` allows new fields (e.g. `router_id`) to land
+/// on `main` between releases without forcing every literal
+/// `SpfRoute { … }` site to add the new field at every minor.
+/// Construct via `SpfRoute::from_locator(prefix, metric, next_hop,
+/// advertising_router)` for the common case; the FFI surface and
+/// downstream consumers should use the constructor rather than a
+/// struct expression so future fields land without breaking call
+/// sites.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SpfRoute {
     pub prefix: Prefix,
     pub metric: u64,
@@ -92,6 +104,30 @@ pub struct SpfRoute {
     /// so the policy DSL's `ospf.router_id` accessor can surface it
     /// (mirrors BIRD's `ospf_router_id` eattr).
     pub router_id: Option<u32>,
+}
+
+impl SpfRoute {
+    /// Construct an `SpfRoute` from the FFI locator projection.
+    ///
+    /// `SpfRoute` is `#[non_exhaustive]` so the public literal form
+    /// `SpfRoute { … }` is not available across crate boundaries. The
+    /// constructor is the source of truth for new fields; future
+    /// additions land with a sensible default here and the FFI surface
+    /// picks them up automatically.
+    pub fn from_locator(
+        prefix: Prefix,
+        metric: u64,
+        next_hop: Vec<IpAddr>,
+        advertising_router: u32,
+    ) -> Self {
+        Self {
+            prefix,
+            metric,
+            next_hop,
+            border_router: None,
+            router_id: Some(advertising_router),
+        }
+    }
 }
 
 impl Ord for SpfVertex {

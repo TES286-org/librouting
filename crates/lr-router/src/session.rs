@@ -140,7 +140,19 @@ impl OspfNetworkType {
 }
 
 /// Configuration for a new session.
+///
+/// `#[non_exhaustive]` allows new fields (e.g. `route_reflector_client`,
+/// `route_reflector`, `peer_address`) to land on `main` between releases
+/// without forcing every literal `SessionConfig { … }` site to add the
+/// new field at every minor. The `bgp` / `ospfv2` constructors stay the
+/// source of truth for new fields; the FFI surface constructs via
+/// `SessionConfig::bgp(..).with_*(..)` for new fields, falling back to
+/// `SessionConfig { known_fields, ..SessionConfig::bgp(0, 0, 0) }` for
+/// the raw FFI struct-expression form (the `..Default::default()` is
+/// not available because `SessionConfig` does not implement `Default`
+/// — it has no single zero value across `kind`/`local_as`/`peer_as`).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SessionConfig {
     pub kind: SessionKind,
     pub local_as: Asn,
@@ -687,8 +699,16 @@ pub struct SessionStats {
 /// Coarse classification of the most recent error that ended a
 /// session, exposed as a small numeric tag so `SessionStats` stays
 /// `Copy` and the wire format stays stable across releases.
+///
+/// `#[non_exhaustive]` allows new variants (e.g. `OspfKill`,
+/// `OspfSeqMismatch`, `OspfBadLsa`) to land on `main` between
+/// releases without forcing every `match SessionErrorKind { … }`
+/// site to grow a new arm at every minor. The discriminant values
+/// are stable across releases (the `#[repr(u8)]` is part of the
+/// wire format) — new variants are appended to the end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum SessionErrorKind {
     /// No error observed since the last session reset (the default).
     #[default]

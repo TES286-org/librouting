@@ -24,7 +24,16 @@ use lr_core::rib::Route;
 use crate::path::{AsPath, AttrType, Community, PathAttributes};
 
 /// Knobs that control the best-path algorithm.
+///
+/// `#[non_exhaustive]` allows new knobs (e.g. `compare_igp_metric`,
+/// `prefer_next_hop_self`) to land on `main` between releases without
+/// forcing every existing literal `BestPathConfig { … }` site to add
+/// the new field at every minor. The `Default` impl stays the source
+/// of truth for new fields; the FFI surface constructs via
+/// `BestPathConfig { ..Default::default() }` so unknown fields pick
+/// up the documented default.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BestPathConfig {
     /// Compare MED across AS boundaries (default false; RFC 4271 §9.1.2.2
     /// "b" restricts comparison to the same neighboring AS).

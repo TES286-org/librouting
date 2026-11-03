@@ -5972,6 +5972,14 @@ class Srv6Sid:
         """Return the raw CFFI pointer for direct C ABI access."""
         return self._ptr
 
+    @classmethod
+    def new(cls, octets):
+        """Construct a new ``lr_srv6_sid_t``. Throws ``LrError`` on failure."""
+        p = _lib.lr_srv6_sid_new(octets)
+        if not p:
+            raise LrError(last_error())
+        return cls(p)
+
     def octets(self, out_octets):
         """Low-level wrapper for ``lr_srv6_sid_octets``. See ``include/lr_ffi.h``."""
         rc = _lib.lr_srv6_sid_octets(self._ptr, out_octets)
@@ -6749,14 +6757,6 @@ def ldp_advertisement_mode_to_u8(v):
 def ldp_advertisement_mode_name(v):
     """Low-level wrapper for ``lr_ldp_advertisement_mode_name``. See ``include/lr_ffi.h``."""
     return _lib.lr_ldp_advertisement_mode_name(v)
-
-def last_error():
-    """Low-level wrapper for ``lr_last_error``. See ``include/lr_ffi.h``."""
-    return _lib.lr_last_error()
-
-def abi_version():
-    """Low-level wrapper for ``lr_abi_version``. See ``include/lr_ffi.h``."""
-    return _lib.lr_abi_version()
 
 def bfd_auth_type_from_algorithm(algorithm):
     """Low-level wrapper for ``lr_bfd_auth_type_from_algorithm``. See ``include/lr_ffi.h``."""

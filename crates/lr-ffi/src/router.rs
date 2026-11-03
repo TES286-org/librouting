@@ -7,7 +7,6 @@ use lr_core::addr::{Asn, RouterId};
 use lr_core::time::Instant;
 use lr_router::{
     DefaultRouter, OspfAreaType, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle,
-    SessionKind,
 };
 
 use lr_core::rib::RouteKey;
@@ -117,83 +116,89 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
                 Some(g) => g,
                 None => return -1,
             };
-            let cfg = SessionConfig {
-                kind: SessionKind::Bgp,
-                local_as: Asn(local_as),
-                peer_as: Asn(peer_as),
-                local_bgp_id: RouterId::from_u32(local_bgp_id),
-                hold_time,
-                keepalive,
-                asn4: asn4 != 0,
-                route_refresh: true,
-                enhanced_route_refresh: true,
-                add_path: false,
-                extended_next_hop: Vec::new(),
-                graceful_restart: graceful_restart != 0,
-                graceful_restart_time: gr_restart_time,
-                long_lived_gr: long_lived_gr != 0,
-                long_lived_stale_time: llgr_stale_time,
-                llgr_max_stale_time: if llgr_max_stale_time != 0 {
-                    Some(llgr_max_stale_time)
-                } else {
-                    None
-                },
-                mrai_ms: if local_as == peer_as { 5_000 } else { 30_000 },
-                // W2.1: FRR `bgp default ipv4-unicast` defaults to on, and
-                // the library default for a session with no explicit
-                // families is `[IPV4_UNICAST]` (SessionConfig::bgp). The
-                // FFI's ext entry point has no parameter for the default —
-                // it is always on here — so advertise the IPv4-unicast
-                // MP-BGP capability in OPEN: BIRD 2 refuses sessions whose
-                // required capability is missing. This mirrors the daemon's
-                // family-list builder (crates/lr-cli/src/daemon.rs), which
-                // inserts IPV4_UNICAST when the effective default is on.
-                // Embedders who want the `no bgp default ipv4-unicast`
-                // posture call `lr_router_set_default_ipv4_unicast(0)` and
-                // `lr_router_set_mp_families` before starting the session.
-                mp_families: vec![lr_core::nlri::NlriFamily::IPV4_UNICAST],
-                default_ipv4_unicast: true,
-                // W2.3: FRR `neighbor X allowas-in N` defaults to 0 (reject any
-                // local AS in the AS_PATH). Embedders flip it via
-                // `lr_router_set_local_as_tolerance`.
-                local_as_tolerance: 0,
-                // W2.4: FRR `neighbor X soft-reconfiguration inbound` defaults
-                // to off. Embedders flip it via
-                // `lr_router_set_soft_reconfig_inbound`.
-                soft_reconfig_inbound: false,
-                local_address: None,
-                area_id: 0,
-                ospf_area_type: OspfAreaType::Normal,
-                ospf_mtu: 1500,
-                ospf_network_type: OspfNetworkType::PointToPoint,
-                ospf_interface_ip: None,
-                ospf_neighbor_ip: None,
-                maximum_prefix: None,
-                maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
-                maximum_prefix_threshold: 75,
-                maximum_prefix_restart_time: 0,
-                // RFC 4271 §6.8: FFI sessions are single-transport; the
-                // collision group is reserved for embedders that run
-                // both transports of a bidirectional peer (the daemon).
-                collision_group: None,
-                locally_initiated: false,
-                // RFC 4456: route-reflector posture is off by default
-                // for FFI-constructed sessions; embedders wanting
-                // reflection call `lr_router_add_session` then
-                // `DefaultRouter::add_session` propagates these into
-                // `PeerConfig`. The FFI surface does not (yet) expose
-                // dedicated setters for these two fields; tracked as
-                // part of the defects.txt follow-up for the RR API.
-                route_reflector_client: false,
-                route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
-                // RFC 4271 §9.1.2.2 step (h): the FFI surface does not
-                // (yet) accept a peer transport source address; the
-                // comparator's step 8 ties through to the remaining
-                // tiebreakers when this is `None`. Embedders using the
-                // programmatic API call `SessionConfig::with_peer_address`
-                // before `add_session` instead.
-                peer_address: None,
+            // `SessionConfig` is `#[non_exhaustive]` and has no
+            // `Default` impl (the BGP/OSPF defaults are not the
+            // same — there is no single zero value across
+            // `kind`/`local_as`/`peer_as`). The base form pulls in
+            // the documented defaults for any future fields the FFI
+            // surface has not learned yet; the explicit overrides
+            // below carry the FFI-callable subset.
+            let mut cfg = SessionConfig::bgp(
+                Asn(local_as),
+                Asn(peer_as),
+                RouterId::from_u32(local_bgp_id),
+            );
+            cfg.hold_time = hold_time;
+            cfg.keepalive = keepalive;
+            cfg.asn4 = asn4 != 0;
+            cfg.route_refresh = true;
+            cfg.enhanced_route_refresh = true;
+            cfg.add_path = false;
+            cfg.extended_next_hop = Vec::new();
+            cfg.graceful_restart = graceful_restart != 0;
+            cfg.graceful_restart_time = gr_restart_time;
+            cfg.long_lived_gr = long_lived_gr != 0;
+            cfg.long_lived_stale_time = llgr_stale_time;
+            cfg.llgr_max_stale_time = if llgr_max_stale_time != 0 {
+                Some(llgr_max_stale_time)
+            } else {
+                None
             };
+            cfg.mrai_ms = if local_as == peer_as { 5_000 } else { 30_000 };
+            // W2.1: FRR `bgp default ipv4-unicast` defaults to on, and
+            // the library default for a session with no explicit
+            // families is `[IPV4_UNICAST]` (SessionConfig::bgp). The
+            // FFI's ext entry point has no parameter for the default —
+            // it is always on here — so advertise the IPv4-unicast
+            // MP-BGP capability in OPEN: BIRD 2 refuses sessions whose
+            // required capability is missing. This mirrors the daemon's
+            // family-list builder (crates/lr-cli/src/daemon.rs), which
+            // inserts IPV4_UNICAST when the effective default is on.
+            // Embedders who want the `no bgp default ipv4-unicast`
+            // posture call `lr_router_set_default_ipv4_unicast(0)` and
+            // `lr_router_set_mp_families` before starting the session.
+            cfg.mp_families = vec![lr_core::nlri::NlriFamily::IPV4_UNICAST];
+            cfg.default_ipv4_unicast = true;
+            // W2.3: FRR `neighbor X allowas-in N` defaults to 0 (reject any
+            // local AS in the AS_PATH). Embedders flip it via
+            // `lr_router_set_local_as_tolerance`.
+            cfg.local_as_tolerance = 0;
+            // W2.4: FRR `neighbor X soft-reconfiguration inbound` defaults
+            // to off. Embedders flip it via
+            // `lr_router_set_soft_reconfig_inbound`.
+            cfg.soft_reconfig_inbound = false;
+            cfg.local_address = None;
+            cfg.area_id = 0;
+            cfg.ospf_area_type = OspfAreaType::Normal;
+            cfg.ospf_mtu = 1500;
+            cfg.ospf_network_type = OspfNetworkType::PointToPoint;
+            cfg.ospf_interface_ip = None;
+            cfg.ospf_neighbor_ip = None;
+            cfg.maximum_prefix = None;
+            cfg.maximum_prefix_action = lr_bgp::MaxPrefixAction::Warn;
+            cfg.maximum_prefix_threshold = 75;
+            cfg.maximum_prefix_restart_time = 0;
+            // RFC 4271 §6.8: FFI sessions are single-transport; the
+            // collision group is reserved for embedders that run
+            // both transports of a bidirectional peer (the daemon).
+            cfg.collision_group = None;
+            cfg.locally_initiated = false;
+            // RFC 4456: route-reflector posture is off by default
+            // for FFI-constructed sessions; embedders wanting
+            // reflection call `lr_router_add_session` then
+            // `DefaultRouter::add_session` propagates these into
+            // `PeerConfig`. The FFI surface does not (yet) expose
+            // dedicated setters for these two fields; tracked as
+            // part of the defects.txt follow-up for the RR API.
+            cfg.route_reflector_client = false;
+            cfg.route_reflector = lr_bgp::role::RouteReflectorConfig::default();
+            // RFC 4271 §9.1.2.2 step (h): the FFI surface does not
+            // (yet) accept a peer transport source address; the
+            // comparator's step 8 ties through to the remaining
+            // tiebreakers when this is `None`. Embedders using the
+            // programmatic API call `SessionConfig::with_peer_address`
+            // before `add_session` instead.
+            cfg.peer_address = None;
             match router.add_session(cfg) {
                 Ok(h) => {
                     if !out_handle.is_null() {

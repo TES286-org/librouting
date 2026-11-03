@@ -83,8 +83,18 @@ impl PathAttrFlags {
 }
 
 /// BGP path attribute type code (RFC 4271 §5 + IANA registry).
+///
+/// `#[non_exhaustive]` allows new attribute codes (e.g. the
+/// librouting-private `LrOspfMetric2`, `LrOspfRouterId`,
+/// `LrBabelSeqno`, `LrBabelRouterId`, `LrIgpMetric`,
+/// `LrPeerSourceAddress` tags) to land on `main` between releases
+/// without forcing every `match AttrType { … }` site to grow a new
+/// arm at every minor. The `Other(u8)` catch-all carries unknown
+/// IANA codes; the librouting-private tags use a private range
+/// above the IANA allocation and never escape the encode surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum AttrType {
     Origin = 1,
     AsPath = 2,

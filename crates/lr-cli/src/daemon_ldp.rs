@@ -1322,6 +1322,15 @@ impl LdpDaemon {
                         peer_id
                     );
                 }
+                // `EngineEvent` is `#[non_exhaustive]` — future
+                // variants land without a daemon-side handler and
+                // surface as a generic log line. The daemon does not
+                // need to act on every engine event; the embedder is
+                // free to extend `EngineEvent` with new variants for
+                // observability without breaking the daemon.
+                _ => {
+                    log_info!(Component::Ldp, "unhandled ldp engine event (dropped)");
+                }
             }
         }
     }

@@ -58,18 +58,24 @@ impl Default for lr_best_path_config_t {
 
 impl From<lr_best_path_config_t> for BestPathConfig {
     fn from(c: lr_best_path_config_t) -> Self {
-        Self {
-            always_compare_med: c.always_compare_med != 0,
-            missing_med_as_infinity: c.missing_med_as_infinity != 0,
-            deterministic_router_id: c.deterministic_router_id != 0,
-            prefer_externals: c.prefer_externals != 0,
-            count_confed_in_path_len: c.count_confed_in_path_len != 0,
-            multipath: c.multipath,
-            multipath_relax: c.multipath_relax != 0,
-            graceful_shutdown_least_preferred: c.graceful_shutdown_least_preferred != 0,
-            compare_igp_metric: c.compare_igp_metric != 0,
-            prefer_next_hop_self: c.prefer_next_hop_self != 0,
-        }
+        // `BestPathConfig` is `#[non_exhaustive]` so the public
+        // constructor cannot use a struct expression directly — it
+        // must go through `Default::default()` + explicit field
+        // assignment. This shape is forward-compatible: when a new
+        // field lands on `main` between releases, the FFI surface
+        // picks up the documented default automatically.
+        let mut cfg = BestPathConfig::default();
+        cfg.always_compare_med = c.always_compare_med != 0;
+        cfg.missing_med_as_infinity = c.missing_med_as_infinity != 0;
+        cfg.deterministic_router_id = c.deterministic_router_id != 0;
+        cfg.prefer_externals = c.prefer_externals != 0;
+        cfg.count_confed_in_path_len = c.count_confed_in_path_len != 0;
+        cfg.multipath = c.multipath;
+        cfg.multipath_relax = c.multipath_relax != 0;
+        cfg.graceful_shutdown_least_preferred = c.graceful_shutdown_least_preferred != 0;
+        cfg.compare_igp_metric = c.compare_igp_metric != 0;
+        cfg.prefer_next_hop_self = c.prefer_next_hop_self != 0;
+        cfg
     }
 }
 
@@ -135,18 +141,13 @@ pub extern "C" fn lr_best_path_config_new(
 /// Convert a Rust `BestPathConfig` to its C form. Mostly useful for
 /// testing the round-trip.
 pub fn best_path_config_to_c(c: &BestPathConfig) -> lr_best_path_config_t {
-    let cloned = BestPathConfig {
-        always_compare_med: c.always_compare_med,
-        missing_med_as_infinity: c.missing_med_as_infinity,
-        deterministic_router_id: c.deterministic_router_id,
-        prefer_externals: c.prefer_externals,
-        count_confed_in_path_len: c.count_confed_in_path_len,
-        multipath: c.multipath,
-        multipath_relax: c.multipath_relax,
-        graceful_shutdown_least_preferred: c.graceful_shutdown_least_preferred,
-        compare_igp_metric: c.compare_igp_metric,
-        prefer_next_hop_self: c.prefer_next_hop_self,
-    };
+    // `BestPathConfig` is `#[non_exhaustive]` so a struct expression
+    // won't compile here; clone the input (preserves every field the
+    // Rust side carries) and convert to the C form. When a new field
+    // lands on `main`, the C struct gains a matching member and the
+    // `From<BestPathConfig>` impl grows the new field — the clone
+    // here keeps the round-trip complete.
+    let cloned = c.clone();
     cloned.into()
 }
 
