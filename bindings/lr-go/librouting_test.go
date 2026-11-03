@@ -1119,6 +1119,41 @@ func TestRouteD5_4AttributeReaders(t *testing.T) {
 	if _, ok, err := rt.OspfRouterID(); err != nil || ok {
 		t.Fatalf("OspfRouterID default: ok=%v, err=%v", ok, err)
 	}
+
+	// LRXP exchange-plane readers (design §4–§5). The lr_route_lrxp_*
+	// C ABI surface is always compiled; without the exchange-plane
+	// feature every reader returns the "absent / 0 / false" defaults
+	// a route with no LRXP attribute would yield.
+	if _, ok, err := rt.LrxpStoreKind(); err != nil || ok {
+		t.Fatalf("LrxpStoreKind default: ok=%v, err=%v", ok, err)
+	}
+	if v, err := rt.LrxpVerified(); err != nil || v {
+		t.Fatalf("LrxpVerified default: got (%v, %v)", v, err)
+	}
+	if v, err := rt.LrxpPartialTransit(); err != nil || v {
+		t.Fatalf("LrxpPartialTransit default: got (%v, %v)", v, err)
+	}
+	if rank, ok, err := rt.LrxpHintRank(); err != nil || ok || rank != 0 {
+		t.Fatalf("LrxpHintRank default: got (%v, %v, %v)", rank, ok, err)
+	}
+	if fom, _, err := rt.LrxpHintDampFom(); err != nil || fom != 0 {
+		t.Fatalf("LrxpHintDampFom default: got (%v, _, %v)", fom, err)
+	}
+	if cost, _, err := rt.LrxpHintIgpCost(); err != nil || cost != 0 {
+		t.Fatalf("LrxpHintIgpCost default: got (%v, _, %v)", cost, err)
+	}
+	if role, ok, err := rt.LrxpPolicyRole(); err != nil || ok || role != 255 {
+		t.Fatalf("LrxpPolicyRole default: got (%v, %v, %v)", role, ok, err)
+	}
+	if asn, ok, err := rt.LrxpOriginAs(); err != nil || ok || asn != 0 {
+		t.Fatalf("LrxpOriginAs default: got (%v, %v, %v)", asn, ok, err)
+	}
+	if maxLen, ok, err := rt.LrxpOriginMaxValidLen(); err != nil || ok || maxLen != 0 {
+		t.Fatalf("LrxpOriginMaxValidLen default: got (%v, %v, %v)", maxLen, ok, err)
+	}
+	if expiry, ok, err := rt.LrxpOriginExpiry(); err != nil || ok || expiry != 0 {
+		t.Fatalf("LrxpOriginExpiry default: got (%v, %v, %v)", expiry, ok, err)
+	}
 }
 
 func TestFilterDSL(t *testing.T) {

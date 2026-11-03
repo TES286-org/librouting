@@ -1157,7 +1157,6 @@ func (r *Router) OspfIsAsbr() (bool, error) {
 	return rc == 1, nil
 }
 
-
 // OspfSetAreaType sets an attached OSPF area's type policy (RFC 2328
 // §3.6 / RFC 3101) using the full struct-value (carries the
 // border-router-injected default-route metric). The router refuses
@@ -1170,6 +1169,25 @@ func (r *Router) OspfSetAreaType(areaID uint32, t OspfAreaType) (bool, error) {
 	rc := C.lr_router_ospf_set_area_type_ext(r.ptr, C.uint32_t(areaID), t.cHandle())
 	if rc < 0 {
 		return false, fmt.Errorf("lr_router_ospf_set_area_type_ext: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// OspfSetAreaTypeKind is the legacy i32-kind variant of OspfSetAreaType
+// (RFC 2328 §3.6 / RFC 3101). It takes one of the AreaNormal /
+// AreaStub / AreaStubNoSummary / AreaNssa / AreaNssaNoSummary
+// constants and drops the border-router-injected default-route
+// metric to 0 (the legacy C ABI entry point lr_router_ospf_set_area_type
+// has no slot for the metric). New callers should prefer
+// OspfSetAreaType, which takes the full struct-value OspfAreaType
+// and propagates the default_metric field. Returns (true, nil) on a
+// successful conversion, (false, nil) for a no-op or refused
+// conversion (the backbone cannot become stub/NSSA), and (false,
+// err) on an unexpected C ABI failure.
+func (r *Router) OspfSetAreaTypeKind(areaID uint32, kind int32) (bool, error) {
+	rc := C.lr_router_ospf_set_area_type(r.ptr, C.uint32_t(areaID), C.int32_t(kind))
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_ospf_set_area_type: %s (rc=%d)", LastError(), int(rc))
 	}
 	return rc == 1, nil
 }
@@ -3165,6 +3183,122 @@ func (r *Route) OspfRouterID() (value uint32, ok bool, err error) {
 		return 0, false, nil
 	}
 	return value, true, nil
+}
+
+// LrxpStoreKind reads the LRXP store-kind tag (design §4):
+//
+//	0 = no LRXP attribute, 1 = verified record set, 2 = partial-raw.
+//
+// ok is false when the route carries no LRXP attribute at all.
+func (r *Route) LrxpStoreKind() (kind uint8, ok bool, err error) {
+	var present C.uint8_t
+	if rc := C.lr_route_lrxp_store_kind(r.ptr, (*C.uint8_t)(&kind), &present); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_store_kind: %s (rc=%d)", LastError(), int(rc))
+	}
+	if present == 0 {
+		return 0, false, nil
+	}
+	return kind, true, nil
+}
+
+// LrxpVerified reports whether the route carries a verified LRXP
+// record set (design §4).
+func (r *Route) LrxpVerified() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_lrxp_verified(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_lrxp_verified: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// LrxpPartialTransit reports whether the route carries partial-transit
+// LRXP forwarding material (design §4).
+func (r *Route) LrxpPartialTransit() (bool, error) {
+	var v C.uint8_t
+	if rc := C.lr_route_lrxp_partial_transit(r.ptr, &v); rc != 0 {
+		return false, fmt.Errorf("lr_route_lrxp_partial_transit: %s (rc=%d)", LastError(), int(rc))
+	}
+	return v != 0, nil
+}
+
+// LrxpHintRank reads the sender's best-path rank for this path
+// among its alternates (design §5.1: 1 = the path the sender itself
+// uses). ok is false when the route carries no verified hint record.
+func (r *Route) LrxpHintRank() (rank uint8, ok bool, err error) {
+	if rc := C.lr_route_lrxp_hint_rank(r.ptr, (*C.uint8_t)(&rank)); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_hint_rank: %s (rc=%d)", LastError(), int(rc))
+	}
+	// 0 means "no verified hint record"; valid ranks start at 1.
+	return rank, rank != 0, nil
+}
+
+// LrxpHintDampFom reads the sender's route-flap figure of merit
+// for the prefix (design §5.1: 0 when damping is off). ok is false
+// when the route carries no verified hint record.
+func (r *Route) LrxpHintDampFom() (fom uint16, ok bool, err error) {
+	if rc := C.lr_route_lrxp_hint_damp_fom(r.ptr, (*C.uint16_t)(&fom)); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_hint_damp_fom: %s (rc=%d)", LastError(), int(rc))
+	}
+	// The C ABI returns 0 for "no verified hint record"; a non-zero
+	// FOM is unambiguous, but a 0 with no hint record is the common
+	// case. Use LrxpVerified to disambiguate when needed.
+	return fom, true, nil
+}
+
+// LrxpHintIgpCost reads the sender's IGP cost from its decision
+// point to this path's next hop (design §5.1). ok is false when
+// the route carries no verified hint record.
+func (r *Route) LrxpHintIgpCost() (cost uint32, ok bool, err error) {
+	if rc := C.lr_route_lrxp_hint_igp_cost(r.ptr, (*C.uint32_t)(&cost)); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_hint_igp_cost: %s (rc=%d)", LastError(), int(rc))
+	}
+	return cost, true, nil
+}
+
+// LrxpPolicyRole reads the sender's RFC 9234 role claim for this
+// session (design §5.2):
+//
+//	0 = provider, 1 = customer, 2 = RS, 3 = RS-client, 4 = peer,
+//	255 = unspecified.
+//
+// ok is false when the route carries no verified policy record.
+func (r *Route) LrxpPolicyRole() (role uint8, ok bool, err error) {
+	if rc := C.lr_route_lrxp_policy_role(r.ptr, (*C.uint8_t)(&role)); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_policy_role: %s (rc=%d)", LastError(), int(rc))
+	}
+	// 255 (unspecified) signals "no verified policy record".
+	return role, role != 255, nil
+}
+
+// LrxpOriginAs reads the origin AS the attestation authorises for
+// this announcement set (design §5.3). ok is false when the route
+// carries no verified origin record.
+func (r *Route) LrxpOriginAs() (asn uint32, ok bool, err error) {
+	if rc := C.lr_route_lrxp_origin_as(r.ptr, (*C.uint32_t)(&asn)); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_origin_as: %s (rc=%d)", LastError(), int(rc))
+	}
+	return asn, asn != 0, nil
+}
+
+// LrxpOriginMaxValidLen reads the maximum prefix length the origin
+// authorises for this announcement set (design §5.3: the ROA
+// maxLength idea, RFC 6811 §3, without the PKI). ok is false when
+// the route carries no verified origin record.
+func (r *Route) LrxpOriginMaxValidLen() (maxLen uint8, ok bool, err error) {
+	if rc := C.lr_route_lrxp_origin_max_valid_len(r.ptr, (*C.uint8_t)(&maxLen)); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_origin_max_valid_len: %s (rc=%d)", LastError(), int(rc))
+	}
+	return maxLen, maxLen != 0, nil
+}
+
+// LrxpOriginExpiry reads the absolute timestamp after which
+// downstream speakers stop trusting the record (design §5.3).
+// ok is false when the route carries no verified origin record.
+func (r *Route) LrxpOriginExpiry() (expiry uint32, ok bool, err error) {
+	if rc := C.lr_route_lrxp_origin_expiry(r.ptr, (*C.uint32_t)(&expiry)); rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_lrxp_origin_expiry: %s (rc=%d)", LastError(), int(rc))
+	}
+	return expiry, expiry != 0, nil
 }
 
 // PrefixList is an owned prefix-list handle (FRR ge/le semantics,
