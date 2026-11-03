@@ -2020,6 +2020,2759 @@ void lr_bgp_large_community_free(lr_bgp_large_community_t c);
  * as4_path. The full BgpAsPath surface (decode/encode/prepend/etc)
  * is a separate follow-up. */
 void lr_bgp_as_path_free(lr_bgp_as_path_t p);
+
+/* GENERATED ADDITIONS - do not edit by hand.
+   Source: scripts/gen_python.py + scripts/abi.json
+   Re-run: python3 scripts/gen_python.py */
+
+typedef struct OpaqueBabelUpdate OpaqueBabelUpdate;
+typedef struct OpaqueBabelUpdate *lr_babel_update_t;
+typedef struct OpaqueBfdConfig OpaqueBfdConfig;
+typedef struct OpaqueBfdConfig *lr_bfd_config_t;
+typedef struct OpaqueBfdSessionEvent OpaqueBfdSessionEvent;
+typedef struct OpaqueBfdSessionEvent *lr_bfd_session_event_t;
+typedef struct OpaqueBfdSession OpaqueBfdSession;
+typedef struct OpaqueBfdSession *lr_bfd_session_t;
+typedef struct OpaqueBgpCapArray OpaqueBgpCapArray;
+typedef struct OpaqueBgpCapArray *lr_bgp_capability_array_t;
+typedef struct OpaqueBgpCapability OpaqueBgpCapability;
+typedef struct OpaqueBgpCapability *lr_bgp_capability_t;
+typedef struct OpaqueBgpCodec OpaqueBgpCodec;
+typedef struct OpaqueBgpCodec *lr_bgp_codec_t;
+typedef struct OpaqueBgpCommunity OpaqueBgpCommunity;
+typedef struct OpaqueBgpCommunity *lr_bgp_community_t;
+typedef struct OpaqueConfederationConfig OpaqueConfederationConfig;
+typedef struct OpaqueConfederationConfig *lr_bgp_confed_config_t;
+typedef struct OpaqueBgpExtCommunity OpaqueBgpExtCommunity;
+typedef struct OpaqueBgpExtCommunity *lr_bgp_ext_community_t;
+typedef struct OpaqueBgpLsAttr OpaqueBgpLsAttr;
+typedef struct OpaqueBgpLsAttr *lr_bgp_ls_attr_t;
+typedef struct OpaqueBgpLsTlvVec OpaqueBgpLsTlvVec;
+typedef struct OpaqueBgpLsTlvVec *lr_bgp_ls_tlv_vec_t;
+typedef struct OpaqueOtc OpaqueOtc;
+typedef struct OpaqueOtc *lr_bgp_otc_t;
+typedef struct OpaquePeerConfig OpaquePeerConfig;
+typedef struct OpaquePeerConfig *lr_bgp_peer_config_t;
+typedef struct OpaqueBgpPeer OpaqueBgpPeer;
+typedef struct OpaqueBgpPeer *lr_bgp_peer_t;
+typedef struct OpaquePeerTopology OpaquePeerTopology;
+typedef struct OpaquePeerTopology *lr_bgp_peer_topology_t;
+typedef struct OpaqueRouteReflectorConfig OpaqueRouteReflectorConfig;
+typedef struct OpaqueRouteReflectorConfig *lr_bgp_rr_config_t;
+typedef struct OpaqueRouteServerConfig OpaqueRouteServerConfig;
+typedef struct OpaqueRouteServerConfig *lr_bgp_rs_config_t;
+typedef struct OpaqueBmpCodec OpaqueBmpCodec;
+typedef struct OpaqueBmpCodec *lr_bmp_codec_t;
+typedef struct OpaqueBmpMessage OpaqueBmpMessage;
+typedef struct OpaqueBmpMessage *lr_bmp_message_t;
+typedef struct OpaqueBgpCapBytes OpaqueBgpCapBytes;
+typedef struct OpaqueBgpCapBytes *lr_bytes_t_handle;
+typedef struct OpaqueDampingTable OpaqueDampingTable;
+typedef struct OpaqueDampingTable *lr_damping_table_t;
+typedef struct OpaqueLdpDiscoveryConfig OpaqueLdpDiscoveryConfig;
+typedef struct OpaqueLdpDiscoveryConfig *lr_ldp_discovery_config_t;
+typedef struct OpaqueLdpDiscovery OpaqueLdpDiscovery;
+typedef struct OpaqueLdpDiscovery *lr_ldp_discovery_t;
+typedef struct OpaqueLdpEngineConfig OpaqueLdpEngineConfig;
+typedef struct OpaqueLdpEngineConfig *lr_ldp_engine_config_t;
+typedef struct OpaqueLdpEngine OpaqueLdpEngine;
+typedef struct OpaqueLdpEngine *lr_ldp_engine_t;
+typedef struct OpaqueLdpFec OpaqueLdpFec;
+typedef struct OpaqueLdpFec *lr_ldp_fec_t;
+typedef struct OpaqueLdpLabelStore OpaqueLdpLabelStore;
+typedef struct OpaqueLdpLabelStore *lr_ldp_label_store_t;
+typedef struct OpaqueLdpGenericLabel OpaqueLdpGenericLabel;
+typedef struct OpaqueLdpGenericLabel *lr_ldp_label_t;
+typedef struct OpaqueLdpPdu OpaqueLdpPdu;
+typedef struct OpaqueLdpPdu *lr_ldp_pdu_t;
+typedef struct OpaqueLdpSession OpaqueLdpSession;
+typedef struct OpaqueLdpSession *lr_ldp_session_t;
+typedef struct OpaqueLdpTransit OpaqueLdpTransit;
+typedef struct OpaqueLdpTransit *lr_ldp_transit_t;
+typedef struct OpaqueMrtReader OpaqueMrtReader;
+typedef struct OpaqueMrtReader *lr_mrt_reader_t;
+typedef struct OpaqueMrtRecord OpaqueMrtRecord;
+typedef struct OpaqueMrtRecord *lr_mrt_record_t;
+typedef struct OpaqueMrtRibDump OpaqueMrtRibDump;
+typedef struct OpaqueMrtRibDump *lr_mrt_rib_dump_t;
+typedef struct OpaqueOspfAsbrDest OpaqueOspfAsbrDest;
+typedef struct OpaqueOspfAsbrDest *lr_ospf_asbr_dest_t;
+typedef struct OpaqueOspfCryptoAuth OpaqueOspfCryptoAuth;
+typedef struct OpaqueOspfCryptoAuth *lr_ospf_crypto_auth_t;
+typedef struct OpaqueOspfDbExchange OpaqueOspfDbExchange;
+typedef struct OpaqueOspfDbExchange *lr_ospf_db_exchange_t;
+typedef struct OpaqueOspfExternalRoute OpaqueOspfExternalRoute;
+typedef struct OpaqueOspfExternalRoute *lr_ospf_external_route_t;
+typedef struct OpaqueOspfExternalRouteV3 OpaqueOspfExternalRouteV3;
+typedef struct OpaqueOspfExternalRouteV3 *lr_ospf_external_route_v3_t;
+typedef struct OpaqueOspfExternalRouteV3Vec OpaqueOspfExternalRouteV3Vec;
+typedef struct OpaqueOspfExternalRouteV3Vec *lr_ospf_external_route_v3_vec_t;
+typedef struct OpaqueOspfExternalRouteVec OpaqueOspfExternalRouteVec;
+typedef struct OpaqueOspfExternalRouteVec *lr_ospf_external_route_vec_t;
+typedef struct OpaqueOspfHelperEntry OpaqueOspfHelperEntry;
+typedef struct OpaqueOspfHelperEntry *lr_ospf_helper_entry_t;
+typedef struct OpaqueOspfIfAction OpaqueOspfIfAction;
+typedef struct OpaqueOspfIfAction *lr_ospf_if_action_t;
+typedef struct OpaqueOspfInterface OpaqueOspfInterface;
+typedef struct OpaqueOspfInterface *lr_ospf_interface_t;
+typedef struct OpaqueOspfNeighbor OpaqueOspfNeighbor;
+typedef struct OpaqueOspfNeighbor *lr_ospf_neighbor_t;
+typedef struct OpaqueOspfNssaDefault OpaqueOspfNssaDefault;
+typedef struct OpaqueOspfNssaDefault *lr_ospf_nssa_default_t;
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct OpaqueOspfPacket OpaqueOspfPacket;
+typedef struct OpaqueOspfPacket *lr_ospf_packet_t;
+typedef struct OpaqueOspfRestartTracker OpaqueOspfRestartTracker;
+typedef struct OpaqueOspfRestartTracker *lr_ospf_restart_tracker_t;
+typedef struct OpaqueOspfRouterLsaLink OpaqueOspfRouterLsaLink;
+typedef struct OpaqueOspfRouterLsaLink *lr_ospf_router_lsa_link_t;
+typedef struct OpaqueOspfSimplePassword OpaqueOspfSimplePassword;
+typedef struct OpaqueOspfSimplePassword *lr_ospf_simple_password_t;
+typedef struct OpaqueOspfSpfResult OpaqueOspfSpfResult;
+typedef struct OpaqueOspfSpfResult *lr_ospf_spf_result_t;
+typedef struct OpaqueOspfSpfResultV3 OpaqueOspfSpfResultV3;
+typedef struct OpaqueOspfSpfResultV3 *lr_ospf_spf_v3_result_t;
+typedef struct OpaqueOspfSrDb OpaqueOspfSrDb;
+typedef struct OpaqueOspfSrDb *lr_ospf_sr_db_t;
+typedef struct OpaqueOspfSrv6Db OpaqueOspfSrv6Db;
+typedef struct OpaqueOspfSrv6Db *lr_ospf_srv6_db_t;
+typedef struct OpaqueOspfSummaryDest OpaqueOspfSummaryDest;
+typedef struct OpaqueOspfSummaryDest *lr_ospf_summary_dest_t;
+typedef struct OpaqueOspfV3Auth OpaqueOspfV3Auth;
+typedef struct OpaqueOspfV3Auth *lr_ospf_v3_auth_t;
+typedef struct OpaqueOsRouteTable OpaqueOsRouteTable;
+typedef struct OpaqueOsRouteTable *lr_osroute_t;
+typedef struct OpaquePolicyChain OpaquePolicyChain;
+typedef struct OpaquePolicyChain *lr_policy_chain_t;
+typedef struct OpaquePolicy OpaquePolicy;
+typedef struct OpaquePolicy *lr_policy_t;
+typedef struct OpaqueRoaTableBuilder OpaqueRoaTableBuilder;
+typedef struct OpaqueRoaTableBuilder *lr_roa_table_builder_t;
+typedef struct OpaqueRoaTable OpaqueRoaTable;
+typedef struct OpaqueRoaTable *lr_roa_table_t;
+typedef struct OpaqueRtrPdu OpaqueRtrPdu;
+typedef struct OpaqueRtrPdu *lr_rtr_pdu_t;
+typedef struct OpaqueSafetyNet OpaqueSafetyNet;
+typedef struct OpaqueSafetyNet *lr_safety_net_t;
+typedef struct OpaqueSessionConfig OpaqueSessionConfig;
+typedef struct OpaqueSessionConfig *lr_session_config_t;
+typedef struct OpaqueTcpAuth OpaqueTcpAuth;
+typedef struct OpaqueTcpAuth *lr_tcp_auth_t;
+typedef struct lr_best_path_config_t {
+    uint8_t always_compare_med;
+    uint8_t missing_med_as_infinity;
+    uint8_t deterministic_router_id;
+    uint8_t prefer_externals;
+    uint8_t count_confed_in_path_len;
+    uint32_t multipath;
+    uint8_t multipath_relax;
+    uint8_t graceful_shutdown_least_preferred;
+    uint8_t compare_igp_metric;
+    uint8_t prefer_next_hop_self;
+} lr_best_path_config_t;
+typedef struct lr_bgp_cap_add_path_family_t {
+    uint16_t afi;
+    uint8_t safi;
+    uint8_t send;
+    uint8_t recv;
+} lr_bgp_cap_add_path_family_t;
+typedef struct lr_bgp_cap_gr_family_t {
+    uint16_t afi;
+    uint8_t safi;
+    uint8_t forwarding;
+} lr_bgp_cap_gr_family_t;
+typedef struct lr_bgp_cap_llgr_family_t {
+    uint16_t afi;
+    uint8_t safi;
+    uint8_t forwarding;
+    uint32_t stale_time_secs;
+} lr_bgp_cap_llgr_family_t;
+typedef struct lr_bgp_ext_next_hop_tuple_t {
+    uint16_t nlri_afi;
+    uint8_t nlri_safi;
+    uint16_t nh_afi;
+} lr_bgp_ext_next_hop_tuple_t;
+typedef struct lr_bgp_ls_tlv_t {
+    uint16_t tlv_type;
+    uintptr_t value_offset;
+    uint16_t value_len;
+    uint8_t * value_ptr;
+    void * _owned;
+} lr_bgp_ls_tlv_t;
+typedef struct lr_bgp_peer_message_stats_t {
+    uint64_t open_sent;
+    uint64_t open_received;
+    uint64_t keepalive_sent;
+    uint64_t keepalive_received;
+    uint64_t notification_sent;
+    uint64_t notification_received;
+    uint64_t update_sent;
+    uint64_t update_received;
+    uint64_t route_refresh_sent;
+    uint64_t route_refresh_received;
+} lr_bgp_peer_message_stats_t;
+typedef struct lr_bmp_peer_header_t {
+    uint8_t peer_type;
+    uint8_t peer_flags;
+    uint64_t peer_distinguisher;
+    uint8_t peer_address[16];
+    uint32_t peer_as;
+    uint32_t peer_bgp_id;
+    uint32_t timestamp_secs;
+    uint32_t timestamp_fraction;
+} lr_bmp_peer_header_t;
+typedef struct lr_bmp_tlv_t {
+    uint16_t tlv_type;
+    const uint8_t * value;
+    uintptr_t value_len;
+} lr_bmp_tlv_t;
+typedef struct lr_damping_entry_t {
+    struct lr_prefix_t prefix;
+    double figure_of_merit;
+    uint8_t suppressed;
+    uint64_t last_decay_s;
+    uint64_t last_flap_s;
+    uint32_t flap_count;
+} lr_damping_entry_t;
+typedef struct lr_gtsm_t {
+    uint8_t outbound_ttl;
+    uint8_t min_ttl;
+} lr_gtsm_t;
+typedef struct lr_kernel_route_t {
+    struct lr_prefix_t prefix;
+    uint8_t next_hop[16];
+    uint8_t next_hop_is_ipv6;
+    uint8_t next_hop_present;
+    uint8_t if_index_present;
+    uint32_t if_index;
+    uint32_t metric;
+    int32_t protocol;
+} lr_kernel_route_t;
+typedef struct lr_ldp_engine_event_t {
+    int32_t kind;
+    uint32_t peer_lsr;
+    uint16_t peer_label_space;
+    int32_t discovery_kind;
+    uint8_t source_is_ipv6;
+    uint8_t source_addr[16];
+    uint8_t transport_is_ipv6;
+    uint8_t transport_addr[16];
+    uint64_t conn;
+    uint16_t negotiated_keepalive_time;
+    uint16_t negotiated_max_pdu_len;
+    int32_t session_down_reason;
+    uint32_t status_code;
+    uint8_t status_is_fatal;
+    uint8_t graceful;
+    uint8_t prefix_is_ipv6;
+    uint8_t prefix_len;
+    uint8_t prefix_addr[16];
+    uint32_t label;
+    uint32_t in_label;
+    uint32_t out_label;
+    uint8_t transit_next_hop_is_ipv6;
+    uint8_t transit_next_hop_addr[16];
+    uint32_t message_id;
+    uint32_t request_message_id;
+    struct lr_bytes_t prefixes;
+    uint32_t prefix_count;
+    struct lr_bytes_t addresses;
+    uint32_t address_count;
+} lr_ldp_engine_event_t;
+typedef struct lr_ldp_hello_adjacency_t {
+    uint32_t peer_lsr_id;
+    uint16_t peer_label_space;
+    uint8_t kind;
+    uint8_t source_is_ipv6;
+    uint8_t source[16];
+    uint8_t transport_is_ipv6;
+    uint8_t transport_addr[16];
+    uint64_t hold_time_ms;
+    uint64_t last_seen_ms;
+    uint8_t config_seq_present;
+    uint32_t config_seq;
+    uint8_t dual_stack_present;
+    uint8_t dual_stack_prefer_ipv6;
+} lr_ldp_hello_adjacency_t;
+typedef struct lr_ldp_id_t {
+    uint8_t lsr_id[4];
+    uint16_t label_space;
+} lr_ldp_id_t;
+typedef struct lr_ldp_prefix_t {
+    uint8_t addr_v4[16];
+    uint8_t addr_v6[16];
+    uint8_t is_ipv6;
+    uint8_t prefix_len;
+} lr_ldp_prefix_t;
+typedef struct lr_mrt_attr_summary_t {
+    uint8_t has_next_hop_v4;
+    uint8_t has_next_hop_v6;
+    uint8_t next_hop_v4[4];
+    uint8_t next_hop_v6[16];
+    uint8_t has_local_pref;
+    uint32_t local_pref;
+    uint8_t has_med;
+    uint32_t med;
+    uintptr_t raw_len;
+} lr_mrt_attr_summary_t;
+typedef struct lr_mrt_peer_entry_t {
+    uint32_t bgp_id;
+    const uint8_t * ip_addr;
+    uint8_t is_ipv6;
+    uint32_t asn;
+} lr_mrt_peer_entry_t;
+typedef struct lr_mrt_rib_entry_t {
+    uint16_t peer_index;
+    uint32_t originated_time;
+    uint32_t path_id;
+    const uint8_t * attributes;
+    uintptr_t attr_len;
+} lr_mrt_rib_entry_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+typedef struct lr_ospf_e_lsa_tlv_t {
+    uint16_t tlv_type;
+    uint16_t length;
+    uintptr_t value_offset;
+} lr_ospf_e_lsa_tlv_t;
+typedef struct lr_ospf_elector_t {
+    uint32_t router_id;
+    uint32_t ip;
+    uint8_t priority;
+    uint32_t stated_dr;
+    uint32_t stated_bdr;
+} lr_ospf_elector_t;
+typedef struct lr_ospf_exchange_step_t {
+    lr_ospf_packet_t * out_packets;
+    uintptr_t out_packet_count;
+    lr_ospf_lsa_box_t * out_lsas;
+    uintptr_t out_lsa_count;
+    uint8_t newly_full;
+} lr_ospf_exchange_step_t;
+typedef struct lr_ospf_nssa_calc_opts_t {
+    uint8_t border_router;
+    uint8_t summaries_suppressed;
+} lr_ospf_nssa_calc_opts_t;
+typedef struct lr_ospf_router_link_t {
+    uint32_t link_id;
+    uint32_t link_data;
+    uint8_t link_type;
+    uint8_t tos_count;
+    uint16_t metric;
+} lr_ospf_router_link_t;
+typedef struct lr_ospf_spf_route_t {
+    uint8_t prefix_addr[16];
+    uint8_t prefix_is_ipv6;
+    uint8_t prefix_len;
+    uint64_t metric;
+    uint32_t next_hop_count;
+    uint32_t border_router;
+    uint32_t advertising_router;
+} lr_ospf_spf_route_t;
+typedef struct lr_ospf_v3_elector_t {
+    uint32_t router_id;
+    uint8_t priority;
+    uint32_t stated_dr;
+    uint32_t stated_bdr;
+} lr_ospf_v3_elector_t;
+typedef struct lr_osroute_interface_v4_addr_t {
+    uint8_t addr[4];
+    uint8_t prefix_len;
+} lr_osroute_interface_v4_addr_t;
+typedef struct lr_osroute_interface_v6_addr_t {
+    uint8_t addr[16];
+    uint8_t prefix_len;
+    uint32_t scope_id;
+} lr_osroute_interface_v6_addr_t;
+typedef struct lr_tcp_ao_key_t {
+    uint8_t send_id;
+    uint8_t recv_id;
+    uintptr_t key_len;
+} lr_tcp_ao_key_t;
+lr_babel_update_t lr_babel_update_new(
+    uint8_t prefix_len_bits,
+    const uint8_t * prefix,
+    uintptr_t prefix_len_bytes,
+    uint16_t seqno,
+    uint16_t metric
+);
+uint8_t lr_babel_update_ae(lr_babel_update_t u);
+uint8_t lr_babel_update_flags(lr_babel_update_t u);
+uint8_t lr_babel_update_prefix_len(lr_babel_update_t u);
+uint8_t lr_babel_update_omitted(lr_babel_update_t u);
+uint16_t lr_babel_update_interval_cs(lr_babel_update_t u);
+uint16_t lr_babel_update_seqno(lr_babel_update_t u);
+uint16_t lr_babel_update_metric(lr_babel_update_t u);
+uintptr_t lr_babel_update_prefix(
+    lr_babel_update_t u,
+    uint8_t * out,
+    uintptr_t out_len
+);
+uintptr_t lr_babel_update_prefix_len_bytes(lr_babel_update_t u);
+uint8_t lr_babel_update_src_prefix_len(lr_babel_update_t u);
+uintptr_t lr_babel_update_src_prefix(
+    lr_babel_update_t u,
+    uint8_t * out,
+    uintptr_t out_len
+);
+int32_t lr_babel_update_set_ae(lr_babel_update_t u, uint8_t ae);
+int32_t lr_babel_update_set_flags(lr_babel_update_t u, uint8_t flags);
+int32_t lr_babel_update_set_omitted(lr_babel_update_t u, uint8_t omitted);
+int32_t lr_babel_update_set_interval_cs(lr_babel_update_t u, uint16_t interval_cs);
+int32_t lr_babel_update_encode(lr_babel_update_t u, struct lr_bytes_t * out);
+void lr_babel_update_free(lr_babel_update_t u);
+struct lr_best_path_config_t lr_best_path_config_default(void);
+struct lr_best_path_config_t lr_best_path_config_new(
+    uint8_t always_compare_med,
+    uint8_t missing_med_as_infinity,
+    uint8_t deterministic_router_id,
+    uint8_t prefer_externals,
+    uint8_t count_confed_in_path_len,
+    uint32_t multipath,
+    uint8_t multipath_relax,
+    uint8_t graceful_shutdown_least_preferred,
+    uint8_t compare_igp_metric,
+    uint8_t prefer_next_hop_self
+);
+int32_t lr_best_path_compare(
+    lr_route_t a,
+    lr_route_t b,
+    struct lr_best_path_config_t cfg
+);
+lr_route_t lr_best_path_select(
+    const lr_route_t * routes,
+    uintptr_t count,
+    struct lr_best_path_config_t cfg
+);
+int32_t lr_best_path_rank(
+    const lr_route_t * routes,
+    uintptr_t count,
+    struct lr_best_path_config_t cfg,
+    struct lr_bytes_t * out
+);
+int32_t lr_best_path_multipath(
+    const lr_route_t * routes,
+    uintptr_t count,
+    struct lr_best_path_config_t cfg,
+    struct lr_bytes_t * out
+);
+int32_t lr_best_path_compare_multipath(
+    lr_route_t a,
+    lr_route_t b,
+    struct lr_best_path_config_t cfg
+);
+int32_t lr_bfd_session_set_keyed_auth(lr_bfd_session_t s, lr_bfd_keyed_auth_t auth);
+uint8_t lr_bfd_session_keyed_auth_present(lr_bfd_session_t s);
+int32_t lr_bfd_session_update_timers(
+    lr_bfd_session_t s,
+    uint64_t now_ms,
+    uint32_t desired_min_tx,
+    uint32_t required_min_rx,
+    lr_bfd_session_event_t ** out_array,
+    uintptr_t * out_count
+);
+uint8_t lr_bfd_session_remote_detect_mult(lr_bfd_session_t s);
+uint8_t lr_bfd_session_poll_active(lr_bfd_session_t s);
+lr_bfd_config_t lr_bfd_config_new(
+    uint8_t detect_mult,
+    uint32_t desired_min_tx_interval_us,
+    uint32_t required_min_rx_interval_us,
+    uint32_t required_min_echo_interval_us,
+    uint8_t role
+);
+void lr_bfd_config_free(lr_bfd_config_t c);
+uint8_t lr_bfd_config_detect_mult(lr_bfd_config_t c);
+uint8_t lr_bfd_config_role(lr_bfd_config_t c);
+uint32_t lr_bfd_config_desired_min_tx_interval(lr_bfd_config_t c);
+uint32_t lr_bfd_config_required_min_rx_interval(lr_bfd_config_t c);
+uint32_t lr_bfd_config_required_min_echo_interval(lr_bfd_config_t c);
+int32_t lr_bfd_config_set_detect_mult(lr_bfd_config_t c, uint8_t value);
+int32_t lr_bfd_config_set_desired_min_tx_interval(lr_bfd_config_t c, uint32_t value);
+int32_t lr_bfd_config_set_required_min_rx_interval(lr_bfd_config_t c, uint32_t value);
+int32_t lr_bfd_config_set_required_min_echo_interval(lr_bfd_config_t c, uint32_t value);
+int32_t lr_bfd_config_set_role(lr_bfd_config_t c, uint8_t role);
+int32_t lr_bfd_config_set_auth_key(
+    lr_bfd_config_t c,
+    const uint8_t * password,
+    uintptr_t password_len
+);
+uint8_t lr_bfd_config_has_auth_key(lr_bfd_config_t c);
+uint8_t lr_bfd_session_remote_diag(lr_bfd_session_t s);
+lr_bfd_session_t lr_bfd_session_new(lr_bfd_config_t cfg, uint32_t my_disc);
+void lr_bfd_session_free(lr_bfd_session_t s);
+uint8_t lr_bfd_session_state(lr_bfd_session_t s);
+uint8_t lr_bfd_session_is_up(lr_bfd_session_t s);
+uint32_t lr_bfd_session_my_discriminator(lr_bfd_session_t s);
+uint32_t lr_bfd_session_remote_discriminator(lr_bfd_session_t s);
+uint8_t lr_bfd_session_local_diag(lr_bfd_session_t s);
+uint8_t lr_bfd_session_remote_state(lr_bfd_session_t s);
+uint32_t lr_bfd_session_tx_interval_us(lr_bfd_session_t s);
+uint64_t lr_bfd_session_detection_time_us(lr_bfd_session_t s);
+int32_t lr_bfd_session_drain_outgoing(lr_bfd_session_t s, struct lr_bytes_t * out);
+int32_t lr_bfd_session_feed_bytes(
+    lr_bfd_session_t s,
+    uint64_t now_ms,
+    const uint8_t * data,
+    uintptr_t len,
+    lr_bfd_session_event_t ** out_array,
+    uintptr_t * out_count
+);
+int32_t lr_bfd_session_tick(
+    lr_bfd_session_t s,
+    uint64_t now_ms,
+    lr_bfd_session_event_t ** out_array,
+    uintptr_t * out_count
+);
+int32_t lr_bfd_session_start(
+    lr_bfd_session_t s,
+    uint64_t now_ms,
+    lr_bfd_session_event_t ** out_array,
+    uintptr_t * out_count
+);
+int32_t lr_bfd_session_admin_down(
+    lr_bfd_session_t s,
+    lr_bfd_session_event_t ** out_array,
+    uintptr_t * out_count
+);
+uint8_t lr_bfd_session_event_kind(lr_bfd_session_event_t e);
+int32_t lr_bfd_session_event_state_change_fields(
+    lr_bfd_session_event_t e,
+    uint8_t * out_from,
+    uint8_t * out_to,
+    uint8_t * out_diag
+);
+void lr_bfd_session_event_free(lr_bfd_session_event_t e);
+void lr_bfd_session_event_array_free(lr_bfd_session_event_t * array, uintptr_t count);
+lr_bgp_codec_t lr_bgp_codec_new(void);
+lr_bgp_codec_t lr_bgp_codec_with_asn4(uint8_t asn4);
+int32_t lr_bgp_codec_set_asn4(lr_bgp_codec_t c, uint8_t asn4);
+uint8_t lr_bgp_codec_asn4_active(lr_bgp_codec_t c);
+int32_t lr_bgp_codec_set_add_path(
+    lr_bgp_codec_t c,
+    const struct lr_afi_safi_t * tx,
+    uintptr_t tx_count,
+    const struct lr_afi_safi_t * rx,
+    uintptr_t rx_count
+);
+int32_t lr_bgp_codec_decode_slice(
+    lr_bgp_codec_t c,
+    const uint8_t * data,
+    uintptr_t len,
+    lr_bgp_message_t * out
+);
+int32_t lr_bgp_codec_encode_vec(
+    lr_bgp_codec_t c,
+    lr_bgp_message_t msg,
+    struct lr_bytes_t * out
+);
+void lr_bgp_codec_free(lr_bgp_codec_t c);
+int32_t lr_bgp_reconcile_as4(
+    uint8_t wire_present,
+    const uint8_t * wire_data,
+    uintptr_t wire_len,
+    uint8_t as4_present,
+    const uint8_t * as4_data,
+    uintptr_t as4_len,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_decode_tlv_stream(
+    const uint8_t * data,
+    uintptr_t len,
+    uintptr_t * out_count,
+    struct lr_bgp_ls_tlv_t ** out_array
+);
+int32_t lr_bgp_encode_tlv_stream(
+    const struct lr_bgp_ls_tlv_t * tlvs,
+    uintptr_t count,
+    struct lr_bytes_t * out
+);
+void lr_bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_t * arr, uintptr_t count);
+int32_t lr_bgp_labeled_nlri_encode_list(
+    const uint8_t * data,
+    uintptr_t len,
+    uint8_t add_path,
+    struct lr_bytes_t * out
+);
+lr_bgp_community_t lr_bgp_community_new(uint16_t asn, uint16_t value);
+lr_bgp_community_t lr_bgp_community_from_u32(uint32_t value);
+lr_bgp_community_t lr_bgp_community_new_well_known(int32_t kind);
+uint32_t lr_bgp_community_as_u32(lr_bgp_community_t c);
+uint16_t lr_bgp_community_asn(lr_bgp_community_t c);
+uint16_t lr_bgp_community_value(lr_bgp_community_t c);
+int32_t lr_bgp_community_kind(lr_bgp_community_t c);
+void lr_bgp_community_free(lr_bgp_community_t c);
+int32_t lr_bgp_community_encode_set(
+    const uint32_t * values,
+    uintptr_t count,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_community_decode_set(
+    const uint8_t * data,
+    uintptr_t len,
+    struct lr_bytes_t * out_values,
+    uintptr_t * out_count
+);
+int32_t lr_bgp_large_community_encode_set(
+    const uint32_t * triples,
+    uintptr_t count,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_large_community_decode_set(
+    const uint8_t * data,
+    uintptr_t len,
+    struct lr_bytes_t * out_values,
+    uintptr_t * out_count
+);
+lr_bgp_ext_community_t lr_bgp_ext_community_new(
+    uint8_t kind,
+    uint8_t subtype,
+    uint32_t global,
+    uint16_t local
+);
+uint8_t lr_bgp_ext_community_kind(lr_bgp_ext_community_t c);
+uint8_t lr_bgp_ext_community_subtype(lr_bgp_ext_community_t c);
+uint32_t lr_bgp_ext_community_global(lr_bgp_ext_community_t c);
+uint16_t lr_bgp_ext_community_local(lr_bgp_ext_community_t c);
+void lr_bgp_ext_community_free(lr_bgp_ext_community_t c);
+int32_t lr_bgp_ext_community_encode_set(
+    const uint32_t * specs,
+    uintptr_t count,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_ext_community_decode_set(
+    const uint8_t * data,
+    uintptr_t len,
+    struct lr_bytes_t * out_values,
+    uintptr_t * out_count
+);
+uint8_t lr_bgp_error_code_from_u8(uint8_t v);
+uint8_t lr_bgp_error_code_to_u8(uint8_t v);
+const char * lr_bgp_error_code_name(uint8_t v);
+uint8_t lr_bgp_open_error_subcode_from_u8(uint8_t v);
+uint8_t lr_bgp_open_error_subcode_to_u8(uint8_t v);
+const char * lr_bgp_open_error_subcode_name(uint8_t v);
+uint8_t lr_bgp_update_error_subcode_from_u8(uint8_t v);
+uint8_t lr_bgp_update_error_subcode_to_u8(uint8_t v);
+const char * lr_bgp_update_error_subcode_name(uint8_t v);
+uint8_t lr_bgp_header_error_subcode_from_u8(uint8_t v);
+uint8_t lr_bgp_header_error_subcode_to_u8(uint8_t v);
+const char * lr_bgp_header_error_subcode_name(uint8_t v);
+uint8_t lr_bgp_cease_subcode_from_u8(uint8_t v);
+uint8_t lr_bgp_cease_subcode_to_u8(uint8_t v);
+const char * lr_bgp_cease_subcode_name(uint8_t v);
+uint8_t lr_bgp_message_type_from_u8(uint8_t v);
+uint8_t lr_bgp_message_type_to_u8(uint8_t v);
+const char * lr_bgp_message_type_name(uint8_t v);
+uint8_t lr_bgp_capability_code_from_u8(uint8_t v);
+uint8_t lr_bgp_capability_code_to_u8(uint8_t v);
+const char * lr_bgp_capability_code_name(uint8_t v);
+uint16_t lr_bgp_ls_nlri_type_from_u16(uint16_t v);
+uint16_t lr_bgp_ls_nlri_type_to_u16(uint16_t v);
+const char * lr_bgp_ls_nlri_type_name(uint16_t v);
+uint8_t lr_bgp_as_path_type_from_u8(uint8_t v);
+uint8_t lr_bgp_as_path_type_to_u8(uint8_t v);
+const char * lr_bgp_as_path_type_name(uint8_t v);
+uint8_t lr_bgp_origin_kind_from_u8(uint8_t v);
+uint8_t lr_bgp_origin_kind_to_u8(uint8_t v);
+const char * lr_bgp_origin_kind_name(uint8_t v);
+uint8_t lr_bgp_community_kind_from_u8(uint8_t v);
+uint8_t lr_bgp_community_kind_to_u8(uint8_t v);
+const char * lr_bgp_community_kind_name(uint8_t v);
+uint8_t lr_bgp_route_refresh_subtype_from_u8(uint8_t v);
+uint8_t lr_bgp_route_refresh_subtype_to_u8(uint8_t v);
+const char * lr_bgp_route_refresh_subtype_name(uint8_t v);
+struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(
+    uint16_t tlv_type,
+    const uint8_t * value,
+    uintptr_t value_len
+);
+uint16_t lr_bgp_ls_tlv_type(struct lr_bgp_ls_tlv_t t);
+uintptr_t lr_bgp_ls_tlv_value_len(struct lr_bgp_ls_tlv_t t);
+int32_t lr_bgp_ls_tlv_value(
+    struct lr_bgp_ls_tlv_t t,
+    uint8_t * out,
+    uintptr_t cap
+);
+void lr_bgp_ls_tlv_free(struct lr_bgp_ls_tlv_t t);
+int32_t lr_bgp_ls_decode_tlv_stream(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_bgp_ls_tlv_vec_t * out
+);
+int32_t lr_bgp_ls_encode_tlv_stream(lr_bgp_ls_tlv_vec_t vec, struct lr_bytes_t * out);
+uintptr_t lr_bgp_ls_tlv_vec_len(lr_bgp_ls_tlv_vec_t vec);
+struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
+void lr_bgp_ls_tlv_vec_free(lr_bgp_ls_tlv_vec_t vec);
+lr_bgp_ls_attr_t lr_bgp_ls_attr_new(void);
+void lr_bgp_ls_attr_free(lr_bgp_ls_attr_t a);
+uintptr_t lr_bgp_ls_attr_len(lr_bgp_ls_attr_t a);
+uint8_t lr_bgp_ls_attr_is_empty(lr_bgp_ls_attr_t a);
+uintptr_t lr_bgp_ls_attr_value_len(lr_bgp_ls_attr_t a);
+int32_t lr_bgp_ls_attr_encode(lr_bgp_ls_attr_t a, struct lr_bytes_t * out);
+int32_t lr_bgp_ls_attr_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_bgp_ls_attr_t * out
+);
+int32_t lr_bgp_ls_attr_find(
+    lr_bgp_ls_attr_t a,
+    uint16_t ty,
+    uintptr_t * out_index
+);
+lr_bgp_message_t lr_bgp_message_new_open(
+    uint32_t my_as,
+    uint16_t hold_time,
+    uint32_t bgp_id,
+    uint8_t as4
+);
+lr_bgp_message_t lr_bgp_message_new_update(void);
+lr_bgp_message_t lr_bgp_message_new_notification(
+    uint8_t error_code,
+    uint8_t error_subcode,
+    const uint8_t * data,
+    uintptr_t data_len
+);
+lr_bgp_message_t lr_bgp_message_new_notification_from_code(
+    uint8_t error_code,
+    uint8_t error_subcode,
+    const uint8_t * data,
+    uintptr_t data_len
+);
+lr_bgp_message_t lr_bgp_message_new_keepalive(void);
+lr_bgp_message_t lr_bgp_message_new_route_refresh(
+    uint16_t afi,
+    uint8_t safi,
+    uint8_t subtype
+);
+lr_bgp_message_t lr_bgp_message_new_begin_of_rib(uint16_t afi, uint8_t safi);
+lr_bgp_message_t lr_bgp_message_new_end_of_rib(uint16_t afi, uint8_t safi);
+lr_bgp_message_t lr_bgp_message_new_open_auto_as4(
+    uint32_t my_as,
+    uint16_t hold_time,
+    uint32_t bgp_id
+);
+uint8_t lr_bgp_attr_type_to_u8(uint8_t t);
+int32_t lr_bgp_attr_type_from_u8(uint8_t wire, uint8_t * out_canonical);
+lr_bgp_as_path_t lr_bgp_as_path_new(void);
+lr_bgp_as_path_t lr_bgp_as_path_from_sequence(const uint32_t * ases, uintptr_t count);
+uintptr_t lr_bgp_as_path_length(lr_bgp_as_path_t p);
+uintptr_t lr_bgp_as_path_length_with_confed(lr_bgp_as_path_t p);
+uintptr_t lr_bgp_as_path_as_sequence(
+    lr_bgp_as_path_t p,
+    uint32_t * out,
+    uintptr_t cap
+);
+uintptr_t lr_bgp_as_path_segment_count(lr_bgp_as_path_t p);
+int32_t lr_bgp_as_path_segment_at(
+    lr_bgp_as_path_t p,
+    uintptr_t index,
+    uint8_t * out_kind,
+    uintptr_t * out_count
+);
+uintptr_t lr_bgp_as_path_segment_ases(
+    lr_bgp_as_path_t p,
+    uintptr_t index,
+    uint32_t * out,
+    uintptr_t cap
+);
+int32_t lr_bgp_as_path_prepend(lr_bgp_as_path_t p, uint32_t as_);
+int32_t lr_bgp_as_path_prepend_confed(lr_bgp_as_path_t p, uint32_t as_);
+int32_t lr_bgp_as_path_strip_confed(lr_bgp_as_path_t p);
+uint8_t lr_bgp_as_path_has_confed(lr_bgp_as_path_t p);
+uint8_t lr_bgp_as_path_loop_check(lr_bgp_as_path_t p, uint32_t my_as);
+lr_bgp_as_path_t lr_bgp_as_path_decode_2(const uint8_t * data, uintptr_t len);
+lr_bgp_as_path_t lr_bgp_as_path_decode_4(const uint8_t * data, uintptr_t len);
+int32_t lr_bgp_as_path_encode_2(lr_bgp_as_path_t p, struct lr_bytes_t * out);
+int32_t lr_bgp_as_path_encode_4(lr_bgp_as_path_t p, struct lr_bytes_t * out);
+lr_bgp_peer_t lr_bgp_peer_new(
+    uint32_t local_as,
+    uint32_t peer_as,
+    uint32_t local_bgp_id,
+    uint16_t hold_time,
+    uint16_t keepalive,
+    uint8_t asn4
+);
+void lr_bgp_peer_free(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_state(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_is_established(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_peer_bgp_id(lr_bgp_peer_t r, uint32_t * out);
+int32_t lr_bgp_peer_peer_as(lr_bgp_peer_t r, uint32_t * out);
+uint16_t lr_bgp_peer_negotiated_hold_time(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_feed_bytes(
+    lr_bgp_peer_t r,
+    const uint8_t * data,
+    uintptr_t len
+);
+int32_t lr_bgp_peer_drain_outgoing(lr_bgp_peer_t r, struct lr_bytes_t * out);
+int32_t lr_bgp_peer_step_manual_start(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_manual_stop(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_transport_open(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_transport_fatal(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_transport_close(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_timer_connect_retry(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_timer_hold_expired(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_timer_keepalive(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_step_timer_idle_hold(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_advertise(lr_bgp_peer_t r, lr_route_t route);
+int32_t lr_bgp_peer_withdraw(
+    lr_bgp_peer_t r,
+    const struct lr_prefix_t * prefixes,
+    uintptr_t count,
+    uint16_t family_afi,
+    uint8_t family_safi
+);
+int32_t lr_bgp_peer_send_end_of_rib(
+    lr_bgp_peer_t r,
+    uint16_t family_afi,
+    uint8_t family_safi
+);
+int32_t lr_bgp_peer_message_stats(lr_bgp_peer_t r, struct lr_bgp_peer_message_stats_t * out);
+uint16_t lr_bgp_peer_hold_time(lr_bgp_peer_t r);
+uint16_t lr_bgp_peer_keepalive(lr_bgp_peer_t r);
+uint32_t lr_bgp_peer_local_as(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_asn4(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_ipv4_unicast_active(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_is_rr_client(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_is_rs_client(lr_bgp_peer_t r);
+int32_t lr_bgp_peer_role(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_route_refresh_negotiated(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_enhanced_route_refresh_negotiated(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_add_path_negotiated(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_add_path_tx_for(lr_bgp_peer_t r, lr_nlri_family_t family);
+uint8_t lr_bgp_peer_add_path_rx_for(lr_bgp_peer_t r, lr_nlri_family_t family);
+uint8_t lr_bgp_peer_extended_next_hop_for(
+    lr_bgp_peer_t r,
+    uint16_t nlri_afi,
+    uint8_t nlri_safi,
+    uint16_t nexthop_afi
+);
+int32_t lr_bgp_peer_negotiated_graceful_restart_time(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_llgr_negotiated(lr_bgp_peer_t r);
+uint32_t lr_bgp_peer_negotiated_llgr_stale_time(lr_bgp_peer_t r, lr_nlri_family_t family);
+uint8_t lr_bgp_peer_received_cease_collision(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_notification_received(lr_bgp_peer_t r);
+uint8_t lr_bgp_peer_request_route_refresh(lr_bgp_peer_t r, lr_nlri_family_t family);
+uint8_t lr_bgp_peer_begin_enhanced_route_refresh(lr_bgp_peer_t r, lr_nlri_family_t family);
+uint8_t lr_bgp_peer_end_enhanced_route_refresh(lr_bgp_peer_t r, lr_nlri_family_t family);
+int32_t lr_bgp_peer_enqueue_notification(
+    lr_bgp_peer_t r,
+    uint8_t code,
+    uint8_t subcode
+);
+int32_t lr_bgp_peer_reset(lr_bgp_peer_t r);
+int32_t lr_bgp_compute_originator_id(
+    uint8_t existing_present,
+    const uint8_t * existing_addr,
+    uint32_t local_bgp_id,
+    uint8_t * out_addr,
+    uint8_t * out_present
+);
+uint8_t lr_bgp_cluster_list_has_loop(
+    const uint8_t * cluster_list,
+    uintptr_t count,
+    uint32_t local_cluster
+);
+int32_t lr_bgp_prepend_cluster_id(
+    const uint8_t * cluster_list,
+    uintptr_t count,
+    uint32_t local_cluster,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_otc_on_receive(
+    uint8_t existing_present,
+    uint32_t existing_value,
+    uint8_t local_role,
+    uint32_t peer_as,
+    uint32_t * out_value,
+    uint8_t * out_present
+);
+uint8_t lr_bgp_otc_can_advertise(uint32_t route_otc, uint8_t local_role);
+int32_t lr_bgp_peer_advertised_tuples(
+    lr_bgp_peer_t peer,
+    uintptr_t * out_count,
+    struct lr_bgp_ext_next_hop_tuple_t ** out_array
+);
+void lr_bgp_ext_next_hop_tuple_array_free(struct lr_bgp_ext_next_hop_tuple_t * arr, uintptr_t count);
+uint8_t lr_bgp_ext_next_hop_supports(
+    const struct lr_bgp_ext_next_hop_tuple_t * tuples,
+    uintptr_t count,
+    uint16_t nlri_afi,
+    uint8_t nlri_safi,
+    uint16_t nh_afi
+);
+int32_t lr_bgp_labeled_nlri_ipv4_implicit_null(
+    const uint8_t * prefix_addr,
+    uint8_t prefix_len,
+    struct lr_bytes_t * out
+);
+int32_t lr_bmp_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_bmp_message_t * out
+);
+int32_t lr_bmp_encode(lr_bmp_message_t message, struct lr_bytes_t * out);
+lr_bmp_message_t lr_bmp_message_route_monitoring(
+    const struct lr_bmp_peer_header_t * peer,
+    const uint8_t * bgp_update,
+    uintptr_t bgp_len
+);
+lr_bmp_message_t lr_bmp_message_termination(const struct lr_bmp_tlv_t * info, uintptr_t count);
+lr_bmp_message_t lr_bmp_message_initiation(const struct lr_bmp_tlv_t * info, uintptr_t count);
+lr_bmp_message_t lr_bmp_message_peer_down(
+    const struct lr_bmp_peer_header_t * peer,
+    uint8_t reason,
+    const uint8_t * data,
+    uintptr_t data_len
+);
+lr_bmp_message_t lr_bmp_message_peer_up(
+    const struct lr_bmp_peer_header_t * peer,
+    const uint8_t * local_addr,
+    uintptr_t local_addr_len,
+    uint16_t local_port,
+    uint16_t remote_port,
+    const uint8_t * sent_open,
+    uintptr_t sent_open_len,
+    const uint8_t * received_open,
+    uintptr_t received_open_len
+);
+uint8_t lr_bmp_message_type(lr_bmp_message_t message);
+uint8_t lr_bmp_message_peer_present(lr_bmp_message_t message);
+int32_t lr_bmp_message_peer_header(lr_bmp_message_t message, struct lr_bmp_peer_header_t * out);
+uint8_t lr_bmp_peer_flags_is_ipv6(uint8_t peer_flags);
+uint8_t lr_bmp_peer_flags_is_post_policy(uint8_t peer_flags);
+uint8_t lr_bmp_peer_flags_is_legacy_as_path(uint8_t peer_flags);
+uintptr_t lr_bmp_message_payload_len(lr_bmp_message_t message);
+int32_t lr_bmp_message_payload(lr_bmp_message_t message, struct lr_bytes_t * out);
+void lr_bmp_message_free(lr_bmp_message_t message);
+lr_bmp_codec_t lr_bmp_codec_new(void);
+int32_t lr_bmp_codec_decode_slice(
+    lr_bmp_codec_t c,
+    const uint8_t * data,
+    uintptr_t len,
+    lr_bmp_message_t * out
+);
+int32_t lr_bmp_codec_feed(
+    lr_bmp_codec_t c,
+    const uint8_t * data,
+    uintptr_t len
+);
+int32_t lr_bmp_codec_next_message(lr_bmp_codec_t c, lr_bmp_message_t * out);
+int32_t lr_bmp_codec_encode_vec(
+    lr_bmp_codec_t c,
+    lr_bmp_message_t m,
+    struct lr_bytes_t * out
+);
+void lr_bmp_codec_free(lr_bmp_codec_t c);
+uint8_t lr_bgp_cap_code_from_wire(uint8_t wire);
+lr_bgp_capability_t lr_bgp_cap_four_octet_as(uint32_t asn);
+uint8_t lr_bgp_cap_code(lr_bgp_capability_t cap);
+uintptr_t lr_bgp_cap_value_len(lr_bgp_capability_t cap);
+uintptr_t lr_bgp_cap_value(
+    lr_bgp_capability_t cap,
+    uint8_t * out,
+    uintptr_t cap_size
+);
+uint32_t lr_bgp_cap_as_four_octet(lr_bgp_capability_t cap);
+lr_bgp_capability_t lr_bgp_cap_multiprotocol(uint16_t afi, uint8_t safi);
+uint8_t lr_bgp_cap_as_multiprotocol(
+    lr_bgp_capability_t cap,
+    uint16_t * out_afi,
+    uint8_t * out_safi
+);
+lr_bgp_capability_t lr_bgp_cap_extended_next_hop(const struct lr_bgp_ext_next_hop_tuple_t * tuples, uintptr_t count);
+uintptr_t lr_bgp_cap_extended_next_hop_len(lr_bgp_capability_t cap);
+uintptr_t lr_bgp_cap_extended_next_hop_tuples(
+    lr_bgp_capability_t cap,
+    struct lr_bgp_ext_next_hop_tuple_t * out,
+    uintptr_t cap_size
+);
+lr_bgp_capability_t lr_bgp_cap_new(
+    uint8_t code,
+    const uint8_t * value,
+    uintptr_t value_len
+);
+void lr_bgp_cap_free(lr_bgp_capability_t cap);
+lr_bgp_capability_t lr_bgp_cap_route_refresh(void);
+lr_bgp_capability_t lr_bgp_cap_add_path(const struct lr_bgp_cap_add_path_family_t * families, uintptr_t count);
+uintptr_t lr_bgp_cap_as_add_path_len(lr_bgp_capability_t cap);
+uintptr_t lr_bgp_cap_as_add_path(
+    lr_bgp_capability_t cap,
+    struct lr_bgp_cap_add_path_family_t * out,
+    uintptr_t cap_size
+);
+lr_bgp_capability_t lr_bgp_cap_enhanced_rr(void);
+lr_bgp_capability_t lr_bgp_cap_graceful_restart(
+    uint8_t restart_flags,
+    uint16_t restart_time_secs,
+    const struct lr_bgp_cap_gr_family_t * families,
+    uintptr_t count
+);
+uint8_t lr_bgp_cap_as_graceful_restart(
+    lr_bgp_capability_t cap,
+    uint8_t * out_flags,
+    uint16_t * out_time
+);
+uintptr_t lr_bgp_cap_as_graceful_restart_families_len(lr_bgp_capability_t cap);
+uintptr_t lr_bgp_cap_as_graceful_restart_families(
+    lr_bgp_capability_t cap,
+    struct lr_bgp_cap_gr_family_t * out,
+    uintptr_t cap_size
+);
+lr_bgp_capability_t lr_bgp_cap_long_lived_gr(const struct lr_bgp_cap_llgr_family_t * families, uintptr_t count);
+uintptr_t lr_bgp_cap_as_long_lived_gr_len(lr_bgp_capability_t cap);
+uintptr_t lr_bgp_cap_as_long_lived_gr(
+    lr_bgp_capability_t cap,
+    struct lr_bgp_cap_llgr_family_t * out,
+    uintptr_t cap_size
+);
+int32_t lr_bgp_cap_encode_set(
+    const lr_bgp_capability_t * caps,
+    uintptr_t count,
+    lr_bytes_t_handle * out
+);
+int32_t lr_bgp_cap_decode_set(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_bgp_capability_array_t * out_caps,
+    uintptr_t * out_count
+);
+void lr_bgp_cap_bytes_free(lr_bytes_t_handle b);
+uintptr_t lr_bgp_cap_bytes_len(lr_bytes_t_handle b);
+const uint8_t * lr_bgp_cap_bytes_ptr(lr_bytes_t_handle b);
+void lr_bgp_cap_array_free(lr_bgp_capability_array_t arr, uintptr_t count);
+int32_t lr_bgp_encode_ipv4_nlri(
+    const struct lr_prefix_t * prefixes,
+    uintptr_t count,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_decode_ipv4_nlri(
+    const uint8_t * data,
+    uintptr_t len,
+    struct lr_bytes_t * out
+);
+lr_damping_table_t lr_damping_table_new(const struct lr_damping_config_t * cfg);
+int32_t lr_damping_table_config(lr_damping_table_t t, struct lr_damping_config_t * out);
+int32_t lr_damping_default_config(struct lr_damping_config_t * out);
+int32_t lr_damping_config_new(
+    uint32_t additive_incr,
+    uint32_t suppress_threshold,
+    uint32_t reuse_threshold,
+    uint32_t upper_limit,
+    uint64_t decay_interval_s,
+    double decay_factor_active,
+    double decay_factor_withdrawn,
+    struct lr_damping_config_t * out
+);
+int32_t lr_damping_config_validate(const struct lr_damping_config_t * cfg);
+void lr_damping_config_free(struct lr_damping_config_t _cfg);
+int32_t lr_damping_table_on_withdraw(
+    lr_damping_table_t t,
+    const struct lr_prefix_t * prefix,
+    uint64_t now_s
+);
+int32_t lr_damping_table_on_announce(
+    lr_damping_table_t t,
+    const struct lr_prefix_t * prefix,
+    uint64_t now_s
+);
+int32_t lr_damping_table_is_suppressed(lr_damping_table_t t, const struct lr_prefix_t * prefix);
+int64_t lr_damping_table_decay_all(
+    lr_damping_table_t t,
+    uint64_t now_s,
+    struct lr_prefix_t * out_reactivated,
+    uintptr_t cap
+);
+int32_t lr_damping_table_forget(lr_damping_table_t t, const struct lr_prefix_t * prefix);
+uintptr_t lr_damping_table_len(lr_damping_table_t t);
+int32_t lr_damping_table_at(
+    lr_damping_table_t t,
+    uintptr_t index,
+    struct lr_damping_entry_t * out
+);
+void lr_damping_table_free(lr_damping_table_t t);
+uint8_t lr_bfd_auth_type_from_u8(uint8_t v);
+uint8_t lr_bfd_auth_type_to_u8(uint8_t v);
+const char * lr_bfd_auth_type_name(uint8_t v);
+uint8_t lr_bfd_diagnostic_from_u8(uint8_t v);
+uint8_t lr_bfd_diagnostic_to_u8(uint8_t v);
+const char * lr_bfd_diagnostic_name(uint8_t v);
+uint8_t lr_bfd_state_from_u8(uint8_t v);
+uint8_t lr_bfd_state_to_u8(uint8_t v);
+const char * lr_bfd_state_name(uint8_t v);
+uint8_t lr_bfd_keyed_auth_algorithm_from_u8(uint8_t v);
+uint8_t lr_bfd_keyed_auth_algorithm_to_u8(uint8_t v);
+const char * lr_bfd_keyed_auth_algorithm_name(uint8_t v);
+uint8_t lr_bmp_msg_type_from_u8(uint8_t v);
+uint8_t lr_bmp_msg_type_to_u8(uint8_t v);
+const char * lr_bmp_msg_type_name(uint8_t v);
+uint8_t lr_bmp_peer_type_from_u8(uint8_t v);
+uint8_t lr_bmp_peer_type_to_u8(uint8_t v);
+const char * lr_bmp_peer_type_name(uint8_t v);
+uint8_t lr_bmp_peer_down_reason_from_u8(uint8_t v);
+uint8_t lr_bmp_peer_down_reason_to_u8(uint8_t v);
+const char * lr_bmp_peer_down_reason_name(uint8_t v);
+uint8_t lr_ospf_lsa_type_v2_from_u8(uint8_t v);
+uint8_t lr_ospf_lsa_type_v2_to_u8(uint8_t v);
+const char * lr_ospf_lsa_type_v2_name(uint8_t v);
+uint16_t lr_ospf_lsa_type_v3_from_u16(uint16_t v);
+uint16_t lr_ospf_lsa_type_v3_to_u16(uint16_t v);
+const char * lr_ospf_lsa_type_v3_name(uint16_t v);
+uint8_t lr_ospf_router_link_type_from_u8(uint8_t v);
+uint8_t lr_ospf_router_link_type_to_u8(uint8_t v);
+const char * lr_ospf_router_link_type_name(uint8_t v);
+uint16_t lr_ldp_message_type_from_u16(uint16_t v);
+uint16_t lr_ldp_message_type_to_u16(uint16_t v);
+const char * lr_ldp_message_type_name(uint16_t v);
+uint16_t lr_ldp_tlv_type_from_u16(uint16_t v);
+uint16_t lr_ldp_tlv_type_to_u16(uint16_t v);
+const char * lr_ldp_tlv_type_name(uint16_t v);
+uint8_t lr_ldp_advertisement_mode_from_u8(uint8_t v);
+uint8_t lr_ldp_advertisement_mode_to_u8(uint8_t v);
+const char * lr_ldp_advertisement_mode_name(uint8_t v);
+const char * lr_router_ospf_network_type_name(int32_t v);
+const char * lr_router_session_error_kind_name(int32_t v);
+const char * lr_mpls_label_stack_error_name(int32_t v);
+lr_bgp_peer_config_t lr_bgp_peer_config_new(
+    uint32_t local_as,
+    uint32_t peer_as,
+    const uint8_t * local_bgp_id
+);
+void lr_bgp_peer_config_free(lr_bgp_peer_config_t c);
+uint32_t lr_bgp_peer_config_local_as(lr_bgp_peer_config_t c);
+uint32_t lr_bgp_peer_config_peer_as(lr_bgp_peer_config_t c);
+int32_t lr_bgp_peer_config_local_bgp_id(lr_bgp_peer_config_t c, uint32_t * out);
+uint16_t lr_bgp_peer_config_hold_time(lr_bgp_peer_config_t c);
+uint16_t lr_bgp_peer_config_keepalive(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_asn4(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_route_refresh(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_enhanced_rr(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_graceful_restart(lr_bgp_peer_config_t c);
+uint16_t lr_bgp_peer_config_graceful_restart_time(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_long_lived(lr_bgp_peer_config_t c);
+uint32_t lr_bgp_peer_config_long_lived_stale_time(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_is_rr_client(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_is_rs_client(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_default_ipv4_unicast(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_add_path(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_is_ebgp(lr_bgp_peer_config_t c);
+uint16_t lr_bgp_peer_config_keepalive_interval(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_ipv4_unicast_active(lr_bgp_peer_config_t c);
+uint8_t lr_bgp_peer_config_peer_role(lr_bgp_peer_config_t c);
+int32_t lr_bgp_peer_config_set_hold_time(lr_bgp_peer_config_t c, uint16_t hold_time);
+int32_t lr_bgp_peer_config_set_keepalive(lr_bgp_peer_config_t c, uint16_t keepalive);
+int32_t lr_bgp_peer_config_set_asn4(lr_bgp_peer_config_t c, uint8_t asn4);
+int32_t lr_bgp_peer_config_set_rr_client(lr_bgp_peer_config_t c, uint8_t enabled);
+int32_t lr_bgp_peer_config_set_graceful_restart(lr_bgp_peer_config_t c, uint8_t enabled);
+lr_mpls_label_t lr_mpls_label_new_value(uint32_t value);
+uint8_t lr_mpls_label_is_valid_value(uint32_t value);
+lr_mpls_label_t lr_mpls_label_try_new(uint32_t value);
+lr_mpls_label_stack_t lr_mpls_label_stack_from_vec(const lr_mpls_label_t * labels, uintptr_t count);
+int32_t lr_mpls_label_stack_into_vec(lr_mpls_label_stack_t stack, struct lr_bytes_t * out);
+int32_t lr_bfd_auth_type_from_algorithm(int32_t algorithm);
+lr_ospf_helper_entry_t lr_ospf_helper_entry_new(void);
+void lr_ospf_helper_entry_free(lr_ospf_helper_entry_t h);
+uint8_t lr_ospf_helper_entry_is_active(lr_ospf_helper_entry_t h);
+uint64_t lr_ospf_helper_entry_grace_deadline_ms(lr_ospf_helper_entry_t h);
+uint32_t lr_ospf_helper_entry_last_period_secs(lr_ospf_helper_entry_t h);
+uint8_t lr_ospf_restart_tracker_recovering(lr_ospf_restart_tracker_t t);
+uint64_t lr_ospf_restart_tracker_grace_deadline_ms(lr_ospf_restart_tracker_t t);
+lr_session_config_t lr_session_config_bgp(
+    uint32_t local_as,
+    uint32_t peer_as,
+    uint32_t local_bgp_id
+);
+lr_session_config_t lr_session_config_ospfv2(uint32_t router_id, uint32_t area_id);
+lr_session_config_t lr_session_config_ospfv3(uint32_t router_id, uint32_t area_id);
+lr_session_config_t lr_session_config_babel(const uint8_t * addr, uintptr_t addr_len);
+void lr_session_config_free(lr_session_config_t c);
+lr_session_config_t lr_session_config_with_mp_families(
+    lr_session_config_t c,
+    const struct lr_afi_safi_t * families,
+    uintptr_t count
+);
+lr_session_config_t lr_session_config_with_add_path(lr_session_config_t c);
+lr_session_config_t lr_session_config_with_extended_next_hop(lr_session_config_t c);
+lr_session_config_t lr_session_config_with_extended_next_hop_tuple(
+    lr_session_config_t c,
+    uint16_t nlri_afi,
+    uint8_t nlri_safi,
+    uint16_t nexthop_afi
+);
+lr_session_config_t lr_session_config_with_graceful_restart(lr_session_config_t c, uint16_t restart_time_secs);
+lr_session_config_t lr_session_config_with_long_lived_gr(lr_session_config_t c, uint32_t stale_time_secs);
+lr_session_config_t lr_session_config_with_llgr_max_stale_time(lr_session_config_t c, uint32_t cap_secs);
+lr_session_config_t lr_session_config_with_mrai_ms(lr_session_config_t c, uint64_t mrai_ms);
+lr_session_config_t lr_session_config_with_route_reflector_client(lr_session_config_t c);
+lr_session_config_t lr_session_config_with_maximum_prefix(
+    lr_session_config_t c,
+    uint32_t limit,
+    int32_t action
+);
+lr_session_config_t lr_session_config_with_maximum_prefix_threshold(lr_session_config_t c, uint8_t pct);
+lr_session_config_t lr_session_config_with_maximum_prefix_restart_time(lr_session_config_t c, uint32_t secs);
+uint8_t lr_gtsm_error_is_kernel_unsupported(int32_t err_code);
+uint8_t lr_tcp_auth_error_is_kernel_unsupported(int32_t err_code);
+int32_t lr_policy_peephole_optimize(
+    const uint8_t * data,
+    uintptr_t len,
+    struct lr_bytes_t * out
+);
+int32_t lr_policy_lexer_tokenize(const char * src, struct lr_bytes_t * out);
+lr_filter_t lr_policy_parse_filter(const char * name, const char * src);
+uint8_t lr_policy_value_truthy(int32_t value_kind);
+uint8_t lr_policy_binary_op_precedence(int32_t op);
+uint8_t lr_policy_route_field_is_settable(int32_t kind);
+int32_t lr_ip_net_into_inner(const struct lr_prefix_t * net, struct lr_prefix_t * out);
+struct lr_ldp_id_t lr_ldp_id_new(const uint8_t * lsr_id, uint16_t label_space);
+int32_t lr_ldp_id_to_bytes(struct lr_ldp_id_t id, uint8_t * out);
+struct lr_ldp_id_t lr_ldp_id_from_bytes(const uint8_t * bytes);
+int32_t lr_ldp_encode_hello_pdu(
+    struct lr_ldp_id_t sender,
+    uint32_t message_id,
+    uint16_t hold_time,
+    uint8_t target,
+    struct lr_bytes_t * out
+);
+int32_t lr_ldp_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_ldp_pdu_t * out
+);
+struct lr_ldp_id_t lr_ldp_pdu_sender(lr_ldp_pdu_t pdu);
+uint16_t lr_ldp_pdu_version(lr_ldp_pdu_t pdu);
+uintptr_t lr_ldp_pdu_message_count(lr_ldp_pdu_t pdu);
+uint16_t lr_ldp_pdu_message_type_at(lr_ldp_pdu_t pdu, uintptr_t index);
+uint32_t lr_ldp_pdu_message_id_at(lr_ldp_pdu_t pdu, uintptr_t index);
+uint8_t lr_ldp_pdu_message_u_bit_at(lr_ldp_pdu_t pdu, uintptr_t index);
+void lr_ldp_pdu_free(lr_ldp_pdu_t pdu);
+lr_ldp_discovery_config_t lr_ldp_discovery_config_new(uint32_t local_lsr_id, uint16_t local_label_space);
+int32_t lr_ldp_discovery_config_set_transport_v4(lr_ldp_discovery_config_t cfg, const uint8_t * addr);
+int32_t lr_ldp_discovery_config_set_transport_v6(lr_ldp_discovery_config_t cfg, const uint8_t * addr);
+int32_t lr_ldp_discovery_config_set_link_hello_hold(lr_ldp_discovery_config_t cfg, uint16_t hold);
+int32_t lr_ldp_discovery_config_set_targeted_hello_hold(lr_ldp_discovery_config_t cfg, uint16_t hold);
+int32_t lr_ldp_discovery_config_set_prefer_ipv6(lr_ldp_discovery_config_t cfg, uint8_t prefer_ipv6);
+int32_t lr_ldp_discovery_config_set_accept_targeted(lr_ldp_discovery_config_t cfg, uint8_t accept);
+void lr_ldp_discovery_config_free(lr_ldp_discovery_config_t cfg);
+lr_ldp_discovery_t lr_ldp_discovery_new(lr_ldp_discovery_config_t cfg);
+uintptr_t lr_ldp_discovery_adjacency_count(lr_ldp_discovery_t d);
+int32_t lr_ldp_discovery_adjacency_at(
+    lr_ldp_discovery_t d,
+    uintptr_t index,
+    struct lr_ldp_hello_adjacency_t * out
+);
+int32_t lr_ldp_discovery_adjacency_for_peer(
+    lr_ldp_discovery_t d,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space,
+    struct lr_ldp_hello_adjacency_t * out
+);
+int32_t lr_ldp_discovery_remove_adjacencies_for_peer(
+    lr_ldp_discovery_t d,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space
+);
+uintptr_t lr_ldp_discovery_tick(lr_ldp_discovery_t d, uint64_t now_ms);
+uintptr_t lr_ldp_discovery_outgoing_count(lr_ldp_discovery_t d);
+void lr_ldp_discovery_free(lr_ldp_discovery_t d);
+void lr_ldp_engine_config_free(lr_ldp_engine_config_t c);
+int32_t lr_ldp_engine_config_set_transport_addr_v6(lr_ldp_engine_config_t c, const uint8_t * transport_addr_v6);
+int32_t lr_ldp_engine_config_set_prefer_ipv6(lr_ldp_engine_config_t c, uint8_t prefer_ipv6);
+int32_t lr_ldp_engine_config_set_keepalive_time(lr_ldp_engine_config_t c, uint16_t keepalive_time);
+int32_t lr_ldp_engine_config_set_max_pdu_len(lr_ldp_engine_config_t c, uint16_t max_pdu_len);
+int32_t lr_ldp_engine_config_set_advertisement(lr_ldp_engine_config_t c, int32_t advertisement);
+int32_t lr_ldp_engine_config_set_link_hello_hold(lr_ldp_engine_config_t c, uint16_t hold);
+int32_t lr_ldp_engine_config_set_targeted_hello_hold(lr_ldp_engine_config_t c, uint16_t hold);
+int32_t lr_ldp_engine_config_set_accept_targeted(lr_ldp_engine_config_t c, uint8_t accept);
+int32_t lr_ldp_engine_config_set_loop_detection(
+    lr_ldp_engine_config_t c,
+    uint8_t enabled,
+    uint8_t path_vector_limit
+);
+int32_t lr_ldp_engine_config_set_label_range(
+    lr_ldp_engine_config_t c,
+    uint32_t label_min,
+    uint32_t label_max
+);
+int32_t lr_ldp_engine_config_add_reserved_label(lr_ldp_engine_config_t c, uint32_t label);
+lr_ldp_engine_t lr_ldp_engine_new(lr_ldp_engine_config_t c);
+void lr_ldp_engine_free(lr_ldp_engine_t e);
+int32_t lr_ldp_engine_on_connected(
+    lr_ldp_engine_t e,
+    uint64_t now_ms,
+    uint64_t conn,
+    uint32_t peer_lsr,
+    uint16_t peer_label_space
+);
+int32_t lr_ldp_engine_on_connect_failed(
+    lr_ldp_engine_t e,
+    uint32_t peer_lsr,
+    uint16_t peer_label_space
+);
+int32_t lr_ldp_engine_feed_tcp(
+    lr_ldp_engine_t e,
+    uint64_t now_ms,
+    uint64_t conn,
+    const uint8_t * data,
+    uintptr_t len
+);
+int32_t lr_ldp_engine_on_closed(
+    lr_ldp_engine_t e,
+    uint64_t now_ms,
+    uint64_t conn
+);
+int32_t lr_ldp_engine_tick(lr_ldp_engine_t e, uint64_t now_ms);
+int32_t lr_ldp_engine_shutdown_peer(
+    lr_ldp_engine_t e,
+    uint64_t now_ms,
+    uint32_t peer_lsr,
+    uint16_t peer_label_space
+);
+int32_t lr_ldp_engine_drain_udp(lr_ldp_engine_t e, struct lr_bytes_t * out);
+int32_t lr_ldp_engine_drain_tcp(
+    lr_ldp_engine_t e,
+    uint64_t conn,
+    struct lr_bytes_t * out
+);
+int32_t lr_ldp_engine_drain_tcp_all(lr_ldp_engine_t e, struct lr_bytes_t * out);
+uintptr_t lr_ldp_engine_transit_label_count(lr_ldp_engine_t e);
+uintptr_t lr_ldp_engine_adjacency_count(lr_ldp_engine_t e);
+int32_t lr_ldp_engine_adjacency_at(
+    lr_ldp_engine_t e,
+    uintptr_t index,
+    uint32_t * out_peer_lsr,
+    uint16_t * out_peer_label_space,
+    int32_t * out_kind,
+    uint8_t * out_source_is_ipv6,
+    uint8_t * source_addr,
+    uint8_t * out_transport_is_ipv6,
+    uint8_t * transport_addr,
+    uint32_t * out_hold_time_secs,
+    uint64_t * out_last_seen_ms,
+    uint8_t * out_config_seq_present,
+    uint32_t * out_config_seq,
+    uint8_t * out_dual_stack_present,
+    uint8_t * out_dual_stack_prefer_ipv6
+);
+int32_t lr_ldp_engine_session_state(
+    lr_ldp_engine_t e,
+    uint32_t peer_lsr,
+    uint16_t peer_label_space
+);
+uintptr_t lr_ldp_engine_take_events(
+    lr_ldp_engine_t e,
+    struct lr_ldp_engine_event_t * out,
+    uintptr_t cap
+);
+lr_ldp_label_store_t lr_ldp_label_store_new(void);
+void lr_ldp_label_store_free(lr_ldp_label_store_t s);
+uint8_t lr_ldp_label_store_learn(
+    lr_ldp_label_store_t s,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t label
+);
+uint8_t lr_ldp_label_store_unlearn(
+    lr_ldp_label_store_t s,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+uint8_t lr_ldp_label_store_label_from(
+    lr_ldp_label_store_t s,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+uintptr_t lr_ldp_label_store_unlearn_peer(
+    lr_ldp_label_store_t s,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space
+);
+uintptr_t lr_ldp_label_store_unlearn_by_label(
+    lr_ldp_label_store_t s,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space,
+    uint32_t label,
+    struct lr_ldp_prefix_t * out_prefixes,
+    uintptr_t cap
+);
+uintptr_t lr_ldp_label_store_unlearn_all_from(
+    lr_ldp_label_store_t s,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space,
+    struct lr_ldp_prefix_t * out_prefixes,
+    uintptr_t cap
+);
+uint8_t lr_ldp_label_store_advertise(
+    lr_ldp_label_store_t s,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t label,
+    uint32_t * out_previous
+);
+uint8_t lr_ldp_label_store_withdraw_advertised(
+    lr_ldp_label_store_t s,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+uint8_t lr_ldp_label_store_advertised_label(
+    lr_ldp_label_store_t s,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+lr_ldp_session_t lr_ldp_session_new(
+    uint32_t local_lsr_id,
+    uint16_t local_label_space,
+    uint32_t peer_lsr_id,
+    uint16_t peer_label_space,
+    uint16_t keepalive_time,
+    uint16_t max_pdu_len
+);
+void lr_ldp_session_free(lr_ldp_session_t r);
+int32_t lr_ldp_session_state(lr_ldp_session_t r);
+uint8_t lr_ldp_session_is_operational(lr_ldp_session_t r);
+int32_t lr_ldp_session_start(lr_ldp_session_t r, uint64_t now_ms);
+int32_t lr_ldp_session_drain_outgoing(lr_ldp_session_t r, struct lr_bytes_t * out);
+int32_t lr_ldp_session_peer(lr_ldp_session_t r, struct lr_ldp_id_t * out);
+int32_t lr_ldp_session_negotiated(
+    lr_ldp_session_t r,
+    uint16_t * out_keepalive,
+    uint16_t * out_max_pdu_len
+);
+int32_t lr_ldp_session_tick(lr_ldp_session_t r, uint64_t now_ms);
+int32_t lr_ldp_session_transport_closed(lr_ldp_session_t r);
+int32_t lr_ldp_session_shutdown(lr_ldp_session_t r, uint64_t now_ms);
+int32_t lr_ldp_session_feed_pdu(
+    lr_ldp_session_t r,
+    lr_ldp_pdu_t pdu,
+    uint64_t now_ms
+);
+int32_t lr_ldp_session_send_label_mapping(
+    lr_ldp_session_t r,
+    uint32_t message_id,
+    lr_ldp_fec_t fec,
+    lr_ldp_label_t label
+);
+int32_t lr_ldp_session_send_label_withdraw(
+    lr_ldp_session_t r,
+    uint32_t message_id,
+    lr_ldp_fec_t fec,
+    lr_ldp_label_t label
+);
+int32_t lr_ldp_session_send_label_request(
+    lr_ldp_session_t r,
+    uint32_t message_id,
+    lr_ldp_fec_t fec
+);
+int32_t lr_ldp_session_send_label_release(
+    lr_ldp_session_t r,
+    uint32_t message_id,
+    lr_ldp_fec_t fec,
+    lr_ldp_label_t label,
+    uint32_t status_code
+);
+int32_t lr_ldp_session_send_address_message(
+    lr_ldp_session_t r,
+    const uint8_t * addrs,
+    uintptr_t count,
+    uint8_t is_ipv6
+);
+int32_t lr_ldp_session_enqueue_notification(
+    lr_ldp_session_t r,
+    uint32_t status_code,
+    uint32_t msg_id,
+    uint16_t msg_type
+);
+lr_ldp_label_t lr_ldp_label_new(uint32_t value);
+uint32_t lr_ldp_label_value(lr_ldp_label_t l);
+uint8_t lr_ldp_label_is_valid(lr_ldp_label_t l);
+void lr_ldp_label_free(lr_ldp_label_t l);
+lr_ldp_fec_t lr_ldp_fec_new_wildcard(void);
+lr_ldp_fec_t lr_ldp_fec_new_prefix(
+    const uint8_t * prefix_v4,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len
+);
+uint8_t lr_ldp_fec_is_wildcard(lr_ldp_fec_t f);
+int32_t lr_ldp_fec_single_prefix(
+    lr_ldp_fec_t f,
+    uint8_t * octets_out,
+    uint8_t * prefix_len_out,
+    uint8_t * present_out
+);
+void lr_ldp_fec_free(lr_ldp_fec_t f);
+uint32_t lr_ldp_status_code_new(uint32_t code);
+uint8_t lr_ldp_status_code_is_fatal(uint32_t code);
+uint8_t lr_ldp_status_code_is_forward(uint32_t code);
+lr_ldp_transit_t lr_ldp_transit_new(
+    uint32_t label_min,
+    uint32_t label_max,
+    const uint32_t * reserved,
+    uintptr_t reserved_count
+);
+void lr_ldp_transit_free(lr_ldp_transit_t a);
+uint8_t lr_ldp_transit_label_of(
+    lr_ldp_transit_t a,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+uint8_t lr_ldp_transit_is_allocated(
+    lr_ldp_transit_t a,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len
+);
+uintptr_t lr_ldp_transit_allocated_count(lr_ldp_transit_t a);
+uint8_t lr_ldp_transit_allocate(
+    lr_ldp_transit_t a,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+uint8_t lr_ldp_transit_release(
+    lr_ldp_transit_t a,
+    const uint8_t * prefix_addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+uint32_t lr_babel_link_cost(uint16_t rxcost);
+int32_t lr_ldp_compare_transport_addrs(
+    uint8_t a_is_v6,
+    const uint8_t * a,
+    uint8_t b_is_v6,
+    const uint8_t * b
+);
+int32_t lr_ldp_role_for(
+    uint8_t local_is_v6,
+    const uint8_t * local,
+    uint8_t remote_is_v6,
+    const uint8_t * remote
+);
+int32_t lr_ospf_sr_remote_label(
+    uint32_t srgb_base,
+    uint32_t srgb_range,
+    uint32_t sid,
+    uint8_t flags,
+    uint32_t * out,
+    uint8_t * out_present
+);
+int32_t lr_ospf_sr_encode_ri_lsa_body(
+    uint32_t srgb_base,
+    uint32_t srgb_range,
+    struct lr_bytes_t * out
+);
+int32_t lr_ospf_sr_decode_ri_lsa_body(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out_srgb_base,
+    uint32_t * out_srgb_range,
+    uint8_t * out_present
+);
+uint8_t lr_ospf_sr_opaque_type_from_lsid(uint32_t link_state_id);
+int32_t lr_mpls_label_stack_decode_3octet_count(
+    const uint8_t * data,
+    uintptr_t len,
+    uintptr_t count,
+    lr_mpls_label_stack_t * out
+);
+uint8_t lr_mpls_label_stack_all_reserved(lr_mpls_label_stack_t stack);
+uint8_t lr_mpls_label_stack_contains(lr_mpls_label_stack_t stack, lr_mpls_label_t label);
+int32_t lr_mpls_stack_last_err_code(void);
+int32_t lr_mrt_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_mrt_record_t * out
+);
+int32_t lr_mrt_encode_peer_index_table(
+    uint32_t timestamp,
+    uint32_t collector_bgp_id,
+    const char * view_name,
+    const struct lr_mrt_peer_entry_t * peers,
+    uintptr_t peer_count,
+    struct lr_bytes_t * out
+);
+int32_t lr_mrt_encode_rib_table(
+    uint32_t timestamp,
+    uint32_t sequence,
+    const uint8_t * prefix_addr,
+    uint8_t prefix_len,
+    uint8_t is_ipv6,
+    uint8_t add_path,
+    const struct lr_mrt_rib_entry_t * entries,
+    uintptr_t entry_count,
+    struct lr_bytes_t * out
+);
+uint8_t lr_mrt_record_type(lr_mrt_record_t record);
+uint8_t lr_mrt_record_is_rib(lr_mrt_record_t record);
+int32_t lr_mrt_record_unknown_subtype(
+    lr_mrt_record_t record,
+    uint16_t * out_msg_type,
+    uint16_t * out_subtype
+);
+void lr_mrt_record_free(lr_mrt_record_t record);
+int32_t lr_mrt_walk_attributes(
+    const struct lr_mrt_rib_entry_t * entry,
+    struct lr_mrt_attr_summary_t * out_summary,
+    uint8_t * as_path_buf,
+    uintptr_t as_path_cap,
+    uint8_t * communities_buf,
+    uintptr_t communities_cap
+);
+lr_mrt_rib_dump_t lr_mrt_rib_dump_new(uint32_t collector_bgp_id, const char * view_name);
+uint16_t lr_mrt_rib_dump_add_peer(lr_mrt_rib_dump_t dump, struct lr_mrt_peer_entry_t peer);
+int32_t lr_mrt_rib_dump_add_table(
+    lr_mrt_rib_dump_t dump,
+    uint32_t sequence,
+    const uint8_t * prefix_addr,
+    uint8_t prefix_len,
+    uint8_t is_ipv6,
+    uint8_t add_path,
+    const struct lr_mrt_rib_entry_t * entries,
+    uintptr_t entry_count
+);
+int32_t lr_mrt_rib_dump_encode(
+    lr_mrt_rib_dump_t dump,
+    uint32_t timestamp,
+    struct lr_bytes_t * out
+);
+void lr_mrt_rib_dump_free(lr_mrt_rib_dump_t dump);
+lr_mrt_record_t lr_mrt_record_bgp4mp_message(
+    uint32_t peer_as,
+    uint32_t local_as,
+    uint16_t ifindex,
+    uint16_t af,
+    const uint8_t * peer_addr,
+    uintptr_t peer_addr_len,
+    const uint8_t * local_addr,
+    uintptr_t local_addr_len,
+    const uint8_t * message,
+    uintptr_t message_len
+);
+lr_mrt_record_t lr_mrt_record_bgp4mp_state_change(
+    uint32_t peer_as,
+    uint32_t local_as,
+    uint16_t ifindex,
+    uint16_t af,
+    const uint8_t * peer_addr,
+    uintptr_t peer_addr_len,
+    const uint8_t * local_addr,
+    uintptr_t local_addr_len,
+    uint16_t old_state,
+    uint16_t new_state
+);
+uint8_t lr_mrt_record_peer_index_table_summary(
+    lr_mrt_record_t record,
+    uint32_t * out_collector_bgp_id,
+    uintptr_t * out_view_name_len,
+    uintptr_t * out_peer_count
+);
+uintptr_t lr_mrt_record_peer_index_table_view_name(
+    lr_mrt_record_t record,
+    uint8_t * out,
+    uintptr_t out_len
+);
+uint8_t lr_mrt_record_peer_index_table_peer_at(
+    lr_mrt_record_t record,
+    uintptr_t index,
+    struct lr_mrt_peer_entry_t * out
+);
+uint8_t lr_mrt_record_rib_table_summary(
+    lr_mrt_record_t record,
+    uint32_t * out_sequence,
+    struct lr_prefix_t * out_prefix,
+    uint8_t * out_add_path,
+    uintptr_t * out_entry_count
+);
+uint8_t lr_mrt_record_rib_table_entry_at(
+    lr_mrt_record_t record,
+    uintptr_t index,
+    struct lr_mrt_rib_entry_t * out
+);
+int32_t lr_mrt_encode_attributes(lr_attributes_t attrs, struct lr_bytes_t * out);
+lr_mrt_reader_t lr_mrt_reader_new(void);
+int32_t lr_mrt_reader_decode_slice(
+    lr_mrt_reader_t r,
+    const uint8_t * data,
+    uintptr_t len,
+    lr_mrt_record_t * out
+);
+int32_t lr_mrt_reader_feed(
+    lr_mrt_reader_t r,
+    const uint8_t * data,
+    uintptr_t len
+);
+int32_t lr_mrt_reader_next_record(lr_mrt_reader_t r, lr_mrt_record_t * out);
+void lr_mrt_reader_free(lr_mrt_reader_t r);
+int32_t lr_ospf_decode_v2_packet(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_ospf_packet_t * out
+);
+int32_t lr_ospf_decode_v3_packet(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_ospf_packet_t * out
+);
+int32_t lr_ospf_encode_packet(lr_ospf_packet_t packet, struct lr_bytes_t * out);
+uint8_t lr_ospf_packet_version(lr_ospf_packet_t packet);
+uint8_t lr_ospf_packet_type(lr_ospf_packet_t packet);
+uint32_t lr_ospf_packet_router_id(lr_ospf_packet_t packet);
+uint32_t lr_ospf_packet_area_id(lr_ospf_packet_t packet);
+uint8_t lr_ospf_packet_body_kind(lr_ospf_packet_t packet);
+void lr_ospf_packet_free(lr_ospf_packet_t packet);
+uint8_t lr_ospf_finalize_v2_packet(uint8_t * bytes, uintptr_t len);
+uintptr_t lr_ospf_finalize_v2_stream(uint8_t * bytes, uintptr_t len);
+uint8_t lr_ospf_v2_packet_checksum_ok(const uint8_t * bytes, uintptr_t len);
+uint8_t lr_ospf_finalize_v3_packet(
+    uint8_t * bytes,
+    uintptr_t len,
+    const uint8_t * src,
+    const uint8_t * dst
+);
+uintptr_t lr_ospf_finalize_v3_stream(
+    uint8_t * bytes,
+    uintptr_t len,
+    const uint8_t * src,
+    const uint8_t * dst
+);
+lr_ospf_summary_dest_t lr_ospf_summary_dest_new(
+    const uint8_t * prefix_v4,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len,
+    uint32_t metric
+);
+uint32_t lr_ospf_summary_dest_metric(lr_ospf_summary_dest_t d);
+int32_t lr_ospf_summary_dest_prefix(
+    lr_ospf_summary_dest_t d,
+    uint8_t * octets_out,
+    uint8_t * prefix_len_out
+);
+void lr_ospf_summary_dest_free(lr_ospf_summary_dest_t d);
+int32_t lr_ospf_summary_lsa_id_for(
+    const uint8_t * prefix_v4,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len,
+    const uint32_t * existing,
+    uintptr_t count,
+    uint32_t * out
+);
+int32_t lr_ospf_originate_summary_lsa(
+    uint32_t router_id,
+    lr_ospf_summary_dest_t dest,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+int32_t lr_ospf_flush_summary_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t * out);
+int32_t lr_ospf_originate_v3_inter_area_prefix_lsa(
+    uint32_t router_id,
+    uint32_t ls_id,
+    lr_ospf_summary_dest_t dest,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+lr_ospf_nssa_default_t lr_ospf_nssa_default_new(uint32_t metric);
+void lr_ospf_nssa_default_free(lr_ospf_nssa_default_t d);
+int32_t lr_ospf_originate_nssa_lsa(
+    uint32_t router_id,
+    lr_ospf_external_dest_t dest,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+int32_t lr_ospf_flush_nssa_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t * out);
+int32_t lr_ospf_originate_nssa_default_lsa(
+    uint32_t router_id,
+    lr_ospf_nssa_default_t default_dest,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+uint8_t lr_ospf_is_elected_translator(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+uint8_t lr_ospf_nssa_p_bit_set(lr_ospf_lsa_box_t lsa);
+lr_ospf_nssa_route_vec_t lr_ospf_nssa_routes(
+    lr_ospf_lsdb_t lsdb,
+    lr_ospf_spf_result_t spf_result,
+    struct lr_ospf_nssa_calc_opts_t opts
+);
+lr_ospf_external_route_v3_vec_t lr_ospf_nssa_routes_v3(
+    lr_ospf_lsdb_t lsdb,
+    lr_ospf_spf_v3_result_t spf_result,
+    struct lr_ospf_nssa_calc_opts_t opts
+);
+lr_ospf_external_route_v3_vec_t lr_ospf_nssa_routes_v3_extended(
+    lr_ospf_lsdb_t lsdb,
+    lr_ospf_spf_v3_result_t spf_result,
+    struct lr_ospf_nssa_calc_opts_t opts
+);
+uint16_t lr_ospf_au_type_from_u16(uint16_t wire);
+uint16_t lr_ospf_au_type_to_u16(uint16_t value);
+const char * lr_ospf_au_type_name(uint16_t value);
+lr_ospf_simple_password_t lr_ospf_simple_password_new(const uint8_t * password, uintptr_t password_len);
+uintptr_t lr_ospf_simple_password_password(lr_ospf_simple_password_t p, uint8_t * out);
+void lr_ospf_simple_password_free(lr_ospf_simple_password_t p);
+uint8_t lr_ospf_crypto_algorithm_to_u8(uint8_t value);
+uint8_t lr_ospf_crypto_algorithm_from_u8(uint8_t value);
+const char * lr_ospf_crypto_algorithm_name(uint8_t value);
+uintptr_t lr_ospf_crypto_algorithm_digest_len(uint8_t value);
+uintptr_t lr_ospf_crypto_algorithm_trailer_len(uint8_t value);
+lr_ospf_crypto_auth_t lr_ospf_crypto_auth_new(
+    uint8_t key_id,
+    const uint8_t * key,
+    uintptr_t key_len
+);
+int32_t lr_ospf_crypto_auth_with_sha1(lr_ospf_crypto_auth_t c);
+uint8_t lr_ospf_crypto_auth_key_id(lr_ospf_crypto_auth_t c);
+uint8_t lr_ospf_crypto_auth_algorithm(lr_ospf_crypto_auth_t c);
+uint32_t lr_ospf_crypto_auth_crypto_seq(lr_ospf_crypto_auth_t c);
+int32_t lr_ospf_crypto_auth_advance_seq(lr_ospf_crypto_auth_t c);
+uintptr_t lr_ospf_crypto_auth_key(
+    lr_ospf_crypto_auth_t c,
+    uint8_t * out,
+    uintptr_t out_len
+);
+uintptr_t lr_ospf_crypto_auth_key_len(lr_ospf_crypto_auth_t c);
+void lr_ospf_crypto_auth_free(lr_ospf_crypto_auth_t c);
+lr_ospf_v3_auth_t lr_ospf_v3_auth_new(
+    uint16_t sa_id,
+    const uint8_t * key,
+    uintptr_t key_len
+);
+int32_t lr_ospf_v3_auth_with_sha1(lr_ospf_v3_auth_t v);
+int32_t lr_ospf_v3_auth_with_source(lr_ospf_v3_auth_t v, const uint8_t * source);
+uint16_t lr_ospf_v3_auth_sa_id(lr_ospf_v3_auth_t v);
+uint8_t lr_ospf_v3_auth_algorithm(lr_ospf_v3_auth_t v);
+uintptr_t lr_ospf_v3_auth_trailer_len(lr_ospf_v3_auth_t v);
+uintptr_t lr_ospf_v3_auth_key(
+    lr_ospf_v3_auth_t v,
+    uint8_t * out,
+    uintptr_t out_len
+);
+uintptr_t lr_ospf_v3_auth_key_len(lr_ospf_v3_auth_t v);
+void lr_ospf_v3_auth_free(lr_ospf_v3_auth_t v);
+uint32_t lr_ospf_hello_network_mask(lr_ospf_packet_t p);
+uint16_t lr_ospf_hello_interval(lr_ospf_packet_t p);
+uint32_t lr_ospf_hello_options(lr_ospf_packet_t p);
+uint8_t lr_ospf_hello_priority(lr_ospf_packet_t p);
+uint32_t lr_ospf_hello_dead_interval(lr_ospf_packet_t p);
+uint32_t lr_ospf_hello_dr(lr_ospf_packet_t p);
+uint32_t lr_ospf_hello_bdr(lr_ospf_packet_t p);
+uintptr_t lr_ospf_hello_neighbor_count(lr_ospf_packet_t p);
+uint32_t lr_ospf_hello_neighbor_at(lr_ospf_packet_t p, uintptr_t index);
+uint16_t lr_ospf_db_desc_mtu(lr_ospf_packet_t p);
+uint32_t lr_ospf_db_desc_options(lr_ospf_packet_t p);
+uint8_t lr_ospf_db_desc_flags(lr_ospf_packet_t p);
+uint32_t lr_ospf_db_desc_seq(lr_ospf_packet_t p);
+uintptr_t lr_ospf_db_desc_lsa_header_count(lr_ospf_packet_t p);
+int32_t lr_ospf_db_desc_lsa_header_at(
+    lr_ospf_packet_t p,
+    uintptr_t index,
+    struct lr_ospf_lsa_hdr_t * out
+);
+uint32_t lr_ospf_ls_update_lsa_count(lr_ospf_packet_t p);
+uintptr_t lr_ospf_ls_update_lsa_len(lr_ospf_packet_t p);
+lr_ospf_db_exchange_t lr_ospf_db_exchange_new(
+    uint32_t router_id,
+    uint32_t area_id,
+    uint16_t iface_mtu
+);
+lr_ospf_db_exchange_t lr_ospf_db_exchange_with_version(
+    uint32_t router_id,
+    uint32_t area_id,
+    uint16_t iface_mtu,
+    uint8_t version
+);
+int32_t lr_ospf_db_exchange_with_rxmt_interval(lr_ospf_db_exchange_t e, uint64_t ms);
+void lr_ospf_db_exchange_free(lr_ospf_db_exchange_t e);
+uint64_t lr_ospf_db_exchange_rxmt_interval_ms(lr_ospf_db_exchange_t e);
+int32_t lr_ospf_db_exchange_phase(lr_ospf_db_exchange_t e);
+uint8_t lr_ospf_db_exchange_is_full(lr_ospf_db_exchange_t e);
+uint8_t lr_ospf_db_exchange_started(lr_ospf_db_exchange_t e);
+int32_t lr_ospf_db_exchange_restart(lr_ospf_db_exchange_t e, uint32_t seq);
+lr_ospf_packet_t lr_ospf_db_exchange_initial_db_desc(
+    lr_ospf_db_exchange_t e,
+    uint32_t seq,
+    uint64_t now_ms
+);
+int32_t lr_ospf_db_exchange_poll(
+    lr_ospf_db_exchange_t e,
+    uint64_t now_ms,
+    lr_ospf_packet_t ** out_packets,
+    uintptr_t * out_count
+);
+void lr_ospf_db_exchange_packet_array_free(lr_ospf_packet_t * packets, uintptr_t count);
+lr_ospf_packet_t lr_ospf_db_exchange_take_ls_request(lr_ospf_db_exchange_t e, uint64_t now_ms);
+uintptr_t lr_ospf_db_exchange_pending_requests(lr_ospf_db_exchange_t e);
+int32_t lr_ospf_db_exchange_on_db_desc_packet(
+    lr_ospf_db_exchange_t e,
+    lr_ospf_neighbor_t neighbor,
+    lr_ospf_lsdb_t lsdb,
+    const uint8_t * data,
+    uintptr_t len,
+    uint64_t now_ms,
+    struct lr_ospf_exchange_step_t * out
+);
+int32_t lr_ospf_db_exchange_on_ls_request_packet(
+    lr_ospf_db_exchange_t e,
+    lr_ospf_neighbor_t neighbor,
+    lr_ospf_lsdb_t lsdb,
+    const uint8_t * data,
+    uintptr_t len,
+    uint64_t now_ms,
+    struct lr_ospf_exchange_step_t * out
+);
+int32_t lr_ospf_db_exchange_on_ls_update_packet(
+    lr_ospf_db_exchange_t e,
+    lr_ospf_neighbor_t neighbor,
+    const uint8_t * data,
+    uintptr_t len,
+    struct lr_ospf_exchange_step_t * out
+);
+void lr_ospf_db_exchange_step_free(struct lr_ospf_exchange_step_t * step);
+int32_t lr_ospf_packet_type_from_u8(uint8_t v);
+const char * lr_ospf_packet_type_name(uint8_t v);
+int32_t lr_ospf_version_from_u8(uint8_t v);
+const char * lr_ospf_neighbor_state_name(uint8_t state);
+const char * lr_ospf_if_state_name(uint8_t state);
+const char * lr_ospf_db_exchange_phase_name(uint8_t phase);
+uint8_t lr_ospf_external_metric_type_e_bit(uint8_t t);
+uint8_t lr_ospf_external_metric_type_from_e_bit(uint8_t e_bit);
+int32_t lr_ospf_grace_tlv_type_from_u16(uint16_t v);
+int32_t lr_ospf_grace_reason_from_u8(uint8_t v);
+uint16_t lr_ospf_router_lsa_flags_to_word(
+    uint8_t virtual_link,
+    uint8_t asbr,
+    uint8_t border
+);
+int32_t lr_ospf_router_lsa_flags_from_word(
+    uint16_t word,
+    uint8_t * out_v,
+    uint8_t * out_e,
+    uint8_t * out_b
+);
+int32_t lr_ospf_external_dest_prefix(
+    lr_ospf_external_dest_t d,
+    uint8_t * octets_out,
+    uint8_t * prefix_len_out
+);
+lr_ospf_asbr_dest_t lr_ospf_asbr_dest_new(uint32_t asbr, uint32_t metric);
+uint32_t lr_ospf_asbr_dest_asbr(lr_ospf_asbr_dest_t d);
+uint32_t lr_ospf_asbr_dest_metric(lr_ospf_asbr_dest_t d);
+void lr_ospf_asbr_dest_free(lr_ospf_asbr_dest_t d);
+int32_t lr_ospf_originate_external_lsa(
+    uint32_t router_id,
+    lr_ospf_external_dest_t dest,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+int32_t lr_ospf_flush_external_lsa(lr_ospf_lsa_box_t existing, lr_ospf_lsa_box_t * out);
+int32_t lr_ospf_originate_summary_asbr_lsa(
+    uint32_t router_id,
+    lr_ospf_asbr_dest_t asbr_dest,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+lr_ospf_external_route_vec_t lr_ospf_external_routes(lr_ospf_lsdb_t lsdb, lr_ospf_spf_result_t spf_result);
+uintptr_t lr_ospf_external_route_vec_len(lr_ospf_external_route_vec_t v);
+lr_ospf_external_route_t lr_ospf_external_route_vec_at(lr_ospf_external_route_vec_t v, uintptr_t index);
+void lr_ospf_external_route_vec_free(lr_ospf_external_route_vec_t v);
+int32_t lr_ospf_external_route_prefix(
+    lr_ospf_external_route_t r,
+    uint8_t * octets_out,
+    uint8_t * prefix_len_out
+);
+uint64_t lr_ospf_external_route_metric(lr_ospf_external_route_t r);
+int32_t lr_ospf_external_route_metric_type(lr_ospf_external_route_t r);
+uint64_t lr_ospf_external_route_internal_cost(lr_ospf_external_route_t r);
+uint32_t lr_ospf_external_route_asbr(lr_ospf_external_route_t r);
+int32_t lr_ospf_external_route_border_router(
+    lr_ospf_external_route_t r,
+    uint8_t * present,
+    uint32_t * border_router
+);
+uint32_t lr_ospf_external_route_forwarding_addr(lr_ospf_external_route_t r);
+uint32_t lr_ospf_external_route_tag(lr_ospf_external_route_t r);
+lr_ospf_external_route_v3_vec_t lr_ospf_external_routes_v3(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t spf_result);
+lr_ospf_external_route_v3_vec_t lr_ospf_external_routes_v3_extended(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t spf_result);
+uintptr_t lr_ospf_external_route_v3_vec_len(lr_ospf_external_route_v3_vec_t v);
+lr_ospf_external_route_v3_t lr_ospf_external_route_v3_vec_at(lr_ospf_external_route_v3_vec_t v, uintptr_t index);
+void lr_ospf_external_route_v3_vec_free(lr_ospf_external_route_v3_vec_t v);
+int32_t lr_ospf_external_route_v3_prefix(
+    lr_ospf_external_route_v3_t r,
+    uint8_t * octets_out,
+    uint8_t * prefix_len_out
+);
+uint64_t lr_ospf_external_route_v3_metric(lr_ospf_external_route_v3_t r);
+int32_t lr_ospf_external_route_v3_metric_type(lr_ospf_external_route_v3_t r);
+uint64_t lr_ospf_external_route_v3_internal_cost(lr_ospf_external_route_v3_t r);
+uint32_t lr_ospf_external_route_v3_asbr(lr_ospf_external_route_v3_t r);
+int32_t lr_ospf_external_route_v3_border_router(
+    lr_ospf_external_route_v3_t r,
+    uint8_t * present,
+    uint32_t * border_router
+);
+int32_t lr_ospf_external_route_v3_next_hop(
+    lr_ospf_external_route_v3_t r,
+    uint8_t * octets_out,
+    uint8_t * present_out
+);
+int32_t lr_ospf_external_route_v3_route_tag(
+    lr_ospf_external_route_v3_t r,
+    uint8_t * present,
+    uint32_t * tag
+);
+lr_ospf_interface_t lr_ospf_interface_new(uint32_t area_id);
+void lr_ospf_interface_free(lr_ospf_interface_t i);
+uint8_t lr_ospf_interface_state(lr_ospf_interface_t i);
+uint8_t lr_ospf_interface_priority(lr_ospf_interface_t i);
+uint16_t lr_ospf_interface_hello_interval(lr_ospf_interface_t i);
+uint32_t lr_ospf_interface_dead_interval(lr_ospf_interface_t i);
+uint32_t lr_ospf_interface_dr(lr_ospf_interface_t i);
+uint32_t lr_ospf_interface_bdr(lr_ospf_interface_t i);
+uint32_t lr_ospf_interface_area_id(lr_ospf_interface_t i);
+uint32_t lr_ospf_interface_router_id(lr_ospf_interface_t i);
+uint32_t lr_ospf_interface_ip(lr_ospf_interface_t i);
+int32_t lr_ospf_interface_set_priority(lr_ospf_interface_t i, uint8_t priority);
+int32_t lr_ospf_interface_set_hello_interval(lr_ospf_interface_t i, uint16_t hello_interval);
+int32_t lr_ospf_interface_set_dead_interval(lr_ospf_interface_t i, uint32_t dead_interval);
+int32_t lr_ospf_interface_set_router_id(lr_ospf_interface_t i, uint32_t router_id);
+int32_t lr_ospf_interface_set_ip(lr_ospf_interface_t i, uint32_t ip);
+int32_t lr_ospf_interface_step_interface_up(
+    lr_ospf_interface_t i,
+    lr_ospf_if_action_t ** out_array,
+    uintptr_t * out_count
+);
+int32_t lr_ospf_interface_step_interface_down(
+    lr_ospf_interface_t i,
+    lr_ospf_if_action_t ** out_array,
+    uintptr_t * out_count
+);
+int32_t lr_ospf_interface_step_wait_timer(
+    lr_ospf_interface_t i,
+    lr_ospf_if_action_t ** out_array,
+    uintptr_t * out_count
+);
+int32_t lr_ospf_interface_step_backup_seen(
+    lr_ospf_interface_t i,
+    lr_ospf_if_action_t ** out_array,
+    uintptr_t * out_count
+);
+int32_t lr_ospf_interface_step_neighbor_change(
+    lr_ospf_interface_t i,
+    const struct lr_ospf_elector_t * electors,
+    uintptr_t count,
+    lr_ospf_if_action_t ** out_array,
+    uintptr_t * out_count
+);
+uint8_t lr_ospf_interface_action_kind(lr_ospf_if_action_t a);
+int32_t lr_ospf_interface_action_peer_state_name(
+    lr_ospf_if_action_t a,
+    uint8_t * out,
+    uintptr_t cap
+);
+void lr_ospf_interface_action_free(lr_ospf_if_action_t a);
+void lr_ospf_interface_action_array_free(lr_ospf_if_action_t * array, uintptr_t count);
+int32_t lr_ospf_elect(
+    const struct lr_ospf_elector_t * electors,
+    uintptr_t count,
+    uint32_t self_router_id,
+    uint32_t self_ip,
+    uint8_t self_priority,
+    uint32_t self_stated_dr,
+    uint32_t self_stated_bdr,
+    uint32_t * out_dr,
+    uint32_t * out_bdr
+);
+int32_t lr_ospf_elect_v3(
+    const struct lr_ospf_v3_elector_t * electors,
+    uintptr_t count,
+    uint32_t self_router_id,
+    uint8_t self_priority,
+    uint32_t self_stated_dr,
+    uint32_t self_stated_bdr,
+    uint32_t * out_dr,
+    uint32_t * out_bdr
+);
+uint32_t lr_ospf_clamp_grace_period(uint32_t secs);
+uint32_t lr_ospf_mask_to_prefix_len(uint32_t mask);
+uint32_t lr_ospf_prefix_len_to_mask(uint8_t len);
+uint16_t lr_ospf_grace_lsa_type(void);
+uint32_t lr_ospf_opaque_lsa_id(uint8_t opaque_type, uint32_t opaque_id);
+int32_t lr_ospf_unpack_opaque_lsa_id(
+    uint32_t link_state_id,
+    uint8_t * out_type,
+    uint32_t * out_id
+);
+uint8_t lr_ospf_with_grace_restart_capable(uint8_t options);
+uint8_t lr_ospf_is_grace_restart_capable(uint8_t options);
+int32_t lr_ospf_interface_address_tlv(
+    uint8_t is_v6,
+    const uint8_t * addr,
+    uint8_t * out_v4_present,
+    uint8_t * out_v4,
+    uint8_t * out_v6_present,
+    uint8_t * out_v6
+);
+int32_t lr_ospf_encode_summary_lsa_body(
+    uint32_t network_mask,
+    uint32_t metric,
+    struct lr_bytes_t * out
+);
+int32_t lr_ospf_decode_summary_lsa_body(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out_mask,
+    uint32_t * out_metric
+);
+int32_t lr_ospf_encode_as_external_body(
+    uint32_t network_mask,
+    uint32_t metric,
+    uint8_t external_type2,
+    const uint8_t * forwarding_addr_v4,
+    uint32_t external_route_tag,
+    struct lr_bytes_t * out
+);
+int32_t lr_ospf_decode_as_external_body(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out_mask,
+    uint32_t * out_metric,
+    uint8_t * out_external_type2,
+    uint8_t * out_forwarding_addr_v4,
+    uint32_t * out_external_route_tag
+);
+int32_t lr_ospf_decode_router_links(
+    const uint8_t * data,
+    uintptr_t len,
+    uintptr_t * out_count,
+    struct lr_ospf_router_link_t ** out_array
+);
+void lr_ospf_router_link_array_free(struct lr_ospf_router_link_t * arr, uintptr_t count);
+int32_t lr_ospf_router_lsa_flags_byte(
+    const uint8_t * data,
+    uintptr_t len,
+    uint8_t * out
+);
+int32_t lr_ospf_encode_v3_inter_area_prefix_body(
+    uint8_t is_v6,
+    const uint8_t * prefix_addr,
+    uint8_t prefix_len,
+    uint32_t metric,
+    struct lr_bytes_t * out
+);
+int32_t lr_ospf_decode_v3_inter_area_prefix_body(
+    const uint8_t * data,
+    uintptr_t len,
+    uint8_t * out_prefix_len,
+    uint32_t * out_metric,
+    uint8_t * out_prefix_addr
+);
+uint8_t lr_ospf_is_e_lsa_type(uint16_t ls_type);
+int32_t lr_ospf_walk_e_lsa_tlvs(
+    const uint8_t * data,
+    uintptr_t len,
+    uintptr_t * out_count,
+    struct lr_ospf_e_lsa_tlv_t ** out_array
+);
+void lr_ospf_e_lsa_tlv_array_free(struct lr_ospf_e_lsa_tlv_t * arr, uintptr_t count);
+uint8_t lr_ospf_srv6_behavior_valid_for_end_sid(uint16_t behavior);
+uint8_t lr_ospf_lsa_maxage_flush(lr_ospf_lsa_box_t lsa, lr_ospf_lsa_box_t * out);
+void lr_ospf_lsa_header_free(lr_ospf_lsa_hdr_box_t h);
+lr_ospf_neighbor_t lr_ospf_neighbor_new(uint32_t router_id);
+void lr_ospf_neighbor_free(lr_ospf_neighbor_t r);
+int32_t lr_ospf_neighbor_state(lr_ospf_neighbor_t r);
+int32_t lr_ospf_neighbor_step_hello_seen(
+    lr_ospf_neighbor_t r,
+    uint32_t dr,
+    uint32_t bdr,
+    uint8_t priority
+);
+int32_t lr_ospf_neighbor_step_adj_ok(lr_ospf_neighbor_t r, uint8_t proceed);
+int32_t lr_ospf_neighbor_step_kill(lr_ospf_neighbor_t r);
+lr_ospf_router_lsa_link_t lr_ospf_router_lsa_link_new(
+    int32_t link_kind,
+    uint32_t field1,
+    uint32_t field2,
+    uint8_t field3,
+    uint16_t metric
+);
+void lr_ospf_router_lsa_link_free(lr_ospf_router_lsa_link_t l);
+int32_t lr_ospf_originate_router_lsa(
+    uint32_t router_id,
+    uint8_t flags_byte,
+    const lr_ospf_router_lsa_link_t * links,
+    uintptr_t count,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+int32_t lr_ospf_originate_network_lsa(
+    uint32_t dr_router_id,
+    uint32_t dr_addr,
+    uint32_t mask,
+    const uint32_t * attached_routers,
+    uintptr_t count,
+    const uint32_t * prev_seq,
+    lr_ospf_lsa_box_t * out
+);
+lr_ospf_spf_result_t lr_ospf_spf_run(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+void lr_ospf_spf_result_free(lr_ospf_spf_result_t r);
+uintptr_t lr_ospf_spf_route_count(lr_ospf_spf_result_t r);
+int32_t lr_ospf_spf_route_at(
+    lr_ospf_spf_result_t r,
+    uintptr_t index,
+    struct lr_ospf_spf_route_t * out
+);
+uintptr_t lr_ospf_spf_summary_count(lr_ospf_lsdb_t lsdb, lr_ospf_spf_result_t r);
+int32_t lr_ospf_spf_summary_at(
+    lr_ospf_lsdb_t lsdb,
+    lr_ospf_spf_result_t r,
+    uintptr_t index,
+    struct lr_ospf_spf_route_t * out
+);
+lr_ospf_spf_v3_result_t lr_ospf_spf_v3_run(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+lr_ospf_spf_v3_result_t lr_ospf_spf_v3_extended_run(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+void lr_ospf_spf_v3_result_free(lr_ospf_spf_v3_result_t r);
+uintptr_t lr_ospf_spf_v3_route_count(lr_ospf_spf_v3_result_t r);
+int32_t lr_ospf_spf_v3_route_at(
+    lr_ospf_spf_v3_result_t r,
+    uintptr_t index,
+    struct lr_ospf_spf_route_t * out
+);
+uintptr_t lr_ospf_spf_v3_summary_count(lr_ospf_lsdb_t lsdb, lr_ospf_spf_v3_result_t r);
+int32_t lr_ospf_spf_v3_summary_at(
+    lr_ospf_lsdb_t lsdb,
+    lr_ospf_spf_v3_result_t r,
+    uintptr_t index,
+    struct lr_ospf_spf_route_t * out
+);
+uintptr_t lr_ospf_spf_v3_locator_count(lr_ospf_spf_v3_result_t r);
+int32_t lr_ospf_spf_v3_locator_at(
+    lr_ospf_spf_v3_result_t r,
+    uintptr_t index,
+    struct lr_ospf_spf_route_t * out
+);
+lr_ospf_sr_db_t lr_ospf_sr_db_new(lr_ospf_lsdb_t lsdb);
+void lr_ospf_sr_db_free(lr_ospf_sr_db_t db);
+lr_ospf_srv6_db_t lr_ospf_srv6_db_new(lr_ospf_lsdb_t lsdb);
+void lr_ospf_srv6_db_free(lr_ospf_srv6_db_t db);
+lr_osroute_t lr_osroute_connect(void);
+lr_osroute_t lr_osroute_connect_stub(void);
+const char * lr_osroute_platform_name(void);
+int32_t lr_osroute_add_route(
+    lr_osroute_t t,
+    const struct lr_prefix_t * prefix,
+    const uint8_t * next_hop,
+    uintptr_t next_hop_len,
+    uint32_t if_index
+);
+int32_t lr_osroute_add_route_tagged(
+    lr_osroute_t t,
+    const struct lr_prefix_t * prefix,
+    const uint8_t * next_hop,
+    uintptr_t next_hop_len,
+    uint32_t if_index,
+    int32_t protocol
+);
+int32_t lr_osroute_add_blackhole_route(lr_osroute_t t, const struct lr_prefix_t * prefix);
+int32_t lr_osroute_delete_route(lr_osroute_t t, const struct lr_prefix_t * prefix);
+int64_t lr_osroute_list_routes_count(lr_osroute_t t);
+int64_t lr_osroute_list_routes(
+    lr_osroute_t t,
+    struct lr_kernel_route_t * out,
+    uintptr_t cap
+);
+int32_t lr_osroute_has_route(lr_osroute_t t, const struct lr_prefix_t * prefix);
+void lr_osroute_destroy(lr_osroute_t t);
+struct lr_gtsm_t lr_gtsm_single_hop(void);
+struct lr_gtsm_t lr_gtsm_multihop(uint8_t hops);
+struct lr_gtsm_t lr_gtsm_disabled(void);
+uint8_t lr_gtsm_outbound_ttl(struct lr_gtsm_t g);
+uint8_t lr_gtsm_min_ttl(struct lr_gtsm_t g);
+uint8_t lr_gtsm_is_disabled(struct lr_gtsm_t g);
+int32_t lr_gtsm_mode(struct lr_gtsm_t g);
+int32_t lr_tcp_ao_key_symmetric(
+    uint8_t id,
+    const uint8_t * key,
+    uintptr_t key_len,
+    struct lr_tcp_ao_key_t * out
+);
+int32_t lr_tcp_ao_key_new(
+    uint8_t send_id,
+    uint8_t recv_id,
+    const uint8_t * key,
+    uintptr_t key_len,
+    struct lr_tcp_ao_key_t * out
+);
+int32_t lr_tcp_ao_key_read(
+    const struct lr_tcp_ao_key_t * key,
+    uint8_t * out_send_id,
+    uint8_t * out_recv_id,
+    uintptr_t * out_key_len
+);
+int64_t lr_tcp_ao_key_copy(
+    const struct lr_tcp_ao_key_t * key,
+    uint8_t * out_buf,
+    uintptr_t cap
+);
+int32_t lr_tcp_auth_kind(lr_tcp_auth_t auth);
+uint8_t lr_tcp_auth_is_none(lr_tcp_auth_t auth);
+lr_tcp_auth_t lr_tcp_auth_new_none(void);
+lr_tcp_auth_t lr_tcp_auth_new_md5(const uint8_t * key, uintptr_t key_len);
+lr_tcp_auth_t lr_tcp_auth_new_ao(
+    const struct lr_tcp_ao_key_t * keys,
+    uintptr_t keys_count,
+    int32_t algorithm,
+    uint8_t mac_len
+);
+void lr_tcp_auth_free(lr_tcp_auth_t auth);
+uint32_t lr_osroute_prefix_mask(uint8_t prefix_len);
+int32_t lr_osroute_check_source_compatibility(
+    uint8_t local_is_v6,
+    const uint8_t * local,
+    uint8_t peer_is_v6,
+    const uint8_t * peer,
+    uint8_t * out_kind
+);
+uint32_t lr_osroute_ifindex_of(const char * interface);
+uint32_t lr_osroute_ipv6_ifindex_of(const char * interface);
+int32_t lr_osroute_interface_v4_addrs(
+    const char * interface,
+    uintptr_t * out_count,
+    struct lr_osroute_interface_v4_addr_t ** out_array
+);
+void lr_osroute_interface_v4_addr_array_free(struct lr_osroute_interface_v4_addr_t * arr, uintptr_t count);
+int32_t lr_osroute_interface_v6_addrs(
+    const char * interface,
+    uintptr_t * out_count,
+    struct lr_osroute_interface_v6_addr_t ** out_array
+);
+void lr_osroute_interface_v6_addr_array_free(struct lr_osroute_interface_v6_addr_t * arr, uintptr_t count);
+uint8_t lr_osroute_mpls_enabled(void);
+uint8_t lr_osroute_seg6_enabled(void);
+uint8_t lr_osroute_ttl_check_enforced(void);
+lr_policy_chain_t lr_policy_chain_new(void);
+int32_t lr_policy_chain_push(lr_policy_chain_t chain, lr_route_map_t map);
+uint8_t lr_policy_chain_evaluate(
+    lr_policy_chain_t chain,
+    lr_route_t route,
+    lr_resolver_t resolver
+);
+uintptr_t lr_policy_chain_len(lr_policy_chain_t chain);
+void lr_policy_chain_free(lr_policy_chain_t chain);
+lr_policy_t lr_policy_new(const char * name);
+const char * lr_policy_name(lr_policy_t p);
+lr_policy_chain_t lr_policy_chain(lr_policy_t p);
+void lr_policy_free(lr_policy_t p);
+lr_safety_net_t lr_safety_net_new(uint32_t local_as);
+lr_safety_net_t lr_safety_net_with_local_addr(
+    lr_safety_net_t r,
+    const uint8_t * addr_v4,
+    const uint8_t * addr_v6
+);
+int32_t lr_safety_net_check(
+    lr_safety_net_t r,
+    lr_route_t route,
+    uint8_t is_ebgp
+);
+void lr_safety_net_free(lr_safety_net_t r);
+int32_t lr_safety_net_config_enabled(lr_safety_net_t r);
+int32_t lr_safety_net_config_set_enabled(lr_safety_net_t r, uint8_t enabled);
+int32_t lr_safety_net_config_get_bool(lr_safety_net_t r, int32_t field);
+int32_t lr_safety_net_config_set_bool(
+    lr_safety_net_t r,
+    int32_t field,
+    uint8_t value
+);
+uint64_t lr_safety_net_config_get_u64(lr_safety_net_t r, int32_t field);
+int32_t lr_safety_net_config_set_u64(
+    lr_safety_net_t r,
+    int32_t field,
+    uint64_t value
+);
+int32_t lr_safety_net_check_violation(
+    lr_safety_net_t r,
+    lr_route_t route,
+    uint8_t is_ebgp
+);
+int32_t lr_resolver_list_id(
+    lr_resolver_t r,
+    int32_t kind,
+    const char * name
+);
+uintptr_t lr_resolver_route_map_count(lr_resolver_t r);
+uintptr_t lr_resolver_route_map_names(
+    lr_resolver_t r,
+    char * out_buf,
+    uintptr_t * out_offsets,
+    uintptr_t * out_lens,
+    uintptr_t cap
+);
+int32_t lr_resolver_push_route_map_entry(
+    lr_resolver_t r,
+    const char * name,
+    lr_route_map_t map
+);
+int32_t lr_policy_set_bind_import(
+    lr_resolver_t r,
+    uint64_t session,
+    const char * map_name
+);
+int32_t lr_policy_set_bind_export(
+    lr_resolver_t r,
+    uint64_t session,
+    const char * map_name
+);
+int32_t lr_policy_set_validate(lr_resolver_t r);
+int32_t lr_roa_store_add_static(lr_roa_store_t s, const struct lr_roa_entry_t * entry);
+int32_t lr_roa_store_remove_static(lr_roa_store_t s, const struct lr_roa_entry_t * entry);
+uintptr_t lr_roa_store_static_len(lr_roa_store_t s);
+uintptr_t lr_roa_store_rtr_len(lr_roa_store_t s);
+int32_t lr_roa_store_provenance_of(
+    lr_roa_store_t s,
+    const struct lr_roa_entry_t * entry,
+    uint8_t * out
+);
+int32_t lr_roa_store_provenance_of_checked(
+    lr_roa_store_t s,
+    const struct lr_roa_entry_t * entry,
+    uint8_t * out
+);
+lr_roa_table_builder_t lr_roa_table_builder_new(void);
+void lr_roa_table_builder_free(lr_roa_table_builder_t b);
+int32_t lr_roa_table_builder_add(
+    lr_roa_table_builder_t b,
+    const char * prefix,
+    uint8_t max_length,
+    uint32_t asn
+);
+int32_t lr_roa_table_builder_add_entry(lr_roa_table_builder_t b, struct lr_roa_entry_t entry);
+lr_roa_table_t lr_roa_table_builder_build(lr_roa_table_builder_t b);
+lr_roa_table_t lr_roa_table_new(void);
+void lr_roa_table_free(lr_roa_table_t t);
+uintptr_t lr_roa_table_len(lr_roa_table_t t);
+uint8_t lr_roa_table_is_empty(lr_roa_table_t t);
+uint8_t lr_roa_table_validate(
+    lr_roa_table_t t,
+    const uint8_t * addr,
+    uint8_t is_ipv6,
+    uint8_t prefix_len,
+    uint32_t origin_as,
+    uint8_t has_origin
+);
+int32_t lr_roa_table_entry_at(
+    lr_roa_table_t t,
+    uintptr_t index,
+    uint8_t * out_addr,
+    uint8_t * out_is_ipv6,
+    uint8_t * out_prefix_len,
+    uint8_t * out_max_length,
+    uint32_t * out_asn
+);
+uint8_t lr_bgp_otc_role_from_u8(uint8_t v);
+uint8_t lr_bgp_otc_role_to_u8(uint8_t role);
+uint8_t lr_bgp_otc_role_is_upstream(uint8_t role);
+uint8_t lr_bgp_otc_role_is_route_server(uint8_t role);
+lr_bgp_otc_t lr_bgp_otc_new(uint32_t asn);
+lr_bgp_otc_t lr_bgp_otc_decode(const uint8_t * data, uintptr_t len);
+int32_t lr_bgp_otc_encode(lr_bgp_otc_t otc, uint8_t * out);
+uint32_t lr_bgp_otc_value(lr_bgp_otc_t otc);
+uint8_t lr_bgp_otc_is_set(lr_bgp_otc_t otc);
+void lr_bgp_otc_free(lr_bgp_otc_t otc);
+uint8_t lr_bgp_peer_role_from_asns(
+    uint32_t local_as,
+    uint32_t peer_as,
+    const uint32_t * confed,
+    uintptr_t confed_count
+);
+uint8_t lr_bgp_peer_role_is_internal(uint8_t role);
+uint8_t lr_bgp_peer_role_is_external(uint8_t role);
+uint8_t lr_bgp_peer_role_prepends_as_path(uint8_t role);
+uint8_t lr_bgp_peer_role_rewrites_next_hop(uint8_t role);
+lr_bgp_peer_topology_t lr_bgp_peer_topology_new(
+    uint8_t role,
+    uint8_t rr_client,
+    uint8_t rs_client,
+    uint8_t otc_role
+);
+void lr_bgp_peer_topology_free(lr_bgp_peer_topology_t t);
+uint8_t lr_bgp_peer_topology_role(lr_bgp_peer_topology_t t);
+uint8_t lr_bgp_peer_topology_rr_client(lr_bgp_peer_topology_t t);
+uint8_t lr_bgp_peer_topology_rs_client(lr_bgp_peer_topology_t t);
+uint8_t lr_bgp_peer_topology_otc_role(lr_bgp_peer_topology_t t);
+uint8_t lr_bgp_peer_topology_can_advertise(
+    lr_bgp_peer_topology_t to,
+    lr_bgp_peer_topology_t from,
+    lr_bgp_otc_t route_otc
+);
+uint32_t lr_bgp_cluster_id_from_u32(uint32_t v);
+int32_t lr_bgp_cluster_id_to_v4_bytes(uint32_t cluster_id, uint8_t * out);
+lr_bgp_rr_config_t lr_bgp_rr_config_new(uint32_t cluster_id, uint8_t enabled);
+void lr_bgp_rr_config_free(lr_bgp_rr_config_t c);
+uint32_t lr_bgp_rr_config_cluster_id(lr_bgp_rr_config_t c);
+uint8_t lr_bgp_rr_config_enabled(lr_bgp_rr_config_t c);
+lr_bgp_confed_config_t lr_bgp_confed_config_new(
+    const uint32_t * members,
+    uintptr_t count,
+    uint32_t confederation_id
+);
+void lr_bgp_confed_config_free(lr_bgp_confed_config_t c);
+uint8_t lr_bgp_confed_config_contains(lr_bgp_confed_config_t c, uint32_t asn);
+uint32_t lr_bgp_confed_config_external_as(lr_bgp_confed_config_t c);
+uintptr_t lr_bgp_confed_config_member_count(lr_bgp_confed_config_t c);
+uint32_t lr_bgp_confed_config_member_at(lr_bgp_confed_config_t c, uintptr_t index);
+lr_bgp_rs_config_t lr_bgp_rs_config_new(
+    uint8_t client,
+    const char * inbound_policy,
+    const char * outbound_policy
+);
+void lr_bgp_rs_config_free(lr_bgp_rs_config_t c);
+uint8_t lr_bgp_rs_config_client(lr_bgp_rs_config_t c);
+uintptr_t lr_bgp_rs_config_strip_count(lr_bgp_rs_config_t c);
+uint32_t lr_bgp_rs_config_strip_at(lr_bgp_rs_config_t c, uintptr_t index);
+uintptr_t lr_bgp_rs_config_add_count(lr_bgp_rs_config_t c);
+uint32_t lr_bgp_rs_config_add_at(lr_bgp_rs_config_t c, uintptr_t index);
+int32_t lr_route_lrxp_store_kind(
+    lr_route_t route,
+    uint8_t * out,
+    uint8_t * out_present
+);
+int32_t lr_route_lrxp_verified(lr_route_t route, uint8_t * out);
+int32_t lr_route_lrxp_partial_transit(lr_route_t route, uint8_t * out);
+int32_t lr_route_lrxp_hint_rank(lr_route_t route, uint8_t * out);
+int32_t lr_route_lrxp_hint_damp_fom(lr_route_t route, uint16_t * out);
+int32_t lr_route_lrxp_hint_igp_cost(lr_route_t route, uint32_t * out);
+int32_t lr_route_lrxp_policy_role(lr_route_t route, uint8_t * out);
+int32_t lr_route_lrxp_origin_as(lr_route_t route, uint32_t * out);
+int32_t lr_route_lrxp_origin_max_valid_len(lr_route_t route, uint8_t * out);
+int32_t lr_route_lrxp_origin_expiry(lr_route_t route, uint32_t * out);
+int32_t lr_router_close_session(lr_router_t r, uint64_t session);
+int32_t lr_router_shutdown_session(lr_router_t r, uint64_t session);
+int32_t lr_router_remove_redistribution_pipe(
+    lr_router_t r,
+    int32_t source,
+    int32_t target
+);
+int32_t lr_router_adj_rib_in_snapshot(
+    lr_router_t r,
+    uint64_t session,
+    struct lr_bytes_t * out
+);
+int32_t lr_router_ospf_set_area_type(
+    lr_router_t r,
+    uint32_t area_id,
+    int32_t kind
+);
+int32_t lr_router_set_ospf_sr_receive(lr_router_t r, uint8_t on);
+uint8_t lr_router_ospf_sr_receive(lr_router_t r);
+int32_t lr_router_set_ospf_srv6_receive(lr_router_t r, uint8_t on);
+uint8_t lr_router_ospf_srv6_receive(lr_router_t r);
+int32_t lr_router_set_ospf_v3_extended_lsas(lr_router_t r, uint8_t on);
+uint8_t lr_router_ospf_v3_extended_lsas(lr_router_t r);
+int32_t lr_rtr_pdu_encode(
+    lr_rtr_pdu_t pdu,
+    uint8_t version,
+    struct lr_bytes_t * out
+);
+int32_t lr_rtr_pdu_encode_vec(
+    lr_rtr_pdu_t pdu,
+    uint8_t version,
+    struct lr_bytes_t * out
+);
+int32_t lr_rtr_pdu_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    lr_rtr_pdu_t * out_pdu,
+    uint8_t * out_version,
+    uintptr_t * out_consumed
+);
+void lr_rtr_pdu_free(lr_rtr_pdu_t pdu);
+int32_t lr_rtr_pdu_type(lr_rtr_pdu_t pdu, uint8_t * out);
+int32_t lr_rtr_pdu_min_version(lr_rtr_pdu_t pdu, uint8_t * out);
+lr_rtr_pdu_t lr_rtr_pdu_serial_notify(uint16_t session_id, uint32_t serial);
+lr_rtr_pdu_t lr_rtr_pdu_serial_query(uint16_t session_id, uint32_t serial);
+lr_rtr_pdu_t lr_rtr_pdu_reset_query(void);
+lr_rtr_pdu_t lr_rtr_pdu_cache_response(uint16_t session_id);
+lr_rtr_pdu_t lr_rtr_pdu_cache_reset(void);
+lr_rtr_pdu_t lr_rtr_pdu_ipv4_prefix(
+    uint8_t announce,
+    const uint8_t * prefix_v4,
+    uint8_t prefix_len,
+    uint8_t max_length,
+    uint32_t asn
+);
+lr_rtr_pdu_t lr_rtr_pdu_ipv6_prefix(
+    uint8_t announce,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len,
+    uint8_t max_length,
+    uint32_t asn
+);
+lr_rtr_pdu_t lr_rtr_pdu_end_of_data(
+    uint16_t session_id,
+    uint32_t serial,
+    uint32_t refresh_interval,
+    uint32_t retry_interval,
+    uint32_t expire_interval
+);
+lr_rtr_pdu_t lr_rtr_pdu_router_key(
+    uint8_t announce,
+    const uint8_t * ski,
+    uint32_t asn,
+    const uint8_t * spki,
+    uintptr_t spki_len
+);
+lr_rtr_pdu_t lr_rtr_pdu_error_report(
+    uint16_t error_code,
+    const uint8_t * erroneous_pdu,
+    uintptr_t erroneous_pdu_len,
+    const char * error_text
+);
+lr_rtr_pdu_t lr_rtr_pdu_aspa(
+    uint8_t announce,
+    uint32_t customer_asn,
+    const uint32_t * providers,
+    uintptr_t providers_count
+);
+int32_t lr_rtr_pdu_session_id(lr_rtr_pdu_t pdu, uint16_t * out);
+int32_t lr_rtr_pdu_serial(lr_rtr_pdu_t pdu, uint32_t * out);
+int32_t lr_rtr_pdu_announce(lr_rtr_pdu_t pdu, uint8_t * out);
+int32_t lr_rtr_pdu_ipv4_prefix_fields(
+    lr_rtr_pdu_t pdu,
+    uint8_t * out_prefix_v4,
+    uint8_t * out_prefix_len,
+    uint8_t * out_max_length,
+    uint32_t * out_asn
+);
+int32_t lr_rtr_pdu_ipv6_prefix_fields(
+    lr_rtr_pdu_t pdu,
+    uint8_t * out_prefix_v6,
+    uint8_t * out_prefix_len,
+    uint8_t * out_max_length,
+    uint32_t * out_asn
+);
+int32_t lr_rtr_pdu_end_of_data_intervals(
+    lr_rtr_pdu_t pdu,
+    uint8_t * out_present,
+    uint32_t * out_refresh,
+    uint32_t * out_retry,
+    uint32_t * out_expire
+);
+int32_t lr_rtr_pdu_router_key_fields(
+    lr_rtr_pdu_t pdu,
+    uint8_t * out_ski,
+    uint32_t * out_asn,
+    struct lr_bytes_t * out_spki
+);
+int32_t lr_rtr_pdu_error_code(lr_rtr_pdu_t pdu, uint16_t * out);
+int32_t lr_rtr_pdu_erroneous_pdu(lr_rtr_pdu_t pdu, struct lr_bytes_t * out);
+int32_t lr_rtr_pdu_error_text(lr_rtr_pdu_t pdu, struct lr_bytes_t * out);
+int32_t lr_rtr_pdu_customer_asn(lr_rtr_pdu_t pdu, uint32_t * out);
+int32_t lr_rtr_pdu_providers(
+    lr_rtr_pdu_t pdu,
+    uint32_t * out_providers,
+    uintptr_t cap,
+    uintptr_t * out_count
+);
+int32_t lr_rtr_pdu_type_name(uint8_t ty, const char ** out_name);
+int32_t lr_rtr_pdu_type_min_len(uint8_t ty, uintptr_t * out);
+int32_t lr_rtr_pdu_type_from_u8(uint8_t ty, uint8_t * out);
+int32_t lr_rtr_error_code_name(uint16_t code, const char ** out_name);
+int32_t lr_rtr_error_code_is_fatal(uint16_t code, uint8_t * out);
+int32_t lr_rtr_error_code_from_u16(uint16_t code);
+int32_t lr_bgp_well_known_origin_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint8_t * out
+);
+int32_t lr_bgp_well_known_origin_encode(uint8_t kind, struct lr_bytes_t * out);
+int32_t lr_bgp_well_known_next_hop_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint8_t * out_is_ipv6,
+    uint8_t * out_addr
+);
+int32_t lr_bgp_well_known_next_hop_encode(
+    uint8_t is_ipv6,
+    const uint8_t * addr,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_well_known_med_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out
+);
+int32_t lr_bgp_well_known_med_encode(uint32_t value, struct lr_bytes_t * out);
+int32_t lr_bgp_well_known_local_pref_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out
+);
+int32_t lr_bgp_well_known_local_pref_encode(uint32_t value, struct lr_bytes_t * out);
+int32_t lr_bgp_well_known_aggregator_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out_asn,
+    uint8_t * out_speaker
+);
+int32_t lr_bgp_well_known_aggregator_encode_4(
+    uint32_t asn,
+    const uint8_t * speaker,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_well_known_originator_id_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out_bgp_id
+);
+int32_t lr_bgp_well_known_originator_id_encode(uint32_t bgp_id, struct lr_bytes_t * out);
+int32_t lr_bgp_well_known_cluster_list_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint32_t * out_clusters,
+    uintptr_t cap,
+    uintptr_t * out_count
+);
+int32_t lr_bgp_well_known_cluster_list_encode(
+    const uint32_t * clusters,
+    uintptr_t count,
+    struct lr_bytes_t * out
+);
+int32_t lr_bgp_well_known_aigp_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint64_t * out_metric
+);
+int32_t lr_bgp_well_known_aigp_encode(uint64_t metric, struct lr_bytes_t * out);
+int32_t lr_bgp_well_known_pmsi_tunnel_decode(
+    const uint8_t * data,
+    uintptr_t len,
+    uint8_t * out_flags,
+    uint8_t * out_tunnel_type,
+    uint32_t * out_label,
+    struct lr_bytes_t * out_tunnel_id
+);
+int32_t lr_bgp_well_known_pmsi_tunnel_encode(
+    uint8_t flags,
+    uint8_t tunnel_type,
+    uint32_t label,
+    const uint8_t * tunnel_id,
+    uintptr_t tunnel_id_len,
+    struct lr_bytes_t * out
+);
 """
 
 
@@ -2075,3 +4828,11 @@ def copy_bytes(b) -> bytes:
         return b""
     ptr = get_lib().lr_bytes_ptr(b)
     return ffi.buffer(ptr, n)[:]
+
+
+def last_error() -> str:
+    """Return the thread-local last-error message from the C ABI."""
+    cstr = get_lib().lr_last_error()
+    if cstr == ffi.NULL:
+        return ""
+    return ffi.string(cstr).decode("utf-8", errors="replace")
