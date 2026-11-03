@@ -390,6 +390,50 @@ jobs:
         timeout-minutes: 25
         run: cargo build --workspace --all-features
 
+  # Scaffolding templates (`templates/*/`). Each template is its own
+  # Cargo workspace (with its own `[workspace]` table), so a change
+  # to a public lr-* API surface that breaks a template would
+  # otherwise land silently — the workspace's `cargo build --workspace`
+  # step does not reach them. This job loops through every
+  # `templates/<name>/Cargo.toml` and runs `cargo build && cargo test`
+  # in that directory so a regression in a template's main.rs or its
+  # in-process demo fails CI here, not in a downstream user's
+  # `cp -r templates/<name> ~/projects/` copy.
+  templates:
+    name: Templates build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "templates"
+      - name: Build + test every template
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # Each template carries its own [workspace] table, so it
+          # must be built from inside its own directory. The
+          # `Swatinem/rust-cache@v2` action above caches the per-
+          # template `target/` directories across runs; the first CI
+          # run on a cold cache downloads every workspace dependency
+          # once per template, subsequent runs reuse the cache.
+          for toml in templates/*/Cargo.toml; do
+            dir="$(dirname "$toml")"
+            name="$(basename "$dir")"
+            echo "::group::template: $name"
+            (
+              cd "$dir"
+              cargo build --quiet
+              cargo test --quiet
+            )
+            echo "::endgroup::"
+          done
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
