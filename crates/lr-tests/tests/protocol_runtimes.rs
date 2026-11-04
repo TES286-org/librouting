@@ -132,25 +132,27 @@ fn route_reflector_reflects_between_clients() {
         1,
         "RR reflects C1's route to C2 (iBGP split-horizon lifted for clients)"
     );
-    // The reflected UPDATE carries ORIGINATOR_ID (RFC 4456 §9) and
+    // The reflected UPDATE carries ORIGINATOR_ID (RFC 4456 §8) and
     // CLUSTER_LIST (RFC 4456 §10) — both stamped by
-    // `BgpPeer::advertise` for client-bound UPDATEs.
+    // `BgpPeer::advertise_with_originator` for client-bound UPDATEs.
     //
-    // NOTE: the value of ORIGINATOR_ID is intentionally not pinned
-    // here. RFC 4456 §9 specifies the BGP Identifier of the route's
-    // originator in the local AS (i.e. C1's identifier, 10.0.0.1),
-    // but the current `BgpPeer::advertise` implementation stamps
-    // `self.cfg.local_bgp_id` (the RR's own identifier, 10.0.0.254)
-    // because the egress peer does not have access to the inbound
-    // peer's bgp_id. Plumbing that lookup is a separate,
-    // semver-significant API change tracked in defects.txt; this
-    // test only pins that the reflection attributes are stamped at
-    // all, which is the contract the previous shape of this test
-    // failed to verify.
+    // ORIGINATOR_ID value (RFC 4456 §8): the BGP Identifier of the
+    // originator of the route in the local AS. C1 originated the
+    // route into iBGP (it called `originate` on the local router),
+    // so the originator is C1's BGP Identifier, 10.0.0.1. The RR's
+    // own BGP Identifier is 10.0.0.254 — distinct from 10.0.0.1, so
+    // a regression that stamps the RR's identifier (the historical
+    // `BgpPeer::advertise` behaviour before the
+    // `advertise_with_originator` plumbing) is observable in the
+    // wire bytes.
     let attrs: lr_bgp::path::PathAttributes = c2_snap[0].attributes.clone().into();
-    assert!(
-        attrs.originator_id().is_some(),
-        "ORIGINATOR_ID present on a reflected UPDATE (RFC 4456 §9)"
+    let originator_id = attrs
+        .originator_id()
+        .expect("ORIGINATOR_ID present on a reflected UPDATE (RFC 4456 §8)");
+    assert_eq!(
+        originator_id,
+        lr_bgp::path::OriginatorId(RouterId::from_v4([10, 0, 0, 1])),
+        "ORIGINATOR_ID carries C1's BGP Identifier (the originator), not the RR's own 10.0.0.254"
     );
     let cluster_list = attrs
         .cluster_list()

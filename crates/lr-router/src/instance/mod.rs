@@ -42,7 +42,7 @@ use crate::session::{
     SessionSummary,
 };
 
-use lr_core::addr::{Asn, IpAddr, Prefix};
+use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
 
 use lr_core::codec::Decoder;
 use lr_core::fsm::{StateMachine, TimerId};
@@ -1014,6 +1014,29 @@ impl DefaultRouter {
             timestamp_secs: (self.now_ms / 1000) as u32,
             timestamp_fraction: 0,
         })
+    }
+
+    /// Look up the BGP Identifier of the peer on the far end of `session`
+    /// (RFC 4271 §4.2). Returns `None` for non-BGP sessions or BGP
+    /// sessions that have not yet completed the OPEN handshake (the
+    /// peer's BGP Identifier is announced in OPEN and recorded by the
+    /// FSM at Established).
+    ///
+    /// Used at every `BgpPeer::advertise_with_originator` call site to
+    /// stamp the ORIGINATOR_ID attribute per RFC 4456 §8 — the
+    /// ORIGINATOR_ID carries the BGP Identifier of the originator of
+    /// the route in the local AS, which for an iBGP-learned route is
+    /// the source peer's BGP Identifier (NOT the route reflector's
+    /// own). Looking up the source peer's BGP Identifier at the
+    /// egress call site — rather than storing it on every Loc-RIB
+    /// route as a private attribute — keeps the Loc-RIB route shape
+    /// stable and the lookup O(1) per distinct source session.
+    fn session_peer_bgp_id(&self, session: u64) -> Option<RouterId> {
+        let state = self.sessions.get(&session)?;
+        let SessionState::Bgp { peer, .. } = state else {
+            return None;
+        };
+        peer.peer_bgp_id()
     }
 
     /// Emit a BMP Peer Up message (RFC 7854 §4.6) to the sink, when
@@ -2499,11 +2522,23 @@ impl DefaultRouter {
             return;
         };
         let key = first.key.clone();
+        // Pre-compute the source peer's BGP Identifier for each
+        // distinct originator session in `routes` before the egress
+        // session's mutable borrow — `BgpPeer::advertise_with_originator`
+        // stamps this into ORIGINATOR_ID per RFC 4456 §8 (the
+        // originator of the route in the local AS, not the route
+        // reflector's own BGP Identifier). The lookup is O(distinct
+        // source sessions) — typically 1 in steady-state.
+        let originators: BTreeMap<u64, Option<RouterId>> = routes
+            .iter()
+            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .collect();
         let sent =
             if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
                 let mut sent = false;
                 for route in routes {
-                    sent |= peer.advertise(route);
+                    let originator = originators.get(&route.origin.peer).copied().flatten();
+                    sent |= peer.advertise_with_originator(route, originator);
                 }
                 let bytes = peer.drain_outgoing();
                 if !bytes.is_empty() {
@@ -2704,6 +2739,19 @@ impl DefaultRouter {
         // Adj-RIB-Out empty as the RFC requires.
         let (_, rfc8212_deny_export) = self.rfc8212_denies(session);
 
+        // Pre-compute the source peer's BGP Identifier for each
+        // route in `snapshot` before the egress session's mutable
+        // borrow — `BgpPeer::advertise_with_originator` stamps this
+        // into ORIGINATOR_ID per RFC 4456 §8. The snapshot may
+        // contain routes from many distinct source sessions (Add-Path
+        // refresh of the full Loc-RIB view), so the lookup is keyed
+        // by `route.origin.peer` and de-duplicated by the BTreeMap.
+        let originators: BTreeMap<u64, Option<RouterId>> = snapshot
+            .iter()
+            .flatten()
+            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .collect();
+
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
             if !peer.is_established() {
                 self.hooks = hooks;
@@ -2731,7 +2779,8 @@ impl DefaultRouter {
                     if matches!(hooks.run_export_to(&mut route, session), HookVerdict::Drop) {
                         continue;
                     }
-                    if peer.advertise(&route) {
+                    let originator = originators.get(&route.origin.peer).copied().flatten();
+                    if peer.advertise_with_originator(&route, originator) {
                         advertised.push(route);
                     }
                 }
@@ -2945,6 +2994,20 @@ impl DefaultRouter {
                 )));
             }
         }
+
+        // Pre-compute the source peer's BGP Identifier for each
+        // route in `snapshot` before the egress session's mutable
+        // borrow — `BgpPeer::advertise_with_originator` stamps this
+        // into ORIGINATOR_ID per RFC 4456 §8. The initial dump covers
+        // the whole Loc-RIB, so the snapshot typically contains
+        // routes from many distinct source sessions; the lookup is
+        // keyed by `route.origin.peer` and de-duplicated by the
+        // BTreeMap.
+        let originators: BTreeMap<u64, Option<RouterId>> = snapshot
+            .iter()
+            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .collect();
+
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&h) {
             for route in &snapshot {
                 if rfc8212_deny_export {
@@ -2954,7 +3017,8 @@ impl DefaultRouter {
                 if matches!(hooks.run_export_to(&mut r, h), HookVerdict::Drop) {
                     continue;
                 }
-                if peer.advertise(&r) {
+                let originator = originators.get(&r.origin.peer).copied().flatten();
+                if peer.advertise_with_originator(&r, originator) {
                     advertised.push(r);
                 }
             }
