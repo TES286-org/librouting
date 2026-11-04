@@ -18,6 +18,7 @@ fn locator_tlv_wire_shape_matches_rfc_9513_figure_5() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let mut wire = Vec::new();
     tlv.encode(&mut wire);
@@ -69,6 +70,7 @@ fn locator_tlv_with_end_sid_and_structure_roundtrips() {
         }],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let mut wire = Vec::new();
     tlv.encode(&mut wire);
@@ -179,6 +181,7 @@ fn invalid_route_type_and_locator_length_are_rejected() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     }
     .encode(&mut wire);
     assert!(Srv6LocatorTlv::decode(&wire, 0).is_none());
@@ -195,6 +198,7 @@ fn invalid_route_type_and_locator_length_are_rejected() {
             end_sids: vec![],
             fwd_addr: None,
             route_tag: None,
+            ..Default::default()
         }
         .encode(&mut w);
         assert!(Srv6LocatorTlv::decode(&w, 0).is_none());
@@ -218,6 +222,7 @@ fn locator_sub_tlvs_fwd_addr_route_tag_unknown_skip() {
         end_sids: vec![],
         fwd_addr: Some([0xaa; 16]),
         route_tag: Some(0xdead_beef),
+        ..Default::default()
     };
     let mut wire = Vec::new();
     tlv.encode(&mut wire);
@@ -238,6 +243,296 @@ fn locator_sub_tlvs_fwd_addr_route_tag_unknown_skip() {
     assert_eq!(back, tlv);
     assert_eq!(back.fwd_addr, Some([0xaa; 16]));
     assert_eq!(back.route_tag, Some(0xdead_beef));
+}
+
+/// RFC 9084 §2.1 — Prefix Source OSPF Router-ID sub-TLV (Locator LSA
+/// registry type 4). The 4-octet OSPF Router-ID of the router that
+/// originated the locator. Round-trips through `encode`/`decode` and
+/// preserves the bit-for-bit wire shape.
+#[test]
+fn locator_sub_tlv_prefix_src_router_id_roundtrips() {
+    let tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTER_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 20,
+        prefix: [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        prefix_src_router_id: Some(0x0a00_0001),
+        prefix_src_router_addr: None,
+    };
+    let mut wire = Vec::new();
+    tlv.encode(&mut wire);
+    // TLV value layout: 4 fixed bytes (route_type | algorithm |
+    // locator_len | options) + 4-byte metric + 8-byte /48 prefix + 4
+    // sub-TLV header + 4 sub-TLV value = 24 bytes. Wire = 4-byte TLV
+    // header + 24 = 28. The value is already 4-aligned, so no padding.
+    assert_eq!(wire.len(), 28);
+    // Verify the sub-TLV wire shape byte-for-byte. The sub-TLV starts
+    // at wire[20] — TLV header (4) + fixed (4) + metric (4) + prefix (8).
+    assert_eq!(
+        &wire[20..28],
+        &[
+            0x00, 0x04, // type 4 (Locator LSA sub-TLV registry)
+            0x00, 0x04, // length 4
+            0x0a, 0x00, 0x00, 0x01, // OSPF Router-ID 10.0.0.1
+        ]
+    );
+    let (back, used) = Srv6LocatorTlv::decode(&wire, 0).unwrap();
+    assert_eq!(used, wire.len());
+    assert_eq!(back, tlv);
+    assert_eq!(back.prefix_src_router_id, Some(0x0a00_0001));
+    assert_eq!(back.prefix_src_router_addr, None);
+}
+
+/// RFC 9084 §2.2 — Prefix Source Router Address sub-TLV (Locator LSA
+/// registry type 5). The IPv4 form (Length 4) and IPv6 form (Length 16)
+/// both round-trip through `encode`/`decode`.
+#[test]
+fn locator_sub_tlv_prefix_src_router_addr_roundtrips_v4_and_v6() {
+    use lr_core::addr::IpAddr;
+
+    // IPv4 form (Length 4).
+    let v4 = Srv6LocatorTlv {
+        route_type: locator_route_type::INTER_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 20,
+        prefix: [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        prefix_src_router_id: None,
+        prefix_src_router_addr: Some(IpAddr::V4([192, 0, 2, 1])),
+    };
+    let mut wire = Vec::new();
+    v4.encode(&mut wire);
+    // TLV value = 8 fixed + 8 prefix + 8 sub-TLV (4 hdr + 4 v4 value) = 24.
+    // Wire = 4-byte header + 24 = 28. Already 4-aligned.
+    assert_eq!(wire.len(), 28);
+    assert_eq!(
+        &wire[20..28],
+        &[
+            0x00, 0x05, // type 5
+            0x00, 0x04, // length 4
+            192, 0, 2, 1, // 192.0.2.1
+        ]
+    );
+    let (back, used) = Srv6LocatorTlv::decode(&wire, 0).unwrap();
+    assert_eq!(used, wire.len());
+    assert_eq!(back, v4);
+    assert_eq!(
+        back.prefix_src_router_addr,
+        Some(IpAddr::V4([192, 0, 2, 1]))
+    );
+
+    // IPv6 form (Length 16).
+    let v6 = Srv6LocatorTlv {
+        route_type: locator_route_type::INTER_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 20,
+        prefix: [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        prefix_src_router_id: None,
+        prefix_src_router_addr: Some(IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ])),
+    };
+    let mut wire = Vec::new();
+    v6.encode(&mut wire);
+    // TLV value = 8 fixed + 8 prefix + 20 sub-TLV (4 hdr + 16 v6 value) = 36.
+    // Wire = 4-byte header + 36 = 40. Already 4-aligned.
+    assert_eq!(wire.len(), 40);
+    assert_eq!(
+        &wire[20..40],
+        &[
+            0x00, 0x05, // type 5
+            0x00, 0x10, // length 16
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]
+    );
+    let (back, used) = Srv6LocatorTlv::decode(&wire, 0).unwrap();
+    assert_eq!(used, wire.len());
+    assert_eq!(back, v6);
+    assert_eq!(
+        back.prefix_src_router_addr,
+        Some(IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]))
+    );
+}
+
+/// RFC 9084 §2.1/§2.2 — the two Prefix Source sub-TLVs together with
+/// the existing fwd_addr/route_tag sub-TLVs all round-trip; the
+/// decoder accepts them in any order the encoder emits them.
+#[test]
+fn locator_sub_tlv_prefix_src_pair_combined_with_existing_sub_tlvs() {
+    use lr_core::addr::IpAddr;
+
+    let tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTER_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 20,
+        prefix: [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        end_sids: vec![],
+        fwd_addr: Some([0xaa; 16]),
+        route_tag: Some(0xdead_beef),
+        prefix_src_router_id: Some(0x0a00_0001),
+        prefix_src_router_addr: Some(IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ])),
+    };
+    let mut wire = Vec::new();
+    tlv.encode(&mut wire);
+    let (back, used) = Srv6LocatorTlv::decode(&wire, 0).unwrap();
+    assert_eq!(used, wire.len());
+    assert_eq!(back, tlv);
+    assert_eq!(back.fwd_addr, Some([0xaa; 16]));
+    assert_eq!(back.route_tag, Some(0xdead_beef));
+    assert_eq!(back.prefix_src_router_id, Some(0x0a00_0001));
+    assert_eq!(
+        back.prefix_src_router_addr,
+        Some(IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]))
+    );
+}
+
+/// RFC 9084 §2.1: the Prefix Source OSPF Router-ID sub-TLV's length
+/// MUST be 4. Any other length invalidates the parent TLV (returns
+/// `None`); the malformed originator attribution is not silently
+/// skipped.
+#[test]
+fn locator_sub_tlv_prefix_src_router_id_wrong_length_rejected() {
+    let mut wire = Vec::new();
+    // Build a minimal Locator TLV: header + 12 fixed + 8 prefix
+    // (locator_len = 48), then the malformed sub-TLV.
+    let prefix_bytes = [0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0];
+    let mut value = vec![
+        locator_route_type::INTER_AREA, // route_type
+        0,                              // algorithm
+        48,                             // locator_len
+        0,                              // options
+        0,
+        0,
+        0,
+        20, // metric
+    ];
+    value.extend_from_slice(&prefix_bytes);
+    // Sub-TLV type 4 with length 3 (malformed — MUST be 4).
+    value.extend_from_slice(&LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID.to_be_bytes());
+    value.extend_from_slice(&3u16.to_be_bytes());
+    value.extend_from_slice(&[0x0a, 0x00, 0x00]);
+    // Pad the sub-TLV value to 4-octet alignment (3 → 4).
+    value.push(0);
+    // Build the TLV header.
+    wire.extend_from_slice(&LOCATOR_TLV_SRV6_LOCATOR.to_be_bytes());
+    wire.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    wire.extend_from_slice(&value);
+    // The Locator TLV value is 12 + 8 + 8 = 28 — already 4-aligned.
+    assert!(Srv6LocatorTlv::decode(&wire, 0).is_none());
+}
+
+/// RFC 9084 §2.2: the Prefix Source Router Address sub-TLV's length
+/// MUST be 4 (IPv4) or 16 (IPv6). Any other length invalidates the
+/// parent TLV.
+#[test]
+fn locator_sub_tlv_prefix_src_router_addr_wrong_length_rejected() {
+    let prefix_bytes = [0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0];
+    for bad_len in [3u16, 5, 8, 12, 15, 17, 20] {
+        let mut wire = Vec::new();
+        let mut value = vec![locator_route_type::INTER_AREA, 0, 48, 0, 0, 0, 0, 20];
+        value.extend_from_slice(&prefix_bytes);
+        // Sub-TLV type 5 with the bad length; fill with zeros (the
+        // decoder rejects on length before reading the value bytes).
+        value.extend_from_slice(&LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR.to_be_bytes());
+        value.extend_from_slice(&bad_len.to_be_bytes());
+        let n = bad_len as usize;
+        value.extend(std::iter::repeat_n(0u8, n));
+        // Pad to 4-octet alignment.
+        let pad = (4 - (n % 4)) % 4;
+        value.extend(std::iter::repeat_n(0u8, pad));
+        wire.extend_from_slice(&LOCATOR_TLV_SRV6_LOCATOR.to_be_bytes());
+        wire.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        wire.extend_from_slice(&value);
+        assert!(
+            Srv6LocatorTlv::decode(&wire, 0).is_none(),
+            "length {bad_len} should invalidate the parent TLV"
+        );
+    }
+}
+
+/// The two Prefix Source sub-TLVs can also appear in arbitrary
+/// order in the wire (RFC 3630 §2.5 TLV format allows any order). The
+/// decoder accepts an out-of-order wire shape (router address before
+/// router-id, both before fwd_addr) and reconstructs the same struct.
+#[test]
+fn locator_sub_tlvs_decode_in_arbitrary_order() {
+    use lr_core::addr::IpAddr;
+
+    let prefix_bytes = [0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0];
+    let mut value = vec![
+        locator_route_type::INTER_AREA,
+        0,  // algorithm
+        48, // locator_len
+        0,  // options
+        0,
+        0,
+        0,
+        20, // metric
+    ];
+    value.extend_from_slice(&prefix_bytes);
+    // Sub-TLV 5 (Prefix Source Router Address, IPv6) — emitted first.
+    value.extend_from_slice(&LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR.to_be_bytes());
+    value.extend_from_slice(&16u16.to_be_bytes());
+    value.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    // Sub-TLV 4 (Prefix Source OSPF Router-ID) — emitted second.
+    value.extend_from_slice(&LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID.to_be_bytes());
+    value.extend_from_slice(&4u16.to_be_bytes());
+    value.extend_from_slice(&0x0a00_0001u32.to_be_bytes());
+    // Sub-TLV 2 (IPv6 Forwarding Address) — emitted third.
+    value.extend_from_slice(&LOCATOR_SUBTLV_IPV6_FWD_ADDR.to_be_bytes());
+    value.extend_from_slice(&16u16.to_be_bytes());
+    value.extend_from_slice(&[0xaa; 16]);
+    // Sub-TLV 1 (End SID) is omitted (no End SIDs in this test).
+
+    let mut wire = Vec::new();
+    wire.extend_from_slice(&LOCATOR_TLV_SRV6_LOCATOR.to_be_bytes());
+    wire.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    wire.extend_from_slice(&value);
+    let (back, used) = Srv6LocatorTlv::decode(&wire, 0).unwrap();
+    assert_eq!(used, wire.len());
+    assert_eq!(back.route_type, locator_route_type::INTER_AREA);
+    assert_eq!(back.locator_len, 48);
+    assert_eq!(back.metric, 20);
+    assert_eq!(back.end_sids, Vec::<Srv6EndSidSubTlv>::new());
+    assert_eq!(back.fwd_addr, Some([0xaa; 16]));
+    assert_eq!(back.route_tag, None);
+    assert_eq!(back.prefix_src_router_id, Some(0x0a00_0001));
+    assert_eq!(
+        back.prefix_src_router_addr,
+        Some(IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]))
+    );
 }
 
 /// The Router Information body (RFC 9513 §2-§4): capabilities TLV
@@ -327,6 +622,7 @@ fn origination_headers_and_sequence_convention() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let lsa = originate_v3_srv6_locator_lsa(0x0a00_0001, 7, std::slice::from_ref(&locator), None)
         .unwrap();
@@ -373,6 +669,7 @@ fn host_locator_uses_full_address_bytes() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let mut wire = Vec::new();
     tlv.encode(&mut wire);
@@ -396,6 +693,7 @@ fn locator_body_truncation_is_rejected() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let lsa = originate_v3_srv6_locator_lsa(1, 0, std::slice::from_ref(&locator), None).unwrap();
     assert!(Srv6LocatorLsaBody::decode(&lsa.body).is_some());

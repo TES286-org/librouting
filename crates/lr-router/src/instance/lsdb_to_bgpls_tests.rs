@@ -829,6 +829,7 @@ fn srv6_locator_tlv(sids: &[[u8; 16]], behavior: u16) -> Srv6LocatorTlv {
             .collect(),
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     }
 }
 

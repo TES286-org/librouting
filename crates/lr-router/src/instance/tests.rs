@@ -3259,6 +3259,7 @@ fn ospfv3_srv6_locator_publishes_with_receive_on() {
         }],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let locator_lsa =
         originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&locator_tlv), None).unwrap();
@@ -3953,6 +3954,7 @@ fn ospfv3_srv6_locator_inert_without_receive() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let locator_lsa =
         originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap();
@@ -4052,6 +4054,7 @@ fn ospfv3_srv6_iap_prefix_beats_locator_for_the_same_prefix() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let locator_lsa =
         originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap();
@@ -4148,6 +4151,7 @@ fn ospfv3_srv6_unsupported_algorithm_not_installed() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let locator_lsa =
         originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap();
@@ -4778,6 +4782,7 @@ fn bgpls_republish_end_x_pushes_end_x_nlri_with_attribute_to_bgp_ls_session() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     let locator_lsa =
         originate_v3_srv6_locator_lsa(rid, 0, std::slice::from_ref(&tlv), None).unwrap();

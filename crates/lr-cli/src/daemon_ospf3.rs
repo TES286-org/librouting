@@ -592,6 +592,7 @@ impl Srv6Origination {
                 }],
                 fwd_addr: None,
                 route_tag: None,
+                ..Default::default()
             });
         }
         let mut msds = Vec::new();

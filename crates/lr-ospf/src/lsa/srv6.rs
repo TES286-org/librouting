@@ -52,6 +52,7 @@
 use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::lsa::v3::V3Prefix;
 use crate::lsa::{Lsa, LsaHeader};
+use lr_core::addr::IpAddr;
 
 /// OSPFv3 Router Information LSA (RFC 7770 §2.2): function code 12,
 /// U-bit set, area-scoped flooding (§2.2 — "the U bit will be set";
@@ -91,11 +92,19 @@ pub const LOCATOR_SUBTLV_END_SID: u16 = 1;
 pub const LOCATOR_SUBTLV_IPV6_FWD_ADDR: u16 = 2;
 /// Route-Tag (RFC 8362 §4.3) — 4 octets.
 pub const LOCATOR_SUBTLV_ROUTE_TAG: u16 = 3;
-/// Prefix Source OSPF Router-ID (RFC 9084) — parsed by a later slice
-/// (matters for external locator propagation, like the forwarding
-/// address it accompanies).
+/// Prefix Source OSPF Router-ID (RFC 9084 §2.1) — the 4-octet OSPF
+/// Router-ID of the router that originated the locator into the OSPFv3
+/// area. The decoder accepts this sub-TLV only when its length is
+/// exactly 4; an out-of-range length ignores the sub-TLV. Parsed by
+/// [`Srv6LocatorTlv::decode`] and emitted by [`Srv6LocatorTlv::encode`]
+/// when [`Srv6LocatorTlv::prefix_src_router_id`] is `Some`.
 pub const LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID: u16 = 4;
-/// Prefix Source Router Address (RFC 9084) — later slice, see above.
+/// Prefix Source Router Address (RFC 9084 §2.2) — the IPv4 or IPv6
+/// address of the originating router. The value is 4 octets (IPv4) or
+/// 16 octets (IPv6); any other length ignores the sub-TLV on decode.
+/// Parsed by [`Srv6LocatorTlv::decode`] and emitted by
+/// [`Srv6LocatorTlv::encode`] when
+/// [`Srv6LocatorTlv::prefix_src_router_addr`] is `Some`.
 pub const LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR: u16 = 5;
 /// SRv6 SID Structure (§10) in the Locator LSA sub-TLV registry.
 pub const LOCATOR_SUBTLV_SID_STRUCTURE: u16 = 10;
@@ -699,7 +708,7 @@ pub fn walk_lan_end_x_sub_tlvs(sub_tlvs: &[u8]) -> Vec<Srv6LanEndXSidSubTlv> {
 
 /// SRv6 Locator TLV (RFC 9513 §7.1): one locator of the advertising
 /// router, its attributes, and the End SIDs instantiated under it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Srv6LocatorTlv {
     /// [`locator_route_type`] value. Other values ignore the TLV.
     pub route_type: u8,
@@ -723,6 +732,17 @@ pub struct Srv6LocatorTlv {
     pub fwd_addr: Option<[u8; 16]>,
     /// Route-Tag sub-TLV (§7.2, RFC 8362 §4.3) when present.
     pub route_tag: Option<u32>,
+    /// Prefix Source OSPF Router-ID sub-TLV (RFC 9084 §2.1, type 4)
+    /// when present — the 4-octet OSPF Router-ID of the router that
+    /// originated the locator. Riding the same external-propagation
+    /// channel as `fwd_addr`, this identifies the originator when the
+    /// locator is re-advertised by an ABR (RFC 9084 §1).
+    pub prefix_src_router_id: Option<u32>,
+    /// Prefix Source Router Address sub-TLV (RFC 9084 §2.2, type 5)
+    /// when present — the IPv4 or IPv6 address of the originating
+    /// router. RFC 9084 §2.2 allows Length 4 (IPv4) or 16 (IPv6); the
+    /// decoder rejects any other length.
+    pub prefix_src_router_addr: Option<IpAddr>,
 }
 
 impl Srv6LocatorTlv {
@@ -751,6 +771,27 @@ impl Srv6LocatorTlv {
             value.extend_from_slice(&LOCATOR_SUBTLV_ROUTE_TAG.to_be_bytes());
             value.extend_from_slice(&4u16.to_be_bytes());
             value.extend_from_slice(&tag.to_be_bytes());
+        }
+        if let Some(rid) = &self.prefix_src_router_id {
+            // RFC 9084 §2.1: Type 4, Length 4, value = OSPF Router-ID.
+            value.extend_from_slice(&LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID.to_be_bytes());
+            value.extend_from_slice(&4u16.to_be_bytes());
+            value.extend_from_slice(&rid.to_be_bytes());
+        }
+        if let Some(addr) = &self.prefix_src_router_addr {
+            // RFC 9084 §2.2: Type 5, Length 4 (IPv4) or 16 (IPv6).
+            match addr {
+                IpAddr::V4(bytes) => {
+                    value.extend_from_slice(&LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR.to_be_bytes());
+                    value.extend_from_slice(&4u16.to_be_bytes());
+                    value.extend_from_slice(bytes);
+                }
+                IpAddr::V6(bytes) => {
+                    value.extend_from_slice(&LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR.to_be_bytes());
+                    value.extend_from_slice(&16u16.to_be_bytes());
+                    value.extend_from_slice(bytes);
+                }
+            }
         }
         for sid in &self.end_sids {
             sid.encode(&mut value);
@@ -801,6 +842,8 @@ impl Srv6LocatorTlv {
         let mut end_sids = Vec::new();
         let mut fwd_addr = None;
         let mut route_tag = None;
+        let mut prefix_src_router_id = None;
+        let mut prefix_src_router_addr = None;
         let mut sub = off + 12 + n;
         while sub + 4 <= value_end {
             let st = u16::from_be_bytes([b[sub], b[sub + 1]]);
@@ -834,6 +877,38 @@ impl Srv6LocatorTlv {
                         b[sub + 7],
                     ]));
                 }
+                x if x == LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID => {
+                    // RFC 9084 §2.1: Length MUST be 4; anything else
+                    // invalidates the parent TLV (a malformed sub-TLV
+                    // is not silently skipped — the locator's origin
+                    // attribution is a §1 invariant).
+                    if slen != 4 {
+                        return None;
+                    }
+                    prefix_src_router_id = Some(u32::from_be_bytes([
+                        b[sub + 4],
+                        b[sub + 5],
+                        b[sub + 6],
+                        b[sub + 7],
+                    ]));
+                }
+                x if x == LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR => {
+                    // RFC 9084 §2.2: Length is 4 (IPv4) or 16 (IPv6);
+                    // any other length invalidates the parent TLV.
+                    match slen {
+                        4 => {
+                            let mut v4 = [0u8; 4];
+                            v4.copy_from_slice(&b[sub + 4..sub + 8]);
+                            prefix_src_router_addr = Some(IpAddr::V4(v4));
+                        }
+                        16 => {
+                            let mut v6 = [0u8; 16];
+                            v6.copy_from_slice(&b[sub + 4..sub + 20]);
+                            prefix_src_router_addr = Some(IpAddr::V6(v6));
+                        }
+                        _ => return None,
+                    }
+                }
                 _ => {}
             }
             sub += 4 + slen.div_ceil(4) * 4;
@@ -850,6 +925,8 @@ impl Srv6LocatorTlv {
                 end_sids,
                 fwd_addr,
                 route_tag,
+                prefix_src_router_id,
+                prefix_src_router_addr,
             },
             consumed,
         ))

@@ -545,6 +545,7 @@ fn v3_locator_route_follows_the_advertising_router() {
         }],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     db.install(
         originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap(),
@@ -583,6 +584,7 @@ fn v3_own_locator_connected_and_unreachable_locator_dropped() {
             end_sids: vec![],
             fwd_addr: None,
             route_tag: None,
+            ..Default::default()
         }
     };
     // r1's own locator.
@@ -625,6 +627,7 @@ fn v3_non_intra_area_locator_not_computed() {
         end_sids: vec![],
         fwd_addr: None,
         route_tag: None,
+        ..Default::default()
     };
     db.install(
         originate_v3_srv6_locator_lsa(r1, 0, std::slice::from_ref(&tlv), None).unwrap(),

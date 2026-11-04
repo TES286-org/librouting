@@ -94,6 +94,36 @@ recompiling.
 
 ### Added
 
+**`lr-ospf` SRv6 Locator LSA RFC 9084 Prefix Source sub-TLVs** (`ospf`,
+issue #92). The SRv6 Locator TLV (`Srv6LocatorTlv`) now parses and emits
+the RFC 9084 §2.1 Prefix Source OSPF Router-ID sub-TLV (Locator LSA
+registry type 4) and the RFC 9084 §2.2 Prefix Source Router Address
+sub-TLV (type 5). The two constants
+`LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID` and
+`LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR` were already declared but the
+codec skipped the sub-TLVs as unknown; a receiver that wanted the
+originator attribution that RFC 9084 §1 introduces — the OSPF Router-ID
+and a reachable IP address of the router that originated an externally
+propagated locator — had no surface to read it from. The TLV now carries
+`prefix_src_router_id: Option<u32>` and `prefix_src_router_addr:
+Option<IpAddr>` (Length 4 = IPv4, Length 16 = IPv6, matching RFC 9084
+§2.2's both-AF form); the decoder rejects the parent TLV on a
+wrong-length sub-TLV — the same invalidates-parent policy the existing
+`IPv6-Forwarding-Address` and `Route-Tag` sub-TLVs use, and a §1
+invariant the codec should not silently mask. 6 new unit tests pin the
+wire shape byte-for-byte (v4 and v6 round-trip, combined with the
+existing sub-TLVs, malformed-length rejection for both, and
+arbitrary-order decoding).
+
+This is a breaking change to the Rust pub API of `lr-ospf` — two new
+`pub` fields on `Srv6LocatorTlv`, plus a `Default` derive so existing
+literal constructors pick up the new fields with `..Default::default()`.
+The C ABI does not surface `Srv6LocatorTlv` (the C ABI's `Srv6Locator`
+handle wraps `lr_srv6::Locator`, a different type), so the FFI header
+and the Python / Go / C++ bindings are unaffected. Within the workspace,
+the daemon's `Srv6Origination` builder adds `..Default::default()` to
+its single literal; the in-tree test literals follow the same pattern.
+
 **`lr-router` `RedistributionPipe::allow_prefixes` typed as
 `Vec<Prefix>`** (`router`, issue #92). The pipe's allow-list was
 stored as `Vec<(IpAddr, u8)>` — the unstructured-tuple shape the

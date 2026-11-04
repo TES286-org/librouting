@@ -458,6 +458,7 @@ mod tests {
                 .collect(),
             fwd_addr: None,
             route_tag: None,
+            ..Default::default()
         }
     }
 
@@ -582,6 +583,7 @@ mod tests {
                 end_sids: vec![],
                 fwd_addr: None,
                 route_tag: None,
+                ..Default::default()
             };
             let mut lsa = crate::lsa::srv6::originate_v3_srv6_locator_lsa(
                 rid,
