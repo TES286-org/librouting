@@ -211,3 +211,42 @@ files of the `lr-cli` binary crate, which is not a library.
 | YANG instance data for Babel and key chains | yes | `crates/lr-cli/src/yang.rs`, `yang/ietf-babel@2024-10-10.yang` |
 | Privilege drop, signal handling and reload | yes | `crates/lr-cli/src/privdrop.rs`, `crates/lr-cli/src/signal.rs` |
 | Cross-crate integration tests | yes | `crates/lr-tests/tests/` |
+
+## Outstanding work — partial / not started
+
+Every row above names something the workspace ships today and marks
+it `yes`. The `partial` flag is reserved for a capability that exists
+with a documented subset missing; the workspace today has none that
+fits that shape on a single row, so the partial-class items live in
+[`ROADMAP.md`](ROADMAP.md) under their own sections instead. Read
+those before assuming a feature listed here as `yes` covers the
+entire RFC scope. The major ones:
+
+- **Egress Peer Engineering receiver-side (RFC 9086 §4,
+  controller-mode daemon)** — the projection rows above (`Egress Peer
+  Engineering peer-session → BGP-LS Link NLRI projection (RFC 9086 §3)`
+  and friends) cover the egress side only. A controller-mode daemon
+  that ingests EPE Link NLRIs from its BGP-LS peers and surfaces them
+  through its Loc-RIB is not started: the daemon's
+  `RouteKey { prefix, family }` does not fit a BGP-LS NLRI today, and
+  the receiver-side ingestion path is independent of the projection.
+  See [`ROADMAP.md`](ROADMAP.md) §Protocol coverage, `Egress Peer
+  Engineering (RFC 9086)`.
+- **BGP SR Policy (RFC 9256) with the SRv6 binding (RFC 9430)** —
+  not started. Nothing consumes an SR Policy address family or the
+  tunnel-encapsulations attribute today. See [`ROADMAP.md`](ROADMAP.md)
+  §Protocol coverage, `BGP SR Policy (RFC 9256) with the SRv6 binding
+  (RFC 9430)`.
+- **Scaling — async I/O, per-AFI RIB sharding, multi-threaded RIB +
+  lock-free event bus** — not started. The daemon is single-threaded
+  over a poll-driven ticker today. See [`ROADMAP.md`](ROADMAP.md)
+  §Scaling.
+- **RISC-V CI gate** — pending. The cross-build job is green on
+  `main`; the gate closes when the `riscv-native` job has been green
+  for a release window without an arch-specific patch landing. See
+  [`ROADMAP.md`](ROADMAP.md) §Scaling, `RISC-V targeted compatibility
+  improvements`.
+
+The deliberately out-of-scope protocols (BGPsec, NBMA, p2mp OSPF,
+OSPFv3 virtual links) are listed in [`RELEASE-PLAN.md`](RELEASE-PLAN.md)
+§4.4 and are not tracked here.
