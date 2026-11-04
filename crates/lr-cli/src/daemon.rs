@@ -2057,6 +2057,35 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     if let Some(peer_ip) = expected_peer_ip(p) {
         sc = sc.with_peer_address(peer_ip);
     }
+    // RFC 4456 §3 + §10: route-reflector wiring. The local speaker is
+    // a route reflector when either (a) the operator pinned the
+    // cluster id globally (`[bgp] route_reflector_cluster_id`) or
+    // (b) at least one peer is flagged as an RR client — the latter
+    // makes us a reflector by implication, with the cluster id
+    // falling back to the local BGP identifier (the RFC's default).
+    // Per-peer `route_reflector_client = true` then marks this
+    // session's peer as a client. The two flags are independent per
+    // RFC 4456 §3, mirroring `SessionConfig::with_route_reflector` /
+    // `with_route_reflector_client`.
+    if let Some(cidr) = g.route_reflector_cluster_id.as_deref() {
+        if let Ok(cluster_id) = lr_bgp::role::ClusterId::from_str(cidr) {
+            sc = sc.with_route_reflector(Some(cluster_id));
+        } else {
+            log_warn!(
+                Component::Bgp,
+                "peer {}: ignoring malformed global route_reflector_cluster_id '{}'",
+                p.label(),
+                cidr
+            );
+        }
+    } else if p.route_reflector_client.unwrap_or(false) {
+        // No explicit cluster id: enable reflection with the BGP
+        // identifier as the cluster id (the RFC 4456 §10 default).
+        sc = sc.with_route_reflector(None);
+    }
+    if p.route_reflector_client.unwrap_or(false) {
+        sc = sc.with_route_reflector_client();
+    }
     sc
 }
 

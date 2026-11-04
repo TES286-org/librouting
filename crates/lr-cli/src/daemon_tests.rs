@@ -928,3 +928,164 @@ mod babel_retraction_tests {
         );
     }
 }
+
+/// RFC 4456 §3 + §10: end-to-end test that the daemon's
+/// `build_session_config` wires the new TOML keys
+/// (`[bgp] route_reflector_cluster_id` and `[[peer]]
+/// route_reflector_client`) into the underlying
+/// `lr_router::SessionConfig`'s route-reflector fields. The
+/// translation tests verify the BIRD/FRR → TOML leg; this test
+/// verifies the TOML → SessionConfig leg, closing the loop.
+mod route_reflector_wiring_tests {
+    use super::*;
+    use crate::daemon_config::{DaemonConfig, PeerSpec};
+    use lr_core::addr::RouterId;
+
+    /// A peer whose TOML sets `route_reflector_client = true` and
+    /// whose `[bgp] route_reflector_cluster_id` is "10.0.0.254"
+    /// becomes a session with `route_reflector.enabled = true`,
+    /// `route_reflector.cluster_id = 10.0.0.254` and
+    /// `route_reflector_client = true`. All three fields must agree
+    /// for the daemon's reflection path to stamp CLUSTER_LIST and
+    /// ORIGINATOR_ID on reflected UPDATEs.
+    #[test]
+    fn build_session_config_wires_rr_client_and_cluster_id() {
+        let mut g = DaemonConfig::with_defaults();
+        g.local_as = 64512;
+        g.route_reflector_cluster_id = Some("10.0.0.254".to_string());
+        let p = PeerSpec {
+            remote: Some("192.0.2.2".to_string()),
+            peer_as: 64512,
+            route_reflector_client: Some(true),
+            ..PeerSpec::default()
+        };
+        let rid = RouterId::from_v4([10, 0, 0, 1]);
+        let sc = build_session_config(&g, &p, rid);
+        assert!(
+            sc.route_reflector.enabled,
+            "global route_reflector_cluster_id enables route_reflector.enabled"
+        );
+        assert_eq!(
+            sc.route_reflector.cluster_id,
+            lr_bgp::role::ClusterId::from_v4([10, 0, 0, 254]),
+            "cluster_id parsed from the global route_reflector_cluster_id"
+        );
+        assert!(
+            sc.route_reflector_client,
+            "per-peer route_reflector_client = true sets sc.route_reflector_client"
+        );
+    }
+
+    /// A peer flagged as an RR client without a global cluster id
+    /// still enables reflection on the local speaker — the cluster
+    /// id then falls back to the local BGP identifier (RFC 4456
+    /// §10), which the SessionConfig represents as the default
+    /// `ClusterId(0)` value (`effective_cluster_id(bgp_id)` resolves
+    /// it at reflect time).
+    #[test]
+    fn build_session_config_rr_client_without_cluster_id_uses_bgp_id_default() {
+        let mut g = DaemonConfig::with_defaults();
+        g.local_as = 64512;
+        // No `route_reflector_cluster_id` — the global is `None`.
+        let p = PeerSpec {
+            remote: Some("192.0.2.2".to_string()),
+            peer_as: 64512,
+            route_reflector_client: Some(true),
+            ..PeerSpec::default()
+        };
+        let rid = RouterId::from_v4([10, 0, 0, 1]);
+        let sc = build_session_config(&g, &p, rid);
+        assert!(
+            sc.route_reflector.enabled,
+            "per-peer route_reflector_client alone enables route_reflector.enabled"
+        );
+        assert_eq!(
+            sc.route_reflector.cluster_id,
+            lr_bgp::role::ClusterId::default(),
+            "cluster_id stays at the default (0) — the router uses bgp_id at reflect time"
+        );
+        assert!(sc.route_reflector_client);
+    }
+
+    /// A peer without `route_reflector_client` and no global cluster
+    /// id is a plain iBGP session — neither route-reflector flag is
+    /// set. This is the regression guard for any future refactor
+    /// that accidentally enables reflection unconditionally.
+    #[test]
+    fn build_session_config_without_rr_keys_leaves_reflection_off() {
+        let mut g = DaemonConfig::with_defaults();
+        g.local_as = 64512;
+        let p = PeerSpec {
+            remote: Some("192.0.2.2".to_string()),
+            peer_as: 64512,
+            ..PeerSpec::default()
+        };
+        let rid = RouterId::from_v4([10, 0, 0, 1]);
+        let sc = build_session_config(&g, &p, rid);
+        assert!(
+            !sc.route_reflector.enabled,
+            "no RR keys set — route_reflector.enabled stays off"
+        );
+        assert!(
+            !sc.route_reflector_client,
+            "no per-peer RR client flag — sc.route_reflector_client stays off"
+        );
+    }
+
+    /// A global `route_reflector_cluster_id` without any per-peer
+    /// `route_reflector_client = true` still enables the local
+    /// speaker as a route reflector (the local speaker is still a
+    /// reflector for the configured cluster id; the per-peer flag
+    /// only decides who is a client). This mirrors FRR's behaviour
+    /// where `bgp cluster-id` alone does not require every peer to
+    /// be flagged.
+    #[test]
+    fn build_session_config_cluster_id_alone_enables_reflector() {
+        let mut g = DaemonConfig::with_defaults();
+        g.local_as = 64512;
+        g.route_reflector_cluster_id = Some("10.0.0.254".to_string());
+        let p = PeerSpec {
+            remote: Some("192.0.2.2".to_string()),
+            peer_as: 64512,
+            // No per-peer route_reflector_client.
+            ..PeerSpec::default()
+        };
+        let rid = RouterId::from_v4([10, 0, 0, 1]);
+        let sc = build_session_config(&g, &p, rid);
+        assert!(
+            sc.route_reflector.enabled,
+            "global route_reflector_cluster_id alone enables route_reflector.enabled"
+        );
+        assert!(
+            !sc.route_reflector_client,
+            "no per-peer RR client flag — sc.route_reflector_client stays off"
+        );
+    }
+
+    /// A malformed global `route_reflector_cluster_id` is logged and
+    /// ignored — the session continues with reflection disabled
+    /// (no panic, no startup failure). The user-facing parse
+    /// failure surfaces at TOML load time via the `parse_toml_subset`
+    /// error path; this test pins the defensive `build_session_config`
+    /// behaviour for the case where a config-reload code path
+    /// circumvents that gate.
+    #[test]
+    fn build_session_config_malformed_cluster_id_is_ignored() {
+        let mut g = DaemonConfig::with_defaults();
+        g.local_as = 64512;
+        // The TOML parser rejects this string at load time; the
+        // `build_session_config` defensive path mirrors that contract.
+        g.route_reflector_cluster_id = Some("not-an-ip".to_string());
+        let p = PeerSpec {
+            remote: Some("192.0.2.2".to_string()),
+            peer_as: 64512,
+            ..PeerSpec::default()
+        };
+        let rid = RouterId::from_v4([10, 0, 0, 1]);
+        let sc = build_session_config(&g, &p, rid);
+        assert!(
+            !sc.route_reflector.enabled,
+            "malformed cluster_id must not enable reflection — it would not have a valid cluster id"
+        );
+    }
+}
