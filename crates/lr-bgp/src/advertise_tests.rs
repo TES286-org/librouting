@@ -254,6 +254,121 @@ fn rr_reflection_to_client() {
     }
 }
 
+/// `advertise_with_originator` stamps the supplied originator's BGP
+/// Identifier into ORIGINATOR_ID, not the local speaker's BGP
+/// Identifier. Per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP
+/// Identifier of the originator of the route in the local AS" — i.e.
+/// the source router that originated the route into iBGP, NOT the
+/// route reflector's own identifier.
+#[test]
+fn rr_reflection_stamps_supplied_originator_bgp_id() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 254]));
+    cfg.route_reflector_client = true;
+    cfg.route_reflector.enabled = true;
+    let mut peer = established_peer(cfg);
+    // iBGP-learned route (origin.proto == 1) — the source peer's BGP
+    // Identifier is 10.0.0.1, distinct from the local speaker's
+    // 10.0.0.254 so a regression that stamps the local BGP ID is
+    // observable in the wire bytes.
+    let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
+    let originator = RouterId::from_v4([10, 0, 0, 1]);
+    assert!(peer.advertise_with_originator(&route, Some(originator)));
+    let bytes = peer.drain_outgoing();
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    let msg = dec.decode(&mut r).unwrap().unwrap();
+    let BgpMessage::Update(u) = msg else {
+        panic!("expected UPDATE");
+    };
+    let oi = u
+        .attributes
+        .get(AttrType::OriginatorId)
+        .expect("ORIGINATOR_ID stamped on reflected UPDATE");
+    assert_eq!(
+        oi.value.as_slice(),
+        [10, 0, 0, 1],
+        "ORIGINATOR_ID carries the source peer's BGP Identifier, not the RR's own"
+    );
+}
+
+/// `advertise` (the legacy entry point) still stamps the local
+/// speaker's BGP Identifier when no originator is supplied. This pins
+/// the backwards-compatibility shim — the historical callers that
+/// have not been wired with the source-peer lookup keep their
+/// previous behaviour, so the change to `advertise_with_originator`
+/// is purely additive at the Rust pub-API level.
+#[test]
+fn rr_reflection_legacy_advertise_stamps_local_bgp_id() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 254]));
+    cfg.route_reflector_client = true;
+    cfg.route_reflector.enabled = true;
+    let mut peer = established_peer(cfg);
+    let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
+    assert!(peer.advertise(&route));
+    let bytes = peer.drain_outgoing();
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    let msg = dec.decode(&mut r).unwrap().unwrap();
+    let BgpMessage::Update(u) = msg else {
+        panic!("expected UPDATE");
+    };
+    let oi = u
+        .attributes
+        .get(AttrType::OriginatorId)
+        .expect("ORIGINATOR_ID stamped on reflected UPDATE");
+    assert_eq!(
+        oi.value.as_slice(),
+        [10, 0, 0, 254],
+        "legacy advertise() falls back to the local speaker's BGP Identifier"
+    );
+}
+
+/// `advertise_with_originator` preserves an existing ORIGINATOR_ID
+/// verbatim. RFC 4456 §8: "A BGP speaker SHOULD NOT create an
+/// ORIGINATOR_ID attribute if one already exists." The previous
+/// implementation already obeyed this for the legacy `advertise`
+/// path; this test pins the same invariant for the new entry point
+/// so a subsequent reflection hop carries the original originator's
+/// BGP Identifier through, not the local reflector's.
+#[test]
+fn rr_reflection_preserves_existing_originator_id() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 254]));
+    cfg.route_reflector_client = true;
+    cfg.route_reflector.enabled = true;
+    let mut peer = established_peer(cfg);
+    let mut route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
+    // Pre-stamp an ORIGINATOR_ID from an earlier reflection hop. The
+    // `Route::attributes` field is `lr_core::attr::Attributes`, the
+    // generic tagged-attribute container; BGP's `PathAttributes` is
+    // the protocol-specific view built from it via `From`.
+    let prior_originator = RouterId::from_v4([10, 0, 0, 42]);
+    route.attributes.insert(lr_core::attr::Attribute {
+        tag: lr_core::attr::AttrTag(AttrType::OriginatorId.to_u8()),
+        flags: PathAttrFlags::new().set_optional(true).0,
+        value: prior_originator.to_v4_bytes().to_vec(),
+    });
+    // Supply a different BGP Identifier as the candidate — the
+    // existing ORIGINATOR_ID must win.
+    let candidate = RouterId::from_v4([10, 0, 0, 1]);
+    assert!(peer.advertise_with_originator(&route, Some(candidate)));
+    let bytes = peer.drain_outgoing();
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    let msg = dec.decode(&mut r).unwrap().unwrap();
+    let BgpMessage::Update(u) = msg else {
+        panic!("expected UPDATE");
+    };
+    let oi = u
+        .attributes
+        .get(AttrType::OriginatorId)
+        .expect("ORIGINATOR_ID still present");
+    assert_eq!(
+        oi.value.as_slice(),
+        [10, 0, 0, 42],
+        "existing ORIGINATOR_ID preserved verbatim (RFC 4456 §8)"
+    );
+}
+
 /// Withdraw encoding: withdraw-only UPDATE roundtrips.
 #[test]
 fn withdraw_encodes() {

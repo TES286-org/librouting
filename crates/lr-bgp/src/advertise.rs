@@ -30,7 +30,7 @@ use crate::path::{
 use crate::role::otc::Otc;
 use crate::role::PeerRole;
 
-use lr_core::addr::Prefix;
+use lr_core::addr::{Prefix, RouterId};
 use lr_core::nlri::NlriFamily;
 use lr_core::rib::Route;
 
@@ -39,7 +39,45 @@ impl BgpPeer {
     /// UPDATE and appends it to the outbound buffer. Returns `false` (and
     /// sends nothing) when the route is not advertisable to this peer —
     /// e.g. an iBGP-learned route to a non-client iBGP peer.
+    ///
+    /// Equivalent to [`BgpPeer::advertise_with_originator`] with
+    /// `originator_bgp_id = None`: when reflecting to an RR-client the
+    /// ORIGINATOR_ID attribute falls back to the local speaker's BGP
+    /// Identifier. The router instance — which knows the source peer's
+    /// BGP Identifier — should call
+    /// [`BgpPeer::advertise_with_originator`] instead so the
+    /// ORIGINATOR_ID carries the actual originator per RFC 4456 §8.
     pub fn advertise(&mut self, route: &Route) -> bool {
+        self.advertise_with_originator(route, None)
+    }
+
+    /// Advertise a route to this peer with an explicit ORIGINATOR_ID
+    /// source (RFC 4456 §8). Like [`BgpPeer::advertise`] but, when
+    /// reflecting a route to an RR-client and the route does not already
+    /// carry an ORIGINATOR_ID, stamps `originator_bgp_id` instead of the
+    /// local speaker's BGP Identifier.
+    ///
+    /// Per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP Identifier of
+    /// the originator of the route in the local AS" — i.e. the source
+    /// router that originated the route into iBGP, NOT the route
+    /// reflector's own identifier. The caller (typically the router
+    /// instance) is responsible for supplying the source peer's BGP
+    /// Identifier for an iBGP-learned route, or `None` for a locally
+    /// originated route (in which case the local speaker is itself the
+    /// originator and the local BGP Identifier is the correct value).
+    ///
+    /// When `originator_bgp_id` is `None` the ORIGINATOR_ID falls back to
+    /// the local speaker's BGP Identifier — preserving the historical
+    /// [`BgpPeer::advertise`] behaviour for callers that have not yet
+    /// been wired with the source-peer lookup. When the route already
+    /// carries an ORIGINATOR_ID the existing value is preserved (RFC
+    /// 4456 §8: "A BGP speaker SHOULD NOT create an ORIGINATOR_ID
+    /// attribute if one already exists").
+    pub fn advertise_with_originator(
+        &mut self,
+        route: &Route,
+        originator_bgp_id: Option<RouterId>,
+    ) -> bool {
         if !self.is_established() {
             return false;
         }
@@ -240,12 +278,25 @@ impl BgpPeer {
                 .cfg
                 .route_reflector
                 .effective_cluster_id(self.cfg.local_bgp_id);
-            // ORIGINATOR_ID: the BGP-ID of the originator in the local AS.
+            // ORIGINATOR_ID (RFC 4456 §8): the BGP Identifier of the
+            // originator of the route in the local AS — i.e. the source
+            // router that originated the route into iBGP, NOT the
+            // route reflector's own identifier. `originator_bgp_id`
+            // (passed by the router instance, which tracks the source
+            // peer's BGP Identifier) is the source-peer value; when the
+            // caller has not wired that lookup, fall back to the local
+            // speaker's BGP Identifier (the historical behaviour, and
+            // the correct value for a locally-originated route where
+            // the local speaker is itself the originator). An existing
+            // ORIGINATOR_ID is preserved verbatim — RFC 4456 §8: "A
+            // BGP speaker SHOULD NOT create an ORIGINATOR_ID attribute
+            // if one already exists".
             if attrs.get(AttrType::OriginatorId).is_none() {
+                let originator = originator_bgp_id.unwrap_or(self.cfg.local_bgp_id);
                 attrs.insert(PathAttribute::new(
                     PathAttrFlags::new().set_optional(true),
                     AttrType::OriginatorId,
-                    self.cfg.local_bgp_id.to_v4_bytes().to_vec(),
+                    originator.to_v4_bytes().to_vec(),
                 ));
             }
             // CLUSTER_LIST: prepend our cluster ID for loop detection.
