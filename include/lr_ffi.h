@@ -8304,11 +8304,70 @@ int32_t lr_bgp_peer_step_timer_idle_hold(lr_bgp_peer_t r);
  * The route handle is **borrowed** — the caller retains ownership
  * and must still free it via `lr_route_free`.
  *
+ * Equivalent to [`lr_bgp_peer_advertise_with_originator`] with
+ * `originator_bgp_id_present = 0`: when reflecting to an RR-client
+ * the ORIGINATOR_ID attribute falls back to the local speaker's
+ * BGP Identifier. An embedder that tracks the source peer's BGP
+ * Identifier (typically the router instance, which learns it from
+ * the OPEN handshake) should call
+ * [`lr_bgp_peer_advertise_with_originator`] instead so the
+ * ORIGINATOR_ID carries the actual originator per RFC 4456 §8.
+ *
  * # Safety
  * `r` must be a valid BgpPeer handle. `route` must be a valid
  * Route handle (NULL is rejected with `LR_ERR_NULL`).
  */
 int32_t lr_bgp_peer_advertise(lr_bgp_peer_t r, lr_route_t route);
+
+/**
+ * Advertise a route to this peer with an explicit ORIGINATOR_ID
+ * source (RFC 4456 §8). Like [`lr_bgp_peer_advertise`] but, when
+ * reflecting a route to an RR-client and the route does not already
+ * carry an ORIGINATOR_ID, stamps the supplied BGP Identifier
+ * (`originator_bgp_id_addr`) into ORIGINATOR_ID instead of the
+ * local speaker's BGP Identifier.
+ *
+ * Per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP Identifier of
+ * the originator of the route in the local AS" — i.e. the source
+ * router that originated the route into iBGP, NOT the route
+ * reflector's own identifier. The caller is responsible for
+ * supplying the source peer's BGP Identifier for an iBGP-learned
+ * route (typically tracked by the router instance from the OPEN
+ * handshake), or setting `originator_bgp_id_present = 0` for a
+ * locally originated route (in which case the local speaker is
+ * itself the originator and the local BGP Identifier is the
+ * correct fallback value).
+ *
+ * When `originator_bgp_id_present = 0` the ORIGINATOR_ID falls back
+ * to the local speaker's BGP Identifier — preserving the
+ * [`lr_bgp_peer_advertise`] behaviour for callers that have not yet
+ * been wired with the source-peer lookup. When the route already
+ * carries an ORIGINATOR_ID the existing value is preserved (RFC
+ * 4456 §8: "A BGP speaker SHOULD NOT create an ORIGINATOR_ID
+ * attribute if one already exists").
+ *
+ * `originator_bgp_id_addr` points to 4 bytes (the BGP Identifier
+ * in network byte order — i.e. the dotted-quad bytes 10.0.0.1
+ * would be passed as `{ 10, 0, 0, 1 }`). NULL is rejected with
+ * `LR_ERR_NULL` when `originator_bgp_id_present != 0`.
+ *
+ * Returns 1 when the route was queued for transmission, 0 when the
+ * peer refused the route (same gates as [`lr_bgp_peer_advertise`]),
+ * `LR_ERR_NULL` (-1) on a NULL peer handle, NULL route handle, or
+ * a NULL originator handle with `present != 0`.
+ *
+ * The route handle is **borrowed** — the caller retains ownership
+ * and must still free it via `lr_route_free`.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `route` must be a valid
+ * Route handle. `originator_bgp_id_addr` (when
+ * `originator_bgp_id_present != 0`) must point to 4 readable bytes.
+ */
+int32_t lr_bgp_peer_advertise_with_originator(lr_bgp_peer_t r,
+                                              lr_route_t route,
+                                              uint8_t originator_bgp_id_present,
+                                              const uint8_t *originator_bgp_id_addr);
 
 /**
  * Withdraw a list of IPv4/IPv6 prefixes (RFC 4271 §9.3). The peer

@@ -1863,6 +1863,13 @@ class BgpPeer:
             raise LrError(last_error())
         return rc
 
+    def advertise_with_originator(self, route, originator_bgp_id_present, originator_bgp_id_addr):
+        """Low-level wrapper for ``lr_bgp_peer_advertise_with_originator``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_bgp_peer_advertise_with_originator(self._ptr, route, originator_bgp_id_present, originator_bgp_id_addr)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
     def withdraw(self, prefixes, count, family_afi, family_safi):
         """Low-level wrapper for ``lr_bgp_peer_withdraw``. See ``include/lr_ffi.h``."""
         rc = _lib.lr_bgp_peer_withdraw(self._ptr, prefixes, count, family_afi, family_safi)

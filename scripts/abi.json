@@ -8753,6 +8753,41 @@
       ]
     },
     {
+      "name": "lr_bgp_peer_advertise_with_originator",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_bgp_peer_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "route",
+          "type": "lr_route_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "originator_bgp_id_present",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "originator_bgp_id_addr",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        }
+      ]
+    },
+    {
       "name": "lr_bgp_peer_withdraw",
       "return_type": "int32_t",
       "params": [
@@ -53379,6 +53414,41 @@
             "is_const": false,
             "is_ptr": false,
             "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_peer_advertise_with_originator",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_bgp_peer_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "route",
+            "type": "lr_route_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "originator_bgp_id_present",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "originator_bgp_id_addr",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
           }
         ]
       },

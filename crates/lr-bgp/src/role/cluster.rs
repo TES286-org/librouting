@@ -177,6 +177,9 @@ mod tests {
         assert_eq!(compute_originator_id(None, supplied), Some(supplied));
         // Existing ORIGINATOR_ID is preserved (RFC 4456 §8).
         let existing = RouterId::from_v4([10, 0, 0, 2]);
-        assert_eq!(compute_originator_id(Some(existing), supplied), Some(existing));
+        assert_eq!(
+            compute_originator_id(Some(existing), supplied),
+            Some(existing)
+        );
     }
 }

@@ -521,6 +521,15 @@ pub unsafe extern "C" fn lr_bgp_peer_step_timer_idle_hold(r: lr_bgp_peer_t) -> i
 /// The route handle is **borrowed** — the caller retains ownership
 /// and must still free it via `lr_route_free`.
 ///
+/// Equivalent to [`lr_bgp_peer_advertise_with_originator`] with
+/// `originator_bgp_id_present = 0`: when reflecting to an RR-client
+/// the ORIGINATOR_ID attribute falls back to the local speaker's
+/// BGP Identifier. An embedder that tracks the source peer's BGP
+/// Identifier (typically the router instance, which learns it from
+/// the OPEN handshake) should call
+/// [`lr_bgp_peer_advertise_with_originator`] instead so the
+/// ORIGINATOR_ID carries the actual originator per RFC 4456 §8.
+///
 /// # Safety
 /// `r` must be a valid BgpPeer handle. `route` must be a valid
 /// Route handle (NULL is rejected with `LR_ERR_NULL`).
@@ -542,6 +551,91 @@ pub unsafe extern "C" fn lr_bgp_peer_advertise(
             let route_ref: &'static lr_core::rib::Route =
                 unsafe { &*(route as *const lr_core::rib::Route) };
             if p.advertise(route_ref) {
+                1
+            } else {
+                0
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Advertise a route to this peer with an explicit ORIGINATOR_ID
+/// source (RFC 4456 §8). Like [`lr_bgp_peer_advertise`] but, when
+/// reflecting a route to an RR-client and the route does not already
+/// carry an ORIGINATOR_ID, stamps the supplied BGP Identifier
+/// (`originator_bgp_id_addr`) into ORIGINATOR_ID instead of the
+/// local speaker's BGP Identifier.
+///
+/// Per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP Identifier of
+/// the originator of the route in the local AS" — i.e. the source
+/// router that originated the route into iBGP, NOT the route
+/// reflector's own identifier. The caller is responsible for
+/// supplying the source peer's BGP Identifier for an iBGP-learned
+/// route (typically tracked by the router instance from the OPEN
+/// handshake), or setting `originator_bgp_id_present = 0` for a
+/// locally originated route (in which case the local speaker is
+/// itself the originator and the local BGP Identifier is the
+/// correct fallback value).
+///
+/// When `originator_bgp_id_present = 0` the ORIGINATOR_ID falls back
+/// to the local speaker's BGP Identifier — preserving the
+/// [`lr_bgp_peer_advertise`] behaviour for callers that have not yet
+/// been wired with the source-peer lookup. When the route already
+/// carries an ORIGINATOR_ID the existing value is preserved (RFC
+/// 4456 §8: "A BGP speaker SHOULD NOT create an ORIGINATOR_ID
+/// attribute if one already exists").
+///
+/// `originator_bgp_id_addr` points to 4 bytes (the BGP Identifier
+/// in network byte order — i.e. the dotted-quad bytes 10.0.0.1
+/// would be passed as `{ 10, 0, 0, 1 }`). NULL is rejected with
+/// `LR_ERR_NULL` when `originator_bgp_id_present != 0`.
+///
+/// Returns 1 when the route was queued for transmission, 0 when the
+/// peer refused the route (same gates as [`lr_bgp_peer_advertise`]),
+/// `LR_ERR_NULL` (-1) on a NULL peer handle, NULL route handle, or
+/// a NULL originator handle with `present != 0`.
+///
+/// The route handle is **borrowed** — the caller retains ownership
+/// and must still free it via `lr_route_free`.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle. `route` must be a valid
+/// Route handle. `originator_bgp_id_addr` (when
+/// `originator_bgp_id_present != 0`) must point to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_advertise_with_originator(
+    r: lr_bgp_peer_t,
+    route: crate::handle::lr_route_t,
+    originator_bgp_id_present: u8,
+    originator_bgp_id_addr: *const u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(p) = borrow_peer_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if route.is_null() {
+                return LR_ERR_NULL;
+            }
+            let originator = if originator_bgp_id_present != 0 {
+                if originator_bgp_id_addr.is_null() {
+                    return LR_ERR_NULL;
+                }
+                // SAFETY: the caller asserts the pointer is readable
+                // for 4 bytes when `present != 0`.
+                let bytes = unsafe { core::slice::from_raw_parts(originator_bgp_id_addr, 4) };
+                Some(lr_core::addr::RouterId::from_v4([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ]))
+            } else {
+                None
+            };
+            // SAFETY: the caller passed a handle from `lr_route_new_*`
+            // and asserts it has not been freed yet.
+            let route_ref: &'static lr_core::rib::Route =
+                unsafe { &*(route as *const lr_core::rib::Route) };
+            if p.advertise_with_originator(route_ref, originator) {
                 1
             } else {
                 0
@@ -1317,6 +1411,80 @@ mod tests {
         assert!(!route.is_null());
         let rc = unsafe { lr_bgp_peer_advertise(p, route) };
         assert_eq!(rc, 0, "Idle peer must refuse to advertise (returns 0)");
+        unsafe {
+            crate::policy_objects::lr_route_free(route);
+            lr_bgp_peer_free(p);
+        };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_advertise_with_originator_rejects_null_safely() {
+        // NULL peer → LR_ERR_NULL (no originator passed).
+        let rc = unsafe {
+            lr_bgp_peer_advertise_with_originator(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+        // Non-null peer, NULL route → LR_ERR_NULL.
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        let rc = unsafe {
+            lr_bgp_peer_advertise_with_originator(p, std::ptr::null_mut(), 0, std::ptr::null())
+        };
+        assert_eq!(rc, LR_ERR_NULL);
+        // Originator present but addr NULL → LR_ERR_NULL.
+        let route = unsafe {
+            crate::policy_objects::lr_route_new_v4(
+                [203, 0, 113, 1].as_ptr(),
+                32,
+                crate::policy::LrProtocol::Bgp as i32,
+            )
+        };
+        assert!(!route.is_null());
+        let rc = unsafe { lr_bgp_peer_advertise_with_originator(p, route, 1, std::ptr::null()) };
+        assert_eq!(
+            rc, LR_ERR_NULL,
+            "originator_bgp_id_present=1 with NULL addr must fail closed"
+        );
+        unsafe {
+            crate::policy_objects::lr_route_free(route);
+            lr_bgp_peer_free(p);
+        };
+    }
+
+    #[test]
+    fn ffi_bgp_peer_advertise_with_originator_returns_zero_when_not_established() {
+        // An Idle peer refuses to advertise regardless of whether an
+        // originator is supplied. The originator pointer is read but
+        // the early return on `is_established()` short-circuits before
+        // the ORIGINATOR_ID stamping path is reached, so the call is
+        // safe to make with a present originator and a route handle.
+        let p = lr_bgp_peer_new(64512, 64513, 0x0a000001, 90, 30, 1);
+        let route = unsafe {
+            crate::policy_objects::lr_route_new_v4(
+                [203, 0, 113, 1].as_ptr(),
+                32,
+                crate::policy::LrProtocol::Bgp as i32,
+            )
+        };
+        assert!(!route.is_null());
+        let originator_bytes: [u8; 4] = [10, 0, 0, 1];
+        let rc = unsafe {
+            lr_bgp_peer_advertise_with_originator(p, route, 1, originator_bytes.as_ptr())
+        };
+        assert_eq!(
+            rc, 0,
+            "Idle peer must refuse to advertise (returns 0, not LR_ERR_NULL)"
+        );
+        // Same call with originator_bgp_id_present = 0: NULL addr
+        // must NOT trigger an error (the addr is unread when
+        // present=0); the call still returns 0 because the peer is
+        // Idle.
+        let rc = unsafe { lr_bgp_peer_advertise_with_originator(p, route, 0, std::ptr::null()) };
+        assert_eq!(rc, 0, "Idle peer + no originator: returns 0");
         unsafe {
             crate::policy_objects::lr_route_free(route);
             lr_bgp_peer_free(p);

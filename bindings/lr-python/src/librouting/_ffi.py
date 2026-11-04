@@ -4773,12 +4773,21 @@ int32_t lr_bgp_well_known_pmsi_tunnel_encode(
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
 typedef struct lr_afi_safi_t lr_nlri_family_t;
 
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+
 /* GENERATED ADDITIONS - do not edit by hand.
    Source: scripts/gen_python.py + scripts/abi.json
    Re-run: python3 scripts/gen_python.py */
 
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
 typedef struct lr_afi_safi_t lr_nlri_family_t;
+int32_t lr_bgp_peer_advertise_with_originator(
+    lr_bgp_peer_t r,
+    lr_route_t route,
+    uint8_t originator_bgp_id_present,
+    const uint8_t * originator_bgp_id_addr
+);
 """
 
 

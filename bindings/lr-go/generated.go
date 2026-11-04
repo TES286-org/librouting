@@ -3756,6 +3756,14 @@ func (x *BgpPeer) Advertise(route *Route) (int32, error) {
 	return int32(rc), nil
 }
 
+func (x *BgpPeer) AdvertiseWithOriginator(route *Route, originator_bgp_id_present uint8, originator_bgp_id_addr *C.uint8_t) (int32, error) {
+	rc := C.lr_bgp_peer_advertise_with_originator(x.ptr, route.ptr, C.uint8_t(originator_bgp_id_present), originator_bgp_id_addr)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_bgp_peer_advertise_with_originator: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
 func (x *BgpPeer) Withdraw(prefixes *C.lr_prefix_t, count uintptr, family_afi uint16, family_safi uint8) (int32, error) {
 	rc := C.lr_bgp_peer_withdraw(x.ptr, prefixes, C.uintptr_t(count), C.uint16_t(family_afi), C.uint8_t(family_safi))
 	if rc < 0 {
