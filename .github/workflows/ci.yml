@@ -65,12 +65,23 @@ jobs:
   # ABI freeze gate (docs/RELEASE-PLAN.md §2.8 condition 3): between
   # the current pre-1.0 tag and any later commit on main, the C ABI
   # surface (include/lr_ffi.h + include/librouting.hpp) may only GROW.
-  # A removed or modified line in the header diff is a removed or
-  # changed symbol/contract — i.e. a breaking ABI change, which must
-  # ship as a new -rc and restart the freeze clock, never silently.
-  # Additive growth (new symbols) is allowed and expected. The
-  # ABI_VERSION constant must not move within one -rc window either:
-  # it is bumped only by the release commit that cuts the next tag.
+  # A removed or modified SYMBOL — a function signature, a struct /
+  # enum / class body, a typedef, a #define value — is a breaking ABI
+  # change, which must ship as a new -rc and restart the freeze clock,
+  # never silently. Additive growth (new symbols, new fields, new
+  # enum variants) is allowed and expected. The ABI_VERSION constant
+  # must not move within one -rc window either: it is bumped only by
+  # the release commit that cuts the next tag.
+  #
+  # The check runs `scripts/abi_freeze_check.py <baseline> HEAD`, which
+  # extracts the symbol-level surface (function declarations, struct
+  # / enum / class bodies, typedefs, #defines) from each header set
+  # and reports only symbols that were actually removed or whose
+  # signature changed. The earlier `git diff ... | grep '^-'` form
+  # flagged every removed line in the diff, including comment text
+  # and the inside of multi-line declarations cbindgen reformatted
+  # between versions; the symbol-level check does not false-positive
+  # on a comment reflow or a multi-line wrap.
   abi-freeze:
     name: ABI freeze (additive-only vs baseline tag)
     runs-on: ubuntu-latest
@@ -82,19 +93,20 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so the baseline tag is present
+      - name: Set up Python (for scripts/abi_freeze_check.py)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
       - name: C ABI surface must be additive-only since the baseline
         timeout-minutes: 2
         run: |
           set -euo pipefail
           echo "Baseline: $ABI_BASELINE_TAG -> HEAD: $(git rev-parse --short HEAD)"
-          removed="$(git diff "$ABI_BASELINE_TAG"..HEAD -- include/lr_ffi.h include/librouting.hpp | grep '^-' | grep -v '^---' || true)"
-          if [ -n "$removed" ]; then
-            echo "::error::Breaking C ABI change since $ABI_BASELINE_TAG — these header lines were removed or modified:"
-            echo "$removed"
-            echo "Per docs/RELEASE-PLAN.md §1 Tier 2, a breaking ABI change is a major version bump, even pre-1.0."
-            exit 1
-          fi
-          echo "OK: no header line was removed or modified since $ABI_BASELINE_TAG (additions are allowed)."
+          # Run the script's own unit tests first so a regression
+          # in the symbol-extraction logic that would silently miss
+          # a real ABI break surfaces before the gate does.
+          python3 scripts/abi_freeze_check_test.py
+          python3 scripts/abi_freeze_check.py "$ABI_BASELINE_TAG" HEAD
       - name: ABI_VERSION must hold steady within one -rc window
         timeout-minutes: 2
         run: |
