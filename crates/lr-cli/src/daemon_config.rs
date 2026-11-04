@@ -8,6 +8,7 @@
 //! configs behave exactly as before.
 
 use std::process::ExitCode;
+use std::str::FromStr;
 
 use lr_babel::BabelMacAlgorithm;
 
@@ -111,6 +112,26 @@ pub(crate) struct PeerSpec {
     /// is not scoped per peer (mirroring FRR, which de-preferences
     /// GS-tagged eBGP routes regardless of configuration).
     pub graceful_shutdown: Option<bool>,
+    /// RFC 4456 §3 route-reflector client flag (per-peer). When `Some(true)`
+    /// this peer is treated as an RR client: the local speaker reflects
+    /// routes between RR clients (and from non-clients to clients),
+    /// stamping ORIGINATOR_ID + CLUSTER_LIST on reflected UPDATEs. `None`
+    /// (the default) inherits `false`. The local speaker needs
+    /// [`DaemonConfig::route_reflector_cluster_id`] (or a non-zero default
+    /// cluster id derived from the local BGP identifier) for the
+    /// reflection path to actually stamp CLUSTER_LIST — the daemon turns
+    /// the global `[bgp] route_reflector_cluster_id` (or any per-peer
+    /// `route_reflector_client = true`) into [`SessionConfig`]'s
+    /// `route_reflector.enabled` flag so the per-peer and global sides
+    /// agree on who is a reflector.
+    ///
+    /// The two flags are independent per RFC 4456 §3 — `route_reflector_client`
+    /// on a peer whose local speaker has no `route_reflector.enabled`
+    /// does not stamp reflection attributes, mirroring the
+    /// [`lr_router::SessionConfig`] contract.
+    ///
+    /// [`SessionConfig`]: lr_router::SessionConfig
+    pub route_reflector_client: Option<bool>,
 }
 
 impl PeerSpec {
@@ -875,6 +896,23 @@ pub(crate) struct DaemonConfig {
     /// default (FRR's default; the cost is duplicate RIB memory per
     /// peer). Per-peer overrides via `[peer] soft_reconfig_inbound`.
     pub soft_reconfig_inbound: bool,
+    /// RFC 4456 §10 route-reflector cluster id (router-wide). When
+    /// `Some("A.B.C.D")` the local speaker identifies as a route
+    /// reflector with the given 4-byte cluster id, the value is
+    /// propagated to every BGP session's `route_reflector.enabled =
+    /// true` / `route_reflector.cluster_id` at `build_session_config`
+    /// time, and the speaker prepends it to CLUSTER_LIST when
+    /// reflecting a route to an RR client. When `None` the speaker
+    /// becomes a route reflector only when at least one peer has
+    /// `[[peer]] route_reflector_client = true` set; in that case the
+    /// effective cluster id falls back to the local BGP identifier
+    /// (RFC 4456 §10: "the BGP Identifier of the route reflector ...
+    /// can serve as the cluster id").
+    ///
+    /// FRR `bgp cluster-id A.B.C.D` / BIRD `route reflector cluster_id
+    /// A.B.C.D;` both translate to this key. The lr DSL exposes the
+    /// same `route_reflector_cluster_id` key under `[bgp]`.
+    pub route_reflector_cluster_id: Option<String>,
     /// W6.3 exchange-plane prototype (`[bgp] exchange_plane`,
     /// `--exchange-plane`): advertise the LRXP capability (code 251) on
     /// every BGP peer and activate the record plane where the peer
@@ -2986,6 +3024,22 @@ pub(crate) fn apply_config_key(
             cfg.ebgp_policy = value.to_string();
         }
         "bgp.enforce_first_as" => cfg.enforce_first_as = parse_bool(value),
+        "bgp.route_reflector_cluster_id" => {
+            // RFC 4456 §10: a 4-byte IPv4-shaped cluster id. The
+            // `ClusterId::from_str` parser (lr_bgp::role::cluster)
+            // rejects anything that does not parse as an IPv4
+            // dotted-quad, so a malformed value surfaces here as a
+            // parse error instead of landing silently in the TOML
+            // as a string the daemon cannot resolve.
+            lr_bgp::role::ClusterId::from_str(value).map_err(|_| {
+                format!(
+                    "line {}: bad route_reflector_cluster_id '{}' (expected A.B.C.D)",
+                    lineno + 1,
+                    value,
+                )
+            })?;
+            cfg.route_reflector_cluster_id = Some(value.to_string());
+        }
         "bgp.bestpath_compare_routerid" => {
             cfg.bestpath_compare_routerid = parse_bool(value);
         }
@@ -4721,6 +4775,12 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         }
         "bfd" => peer.bfd = Some(parse_bool(value)),
         "bfd_multihop" => peer.bfd_multihop = Some(parse_bool(value)),
+        // RFC 4456 §3 route-reflector client flag. The local speaker's
+        // route-reflector enabled flag and cluster id are router-wide
+        // (the daemon owns the cluster id; the local speaker is one
+        // route reflector), so the per-peer key only flips the client
+        // membership for this session.
+        "route_reflector_client" => peer.route_reflector_client = Some(parse_bool(value)),
         "import" => peer.import = Some(value.to_string()),
         "export" => peer.export = Some(value.to_string()),
         "import_filter" => peer.import_filter = Some(value.to_string()),

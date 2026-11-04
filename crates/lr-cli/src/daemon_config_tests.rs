@@ -2298,3 +2298,72 @@ fn deprecation_notice_keys_on_the_resolved_dialect() {
         );
     }
 }
+
+// ---- RFC 4456 §3 + §10: route-reflector TOML keys ----
+
+/// `[bgp] route_reflector_cluster_id = "A.B.C.D"` parses into
+/// `DaemonConfig::route_reflector_cluster_id`. A malformed value
+/// (not an IPv4 dotted-quad) fails closed at parse time so the
+/// daemon cannot start with a cluster id it cannot resolve.
+#[test]
+fn toml_bgp_route_reflector_cluster_id_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nroute_reflector_cluster_id = \"10.0.0.254\"\n",
+        &mut cfg,
+    )
+    .expect("a valid IPv4 cluster id parses");
+    assert_eq!(
+        cfg.route_reflector_cluster_id.as_deref(),
+        Some("10.0.0.254")
+    );
+}
+
+#[test]
+fn toml_bgp_route_reflector_cluster_id_malformed_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    let err = parse_toml_subset(
+        "[bgp]\nroute_reflector_cluster_id = \"not-an-ip\"\n",
+        &mut cfg,
+    )
+    .expect_err("a non-IPv4 cluster id must fail");
+    assert!(
+        err.contains("bad route_reflector_cluster_id"),
+        "expected a 'bad route_reflector_cluster_id' error, got: {err}"
+    );
+}
+
+/// Per-peer `route_reflector_client = true` parses into the
+/// `PeerSpec`'s field. `false` also parses (a future `no rr client`
+/// mapping can flip it back). The global
+/// `route_reflector_cluster_id` is what enables reflection on the
+/// local speaker; the per-peer flag only marks the client.
+#[test]
+fn toml_peer_route_reflector_client_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64512\nroute_reflector_client = true\n",
+        &mut cfg,
+    )
+    .expect("a bool value parses");
+    cfg.finalize()
+        .expect("finalize succeeds with one valid peer");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].route_reflector_client, Some(true));
+}
+
+#[test]
+fn toml_peer_route_reflector_client_false_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64512\nroute_reflector_client = false\n",
+        &mut cfg,
+    )
+    .expect("a bool value parses");
+    cfg.finalize()
+        .expect("finalize succeeds with one valid peer");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].route_reflector_client, Some(false));
+}
