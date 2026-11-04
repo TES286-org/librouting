@@ -1,10 +1,17 @@
-//! Route Reflector cluster identification (RFC 4456 §9 + §10).
+//! Route Reflector cluster identification (RFC 4456 §8 + §10).
 //!
 //! A route reflector is identified by a 4-byte cluster identifier. When the
 //! local speaker acts as a route reflector, it:
 //!
-//! 1. Inserts its own [`RouterId`] as [`path::well_known`] ORIGINATOR_ID when
-//!    advertising a route to an RR-client (only if ORIGINATOR_ID is absent).
+//! 1. Stamps the ORIGINATOR_ID attribute (RFC 4456 §8) when reflecting a
+//!    route to an RR-client — *only if* the attribute is not already present
+//!    (the RFC says a speaker SHOULD NOT create one when one exists). The
+//!    value is the BGP Identifier of the originator of the route in the
+//!    local AS — i.e. the source router that originated the route into
+//!    iBGP, NOT the route reflector's own identifier. For a locally
+//!    originated route the originator is the local speaker, so its own
+//!    BGP Identifier is the correct value; for a route learned from an
+//!    iBGP peer the originator is that peer.
 //! 2. Prepends its [`ClusterId`] to the CLUSTER_LIST when reflecting a route.
 //! 3. Discards routes whose CLUSTER_LIST contains its own cluster id
 //!    (loop detection).
@@ -79,12 +86,28 @@ impl RouteReflectorConfig {
     }
 }
 
-/// Compute the new ORIGINATOR_ID to insert when reflecting `route` to an
-/// RR-client. Returns the ORIGINATOR_ID to insert, if any.
+/// Compute the ORIGINATOR_ID to stamp when reflecting a route to an
+/// RR-client (RFC 4456 §8).
 ///
-/// Per RFC 4456 §9, ORIGINATOR_ID is the BGP identifier of the route
-/// reflector that originated the route into the cluster. If the route already
-/// has an ORIGINATOR_ID, it is preserved.
+/// `existing_originator_id` is the ORIGINATOR_ID already on the route
+/// (preserved verbatim when present — RFC 4456 §8: "A BGP speaker SHOULD
+/// NOT create an ORIGINATOR_ID attribute if one already exists").
+///
+/// `local_bgp_id` is the BGP Identifier to stamp when no existing
+/// ORIGINATOR_ID is present. Despite the historical name (preserved for
+/// API stability), per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP
+/// Identifier of the originator of the route in the local AS" — i.e.
+/// the source router that originated the route into iBGP, *not* the
+/// route reflector's own identifier. Callers should therefore supply
+/// the source peer's BGP Identifier for an iBGP-learned route, or the
+/// local speaker's BGP Identifier for a locally originated route (in
+/// which case the local speaker is itself the originator and the
+/// historical "local_bgp_id" name is accurate).
+///
+/// Returns the `RouterId` to stamp, or `None` when an existing
+/// ORIGINATOR_ID is to be preserved (the caller is responsible for
+/// not overwriting in that case — typically by checking
+/// `PathAttributes::get(AttrType::OriginatorId).is_none()` first).
 pub fn compute_originator_id(
     existing_originator_id: Option<RouterId>,
     local_bgp_id: RouterId,
@@ -144,12 +167,16 @@ mod tests {
     }
 
     #[test]
-    fn originator_id_falls_back_to_local() {
-        let local = RouterId::from_v4([10, 0, 0, 1]);
-        // No existing ORIGINATOR_ID -> use local.
-        assert_eq!(compute_originator_id(None, local), Some(local));
-        // Existing preserved.
-        let other = RouterId::from_v4([10, 0, 0, 2]);
-        assert_eq!(compute_originator_id(Some(other), local), Some(other));
+    fn originator_id_falls_back_to_supplied_value() {
+        // The supplied BGP Identifier is what gets stamped when no
+        // existing ORIGINATOR_ID is on the route — the caller is
+        // responsible for passing the originator's BGP Identifier
+        // (the source peer's for iBGP-learned routes, the local
+        // speaker's for locally-originated routes).
+        let supplied = RouterId::from_v4([10, 0, 0, 1]);
+        assert_eq!(compute_originator_id(None, supplied), Some(supplied));
+        // Existing ORIGINATOR_ID is preserved (RFC 4456 §8).
+        let existing = RouterId::from_v4([10, 0, 0, 2]);
+        assert_eq!(compute_originator_id(Some(existing), supplied), Some(existing));
     }
 }

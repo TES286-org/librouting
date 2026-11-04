@@ -46,6 +46,17 @@ const LR_ERR_OTHER: i32 = -6;
 /// ORIGINATOR_ID to `*out_addr` and `1` to `*out_present` when a
 /// value is to be inserted.
 ///
+/// Per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP Identifier of
+/// the originator of the route in the local AS" — i.e. the source
+/// router that originated the route into iBGP, NOT the route
+/// reflector's own identifier. The C ABI parameter is named
+/// `local_bgp_id` for historical reasons (preserved for header
+/// stability); the caller is responsible for supplying the
+/// originator's BGP Identifier: the source peer's for an iBGP-learned
+/// route, or the local speaker's for a locally originated route (in
+/// which case the local speaker is itself the originator and the
+/// historical "local_bgp_id" name is accurate).
+///
 /// # Safety
 /// All out-pointers must point to writable memory of the documented
 /// type; `out_addr` needs 4 bytes.
@@ -423,7 +434,13 @@ mod tests {
     }
 
     #[test]
-    fn ffi_compute_originator_id_uses_local_when_absent() {
+    fn ffi_compute_originator_id_uses_supplied_value_when_absent() {
+        // RFC 4456 §8: ORIGINATOR_ID carries the BGP Identifier of the
+        // originator of the route. When no existing ORIGINATOR_ID is
+        // present, the C ABI takes the caller-supplied `local_bgp_id`
+        // (named for historical reasons — the caller is expected to
+        // supply the originator's BGP Identifier, not the route
+        // reflector's own identifier).
         let mut out_addr = [0u8; 4];
         let mut present = 0u8;
         let rc = unsafe {

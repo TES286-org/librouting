@@ -8607,6 +8607,17 @@ int32_t lr_bgp_peer_reset(lr_bgp_peer_t r);
  * ORIGINATOR_ID to `*out_addr` and `1` to `*out_present` when a
  * value is to be inserted.
  *
+ * Per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP Identifier of
+ * the originator of the route in the local AS" — i.e. the source
+ * router that originated the route into iBGP, NOT the route
+ * reflector's own identifier. The C ABI parameter is named
+ * `local_bgp_id` for historical reasons (preserved for header
+ * stability); the caller is responsible for supplying the
+ * originator's BGP Identifier: the source peer's for an iBGP-learned
+ * route, or the local speaker's for a locally originated route (in
+ * which case the local speaker is itself the originator and the
+ * historical "local_bgp_id" name is accurate).
+ *
  * # Safety
  * All out-pointers must point to writable memory of the documented
  * type; `out_addr` needs 4 bytes.
