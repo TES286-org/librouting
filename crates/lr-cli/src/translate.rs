@@ -49,6 +49,16 @@
 //!   `default_ipv4_unicast = false` for an ipv6-only peer)
 //! - FRR `address-family ipv6 unicast` + `neighbor … activate` →
 //!   `mp_families += ipv6-unicast`
+//! - BIRD `rr client;` (RFC 4456 §3) → per-peer
+//!   `route_reflector_client = true`. BIRD `route reflector cluster_id
+//!   A.B.C.D;` (RFC 4456 §10) → `[bgp] route_reflector_cluster_id`
+//!   (router-wide, last write wins; `cluster_id 0.0.0.0` silently
+//!   dropped as it is lr's default fall-through to the local BGP
+//!   identifier).
+//! - FRR `bgp cluster-id A.B.C.D` (RFC 4456 §10) →
+//!   `[bgp] route_reflector_cluster_id`; FRR
+//!   `neighbor … route-reflector-client` (inside `address-family`) →
+//!   per-peer `route_reflector_client = true`.
 //! - FRR `aggregate-address A.B.C.D/M [summary-only] [as-set]
 //!   [route-map NAME]` → `[[aggregate]]` rows (RFC 4271 §9.2.2.2);
 //!   `summary-only`/`as-set`/`route-map` carry unmapped notes — lr's
@@ -90,15 +100,14 @@
 //! Directives are invisible to the reference implementations, so a
 //! config carrying them still loads in real BIRD / FRR.
 //!
-//! Not mapped (no lr equivalent): BIRD `multihop`, `rr client`,
-//! FRR `ebgp-multihop`, `shutdown`, VRFs, route reflector/cluster
-//! knobs, and anything inside non-BGP protocol stanzas. Non-BGP
-//! routing protocols (`protocol ospf …`, `router ospf`, …) are
-//! reported as ignored — the converter covers the BGP control plane.
-//! Lines inside a BGP stanza that have no mapping are kept as
-//! `# UNMAPPED:` comments; FRR peers whose `remote-as` never appears
-//! are dropped with a note instead of emitting a peer that cannot
-//! start.
+//! Not mapped (no lr equivalent): BIRD `multihop`, FRR
+//! `ebgp-multihop`, `shutdown`, VRFs, and anything inside non-BGP
+//! protocol stanzas. Non-BGP routing protocols (`protocol ospf …`,
+//! `router ospf`, …) are reported as ignored — the converter covers
+//! the BGP control plane. Lines inside a BGP stanza that have no
+//! mapping are kept as `# UNMAPPED:` comments; FRR peers whose
+//! `remote-as` never appears are dropped with a note instead of
+//! emitting a peer that cannot start.
 
 use std::process::ExitCode;
 
@@ -153,6 +162,14 @@ struct PeerOut {
     /// `lr:` directives scoped to this peer (inside the BIRD BGP
     /// stanza / FRR `neighbor ADDR` form).
     ext: Vec<LrDirective>,
+    /// BIRD `rr client;` / FRR `neighbor ADDR route-reflector-client`
+    /// → `route_reflector_client = true`. Per RFC 4456 §3 the flag
+    /// marks this peer as a route-reflector client; the local
+    /// speaker's route-reflector enablement (the cluster id half of
+    /// the RFC 4456 §10 contract) is the global
+    /// [`ConfigOut::route_reflector_cluster_id`] (FRR `bgp cluster-id`).
+    /// `None` means neither source dialect set the flag for this peer.
+    route_reflector_client: Option<bool>,
     /// Source lines with no lr equivalent.
     unmapped: Vec<String>,
 }
@@ -292,6 +309,17 @@ pub(super) struct ConfigOut {
     /// Dialect-specific default that differs from lr's: FRR runs with
     /// `bgp enforce-first-as` on, so an FRR config keeps that.
     enforce_first_as: Option<bool>,
+    /// FRR `bgp cluster-id A.B.C.D` / BIRD `route reflector cluster_id
+    /// A.B.C.D;` → `[bgp] route_reflector_cluster_id`. Per RFC 4456
+    /// §10 the local speaker's cluster id; absent in the source
+    /// config falls back to the local BGP identifier (the RFC's
+    /// default), and the daemon-side wiring turns the global flag
+    /// into `SessionConfig::route_reflector.enabled = true` on every
+    /// BGP session — even without the per-peer
+    /// [`PeerOut::route_reflector_client`] flag set (the local speaker
+    /// is still a reflector for the configured cluster id; the
+    /// per-peer flag only decides who is a client).
+    route_reflector_cluster_id: Option<String>,
 }
 
 /// Entry point: `lr translate <bird|frr> <file>`.
@@ -747,9 +775,46 @@ fn translate_bird(text: &str) -> ConfigOut {
                     &mut pending,
                 );
             }
-            "rr" if tokens.len() >= 2 && tokens[1] == "client" => {
+            // BIRD `rr client;` (RFC 4456 §3): mark the peer as an
+            // RR client. The cluster id half of the route-reflector
+            // contract is router-wide — BIRD lets the operator set
+            // it per-peer with `route reflector cluster_id X.X.X.X;`,
+            // but lr keys it off `[bgp] route_reflector_cluster_id`,
+            // so the per-peer form lands as an UNMAPPED note (the
+            // router-wide `cluster_id` directive below already maps
+            // to the global key). Without `rr client` the peer is a
+            // non-client; the local speaker's reflector enablement
+            // comes from the global `route_reflector_cluster_id`
+            // (FRR `bgp cluster-id`) and the daemon's
+            // `build_session_config` wires the per-peer flag through
+            // `SessionConfig::with_route_reflector_client`.
+            "rr" if tokens.len() >= 2 && tokens[1].trim_end_matches(';') == "client" => {
                 if let Some(peer) = current.as_mut() {
-                    peer.unmapped.push(line.trim().to_string());
+                    peer.route_reflector_client = Some(true);
+                }
+            }
+            // BIRD `route reflector cluster_id A.B.C.D;` (RFC 4456 §10):
+            // the local speaker's cluster id. BIRD lets this directive
+            // appear inside a `protocol bgp` stanza, but lr keys it off
+            // `[bgp] route_reflector_cluster_id` (router-wide). When the
+            // source has multiple RR-client peers each carrying its own
+            // `cluster_id` line, the last one wins — the operator
+            // almost always pins one cluster id per reflector, and a
+            // mismatched pair would silently reflect with two ids, so
+            // the resulting UNMAPPED note from the second peer's value
+            // keeps the conflict visible. `cluster_id 0.0.0.0` is BIRD's
+            // spelling for "use the local router id", which is lr's
+            // default too — silently ignored to keep the generated
+            // config clean.
+            "route"
+                if current.is_some()
+                    && tokens.len() >= 4
+                    && tokens[1] == "reflector"
+                    && tokens[2] == "cluster_id" =>
+            {
+                let value = tokens[3].trim_end_matches(';');
+                if value != "0.0.0.0" {
+                    out.route_reflector_cluster_id = Some(value.to_string());
                 }
             }
             // Anything else inside the BGP stanza has no lr mapping —
@@ -1797,6 +1862,23 @@ fn translate_frr(text: &str) -> ConfigOut {
             "bgp" if tokens.len() >= 3 && tokens[1] == "router-id" => {
                 out.router_id = Some(tokens[2].to_string());
             }
+            // FRR `bgp cluster-id A.B.C.D` (RFC 4456 §10): the local
+            // speaker's cluster id. Maps onto lr's router-wide
+            // `[bgp] route_reflector_cluster_id`. FRR also accepts the
+            // integer form (`bgp cluster-id 16843009`) — lr keeps the
+            // IPv4-dotted-quad spelling, so the integer form lands as
+            // UNMAPPED with the original line preserved so the
+            // operator can convert it manually.
+            "bgp" if tokens.len() >= 3 && tokens[1] == "cluster-id" => {
+                let v = tokens[2];
+                if v.matches('.').count() == 3 && v.parse::<lr_bgp::role::ClusterId>().is_ok() {
+                    out.route_reflector_cluster_id = Some(v.to_string());
+                } else {
+                    out.unmapped_global.push(format!(
+                        "{line} — integer cluster-id form not mapped (use A.B.C.D)"
+                    ));
+                }
+            }
             // `bgp as-path access-list NAME permit|deny PATTERN` —
             // lr's [[as-path-list]] rows.
             "bgp" if tokens.len() >= 6 && tokens[1] == "as-path" && tokens[2] == "access-list" => {
@@ -2553,6 +2635,19 @@ fn apply_frr_neighbor(
                 }
             }
         }
+        // FRR `neighbor ADDR route-reflector-client` (RFC 4456 §3):
+        // mark the peer as an RR client. FRR only allows this inside
+        // an `address-family` block; lr scopes it per-peer (the
+        // family-agnostic form), so the directive maps regardless of
+        // the active AF context — a v6-only RR client carries the
+        // same per-peer flag. The local speaker's reflector
+        // enablement comes from `bgp cluster-id` (mapped above) or
+        // falls back to the local BGP identifier (RFC 4456 §10).
+        "route-reflector-client" => {
+            if let Some(peer) = peer_for_or_create(out, &addr) {
+                peer.route_reflector_client = Some(true);
+            }
+        }
         _ => {
             if let Some(peer) = peer_for_or_create(out, &addr) {
                 peer.unmapped
@@ -2790,6 +2885,16 @@ fn render(out: ConfigOut) -> String {
         // has no such check. Emitted only when the source dialect
         // differs from the lr default (off).
         s.push_str("enforce_first_as = true\n");
+    }
+    if let Some(cidr) = &out.route_reflector_cluster_id {
+        // FRR `bgp cluster-id` / BIRD `route reflector cluster_id` —
+        // already validated to parse as `ClusterId` (an IPv4
+        // dotted-quad) at the parse site, so the value renders as a
+        // bare TOML string.
+        s.push_str(&format!(
+            "route_reflector_cluster_id = {}\n",
+            toml_str(cidr)
+        ));
     }
     // Remaining global `lr:` directives land in the [bgp] section.
     for (k, v) in &bgp_ext {
@@ -3107,6 +3212,15 @@ fn render(out: ConfigOut) -> String {
         }
         if let Some(e) = &peer.export_filter {
             s.push_str(&format!("export_filter = {}\n", toml_str(e)));
+        }
+        if let Some(true) = peer.route_reflector_client {
+            // BIRD `rr client;` / FRR `neighbor ADDR
+            // route-reflector-client` — already validated at the
+            // parse site. Emitted only when set true; `None` (the
+            // default) and `Some(false)` (a future `no rr client`
+            // mapping) both stay quiet to keep the converted config
+            // minimal.
+            s.push_str("route_reflector_client = true\n");
         }
         for u in &peer.unmapped {
             s.push_str(&format!("# UNMAPPED: {u}\n"));

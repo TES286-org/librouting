@@ -1632,3 +1632,255 @@ protocol bgp customer {
     assert!(body.contains("defined(bgp.pmsi_tunnel)"), "body: {body}");
     assert!(body.contains("!defined(bgp.pmsi_tunnel)"), "body: {body}");
 }
+
+// ---- RFC 4456 §3 + §10: route-reflector wiring (BIRD + FRR) ----
+
+/// BIRD's `rr client;` directive (RFC 4456 §3) maps onto the per-peer
+/// `route_reflector_client = true` TOML key. Without it the converter
+/// would push the line to `# UNMAPPED:`, forcing the operator to
+/// hand-migrate every RR-client peer; with it a BIRD config carrying
+/// the directive runs unchanged.
+#[test]
+fn bird_rr_client_maps_to_peer_route_reflector_client() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+protocol bgp rr_client_a {
+    local as 64512;
+    neighbor 192.0.2.2 as 64512;
+    rr client;
+    ipv4 {
+        import all;
+        export all;
+    };
+}
+
+protocol bgp non_client {
+    local as 64512;
+    neighbor 192.0.2.3 as 64512;
+    ipv4 {
+        import all;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    // The first peer (rr_client_a) carries the directive; the
+    // second (non_client) does not. Both peers should round-trip.
+    assert_eq!(cfg.peers.len(), 2);
+    let rr = cfg
+        .peers
+        .iter()
+        .find(|p| p.name.as_deref() == Some("rr_client_a"))
+        .expect("rr_client_a peer survived round-trip");
+    assert_eq!(
+        rr.route_reflector_client,
+        Some(true),
+        "rr client maps to route_reflector_client = true"
+    );
+    let non = cfg
+        .peers
+        .iter()
+        .find(|p| p.name.as_deref() == Some("non_client"))
+        .expect("non_client peer survived round-trip");
+    assert_eq!(
+        non.route_reflector_client, None,
+        "no rr client = no route_reflector_client key"
+    );
+    // The rendered TOML must carry the key for the RR client peer
+    // and not carry it for the non-client peer.
+    assert!(
+        toml.contains("route_reflector_client = true"),
+        "expected `route_reflector_client = true` in rendered TOML:\n{toml}"
+    );
+    // The unmapped list must NOT keep the original `rr client;`
+    // line as a fallback note — the directive mapped successfully.
+    assert!(
+        !toml.contains("# UNMAPPED: rr client"),
+        "rr client should not appear as UNMAPPED:\n{toml}"
+    );
+}
+
+/// BIRD's `route reflector cluster_id A.B.C.D;` (RFC 4456 §10) maps
+/// onto the router-wide `[bgp] route_reflector_cluster_id` key. The
+/// directive appears inside a `protocol bgp` stanza in BIRD, but lr
+/// keys it off the `[bgp]` global — last write wins when the source
+/// has multiple RR-client peers, mirroring BIRD's own router-wide
+/// effective cluster id. `cluster_id 0.0.0.0` is BIRD's spelling for
+/// "use the local router id", which is lr's default fall-through too;
+/// it is silently dropped so the generated config stays minimal.
+#[test]
+fn bird_route_reflector_cluster_id_maps_to_global() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+protocol bgp rr_client_a {
+    local as 64512;
+    neighbor 192.0.2.2 as 64512;
+    rr client;
+    route reflector cluster_id 10.0.0.254;
+    ipv4 {
+        import all;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(
+        cfg.route_reflector_cluster_id.as_deref(),
+        Some("10.0.0.254"),
+        "route reflector cluster_id maps to [bgp] route_reflector_cluster_id"
+    );
+    assert!(
+        toml.contains("route_reflector_cluster_id = \"10.0.0.254\""),
+        "expected `route_reflector_cluster_id = \"10.0.0.254\"` in rendered TOML:\n{toml}"
+    );
+}
+
+#[test]
+fn bird_route_reflector_cluster_id_zero_drops_silently() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+protocol bgp rr_client_a {
+    local as 64512;
+    neighbor 192.0.2.2 as 64512;
+    rr client;
+    route reflector cluster_id 0.0.0.0;
+    ipv4 {
+        import all;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    // 0.0.0.0 is BIRD's "fall back to the local router id" spelling,
+    // which is also lr's default — no key needs to be emitted.
+    assert_eq!(
+        cfg.route_reflector_cluster_id, None,
+        "cluster_id 0.0.0.0 must not be emitted as a TOML key"
+    );
+    assert!(
+        !toml.contains("route_reflector_cluster_id"),
+        "expected no `route_reflector_cluster_id` key in rendered TOML:\n{toml}"
+    );
+}
+
+/// FRR's `bgp cluster-id A.B.C.D` (RFC 4456 §10) maps onto the
+/// router-wide `[bgp] route_reflector_cluster_id` key. The integer
+/// form FRR also accepts (`bgp cluster-id 16843009`) does not map —
+/// lr keeps the IPv4-dotted-quad spelling and surfaces the original
+/// line as `# UNMAPPED:` so the operator can convert it manually.
+#[test]
+fn frr_bgp_cluster_id_maps_to_global() {
+    let toml = render(translate_frr(
+        r#"
+router bgp 64512
+ bgp router-id 10.0.0.1
+ bgp cluster-id 10.0.0.254
+ neighbor 192.0.2.2 remote-as 64512
+!
+ address-family ipv4 unicast
+  neighbor 192.0.2.2 route-reflector-client
+ exit-address-family
+!
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(
+        cfg.route_reflector_cluster_id.as_deref(),
+        Some("10.0.0.254"),
+        "FRR bgp cluster-id maps to [bgp] route_reflector_cluster_id"
+    );
+    assert!(
+        toml.contains("route_reflector_cluster_id = \"10.0.0.254\""),
+        "expected `route_reflector_cluster_id = \"10.0.0.254\"` in rendered TOML:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_bgp_cluster_id_integer_form_is_unmapped() {
+    let toml = render(translate_frr(
+        r#"
+router bgp 64512
+ bgp router-id 10.0.0.1
+ bgp cluster-id 16843009
+ neighbor 192.0.2.2 remote-as 64512
+!
+"#,
+    ));
+    // The integer form (1.1.1.1 in dotted-quad) does not parse as
+    // `ClusterId` (the parser requires an IPv4 dotted-quad), so the
+    // converter surfaces the original line as `# UNMAPPED:` instead
+    // of silently producing a config the daemon would refuse to
+    // load. The rendered TOML must not carry `route_reflector_cluster_id`.
+    assert!(
+        toml.contains("integer cluster-id form not mapped"),
+        "expected an UNMAPPED note for the integer cluster id:\n{toml}"
+    );
+    assert!(
+        !toml.contains("route_reflector_cluster_id"),
+        "expected no `route_reflector_cluster_id` key for integer form:\n{toml}"
+    );
+}
+
+/// FRR's `neighbor ADDR route-reflector-client` (RFC 4456 §3), which
+/// FRR only allows inside an `address-family` block, maps onto the
+/// per-peer `route_reflector_client = true` TOML key. Without it the
+/// directive would land in `# UNMAPPED:` like the `bgp cluster-id`
+/// integer form above; with it an FRR config carrying the directive
+/// runs unchanged.
+#[test]
+fn frr_neighbor_route_reflector_client_maps_per_peer() {
+    let toml = render(translate_frr(
+        r#"
+router bgp 64512
+ bgp router-id 10.0.0.1
+ bgp cluster-id 10.0.0.254
+ neighbor 192.0.2.2 remote-as 64512
+ neighbor 192.0.2.3 remote-as 64512
+!
+ address-family ipv4 unicast
+  neighbor 192.0.2.2 route-reflector-client
+ exit-address-family
+!
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.peers.len(), 2);
+    let rr = cfg
+        .peers
+        .iter()
+        .find(|p| p.remote.as_deref() == Some("192.0.2.2"))
+        .expect("RR client peer survived round-trip");
+    assert_eq!(
+        rr.route_reflector_client,
+        Some(true),
+        "neighbor X route-reflector-client maps to route_reflector_client = true"
+    );
+    let non = cfg
+        .peers
+        .iter()
+        .find(|p| p.remote.as_deref() == Some("192.0.2.3"))
+        .expect("non-client peer survived round-trip");
+    assert_eq!(
+        non.route_reflector_client, None,
+        "peer without route-reflector-client stays unset"
+    );
+    // The rendered TOML must carry the key for the RR client peer
+    // and not carry an UNMAPPED note for the directive.
+    assert!(
+        toml.contains("route_reflector_client = true"),
+        "expected `route_reflector_client = true` in rendered TOML:\n{toml}"
+    );
+    assert!(
+        !toml.contains("# UNMAPPED: neighbor 192.0.2.2 route-reflector-client"),
+        "route-reflector-client should not appear as UNMAPPED:\n{toml}"
+    );
+}
