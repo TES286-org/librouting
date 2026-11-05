@@ -2603,9 +2603,11 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
     // resolve yet, a route that appears later via Babel, etc.).
     match lr_osroute::source_check::check_source_compatibility(local, peer_ip) {
         lr_osroute::source_check::SourceCheck::Ok => {
-            // The bind test passed (Windows) or the platform does not
-            // implement the diagnostic (Linux/macOS). Either way, no
-            // warning — the daemon's `connect_bound` will use the
+            // The bind test passed (Windows), the kernel's preferred
+            // source for the peer matches the configured `local`
+            // (Linux `RTM_GETROUTE` `RTA_PREFSRC`), or the platform
+            // does not implement the diagnostic (macOS). Either way,
+            // no warning — the daemon's `connect_bound` will use the
             // configured `local` as the source.
         }
         lr_osroute::source_check::SourceCheck::NoRoute => {
@@ -2622,16 +2624,20 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
             configured,
             kernel_choice,
         } => {
-            // Non-Windows platforms: the kernel's default source differs
-            // from the configured `local`, but the daemon binds (which
-            // overrides the default on Linux/macOS). This is
-            // informational — no warning needed unless the bind also
-            // fails (which the non-Windows diagnostic cannot test).
+            // Linux `RTM_GETROUTE` reports the kernel's preferred
+            // source for the peer; macOS does not implement the
+            // diagnostic and never enters this arm. The kernel's
+            // default differs from the configured `local`, but the
+            // daemon binds (which overrides the default on Linux).
+            // This is informational — no warning needed unless the
+            // bind also fails (which the Linux diagnostic does not
+            // test; only the Windows diagnostic does a real `bind()`).
             log_info!(
                 Component::Bgp,
                 "peer {}: kernel default source for {} is \
                  {} (if {}) — the daemon binds to {} which overrides this; \
-                 verify the actual source via the 'outbound TCP established' log line",
+                 verify the actual source once the dial completes by inspecting \
+                 the peer-side session log",
                 entry.label(),
                 remote,
                 kernel_choice.source,
