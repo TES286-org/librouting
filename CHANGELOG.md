@@ -94,6 +94,32 @@ recompiling.
 
 ### Added
 
+**`lr-cli` complementary test for the exchange-plane feature gate**
+(`tests`, issue #92). The existing `daemon_exchange_plane.rs`
+integration test is gated with `#![cfg(all(unix, feature =
+"exchange-plane"))]` and exercises the daemon's opt-in path when the
+W6.3 prototype is compiled in (the session establishes, records
+flow, the key-mismatch drops records while keeping the route, a
+one-sided opt-in stays inert). The opposite side of the gate — what
+the daemon does when `exchange_plane = true` is configured but the
+binary was built WITHOUT the `exchange-plane` feature — had no test
+coverage: the `defects.txt` `crates/lr-cli/tests/daemon_exchange_plane.rs:L21
+| TEST-GAP` entry called out the gap. The new companion file
+`crates/lr-cli/tests/daemon_exchange_plane_off.rs` is gated with
+`#![cfg(all(unix, not(feature = "exchange-plane")))]` and asserts the
+daemon's fail-closed contract: spawning `lr-daemon --exchange-plane`
+(or with `--exchange-plane-key`) on a feature-less binary exits with
+code 2 and logs `peer {label}: exchange_plane requested but this
+binary was built without the exchange-plane feature`. A third test
+pins the negative case — a plain BGP daemon config that asks for
+neither flag nor key must NOT trip the gate (the regression guard).
+The existing `daemon_exchange_plane.rs` header now points at the
+companion file so a reader landing on either side of the gate finds
+the other. `cargo test` (default features) runs the `_off` file and
+skips the feature-on file; `cargo test --features exchange-plane`
+runs the converse. The CI matrix exercises both shapes; no public
+Rust API change, no C ABI change, no version bump.
+
 **`lr-ospf` SRv6 Locator LSA RFC 9084 Prefix Source sub-TLVs** (`ospf`,
 issue #92). The SRv6 Locator TLV (`Srv6LocatorTlv`) now parses and emits
 the RFC 9084 §2.1 Prefix Source OSPF Router-ID sub-TLV (Locator LSA
