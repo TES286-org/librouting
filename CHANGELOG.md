@@ -94,6 +94,63 @@ recompiling.
 
 ### Added
 
+**`lr-ospf` SRv6 locator reachability for every route type**
+(`ospf`, issue #92). The SRv6 Locator TLV (RFC 9513 §7.1) carries a
+`Route Type` field that selects the reachability calculation per
+§5: intra-area (1), inter-area (2), AS-external type 1 / 2 (3 / 4)
+and NSSA type 1 / 2 (5 / 6). Until this release the v3 SPF
+locator-attachment loop computed *only* intra-area locators — every
+inter-area, external, and NSSA locator TLV the SRv6 database
+projection kept was silently dropped, and a test
+(`v3_non_intra_area_locator_not_computed`) explicitly codified the
+gap as the expected behaviour. A receiver that wanted the FIB entry
+for a locator advertised by an ABR (or an ASBR, or an NSSA ASBR)
+got nothing, even though the upstream LSA was accepted, projected
+and deduplicated per §7.1. This release closes the gap by
+implementing the per-route-type reachability calculation per §5 +
+RFC 5340 §4.8.3 (inter-area shape) + RFC 2328 §16.4 (type-1 /
+type-2 external shape) + RFC 3101 §2.5 (NSSA shape):
+
+- **Intra-area (1)**: `metric = dist(advertising router)` (the
+  locator's owner is the advertising router; the TLV metric is
+  informational — the owner reports 0 for its own locator). This
+  is the previously-implemented shape and stays byte-for-byte
+  unchanged.
+- **Inter-area (2)**: `metric = dist(advertising router) +
+  TLV.metric` (saturating at `u64::MAX`), where the advertising
+  router is the ABR and the TLV metric is the ABR's reported
+  distance to the locator in the remote area — the same shape as a
+  v3 inter-area-prefix route derived from a 0x2003 LSA (RFC 5340
+  §4.8.3).
+- **AS-external type 1 (3) / NSSA type 1 (5)**: `metric =
+  dist(advertising router) + TLV.metric` (saturating), mirroring
+  the type-1 external route shape (`internal_cost +
+  external_metric`, RFC 2328 §16.4 / RFC 3101 §2.5).
+- **AS-external type 2 (4) / NSSA type 2 (6)**: `metric =
+  TLV.metric` (the external metric dominates); the SPF distance
+  to the ASBR / NSSA ASBR is recorded as `internal_cost` so an
+  embedder that compares locators covering the same prefix can
+  apply the §16.4 (6) tie-break ("smaller external metric wins;
+  tie-break by smaller internal cost") without recomputing the SPF
+  distance.
+
+This is a breaking change to the Rust pub API of `lr-ospf` — two
+new `pub` fields on `SpfLocatorRoute` (`internal_cost: u64` and
+`route_type: u8`), plus a `#[non_exhaustive]` annotation that
+mirrors `SpfRoute` / `ExternalRouteV3` so future additions (e.g. a
+forwarding-address field per RFC 9513 §7.2 sub-TLV 1) land without
+forcing every literal construction site to add the new field at
+every minor. The C ABI surface does not surface `SpfLocatorRoute`
+directly — the FFI's `lr_ospf_spf_v3_locator_at` projects through
+`SpfRoute::from_locator` (which keeps its existing signature), so
+`lr_ffi.h`, `librouting.hpp` and the Python / Go bindings are
+unchanged. The previously-codifying test was renamed to
+`v3_inter_area_locator_computed_at_root_with_locator_metric` and
+now asserts the locator IS computed; six new tests pin each route
+type's metric shape (inter-area, external type 1 / 2, NSSA type 1
+/ 2, plus two parametric tests covering unreachable TLV metric and
+unreachable advertising router for every route type).
+
 **`lr-cli` complementary test for the exchange-plane feature gate**
 (`tests`, issue #92). The existing `daemon_exchange_plane.rs`
 integration test is gated with `#![cfg(all(unix, feature =

@@ -119,19 +119,26 @@ pub const EXT_SUBTLV_SID_STRUCTURE: u16 = 30;
 /// Locator route types (RFC 9513 §7.1). Any other value ignores the
 /// whole Locator TLV on receipt.
 pub mod locator_route_type {
-    /// Intra-area (the only route type whose reachability this crate
-    /// computes today — inter-area/external locator propagation rides
-    /// the v3 0x2003/0x4005 calculation, a later slice).
+    /// Intra-area. The advertising router is the locator's owner;
+    /// `metric = dist(adv)` (the TLV metric is informational — the
+    /// owner reports 0 for its own locator).
     pub const INTRA_AREA: u8 = 1;
-    /// Inter-area.
+    /// Inter-area. The advertising router is the ABR forwarding the
+    /// locator into the receiver's area; `metric = dist(adv) +
+    /// TLV.metric` (RFC 5340 §4.8.3 summary-LSA shape).
     pub const INTER_AREA: u8 = 2;
-    /// AS external type 1.
+    /// AS external type 1. The advertising router is the ASBR;
+    /// `metric = dist(adv) + TLV.metric` (RFC 2328 §16.4 type-1).
     pub const AS_EXTERNAL_1: u8 = 3;
-    /// AS external type 2.
+    /// AS external type 2. The advertising router is the ASBR;
+    /// `metric = TLV.metric` (RFC 2328 §16.4 type-2 — the external
+    /// metric dominates; `dist(adv)` is the §16.4 (6) tie-break).
     pub const AS_EXTERNAL_2: u8 = 4;
-    /// NSSA external type 1.
+    /// NSSA external type 1. The advertising router is the NSSA
+    /// ASBR; same metric shape as [`AS_EXTERNAL_1`] (RFC 3101 §2.5).
     pub const NSSA_1: u8 = 5;
-    /// NSSA external type 2.
+    /// NSSA external type 2. The advertising router is the NSSA
+    /// ASBR; same metric shape as [`AS_EXTERNAL_2`] (RFC 3101 §2.5).
     pub const NSSA_2: u8 = 6;
 }
 

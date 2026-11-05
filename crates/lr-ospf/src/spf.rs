@@ -818,26 +818,76 @@ pub struct SpfResultV3 {
     /// deduplicated per prefix keeping the lowest metric.
     pub routes: Vec<SpfRoute>,
     /// SRv6 locators (RFC 9513 §5) reachable through their advertising
-    /// router — intra-area route type only, deduplicated per locator
-    /// prefix by the §7.1 preference. The router layer gates these on
-    /// the algorithms it supports (the receiver's algorithm set is not
+    /// router — every supported route type (intra-area, inter-area,
+    /// AS-external type 1/2, NSSA type 1/2). The route type selects the
+    /// reachability calculation per §5: intra-area follows the
+    /// intra-area SPF distance; inter-area, external type 1 and NSSA
+    /// type 1 add the TLV metric to the SPF distance to the
+    /// advertising router (the ABR / ASBR); external type 2 and NSSA
+    /// type 2 use the TLV metric as the primary metric with the SPF
+    /// distance to the advertising router as the tie-breaker (mirrors
+    /// the §16.4 type-2 ordering). Locators are deduplicated per
+    /// locator prefix by the §7.1 preference inside the SRv6
+    /// database projection. The router layer gates these on the
+    /// algorithms it supports (the receiver's algorithm set is not
     /// LSDB data) and on the §5 preference for prefix reachability
     /// advertisements covering the same prefix.
     pub locators: Vec<SpfLocatorRoute>,
 }
 
 /// One SRv6 locator route (RFC 9513 §5): the locator of one advertising
-/// router with the SPF distance and first hop of that router. The
-/// locator metric itself is the router distance — the TLV metric is
-/// meaningful for inter-area/external propagation (a later slice) and
-/// a 0xFFFFFFFF (unreachable) TLV metric never reaches here.
+/// router with the SPF distance and first hop of that router.
+///
+/// `route_type` selects the reachability calculation per §5 — see
+/// [`crate::lsa::srv6::locator_route_type`] for the six route types
+/// and the metric rules each one implies. `metric` is the
+/// OSPF-comparable metric the embedder installs in the FIB:
+///
+/// - **Intra-area** (`INTRA_AREA`): the SPF distance to the
+///   advertising router (the locator's owner). The TLV metric is
+///   informational — the owner reports 0 for its own locator.
+/// - **Inter-area, AS-external type 1, NSSA type 1**: the SPF
+///   distance to the advertising router (the ABR or ASBR) plus the
+///   TLV metric, saturating at `u64::MAX`. The TLV metric is the
+///   ABR / ASBR's reported distance to the locator in the remote
+///   area or the external network — the same shape as a
+///   summary-LSA or type-1 external route.
+/// - **AS-external type 2, NSSA type 2**: the TLV metric only — the
+///   OSPF type-2 ordering rule ("the external metric dominates; the
+///   AS-internal distance to the ASBR breaks ties") lives in
+///   `internal_cost` so an embedder that compares locators with the
+///   same prefix can apply it without recomputing the SPF distance.
+///
+/// `internal_cost` is the SPF distance to the advertising router
+/// (zero for the root itself). It is informational for intra-area
+/// and type-1 routes; for type-2 routes it is the tie-breaker the
+/// §16.4 step (6) ordering demands.
+///
+/// `#[non_exhaustive]` mirrors [`SpfRoute`] / [`ExternalRouteV3`] —
+/// future additions (e.g. a forwarding-address field per RFC 9513
+/// §7.2 sub-TLV 1) land without forcing every literal construction
+/// site to add the new field at every minor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SpfLocatorRoute {
     pub prefix: Prefix,
     /// The IGP algorithm the locator is bound to (0 = SPF).
     pub algorithm: u8,
-    /// The SPF distance to the advertising router.
+    /// The OSPF-comparable metric the embedder installs in the FIB.
+    /// See the struct docs for the per-`route_type` rules.
     pub metric: u64,
+    /// The SPF distance to the advertising router (the ABR / ASBR for
+    /// non-intra-area locators). Type-2 locators use this as the
+    /// §16.4 (6) tie-breaker; the other route types fold it into
+    /// `metric` (intra-area: it *is* the metric; type 1: the TLV
+    /// metric is added to it).
+    pub internal_cost: u64,
+    /// [`crate::lsa::srv6::locator_route_type`] value carried by the
+    /// winning locator TLV (1-6). The embedder dispatches on this to
+    /// apply the correct ordering across locators covering the same
+    /// prefix (type 1 vs type 2, then the metric, then the
+    /// `internal_cost` tie-breaker for type 2).
+    pub route_type: u8,
     /// The advertising router's resolved first hop(s); empty when the
     /// router is the root itself (directly connected) or when no
     /// link-local could be resolved. Multiple entries mean the router
@@ -1417,22 +1467,69 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
     }
     result.routes = best.into_values().map(|(r, _)| r).collect();
 
-    // Attach the SRv6 locators (RFC 9513 §5): a locator is reachable
-    // through its advertising router, so an intra-area locator's
-    // metric is the router's SPF distance and its first hop the
-    // router's. The Srv6Database projection applies the §7.1
-    // duplicate preference; locators with the unreachable TLV metric
-    // or an unsupported route type never become routes here.
+    // Attach the SRv6 locators (RFC 9513 §5). The route type in each
+    // locator TLV selects the reachability calculation, mirroring the
+    // OSPFv3 rules for the corresponding LSA type:
+    //
+    // - INTRA_AREA (1): the locator is in the same area; the
+    //   advertising router is the locator's owner. The metric is the
+    //   SPF distance to that router (the TLV metric is informational
+    //   — the owner reports 0 for its own locator).
+    // - INTER_AREA (2): the advertising router is the ABR; the
+    //   metric is the SPF distance to the ABR plus the TLV metric
+    //   (the ABR's reported distance to the locator in the remote
+    //   area) — the same shape as a v3 inter-area summary route.
+    // - AS_EXTERNAL_1 (3) / NSSA_1 (5): the advertising router is the
+    //   ASBR / NSSA ASBR; the metric is the SPF distance to the ASBR
+    //   plus the TLV metric (type-1 external: the external metric is
+    //   added to the internal cost).
+    // - AS_EXTERNAL_2 (4) / NSSA_2 (6): the metric is the TLV metric
+    //   only (type-2 external: the external metric dominates). The
+    //   SPF distance to the ASBR is recorded as `internal_cost` so
+    //   the embedder can apply the §16.4 (6) tie-break ("smaller
+    //   external metric wins; tie-break by smaller internal cost")
+    //   across locators covering the same prefix.
+    //
+    // Locators with the unreachable TLV metric (0xFFFFFFFF) or a
+    // route type outside 1-6 never reach here — the SRv6 database
+    // projection drops them. Locators whose advertising router is
+    // unreachable from the root (no SPF distance) are skipped — the
+    // ABR / ASBR has no first hop, so the locator's first hop is
+    // undefined and the route would be uninstallable. The §7.1
+    // duplicate preference is applied inside the projection; the
+    // router layer applies the §5 preference for prefix reachability
+    // advertisements covering the same prefix and gates on the
+    // receiver's supported algorithms (neither is LSDB data).
     let srv6 = crate::srv6db::Srv6Database::from_lsdb(lsdb);
     let mut locators = Vec::new();
     for (&adv, node) in &srv6.nodes {
         for loc in &node.locators {
-            if loc.route_type != locator_route_type::INTRA_AREA || loc.is_unreachable() {
+            if loc.is_unreachable() {
                 continue;
             }
             let vertex = V3VertexId::Router(adv);
-            let Some(&metric) = dist.get(&vertex) else {
+            let Some(&internal_cost) = dist.get(&vertex) else {
                 continue;
+            };
+            // RFC 9513 §5 + RFC 2328 §16.4 (type-2 ordering): the
+            // route type chooses the metric shape. Type-2 routes
+            // keep the TLV metric as the primary metric and let the
+            // SPF distance to the ASBR break ties; the other route
+            // types fold the SPF distance into the metric (intra-
+            // area: it *is* the metric; type-1 / inter-area: the TLV
+            // metric is added to it).
+            let metric = match loc.route_type {
+                locator_route_type::INTRA_AREA => internal_cost,
+                locator_route_type::INTER_AREA
+                | locator_route_type::AS_EXTERNAL_1
+                | locator_route_type::NSSA_1 => internal_cost.saturating_add(u64::from(loc.metric)),
+                locator_route_type::AS_EXTERNAL_2 | locator_route_type::NSSA_2 => {
+                    u64::from(loc.metric)
+                }
+                // Unsupported route types never reach the projection
+                // (§7.1 ignores the TLV), so this arm is unreachable;
+                // `Other` keeps the match exhaustive over `u8`.
+                _ => continue,
             };
             let next_hop: Vec<IpAddr> = if adv == root {
                 Vec::new()
@@ -1447,6 +1544,8 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
                 prefix: loc.prefix,
                 algorithm: loc.algorithm,
                 metric,
+                internal_cost,
+                route_type: loc.route_type,
                 next_hop,
                 advertising_router: adv,
             });

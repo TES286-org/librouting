@@ -607,11 +607,22 @@ fn v3_own_locator_connected_and_unreachable_locator_dropped() {
     assert!(loc.next_hop.is_empty());
 }
 
-/// An inter-area locator (route type 2) is not computed until the
-/// v3 inter-area calculation exists — it stays out of the locator
-/// routes.
+/// RFC 9513 §5 — every supported route type produces a locator
+/// route. The earlier slice computed only intra-area locators and
+/// dropped the other route types; this test pins the contract that
+/// inter-area, AS-external type 1 / 2, and NSSA type 1 / 2 are all
+/// computed (the `v3_*_locator_*` tests below cover each route type's
+/// metric and tie-break shape in detail).
+///
+/// The inter-area locator's reachability follows RFC 5340 §4.8.3
+/// (inter-area-prefix-LSA shape): a router that originates an SRv6
+/// Locator TLV with route type 2 reports the locator's distance from
+/// itself in the TLV metric. The receiving router adds that to its
+/// SPF distance to the originator (the ABR), so a locator whose
+/// originator is the root itself carries `metric = 0 + TLV.metric`
+/// and an empty next hop (the root has no first hop toward itself).
 #[test]
-fn v3_non_intra_area_locator_not_computed() {
+fn v3_inter_area_locator_computed_at_root_with_locator_metric() {
     use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
     let mut db = Lsdb::new();
     let r1 = 0x0a00_0001;
@@ -634,7 +645,337 @@ fn v3_non_intra_area_locator_not_computed() {
         0,
     );
     let spf = run_spf_v3(&db, r1);
-    assert!(spf.locators.is_empty());
+    assert_eq!(spf.locators.len(), 1, "the inter-area locator is computed");
+    let loc = &spf.locators[0];
+    assert_eq!(loc.route_type, locator_route_type::INTER_AREA);
+    assert_eq!(loc.metric, 10, "0 (root distance) + 10 (TLV metric)");
+    assert_eq!(loc.internal_cost, 0, "the root is its own ABR");
+    assert!(loc.next_hop.is_empty(), "no first hop toward the root");
+    assert_eq!(loc.advertising_router, r1);
+}
+
+/// Inter-area locator reachability across a real p2p backbone
+/// (RFC 9513 §5 + RFC 5340 §4.8.3): r2 is the ABR that originates the
+/// locator TLV with route type 2 and a TLV metric of 5; r1 has an SPF
+/// distance of 10 to r2. The computed locator carries `metric = 15`,
+/// `internal_cost = 10`, and r2's link-local as the first hop — the
+/// same shape as a v3 inter-area-prefix route derived from a 0x2003
+/// LSA.
+#[test]
+fn v3_inter_area_locator_uses_abr_distance_plus_locator_metric() {
+    use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let (db, _ll1, ll2) = v3_p2p_lsdb(r1, r2, 5, 3, 10);
+    let mut db = db;
+    let mut prefix = [0u8; 16];
+    prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+    let tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTER_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 5,
+        prefix,
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    db.install(
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap(),
+        0,
+    );
+    let spf = run_spf_v3(&db, r1);
+    assert_eq!(spf.locators.len(), 1);
+    let loc = &spf.locators[0];
+    assert_eq!(loc.route_type, locator_route_type::INTER_AREA);
+    assert_eq!(loc.metric, 15, "10 (SPF to r2) + 5 (TLV metric)");
+    assert_eq!(loc.internal_cost, 10);
+    assert_eq!(loc.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
+    assert_eq!(loc.advertising_router, r2);
+}
+
+/// AS-external type-1 locator (RFC 9513 §5 + RFC 2328 §16.4 type-1):
+/// the TLV metric is added to the SPF distance to the ASBR, mirroring
+/// the type-1 external route shape (`internal_cost + external_metric`).
+#[test]
+fn v3_external_type1_locator_uses_asbr_distance_plus_external_metric() {
+    use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let (db, _ll1, ll2) = v3_p2p_lsdb(r1, r2, 5, 3, 10);
+    let mut db = db;
+    let mut prefix = [0u8; 16];
+    prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02]);
+    let tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::AS_EXTERNAL_1,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 100,
+        prefix,
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    db.install(
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap(),
+        0,
+    );
+    let spf = run_spf_v3(&db, r1);
+    assert_eq!(spf.locators.len(), 1);
+    let loc = &spf.locators[0];
+    assert_eq!(loc.route_type, locator_route_type::AS_EXTERNAL_1);
+    assert_eq!(loc.metric, 110, "10 (SPF to ASBR) + 100 (external metric)");
+    assert_eq!(loc.internal_cost, 10);
+    assert_eq!(loc.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
+    assert_eq!(loc.advertising_router, r2);
+}
+
+/// AS-external type-2 locator (RFC 9513 §5 + RFC 2328 §16.4 type-2):
+/// the TLV metric is the primary metric (the external metric
+/// dominates); the SPF distance to the ASBR is the §16.4 (6)
+/// tie-breaker, recorded in `internal_cost`.
+#[test]
+fn v3_external_type2_locator_metric_is_external_only() {
+    use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let (db, _ll1, ll2) = v3_p2p_lsdb(r1, r2, 5, 3, 10);
+    let mut db = db;
+    let mut prefix = [0u8; 16];
+    prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x03]);
+    let tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::AS_EXTERNAL_2,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 100,
+        prefix,
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    db.install(
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap(),
+        0,
+    );
+    let spf = run_spf_v3(&db, r1);
+    assert_eq!(spf.locators.len(), 1);
+    let loc = &spf.locators[0];
+    assert_eq!(loc.route_type, locator_route_type::AS_EXTERNAL_2);
+    assert_eq!(
+        loc.metric, 100,
+        "type-2: the external metric is the primary"
+    );
+    assert_eq!(
+        loc.internal_cost, 10,
+        "the SPF distance to the ASBR is the tie-breaker"
+    );
+    assert_eq!(loc.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
+    assert_eq!(loc.advertising_router, r2);
+}
+
+/// NSSA type-1 locator (RFC 9513 §5 + RFC 3101 §2.5): same metric
+/// shape as AS-external type-1 (internal cost + TLV metric), but the
+/// advertising router is an NSSA ASBR.
+#[test]
+fn v3_nssa_type1_locator_uses_asbr_distance_plus_external_metric() {
+    use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let (db, _ll1, ll2) = v3_p2p_lsdb(r1, r2, 5, 3, 10);
+    let mut db = db;
+    let mut prefix = [0u8; 16];
+    prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x04]);
+    let tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::NSSA_1,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 100,
+        prefix,
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    db.install(
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap(),
+        0,
+    );
+    let spf = run_spf_v3(&db, r1);
+    assert_eq!(spf.locators.len(), 1);
+    let loc = &spf.locators[0];
+    assert_eq!(loc.route_type, locator_route_type::NSSA_1);
+    assert_eq!(loc.metric, 110);
+    assert_eq!(loc.internal_cost, 10);
+    assert_eq!(loc.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
+    assert_eq!(loc.advertising_router, r2);
+}
+
+/// NSSA type-2 locator (RFC 9513 §5 + RFC 3101 §2.5): same metric
+/// shape as AS-external type-2 (TLV metric as primary, internal cost
+/// as tie-breaker).
+#[test]
+fn v3_nssa_type2_locator_metric_is_external_only() {
+    use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let (db, _ll1, ll2) = v3_p2p_lsdb(r1, r2, 5, 3, 10);
+    let mut db = db;
+    let mut prefix = [0u8; 16];
+    prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x05]);
+    let tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::NSSA_2,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 100,
+        prefix,
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    db.install(
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap(),
+        0,
+    );
+    let spf = run_spf_v3(&db, r1);
+    assert_eq!(spf.locators.len(), 1);
+    let loc = &spf.locators[0];
+    assert_eq!(loc.route_type, locator_route_type::NSSA_2);
+    assert_eq!(
+        loc.metric, 100,
+        "type-2: the external metric is the primary"
+    );
+    assert_eq!(loc.internal_cost, 10);
+    assert_eq!(loc.next_hop.first().copied(), Some(IpAddr::V6(ll2)));
+    assert_eq!(loc.advertising_router, r2);
+}
+
+/// An unreachable locator (TLV metric 0xFFFFFFFF) never becomes a
+/// route regardless of route type — §7.1 marks the TLV unreachable
+/// and the SRv6 database projection drops it before this loop runs.
+#[test]
+fn v3_unreachable_locator_metric_drops_for_every_route_type() {
+    use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let (db, _ll1, _ll2) = v3_p2p_lsdb(r1, r2, 5, 3, 10);
+    let mut db = db;
+    let mk = |route_type: u8, byte6: u8| {
+        let mut prefix = [0u8; 16];
+        prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        prefix[6] = byte6;
+        Srv6LocatorTlv {
+            route_type,
+            algorithm: 0,
+            locator_len: 48,
+            options: 0,
+            metric: u32::MAX,
+            prefix,
+            end_sids: vec![],
+            fwd_addr: None,
+            route_tag: None,
+            ..Default::default()
+        }
+    };
+    for (rt, byte6) in [
+        (locator_route_type::INTRA_AREA, 0u8),
+        (locator_route_type::INTER_AREA, 1u8),
+        (locator_route_type::AS_EXTERNAL_1, 2u8),
+        (locator_route_type::AS_EXTERNAL_2, 3u8),
+        (locator_route_type::NSSA_1, 4u8),
+        (locator_route_type::NSSA_2, 5u8),
+    ] {
+        db.install(
+            originate_v3_srv6_locator_lsa(
+                r2,
+                byte6 as u32,
+                std::slice::from_ref(&mk(rt, byte6)),
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+    }
+    let spf = run_spf_v3(&db, r1);
+    assert!(spf.locators.is_empty(), "all six locators are unreachable");
+}
+
+/// A locator whose advertising router is unreachable from the root
+/// has no SPF distance, so the locator is skipped (no first hop, no
+/// metric) regardless of route type. §5 requires the advertising
+/// router to be reachable before the locator can install.
+#[test]
+fn v3_locator_with_unreachable_advertising_router_dropped_for_every_route_type() {
+    use crate::lsa::srv6::{locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv};
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    // LSDB with r1's Router-LSA only — r2 is advertised as a
+    // neighbour, but r2's own Router-LSA is absent so SPF can never
+    // relax through it and r2 stays unreachable.
+    let mut db = Lsdb::new();
+    db.install(
+        originate_v3_router_lsa(
+            r1,
+            ROUTER_BIT_V6,
+            0x13,
+            &[crate::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: r2,
+            }],
+            None,
+        )
+        .unwrap(),
+        0,
+    );
+    db.install(
+        originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+        0,
+    );
+    let mk = |route_type: u8, byte6: u8| {
+        let mut prefix = [0u8; 16];
+        prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        prefix[6] = byte6;
+        Srv6LocatorTlv {
+            route_type,
+            algorithm: 0,
+            locator_len: 48,
+            options: 0,
+            metric: 5,
+            prefix,
+            end_sids: vec![],
+            fwd_addr: None,
+            route_tag: None,
+            ..Default::default()
+        }
+    };
+    for (rt, byte6) in [
+        (locator_route_type::INTRA_AREA, 0u8),
+        (locator_route_type::INTER_AREA, 1u8),
+        (locator_route_type::AS_EXTERNAL_1, 2u8),
+        (locator_route_type::AS_EXTERNAL_2, 3u8),
+        (locator_route_type::NSSA_1, 4u8),
+        (locator_route_type::NSSA_2, 5u8),
+    ] {
+        db.install(
+            originate_v3_srv6_locator_lsa(
+                r2,
+                byte6 as u32,
+                std::slice::from_ref(&mk(rt, byte6)),
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+    }
+    let spf = run_spf_v3(&db, r1);
+    assert!(
+        spf.locators.is_empty(),
+        "r2 is unreachable; all six locators are skipped"
+    );
 }
 
 /// r1 - r2 p2p backbone with both Router-LSAs, Link-LSAs and the
