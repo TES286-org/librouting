@@ -65,6 +65,65 @@ impl OspfCodec {
         }
     }
 
+    /// Decode a received OSPFv3 packet, verifying the IPv6 upper-layer
+    /// checksum (RFC 5340 §A.4.3.3) against the IPv6 pseudo-header
+    /// observed on the wire.
+    ///
+    /// The codec itself never sees the IPv6 header (the daemon hands it
+    /// the OSPF payload via a raw `IPPROTO_OSPF` socket), so the regular
+    /// [`decode_slice`](Self::decode_slice) cannot compute the v3
+    /// checksum. This variant accepts the IPv6 source and destination
+    /// the kernel reported for the datagram and folds them into the
+    /// standard one's-complement verification — a packet whose checksum
+    /// does not verify is dropped with `ParseError::checksum` (kind
+    /// `ChecksumMismatch`), matching the v2 receive-side gate
+    /// (`bad_v2_checksum_dropped_on_receive`).
+    ///
+    /// Returns `Ok(None)` when the buffer does not yet hold a whole
+    /// frame so a streaming caller can keep reading. The codec must be
+    /// `OspfCodec::v3()` — calling this on a v2 codec returns
+    /// `ParseError::invalid(0, "ospf.header.version")` (the version
+    /// byte check fires before the checksum check, so the contract is
+    /// the same as `decode_slice` for non-v3 input).
+    pub fn decode_slice_v3_with_checksum(
+        &mut self,
+        b: &[u8],
+        src: &[u8; 16],
+        dst: &[u8; 16],
+    ) -> Result<Option<OspfPacket>, ParseError> {
+        // This is the v3-only path; the header length is the 16-byte v3
+        // form (RFC 5340 §A.3.1) regardless of `self.version`. A caller
+        // that built `OspfCodec::v2()` and calls this method by mistake
+        // sees the version-byte check fire inside
+        // `decode_packet_v3_with_checksum`, matching the contract
+        // `decode_slice` offers a non-v3 buffer.
+        let hdr_len = OspfHeader::LEN_V3;
+        self.carryover.extend_from_slice(b);
+        if self.carryover.len() < hdr_len {
+            return Ok(None);
+        }
+        // Peek length field at offset 2..3.
+        let length = u16::from_be_bytes([self.carryover[2], self.carryover[3]]) as usize;
+        if length < hdr_len {
+            self.carryover.clear();
+            return Err(ParseError::bad_length(2, "ospf.header.length"));
+        }
+        if self.carryover.len() < length {
+            return Ok(None);
+        }
+        let buf = &self.carryover[..length];
+        match decode_packet_v3_with_checksum(buf, src, dst) {
+            Ok(pkt) => {
+                self.carryover.drain(0..length);
+                Ok(Some(pkt))
+            }
+            Err(e) => {
+                self.carryover.drain(0..length);
+                Err(e)
+            }
+        }
+    }
+
     pub fn encode_vec(&self, msg: &OspfPacket) -> Result<Vec<u8>, EncodeError> {
         let mut out = vec![0u8; 65535];
         let mut w = WriteBuf::new(&mut out);
@@ -93,13 +152,22 @@ impl Encoder<OspfPacket> for OspfCodec {
         // The checksum field at header offset 12 is written verbatim from
         // `h.checksum` (encode_header writes it once at the top of the
         // packet and is not patched here). The library does not compute
-        // the OSPF checksum itself: OSPFv2's checksum folds in the IPv4
-        // pseudo-header (RFC 2328 §A.1), which requires the IP header
-        // the embedder will hand to sendto(); OSPFv3 folds in the IPv6
-        // pseudo-header (RFC 5340 §A.3). Embedders that own the L3 frame
-        // (the daemon does, raw `IPPROTO_OSPF` socket) recompute on
-        // egress; embedders that go through a transport abstraction must
-        // compute the checksum before the wire too.
+        // the OSPF checksum itself on encode: OSPFv2's checksum folds in
+        // the IPv4 pseudo-header (RFC 2328 §A.1), which requires the IP
+        // header the embedder will hand to sendto(); OSPFv3 folds in the
+        // IPv6 pseudo-header (RFC 5340 §A.3). Embedders that own the L3
+        // frame (the daemon does, raw `IPPROTO_OSPF` socket) recompute on
+        // egress via [`finalize_v2_packet`](crate::origination::finalize_v2_packet)
+        // / [`finalize_v3_packet`](crate::origination::finalize_v3_packet);
+        // embedders that go through a transport abstraction must compute
+        // the checksum before the wire too.
+        //
+        // On receive, [`decode_slice`](OspfCodec::decode_slice) verifies
+        // the v2 checksum (it has no IP header dependency); v3 verification
+        // requires the IPv6 pseudo-header, so the codec offers the
+        // optional [`decode_slice_v3_with_checksum`](OspfCodec::decode_slice_v3_with_checksum)
+        // path for embedders that can supply the observed source and
+        // destination.
         Ok(total)
     }
 }
@@ -285,6 +353,35 @@ fn encode_lsa_header(
 }
 
 fn decode_packet(b: &[u8], version: OspfVersion) -> Result<OspfPacket, ParseError> {
+    decode_packet_inner(b, version, None)
+}
+
+/// Decode a v3 packet and verify its IPv6 upper-layer checksum against
+/// the pseudo-header observed on the wire (RFC 5340 §A.4.3.3 / RFC 2460
+/// §8.1). Used by [`OspfCodec::decode_slice_v3_with_checksum`].
+///
+/// The version byte must already be `3` — the caller is the v3-only
+/// decode path; `decode_slice_v3_with_checksum` routes through here
+/// instead of [`decode_packet`] so the codec can offer checksum
+/// verification to embedders that own the IPv6 frame.
+fn decode_packet_v3_with_checksum(
+    b: &[u8],
+    src: &[u8; 16],
+    dst: &[u8; 16],
+) -> Result<OspfPacket, ParseError> {
+    decode_packet_inner(b, OspfVersion::V3, Some((src, dst)))
+}
+
+/// Shared decode path. `v3_pseudo` carries the IPv6 source/destination
+/// observed on the wire for v3 checksum verification; `None` skips the
+/// v3 checksum gate (the legacy [`decode_slice`](OspfCodec::decode_slice)
+/// contract — the codec never sees the IPv6 header). The v2 checksum
+/// gate runs unconditionally for v2 packets.
+fn decode_packet_inner(
+    b: &[u8],
+    version: OspfVersion,
+    v3_pseudo: Option<(&[u8; 16], &[u8; 16])>,
+) -> Result<OspfPacket, ParseError> {
     let hdr_len = OspfHeader::len_for(version);
     if b.len() < hdr_len {
         return Err(ParseError::truncated("ospf.header"));
@@ -306,6 +403,16 @@ fn decode_packet(b: &[u8], version: OspfVersion) -> Result<OspfPacket, ParseErro
     if version == OspfVersion::V2 && !crate::origination::v2_packet_checksum_ok(b) {
         // RFC 2328 §8.2: packets failing the checksum are discarded.
         return Err(ParseError::invalid(12, "ospf.header.checksum"));
+    }
+    if version == OspfVersion::V3 {
+        if let Some((src, dst)) = v3_pseudo {
+            if !crate::origination::v3_packet_checksum_ok(b, src, dst) {
+                // RFC 5340 §A.4.3.3 (carried from RFC 2328 §8.2):
+                // packets failing the IPv6 upper-layer checksum are
+                // discarded.
+                return Err(ParseError::checksum(12, "ospf.v3.checksum"));
+            }
+        }
     }
     let (au_type_or_instance, auth_data) = if version == OspfVersion::V3 {
         // RFC 5340 §A.3.1: byte 14 = Instance ID, byte 15 = reserved 0.
@@ -1029,8 +1136,16 @@ mod tests {
 
     #[test]
     fn v3_packets_are_not_checksum_gated() {
-        // v3 uses the IPv6 upper-layer checksum (pseudo-header), which
-        // the codec cannot compute; v3 packets pass through unverified.
+        // v3 uses the IPv6 upper-layer checksum (RFC 5340 §A.3 / RFC 2460
+        // §8.1), which folds in the IPv6 pseudo-header (source, destination,
+        // upper-layer length, next-header 89) the codec does not see at
+        // this layer. `decode_slice` therefore passes v3 frames through
+        // unverified — embedders that own the IPv6 frame (raw
+        // `IPPROTO_OSPF` socket, daemon receive path) supply the observed
+        // source and destination to
+        // [`decode_slice_v3_with_checksum`](OspfCodec::decode_slice_v3_with_checksum)
+        // for the receive-side gate; see `v3_decode_with_checksum_*`
+        // below for the parity coverage.
         let codec = OspfCodec::v3();
         let pkt = OspfPacket {
             header: v3_header(5, 0x01020304),
@@ -1039,5 +1154,113 @@ mod tests {
         let bytes = codec.encode_vec(&pkt).unwrap();
         let mut dec = OspfCodec::v3();
         assert!(dec.decode_slice(&bytes).unwrap().is_some());
+    }
+
+    #[test]
+    fn v3_decode_with_checksum_accepts_intact_packet() {
+        // The receive-side gate closes the v3 checksum verification gap:
+        // a finalized v3 packet that the IPv6 kernel delivered to the
+        // OSPF socket verifies against the pseudo-header the daemon
+        // observed on the wire (source + destination), and the codec
+        // returns the decoded body.
+        let codec = OspfCodec::v3();
+        let pkt = OspfPacket {
+            header: v3_header(5, 0x01020304),
+            body: OspfBody::LsAck(LsAckBody::default()),
+        };
+        let mut bytes = codec.encode_vec(&pkt).unwrap();
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        assert!(crate::origination::finalize_v3_packet(
+            &mut bytes, &src, &dst
+        ));
+        let mut dec = OspfCodec::v3();
+        let decoded = dec
+            .decode_slice_v3_with_checksum(&bytes, &src, &dst)
+            .expect("intact packet must decode")
+            .expect("and the buffer was a complete frame");
+        assert_eq!(decoded.header.kind, OspfPacketType::LinkStateAck as u8);
+    }
+
+    #[test]
+    fn v3_decode_with_checksum_drops_corrupted_packet() {
+        // The receive-side gate mirrors `bad_v2_checksum_dropped_on_receive`:
+        // a single flipped body byte breaks the v3 checksum, so the
+        // codec drops the frame with `ParseError::checksum` (kind
+        // `ChecksumMismatch`) and the carryover is drained so a
+        // following good frame can decode.
+        let codec = OspfCodec::v3();
+        let pkt = OspfPacket {
+            header: v3_header(5, 0x01020304),
+            body: OspfBody::LsAck(LsAckBody::default()),
+        };
+        let mut bytes = codec.encode_vec(&pkt).unwrap();
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        assert!(crate::origination::finalize_v3_packet(
+            &mut bytes, &src, &dst
+        ));
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        let mut dec = OspfCodec::v3();
+        let err = dec
+            .decode_slice_v3_with_checksum(&bytes, &src, &dst)
+            .expect_err("corrupted packet must be dropped");
+        assert_eq!(
+            err.kind,
+            lr_core::error::ErrorKind::ChecksumMismatch,
+            "v3 checksum failure must surface as ChecksumMismatch"
+        );
+        assert_eq!(err.offset, 12, "error pinned at the checksum field offset");
+    }
+
+    #[test]
+    fn v3_decode_with_checksum_rejects_wrong_pseudo_header() {
+        // A packet finalized under one pseudo-header must NOT verify
+        // against a different one — the gate catches a receiver that
+        // reconstructs the pseudo-header from the wrong source (a
+        // misconfigured `ip protocol ospf area` address, a forged
+        // outer IP header, etc.).
+        let codec = OspfCodec::v3();
+        let pkt = OspfPacket {
+            header: v3_header(5, 0x01020304),
+            body: OspfBody::LsAck(LsAckBody::default()),
+        };
+        let mut bytes = codec.encode_vec(&pkt).unwrap();
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        assert!(crate::origination::finalize_v3_packet(
+            &mut bytes, &src, &dst
+        ));
+        let dst2 = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+        let mut dec = OspfCodec::v3();
+        let err = dec
+            .decode_slice_v3_with_checksum(&bytes, &src, &dst2)
+            .expect_err("pseudo-header mismatch must drop the frame");
+        assert_eq!(
+            err.kind,
+            lr_core::error::ErrorKind::ChecksumMismatch,
+            "wrong pseudo-header must surface as a checksum mismatch"
+        );
+    }
+
+    #[test]
+    fn v3_decode_with_checksum_returns_none_for_partial_frame() {
+        // The streaming contract mirrors `decode_slice`: a buffer that
+        // does not yet hold a whole frame returns `Ok(None)` so the
+        // caller can keep reading.
+        let mut dec = OspfCodec::v3();
+        let src = [0u8; 16];
+        let dst = [0u8; 16];
+        // An empty buffer is below the 16-byte v3 header.
+        assert!(dec
+            .decode_slice_v3_with_checksum(&[], &src, &dst)
+            .unwrap()
+            .is_none());
+        // A sub-header fragment is still partial.
+        assert!(dec
+            .decode_slice_v3_with_checksum(&[3, 1, 0, 20], &src, &dst)
+            .unwrap()
+            .is_none());
     }
 }

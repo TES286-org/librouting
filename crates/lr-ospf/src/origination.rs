@@ -384,6 +384,41 @@ fn v3_packet_checksum(bytes: &[u8], src: &[u8; 16], dst: &[u8; 16]) -> u16 {
     finish(sum)
 }
 
+/// Verify the checksum of a received OSPFv3 packet.
+///
+/// RFC 5340 §A.4.3.3 (carried from RFC 2328 §8.2): a packet whose
+/// checksum does not verify MUST be discarded. The codec's
+/// [`decode_slice`](crate::codec::OspfCodec::decode_slice) cannot
+/// compute the v3 checksum because it does not see the IPv6 header —
+/// the v3 checksum folds in the IPv6 pseudo-header (source, destination,
+/// upper-layer packet length, next header 89) per RFC 5340 §A.3.1 /
+/// RFC 2460 §8.1. Embedders that own the L3 frame (the daemon does,
+/// via raw `IPPROTO_OSPF` socket) supply the IPv6 source and
+/// destination observed on receive and call this helper, or use
+/// [`OspfCodec::decode_slice_v3_with_checksum`](crate::codec::OspfCodec::decode_slice_v3_with_checksum)
+/// to fold the verification into the decode step.
+///
+/// The whole-packet sum (IPv6 pseudo-header + checksum field included)
+/// must be `0` for an intact packet — the defining property of
+/// one's-complement checksums.
+pub fn v3_packet_checksum_ok(bytes: &[u8], src: &[u8; 16], dst: &[u8; 16]) -> bool {
+    if bytes.len() < crate::packet::OspfHeader::LEN_V3 {
+        return false;
+    }
+    let mut sum: u32 = 0;
+    // Pseudo-header: source, destination.
+    fold(src, &mut sum);
+    fold(dst, &mut sum);
+    // Upper-layer packet length (4 bytes, big endian).
+    fold(&(bytes.len() as u32).to_be_bytes(), &mut sum);
+    // 3 zero bytes + next header 89 (IPPROTO_OSPFIGP).
+    fold(&[0, 0, 0, 89], &mut sum);
+    // The packet with the checksum field INCLUDED (offsets 12..14) —
+    // a correct checksum makes the one's-complement sum fold to 0.
+    fold(bytes, &mut sum);
+    finish(sum) == 0
+}
+
 fn fold(bytes: &[u8], sum: &mut u32) {
     let mut i = 0;
     while i + 1 < bytes.len() {
