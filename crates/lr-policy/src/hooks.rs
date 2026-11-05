@@ -343,19 +343,54 @@ impl ImportHook for GracefulShutdownImportHook {
 /// turn RFD off on Internet-facing eBGP. The daemon ships damping
 /// disabled by default; the operator opts in via `[damping]
 /// enabled = true`.
+///
+/// **Runtime toggle.** The hook carries a shared `enabled` flag
+/// ([`DampingImportHook::enabled_handle`]) so the daemon can flip
+/// damping on or off from a SIGHUP / runtime-API reload without
+/// removing the hook from the import chain. When the flag is
+/// `false`, [`ImportHook::on_import`] returns [`HookVerdict::Keep`]
+/// and [`ImportHook::on_withdraw`] is a no-op — every route flows
+/// through unchanged, no FoM is recorded, no prefix is suppressed.
+/// The daemon pairs the flag flip with starting / stopping the
+/// decay ticker thread so a disabled hook does not accumulate
+/// figure-of-merit while no decay is running.
 #[cfg(feature = "damping")]
 #[derive(Debug, Clone)]
 pub struct DampingImportHook {
     table: Arc<Mutex<DampingTable>>,
+    /// Shared on/off flag. The daemon flips this from another
+    /// thread (the SIGHUP reload path); the hook reads it on every
+    /// `on_import` / `on_withdraw` invocation with a relaxed
+    /// load — the read is essentially free and a torn read is
+    /// harmless because the daemon sets the flag once and then
+    /// joins the writer side with a release on the router lock.
+    enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "damping")]
 impl DampingImportHook {
     /// Wrap a damping table for installation on the import hook chain.
     /// The `Arc<Mutex<_>>` is shared with the daemon's decay ticker
-    /// so the same table is mutated from both code paths.
+    /// so the same table is mutated from both code paths. The hook
+    /// starts **enabled**; use [`Self::with_enabled`] to wire a
+    /// shared on/off flag the daemon can flip at runtime.
     pub fn new(table: Arc<Mutex<DampingTable>>) -> Self {
-        Self { table }
+        Self {
+            table,
+            enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+
+    /// Like [`Self::new`] but with a caller-supplied `enabled` flag.
+    /// The flag is shared with the daemon so a SIGHUP-driven reload
+    /// can disable the hook in-place (the hook pass-throughs while
+    /// the flag is `false`) and re-enable it later without
+    /// reinstalling the hook on the import chain.
+    pub fn with_enabled(
+        table: Arc<Mutex<DampingTable>>,
+        enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self { table, enabled }
     }
 
     /// Borrow the underlying shared table handle. Used by the daemon
@@ -363,6 +398,13 @@ impl DampingImportHook {
     /// taking ownership of the table.
     pub fn shared_table(&self) -> Arc<Mutex<DampingTable>> {
         Arc::clone(&self.table)
+    }
+
+    /// Borrow the shared on/off flag. Used by the daemon's SIGHUP /
+    /// runtime-API reload path to flip damping on or off in-place
+    /// without reinstalling the hook on the import chain.
+    pub fn enabled_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.enabled)
     }
 }
 
@@ -373,6 +415,17 @@ impl ImportHook for DampingImportHook {
     }
 
     fn on_import(&self, route: &mut Route) -> HookVerdict {
+        // The daemon flips this flag from the SIGHUP reload path. A
+        // disabled hook pass-throughs so routes flow unchanged — the
+        // FoM table is left untouched (no decay, no increments), so
+        // re-enabling later resumes from whatever state the table
+        // was in when damping was last active. Relaxed load is safe:
+        // the daemon's writer side joins via the router write lock
+        // before the next import, so every route sees a consistent
+        // flag state per import call.
+        if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            return HookVerdict::Keep;
+        }
         // The router sets `route.age_ms` to `now_ms` immediately
         // before invoking import hooks (instance.rs:2304), so we
         // can read it back to get the current wall-clock. Convert
@@ -399,6 +452,9 @@ impl ImportHook for DampingImportHook {
     }
 
     fn on_withdraw(&self, key: &RouteKey, now_s: u64) {
+        if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let mut table = match self.table.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -1101,6 +1157,114 @@ mod tests {
         );
         hook.on_withdraw(&key, 0);
         assert_eq!(table.lock().unwrap().entries().count(), 1);
+    }
+
+    /// The shared `enabled` flag the daemon flips at SIGHUP time must
+    /// gate both `on_import` and `on_withdraw` — when the flag is
+    /// `false`, the hook is a pass-through (every import keeps; no
+    /// withdraw mutates the FoM table). Mirrors the
+    /// `drain_mode_hook_reflects_runtime_gate_flips` shape.
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_enabled_flag_passes_through_when_disabled() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(
+            lr_damping::DampingConfig::default(),
+        )));
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let hook = DampingImportHook::with_enabled(
+            std::sync::Arc::clone(&table),
+            std::sync::Arc::clone(&enabled),
+        );
+        // enabled_handle() returns the same Arc the caller built —
+        // the daemon flips it from the SIGHUP path without holding
+        // the router lock.
+        assert!(
+            std::sync::Arc::ptr_eq(&hook.enabled_handle(), &enabled),
+            "enabled_handle() must return the same Arc"
+        );
+
+        // Initially enabled: import is gated by the FoM table (empty
+        // → first route passes through).
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
+
+        // Flip the flag off: every import now passes through even if
+        // the FoM table would have suppressed the route. First
+        // suppress the prefix through three withdraws so the
+        // enabled-state would drop the next import, then flip the
+        // flag and verify the disabled hook pass-throughs.
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        hook.on_withdraw(&key, 0);
+        hook.on_withdraw(&key, 0);
+        hook.on_withdraw(&key, 0);
+        assert!(table.lock().unwrap().is_suppressed(&key.prefix));
+
+        enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(
+            matches!(hook.on_import(&mut r), HookVerdict::Keep),
+            "disabled hook must pass suppressed routes through"
+        );
+
+        // A withdraw on a disabled hook must not bump the FoM — the
+        // table state is frozen until the daemon re-enables. We
+        // snapshot the entry count, withdraw, and assert the FoM
+        // did not move (the prefix is still suppressed at the same
+        // figure-of-merit; `on_withdraw` would otherwise add another
+        // `additive_incr`).
+        let fom_before = table
+            .lock()
+            .unwrap()
+            .entries()
+            .next()
+            .map(|e| e.figure_of_merit)
+            .unwrap_or(0.0);
+        hook.on_withdraw(&key, 0);
+        let fom_after = table
+            .lock()
+            .unwrap()
+            .entries()
+            .next()
+            .map(|e| e.figure_of_merit)
+            .unwrap_or(0.0);
+        assert_eq!(
+            fom_before, fom_after,
+            "disabled hook must not mutate the FoM table on withdraw"
+        );
+
+        // Re-enable: the hook resumes gating from the existing FoM
+        // state, so the suppressed prefix is dropped again.
+        enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(
+            matches!(hook.on_import(&mut r), HookVerdict::Drop),
+            "re-enabled hook must resume suppression from the existing FoM"
+        );
+    }
+
+    /// The default-constructed hook (`new`) is enabled — preserves
+    /// backward compatibility for embedders that do not wire a
+    /// shared flag.
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_default_construction_is_enabled() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(
+            lr_damping::DampingConfig::default(),
+        )));
+        let hook = DampingImportHook::new(std::sync::Arc::clone(&table));
+        assert!(
+            hook.enabled_handle()
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "DampingImportHook::new must start enabled"
+        );
+        // A first import with an empty table passes through (FoM 0
+        // is below the suppress threshold) — the hook behaves the
+        // same as before the enabled flag was added.
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
     }
 
     #[test]
