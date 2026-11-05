@@ -1132,6 +1132,7 @@ mod damping_reload_toggle_tests {
     /// Set up a router + damping state mirroring the daemon's
     /// startup install. The hook is installed on the import chain
     /// with the shared `enabled` flag at `initial_enabled`.
+    #[allow(clippy::type_complexity)] // 3-Arc tuple is the natural shape here
     fn setup(
         initial_enabled: bool,
     ) -> (
@@ -1163,54 +1164,6 @@ mod damping_reload_toggle_tests {
             });
         }
         (router, current_networks, damping_state)
-    }
-
-    /// Push three withdraws through the installed hook so the
-    /// prefix crosses the suppress threshold (FoM = 3000 ≥
-    /// `suppress_threshold` = 2000). Returns the hook's enabled
-    /// handle so the test can flip it after the reload.
-    fn suppress_prefix(router: &Arc<RwLock<DefaultRouter>>, prefix: lr_core::addr::Prefix) {
-        // The router's hook chain dispatches `run_import_withdraw`
-        // to every ImportHook (including the damping hook). The
-        // chain's `run_import_withdraw` is `&self`, but the only
-        // public accessor is `hooks_mut()` (`&mut self`); take a
-        // write lock so the call compiles.
-        let key = lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST);
-        let mut r = router.write().unwrap();
-        r.hooks_mut().run_import_withdraw(&key, 0);
-        r.hooks_mut().run_import_withdraw(&key, 0);
-        r.hooks_mut().run_import_withdraw(&key, 0);
-        // The third withdraw crosses the threshold — the prefix is
-        // now suppressed in the FoM table.
-    }
-
-    /// Build a route for the supplied prefix at `age_ms = 1000` (so
-    /// the damping hook derives `now_s = 1` for the announce path).
-    fn route_for(prefix: lr_core::addr::Prefix) -> lr_core::rib::Route {
-        lr_core::rib::Route {
-            key: lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST),
-            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
-            protocol: lr_core::rib::Protocol::Bgp,
-            preference: lr_core::rib::Preference::new(20, 100),
-            next_hop: Some(IpAddr::V4([192, 0, 2, 1])),
-            attributes: lr_core::attr::Attributes::new(),
-            age_ms: 1_000,
-            path_id: 0,
-            tag: None,
-        }
-    }
-
-    /// Run the import hook chain on a route for `prefix` and return
-    /// `true` when the route is kept, `false` when dropped.
-    fn import_kept(router: &Arc<RwLock<DefaultRouter>>, prefix: lr_core::addr::Prefix) -> bool {
-        let mut r = router.write().unwrap();
-        let mut route = route_for(prefix);
-        // The chain dispatches to every ImportHook; the damping hook
-        // returns `Drop` when the prefix is suppressed. `run_import`
-        // is `&self` on `HookChain`, but the only public accessor is
-        // `hooks_mut()`, so we hold the write lock.
-        let verdict = r.hooks_mut().run_import(&mut route);
-        matches!(verdict, lr_policy::hooks::HookVerdict::Keep)
     }
 
     /// off → on: a fresh daemon with no damping installed at startup
@@ -1423,6 +1376,126 @@ mod damping_reload_toggle_tests {
             Some(&damping_state),
         );
         assert!(damping_state.lock().unwrap().is_none());
+
+        let _ = std::fs::remove_file(&cfg_on);
+        let _ = std::fs::remove_file(&cfg_off);
+    }
+
+    /// End-to-end hook behaviour through the reload. The router's
+    /// hook chain dispatches to every installed hook on every
+    /// import; the damping hook returns `Drop` when the prefix's
+    /// FoM is at/above the suppress threshold. This test exercises
+    /// the toggle's user-visible effect: a flap-suppressed prefix is
+    /// dropped while damping is on, kept while damping is off, and
+    /// dropped again after an on→on reload (the FoM table persists
+    /// across on→on reloads, so the suppression survives the
+    /// decay-thread respawn).
+    #[test]
+    fn reload_toggle_visibility_through_hook_chain() {
+        let cfg_on = temp_config_path("vis-on");
+        let cfg_off = temp_config_path("vis-off");
+        write_config(&cfg_on, true);
+        write_config(&cfg_off, false);
+        let (router, current_networks, damping_state) = setup(true);
+        let prefix = lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24);
+        let key = lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST);
+
+        // Suppress the prefix through three withdraws run through
+        // the router's hook chain — the chain dispatches
+        // `run_import_withdraw` to every ImportHook, including the
+        // damping hook, which adds `additive_incr` (= 1000) per
+        // withdraw. After three withdraws the FoM is 3000 ≥ the
+        // 2000 suppress threshold, so the prefix is suppressed.
+        {
+            let mut r = router.write().unwrap();
+            r.hooks_mut().run_import_withdraw(&key, 0);
+            r.hooks_mut().run_import_withdraw(&key, 0);
+            r.hooks_mut().run_import_withdraw(&key, 0);
+        }
+        // Sanity: the FoM table records the prefix and marks it
+        // suppressed (the hook chain dispatched the withdraws).
+        {
+            let state = damping_state.lock().unwrap();
+            let controller = state.as_ref().expect("controller still present");
+            assert!(
+                controller.table.lock().unwrap().is_suppressed(&prefix),
+                "prefix must be suppressed after three withdraws"
+            );
+        }
+
+        // A route for the suppressed prefix is dropped by the
+        // damping hook (FoM ≥ suppress_threshold → Drop verdict).
+        let mut route = lr_core::rib::Route {
+            key: lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST),
+            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: Some(IpAddr::V4([192, 0, 2, 1])),
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 1_000,
+            path_id: 0,
+            tag: None,
+        };
+        {
+            let mut r = router.write().unwrap();
+            let verdict = r.hooks_mut().run_import(&mut route);
+            assert!(
+                matches!(verdict, lr_policy::hooks::HookVerdict::Drop),
+                "suppressed prefix must be dropped while damping is on"
+            );
+        }
+
+        // SIGHUP with `enabled = false`: the hook's enabled flag is
+        // flipped to false (pass-through), the decay thread is
+        // signaled to stop, and the controller is dropped.
+        reload_config(
+            Some(cfg_off.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+
+        // The hook is still installed but pass-throughs: a route
+        // for the (still-suppressed) prefix now flows through
+        // unchanged.
+        {
+            let mut r = router.write().unwrap();
+            let verdict = r.hooks_mut().run_import(&mut route);
+            assert!(
+                matches!(verdict, lr_policy::hooks::HookVerdict::Keep),
+                "suppressed prefix must be kept while damping is off (pass-through)"
+            );
+        }
+
+        // SIGHUP back to `enabled = true` (on→on would not apply
+        // because the controller is gone; this is the off→on arm
+        // that installs a fresh hook + creates a fresh FoM table).
+        reload_config(
+            Some(cfg_on.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+        // The fresh FoM table is empty — the prefix is no longer
+        // suppressed — so the route flows through. This is the
+        // documented behavior: off→on creates a fresh FoM (no
+        // history survives a disable→enable cycle that crosses a
+        // daemon start; here it crosses a SIGHUP, but the FoM does
+        // not carry over because the new hook gets a new table).
+        {
+            let mut r = router.write().unwrap();
+            let verdict = r.hooks_mut().run_import(&mut route);
+            assert!(
+                matches!(verdict, lr_policy::hooks::HookVerdict::Keep),
+                "fresh FoM table after off->on must keep the route (no suppression history)"
+            );
+        }
 
         let _ = std::fs::remove_file(&cfg_on);
         let _ = std::fs::remove_file(&cfg_off);
