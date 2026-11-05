@@ -1132,6 +1132,77 @@ changes, no protocol-on-the-wire changes. Existing OSPF tests
 and the OSPF + BIRD 2.17.5 interop (`tests/interop/ospf_bird.sh`,
 `ospf_gr_bird.sh`, `ospf_broadcast.sh`) remains green.
 
+### `lr-osroute`: Linux `source_check` consults the kernel via `RTM_GETROUTE` (issue #92)
+
+`lr_osroute::source_check::check_source_compatibility` is the
+diagnostic the daemon runs *before* the first outbound TCP dial to
+warn the operator when the configured `local_address` is not on the
+kernel's chosen egress interface — the root cause of the Windows
+Strong Host Model "peer sent NOTIFICATION code=6 sub=7" storm. The
+Windows implementation already used `GetBestRoute2` + a real
+`bind()` test, but the Linux `imp` was a no-op stub that returned
+`SourceCheck::Ok` without consulting the kernel — `defects.txt`
+flagged it as `INCOMPLETE-IMPL` (`crates/lr-osroute/src/source_check.rs:L343-L365`,
+"fall back to Ok on Linux until the rtnetlink helper is factored
+out").
+
+The Linux `imp` now opens a `NETLINK_ROUTE` socket, issues a single
+`RTM_GETROUTE` request carrying `RTA_DST = peer` (the same shape
+`ip route get <addr>` produces), and parses the kernel's reply for
+`RTA_PREFSRC` and `RTA_OIF`. The diagnostic then returns:
+
+- `SourceCheck::Ok` when the kernel's preferred source matches the
+  configured `local`,
+- `SourceCheck::Mismatch { configured, kernel_choice }` when the
+  kernel would source the dial from a different address (the daemon
+  binds, which overrides the default on Linux — informational, no
+  warning),
+- `SourceCheck::NoRoute` when the kernel reports no route to the
+  peer (`NLMSG_ERROR` carrying a negative `ENETUNREACH` /
+  `EHOSTUNREACH`),
+- `SourceCheck::Ok` on any failure to consult the kernel
+  (unprivileged container without netlink access, transient ENOMEM,
+  malformed reply) — the diagnostic is a *hint*, not a gate, so the
+  daemon still dials and the operator's "outbound TCP established"
+  log line is the source of truth once the connection lands.
+
+The platform-support table in the module doc is updated to mark
+Linux as `yes — RTM_GETROUTE with RTA_PREFSRC reports the kernel's
+preferred source`. The `lr-cli::daemon` Mismatch / Ok log comments
+are updated to reflect that Linux now consults the kernel (the
+macOS no-op path is unchanged). The FFI wrapper
+`lr_osroute_check_source_compatibility` and its C ABI signature are
+unchanged — the same `kind` discriminant (0..3) now reflects the
+real Linux verdict instead of always `0`.
+
+Tests:
+
+- `source_check::tests::loopback_v4_matches` /
+  `loopback_v6_matches` — the kernel's preferred source for
+  `127.0.0.1` and `::1` is the loopback address itself, so a
+  `local = 127.0.0.1` peer on `127.0.0.1` returns `Ok`.
+- `source_check::tests::loopback_against_routable_peer_is_not_ok` —
+  the kernel's preferred source for `1.1.1.1` is the egress
+  interface's address (NOT `127.0.0.1`), so a `local = 127.0.0.1`
+  peer on `1.1.1.1` returns `Mismatch` (or `NoRoute` in a hermetic
+  CI without a default route).
+- `source_check::tests::diagnostic_is_total_on_any_peer` — the
+  helper never panics on any peer (the contract is "never block the
+  daemon on a kernel query that might fail").
+- The `ffi_check_source_compatibility_returns_ok_on_non_windows`
+  test is renamed to `ffi_check_source_compatibility_loopback_ok`
+  and now uses loopback-to-loopback (the previous non-loopback probe
+  relied on the Linux no-op returning `Ok` for any address pair).
+- New `crates/lr-cli/tests/daemon_source_check.rs` e2e tests pin the
+  daemon wiring: `loopback_local_loopback_peer_is_ok` (no mismatch
+  info line for `local=127.0.0.1` → `127.0.0.1:<port>`),
+  `loopback_local_routable_peer_logs_mismatch` (the
+  `kernel default source for` info line appears for
+  `local=127.0.0.1` → `1.1.1.1:179`).
+
+No public Rust API change, no C ABI change, no protocol-on-the-wire
+change, no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
