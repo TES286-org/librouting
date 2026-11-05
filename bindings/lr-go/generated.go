@@ -5846,6 +5846,16 @@ func (x *OspfSpfV3Result) OspfSpfV3LocatorAt(index uintptr, out *C.lr_ospf_spf_r
 	return int32(rc), nil
 }
 
+func (x *OspfSpfV3Result) OspfSpfV3LocatorRouteTypeAt(index uintptr) (uint8, error) {
+	res := C.lr_ospf_spf_v3_locator_route_type_at(x.ptr, C.uintptr_t(index))
+	return uint8(res), nil
+}
+
+func (x *OspfSpfV3Result) OspfSpfV3LocatorInternalCostAt(index uintptr) (uint64, error) {
+	res := C.lr_ospf_spf_v3_locator_internal_cost_at(x.ptr, C.uintptr_t(index))
+	return uint64(res), nil
+}
+
 func (x *OspfSummaryDest) Metric() (uint32, error) {
 	res := C.lr_ospf_summary_dest_metric(x.ptr)
 	return uint32(res), nil

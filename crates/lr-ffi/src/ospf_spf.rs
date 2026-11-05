@@ -99,6 +99,18 @@ unsafe fn unbox_v3_result(r: lr_ospf_spf_v3_result_t) -> Option<Box<SpfResultV3>
 /// ceiling.
 pub const LR_OSPF_MAX_NEXTHOPS: usize = 16;
 
+/// RFC 9513 §7.1 Route Type constants — the value carried by the
+/// SRv6 Locator TLV's Route Type byte and by
+/// [`lr_ospf_spf_v3_locator_route_type_at`]. The constants mirror
+/// `lr_ospf::lsa::srv6::locator_route_type` so an embedder drives
+/// the C ABI and the Rust API with the same names.
+pub const LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA: u8 = 1;
+pub const LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA: u8 = 2;
+pub const LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1: u8 = 3;
+pub const LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2: u8 = 4;
+pub const LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1: u8 = 5;
+pub const LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2: u8 = 6;
+
 /// One SPF route projection. Used by `lr_ospf_spf_route_at`,
 /// `_summary_at`, `_v3_route_at` to surface one route to C. The
 /// `next_hops` array carries every ECMP next-hop the SPF computation
@@ -566,6 +578,18 @@ pub unsafe extern "C" fn lr_ospf_spf_v3_locator_count(r: lr_ospf_spf_v3_result_t
 /// through the same `lr_ospf_spf_route_t` shape, with `metric` and
 /// `next_hop` populated from the locator projection.
 ///
+/// The `metric` field follows the per-route-type rules from RFC 9513
+/// §5: intra-area reports the SPF distance to the advertising router;
+/// inter-area, AS-external type 1 and NSSA type 1 add the TLV metric
+/// to the SPF distance; AS-external type 2 and NSSA type 2 report the
+/// TLV metric only (the type-2 ordering rule — the SPF distance to
+/// the ASBR is the §16.4 (6) tie-break, exposed by
+/// [`lr_ospf_spf_v3_locator_internal_cost_at`]). An embedder that
+/// installs locator FIB entries without consulting the route type
+/// and `internal_cost` may pick the wrong entry across locators
+/// covering the same prefix — the dedicated accessors below give
+/// the embedder the data the type-2 tie-break needs.
+///
 /// # Safety
 /// `r` must be a valid SpfResultV3 handle. `out` must point to a
 /// writable `lr_ospf_spf_route_t`.
@@ -605,6 +629,84 @@ pub unsafe extern "C" fn lr_ospf_spf_v3_locator_at(
             0
         },
         LR_ERR_PANIC,
+    )
+}
+
+/// Read one v3 SRv6 locator's RFC 9513 §7.1 Route Type byte by index.
+/// The value is one of the `LR_OSPF_LOCATOR_ROUTE_TYPE_*` constants
+/// (1 = intra-area, 2 = inter-area, 3 = AS-external type 1, 4 =
+/// AS-external type 2, 5 = NSSA type 1, 6 = NSSA type 2). 0 is
+/// returned when `index` is out of range (after recording the
+/// last-error string) or when `r` is null — 0 is never a valid
+/// route type, so an embedder can distinguish the error path from
+/// any real route type without a separate return code.
+///
+/// Embedders dispatch on the route type to apply the correct
+/// ordering across locators covering the same prefix (type 1 vs
+/// type 2, then the metric, then `internal_cost` for the type-2
+/// tie-break). See [`lr_ospf_spf_v3_locator_at`] for the per-route-
+/// type metric rules.
+///
+/// # Safety
+/// `r` must be a valid SpfResultV3 handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_spf_v3_locator_route_type_at(
+    r: lr_ospf_spf_v3_result_t,
+    index: usize,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(result) = borrow_v3_result(r) else {
+                return 0;
+            };
+            let Some(loc) = result.locators.get(index) else {
+                set_last_error(format!(
+                    "spf v3 locator {index} out of range (len={})",
+                    result.locators.len()
+                ));
+                return 0;
+            };
+            loc.route_type
+        },
+        0,
+    )
+}
+
+/// Read one v3 SRv6 locator's SPF distance to its advertising router
+/// by index (the ABR / ASBR / NSSA ASBR for non-intra-area locators).
+/// This is the §16.4 (6) tie-breaker for type-2 locators
+/// (`LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2` /
+/// `LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2`) and is informational for
+/// intra-area / type-1 locators (it is folded into the `metric`
+/// exposed by [`lr_ospf_spf_v3_locator_at`]).
+///
+/// `u64::MAX` is returned when `index` is out of range (after
+/// recording the last-error string) or when `r` is null — the value
+/// matches `LR_ERR_INVALID_HANDLE` shape used elsewhere so the
+/// embedder's error check stays uniform.
+///
+/// # Safety
+/// `r` must be a valid SpfResultV3 handle.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_spf_v3_locator_internal_cost_at(
+    r: lr_ospf_spf_v3_result_t,
+    index: usize,
+) -> u64 {
+    guarded(
+        || unsafe {
+            let Some(result) = borrow_v3_result(r) else {
+                return u64::MAX;
+            };
+            let Some(loc) = result.locators.get(index) else {
+                set_last_error(format!(
+                    "spf v3 locator {index} out of range (len={})",
+                    result.locators.len()
+                ));
+                return u64::MAX;
+            };
+            loc.internal_cost
+        },
+        u64::MAX,
     )
 }
 
@@ -734,6 +836,50 @@ mod tests {
             unsafe { lr_ospf_spf_v3_route_count(std::ptr::null_mut()) },
             0
         );
+        // The v3 locator route-type and internal-cost accessors
+        // mirror the existing null-safety contract: 0 / u64::MAX on a
+        // NULL handle (0 is never a valid RFC 9513 §7.1 route type;
+        // u64::MAX matches the LR_ERR_INVALID_HANDLE shape used
+        // elsewhere). The last-error string carries the diagnostic
+        // for `lr_last_error()`.
+        assert_eq!(
+            unsafe { lr_ospf_spf_v3_locator_route_type_at(std::ptr::null_mut(), 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { lr_ospf_spf_v3_locator_internal_cost_at(std::ptr::null_mut(), 0) },
+            u64::MAX
+        );
+    }
+
+    /// The v3 locator route-type and internal-cost accessors return
+    /// their error sentinels (0 / u64::MAX) on an out-of-range index
+    /// — matching the C ABI contract documented on each entry point.
+    /// `lr_last_error()` carries the "out of range (len=N)" string
+    /// so an embedder that polls the diagnostic gets a precise
+    /// message; the sentinel values let a hot embedder skip the
+    /// diagnostic without parsing strings.
+    #[test]
+    fn ffi_spf_v3_locator_route_type_and_internal_cost_handle_oob() {
+        let lsdb = unsafe { crate::ospf_lsdb::lr_ospf_lsdb_new() };
+        let r = unsafe { lr_ospf_spf_v3_run(lsdb, 0x01020304) };
+        assert!(!r.is_null());
+        // No locators in the empty LSDB; every index is OOB.
+        assert_eq!(unsafe { lr_ospf_spf_v3_locator_count(r) }, 0);
+        assert_eq!(
+            unsafe { lr_ospf_spf_v3_locator_route_type_at(r, 0) },
+            0,
+            "empty LSDB has no locators; route_type_at returns the 0 sentinel"
+        );
+        assert_eq!(
+            unsafe { lr_ospf_spf_v3_locator_internal_cost_at(r, 0) },
+            u64::MAX,
+            "empty LSDB has no locators; internal_cost_at returns the u64::MAX sentinel"
+        );
+        unsafe {
+            lr_ospf_spf_v3_result_free(r);
+            crate::ospf_lsdb::lr_ospf_lsdb_free(lsdb);
+        }
     }
 
     /// ECMP at the C ABI: a route whose SPF computation discovers two

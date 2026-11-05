@@ -537,6 +537,56 @@ const (
 	OspfExternalType2 OspfExternalMetricType = 2
 )
 
+// OspfLocatorRouteType mirrors the RFC 9513 §7.1 Route Type byte
+// carried by the SRv6 Locator TLV and exposed by
+// `OspfSpfV3Result.OspfSpfV3LocatorRouteTypeAt`. The constants match
+// the C ABI `LR_OSPF_LOCATOR_ROUTE_TYPE_*` defines in `lr_ffi.h` and
+// the Rust `lr_ospf::lsa::srv6::locator_route_type` constants
+// byte-for-byte — an embedder dispatches on the route type to apply
+// the per-§5 reachability ordering (intra-area, inter-area, AS-
+// external type 1 / 2, NSSA type 1 / 2).
+type OspfLocatorRouteType uint8
+
+const (
+	// OspfLocatorRouteTypeIntraArea — the advertising router is the
+	// locator's owner; the metric is the SPF distance to that router.
+	OspfLocatorRouteTypeIntraArea OspfLocatorRouteType = 1
+	// OspfLocatorRouteTypeInterArea — the advertising router is the
+	// ABR forwarding the locator into the receiver's area; the
+	// metric is the SPF distance to the ABR plus the TLV metric.
+	OspfLocatorRouteTypeInterArea OspfLocatorRouteType = 2
+	// OspfLocatorRouteTypeAsExternal1 — the advertising router is
+	// the ASBR; the metric is the SPF distance to the ASBR plus the
+	// TLV metric (type-1 external).
+	OspfLocatorRouteTypeAsExternal1 OspfLocatorRouteType = 3
+	// OspfLocatorRouteTypeAsExternal2 — the metric is the TLV metric
+	// only (type-2 external); the SPF distance to the ASBR is the
+	// §16.4 (6) tie-break, exposed by
+	// `OspfSpfV3Result.OspfSpfV3LocatorInternalCostAt`.
+	OspfLocatorRouteTypeAsExternal2 OspfLocatorRouteType = 4
+	// OspfLocatorRouteTypeNssa1 — same metric shape as
+	// `OspfLocatorRouteTypeAsExternal1` but the advertising router
+	// is an NSSA ASBR (RFC 3101 §2.5).
+	OspfLocatorRouteTypeNssa1 OspfLocatorRouteType = 5
+	// OspfLocatorRouteTypeNssa2 — same metric shape as
+	// `OspfLocatorRouteTypeAsExternal2` but the advertising router
+	// is an NSSA ASBR (RFC 3101 §2.5).
+	OspfLocatorRouteTypeNssa2 OspfLocatorRouteType = 6
+)
+
+// C ABI #define aliases — these mirror the C ABI's
+// `LR_OSPF_LOCATOR_ROUTE_TYPE_*` constants in `lr_ffi.h` so a Go
+// embedder that prefers the C ABI spelling over the idiomatic Go
+// `OspfLocatorRouteType*` names gets the same values.
+const (
+	LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA    = 1
+	LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA    = 2
+	LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1 = 3
+	LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2 = 4
+	LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1        = 5
+	LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2        = 6
+)
+
 // OspfExternalDest is an owned handle to one AS-external-LSA
 // destination (RFC 2328 §2.3 and §A.4.5).
 type OspfExternalDest struct {

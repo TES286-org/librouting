@@ -10275,6 +10275,14 @@ inline std::int32_t ospf_spf_v3_locator_at(lr_ospf_spf_v3_result_t r, std::uintp
     return rc;
 }
 
+inline std::uint8_t ospf_spf_v3_locator_route_type_at(lr_ospf_spf_v3_result_t r, std::uintptr_t index) {
+    return lr_ospf_spf_v3_locator_route_type_at(r, index);
+}
+
+inline std::uint64_t ospf_spf_v3_locator_internal_cost_at(lr_ospf_spf_v3_result_t r, std::uintptr_t index) {
+    return lr_ospf_spf_v3_locator_internal_cost_at(r, index);
+}
+
 inline lr_osroute_t osroute_connect() {
     return lr_osroute_connect();
 }
@@ -13315,6 +13323,14 @@ inline std::int32_t ospf_spf_v3_locator_at(OspfSpfV3ResultHandle const& h, std::
     std::int32_t rc = lr_ospf_spf_v3_locator_at(h.get(), index, out);
     if (rc < 0) throw Error(std::string("lr_ospf_spf_v3_locator_at failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
     return rc;
+}
+
+inline std::uint8_t ospf_spf_v3_locator_route_type_at(OspfSpfV3ResultHandle const& h, std::uintptr_t index) {
+    return lr_ospf_spf_v3_locator_route_type_at(h.get(), index);
+}
+
+inline std::uint64_t ospf_spf_v3_locator_internal_cost_at(OspfSpfV3ResultHandle const& h, std::uintptr_t index) {
+    return lr_ospf_spf_v3_locator_internal_cost_at(h.get(), index);
 }
 
 inline std::uint32_t metric(OspfSummaryDestHandle const& h) {

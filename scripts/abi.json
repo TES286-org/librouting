@@ -25956,6 +25956,46 @@
       ]
     },
     {
+      "name": "lr_ospf_spf_v3_locator_route_type_at",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_ospf_spf_v3_result_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "index",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ospf_spf_v3_locator_internal_cost_at",
+      "return_type": "uint64_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_ospf_spf_v3_result_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "index",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_ospf_sr_db_new",
       "return_type": "lr_ospf_sr_db_t",
       "params": [
@@ -42300,6 +42340,30 @@
     {
       "name": "LR_OSPF_MAX_NEXTHOPS",
       "value": "16"
+    },
+    {
+      "name": "LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA",
+      "value": "1"
+    },
+    {
+      "name": "LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA",
+      "value": "2"
+    },
+    {
+      "name": "LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1",
+      "value": "3"
+    },
+    {
+      "name": "LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2",
+      "value": "4"
+    },
+    {
+      "name": "LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1",
+      "value": "5"
+    },
+    {
+      "name": "LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2",
+      "value": "6"
     },
     {
       "name": "LR_GTSM_MODE_DISABLED",
@@ -70635,6 +70699,46 @@
             "is_ptr": true,
             "is_struct": true,
             "pointee": "lr_ospf_spf_route_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_ospf_spf_v3_locator_route_type_at",
+        "return_type": "uint8_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_ospf_spf_v3_result_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "index",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ospf_spf_v3_locator_internal_cost_at",
+        "return_type": "uint64_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_ospf_spf_v3_result_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "index",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
           }
         ]
       }

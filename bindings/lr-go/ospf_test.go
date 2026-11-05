@@ -865,3 +865,85 @@ func TestRouterReadersRoundTrip(t *testing.T) {
 		t.Fatalf("RoaValidateEnabled after SetROAValidate(false) = true, want false")
 	}
 }
+
+// RFC 9513 §5 — the v3 SRv6 locator route-type and internal-cost
+// accessors mirror the existing C ABI null-safety contract: 0 for
+// route_type (a value never used by RFC 9513 §7.1 route types 1-6)
+// and 2**64-1 for internal_cost (the LR_ERR_INVALID_HANDLE shape
+// used elsewhere in the C ABI). The Go wrapper surfaces the same
+// sentinels; the diagnostic ends up in LastError()'s thread-local
+// string. Mirrors the Rust-side FFI tests in
+// crates/lr-ffi/src/ospf_spf.rs::ffi_spf_v3_locator_route_type_and_internal_cost_handle_oob
+// and the Python-side tests in
+// bindings/lr-python/tests/test_ospf.py::test_ospf_spf_v3_locator_route_type_and_internal_cost_handle_oob.
+
+func TestOspfSpfV3LocatorRouteTypeAndInternalCostHandleOob(t *testing.T) {
+	d := NewOspfLsdb()
+	defer d.Free()
+	r, err := d.OspfSpfV3Run(0x01020304)
+	if err != nil {
+		t.Fatalf("OspfSpfV3Run: %v", err)
+	}
+	defer r.Free()
+	// Empty LSDB ⇒ zero locators. Both accessors return their error
+	// sentinel on the out-of-range index; 0 for route_type, 2**64-1
+	// for internal_cost.
+	count, err := r.OspfSpfV3LocatorCount()
+	if err != nil {
+		t.Fatalf("OspfSpfV3LocatorCount: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("empty LSDB OspfSpfV3LocatorCount = %d, want 0", count)
+	}
+	gotRT, _ := r.OspfSpfV3LocatorRouteTypeAt(0)
+	if gotRT != 0 {
+		t.Fatalf("OOB OspfSpfV3LocatorRouteTypeAt = %d, want 0 sentinel", gotRT)
+	}
+	gotIC, _ := r.OspfSpfV3LocatorInternalCostAt(0)
+	if gotIC != ^uint64(0) {
+		t.Fatalf("OOB OspfSpfV3LocatorInternalCostAt = %d, want 2**64-1 sentinel", gotIC)
+	}
+}
+
+func TestOspfSpfV3LocatorRouteTypeAndInternalCostHandleNull(t *testing.T) {
+	// The C ABI null-safety contract for the new accessors: 0 /
+	// 2**64-1 on a NULL handle. We exercise it through the
+	// generated low-level wrappers — `r.ptr` is the raw C handle.
+	// A nil pointer dereference would surface as a panic; the C
+	// ABI's null-guard turns the call into a sentinel return.
+	r := &OspfSpfV3Result{ptr: nil}
+	gotRT, _ := r.OspfSpfV3LocatorRouteTypeAt(0)
+	if gotRT != 0 {
+		t.Fatalf("NULL OspfSpfV3LocatorRouteTypeAt = %d, want 0 sentinel", gotRT)
+	}
+	gotIC, _ := r.OspfSpfV3LocatorInternalCostAt(0)
+	if gotIC != ^uint64(0) {
+		t.Fatalf("NULL OspfSpfV3LocatorInternalCostAt = %d, want 2**64-1 sentinel", gotIC)
+	}
+}
+
+// RFC 9513 §7.1 Route Type constants — must mirror the C ABI defines
+// `LR_OSPF_LOCATOR_ROUTE_TYPE_*` and the Rust constants in
+// `lr_ospf::lsa::srv6::locator_route_type`. Pinning them in Go catches
+// an accidental renumbering of either surface.
+
+func TestOspfLocatorRouteTypeConstantsMatchCABI(t *testing.T) {
+	if LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA != 1 {
+		t.Fatalf("INTRA_AREA = %d, want 1", LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA)
+	}
+	if LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA != 2 {
+		t.Fatalf("INTER_AREA = %d, want 2", LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA)
+	}
+	if LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1 != 3 {
+		t.Fatalf("AS_EXTERNAL_1 = %d, want 3", LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1)
+	}
+	if LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2 != 4 {
+		t.Fatalf("AS_EXTERNAL_2 = %d, want 4", LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2)
+	}
+	if LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1 != 5 {
+		t.Fatalf("NSSA_1 = %d, want 5", LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1)
+	}
+	if LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2 != 6 {
+		t.Fatalf("NSSA_2 = %d, want 6", LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2)
+	}
+}

@@ -584,3 +584,79 @@ def test_router_readers_round_trip():
     assert r.roa_validate_enabled() is True
     r.set_roa_validate(False)
     assert r.roa_validate_enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# C ABI smoke for the v3 SRv6 locator route-type / internal-cost accessors
+# (issue #92 — RFC 9513 §5). Mirrors the Rust-side FFI tests in
+# crates/lr-ffi/src/ospf_spf.rs::ffi_spf_v3_locator_route_type_and_internal_cost_handle_oob.
+# The high-level Python binding does not yet wrap the v3 SPF surface as a
+# dedicated class; the test exercises the C ABI surface directly through
+# ``get_lib()`` and the CFFI cdef so the new symbols stay covered.
+# ---------------------------------------------------------------------------
+
+
+def test_ospf_spf_v3_locator_route_type_and_internal_cost_handle_oob():
+    from librouting._ffi import ffi, get_lib
+
+    lib = get_lib()
+    lsdb = lib.lr_ospf_lsdb_new()
+    try:
+        r = lib.lr_ospf_spf_v3_run(lsdb, 0x01020304)
+        assert r != ffi.NULL
+        try:
+            # Empty LSDB ⇒ zero locators. The new accessors mirror the
+            # existing C ABI null-safety contract: 0 for route_type (a
+            # value never used by RFC 9513 §7.1 route types 1-6) and
+            # 2**64-1 for internal_cost (the LR_ERR_INVALID_HANDLE
+            # shape used elsewhere in the C ABI).
+            assert lib.lr_ospf_spf_v3_locator_count(r) == 0
+            assert (
+                lib.lr_ospf_spf_v3_locator_route_type_at(r, 0) == 0
+            ), "OOB index returns the 0 sentinel for route_type"
+            assert (
+                lib.lr_ospf_spf_v3_locator_internal_cost_at(r, 0) == 2**64 - 1
+            ), "OOB index returns the u64::MAX sentinel for internal_cost"
+        finally:
+            lib.lr_ospf_spf_v3_result_free(r)
+    finally:
+        lib.lr_ospf_lsdb_free(lsdb)
+
+
+def test_ospf_spf_v3_locator_route_type_and_internal_cost_handle_null():
+    from librouting._ffi import ffi, get_lib
+
+    lib = get_lib()
+    # NULL handle mirrors the null-safety every other v3 accessor
+    # already follows. The diagnostic ends up in lr_last_error()'s
+    # thread-local string; the return value is the same sentinel as
+    # the OOB case so a hot consumer can skip the diagnostic.
+    assert (
+        lib.lr_ospf_spf_v3_locator_route_type_at(ffi.NULL, 0) == 0
+    ), "NULL handle returns the 0 sentinel for route_type"
+    assert (
+        lib.lr_ospf_spf_v3_locator_internal_cost_at(ffi.NULL, 0) == 2**64 - 1
+    ), "NULL handle returns the u64::MAX sentinel for internal_cost"
+
+
+# RFC 9513 §7.1 Route Type constants — must mirror the C ABI defines
+# `LR_OSPF_LOCATOR_ROUTE_TYPE_*` and the Rust constants in
+# `lr_ospf::lsa::srv6::locator_route_type`. Pinning them in Python
+# catches an accidental renumbering of either surface.
+
+
+def test_ospf_locator_route_type_constants_match_c_abi():
+    from librouting._ffi import get_lib
+
+    lib = get_lib()
+    # The C ABI exposes these as `#define` constants in lr_ffi.h.
+    # CFFI's dlopen mode reads them as Python attributes on the lib
+    # object (the `#define` value lands in the cdef's preprocessor
+    # namespace). The constants cover every route type the SRv6
+    # Locator TLV may carry per RFC 9513 §7.1.
+    assert lib.LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA == 1
+    assert lib.LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA == 2
+    assert lib.LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1 == 3
+    assert lib.LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2 == 4
+    assert lib.LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1 == 5
+    assert lib.LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2 == 6

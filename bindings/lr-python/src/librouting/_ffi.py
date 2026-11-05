@@ -4261,6 +4261,15 @@ int32_t lr_ospf_spf_v3_locator_at(
     uintptr_t index,
     struct lr_ospf_spf_route_t * out
 );
+uint8_t lr_ospf_spf_v3_locator_route_type_at(lr_ospf_spf_v3_result_t r, uintptr_t index);
+uint64_t lr_ospf_spf_v3_locator_internal_cost_at(lr_ospf_spf_v3_result_t r, uintptr_t index);
+
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA 1
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA 2
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1 3
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2 4
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1 5
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2 6
 lr_ospf_sr_db_t lr_ospf_sr_db_new(lr_ospf_lsdb_t lsdb);
 void lr_ospf_sr_db_free(lr_ospf_sr_db_t db);
 lr_ospf_srv6_db_t lr_ospf_srv6_db_new(lr_ospf_lsdb_t lsdb);
@@ -4785,10 +4794,6 @@ int32_t lr_bgp_peer_advertise_with_originator(
     const uint8_t * originator_bgp_id_addr
 );
 
-/* GENERATED ADDITIONS - do not edit by hand.
-   Source: scripts/gen_python.py + scripts/abi.json
-   Re-run: python3 scripts/gen_python.py */
-
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
 typedef struct lr_afi_safi_t lr_nlri_family_t;
 uint8_t lr_ospf_v3_packet_checksum_ok(
@@ -4797,6 +4802,13 @@ uint8_t lr_ospf_v3_packet_checksum_ok(
     const uint8_t * src,
     const uint8_t * dst
 );
+
+/* GENERATED ADDITIONS - do not edit by hand.
+   Source: scripts/gen_python.py + scripts/abi.json
+   Re-run: python3 scripts/gen_python.py */
+
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
 """
 
 

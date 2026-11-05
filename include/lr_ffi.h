@@ -1696,6 +1696,25 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_OSPF_MAX_NEXTHOPS 16
 
 /**
+ * RFC 9513 §7.1 Route Type constants — the value carried by the
+ * SRv6 Locator TLV's Route Type byte and by
+ * [`lr_ospf_spf_v3_locator_route_type_at`]. The constants mirror
+ * `lr_ospf::lsa::srv6::locator_route_type` so an embedder drives
+ * the C ABI and the Rust API with the same names.
+ */
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_INTRA_AREA 1
+
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_INTER_AREA 2
+
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_1 3
+
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2 4
+
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_1 5
+
+#define LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2 6
+
+/**
  * `LR_GTSM_MODE_*` constants — discriminant for [`lr_gtsm_mode`].
  */
 #define LR_GTSM_MODE_DISABLED 0
@@ -15498,6 +15517,18 @@ uintptr_t lr_ospf_spf_v3_locator_count(lr_ospf_spf_v3_result_t r);
  * through the same `lr_ospf_spf_route_t` shape, with `metric` and
  * `next_hop` populated from the locator projection.
  *
+ * The `metric` field follows the per-route-type rules from RFC 9513
+ * §5: intra-area reports the SPF distance to the advertising router;
+ * inter-area, AS-external type 1 and NSSA type 1 add the TLV metric
+ * to the SPF distance; AS-external type 2 and NSSA type 2 report the
+ * TLV metric only (the type-2 ordering rule — the SPF distance to
+ * the ASBR is the §16.4 (6) tie-break, exposed by
+ * [`lr_ospf_spf_v3_locator_internal_cost_at`]). An embedder that
+ * installs locator FIB entries without consulting the route type
+ * and `internal_cost` may pick the wrong entry across locators
+ * covering the same prefix — the dedicated accessors below give
+ * the embedder the data the type-2 tie-break needs.
+ *
  * # Safety
  * `r` must be a valid SpfResultV3 handle. `out` must point to a
  * writable `lr_ospf_spf_route_t`.
@@ -15505,6 +15536,46 @@ uintptr_t lr_ospf_spf_v3_locator_count(lr_ospf_spf_v3_result_t r);
 int32_t lr_ospf_spf_v3_locator_at(lr_ospf_spf_v3_result_t r,
                                   uintptr_t index,
                                   struct lr_ospf_spf_route_t *out);
+
+/**
+ * Read one v3 SRv6 locator's RFC 9513 §7.1 Route Type byte by index.
+ * The value is one of the `LR_OSPF_LOCATOR_ROUTE_TYPE_*` constants
+ * (1 = intra-area, 2 = inter-area, 3 = AS-external type 1, 4 =
+ * AS-external type 2, 5 = NSSA type 1, 6 = NSSA type 2). 0 is
+ * returned when `index` is out of range (after recording the
+ * last-error string) or when `r` is null — 0 is never a valid
+ * route type, so an embedder can distinguish the error path from
+ * any real route type without a separate return code.
+ *
+ * Embedders dispatch on the route type to apply the correct
+ * ordering across locators covering the same prefix (type 1 vs
+ * type 2, then the metric, then `internal_cost` for the type-2
+ * tie-break). See [`lr_ospf_spf_v3_locator_at`] for the per-route-
+ * type metric rules.
+ *
+ * # Safety
+ * `r` must be a valid SpfResultV3 handle.
+ */
+uint8_t lr_ospf_spf_v3_locator_route_type_at(lr_ospf_spf_v3_result_t r, uintptr_t index);
+
+/**
+ * Read one v3 SRv6 locator's SPF distance to its advertising router
+ * by index (the ABR / ASBR / NSSA ASBR for non-intra-area locators).
+ * This is the §16.4 (6) tie-breaker for type-2 locators
+ * (`LR_OSPF_LOCATOR_ROUTE_TYPE_AS_EXTERNAL_2` /
+ * `LR_OSPF_LOCATOR_ROUTE_TYPE_NSSA_2`) and is informational for
+ * intra-area / type-1 locators (it is folded into the `metric`
+ * exposed by [`lr_ospf_spf_v3_locator_at`]).
+ *
+ * `u64::MAX` is returned when `index` is out of range (after
+ * recording the last-error string) or when `r` is null — the value
+ * matches `LR_ERR_INVALID_HANDLE` shape used elsewhere so the
+ * embedder's error check stays uniform.
+ *
+ * # Safety
+ * `r` must be a valid SpfResultV3 handle.
+ */
+uint64_t lr_ospf_spf_v3_locator_internal_cost_at(lr_ospf_spf_v3_result_t r, uintptr_t index);
 
 /**
  * Construct an `SrDatabase` by projecting from `lsdb`. The LSDB is
