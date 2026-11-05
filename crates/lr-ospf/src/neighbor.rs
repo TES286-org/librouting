@@ -146,20 +146,47 @@ impl StateMachine for OspfNeighbor {
             | (NeighborState::Loading, NeighborEvent::ExchangeDone) => NeighborState::Full,
             (NeighborState::Full, NeighborEvent::LsaUpdateArrived) => NeighborState::Full,
             (_, NeighborEvent::Kill) => {
-                actions.push(Action::EmitEvent(lr_core::event::Event::Log(format!(
-                    "OSPF neighbor {} reset",
-                    self.router_id
-                ))));
+                // RFC 2328 §10.6 / §10.1 — adjacency killed (inactivity
+                // timer expiry, Hello parameter mismatch, manual reset).
+                // Surface a structured `Event::OspfNeighborReset` so the
+                // router can record the cause into the session's
+                // `SessionStats::last_error` via the dedicated
+                // `SessionErrorKind::OspfKill` variant — the previous
+                // shape was a free-form `Event::Log` line that the router
+                // collapsed into the generic `SessionErrorKind::Other`,
+                // losing the RFC 2328 reason on the operator-visible
+                // `show sessions` surface.
+                actions.push(Action::EmitEvent(
+                    lr_core::event::Event::OspfNeighborReset {
+                        router_id: self.router_id.as_u32(),
+                        kind: lr_core::event::OspfNeighborResetKind::Kill,
+                    },
+                ));
                 NeighborState::Down
             }
             // RFC 2328 §10.9 / Fig. 12: a sequence mismatch or a bad
             // LSA in the exchange states restarts the *adjacency
-            // negotiation* (back to ExStart), not the neighbor.
-            (_, NeighborEvent::SeqMismatch) | (_, NeighborEvent::BadLsa) => {
-                actions.push(Action::EmitEvent(lr_core::event::Event::Log(format!(
-                    "OSPF neighbor {} exchange restart (sequence mismatch)",
-                    self.router_id
-                ))));
+            // negotiation* (back to ExStart), not the neighbor. The two
+            // FSM events share the next-state transition but carry
+            // distinct RFC causes — surface them as separate
+            // `OspfNeighborResetKind` variants so the router can record
+            // the right `SessionErrorKind` per cause.
+            (_, NeighborEvent::SeqMismatch) => {
+                actions.push(Action::EmitEvent(
+                    lr_core::event::Event::OspfNeighborReset {
+                        router_id: self.router_id.as_u32(),
+                        kind: lr_core::event::OspfNeighborResetKind::SeqMismatch,
+                    },
+                ));
+                NeighborState::ExStart
+            }
+            (_, NeighborEvent::BadLsa) => {
+                actions.push(Action::EmitEvent(
+                    lr_core::event::Event::OspfNeighborReset {
+                        router_id: self.router_id.as_u32(),
+                        kind: lr_core::event::OspfNeighborResetKind::BadLsa,
+                    },
+                ));
                 NeighborState::ExStart
             }
             (s, _) => s,
@@ -206,5 +233,193 @@ mod tests {
         assert_eq!(n.state, NeighborState::Loading);
         n.step(NeighborEvent::LsaUpdateArrived);
         assert_eq!(n.state, NeighborState::Full);
+    }
+
+    /// `NeighborEvent::Kill` is the "hard reset" trigger (RFC 2328
+    /// §10.6 / §10.1) — inactivity timer expiry, Hello parameter
+    /// mismatch, manual reset. The FSM must surface the cause as a
+    /// structured `Event::OspfNeighborReset { kind: Kill }` so the
+    /// router can record `SessionErrorKind::OspfKill` rather than the
+    /// generic `Other` the previous free-form `Event::Log` shape
+    /// collapsed into.
+    #[test]
+    fn kill_emits_structured_ospf_neighbor_reset_event() {
+        use lr_core::event::{Event, OspfNeighborResetKind};
+        use lr_core::fsm::Action;
+        let mut n = OspfNeighbor::new(RouterId::from_u32(0x0A000001));
+        // Bring the neighbour up to Full so Kill's Down transition is
+        // observable in the action stream.
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::AdjOk { proceed: true });
+        n.step(NeighborEvent::NegotiationDone);
+        n.step(NeighborEvent::ExchangeDone);
+        n.step(NeighborEvent::LsaUpdateArrived);
+        assert_eq!(n.state, NeighborState::Full);
+        let actions = n.step(NeighborEvent::Kill);
+        assert_eq!(n.state, NeighborState::Down);
+        let reset = actions.iter().find_map(|a| match a {
+            Action::EmitEvent(Event::OspfNeighborReset { router_id, kind }) => {
+                Some((*router_id, *kind))
+            }
+            _ => None,
+        });
+        let (router_id, kind) = reset.expect("Kill emits an OspfNeighborReset event");
+        assert_eq!(
+            router_id, 0x0A000001,
+            "the reset carries the neighbour's router-id"
+        );
+        assert_eq!(
+            kind,
+            OspfNeighborResetKind::Kill,
+            "Kill maps to the Kill variant"
+        );
+    }
+
+    /// `NeighborEvent::SeqMismatch` (RFC 2328 §10.9 / Fig. 12) restarts
+    /// the adjacency negotiation back to ExStart — the neighbour stays
+    /// alive. The FSM must surface `OspfNeighborResetKind::SeqMismatch`
+    /// so the router records `SessionErrorKind::OspfSeqMismatch`.
+    #[test]
+    fn seq_mismatch_emits_structured_ospf_neighbor_reset_event() {
+        use lr_core::event::{Event, OspfNeighborResetKind};
+        use lr_core::fsm::Action;
+        let mut n = OspfNeighbor::new(RouterId::from_u32(0x0A000002));
+        // Bring the neighbour up to Exchange so the mismatch's
+        // transition back to ExStart is observable.
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::AdjOk { proceed: true });
+        n.step(NeighborEvent::NegotiationDone);
+        assert_eq!(n.state, NeighborState::Exchange);
+        let actions = n.step(NeighborEvent::SeqMismatch);
+        assert_eq!(n.state, NeighborState::ExStart);
+        let reset = actions.iter().find_map(|a| match a {
+            Action::EmitEvent(Event::OspfNeighborReset { router_id, kind }) => {
+                Some((*router_id, *kind))
+            }
+            _ => None,
+        });
+        let (router_id, kind) = reset.expect("SeqMismatch emits an OspfNeighborReset event");
+        assert_eq!(router_id, 0x0A000002);
+        assert_eq!(
+            kind,
+            OspfNeighborResetKind::SeqMismatch,
+            "SeqMismatch maps to the SeqMismatch variant (not Kill or BadLsa)"
+        );
+    }
+
+    /// `NeighborEvent::BadLsa` (RFC 2328 §13.7 / §A.3 — a malformed or
+    /// inconsistent LSA in an LS-Update or LS-Request) is distinct from
+    /// SeqMismatch even though both restart the adjacency from ExStart.
+    /// The FSM must surface `OspfNeighborResetKind::BadLsa` so the
+    /// router records `SessionErrorKind::OspfBadLsa` rather than
+    /// collapsing the two causes into the same `OspfSeqMismatch`.
+    #[test]
+    fn bad_lsa_emits_structured_ospf_neighbor_reset_event() {
+        use lr_core::event::{Event, OspfNeighborResetKind};
+        use lr_core::fsm::Action;
+        let mut n = OspfNeighbor::new(RouterId::from_u32(0x0A000003));
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::AdjOk { proceed: true });
+        n.step(NeighborEvent::NegotiationDone);
+        assert_eq!(n.state, NeighborState::Exchange);
+        let actions = n.step(NeighborEvent::BadLsa);
+        assert_eq!(n.state, NeighborState::ExStart);
+        let reset = actions.iter().find_map(|a| match a {
+            Action::EmitEvent(Event::OspfNeighborReset { router_id, kind }) => {
+                Some((*router_id, *kind))
+            }
+            _ => None,
+        });
+        let (router_id, kind) = reset.expect("BadLsa emits an OspfNeighborReset event");
+        assert_eq!(router_id, 0x0A000003);
+        assert_eq!(
+            kind,
+            OspfNeighborResetKind::BadLsa,
+            "BadLsa maps to the BadLsa variant (distinct from SeqMismatch)"
+        );
+    }
+
+    /// The previous FSM shape emitted `Event::Log("OSPF neighbor X reset")`
+    /// for Kill and `Event::Log("OSPF neighbor X exchange restart (sequence
+    /// mismatch)")` for SeqMismatch/BadLsa — both free-form strings that
+    /// the router collapsed into the generic `SessionErrorKind::Other`.
+    /// The structured `Event::OspfNeighborReset` replaces both, but
+    /// neither the old `Event::Log` shape nor any other `Event::Log`
+    /// should leak through for these three events (the router
+    /// synthesises the operator-visible log line itself from the
+    /// structured event).
+    #[test]
+    fn reset_events_do_not_also_emit_log() {
+        use lr_core::event::Event;
+        use lr_core::fsm::Action;
+        let mut n = OspfNeighbor::new(RouterId::from_u32(0x0A000004));
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::HelloSeen {
+            dr: 0,
+            bdr: 0,
+            priority: 1,
+        });
+        n.step(NeighborEvent::AdjOk { proceed: true });
+        n.step(NeighborEvent::NegotiationDone);
+        for ev in [
+            NeighborEvent::Kill,
+            NeighborEvent::SeqMismatch,
+            NeighborEvent::BadLsa,
+        ] {
+            let label = format!("{ev:?}");
+            let actions = n.step(ev);
+            let has_log = actions
+                .iter()
+                .any(|a| matches!(a, Action::EmitEvent(Event::Log(_))));
+            assert!(
+                !has_log,
+                "the {label} event must not also emit an Event::Log; the router synthesises the log line"
+            );
+            // Re-establish the neighbour between iterations so the
+            // next event has somewhere to transition from.
+            n.step(NeighborEvent::HelloSeen {
+                dr: 0,
+                bdr: 0,
+                priority: 1,
+            });
+            n.step(NeighborEvent::HelloSeen {
+                dr: 0,
+                bdr: 0,
+                priority: 1,
+            });
+            n.step(NeighborEvent::AdjOk { proceed: true });
+            n.step(NeighborEvent::NegotiationDone);
+        }
     }
 }
