@@ -343,18 +343,17 @@ enum SessionState {
         runtime: OspfRuntime,
         conn: MemoryConn,
         /// Operational statistics (issue #52) — same shape as the BGP
-        /// variant. OSPF does not have a NOTIFICATION mechanism; when
-        /// the OSPF path is wired to record FSM errors into `last_error`,
-        /// the dedicated `SessionErrorKind::OspfKill` /
-        /// `OspfSeqMismatch` / `OspfBadLsa` variants (RFC 2328 §10.3 /
-        /// §10.9 / §13.7) carry the cause. Until that wiring lands the
-        /// OSPF dispatch sites drop FSM `Vec<Action>` events with
-        /// `let _ = self.neighbor.step(..)` (see
-        /// `crates/lr-router/src/instance/ospf.rs:605` and the
-        /// `crates/lr-ospf/src/exchange.rs` siblings — tracked in
-        /// defects.txt under the OSPF `PLACEHOLDER` umbrella), so
-        /// `last_error` stays at `SessionErrorKind::None` for OSPF
-        /// sessions today.
+        /// variant. OSPF does not have a NOTIFICATION mechanism; the
+        /// dedicated `SessionErrorKind::OspfKill` /
+        /// `OspfSeqMismatch` / `OspfBadLsa` variants (RFC 2328 §10.6
+        /// / §10.9 / §13.7) carry the cause when the OSPF neighbour
+        /// FSM emits an `Event::OspfNeighborReset` for an
+        /// unrecoverable mismatch. The router's OSPF dispatch path
+        /// (search this file for `Event::OspfNeighborReset`) records
+        /// the cause into `last_error` and synthesises a
+        /// `RouterEvent::Log` line for backwards compatibility with
+        /// embedders that consumed the previous free-form log
+        /// message.
         stats: SessionStats,
     },
     Babel {
@@ -4188,7 +4187,12 @@ impl RouterInstance for DefaultRouter {
                         post_state,
                     }
                 }
-                SessionState::Ospf { runtime, conn, .. } => {
+                SessionState::Ospf {
+                    runtime,
+                    conn,
+                    stats,
+                    ..
+                } => {
                     conn.push_input(bytes);
                     let input = conn.take_input();
                     if input.is_empty() {
@@ -4196,6 +4200,18 @@ impl RouterInstance for DefaultRouter {
                     }
                     let mut lsas = Vec::new();
                     let mut outbound: Vec<u8> = Vec::new();
+                    // Reset-cause queue: the OSPF neighbour FSM emits
+                    // `Event::OspfNeighborReset` actions inside the
+                    // decode loop. We cannot call `stats.record_error`
+                    // directly there because `runtime` is borrowed
+                    // mutably from this `SessionState::Ospf` arm for the
+                    // whole loop, and `stats` lives in the same struct
+                    // (the borrow checker rejects a second mutable
+                    // borrow). Defer each cause onto this Vec and drain
+                    // it after the loop ends — the `now_ms` timestamp
+                    // is the same the FSM saw, so the recorded
+                    // `last_error_at_ms` is exact.
+                    let mut ospf_resets: Vec<SessionErrorKind> = Vec::new();
                     let area_id = runtime.area_id;
                     // The area LSDB is the header-comparison source for
                     // the DBD exchange (disjoint field borrow from the
@@ -4234,6 +4250,69 @@ impl RouterInstance for DefaultRouter {
                                             state: peer_state,
                                         });
                                     }
+                                    lr_core::event::Event::OspfNeighborReset {
+                                        router_id,
+                                        kind,
+                                    } => {
+                                        // RFC 2328 §10.6 / §10.9 / §13.7:
+                                        // record the cause into the
+                                        // session's `last_error` via the
+                                        // dedicated `SessionErrorKind`
+                                        // variants so `show sessions` /
+                                        // `lrctl session <h>` surfaces the
+                                        // RFC 2328 reason. The previous
+                                        // fall-through collapsed every
+                                        // OSPF reset into
+                                        // `SessionErrorKind::Other`,
+                                        // losing the cause on the
+                                        // operator-visible stats
+                                        // surface.
+                                        //
+                                        // `stats` lives in the same
+                                        // `SessionState::Ospf` struct
+                                        // `runtime` is borrowed from, so
+                                        // we cannot take a second mutable
+                                        // borrow inside the decode loop.
+                                        // Defer the cause onto the
+                                        // `ospf_resets` queue and apply
+                                        // it after the loop ends.
+                                        let cause = match kind {
+                                            lr_core::event::OspfNeighborResetKind::Kill => {
+                                                SessionErrorKind::OspfKill
+                                            }
+                                            lr_core::event::OspfNeighborResetKind::SeqMismatch => {
+                                                SessionErrorKind::OspfSeqMismatch
+                                            }
+                                            lr_core::event::OspfNeighborResetKind::BadLsa => {
+                                                SessionErrorKind::OspfBadLsa
+                                            }
+                                            // `OspfNeighborResetKind` is
+                                            // `#[non_exhaustive]` so future
+                                            // variants (e.g. OSPFv3-specific
+                                            // reset causes) compile against
+                                            // this match without forcing a
+                                            // major bump. An unknown kind
+                                            // falls back to the generic
+                                            // `Other` classification — the
+                                            // same surface the previous
+                                            // fall-through produced — and
+                                            // the log line below still
+                                            // surfaces the raw kind name.
+                                            _ => SessionErrorKind::Other,
+                                        };
+                                        ospf_resets.push(cause);
+                                        // Synthesise a `RouterEvent::Log`
+                                        // line for backwards
+                                        // compatibility with embedders
+                                        // that consumed the previous
+                                        // free-form log message — the
+                                        // operator-visible log stream
+                                        // stays the same shape.
+                                        self.pending_events.push(RouterEvent::Log(format!(
+                                            "OSPF neighbor {router_id} reset ({})",
+                                            cause.as_str(),
+                                        )));
+                                    }
                                     lr_core::event::Event::Log(msg) => {
                                         self.pending_events.push(RouterEvent::Log(msg));
                                     }
@@ -4245,6 +4324,17 @@ impl RouterInstance for DefaultRouter {
                     if !outbound.is_empty() {
                         Self::finalize_ospf_v2_egress(runtime.protocol, &mut outbound);
                         conn.put_output(&outbound);
+                    }
+                    // Apply the deferred reset causes (RFC 2328 §10.6 /
+                    // §10.9 / §13.7) to the session stats. The loop
+                    // above pushed one entry per `Event::OspfNeighborReset`
+                    // the neighbour FSM emitted; `record_error` keeps the
+                    // *last* cause in `last_error` and stamps the
+                    // `last_error_at_ms` timestamp, matching the
+                    // "most recent" semantics the BGP path uses for
+                    // NOTIFICATION/hold-timer errors.
+                    for cause in ospf_resets {
+                        stats.record_error(cause, self.now_ms);
                     }
                     Pending::OspfLsas { lsas }
                 }

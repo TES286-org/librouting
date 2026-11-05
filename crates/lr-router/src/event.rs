@@ -132,6 +132,29 @@ impl From<Event> for RouterEvent {
                 "bgp: end-of-rib received from session {session} for afi={} safi={}",
                 family.afi, family.safi
             )),
+            // OSPF neighbour reset (RFC 2328 §10.6 / §10.9 / §13.7).
+            // The router's OSPF dispatch path
+            // (`instance::mod.rs::feed_input`'s `SessionState::Ospf`
+            // arm) handles this variant directly and records the cause
+            // into `SessionStats::last_error` via the dedicated
+            // `SessionErrorKind::OspfKill`/`OspfSeqMismatch`/`OspfBadLsa`
+            // variants. This arm exists so a trait-only embedder that
+            // converts an `Event` via `into()` (rather than dispatching
+            // inside the router) still gets a readable log line instead
+            // of the generic "unknown event variant" fallback below.
+            Event::OspfNeighborReset { router_id, kind } => Self::Log(format!(
+                "ospf: neighbor {router_id} reset ({})",
+                match kind {
+                    lr_core::event::OspfNeighborResetKind::Kill => "ospf-kill",
+                    lr_core::event::OspfNeighborResetKind::SeqMismatch => "ospf-seq-mismatch",
+                    lr_core::event::OspfNeighborResetKind::BadLsa => "ospf-bad-lsa",
+                    // `OspfNeighborResetKind` is `#[non_exhaustive]` so
+                    // future variants (e.g. OSPFv3-specific reset causes)
+                    // compile against this match without forcing a
+                    // major bump.
+                    _ => "ospf-reset",
+                }
+            )),
             // `Event` is `#[non_exhaustive]` so future variants can
             // land on `main` without forcing this match to grow an
             // arm at every minor. An unknown event carries no
