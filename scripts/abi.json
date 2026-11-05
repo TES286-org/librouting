@@ -20606,6 +20606,43 @@
       ]
     },
     {
+      "name": "lr_ospf_v3_packet_checksum_ok",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "bytes",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "len",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "src",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "dst",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        }
+      ]
+    },
+    {
       "name": "lr_ospf_finalize_v3_packet",
       "return_type": "uint8_t",
       "params": [
@@ -78589,6 +78626,43 @@
           "is_const": false,
           "is_ptr": false,
           "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ospf_v3_packet_checksum_ok",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "bytes",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "len",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "src",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "dst",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
         }
       ]
     },

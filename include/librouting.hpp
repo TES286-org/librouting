@@ -9777,6 +9777,10 @@ inline std::uint8_t ospf_v2_packet_checksum_ok(const std::uint8_t* bytes, std::u
     return lr_ospf_v2_packet_checksum_ok(bytes, len);
 }
 
+inline std::uint8_t ospf_v3_packet_checksum_ok(const std::uint8_t* bytes, std::uintptr_t len, const std::uint8_t* src, const std::uint8_t* dst) {
+    return lr_ospf_v3_packet_checksum_ok(bytes, len, src, dst);
+}
+
 inline std::uint8_t ospf_finalize_v3_packet(std::uint8_t* bytes, std::uintptr_t len, const std::uint8_t* src, const std::uint8_t* dst) {
     return lr_ospf_finalize_v3_packet(bytes, len, src, dst);
 }

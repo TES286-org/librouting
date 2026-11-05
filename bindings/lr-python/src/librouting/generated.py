@@ -6924,6 +6924,10 @@ def ospf_v2_packet_checksum_ok(bytes, len):
     """Low-level wrapper for ``lr_ospf_v2_packet_checksum_ok``. See ``include/lr_ffi.h``."""
     return _lib.lr_ospf_v2_packet_checksum_ok(bytes, len)
 
+def ospf_v3_packet_checksum_ok(bytes, len, src, dst):
+    """Low-level wrapper for ``lr_ospf_v3_packet_checksum_ok``. See ``include/lr_ffi.h``."""
+    return _lib.lr_ospf_v3_packet_checksum_ok(bytes, len, src, dst)
+
 def ospf_finalize_v3_packet(bytes, len, src, dst):
     """Low-level wrapper for ``lr_ospf_finalize_v3_packet``. See ``include/lr_ffi.h``."""
     return _lib.lr_ospf_finalize_v3_packet(bytes, len, src, dst)

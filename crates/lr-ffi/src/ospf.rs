@@ -358,6 +358,46 @@ pub unsafe extern "C" fn lr_ospf_v2_packet_checksum_ok(bytes: *const u8, len: us
     )
 }
 
+/// Verify an OSPFv3 packet's IPv6 upper-layer checksum (RFC 5340
+/// §A.3.1 / RFC 2460 §8.1) against the IPv6 pseudo-header observed on
+/// the wire. Returns 1 when the checksum is correct, 0 on a bad
+/// checksum, a too-short buffer (OSPFv3 header is 16 bytes), or a NULL
+/// pointer. The v3 surface mirrors [`lr_ospf_v2_packet_checksum_ok`]:
+/// embedders driving the daemon-equivalent receive path from C / C++
+/// / Go / Python call this on every received v3 packet the kernel
+/// handed them, with the IPv6 source and destination the kernel
+/// reported for the datagram, and discard frames that return 0 — the
+/// receive-side gate the codec's `decode_slice` cannot perform itself
+/// (it never sees the IPv6 header).
+///
+/// # Safety
+/// `bytes` must point to `len` readable bytes. `src` / `dst` must each
+/// point to 16 readable bytes (IPv6 source / destination address).
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_v3_packet_checksum_ok(
+    bytes: *const u8,
+    len: usize,
+    src: *const u8,
+    dst: *const u8,
+) -> u8 {
+    guarded(
+        || unsafe {
+            if bytes.is_null() || len < 16 || src.is_null() || dst.is_null() {
+                return 0;
+            }
+            let slice = unsafe { core::slice::from_raw_parts(bytes, len) };
+            let mut src_arr = [0u8; 16];
+            let mut dst_arr = [0u8; 16];
+            unsafe {
+                src_arr.copy_from_slice(core::slice::from_raw_parts(src, 16));
+                dst_arr.copy_from_slice(core::slice::from_raw_parts(dst, 16));
+            }
+            lr_ospf::origination::v3_packet_checksum_ok(slice, &src_arr, &dst_arr) as u8
+        },
+        0,
+    )
+}
+
 /// Finalize an OSPFv3 packet's checksum in place (RFC 5340 §A.1 —
 /// uses the IPv6 pseudo-header carrying `src` + `dst`). Writes the
 /// 16-bit checksum into the OSPFv3 header (offset 12) and returns 1
@@ -605,6 +645,77 @@ mod tests {
         assert_eq!(rc, 0);
         // NULL pointer → 0.
         let rc = unsafe { lr_ospf_v2_packet_checksum_ok(std::ptr::null(), 24) };
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn ffi_v3_packet_checksum_ok_roundtrip() {
+        // Build a minimal v3 packet, finalize the checksum under one
+        // pseudo-header, then verify the FFI helper mirrors
+        // `lr_ospf_v2_packet_checksum_ok`: 1 against the same
+        // pseudo-header, 0 against a different one, 0 on short input
+        // and NULL pointers.
+        let mut pkt = vec![0u8; 16 + 20];
+        pkt[0] = 3; // version
+        pkt[1] = 1; // Hello
+        let n = pkt.len() as u16;
+        pkt[2..4].copy_from_slice(&n.to_be_bytes());
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        // finalize_v3_packet through the FFI surface.
+        let rc = unsafe {
+            lr_ospf_finalize_v3_packet(pkt.as_mut_ptr(), pkt.len(), src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(rc, 1, "finalize must succeed on a 16-byte+ buffer");
+        // Verify against the same pseudo-header → 1.
+        let rc = unsafe {
+            lr_ospf_v3_packet_checksum_ok(pkt.as_ptr(), pkt.len(), src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(
+            rc, 1,
+            "finalized packet must verify against its own pseudo-header"
+        );
+        // A different destination → 0 (the sum no longer folds to 0).
+        let dst2 = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+        let rc = unsafe {
+            lr_ospf_v3_packet_checksum_ok(pkt.as_ptr(), pkt.len(), src.as_ptr(), dst2.as_ptr())
+        };
+        assert_eq!(rc, 0, "wrong pseudo-header must fail verification");
+        // A flipped body byte → 0.
+        let mut bad = pkt.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01;
+        let rc = unsafe {
+            lr_ospf_v3_packet_checksum_ok(bad.as_ptr(), bad.len(), src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(rc, 0, "corruption in the body must fail verification");
+    }
+
+    #[test]
+    fn ffi_v3_packet_checksum_ok_returns_zero_on_bad_input() {
+        let src = [0u8; 16];
+        let dst = [0u8; 16];
+        let bytes = [0u8; 15];
+        // Too-short buffer → 0 (v3 header is 16 bytes).
+        let rc = unsafe {
+            lr_ospf_v3_packet_checksum_ok(bytes.as_ptr(), 15, src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(rc, 0);
+        // NULL bytes → 0.
+        let rc = unsafe {
+            lr_ospf_v3_packet_checksum_ok(std::ptr::null(), 16, src.as_ptr(), dst.as_ptr())
+        };
+        assert_eq!(rc, 0);
+        // NULL src → 0.
+        let bytes16 = [0u8; 16];
+        let rc = unsafe {
+            lr_ospf_v3_packet_checksum_ok(bytes16.as_ptr(), 16, std::ptr::null(), dst.as_ptr())
+        };
+        assert_eq!(rc, 0);
+        // NULL dst → 0.
+        let rc = unsafe {
+            lr_ospf_v3_packet_checksum_ok(bytes16.as_ptr(), 16, src.as_ptr(), std::ptr::null())
+        };
         assert_eq!(rc, 0);
     }
 

@@ -8441,6 +8441,11 @@ func OspfV2PacketChecksumOk(bytes *C.uint8_t, len uintptr) (uint8, error) {
 	return uint8(res), nil
 }
 
+func OspfV3PacketChecksumOk(bytes *C.uint8_t, len uintptr, src *C.uint8_t, dst *C.uint8_t) (uint8, error) {
+	res := C.lr_ospf_v3_packet_checksum_ok(bytes, C.uintptr_t(len), src, dst)
+	return uint8(res), nil
+}
+
 func OspfFinalizeV3Packet(bytes *C.uint8_t, len uintptr, src *C.uint8_t, dst *C.uint8_t) (uint8, error) {
 	res := C.lr_ospf_finalize_v3_packet(bytes, C.uintptr_t(len), src, dst)
 	return uint8(res), nil

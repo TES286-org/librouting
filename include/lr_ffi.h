@@ -13330,6 +13330,28 @@ uintptr_t lr_ospf_finalize_v2_stream(uint8_t *bytes, uintptr_t len);
 uint8_t lr_ospf_v2_packet_checksum_ok(const uint8_t *bytes, uintptr_t len);
 
 /**
+ * Verify an OSPFv3 packet's IPv6 upper-layer checksum (RFC 5340
+ * §A.3.1 / RFC 2460 §8.1) against the IPv6 pseudo-header observed on
+ * the wire. Returns 1 when the checksum is correct, 0 on a bad
+ * checksum, a too-short buffer (OSPFv3 header is 16 bytes), or a NULL
+ * pointer. The v3 surface mirrors [`lr_ospf_v2_packet_checksum_ok`]:
+ * embedders driving the daemon-equivalent receive path from C / C++
+ * / Go / Python call this on every received v3 packet the kernel
+ * handed them, with the IPv6 source and destination the kernel
+ * reported for the datagram, and discard frames that return 0 — the
+ * receive-side gate the codec's `decode_slice` cannot perform itself
+ * (it never sees the IPv6 header).
+ *
+ * # Safety
+ * `bytes` must point to `len` readable bytes. `src` / `dst` must each
+ * point to 16 readable bytes (IPv6 source / destination address).
+ */
+uint8_t lr_ospf_v3_packet_checksum_ok(const uint8_t *bytes,
+                                      uintptr_t len,
+                                      const uint8_t *src,
+                                      const uint8_t *dst);
+
+/**
  * Finalize an OSPFv3 packet's checksum in place (RFC 5340 §A.1 —
  * uses the IPv6 pseudo-header carrying `src` + `dst`). Writes the
  * 16-bit checksum into the OSPFv3 header (offset 12) and returns 1
