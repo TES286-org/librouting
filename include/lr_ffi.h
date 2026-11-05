@@ -13565,6 +13565,36 @@ int32_t lr_ospf_originate_nssa_default_lsa(uint32_t router_id,
 uint8_t lr_ospf_is_elected_translator(lr_ospf_lsdb_t lsdb, uint32_t router_id);
 
 /**
+ * True when the local `router_id` is elected as the type-7→type-5
+ * translator for the area whose LSDB is `lsdb` (RFC 3101 §2.5 step
+ * (2) + §3.1 reachability qualifier). Returns 0 (false) on a NULL
+ * `lsdb` handle or a NULL `reachable` pointer with a non-zero
+ * `reachable_count`.
+ *
+ * `reachable` points at an array of `reachable_count` OSPF router
+ * IDs the caller has computed are reachable through the local AS's
+ * regular (non-stubby, non-NSSA) areas' intra-area SPF — the
+ * `ospf_as_reachable_routers` cache the daemon populates after
+ * every summarize/SPF cycle. A candidate border router that is in
+ * the NSSA's LSDB but not in `reachable` is dropped from the
+ * election, so a stale or partitioned NSSA border router cannot
+ * steal the translator role from a reachable one (RFC 3101 §3.1).
+ * Pass `reachable = NULL` with `reachable_count = 0` to use the
+ * legacy election (NSSA reachability only, matching
+ * [`lr_ospf_is_elected_translator`]).
+ *
+ * # Safety
+ * `lsdb` must be a valid handle. When `reachable_count > 0`,
+ * `reachable` must point at `reachable_count` readable `u32`
+ * values; `reachable = NULL` with `reachable_count = 0` selects
+ * the legacy (no-reachability-filter) form.
+ */
+uint8_t lr_ospf_is_elected_translator_with_reachability(lr_ospf_lsdb_t lsdb,
+                                                        uint32_t router_id,
+                                                        const uint32_t *reachable,
+                                                        uintptr_t reachable_count);
+
+/**
  * True when the LSA's P-bit (RFC 3101 §2.4) is set. Returns 0 on a
  * NULL handle.
  *

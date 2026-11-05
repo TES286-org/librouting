@@ -29,9 +29,17 @@
 //! - [`is_elected_translator`] implements the §3.1 election: among the
 //!   area's border routers (B-bit in their router-LSAs, plus the caller
 //!   itself) the highest router ID translates; a router with the Nt-bit
-//!   set always wins (RFC 3101 Appendix B).
+//!   set always wins (RFC 3101 Appendix B). The §3.1 "reachable as an
+//!   ASBR over the AS's transit topology" qualifier is opt-in via the
+//!   [`is_elected_translator_with_reachability`] variant, which takes
+//!   the set of router IDs reachable through the local AS's regular
+//!   areas (the union of every non-stubby, non-NSSA area's intra-area
+//!   SPF). The plain [`is_elected_translator`] form keeps the legacy
+//!   behaviour (NSSA reachability only) for backward compatibility;
+//!   embedders that want full RFC 3101 §3.1 compliance compute the
+//!   set once per LSDB change and pass it through.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::external::{
@@ -294,18 +302,58 @@ pub fn nssa_routes(lsdb: &Lsdb, spf_result: &SpfResult, opts: NssaCalcOpts) -> V
     best.into_values().collect()
 }
 
-/// RFC 3101 §3.1 translator election, simplified: among the NSSA's
+/// RFC 3101 §3.1 translator election (legacy form): among the NSSA's
 /// border routers — every router whose router-LSA in the area carries
 /// the B-bit, plus `router_id` (the caller, a border router by
 /// construction) — the highest router ID performs type-7 → type-5
 /// translation; a router advertising the Nt-bit (unconditional
 /// translator, RFC 3101 Appendix B) beats a merely higher router ID.
 ///
-/// The full rule additionally requires candidates to be reachable "as
-/// ASBRs over the AS's transit topology"; this implementation considers
-/// NSSA reachability only, which matches single-backbone deployments
-/// and is the common FRR/BIRD configuration.
+/// This is the legacy form: it considers NSSA reachability only and
+/// omits the §3.1 "reachable as an ASBR over the AS's transit topology"
+/// qualifier, which matches single-backbone deployments and is the
+/// common FRR/BIRD configuration. Embedders that want full RFC 3101
+/// §3.1 compliance — typically multi-area deployments where a border
+/// router visible in the NSSA's LSDB may not actually be reachable
+/// through the AS's regular areas — should call
+/// [`is_elected_translator_with_reachability`] with the set of router
+/// IDs the local AS's SPF marked reachable.
 pub fn is_elected_translator(lsdb: &Lsdb, router_id: u32) -> bool {
+    is_elected_translator_with_reachability(lsdb, router_id, None)
+}
+
+/// RFC 3101 §3.1 translator election with the full reachability
+/// qualifier. Behaves like [`is_elected_translator`] when
+/// `reachable` is `None` (NSSA reachability only). When `reachable`
+/// is `Some(set)`, candidates — border routers and Nt-bit
+/// unconditional translators — must additionally appear in `set`,
+/// i.e. they must be reachable from the local router through the
+/// AS's regular (non-stubby, non-NSSA) areas' intra-area SPF. A
+/// candidate that is in the NSSA's LSDB but unreachable across the
+/// AS is dropped, so a stale or partitioned NSSA border router
+/// cannot steal the translator role from a reachable one.
+///
+/// `set` is typically the union of every reachable `VertexId::Router(_)`
+/// across the local router's regular-area SPF runs; `router_id`
+/// (the local router) is always considered reachable so a single-
+/// area deployment elects itself. An empty `Some(set)` returns
+/// `false` because no candidate — not even the local router — is
+/// reachable, matching the RFC 3101 §3.1 rule that translation is
+/// disabled when no border router is reachable across the AS.
+pub fn is_elected_translator_with_reachability(
+    lsdb: &Lsdb,
+    router_id: u32,
+    reachable: Option<&HashSet<u32>>,
+) -> bool {
+    // The local router is always a candidate (the caller is a border
+    // router by construction); when a reachability filter is supplied,
+    // the local router must be in it, otherwise no candidate is
+    // reachable and translation is disabled (§3.1).
+    if let Some(set) = reachable {
+        if !set.contains(&router_id) {
+            return false;
+        }
+    }
     for (key, entry) in lsdb.iter() {
         if key.ls_type != LsaTypeV2::RouterLsa as u16 || key.advertising_router == router_id {
             continue;
@@ -315,6 +363,13 @@ pub fn is_elected_translator(lsdb: &Lsdb, router_id: u32) -> bool {
         };
         if flags & router_lsa_flags::B == 0 {
             continue; // not a border router
+        }
+        // §3.1 reachability qualifier: a candidate that is not
+        // reachable through the AS's regular areas cannot be elected.
+        if let Some(set) = reachable {
+            if !set.contains(&key.advertising_router) {
+                continue;
+            }
         }
         // §3.1: disabled "if there exists another border router ... whose
         // router-LSA has bit Nt set or who has a higher router ID".

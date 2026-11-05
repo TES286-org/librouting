@@ -676,3 +676,207 @@ fn nssa_translator_election_prevents_duplicate_translation() {
         "the higher-ID border router translates"
     );
 }
+
+/// RFC 3101 §3.1 reachability qualifier (issue #92): when a border
+/// router is visible in the NSSA's LSDB but unreachable across the
+/// local AS's regular areas, the reachability-aware translator
+/// election drops it from the candidate set so it cannot steal the
+/// translator role from a reachable router.
+///
+/// Topology: X1 (ABR, areas 0+1, router-id `X`) — Y (area 0 only);
+/// X1 — Z (area 1 / NSSA ASBR, router-id `Z`); X2 (router-id `X2`,
+/// a higher-ID border router that lives in the NSSA only — its
+/// router-LSA carries the B-bit so X1 sees it as a candidate, but it
+/// is not in X1's area-0 LSDB and therefore not in X1's
+/// `ospf_as_reachable_routers` cache). Without the reachability
+/// qualifier, X2 (higher ID) would win and X1 would not translate;
+/// with the qualifier, X2 is dropped and X1 translates.
+#[test]
+fn nssa_translator_election_drops_unreachable_candidate() {
+    // X2 is a higher router ID than X so the legacy election would
+    // have X2 win.
+    const X2: u32 = 0x0505_0505;
+
+    let mut abr1 = DefaultRouter::new();
+    let x1_bb = abr1
+        .add_session(SessionConfig::ospfv2(RouterId::from_u32(X), 0))
+        .unwrap();
+    let x1_a1 = abr1
+        .add_session(
+            SessionConfig::ospfv2(RouterId::from_u32(X), 1)
+                .with_ospf_area_type(OspfAreaType::nssa(10)),
+        )
+        .unwrap();
+    let mut br_y = DefaultRouter::new();
+    let y_bb = br_y
+        .add_session(SessionConfig::ospfv2(RouterId::from_u32(Y), 0))
+        .unwrap();
+    let y_bb2 = br_y
+        .add_session(SessionConfig::ospfv2(RouterId::from_u32(Y), 0))
+        .unwrap();
+    let mut asbr = DefaultRouter::new();
+    let z_a1 = asbr
+        .add_session(
+            SessionConfig::ospfv2(RouterId::from_u32(Z), 1)
+                .with_ospf_area_type(OspfAreaType::nssa(10)),
+        )
+        .unwrap();
+    let z_a2 = asbr
+        .add_session(
+            SessionConfig::ospfv2(RouterId::from_u32(Z), 1)
+                .with_ospf_area_type(OspfAreaType::nssa(10)),
+        )
+        .unwrap();
+
+    // Area 0: X1—Y (3). Area 1 (NSSA): X1—Z (5), X2—Z (6).
+    // X2 is in area 1 only (no area-0 router-LSA for X2 reaches X1).
+    // X2's router-LSA in area 1 carries the B-bit (0x01) so the NSSA
+    // election sees it as a candidate; X1's area-0 LSDB does not carry
+    // X2, so the reachability cache `ospf_as_reachable_routers`
+    // built by `ospf_summarize_areas_v2` will not contain X2.
+    let x1_bb_lsa = router_lsa(X, 0, vec![(Y, 0, P2P, 3)]);
+    let x1_a1_lsa = router_lsa(X, 0x01, vec![(Z, 0, P2P, 5)]);
+    let x2_a1_lsa = router_lsa(X2, 0x01, vec![(Z, 0, P2P, 6)]);
+    let y_lsa = router_lsa(Y, 0, vec![(X, 0, P2P, 3)]);
+    let z_lsa = router_lsa(
+        Z,
+        0,
+        vec![
+            (X, 0, P2P, 5),
+            (X2, 0, P2P, 6),
+            (0x0a28_2800, 0xffff_ff00, STUB_NET, 2),
+        ],
+    );
+
+    // Cross-feed area 0 (X1, Y) and area 1 (X1, X2, Z).
+    br_y.feed_input(y_bb, &lsu(Y, 0, vec![y_lsa.clone(), x1_bb_lsa.clone()]))
+        .unwrap();
+    br_y.feed_input(y_bb2, &lsu(Y, 0, vec![y_lsa.clone(), x1_bb_lsa.clone()]))
+        .unwrap();
+    abr1.feed_input(x1_bb, &lsu(X, 0, vec![x1_bb_lsa.clone(), y_lsa.clone()]))
+        .unwrap();
+    abr1.feed_input(
+        x1_a1,
+        &lsu(
+            X,
+            1,
+            vec![x1_a1_lsa.clone(), x2_a1_lsa.clone(), z_lsa.clone()],
+        ),
+    )
+    .unwrap();
+    asbr.feed_input(
+        z_a1,
+        &lsu(
+            Z,
+            1,
+            vec![z_lsa.clone(), x1_a1_lsa.clone(), x2_a1_lsa.clone()],
+        ),
+    )
+    .unwrap();
+    asbr.feed_input(
+        z_a2,
+        &lsu(
+            Z,
+            1,
+            vec![z_lsa.clone(), x2_a1_lsa.clone(), x1_a1_lsa.clone()],
+        ),
+    )
+    .unwrap();
+
+    // Pump to quiescence, capturing every byte X1 emits into the
+    // backbone (the type-5 translations ride this link).
+    let mut x1_bb_out = Vec::new();
+    for _ in 0..16 {
+        let x1_to_y = abr1.drain_output(x1_bb);
+        let x1_to_z = abr1.drain_output(x1_a1);
+        let y_out = br_y.drain_output(y_bb);
+        let y_out2 = br_y.drain_output(y_bb2);
+        let z_out = asbr.drain_output(z_a1);
+        let z_out2 = asbr.drain_output(z_a2);
+        if x1_to_y.is_empty()
+            && x1_to_z.is_empty()
+            && y_out.is_empty()
+            && y_out2.is_empty()
+            && z_out.is_empty()
+            && z_out2.is_empty()
+        {
+            break;
+        }
+        x1_bb_out.extend_from_slice(&x1_to_y);
+        if !x1_to_y.is_empty() {
+            br_y.feed_input(y_bb, &x1_to_y).unwrap();
+        }
+        if !y_out.is_empty() {
+            abr1.feed_input(x1_bb, &y_out).unwrap();
+        }
+        if !y_out2.is_empty() {
+            abr1.feed_input(x1_bb, &y_out2).unwrap();
+        }
+        if !x1_to_z.is_empty() {
+            asbr.feed_input(z_a1, &x1_to_z).unwrap();
+        }
+        if !z_out.is_empty() {
+            abr1.feed_input(x1_a1, &z_out).unwrap();
+        }
+        if !z_out2.is_empty() {
+            abr1.feed_input(x1_a1, &z_out2).unwrap();
+        }
+    }
+
+    // Z redistributes a translatable type-7.
+    let mut dest = ExternalDestination::new(external_net(), 40, ExternalMetricType::Type2);
+    dest.p_bit = true;
+    dest.forwarding_addr = 0x0a28_2801;
+    assert!(asbr.ospf_redistribute(dest));
+
+    // Pump again so the type-7 propagates and X1's translator runs.
+    for _ in 0..16 {
+        let x1_to_y = abr1.drain_output(x1_bb);
+        let x1_to_z = abr1.drain_output(x1_a1);
+        let y_out = br_y.drain_output(y_bb);
+        let y_out2 = br_y.drain_output(y_bb2);
+        let z_out = asbr.drain_output(z_a1);
+        let z_out2 = asbr.drain_output(z_a2);
+        if x1_to_y.is_empty()
+            && x1_to_z.is_empty()
+            && y_out.is_empty()
+            && y_out2.is_empty()
+            && z_out.is_empty()
+            && z_out2.is_empty()
+        {
+            break;
+        }
+        x1_bb_out.extend_from_slice(&x1_to_y);
+        if !x1_to_y.is_empty() {
+            br_y.feed_input(y_bb, &x1_to_y).unwrap();
+        }
+        if !y_out.is_empty() {
+            abr1.feed_input(x1_bb, &y_out).unwrap();
+        }
+        if !y_out2.is_empty() {
+            abr1.feed_input(x1_bb, &y_out2).unwrap();
+        }
+        if !x1_to_z.is_empty() {
+            asbr.feed_input(z_a1, &x1_to_z).unwrap();
+        }
+        if !z_out.is_empty() {
+            abr1.feed_input(x1_a1, &z_out).unwrap();
+        }
+        if !z_out2.is_empty() {
+            abr1.feed_input(x1_a1, &z_out2).unwrap();
+        }
+    }
+
+    // Y routes the external through X1's translation — X2 is
+    // unreachable across the AS so the reachability-aware election
+    // drops X2 from the candidate set and X1 (the only reachable
+    // candidate) translates (RFC 3101 §3.1).
+    assert!(
+        rib_has(&br_y, external_net()),
+        "the translated type-5 reaches the backbone"
+    );
+    assert!(
+        count_type5_adv(&x1_bb_out, X) >= 1,
+        "the reachable border router X1 translates when the higher-ID candidate X2 is unreachable"
+    );
+}

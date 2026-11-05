@@ -21099,6 +21099,41 @@
       ]
     },
     {
+      "name": "lr_ospf_is_elected_translator_with_reachability",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "lsdb",
+          "type": "lr_ospf_lsdb_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "router_id",
+          "type": "uint32_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "reachable",
+          "type": "const uint32_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint32_t"
+        },
+        {
+          "name": "reachable_count",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_ospf_nssa_p_bit_set",
       "return_type": "uint8_t",
       "params": [
@@ -67416,6 +67451,41 @@
           {
             "name": "router_id",
             "type": "uint32_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ospf_is_elected_translator_with_reachability",
+        "return_type": "uint8_t",
+        "params": [
+          {
+            "name": "lsdb",
+            "type": "lr_ospf_lsdb_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "router_id",
+            "type": "uint32_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "reachable",
+            "type": "const uint32_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint32_t"
+          },
+          {
+            "name": "reachable_count",
+            "type": "uintptr_t",
             "is_const": false,
             "is_ptr": false,
             "is_struct": false

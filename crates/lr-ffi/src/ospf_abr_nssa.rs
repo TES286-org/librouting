@@ -7,12 +7,15 @@
 //! - `NssaDefault` / `originate_nssa_lsa` / `flush_nssa_lsa` /
 //!   `originate_nssa_default_lsa`
 //! - `NssaCalcOpts` / `nssa_routes` / `nssa_routes_v3` /
-//!   `nssa_routes_v3_extended` / `is_elected_translator`
+//!   `nssa_routes_v3_extended` / `is_elected_translator` /
+//!   `is_elected_translator_with_reachability`
 //! - `p_bit_set` / `N_P_BIT`
 
 #![allow(unused_unsafe)]
 #![allow(unused_imports)]
 #![allow(dead_code)]
+
+use std::collections::HashSet;
 
 use lr_core::addr::{IpAddr, Prefix};
 use lr_ospf::abr::{
@@ -21,8 +24,9 @@ use lr_ospf::abr::{
 };
 use lr_ospf::lsa::Lsa;
 use lr_ospf::nssa::{
-    flush_nssa_lsa, is_elected_translator, nssa_routes, nssa_routes_v3, nssa_routes_v3_extended,
-    originate_nssa_default_lsa, originate_nssa_lsa, NssaCalcOpts, NssaDefault,
+    flush_nssa_lsa, is_elected_translator, is_elected_translator_with_reachability, nssa_routes,
+    nssa_routes_v3, nssa_routes_v3_extended, originate_nssa_default_lsa, originate_nssa_lsa,
+    NssaCalcOpts, NssaDefault,
 };
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
@@ -545,6 +549,60 @@ pub unsafe extern "C" fn lr_ospf_is_elected_translator(
                 return 0;
             };
             is_elected_translator(lsdb_ref, router_id) as u8
+        },
+        0,
+    )
+}
+
+/// True when the local `router_id` is elected as the type-7→type-5
+/// translator for the area whose LSDB is `lsdb` (RFC 3101 §2.5 step
+/// (2) + §3.1 reachability qualifier). Returns 0 (false) on a NULL
+/// `lsdb` handle or a NULL `reachable` pointer with a non-zero
+/// `reachable_count`.
+///
+/// `reachable` points at an array of `reachable_count` OSPF router
+/// IDs the caller has computed are reachable through the local AS's
+/// regular (non-stubby, non-NSSA) areas' intra-area SPF — the
+/// `ospf_as_reachable_routers` cache the daemon populates after
+/// every summarize/SPF cycle. A candidate border router that is in
+/// the NSSA's LSDB but not in `reachable` is dropped from the
+/// election, so a stale or partitioned NSSA border router cannot
+/// steal the translator role from a reachable one (RFC 3101 §3.1).
+/// Pass `reachable = NULL` with `reachable_count = 0` to use the
+/// legacy election (NSSA reachability only, matching
+/// [`lr_ospf_is_elected_translator`]).
+///
+/// # Safety
+/// `lsdb` must be a valid handle. When `reachable_count > 0`,
+/// `reachable` must point at `reachable_count` readable `u32`
+/// values; `reachable = NULL` with `reachable_count = 0` selects
+/// the legacy (no-reachability-filter) form.
+#[no_mangle]
+pub unsafe extern "C" fn lr_ospf_is_elected_translator_with_reachability(
+    lsdb: crate::ospf_lsdb::lr_ospf_lsdb_t,
+    router_id: u32,
+    reachable: *const u32,
+    reachable_count: usize,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(lsdb_ref) = crate::ospf_lsdb::borrow_lsdb(lsdb) else {
+                return 0;
+            };
+            // NULL pointer with non-zero count is a malformed call;
+            // fail closed (return 0 = "not the translator"). NULL
+            // pointer with zero count selects the legacy form
+            // (NSSA reachability only) — the same behaviour as
+            // `lr_ospf_is_elected_translator`.
+            let set: Option<HashSet<u32>> = if reachable_count == 0 {
+                None
+            } else if reachable.is_null() {
+                return 0;
+            } else {
+                let slice = unsafe { std::slice::from_raw_parts(reachable, reachable_count) };
+                Some(slice.iter().copied().collect())
+            };
+            is_elected_translator_with_reachability(lsdb_ref, router_id, set.as_ref()) as u8
         },
         0,
     )

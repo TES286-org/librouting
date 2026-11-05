@@ -9835,6 +9835,10 @@ inline std::uint8_t ospf_is_elected_translator(lr_ospf_lsdb_t lsdb, std::uint32_
     return lr_ospf_is_elected_translator(lsdb, router_id);
 }
 
+inline std::uint8_t ospf_is_elected_translator_with_reachability(lr_ospf_lsdb_t lsdb, std::uint32_t router_id, const std::uint32_t* reachable, std::size_t reachable_count) {
+    return lr_ospf_is_elected_translator_with_reachability(lsdb, router_id, reachable, reachable_count);
+}
+
 inline std::uint8_t ospf_nssa_p_bit_set(lr_ospf_lsa_box_t lsa) {
     return lr_ospf_nssa_p_bit_set(lsa);
 }
@@ -13097,6 +13101,10 @@ inline void ospf_lsa_header_free(OspfLsaHdrBoxHandle const& h) {
 
 inline std::uint8_t ospf_is_elected_translator(OspfLsdbHandle const& h, std::uint32_t router_id) {
     return lr_ospf_is_elected_translator(h.get(), router_id);
+}
+
+inline std::uint8_t ospf_is_elected_translator_with_reachability(OspfLsdbHandle const& h, std::uint32_t router_id, const std::uint32_t* reachable, std::size_t reachable_count) {
+    return lr_ospf_is_elected_translator_with_reachability(h.get(), router_id, reachable, reachable_count);
 }
 
 inline lr_ospf_nssa_route_vec_t ospf_nssa_routes(OspfLsdbHandle const& h, lr_ospf_spf_result_t spf_result, struct lr_ospf_nssa_calc_opts_t opts) {

@@ -5479,6 +5479,11 @@ func (x *OspfLsdb) OspfIsElectedTranslator(router_id uint32) (uint8, error) {
 	return uint8(res), nil
 }
 
+func (x *OspfLsdb) OspfIsElectedTranslatorWithReachability(router_id uint32, reachable *C.uint32_t, reachable_count uintptr) (uint8, error) {
+	res := C.lr_ospf_is_elected_translator_with_reachability(x.ptr, C.uint32_t(router_id), reachable, C.uintptr_t(reachable_count))
+	return uint8(res), nil
+}
+
 func (x *OspfLsdb) OspfNssaRoutes(spf_result *OspfSpfResult, opts C.lr_ospf_nssa_calc_opts_t) (*OspfNssaRouteVec, error) {
 	p := C.lr_ospf_nssa_routes(x.ptr, spf_result.ptr, opts)
 	if p == nil {

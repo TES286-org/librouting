@@ -1132,7 +1132,7 @@ changes, no protocol-on-the-wire changes. Existing OSPF tests
 and the OSPF + BIRD 2.17.5 interop (`tests/interop/ospf_bird.sh`,
 `ospf_gr_bird.sh`, `ospf_broadcast.sh`) remains green.
 
-### `lr-osroute`: Linux `source_check` consults the kernel via `RTM_GETROUTE` (issue #92)
+### `lr-osroute`: Linux `source_check` via `RTM_GETROUTE` (issue #92)
 
 `lr_osroute::source_check::check_source_compatibility` is the
 diagnostic the daemon runs *before* the first outbound TCP dial to
@@ -1202,6 +1202,103 @@ Tests:
 
 No public Rust API change, no C ABI change, no protocol-on-the-wire
 change, no version bump.
+
+### `lr-ospf` / `lr-router`: RFC 3101 §3.1 NSSA translator reachability (issue #92)
+
+`lr_ospf::nssa::is_elected_translator` was the simplified form of the
+RFC 3101 §3.1 election: among the NSSA's border routers — every router
+whose router-LSA in the area carries the B-bit, plus the caller —
+the highest router ID performs type-7 → type-5 translation, with a
+router advertising the Nt-bit (RFC 3101 Appendix B) beating a merely
+higher router ID. The full §3.1 rule additionally requires candidates
+to be "reachable as an ASBR over the AS's transit topology"; the
+simplified form considered NSSA reachability only, which matches
+single-backbone deployments and the common FRR/BIRD configuration
+but lets a stale or partitioned NSSA border router visible in the
+NSSA's LSDB but unreachable across the regular areas steal the
+translator role from a reachable one (`defects.txt` flagged it as
+`INCOMPLETE-IMPL` at `crates/lr-ospf/src/nssa.rs:L295-L306`,
+"simplified: only considers NSSA reachability, does not verify
+ASBR is reachable across the whole AS").
+
+A new `is_elected_translator_with_reachability(lsdb, router_id,
+reachable: Option<&HashSet<u32>>)` variant adds the §3.1 qualifier.
+When `reachable` is `None` the function keeps the legacy behaviour
+(NSSA reachability only) so existing embedders and the
+`lr_ospf_is_elected_translator` C ABI symbol are unchanged. When
+`reachable` is `Some(set)`, candidates — border routers and Nt-bit
+unconditional translators — must additionally appear in `set`, i.e.
+they must be reachable from the local router through the AS's
+regular (non-stubby, non-NSSA) areas' intra-area SPF. The local
+router itself is always a candidate, but when the filter is supplied
+it must be in the set, otherwise no candidate is reachable and
+translation is disabled (§3.1: "an NSSA border router that is not
+reachable as an ASBR over the AS's transit topology cannot be the
+translator"). An empty `Some(set)` returns `false`.
+
+The daemon's `ospf_translate_nssa` (the only internal caller of the
+election) now uses the reachability-aware variant. The router struct
+gains a cached `ospf_as_reachable_routers: HashSet<u32>` field
+populated by `ospf_summarize_areas_v2` from the same per-area SPF
+run that drives summary origination — the set is the union of every
+`VertexId::Router(_)` reachable across the local router's regular
+(stubby-excluded) v2 areas. Stubby and NSSA areas are excluded from
+the set (RFC 2328 §3.6; RFC 3101 §3.1 — they are not part of the
+AS's transit topology). The cache is populated in the same
+LSDB-change tick that drives the first translation attempt (the
+`ospf_on_lsdb_change` flow runs `ospf_summarize_areas` before
+`ospf_translate_nssa`), so the first election sees a populated set
+rather than a stale `None` filter. There is no extra SPF cost —
+the set is a side-effect of the SPF run `ospf_summarize_areas_v2`
+already does.
+
+A new `lr_ospf_is_elected_translator_with_reachability` C ABI
+symbol exposes the variant. It takes the reachability set as a
+`const uint32_t *reachable` + `uintptr_t reachable_count` pair
+(matching the `lr_ospf_retransmit_apply_acks` pattern); a NULL
+pointer with zero count selects the legacy form. The C++ wrapper
+adds the corresponding `ospf_is_elected_translator_with_reachability`
+inline (both the raw-handle and RAII-handle overloads). The Go
+binding auto-generates an `OspfIsElectedTranslatorWithReachability`
+method on `OspfLsdb`. The Python `_ffi.py` cdef declares the new
+symbol; the Python wrapper generator
+(`scripts/gen_methods_extras.py`) conservatively skips the symbol
+because its `const uint32_t *` + `uintptr_t` signature is too
+complex for the safe auto-wrapper, so embedders call
+`get_lib().lr_ospf_is_elected_translator_with_reachability(...)`
+directly. The `scripts/abi.json` ABI surface catalogue and the
+`scripts/abi_coverage.py` audit (C++/Python/Go) are regenerated
+and stay green: 1788 / 1788 / 1788 covered, 0 missing.
+
+Tests:
+
+- `crates/lr-ospf/src/nssa_tests.rs` — four new unit tests cover the
+  new function directly:
+  `translator_election_with_reachability_drops_unreachable_candidate`
+  (a higher-ID border router that's excluded from the set is dropped;
+  adding it back lets it win again), `translator_election_with_reachability_self_not_in_set_disables_translation`
+  (an empty set disables translation, a set with only the local
+  router elects the local router), `translator_election_with_reachability_drops_unreachable_nt_bit_candidate`
+  (an Nt-bit border router that's excluded from the set is dropped,
+  even though the Nt-bit normally wins regardless of ID),
+  `translator_election_with_reachability_none_matches_legacy`
+  (`None` and the legacy form produce identical results).
+- `crates/lr-tests/tests/ospf_stub_nssa.rs` — a new e2e test
+  `nssa_translator_election_drops_unreachable_candidate` pins the
+  daemon wiring: a topology where X1 (router-id `0x01010101`) is the
+  only router reachable through area 0 and X2 (router-id
+  `0x05050505`, higher) is in the NSSA's LSDB with the B-bit set
+  but NOT in X1's area-0 LSDB. The legacy election would have X2
+  win (higher ID); the reachability-aware election drops X2 and
+  X1 translates, so the type-5 reaches the backbone through X1.
+  The existing `nssa_translator_election_prevents_duplicate_translation`
+  test (where both border routers ARE reachable through area 0)
+  still passes — the reachability filter is a no-op there.
+
+No public Rust API removal (the legacy `is_elected_translator` is
+preserved as a thin wrapper), one new C ABI symbol
+(additive — `scripts/abi_freeze_check.py HEAD~1 HEAD` stays green),
+no protocol-on-the-wire change, no version bump.
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 

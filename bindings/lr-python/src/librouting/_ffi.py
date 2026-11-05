@@ -3799,6 +3799,10 @@ int32_t lr_ospf_originate_nssa_default_lsa(
     lr_ospf_lsa_box_t * out
 );
 uint8_t lr_ospf_is_elected_translator(lr_ospf_lsdb_t lsdb, uint32_t router_id);
+uint8_t lr_ospf_is_elected_translator_with_reachability(lr_ospf_lsdb_t lsdb,
+                                                       uint32_t router_id,
+                                                       const uint32_t *reachable,
+                                                       size_t reachable_count);
 uint8_t lr_ospf_nssa_p_bit_set(lr_ospf_lsa_box_t lsa);
 lr_ospf_nssa_route_vec_t lr_ospf_nssa_routes(
     lr_ospf_lsdb_t lsdb,

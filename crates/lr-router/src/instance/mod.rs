@@ -33,7 +33,7 @@
 //! [`RouterInstance::drain_output`] and consumes events via
 //! [`RouterInstance::poll_events`]. It never owns sockets.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::connection::{Connection, MemoryConn};
 use crate::event::{OspfGraceEvent, RouterEvent};
@@ -67,8 +67,8 @@ use lr_ospf::lsa::{prefix_len_to_mask, Lsa, LsaTypeV2};
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::neighbor::{NeighborEvent, NeighborState};
 use lr_ospf::nssa::{
-    flush_nssa_lsa, is_elected_translator, nssa_routes, originate_nssa_default_lsa,
-    originate_nssa_lsa, NssaCalcOpts, NssaDefault, N_P_BIT,
+    flush_nssa_lsa, is_elected_translator_with_reachability, nssa_routes,
+    originate_nssa_default_lsa, originate_nssa_lsa, NssaCalcOpts, NssaDefault, N_P_BIT,
 };
 use lr_ospf::spf;
 use lr_policy::hooks::{HookChain, HookVerdict};
@@ -527,6 +527,18 @@ pub struct DefaultRouter {
     /// A tracked translation is flushed when its source disappears, the
     /// P-bit clears or the translator role is lost.
     ospf_translations: BTreeSet<(u32, u32, u32)>,
+    /// RFC 3101 §3.1 translator-election reachability cache: the set
+    /// of OSPF router IDs the local router can reach through its
+    /// regular (non-stubby, non-NSSA) v2 areas' intra-area SPF.
+    /// Populated by [`Self::ospf_summarize_areas_v2`] from the same
+    /// per-area SPF run that drives summary origination, and consumed
+    /// by [`Self::ospf_translate_nssa`] to gate the §3.1 "reachable
+    /// as an ASBR over the AS's transit topology" qualifier on
+    /// candidate border routers. Empty until the first summarize run,
+    /// which is the same LSDB-change tick that drives the first
+    /// translation attempt — so the first election sees a populated
+    /// set rather than a stale `None` filter.
+    ospf_as_reachable_routers: HashSet<u32>,
     /// Configured virtual links (RFC 2328 §15), keyed by
     /// (transit area, endpoint router ID).
     ospf_vlinks: BTreeMap<(u32, u32), OspfVirtualLink>,
@@ -713,6 +725,7 @@ impl Default for DefaultRouter {
             ospf_v3_external_lsids: BTreeMap::new(),
             ospf_v3_summary_lsids: BTreeMap::new(),
             ospf_translations: BTreeSet::new(),
+            ospf_as_reachable_routers: HashSet::new(),
             ospf_vlinks: BTreeMap::new(),
             mrai: BTreeMap::new(),
             graceful_restart: BTreeMap::new(),

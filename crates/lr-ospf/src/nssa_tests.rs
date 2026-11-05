@@ -3,6 +3,7 @@ use crate::external::ExternalMetricType;
 use crate::lsa::{decode_as_external_body, LsaHeader, LsaTypeV2};
 use crate::lsdb::MAX_AGE_SECS;
 use crate::spf::{run_spf, SpfRoute};
+use std::collections::HashSet;
 
 fn net(a: u32, len: u8) -> Prefix {
     Prefix::new_v4(a.to_be_bytes(), len)
@@ -358,6 +359,95 @@ fn translator_election_by_b_bit_and_router_id() {
         0,
     );
     assert!(!is_elected_translator(&lsdb, 3), "Nt-bit beats higher ID");
+}
+
+#[test]
+fn translator_election_with_reachability_drops_unreachable_candidate() {
+    // The NSSA's LSDB carries a higher-ID border router (rid=9) that
+    // would beat the local router (rid=3) under the legacy election.
+    // When the reachability set excludes rid=9, it is no longer a
+    // candidate, so the local router is elected.
+    let mut lsdb = Lsdb::new();
+    lsdb.install(router_lsa(9, router_lsa_flags::B, 1, 1), 0);
+    let reachable: HashSet<u32> = [3u32].into_iter().collect();
+    assert!(
+        is_elected_translator_with_reachability(&lsdb, 3, Some(&reachable)),
+        "an unreachable higher-ID border router is dropped from the election"
+    );
+    // The legacy form (no reachability filter) still loses to rid=9.
+    assert!(
+        !is_elected_translator(&lsdb, 3),
+        "legacy form still considers every B-bit router in the NSSA's LSDB"
+    );
+    // When rid=9 joins the reachability set, it wins again.
+    let reachable_with_9: HashSet<u32> = [3u32, 9].into_iter().collect();
+    assert!(
+        !is_elected_translator_with_reachability(&lsdb, 3, Some(&reachable_with_9)),
+        "a reachable higher-ID border router still wins"
+    );
+}
+
+#[test]
+fn translator_election_with_reachability_self_not_in_set_disables_translation() {
+    // The reachability set excludes the local router itself — the
+    // local router is unreachable across the AS, so it cannot be a
+    // candidate, so translation is disabled (§3.1: an NSSA border
+    // router that is not reachable as an ASBR over the AS's transit
+    // topology cannot be the translator).
+    let lsdb = Lsdb::new();
+    let reachable: HashSet<u32> = [].into_iter().collect();
+    assert!(
+        !is_elected_translator_with_reachability(&lsdb, 3, Some(&reachable)),
+        "an empty reachability set disables translation"
+    );
+    // An empty LSDB plus a set containing only the local router
+    // elects the local router — there is no competitor.
+    let reachable_self: HashSet<u32> = [3u32].into_iter().collect();
+    assert!(
+        is_elected_translator_with_reachability(&lsdb, 3, Some(&reachable_self)),
+        "local router alone in the reachability set is elected"
+    );
+}
+
+#[test]
+fn translator_election_with_reachability_drops_unreachable_nt_bit_candidate() {
+    // A border router with the Nt-bit (unconditional translator) at
+    // rid=9 normally wins against rid=3 regardless of router ID.
+    // When the reachability set excludes rid=9, the Nt-bit router
+    // is no longer a candidate, so the local router is elected.
+    let mut lsdb = Lsdb::new();
+    lsdb.install(
+        router_lsa(9, router_lsa_flags::B | router_lsa_flags::NT, 1, 1),
+        0,
+    );
+    let reachable: HashSet<u32> = [3u32].into_iter().collect();
+    assert!(
+        is_elected_translator_with_reachability(&lsdb, 3, Some(&reachable)),
+        "an unreachable Nt-bit border router is dropped from the election"
+    );
+    // The legacy form loses to the Nt-bit router regardless.
+    assert!(
+        !is_elected_translator(&lsdb, 3),
+        "legacy form still loses to the Nt-bit router"
+    );
+}
+
+#[test]
+fn translator_election_with_reachability_none_matches_legacy() {
+    // `None` reachability filter must match the legacy election exactly,
+    // so the existing call sites that pass `None` (e.g. the FFI
+    // binding `lr_ospf_is_elected_translator`) keep their behaviour.
+    let mut lsdb = Lsdb::new();
+    lsdb.install(router_lsa(2, router_lsa_flags::B, 1, 1), 0);
+    assert_eq!(
+        is_elected_translator(&lsdb, 3),
+        is_elected_translator_with_reachability(&lsdb, 3, None),
+    );
+    lsdb.install(router_lsa(9, router_lsa_flags::B, 1, 1), 0);
+    assert_eq!(
+        is_elected_translator(&lsdb, 3),
+        is_elected_translator_with_reachability(&lsdb, 3, None),
+    );
 }
 
 #[test]

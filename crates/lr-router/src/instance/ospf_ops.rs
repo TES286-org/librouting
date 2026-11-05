@@ -688,6 +688,30 @@ impl DefaultRouter {
             .iter()
             .map(|(id, area)| (*id, spf::run_spf(&area.lsdb, router_id)))
             .collect();
+        // RFC 3101 §3.1 reachability cache: the union of every router
+        // ID reachable from the local router through its regular
+        // (non-stubby, non-NSSA) v2 areas' intra-area SPF. Stubby and
+        // NSSA areas are excluded — they are not part of the AS's
+        // transit topology (RFC 2328 §3.6; RFC 3101 §3.1). The cache
+        // feeds `ospf_translate_nssa`'s translator-election qualifier
+        // so a border router visible in the NSSA's LSDB but
+        // unreachable across the regular areas cannot steal the
+        // translator role from a reachable one.
+        let mut reachable: HashSet<u32> = HashSet::new();
+        reachable.insert(router_id);
+        for (id, area) in &self.ospf_areas {
+            if area.protocol != Protocol::Ospfv2 || area.kind.is_stubby() {
+                continue;
+            }
+            if let Some(result) = spf_results.get(id) {
+                for v in result.vertices.keys() {
+                    if let spf::VertexId::Router(rid) = v {
+                        reachable.insert(*rid);
+                    }
+                }
+            }
+        }
+        self.ospf_as_reachable_routers = reachable;
         let tables: BTreeMap<u32, BTreeMap<Prefix, OspfTableEntry>> = self
             .ospf_areas
             .iter()
@@ -1618,7 +1642,11 @@ impl DefaultRouter {
                 if !area.kind.is_nssa() || area.protocol != Protocol::Ospfv2 {
                     continue;
                 }
-                if !is_elected_translator(&area.lsdb, router_id) {
+                if !is_elected_translator_with_reachability(
+                    &area.lsdb,
+                    router_id,
+                    Some(&self.ospf_as_reachable_routers),
+                ) {
                     continue; // §3.1: another border router translates
                 }
                 for (key, entry) in area.lsdb.iter() {
