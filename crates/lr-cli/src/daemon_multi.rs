@@ -281,12 +281,23 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             let current_networks = Arc::clone(&current_networks);
             let config_path = cfg.config_path.clone();
             let config_dialect = cfg.config_dialect.clone();
+            // Multi-protocol supervisor: damping is owned by the BGP
+            // engine (when it is in the protocol set), but the
+            // BGP engine's `DampingController` is local to
+            // `run_bgp_daemon` and not surfaced to the supervisor.
+            // Pass `None` so `reload_config`'s damping toggle is
+            // skipped entirely — toggling damping on a
+            // multi-protocol daemon is a per-engine reload tracked
+            // as future work. The BGP engine continues to honour
+            // the `[damping]` block it was started with; the
+            // supervisor's SIGHUP does not change it.
             move || {
                 crate::reload_config(
                     config_path.as_deref(),
                     config_dialect.as_deref(),
                     &router,
                     &current_networks,
+                    None,
                     None,
                     None,
                 )

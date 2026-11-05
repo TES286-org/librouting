@@ -658,6 +658,127 @@ fn apply_cross_protocol_config(
     ))
 }
 
+/// Shared damping state for the daemon: the import-hook enabled flag
+/// (so a SIGHUP-driven reload can flip damping off without
+/// reinstalling the hook on the import chain), the decay-ticker stop
+/// signal (so the reload can stop the decay thread when damping is
+/// disabled) and the table handle (so a re-enable reuses the existing
+/// FoM state instead of starting from zero).
+///
+/// The daemon installs one `DampingImportHook` (with the `enabled`
+/// flag below) on the router's import chain at startup when
+/// `[damping] enabled = true`. The hook stays installed for the
+/// lifetime of the daemon; flipping `enabled` to `false` makes it
+/// pass-through. The decay thread is spawned with `decay_stop` held
+/// in this struct; setting `decay_stop` to `true` exits the loop at
+/// the next iteration. The `table` is shared between the hook, the
+/// decay thread and this controller so all three see the same FoM
+/// state.
+///
+/// Stored under `Arc<Mutex<Option<DampingController>>>` so the
+/// reload callback can atomically replace the controller with `None`
+/// (damping disabled) or `Some(...)` (damping enabled). The lock is
+/// held only for the field-swap; the daemon's I/O paths never take
+/// it.
+pub(crate) struct DampingController {
+    /// Mirrors `DampingImportHook::enabled_handle` — flipping to
+    /// `false` makes the installed hook pass-through on every
+    /// import / withdraw while the flag stays low.
+    pub(crate) enabled: Arc<AtomicBool>,
+    /// Stop signal for the decay-ticker thread. Setting to `true`
+    /// exits the loop at the next iteration (the thread checks
+    /// before each `sleep` + `decay_all` cycle).
+    pub(crate) decay_stop: Arc<AtomicBool>,
+    /// Shared FoM table. The hook and the decay thread both hold a
+    /// clone of this `Arc`; keeping it here lets a re-enable reuse
+    /// the existing FoM state instead of starting from zero.
+    pub(crate) table: Arc<Mutex<lr_damping::DampingTable>>,
+}
+
+/// Spawn the RFC 2439 §4.2 decay ticker thread. The thread holds
+/// clones of the FoM `table` and the `decay_stop` flag, sleeps
+/// `decay_interval_s` seconds between ticks, and exits when the
+/// stop flag is raised (or when the table mutex is poisoned — the
+/// FoM state is then unknowable and further decay would be
+/// meaningless). Re-exported to `reload_config` so a re-enable can
+/// start a fresh ticker without duplicating the loop body.
+///
+/// Returns immediately; the thread runs until `decay_stop` is set
+/// or the table mutex poisons.
+fn spawn_damping_decay_thread(
+    table: Arc<Mutex<lr_damping::DampingTable>>,
+    decay_stop: Arc<AtomicBool>,
+    decay_interval_s: u64,
+) {
+    std::thread::Builder::new()
+        .name("lr-damping-decay".into())
+        .spawn(move || {
+            // TIME BASE: the damping hook derives `now_s` from
+            // `route.age_ms` — the router's monotonic
+            // milliseconds-since-daemon-start (`start.elapsed()`),
+            // NOT the UNIX epoch. The decay ticker must share
+            // that base: with epoch seconds every tick would see
+            // an astronomically large `elapsed` in
+            // `decay_to_now`, zero the figure-of-merit and
+            // instantly "reactivate" every suppressed prefix —
+            // damping could never hold (caught live by
+            // tests/interop/damping_frr.sh). The per-thread
+            // start skew is milliseconds — noise against decay
+            // intervals measured in seconds.
+            let base = WallClock::now();
+            // RFC 2439 §4.2: decay once per `decay_interval_s`.
+            // The first tick fires after one interval so we do
+            // not decay a freshly-started table (which would be a
+            // no-op anyway — the FoM is 0 everywhere).
+            loop {
+                // SIGHUP-driven disable sets this flag and the
+                // thread exits at the next iteration; a re-enable
+                // spawns a fresh ticker thread with a new
+                // `decay_stop` (this thread's `Arc` is dropped when
+                // it exits).
+                if decay_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(decay_interval_s));
+                // Re-check after the sleep so a SIGHUP that
+                // landed mid-sleep exits without one extra
+                // `decay_all` (which would be harmless — the FoM
+                // would decay once more — but it is wasted work
+                // and a confusing log line).
+                if decay_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(mut table) = table.lock() else {
+                    // Mutex poisoned — another thread panicked
+                    // while holding the lock. The damping table
+                    // is now in an unknown state; the safest thing
+                    // is to stop decaying (suppressed prefixes
+                    // will stay suppressed until the daemon is
+                    // restarted).
+                    break;
+                };
+                let now_s = base.elapsed().as_secs();
+                let reactivated = table.decay_all(now_s);
+                for prefix in &reactivated {
+                    // The router's import hook chain has no
+                    // "please re-import this prefix" API — the
+                    // next re-announce from the peer will
+                    // naturally flow through the import hook
+                    // (and pass, since `is_suppressed(prefix)`
+                    // is now false). Until then, the prefix
+                    // stays out of Adj-RIB-In. Log the
+                    // reactivation so the operator can correlate.
+                    log_info!(
+                        Component::Policy,
+                        "damping: prefix {} reactivated (FoM decayed below reuse threshold)",
+                        prefix
+                    );
+                }
+            }
+        })
+        .expect("spawn damping decay thread");
+}
+
 /// Run the BGP engine. `host = None` is the classic standalone
 /// daemon (own router, own running flag, own ticker, own API socket,
 /// own privilege drop); `Some(host)` plugs it into the multi-protocol
@@ -1247,73 +1368,41 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // a decay ticker thread that periodically calls
     // `DampingTable::decay_all` so suppressed prefixes re-emerge
     // as the figure-of-merit decays below the reuse threshold.
+    //
+    // SIGHUP-driven toggle (ROADMAP-v3 D4.3 follow-up): the hook
+    // carries a shared `enabled` flag the reload path flips, so a
+    // SIGHUP can turn damping *off* mid-run (the hook pass-throughs
+    // and the decay thread exits) and *back on* later (the hook
+    // resumes gating and a fresh decay thread is spawned). The
+    // shared `Arc<Mutex<Option<DampingController>>>` below is
+    // cloned into the reload closure so `reload_config` can
+    // transition between `Some` (damping on) and `None` (damping
+    // off) without the daemon's I/O paths ever taking the lock.
+    let damping_state: Arc<Mutex<Option<DampingController>>> = Arc::new(Mutex::new(None));
     if cfg.damping.enabled {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(
+        let table = Arc::new(Mutex::new(lr_damping::DampingTable::new(
             cfg.damping.config.clone(),
         )));
-        let hook = lr_policy::hooks::DampingImportHook::new(std::sync::Arc::clone(&table));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let decay_stop = Arc::new(AtomicBool::new(false));
+        let hook = lr_policy::hooks::DampingImportHook::with_enabled(
+            Arc::clone(&table),
+            Arc::clone(&enabled),
+        );
         {
             let mut r = router.write().unwrap();
             r.hooks_mut().import.push(Box::new(hook));
         }
-        // Spawn the decay ticker thread. The thread holds a weak-ish
-        // reference (an `Arc`) to the damping table and runs for the
-        // lifetime of the process — the daemon does not currently
-        // expose a "stop damping" knob, so a SIGHUP-driven config
-        // reload cannot unset damping mid-run (a known limitation,
-        // documented in ROADMAP-v3 D4.3 follow-up).
-        let decay_interval_s = cfg.damping.config.decay_interval_s;
-        std::thread::Builder::new()
-            .name("lr-damping-decay".into())
-            .spawn(move || {
-                // TIME BASE: the damping hook derives `now_s` from
-                // `route.age_ms` — the router's monotonic
-                // milliseconds-since-daemon-start (`start.elapsed()`),
-                // NOT the UNIX epoch. The decay ticker must share
-                // that base: with epoch seconds every tick would see
-                // an astronomically large `elapsed` in
-                // `decay_to_now`, zero the figure-of-merit and
-                // instantly "reactivate" every suppressed prefix —
-                // damping could never hold (caught live by
-                // tests/interop/damping_frr.sh). The per-thread
-                // start skew is milliseconds — noise against decay
-                // intervals measured in seconds.
-                let base = WallClock::now();
-                // RFC 2439 §4.2: decay once per `decay_interval_s`.
-                // The first tick fires after one interval so we do
-                // not decay a freshly-started table (which would be a
-                // no-op anyway — the FoM is 0 everywhere).
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(decay_interval_s));
-                    let Ok(mut table) = table.lock() else {
-                        // Mutex poisoned — another thread panicked
-                        // while holding the lock. The damping table
-                        // is now in an unknown state; the safest thing
-                        // is to stop decaying (suppressed prefixes
-                        // will stay suppressed until the daemon is
-                        // restarted).
-                        break;
-                    };
-                    let now_s = base.elapsed().as_secs();
-                    let reactivated = table.decay_all(now_s);
-                    for prefix in &reactivated {
-                        // The router's import hook chain has no
-                        // "please re-import this prefix" API — the
-                        // next re-announce from the peer will
-                        // naturally flow through the import hook
-                        // (and pass, since `is_suppressed(prefix)`
-                        // is now false). Until then, the prefix
-                        // stays out of Adj-RIB-In. Log the
-                        // reactivation so the operator can correlate.
-                        log_info!(
-                            Component::Policy,
-                            "damping: prefix {} reactivated (FoM decayed below reuse threshold)",
-                            prefix
-                        );
-                    }
-                }
-            })
-            .expect("spawn damping decay thread");
+        spawn_damping_decay_thread(
+            Arc::clone(&table),
+            Arc::clone(&decay_stop),
+            cfg.damping.config.decay_interval_s,
+        );
+        *damping_state.lock().unwrap() = Some(DampingController {
+            enabled,
+            decay_stop,
+            table,
+        });
         log_info!(
             Component::Policy,
             "rfc2439:      route flap damping enabled (suppress={}, reuse={}, decay={}s)",
@@ -1592,6 +1681,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let config_dialect = cfg.config_dialect.clone();
                     let roa_store = Arc::clone(&roa_store);
                     let rpki = rpki.clone();
+                    let damping_state = Arc::clone(&damping_state);
                     move || {
                         reload_config(
                             config_path.as_deref(),
@@ -1600,6 +1690,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                             &current_networks,
                             Some(&roa_store),
                             rpki.as_ref(),
+                            Some(&damping_state),
                         )
                     }
                 }),
@@ -4495,12 +4586,18 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 let config_path = cfg.config_path.clone();
                 let config_dialect = cfg.config_dialect.clone();
                 let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
+                // Babel does not install a damping hook (the `[damping]`
+                // block is a BGP-only construct). Pass `None` so
+                // `reload_config`'s damping toggle is skipped entirely
+                // — the Babel daemon never has a `DampingController`
+                // to flip.
                 move || {
                     reload_config(
                         config_path.as_deref(),
                         config_dialect.as_deref(),
                         &router,
                         &current_networks,
+                        None,
                         None,
                         None,
                     )
@@ -6853,6 +6950,16 @@ fn reload_config(
     current_networks: &Arc<Mutex<Vec<String>>>,
     roa_store: Option<&Arc<lr_bgp::RoaStore>>,
     rpki: Option<&daemon_rpki::RpkiHandle>,
+    // `Some` for the standalone BGP daemon: the reload re-syncs the
+    // live damping toggle to the freshly-reloaded `[damping]` block
+    // (on↔off transitions, decay-interval re-spawn). `None` for the
+    // standalone Babel daemon (damping is a BGP-only construct — no
+    // hook is installed) and for the multi-protocol supervisor (the
+    // BGP engine owns its own `DampingController` but does not
+    // surface it to the supervisor's reload closure; toggling
+    // damping on a multi-protocol daemon is a per-engine reload
+    // tracked as future work).
+    damping_state: Option<&Arc<Mutex<Option<DampingController>>>>,
 ) -> Vec<String> {
     let Some(path) = path else {
         return vec!["reload: no config file in use; nothing to reload".into()];
@@ -7050,6 +7157,125 @@ fn reload_config(
             if !fresh_keys.contains(&key) {
                 r.uninstall_static(&key);
                 lines.push(format!("reload: static {} withdrawn", key.prefix));
+            }
+        }
+    }
+    // RFC 2439 damping toggle (ROADMAP-v3 D4.3 follow-up): the daemon
+    // installs the `DampingImportHook` at startup when `[damping]
+    // enabled = true`; the hook carries a shared `enabled` flag the
+    // SIGHUP path can flip in-place. This block re-syncs the live
+    // toggle to the freshly-reloaded `[damping]` block:
+    //
+    // * **off → on**: install a new hook on the router's import
+    //   chain (the startup path did not install one), create a fresh
+    //   FoM table and spawn a decay ticker. The FoM starts from
+    //   zero — no history survives a disable→enable cycle that
+    //   crosses a daemon start.
+    // * **on → off**: flip the shared `enabled` flag to `false` so
+    //   the installed hook pass-throughs on every import, signal
+    //   the decay ticker to stop at its next iteration and drop
+    //   the controller (so the next reload sees `None`).
+    // * **on → on** (config change): the table stays put (the FoM
+    //   state is preserved across reloads), but a fresh decay
+    //   ticker is spawned with the reloaded `decay_interval_s` so a
+    //   tuned interval takes effect immediately. Other DampingConfig
+    //   fields (`suppress_threshold`, `reuse_threshold`,
+    //   `additive_incr`, `decay_factor_*`) are baked into the
+    //   `DampingTable` at construction time and require a restart
+    //   to change — the reload reports this so the operator does
+    //   not silently keep the old tuning.
+    // * **off → off**: no-op.
+    //
+    // The lock window is the field-swap on `damping_state`; the
+    // router's I/O paths never take this mutex (they touch the hook
+    // directly through `hooks.run_import`).
+    //
+    // Skipped entirely when `damping_state` is `None` (the Babel
+    // daemon and the multi-protocol supervisor pass `None` because
+    // they do not own the BGP engine's `DampingController`).
+    if let Some(damping_state) = damping_state {
+        let mut state = damping_state.lock().unwrap();
+        let was_enabled = state.is_some();
+        let is_enabled = fresh.damping.enabled;
+        match (was_enabled, is_enabled) {
+            (false, true) => {
+                // Off → on: install hook + spawn decay thread.
+                let table = Arc::new(Mutex::new(lr_damping::DampingTable::new(
+                    fresh.damping.config.clone(),
+                )));
+                let enabled = Arc::new(AtomicBool::new(true));
+                let decay_stop = Arc::new(AtomicBool::new(false));
+                let hook = lr_policy::hooks::DampingImportHook::with_enabled(
+                    Arc::clone(&table),
+                    Arc::clone(&enabled),
+                );
+                {
+                    let mut r = router.write().unwrap();
+                    r.hooks_mut().import.push(Box::new(hook));
+                }
+                spawn_damping_decay_thread(
+                    Arc::clone(&table),
+                    Arc::clone(&decay_stop),
+                    fresh.damping.config.decay_interval_s,
+                );
+                lines.push(format!(
+                    "reload: damping enabled (suppress={}, reuse={}, decay={}s)",
+                    fresh.damping.config.suppress_threshold,
+                    fresh.damping.config.reuse_threshold,
+                    fresh.damping.config.decay_interval_s,
+                ));
+                *state = Some(DampingController {
+                    enabled,
+                    decay_stop,
+                    table,
+                });
+            }
+            (true, false) => {
+                // On → off: pass-through the hook + stop the decay
+                // thread. The hook stays on the import chain so a
+                // later re-enable does not need to push a new one
+                // (the off→on arm above handles the case where it was
+                // never installed; this arm handles the more common
+                // disable→enable cycle that keeps the hook in
+                // place).
+                if let Some(controller) = state.take() {
+                    controller.enabled.store(false, Ordering::Relaxed);
+                    controller.decay_stop.store(true, Ordering::Relaxed);
+                }
+                lines.push(
+                    "reload: damping disabled (hook pass-through, decay thread stopping)".into(),
+                );
+            }
+            (true, true) => {
+                // On → on: respawn the decay ticker so a tuned
+                // `decay_interval_s` takes effect immediately. Other
+                // DampingConfig fields are baked into the
+                // DampingTable at construction time; changing them
+                // requires a restart.
+                if let Some(controller) = state.take() {
+                    // Signal the old ticker to exit at its next
+                    // iteration. A fresh ticker spawns with a new
+                    // stop flag; the FoM table persists.
+                    controller.decay_stop.store(true, Ordering::Relaxed);
+                    let new_stop = Arc::new(AtomicBool::new(false));
+                    spawn_damping_decay_thread(
+                        Arc::clone(&controller.table),
+                        Arc::clone(&new_stop),
+                        fresh.damping.config.decay_interval_s,
+                    );
+                    *state = Some(DampingController {
+                        enabled: controller.enabled,
+                        decay_stop: new_stop,
+                        table: controller.table,
+                    });
+                    lines.push(format!(
+                        "reload: damping decay interval -> {}s (other config changes require restart)",
+                        fresh.damping.config.decay_interval_s,
+                    ));
+                }
+            }
+            (false, false) => {
+                // No-op: damping was off and stays off.
             }
         }
     }

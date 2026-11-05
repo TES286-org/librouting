@@ -516,6 +516,20 @@ pub(crate) struct FilterFunctionSpec {
 /// re-emerge as the figure-of-merit decays below the reuse
 /// threshold.
 ///
+/// SIGHUP-driven toggle (live reload): the `enabled` flag is
+/// re-evaluated on every SIGHUP / runtime-API reload. Flipping
+/// `enabled` to `false` mid-run flips the installed hook to
+/// pass-through (the FoM table state is preserved in memory) and
+/// signals the decay ticker to exit; flipping back to `true`
+/// re-installs a hook and respawns the decay ticker. Changing
+/// `decay_interval_s` on a live reload respawns the decay ticker
+/// so the new interval takes effect immediately; the other
+/// parameters (`suppress_threshold`, `reuse_threshold`,
+/// `additive_incr`, `decay_factor_*`, `upper_limit`) are baked
+/// into the `DampingTable` at construction time and require a
+/// restart to change — the reload reports this so the operator
+/// does not silently keep the old tuning.
+///
 /// The parameters mirror [`lr_damping::DampingConfig`] verbatim —
 /// no unit conversion is performed. RFC 2439 §4.7 documents the
 /// defaults; RFC 7196 §3 prescribes the conservative tunings that
