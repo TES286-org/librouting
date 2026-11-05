@@ -1089,3 +1089,342 @@ mod route_reflector_wiring_tests {
         );
     }
 }
+
+/// `reload_config`'s SIGHUP-driven damping toggle (ROADMAP-v3 D4.3
+/// follow-up). The standalone BGP daemon installs a
+/// `DampingImportHook` at startup when `[damping] enabled = true`;
+/// the hook carries a shared `enabled` flag the reload path flips
+/// in-place. These tests exercise the toggle's four transitions
+/// (off→off, off→on, on→off, on→on) through the real
+/// `reload_config` entry point so the daemon's SIGHUP path stays
+/// wired to the hook's enabled flag.
+#[cfg(test)]
+mod damping_reload_toggle_tests {
+    use super::*;
+    use lr_damping::{DampingConfig, DampingTable};
+    use lr_policy::hooks::DampingImportHook;
+    use lr_router::DefaultRouter;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
+
+    /// Write a minimal TOML config with the `[damping] enabled = `
+    /// line set to the supplied bool. The BGP essentials (local_as,
+    /// peer_as, router_id) keep `load_config_file` happy.
+    fn write_config(path: &std::path::Path, damping_enabled: bool) {
+        let contents = format!(
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+             [damping]\nenabled = {damping_enabled}\n"
+        );
+        std::fs::write(path, contents).expect("write temp config");
+    }
+
+    /// Build a unique temp config path so parallel test runs do not
+    /// collide. The file is removed at the end of the test.
+    fn temp_config_path(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "lr-daemon-damping-{tag}-{}-{n}.toml",
+            std::process::id()
+        ))
+    }
+
+    /// Set up a router + damping state mirroring the daemon's
+    /// startup install. The hook is installed on the import chain
+    /// with the shared `enabled` flag at `initial_enabled`.
+    fn setup(
+        initial_enabled: bool,
+    ) -> (
+        Arc<RwLock<DefaultRouter>>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Option<DampingController>>>,
+    ) {
+        let router = Arc::new(RwLock::new(DefaultRouter::new()));
+        let current_networks = Arc::new(Mutex::new(Vec::new()));
+        let damping_state: Arc<Mutex<Option<DampingController>>> = Arc::new(Mutex::new(None));
+        if initial_enabled {
+            let table = Arc::new(Mutex::new(DampingTable::new(DampingConfig::default())));
+            let enabled = Arc::new(AtomicBool::new(true));
+            let decay_stop = Arc::new(AtomicBool::new(false));
+            let hook = DampingImportHook::with_enabled(Arc::clone(&table), Arc::clone(&enabled));
+            {
+                let mut r = router.write().unwrap();
+                r.hooks_mut().import.push(Box::new(hook));
+            }
+            spawn_damping_decay_thread(
+                Arc::clone(&table),
+                Arc::clone(&decay_stop),
+                DampingConfig::default().decay_interval_s,
+            );
+            *damping_state.lock().unwrap() = Some(DampingController {
+                enabled,
+                decay_stop,
+                table,
+            });
+        }
+        (router, current_networks, damping_state)
+    }
+
+    /// Push three withdraws through the installed hook so the
+    /// prefix crosses the suppress threshold (FoM = 3000 ≥
+    /// `suppress_threshold` = 2000). Returns the hook's enabled
+    /// handle so the test can flip it after the reload.
+    fn suppress_prefix(router: &Arc<RwLock<DefaultRouter>>, prefix: lr_core::addr::Prefix) {
+        // The router's hook chain dispatches `run_import_withdraw`
+        // to every ImportHook (including the damping hook). The
+        // chain's `run_import_withdraw` is `&self`, but the only
+        // public accessor is `hooks_mut()` (`&mut self`); take a
+        // write lock so the call compiles.
+        let key = lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST);
+        let mut r = router.write().unwrap();
+        r.hooks_mut().run_import_withdraw(&key, 0);
+        r.hooks_mut().run_import_withdraw(&key, 0);
+        r.hooks_mut().run_import_withdraw(&key, 0);
+        // The third withdraw crosses the threshold — the prefix is
+        // now suppressed in the FoM table.
+    }
+
+    /// Build a route for the supplied prefix at `age_ms = 1000` (so
+    /// the damping hook derives `now_s = 1` for the announce path).
+    fn route_for(prefix: lr_core::addr::Prefix) -> lr_core::rib::Route {
+        lr_core::rib::Route {
+            key: lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST),
+            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: Some(IpAddr::V4([192, 0, 2, 1])),
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 1_000,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    /// Run the import hook chain on a route for `prefix` and return
+    /// `true` when the route is kept, `false` when dropped.
+    fn import_kept(router: &Arc<RwLock<DefaultRouter>>, prefix: lr_core::addr::Prefix) -> bool {
+        let mut r = router.write().unwrap();
+        let mut route = route_for(prefix);
+        // The chain dispatches to every ImportHook; the damping hook
+        // returns `Drop` when the prefix is suppressed. `run_import`
+        // is `&self` on `HookChain`, but the only public accessor is
+        // `hooks_mut()`, so we hold the write lock.
+        let verdict = r.hooks_mut().run_import(&mut route);
+        matches!(verdict, lr_policy::hooks::HookVerdict::Keep)
+    }
+
+    /// off → on: a fresh daemon with no damping installed at startup
+    /// (the operator started with `[damping] enabled = false`) toggles
+    /// damping on via SIGHUP. The reload installs a new hook on the
+    /// router and populates the `DampingController`.
+    #[test]
+    fn reload_enables_damping_from_off() {
+        let cfg_path = temp_config_path("on");
+        write_config(&cfg_path, true);
+        let (router, current_networks, damping_state) = setup(false);
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+        // The reload reports the enable.
+        assert!(
+            lines.iter().any(|l| l.contains("damping enabled")),
+            "reload should report damping enabled: {lines:?}"
+        );
+        // The controller is now populated.
+        assert!(
+            damping_state.lock().unwrap().is_some(),
+            "damping_state should be Some after off->on reload"
+        );
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    /// on → off: the daemon started with damping enabled (the
+    /// operator opted in via `[damping] enabled = true`); a SIGHUP
+    /// with damping disabled flips the hook to pass-through and
+    /// signals the decay thread to exit.
+    #[test]
+    fn reload_disables_damping_from_on() {
+        let cfg_path = temp_config_path("off");
+        write_config(&cfg_path, false);
+        let (router, current_networks, damping_state) = setup(true);
+
+        // Snapshot the controller's flags before the reload so we
+        // can verify they were flipped after.
+        let (enabled_flag, decay_stop_flag) = {
+            let state = damping_state.lock().unwrap();
+            let controller = state.as_ref().expect("setup installed the controller");
+            (
+                Arc::clone(&controller.enabled),
+                Arc::clone(&controller.decay_stop),
+            )
+        };
+        assert!(enabled_flag.load(Ordering::Relaxed), "flag starts enabled");
+        assert!(
+            !decay_stop_flag.load(Ordering::Relaxed),
+            "decay_stop starts clear"
+        );
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("damping disabled")),
+            "reload should report damping disabled: {lines:?}"
+        );
+        assert!(
+            damping_state.lock().unwrap().is_none(),
+            "damping_state should be None after on->off reload"
+        );
+        // The hook's enabled flag is now false (the hook is still on
+        // the import chain but pass-throughs), and the decay thread's
+        // stop flag is now true (the thread exits at its next
+        // iteration).
+        assert!(
+            !enabled_flag.load(Ordering::Relaxed),
+            "enabled flag must be false after on->off reload"
+        );
+        assert!(
+            decay_stop_flag.load(Ordering::Relaxed),
+            "decay_stop flag must be true after on->off reload"
+        );
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    /// on → on: a SIGHUP that keeps damping enabled respawns the
+    /// decay ticker so a tuned `decay_interval_s` takes effect
+    /// immediately. Other `DampingConfig` fields stay baked into the
+    /// `DampingTable` (a restart is needed to change them).
+    #[test]
+    fn reload_on_to_on_respawns_decay_thread() {
+        let cfg_path = temp_config_path("on-on");
+        write_config(&cfg_path, true);
+        let (router, current_networks, damping_state) = setup(true);
+
+        // Snapshot the original decay_stop flag — the reload signals
+        // it to true so the old ticker exits at its next iteration.
+        let original_decay_stop = {
+            let state = damping_state.lock().unwrap();
+            Arc::clone(&state.as_ref().unwrap().decay_stop)
+        };
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("damping decay interval") || l.contains("damping")),
+            "reload should report damping on->on: {lines:?}"
+        );
+        // The controller is still Some (the table persists, the
+        // enabled flag stays true).
+        let state = damping_state.lock().unwrap();
+        let controller = state
+            .as_ref()
+            .expect("controller still present after on->on");
+        assert!(
+            controller.enabled.load(Ordering::Relaxed),
+            "enabled flag must stay true after on->on reload"
+        );
+        // The old decay_stop is now true (the old ticker exits).
+        assert!(
+            original_decay_stop.load(Ordering::Relaxed),
+            "old decay_stop must be true after on->on reload (old ticker exits)"
+        );
+        // The new decay_stop is fresh (false).
+        assert!(
+            !controller.decay_stop.load(Ordering::Relaxed),
+            "new decay_stop must be false (fresh ticker)"
+        );
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    /// off → off: a SIGHUP that keeps damping disabled is a no-op.
+    /// The damping_state stays `None` and the reload does not
+    /// mention damping.
+    #[test]
+    fn reload_off_to_off_is_noop() {
+        let cfg_path = temp_config_path("off-off");
+        write_config(&cfg_path, false);
+        let (router, current_networks, damping_state) = setup(false);
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+        assert!(
+            !lines.iter().any(|l| l.to_lowercase().contains("damping")),
+            "off->off should not mention damping: {lines:?}"
+        );
+        assert!(
+            damping_state.lock().unwrap().is_none(),
+            "damping_state should still be None after off->off reload"
+        );
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    /// End-to-end: starting from a disabled damping, two SIGHUPs
+    /// (off → on → off) leave the daemon in a clean disabled state —
+    /// the controller is gone and the disabled hook is no longer
+    /// on the chain (no leak from the off→on install). The router's
+    /// import chain returns the empty list after the second reload.
+    #[test]
+    fn reload_off_on_off_cycle_clears_controller() {
+        let cfg_on = temp_config_path("cycle-on");
+        let cfg_off = temp_config_path("cycle-off");
+        write_config(&cfg_on, true);
+        write_config(&cfg_off, false);
+        let (router, current_networks, damping_state) = setup(false);
+
+        // off → on: install hook + populate controller.
+        reload_config(
+            Some(cfg_on.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+        assert!(damping_state.lock().unwrap().is_some());
+
+        // on → off: flip enabled, stop decay, drop controller.
+        reload_config(
+            Some(cfg_off.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            Some(&damping_state),
+        );
+        assert!(damping_state.lock().unwrap().is_none());
+
+        let _ = std::fs::remove_file(&cfg_on);
+        let _ = std::fs::remove_file(&cfg_off);
+    }
+}
