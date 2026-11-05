@@ -17,6 +17,15 @@
 //!      plain daemon — the capability stays inert (RFC 5492 §3), the
 //!      session and routing behave exactly as without the feature,
 //!      and no records surface anywhere.
+//!
+//! The opposite side of the feature gate — what the daemon does when
+//! `exchange_plane = true` is configured but the binary was built
+//! WITHOUT the `exchange-plane` feature — is covered by the companion
+//! file `daemon_exchange_plane_off.rs` (gated `#![cfg(all(unix,
+//! not(feature = "exchange-plane")))]`). Together the two files
+//! exercise both branches of the gate under `cargo test` (default
+//! features runs the `_off` file and skips this one; `cargo test
+//! --features exchange-plane` runs the converse).
 
 #![cfg(all(unix, feature = "exchange-plane"))]
 
