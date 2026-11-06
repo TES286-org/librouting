@@ -646,6 +646,72 @@ func TestStaticRouteLifecycle(t *testing.T) {
 		t.Fatalf("repeat UninstallStaticV4: got (%v, %v), want (false, nil)", w, err)
 	}
 }
+// TestConnectedRouteLifecycle mirrors TestStaticRouteLifecycle for
+// the connected-route surface (BIRD `protocol direct`, FRR
+// `redistribute connected`). It installs three connected routes,
+// asserts the Loc-RIB carries them, uninstalls them one at a time,
+// and asserts repeated uninstall is an idempotent no-op — exactly
+// the contract TestStaticRouteLifecycle pins for the static surface.
+func TestConnectedRouteLifecycle(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer func() { r.ptr = nil }()
+
+	v4 := [4]byte{203, 0, 113, 0}
+	v6 := [16]byte{0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	nh4 := [4]byte{203, 0, 113, 1}
+	nh6 := [16]byte{0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	bhV4 := [4]byte{10, 0, 0, 0}
+
+	// install_connected_v4 with a real next-hop + metric.
+	if err := r.InstallConnectedV4(v4, 24, &nh4, 0, 1); err != nil {
+		t.Fatalf("InstallConnectedV4 with nh: %v", err)
+	}
+	// install_connected_v4 as a blackhole (nil next-hop).
+	if err := r.InstallConnectedV4(bhV4, 8, nil, 0, 1); err != nil {
+		t.Fatalf("InstallConnectedV4 blackhole: %v", err)
+	}
+	// install_connected_v6 with a real next-hop.
+	if err := r.InstallConnectedV6(v6, 32, &nh6, 0, 1); err != nil {
+		t.Fatalf("InstallConnectedV6: %v", err)
+	}
+	n, err := r.RibLen()
+	if err != nil || n != 3 {
+		t.Fatalf("RibLen after connected: got (%d, %v), want (3, nil)", n, err)
+	}
+
+	// Out-of-range prefix lengths are rejected up front (mirrors
+	// the static surface's pre-flight validation).
+	if err := r.InstallConnectedV4(v4, 33, &nh4, 0, 1); err == nil {
+		t.Fatal("InstallConnectedV4 with plen 33 must fail")
+	}
+	if err := r.InstallConnectedV6(v6, 129, &nh6, 0, 1); err == nil {
+		t.Fatal("InstallConnectedV6 with plen 129 must fail")
+	}
+
+	// Uninstall removes the routes one at a time.
+	if w, err := r.UninstallConnectedV4(v4, 24); err != nil || !w {
+		t.Fatalf("UninstallConnectedV4 of installed route: got (%v, %v), want (true, nil)", w, err)
+	}
+	if w, err := r.UninstallConnectedV4(bhV4, 8); err != nil || !w {
+		t.Fatalf("UninstallConnectedV4 of blackhole: got (%v, %v), want (true, nil)", w, err)
+	}
+	if w, err := r.UninstallConnectedV6(v6, 32); err != nil || !w {
+		t.Fatalf("UninstallConnectedV6: got (%v, %v), want (true, nil)", w, err)
+	}
+	n, err = r.RibLen()
+	if err != nil || n != 0 {
+		t.Fatalf("RibLen after connected uninstalls: got (%d, %v), want (0, nil)", n, err)
+	}
+
+	// Repeated uninstall is an idempotent no-op.
+	if w, err := r.UninstallConnectedV4(v4, 24); err != nil || w {
+		t.Fatalf("repeat UninstallConnectedV4: got (%v, %v), want (false, nil)", w, err)
+	}
+}
+
 
 func TestBGPMessageEncoders(t *testing.T) {
 	// OPEN with the ASN4 capability.

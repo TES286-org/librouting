@@ -636,6 +636,89 @@ func (r *Router) UninstallStaticV6(prefix [16]byte, prefixLen uint8) (withdrawn 
 	return rc == 0, nil
 }
 
+
+// InstallConnectedV4 installs an interface-connected IPv4 route into
+// the Loc-RIB (BIRD "protocol direct", FRR "redistribute connected").
+// The route's protocol is Connected and its admin distance is 0, so
+// it wins over a static route of the same prefix (admin distance 1)
+// and competes with the dynamic protocols' lower preferences by
+// admin distance. Pass nil for nextHop to install a blackhole route
+// (a kernel p2p /32 the daemon has no gateway for). metric is the
+// per-route metric within the connected protocol (lower wins); ifID
+// is a small opaque stable id the daemon allocates per interface —
+// it is carried in the route's origin.peer field so a status
+// renderer can attribute the route back to the interface it came
+// from. Pass 0 when the caller does not allocate per-interface ids.
+func (r *Router) InstallConnectedV4(prefix [4]byte, prefixLen uint8, nextHop *[4]byte, metric uint32, ifID uint64) error {
+	var nhPtr *C.uint8_t
+	if nextHop != nil {
+		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+	}
+	rc := C.lr_router_install_connected_v4(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+		nhPtr,
+		C.uint32_t(metric),
+		C.uint64_t(ifID),
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_install_connected_v4: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// InstallConnectedV6 installs an interface-connected IPv6 route into
+// the Loc-RIB. See InstallConnectedV4 for the semantics.
+func (r *Router) InstallConnectedV6(prefix [16]byte, prefixLen uint8, nextHop *[16]byte, metric uint32, ifID uint64) error {
+	var nhPtr *C.uint8_t
+	if nextHop != nil {
+		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+	}
+	rc := C.lr_router_install_connected_v6(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+		nhPtr,
+		C.uint32_t(metric),
+		C.uint64_t(ifID),
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_install_connected_v6: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// UninstallConnectedV4 removes a previously-installed connected IPv4
+// route. Returns nil and withdrawn=false when the prefix was not a
+// connected route (idempotent no-op, matching UninstallStaticV4's
+// contract).
+func (r *Router) UninstallConnectedV4(prefix [4]byte, prefixLen uint8) (withdrawn bool, err error) {
+	rc := C.lr_router_uninstall_connected_v4(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+	)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_uninstall_connected_v4: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 0, nil
+}
+
+// UninstallConnectedV6 removes a previously-installed connected IPv6
+// route. See UninstallConnectedV4 for the semantics.
+func (r *Router) UninstallConnectedV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, err error) {
+	rc := C.lr_router_uninstall_connected_v6(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+	)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_uninstall_connected_v6: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 0, nil
+}
+
 // OriginateLabeledV4 injects an RFC 8277 labelled IPv4 BGP route
 // (AFI=1, SAFI=4) into Loc-RIB. The label stack is supplied as a slice
 // of 20-bit label values; the bottom-of-stack bit is set automatically.
