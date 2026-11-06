@@ -1206,7 +1206,8 @@ impl V3Topology {
 /// the tree but leave the route without a gateway — the embedder
 /// decides whether to keep it.
 pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
-    run_spf_v3_mode(lsdb, root, false)
+    let srv6 = crate::srv6db::Srv6Database::from_lsdb(lsdb);
+    run_spf_v3_mode_with_srv6(lsdb, root, false, &srv6)
 }
 
 /// The full Extended-LSA reception mode of [`run_spf_v3`] (RFC 8362
@@ -1217,10 +1218,49 @@ pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
 /// exist, so an area migrates router by router. Speakers without
 /// Extended LSAs keep their legacy topology.
 pub fn run_spf_v3_extended(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
-    run_spf_v3_mode(lsdb, root, true)
+    let srv6 = crate::srv6db::Srv6Database::from_lsdb(lsdb);
+    run_spf_v3_mode_with_srv6(lsdb, root, true, &srv6)
 }
 
-fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
+/// Variant of [`run_spf_v3`] that takes a pre-projected SRv6
+/// database (RFC 9513 §2/§5). The SRv6 database is a pure projection
+/// of the LSDB's Router-Information LSAs (function code 12), Locator
+/// LSAs (function code 42) and E-Router-LSAs (0xA021); re-running SPF
+/// on a stable LSDB re-projects it from scratch on every call. A
+/// caller that drives SPF repeatedly against the same area LSDB
+/// (the daemon's [`DefaultRouter`](lr_router::DefaultRouter) recompute
+/// loop) can cache the projection keyed by [`Lsdb::version`] and pass
+/// the cached value in here, avoiding the O(LSDB) re-walk on every
+/// SPF run.
+///
+/// `srv6` **must** be derived from the same `lsdb` (no intervening
+/// `install` / `remove` / `age_out` / `refresh_due` that changed the
+/// body of any LSA the SRv6 database consumes). The cache owner is
+/// responsible for invalidation; the function does not re-check.
+pub fn run_spf_v3_with_srv6(
+    lsdb: &Lsdb,
+    root: u32,
+    srv6: &crate::srv6db::Srv6Database,
+) -> SpfResultV3 {
+    run_spf_v3_mode_with_srv6(lsdb, root, false, srv6)
+}
+
+/// Variant of [`run_spf_v3_extended`] taking a pre-projected SRv6
+/// database — see [`run_spf_v3_with_srv6`] for the caching contract.
+pub fn run_spf_v3_extended_with_srv6(
+    lsdb: &Lsdb,
+    root: u32,
+    srv6: &crate::srv6db::Srv6Database,
+) -> SpfResultV3 {
+    run_spf_v3_mode_with_srv6(lsdb, root, true, srv6)
+}
+
+fn run_spf_v3_mode_with_srv6(
+    lsdb: &Lsdb,
+    root: u32,
+    extended: bool,
+    srv6: &crate::srv6db::Srv6Database,
+) -> SpfResultV3 {
     let topo = V3Topology::from_lsdb(lsdb, extended);
     let mut result = SpfResultV3 {
         router_options: topo.router_options.clone(),
@@ -1500,7 +1540,16 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
     // router layer applies the §5 preference for prefix reachability
     // advertisements covering the same prefix and gates on the
     // receiver's supported algorithms (neither is LSDB data).
-    let srv6 = crate::srv6db::Srv6Database::from_lsdb(lsdb);
+    //
+    // The SRv6 database is supplied by the caller (the cache owner).
+    // The historical re-projection `Srv6Database::from_lsdb(lsdb)`
+    // happened unconditionally on every SPF run — `from_lsdb` walks
+    // the entire area LSDB. The cache keyed on `Lsdb::version`
+    // invalidates only when the LSDB body changes, so a stable LSDB
+    // (refresh ticks that rewrite the same body under a new sequence
+    // number, age updates that don't change the body, periodic SPF
+    // re-runs against the same LSDB) re-uses the prior projection
+    // without re-walking every LSA.
     let mut locators = Vec::new();
     for (&adv, node) in &srv6.nodes {
         for loc in &node.locators {
