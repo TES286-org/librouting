@@ -5555,3 +5555,189 @@ fn router_lsa_body(links: Vec<(u32, u32, u8, u16)>) -> Vec<u8> {
     }
     body
 }
+
+// ---------------------------------------------------------------------------
+// install_connected / uninstall_connected / connected_routes
+// ---------------------------------------------------------------------------
+
+use lr_core::addr::{IpAddr, Prefix};
+use lr_core::nlri::NlriFamily;
+use lr_core::rib::{Preference, Protocol, RouteKey};
+
+/// Build a `DefaultRouter` with no sessions — the connected-route
+/// surface does not need a session to install/diff; the Loc-RIB is the
+/// only consumer for `Protocol::Connected` routes when no
+/// `[[redistribute]] connected -> …` pipe is configured.
+fn router_for_connected_tests() -> DefaultRouter {
+    DefaultRouter::new()
+}
+
+/// A freshly-installed connected route appears in the Loc-RIB and the
+/// `connected_routes()` map; its `protocol` is `Connected` and its
+/// admin distance is 0 (FRR/BIRD default for directly-connected
+/// networks).
+#[test]
+fn install_connected_appears_in_rib_and_map() {
+    let mut r = router_for_connected_tests();
+    let prefix = Prefix::new_v4([10, 0, 0, 0], 24);
+    let family = NlriFamily::IPV4_UNICAST;
+    let key = r.install_connected(prefix, family, Some(IpAddr::V4([10, 0, 0, 1])), 0, 1);
+
+    // The map carries the route.
+    assert_eq!(
+        r.connected_routes().len(),
+        1,
+        "connected_routes map holds the new entry"
+    );
+    let stored = r.connected_routes().get(&key).expect("key just installed");
+    assert_eq!(stored.protocol, Protocol::Connected);
+    assert_eq!(stored.preference, Preference::new(0, 0));
+
+    // The Loc-RIB carries it too.
+    let rib_entry = r
+        .rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.key == key)
+        .expect("connected route is in the Loc-RIB");
+    assert_eq!(rib_entry.protocol, Protocol::Connected);
+    assert_eq!(rib_entry.preference, Preference::new(0, 0));
+    assert_eq!(rib_entry.next_hop, Some(IpAddr::V4([10, 0, 0, 1])));
+}
+
+/// A connected route with `next_hop = None` (a kernel-reported
+/// point-to-point /32 or /128 the daemon has no gateway for) installs
+/// as a blackhole — the FRR/BIRD model for "interface has address
+/// 10.0.0.1/32 on a p2p link".
+#[test]
+fn install_connected_blackhole_when_next_hop_is_none() {
+    let mut r = router_for_connected_tests();
+    let prefix = Prefix::new_v4([10, 0, 0, 1], 32);
+    let key = RouteKey::new(prefix, NlriFamily::IPV4_UNICAST);
+    r.install_connected(prefix, NlriFamily::IPV4_UNICAST, None, 0, 1);
+    let stored = r.connected_routes().get(&key).expect("installed");
+    assert_eq!(stored.protocol, Protocol::Connected);
+    assert_eq!(stored.next_hop, None, "no next-hop means blackhole");
+}
+
+/// A connected route of the same prefix as a static route wins by
+/// admin distance (Connected 0 < Static 1) — exactly the priority
+/// table every routing daemon implements.
+#[test]
+fn connected_wins_over_static_same_prefix() {
+    let mut r = router_for_connected_tests();
+    let prefix = Prefix::new_v4([10, 0, 0, 0], 24);
+    let family = NlriFamily::IPV4_UNICAST;
+
+    // Install a static first.
+    r.install_static(prefix, family, None, 0, None);
+    assert_eq!(
+        r.static_routes().len(),
+        1,
+        "static map holds the static entry"
+    );
+    let static_best = r
+        .rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.key.prefix == prefix)
+        .unwrap();
+    assert_eq!(static_best.protocol, Protocol::Static);
+
+    // Install a connected route for the same prefix.
+    r.install_connected(prefix, family, Some(IpAddr::V4([10, 0, 0, 1])), 0, 1);
+
+    let best = r
+        .rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.key.prefix == prefix)
+        .unwrap();
+    assert_eq!(
+        best.protocol,
+        Protocol::Connected,
+        "connected (admin distance 0) wins over static (admin distance 1)"
+    );
+    assert_eq!(best.preference, Preference::new(0, 0));
+}
+
+/// Uninstalling a connected route removes it from the connected map
+/// and from the Loc-RIB. Uninstalling a key that was not a connected
+/// route is a no-op (returns `false`).
+#[test]
+fn uninstall_connected_removes_and_returns_false_for_unknown() {
+    let mut r = router_for_connected_tests();
+    let prefix = Prefix::new_v4([10, 0, 0, 0], 24);
+    let family = NlriFamily::IPV4_UNICAST;
+    let key = r.install_connected(prefix, family, None, 0, 1);
+
+    assert!(
+        r.uninstall_connected(&key),
+        "first uninstall removes the entry"
+    );
+    assert!(r.connected_routes().is_empty(), "map drained");
+    assert!(
+        r.rib_snapshot().iter().all(|rt| rt.key != key),
+        "the Loc-RIB no longer carries the connected route"
+    );
+
+    // A second uninstall on the same key is a no-op.
+    assert!(!r.uninstall_connected(&key), "second uninstall is a no-op");
+
+    // Uninstalling a static key (which is NOT a connected key) is also
+    // a no-op for the connected path.
+    let static_prefix = Prefix::new_v4([172, 16, 0, 0], 24);
+    let static_key = r.install_static(static_prefix, family, None, 0, None);
+    assert!(
+        !r.uninstall_connected(&static_key),
+        "uninstall_connected on a static key returns false (static stays)"
+    );
+    assert!(
+        r.static_routes().contains_key(&static_key),
+        "static is untouched"
+    );
+}
+
+/// Re-installing the same (prefix, family) connected route overwrites
+/// the prior entry — a reload that re-enumerates interface addresses
+/// keeps the key stable so the Loc-RIB diff is empty when nothing
+/// changed (no churn). This matches `install_static`'s overwrite
+/// contract.
+#[test]
+fn install_connected_overwrites_in_place() {
+    let mut r = router_for_connected_tests();
+    let prefix = Prefix::new_v4([10, 0, 0, 0], 24);
+    let family = NlriFamily::IPV4_UNICAST;
+    let _ = r.install_connected(prefix, family, Some(IpAddr::V4([10, 0, 0, 1])), 0, 1);
+    let key = r.install_connected(prefix, family, Some(IpAddr::V4([10, 0, 0, 1])), 0, 1);
+
+    // Only one entry — the second install replaced the first, did not
+    // append.
+    assert_eq!(r.connected_routes().len(), 1);
+    assert!(r.connected_routes().contains_key(&key));
+}
+
+/// A connected route flows through the export selection — when a
+/// `[[redistribute]] connected -> bgp` pipe is configured, the route
+/// is re-originated into BGP. This mirrors the existing static-route
+/// redistribution test in `babel_updates.rs`.
+#[test]
+fn connected_route_flows_through_redistribution_pipe() {
+    let mut r = router_for_connected_tests();
+    // A pipe that re-originates Connected routes into BGP. The
+    // pipe's `matches` predicate is empty (accept-all).
+    let pipe = RedistributionPipe::new(Protocol::Connected, Protocol::Bgp);
+    r.add_redistribution_pipe(pipe);
+
+    let prefix = Prefix::new_v4([10, 0, 0, 0], 24);
+    let family = NlriFamily::IPV4_UNICAST;
+    r.install_connected(prefix, family, Some(IpAddr::V4([10, 0, 0, 1])), 0, 1);
+
+    // The redistribution pipe should have produced an event that
+    // re-originates the connected route into BGP. Drain the events.
+    let events = r.poll_events();
+    assert!(
+        events.iter().any(
+            |ev| matches!(ev, crate::event::RouterEvent::RouteInstalled(rt)
+                if rt.protocol == Protocol::Bgp && rt.key.prefix == prefix)
+        ),
+        "connected route re-originated into BGP via the redistribution pipe; got {events:?}"
+    );
+}

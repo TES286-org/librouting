@@ -458,6 +458,19 @@ pub struct DefaultRouter {
     /// daemon's reload path re-applies the static table wholesale
     /// like it does for the ROA table).
     static_routes: BTreeMap<RouteKey, Route>,
+    /// Interface-connected routes (BIRD `protocol direct`, FRR
+    /// `redistribute connected`). Populated by the daemon from the
+    /// kernel interface table at startup and on every configuration
+    /// reload: one entry per `(interface, address, prefix-len)` triple
+    /// the kernel reports, with `protocol = Connected` and admin
+    /// distance 0 (so a connected route wins over a static route of
+    /// the same prefix, matching BIRD/FRR). Kept so
+    /// [`Self::uninstall_connected`] can remove them and so a
+    /// configuration reload can diff old vs new — interface address
+    /// changes (DHCP lease, manual `ip addr` add/del) drive a
+    /// re-enumeration, the diff withdraws entries that disappeared
+    /// and installs ones that appeared.
+    connected_routes: BTreeMap<RouteKey, Route>,
     pending_events: Vec<RouterEvent>,
     /// OSPF: per-area link-state databases, shared by all sessions of an
     /// area and keyed by area ID.
@@ -711,6 +724,7 @@ impl Default for DefaultRouter {
             add_path_max_paths: 1,
             originated: BTreeMap::new(),
             static_routes: BTreeMap::new(),
+            connected_routes: BTreeMap::new(),
             pending_events: Vec::new(),
             ospf_areas: BTreeMap::new(),
             ospf_grace_seen: BTreeMap::new(),
@@ -1730,6 +1744,17 @@ impl DefaultRouter {
         self.static_routes.insert(key.clone(), route.clone());
         self.pending_events
             .push(RouterEvent::RouteInstalled(route.clone()));
+        // Push the static through any matching `[[redistribute]]
+        // static -> bgp|ospf|ospf3` pipe — the existing
+        // `apply_cross_protocol_config` order installs pipes BEFORE
+        // static routes, so the pipes' startup-time Loc-RIB scan
+        // (see [`Self::add_redistribution_pipe`]) does not see the
+        // static. Without this call the static would sit in the
+        // Loc-RIB without ever being re-originated into the target
+        // protocol, breaking the BIRD `redistribute static` / FRR
+        // `redistribute static` parity.
+        self.redistribute_route(&route);
+        self.bmp_route_monitor(&route);
         self.export_selection(&key, &[route]);
         key
     }
@@ -1753,6 +1778,99 @@ impl DefaultRouter {
     /// this map and removes dropped entries.
     pub fn static_routes(&self) -> &BTreeMap<RouteKey, Route> {
         &self.static_routes
+    }
+
+    /// Install one interface-connected route (BIRD `protocol direct`,
+    /// FRR `redistribute connected`). The route's `protocol` is
+    /// [`Protocol::Connected`]; its admin distance is 0 (the FRR/BIRD
+    /// default for directly-connected networks) so it wins over a
+    /// static route of the same prefix (admin distance 1) and competes
+    /// with the dynamic protocols' lower preferences only by admin
+    /// distance — exactly the priority table every routing daemon
+    /// implements. The route's `tag` slot is left at `None` (the tag
+    /// is operator-controlled via `[[redistribute]] tag`); the
+    /// interface attribution is carried in the route's `origin.peer`
+    /// field as a small opaque stable id the daemon allocates per
+    /// interface.
+    ///
+    /// The route is tracked in the router's connected-route map so
+    /// [`Self::uninstall_connected`] can remove it and the daemon's
+    /// reload path can diff old vs new (interface address changes
+    /// drive a re-enumeration).
+    ///
+    /// A connected route with a blackhole `next_hop = None` is
+    /// permitted (a point-to-point /32 or /128 the kernel reports
+    /// without a gateway). When `next_hop` is `Some`, it is the
+    /// interface's own address — the route is the network the
+    /// interface sits on.
+    pub fn install_connected(
+        &mut self,
+        prefix: Prefix,
+        family: NlriFamily,
+        next_hop: Option<IpAddr>,
+        metric: u32,
+        if_id: u64,
+    ) -> RouteKey {
+        let key = RouteKey::new(prefix, family);
+        let route = Route {
+            key: key.clone(),
+            // `proto = 3` is the lr-internal "connected" source tag
+            // (0 = peer, 1 = originated, 2 = static); the daemon's
+            // `show routes` renderer interprets it for the "Connected"
+            // label, parallel to `proto = 2` for static.
+            origin: RouteOrigin {
+                proto: 3,
+                peer: if_id,
+            },
+            protocol: Protocol::Connected,
+            preference: lr_core::rib::Preference::new(
+                Protocol::Connected.default_admin_distance(),
+                metric,
+            ),
+            next_hop,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        self.loc_rib.install_set(&key, vec![route.clone()]);
+        self.connected_routes.insert(key.clone(), route.clone());
+        self.pending_events
+            .push(RouterEvent::RouteInstalled(route.clone()));
+        // Push the connected route through any matching
+        // `[[redistribute]] connected -> bgp|ospf|ospf3` pipe —
+        // mirrors the `install_static` call so a connected route the
+        // daemon enumerates from the kernel interface table at startup
+        // flows into the target protocol without waiting for a
+        // reselect (the BIRD `redistribute direct` / FRR
+        // `redistribute connected` parity).
+        self.redistribute_route(&route);
+        self.bmp_route_monitor(&route);
+        self.export_selection(&key, &[route]);
+        key
+    }
+
+    /// Remove a previously-installed connected route. Returns `true`
+    /// when a connected route was removed and `false` when the key was
+    /// not a connected route (matching [`Self::uninstall_static`]'s
+    /// contract for static routes).
+    pub fn uninstall_connected(&mut self, key: &RouteKey) -> bool {
+        if self.connected_routes.remove(key).is_some() {
+            self.unredistribute_route(key);
+            self.reselect(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Read-only access to the kernel-enumerated connected routes —
+    /// the daemon's reload path diffs the freshly-enumerated set
+    /// against this map and removes entries that disappeared (interface
+    /// address removed, interface deleted) and installs ones that
+    /// appeared (DHCP lease, manual `ip addr add`).
+    pub fn connected_routes(&self) -> &BTreeMap<RouteKey, Route> {
+        &self.connected_routes
     }
 
     /// The keys of every route the daemon originated locally
@@ -2448,6 +2566,12 @@ impl DefaultRouter {
             .chain(self.originated.values().filter(|r| r.key == *key).cloned())
             .chain(
                 self.static_routes
+                    .values()
+                    .filter(|r| r.key == *key)
+                    .cloned(),
+            )
+            .chain(
+                self.connected_routes
                     .values()
                     .filter(|r| r.key == *key)
                     .cloned(),
