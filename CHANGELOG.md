@@ -1466,6 +1466,76 @@ version bump. The defects.txt entry this closes is
 `crates/lr-cli/src/daemon.rs:L2548-L2549 | INCOMPLETE-IMPL |
 "Source binding does not yet combine with TCP auth"`.
 
+### `[bgp.rpki]` cache removal via SIGHUP stops the RTR thread
+
+`crates/lr-cli/src/daemon.rs` previously documented a reload
+limitation: "reload: rpki cache removed — RPKI keeps running until a
+restart (removing the RTR thread live is not supported)". A SIGHUP
+that removed the `[bgp.rpki] cache` block from the live config was
+*reported* but not *honoured*: the RTR client thread kept running
+against the stale cache address, the RTR-sourced ROAs stayed in the
+`RoaStore`, and the import hook kept validating inbound UPDATEs
+against the withdrawn-but-still-resident ROAs until the operator
+restarted the daemon. The static `[[roa]]` table reload was the
+only piece of the RPKI surface that SIGHUP actually re-applied.
+
+The fix adds a `RpkiCommand::Shutdown` variant to the RTR client
+thread's control channel and wires the reload path to send it when
+the fresh config has no `[bgp.rpki] cache` block:
+
+- `crates/lr-cli/src/daemon_rpki.rs` — `RpkiCommand::Shutdown`
+  (with `Reconnect`) and `Control::Stop` (with `Interrupt` /
+  `Continue`) carry the new path through the thread. The thread
+  latches a `stopped` flag, drops the transport, clears the
+  RTR-sourced ROAs from the shared `RoaStore` via
+  `RoaStore::clear_rtr` (the static `[[roa]]` layer is untouched),
+  resets the client to a cold-start state, and exits the loop.
+  `refresh_status` renders `phase=stopped` once latched so the
+  runtime API `status` line matches the live state.
+  `RpkiHandle::shutdown()` is the control-plane entry point;
+  `RpkiHandle::reconnect()` and `RpkiHandle::shutdown()` on a dead
+  handle both return the existing "client thread is gone" diagnostic
+  (the channel's receiver dies when the thread exits). The
+  `read_available` burst loop and `sleep_backoff` retry loop both
+  drain the control channel between iterations so a queued
+  Shutdown surfaces promptly even mid-burst or mid-backoff.
+- `crates/lr-cli/src/daemon.rs` — `reload_config` now calls
+  `handle.shutdown()` and reports
+  `reload: rpki cache removed — RTR thread stopped, RTR-sourced ROAs
+  withdrawn`. The `if let Some(handle) = rpki` block's comment was
+  updated to describe the new teardown semantics.
+
+Tests:
+
+- `crates/lr-cli/src/daemon_rpki_tests.rs` — seven new unit tests
+  pin the shutdown contract: `drain_control` returns `Control::Stop`
+  on `Shutdown`; `handle_shutdown` clears the RTR layer, preserves
+  the static layer, drops the transport, clears `last_sync`, resets
+  the client, latches `stopped`, and renders `phase=stopped`; the
+  burst loop and backoff loop both exit promptly on `Shutdown`;
+  repeated `handle_shutdown` calls are idempotent;
+  `RpkiHandle::shutdown` enqueues the command and returns the log
+  line; `RpkiHandle::shutdown` / `reconnect` on a dead handle both
+  return the "thread is gone" diagnostic.
+- `crates/lr-cli/tests/daemon_rpki.rs` — a new end-to-end test
+  (`rpki_reload_removing_cache_stops_thread_and_withdraws_rtr_roas`)
+  spawns a real `lr-daemon` against a mock RTR cache, waits for the
+  first sync, rewrites the config to drop the `[bgp.rpki] cache`
+  block, sends SIGHUP, and asserts that the runtime API `status`
+  line reports `roas=1 (static=1 rtr=0)` and `phase=stopped`, and
+  that the daemon log shows no `connected to` line *after* the
+  `cache removed via reload` line (the thread is gone, no
+  reconnect).
+
+No public Rust API change (the daemon's `RpkiHandle` is
+`pub(crate)`), no C ABI change (no `lr_*` symbol touched), no
+protocol-on-the-wire change, no version bump. The defects.txt entry
+this closes is `crates/lr-cli/src/daemon.rs:L6947-L6951 |
+INCOMPLETE-IMPL | "removing the RTR thread live is not supported"`
+(`crates/lr-cli/src/daemon_rpki.rs:L65-L79 | INCOMPLETE-IMPL |
+"RpkiCommand enum only defines Reconnect variant"` is closed by
+the same change — the enum now also carries `Shutdown`).
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
