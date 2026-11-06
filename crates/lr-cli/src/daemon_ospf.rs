@@ -359,14 +359,16 @@ pub(super) fn run_ospf_daemon(
     rid: RouterId,
     host: Option<EngineHost>,
 ) -> ExitCode {
-    if cfg.user.is_some() || cfg.group.is_some() {
-        log_error!(
-            Component::Ospf,
-            "--user/--group are not supported with --protocol ospf yet \
-             (raw sockets are opened before the drop would happen)"
-        );
-        return ExitCode::from(2);
-    }
+    // Note: `--user` / `--group` is honoured in this entry point.
+    // Every configured interface's raw `IPPROTO_OSPF` socket is bound
+    // below (in `resolve_interface`) BEFORE the privilege drop fires,
+    // so the kernel sees the bind as root (or a user/network namespace
+    // with `CAP_NET_RAW`); the drop then runs in the standalone arm of
+    // the `match &host` block below, exactly mirroring the BGP and LDP
+    // daemon paths. The previous code rejected the combination outright
+    // (defects.txt `daemon_ospf.rs:L359-L366`); removing that gate keeps
+    // the privileged work in privileged scope and the unprivileged work
+    // (API socket, ticker, network I/O) under the reduced identity.
     if cfg.ospf_interfaces.is_empty() {
         log_error!(
             Component::Ospf,
@@ -777,6 +779,19 @@ pub(super) fn run_ospf_daemon(
     let running = Arc::clone(&runtime.running);
     match &host {
         None => {
+            // Privileged work is done: every interface's raw OSPF
+            // socket was bound in `resolve_interface` above. Standalone:
+            // drop root, then create the management socket as the
+            // reduced user. Embedded: the supervisor does the drop
+            // before releasing this engine's startup gate, so this arm
+            // is the no-socket version of `daemon.rs`'s BGP standalone
+            // privdrop+spawn sequence (and the LDP equivalent). The
+            // drop is a no-op when `--user` is unset, so unconditional
+            // invocation matches the BGP and LDP shapes.
+            if let Err(e) = crate::do_privdrop(cfg) {
+                log_error!(Component::Daemon, "{e}");
+                return ExitCode::from(1);
+            }
             if let Err(e) = crate::spawn_api(cfg, &runtime) {
                 log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);

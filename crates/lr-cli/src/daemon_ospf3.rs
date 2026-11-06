@@ -903,6 +903,21 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
     let running = Arc::clone(&runtime.running);
     match &host {
         None => {
+            // Privileged work is done: every interface's raw OSPFv3
+            // socket was bound in `resolve_interface` above. Standalone:
+            // drop root, then create the management socket as the
+            // reduced user. Embedded: the supervisor does the drop
+            // before releasing this engine's startup gate. The drop is
+            // a no-op when `--user` is unset, so unconditional invocation
+            // matches the BGP, LDP, and OSPFv2 shapes — previously the
+            // v3 daemon silently kept root when `--user` was passed, so
+            // the flag had no effect at all (defects.txt
+            // `daemon_ospf.rs:L359-L366` neighbour gap; v3 had no early
+            // reject either, it just silently ignored the flag).
+            if let Err(e) = crate::do_privdrop(cfg) {
+                log_error!(Component::Daemon, "{e}");
+                return ExitCode::from(1);
+            }
             if let Err(e) = crate::spawn_api(cfg, &runtime) {
                 log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);
