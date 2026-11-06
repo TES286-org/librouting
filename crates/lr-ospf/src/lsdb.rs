@@ -62,6 +62,19 @@ pub struct Lsdb {
     entries: BTreeMap<LsaKey, LsaEntry>,
     /// Sequence number watermark — used to detect newer instances.
     seq_watermark: BTreeMap<LsaKey, u32>,
+    /// Monotonic content revision counter, bumped on every install or
+    /// removal that changes the database. Reads of derived projections
+    /// (the SRv6 database, the BGP-LS projection, ...) use it as a
+    /// cheap invalidation token: instead of re-walking the LSDB on
+    /// every SPF run, the caller caches the projection keyed by
+    /// `(lsdb_pointer, version)` and recomputes only when the version
+    /// moves. The counter is bumped exactly when
+    /// [`InstallOutcome::changed`] is true for an [`install`](Self::install)
+    /// and when [`remove`](Self::remove) returns `Some` — refresh
+    /// re-writes and `Ignored` installs leave it untouched so a pure
+    /// refresh tick (RFC 2328 §14.1) does not invalidate caches built
+    /// from the previous content.
+    version: u64,
 }
 
 impl Lsdb {
@@ -77,9 +90,29 @@ impl Lsdb {
         self.entries.is_empty()
     }
 
+    /// Monotonic content revision counter — bumped on every
+    /// [`install`](Self::install) or [`remove`](Self::remove) that
+    /// changes the database. A caller that maintains a derived
+    /// projection (for example the SRv6 database in
+    /// [`crate::srv6db::Srv6Database::from_lsdb`]) reads it before and
+    /// after the rebuild and reuses the cached projection whenever the
+    /// value has not moved.
+    ///
+    /// The counter never wraps in practice: at the OSPF maximum LSA
+    /// arrival rate of one content-changing install per millisecond it
+    /// would take ~584 million years to overflow `u64`.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Install one LSA instance (RFC 2328 §13): newer instances replace
     /// the stored copy, duplicates and older instances are ignored, and an
     /// instance aged to MaxAge purges the LSA from the database.
+    ///
+    /// The [`version`](Self::version) counter is bumped exactly when the
+    /// install changes the database ([`InstallOutcome::changed`] is
+    /// true). `Ignored` installs leave the counter — and every cache
+    /// keyed on it — untouched.
     pub fn install(&mut self, lsa: Lsa, now_ms: u64) -> InstallOutcome {
         let key = lsa.key();
         if lsa.header.ls_age >= MAX_AGE_SECS {
@@ -87,6 +120,7 @@ impl Lsdb {
             // re-origination may restart at the initial sequence number).
             return if self.entries.remove(&key).is_some() {
                 self.seq_watermark.remove(&key);
+                self.version = self.version.wrapping_add(1);
                 InstallOutcome::Purged
             } else {
                 InstallOutcome::Ignored
@@ -118,12 +152,20 @@ impl Lsdb {
                 installed_ms: now_ms,
             },
         );
+        self.version = self.version.wrapping_add(1);
         outcome
     }
 
+    /// Remove one LSA. Bumps [`version`](Self::version) when an entry
+    /// was actually removed (the `Some` arm).
     pub fn remove(&mut self, key: &LsaKey) -> Option<LsaEntry> {
         self.seq_watermark.remove(key);
-        self.entries.remove(key)
+        if let Some(entry) = self.entries.remove(key) {
+            self.version = self.version.wrapping_add(1);
+            Some(entry)
+        } else {
+            None
+        }
     }
 
     pub fn get(&self, key: &LsaKey) -> Option<&LsaEntry> {
@@ -139,6 +181,12 @@ impl Lsdb {
     /// Each returned LSA has its sequence number incremented, age reset to
     /// zero, and checksum cleared for the egress encoder to recompute. The
     /// refreshed instance replaces the installed copy atomically.
+    ///
+    /// The [`version`](Self::version) counter is **not** bumped: a refresh
+    /// rewrites the same LSA body under a new sequence number and reset
+    /// age, so derived projections that depend only on the body (the
+    /// SRv6 database, the BGP-LS projection, ...) stay valid. Caches
+    /// keyed on `version` therefore survive a refresh tick.
     pub fn refresh_due(&mut self, advertising_router: u32, now_ms: u64) -> Vec<Lsa> {
         let due: Vec<LsaKey> = self
             .entries
@@ -183,6 +231,10 @@ impl Lsdb {
     }
 
     /// Aging — LSAs whose age exceeds MAX_AGE (3600s) are removed.
+    ///
+    /// Bumps [`version`](Self::version) once for every LSA actually
+    /// removed (the body of the LSDB shrinks, so every projection that
+    /// depends on its contents is invalidated).
     pub fn age_out(&mut self, now_ms: u64) -> Vec<Lsa> {
         const MAX_AGE: u64 = MAX_AGE_SECS as u64 * 1000;
         let mut removed = Vec::new();
@@ -198,6 +250,7 @@ impl Lsdb {
         for k in keys {
             if let Some(e) = self.entries.remove(&k) {
                 self.seq_watermark.remove(&k);
+                self.version = self.version.wrapping_add(1);
                 removed.push(e.lsa);
             }
         }
@@ -381,5 +434,125 @@ mod tests {
         // Refreshing it would produce the reserved 0x80000000 — the
         // refresh is skipped instead (the LSA must be flushed, §14.1).
         assert!(db.refresh_due(2, 1_800_000).is_empty());
+    }
+
+    #[test]
+    fn version_starts_at_zero() {
+        let db = Lsdb::new();
+        assert_eq!(db.version(), 0);
+    }
+
+    #[test]
+    fn version_bumps_on_install_replace_and_purge() {
+        let mut db = Lsdb::new();
+        assert_eq!(db.version(), 0);
+
+        // New install bumps.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000001), 0),
+            InstallOutcome::New
+        );
+        assert_eq!(db.version(), 1);
+
+        // Replacement bumps again.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000002), 5),
+            InstallOutcome::Replaced
+        );
+        assert_eq!(db.version(), 2);
+
+        // MaxAge instance purges — bumps.
+        let mut flush = make_lsa(1, 2, 0x80000003);
+        flush.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(flush, 10), InstallOutcome::Purged);
+        assert_eq!(db.version(), 3);
+    }
+
+    #[test]
+    fn version_ignored_install_leaves_counter_untouched() {
+        let mut db = Lsdb::new();
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000005), 0),
+            InstallOutcome::New
+        );
+        assert_eq!(db.version(), 1);
+
+        // Older instance — ignored, version does not move.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000003), 1),
+            InstallOutcome::Ignored
+        );
+        assert_eq!(db.version(), 1);
+
+        // Reserved sequence number — ignored.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000000), 2),
+            InstallOutcome::Ignored
+        );
+        assert_eq!(db.version(), 1);
+
+        // Out-of-range (wrap-region) sequence — ignored.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x00000001), 3),
+            InstallOutcome::Ignored
+        );
+        assert_eq!(db.version(), 1);
+
+        // A MaxAge instance for a non-existent LSA is also ignored.
+        let mut flush = make_lsa(7, 2, 0x80000002);
+        flush.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(flush, 4), InstallOutcome::Ignored);
+        assert_eq!(db.version(), 1);
+    }
+
+    #[test]
+    fn version_remove_bumps_only_when_something_was_removed() {
+        let mut db = Lsdb::new();
+        let lsa = make_lsa(1, 2, 0x80000001);
+        db.install(lsa.clone(), 0);
+        assert_eq!(db.version(), 1);
+
+        // Removing an unknown key leaves the counter untouched.
+        let other_key = make_lsa(2, 2, 0x80000001).key();
+        assert!(db.remove(&other_key).is_none());
+        assert_eq!(db.version(), 1);
+
+        // Removing a real entry bumps.
+        assert!(db.remove(&lsa.key()).is_some());
+        assert_eq!(db.version(), 2);
+    }
+
+    #[test]
+    fn version_age_out_bumps_per_removed_lsa() {
+        let mut db = Lsdb::new();
+        db.install(make_lsa(1, 2, 0x80000001), 0);
+        db.install(make_lsa(2, 2, 0x80000001), 0);
+        db.install(make_lsa(3, 2, 0x80000001), 0);
+        assert_eq!(db.version(), 3);
+
+        // Before MaxAge — nothing removed, version untouched.
+        assert!(db.age_out(3_599_999).is_empty());
+        assert_eq!(db.version(), 3);
+
+        // At MaxAge — every entry removed, version bumps per LSA.
+        let removed = db.age_out(3_600_000);
+        assert_eq!(removed.len(), 3);
+        assert_eq!(db.version(), 6);
+        assert!(db.is_empty());
+    }
+
+    #[test]
+    fn version_refresh_does_not_bump() {
+        let mut db = Lsdb::new();
+        let lsa = make_lsa(1, 2, 0x80000001);
+        db.install(lsa, 0);
+        assert_eq!(db.version(), 1);
+
+        // A refresh re-writes the same body under a new sequence
+        // number — the SRv6 / BGP-LS projections that depend on the
+        // body stay valid, so the version counter does not move.
+        let refreshed = db.refresh_due(2, 1_800_000);
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(db.version(), 1);
     }
 }
