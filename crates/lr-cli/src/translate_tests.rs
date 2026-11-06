@@ -1367,6 +1367,11 @@ fn frr_redistribute_kernel_is_still_unmapped() {
 
 #[test]
 fn frr_redistribute_route_map_is_unmapped() {
+    // A `redistribute … route-map NAME` whose NAME is not defined
+    // anywhere in the source config: the resolver cannot look the
+    // route-map up, so it carries an unmapped note that says so
+    // (and the redistribute row still lands — with an empty allow
+    // list, which means "redistribute everything").
     let toml = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
@@ -1378,9 +1383,363 @@ fn frr_redistribute_route_map_is_unmapped() {
     assert_eq!(cfg.redistributes.len(), 1);
     assert_eq!(cfg.redistributes[0].source.as_deref(), Some("ospf"));
     assert!(
-        toml.contains("route-map RM-REDIST dropped"),
-        "expected route-map dropped note, got:\n{toml}"
+        toml.contains("route-map RM-REDIST not defined"),
+        "expected route-map-not-defined note, got:\n{toml}"
     );
+}
+
+#[test]
+fn frr_redistribute_route_map_translates_to_allow_list() {
+    // The happy path: `redistribute connected route-map RM-REDIST`
+    // where RM-REDIST is a single permit entry whose only match is
+    // `match ip address prefix-list PL-ALLOWED`, and PL-ALLOWED is a
+    // pure all-permit prefix-list whose every row carries `le 32`
+    // (i.e. "any prefix inside this network"). The FRR semantics is
+    // exactly `RedistributionPipe::matches`'s bit-level containment
+    // check, so the converter copies the prefixes onto the pipe's
+    // `allow` list. FRR permits the prefix-list to be defined after
+    // the `redistribute` line (forward reference) — the resolver
+    // runs only after the whole file has been scanned.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute connected route-map RM-REDIST\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-REDIST permit 10\n\
+              match ip address prefix-list PL-ALLOWED\n\
+             !\n\
+             ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n\
+             ip prefix-list PL-ALLOWED permit 192.168.0.0/16 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    let rd = &cfg.redistributes[0];
+    assert_eq!(rd.source.as_deref(), Some("connected"));
+    assert_eq!(rd.target.as_deref(), Some("bgp"));
+    assert_eq!(
+        rd.allow,
+        vec!["10.0.0.0/8", "192.168.0.0/16"],
+        "route-map RM-REDIST must translate to allow list with both prefix-list entries"
+    );
+    // No `# UNMAPPED:` line should mention RM-REDIST on the happy
+    // path (the route-map definition itself legitimately contains
+    // RM-REDIST, but it is not an unmapped note). The header comment
+    // about UNMAPPED comments does not count.
+    let unmapped_mentions_rm = toml
+        .lines()
+        .filter(|l| l.starts_with("# UNMAPPED:"))
+        .any(|l| l.contains("RM-REDIST"));
+    assert!(
+        !unmapped_mentions_rm,
+        "no unmapped note for RM-REDIST on the happy path, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_translates_v6_le_128() {
+    // IPv6 variant of the happy path: `le 128` is the v6 containment
+    // marker (any prefix inside the network). The resolver must pick
+    // the family's max plen, not a hard-coded 32.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv6 unicast\n\
+              redistribute connected route-map RM-V6\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-V6 permit 10\n\
+              match ip address prefix-list PL-V6\n\
+             !\n\
+             ipv6 prefix-list PL-V6 permit 2001:db8::/32 le 128\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert_eq!(
+        cfg.redistributes[0].allow,
+        vec!["2001:db8::/32"],
+        "v6 route-map with le 128 must translate to allow list"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_with_deny_entry_is_unmapped() {
+    // A route-map with a `deny` entry cannot be flattened onto the
+    // pipe's `allow` list (allow is a pure union of permit prefixes,
+    // with no exclusion mechanism). The converter emits an unmapped
+    // note describing the gap and leaves the allow list empty.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf route-map RM-DENY\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-DENY deny 10\n\
+              match ip address prefix-list PL-ALLOWED\n\
+             !\n\
+             ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert!(
+        cfg.redistributes[0].allow.is_empty(),
+        "deny route-map must NOT populate allow list"
+    );
+    assert!(
+        toml.contains("route-map RM-DENY cannot be translated") && toml.contains("deny entries"),
+        "expected deny-entry unmapped note, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_with_set_clauses_is_unmapped() {
+    // A route-map with set clauses (local-preference, MED, next-hop,
+    // prepend, community) carries attribute-rewrite semantics that
+    // `allow` cannot express; the converter notes the gap.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf route-map RM-SET\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-SET permit 10\n\
+              match ip address prefix-list PL-ALLOWED\n\
+              set local-preference 200\n\
+             !\n\
+             ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert!(cfg.redistributes[0].allow.is_empty());
+    assert!(
+        toml.contains("route-map RM-SET cannot be translated") && toml.contains("set clauses"),
+        "expected set-clauses unmapped note, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_with_ge_qualifier_is_unmapped() {
+    // FRR's `permit PREFIX ge G` is a stricter-than-containment match
+    // (prefix length >= G AND inside the network). Flattening it onto
+    // `allow` (which is pure containment) would silently admit more
+    // routes, so the converter refuses the translation and notes the
+    // gap.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf route-map RM-GE\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-GE permit 10\n\
+              match ip address prefix-list PL-GE\n\
+             !\n\
+             ip prefix-list PL-GE permit 10.0.0.0/8 ge 16 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert!(
+        cfg.redistributes[0].allow.is_empty(),
+        "ge-qualified prefix-list must NOT populate allow list"
+    );
+    assert!(
+        toml.contains("prefix-list PL-GE has ge/le qualifier"),
+        "expected ge-qualifier unmapped note, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_with_exact_match_is_unmapped() {
+    // FRR's bare `permit PREFIX` (no `le`) is exact-match (ge=plen,
+    // le=plen), which is stricter than `allow`'s containment. The
+    // converter refuses the translation to avoid silently widening
+    // the match.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf route-map RM-EXACT\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-EXACT permit 10\n\
+              match ip address prefix-list PL-EXACT\n\
+             !\n\
+             ip prefix-list PL-EXACT permit 10.0.0.0/8\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert!(
+        cfg.redistributes[0].allow.is_empty(),
+        "exact-match prefix-list must NOT populate allow list"
+    );
+    assert!(
+        toml.contains("prefix-list PL-EXACT has ge/le qualifier"),
+        "expected exact-match unmapped note, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_with_prefix_list_deny_is_unmapped() {
+    // A prefix-list with a `deny` entry cannot be flattened onto the
+    // pipe's `allow` list (allow has no exclusion mechanism).
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf route-map RM-PL-DENY\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-PL-DENY permit 10\n\
+              match ip address prefix-list PL-MIXED\n\
+             !\n\
+             ip prefix-list PL-MIXED permit 10.0.0.0/8 le 32\n\
+             ip prefix-list PL-MIXED deny 10.1.0.0/16 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert!(
+        cfg.redistributes[0].allow.is_empty(),
+        "prefix-list with deny entries must NOT populate allow list"
+    );
+    assert!(
+        toml.contains("prefix-list PL-MIXED has deny entries"),
+        "expected prefix-list-deny unmapped note, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_undefined_prefix_list_is_unmapped() {
+    // A route-map references a prefix-list that is never defined.
+    // The existing route-map reference-validation pass clears the
+    // dangling `match_prefix` (pushing an unmapped note onto the
+    // route-map row), and our resolver then sees the route-map has
+    // no `match_prefix` (and an unmapped clause) — both surface as
+    // reasons in the redistribute's unmapped note.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf route-map RM-UNDEF\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-UNDEF permit 10\n\
+              match ip address prefix-list PL-NEVER\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert!(
+        cfg.redistributes[0].allow.is_empty(),
+        "route-map referencing an undefined prefix-list must NOT populate allow list"
+    );
+    assert!(
+        toml.contains("route-map RM-UNDEF cannot be translated")
+            && toml.contains("no such prefix-list"),
+        "expected undefined-prefix-list unmapped note, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_multiple_entries_merge() {
+    // A route-map with multiple permit entries, each referencing a
+    // different prefix-list, merges all the prefixes onto the pipe's
+    // allow list (deduplicated). This mirrors FRR's "any matching
+    // permit entry allows the route" semantics.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute connected route-map RM-MULTI\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-MULTI permit 10\n\
+              match ip address prefix-list PL-A\n\
+             route-map RM-MULTI permit 20\n\
+              match ip address prefix-list PL-B\n\
+             !\n\
+             ip prefix-list PL-A permit 10.0.0.0/8 le 32\n\
+             ip prefix-list PL-B permit 192.168.0.0/16 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    let mut allow = cfg.redistributes[0].allow.clone();
+    allow.sort();
+    assert_eq!(
+        allow,
+        vec!["10.0.0.0/8", "192.168.0.0/16"],
+        "multiple permit entries must merge their prefix-lists onto allow"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_deduplicates_prefixes() {
+    // The same prefix may legitimately appear in multiple prefix-list
+    // rows or in two different prefix-lists referenced by the same
+    // route-map. `allow` is a set-membership check, so the dedup
+    // keeps the rendered TOML clean and avoids a confusing double
+    // entry in the daemon config.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute connected route-map RM-DUP\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-DUP permit 10\n\
+              match ip address prefix-list PL-DUP\n\
+             !\n\
+             ip prefix-list PL-DUP permit 10.0.0.0/8 le 32\n\
+             ip prefix-list PL-DUP permit 10.0.0.0/8 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert_eq!(
+        cfg.redistributes[0].allow,
+        vec!["10.0.0.0/8"],
+        "duplicated prefix-list rows must collapse to one allow entry"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_preserves_metric() {
+    // `metric M` and `route-map NAME` are independent qualifiers on
+    // the same `redistribute` line: the metric override carries
+    // through unchanged while the route-map is resolved onto the
+    // allow list. Round-trip both through the daemon parser.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute connected metric 100 route-map RM-METRIC\n\
+             exit-address-family\n\
+             !\n\
+             route-map RM-METRIC permit 10\n\
+              match ip address prefix-list PL-ALLOWED\n\
+             !\n\
+             ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    let rd = &cfg.redistributes[0];
+    assert_eq!(rd.metric, Some(100), "metric override carries through");
+    assert_eq!(
+        rd.allow,
+        vec!["10.0.0.0/8"],
+        "route-map translates to allow"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_into_ospf_target_translates() {
+    // The route-map translation works for OSPF targets too — the
+    // resolver is target-agnostic (it only inspects the route-map
+    // and prefix-list tables).
+    let toml = render(translate_frr(
+        "router ospf\n\
+             redistribute bgp route-map RM-INTO-OSPF\n\
+             !\n\
+             route-map RM-INTO-OSPF permit 10\n\
+              match ip address prefix-list PL-ALLOWED\n\
+             !\n\
+             ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
+    ));
+    let cfg = roundtrip_ospf(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    let rd = &cfg.redistributes[0];
+    assert_eq!(rd.source.as_deref(), Some("bgp"));
+    assert_eq!(rd.target.as_deref(), Some("ospf"));
+    assert_eq!(rd.allow, vec!["10.0.0.0/8"]);
 }
 
 #[test]

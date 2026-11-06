@@ -69,7 +69,16 @@
 //!   daemon's injection surface); `connected`/`static`/`kernel`/`rip`/
 //!   `isis` carry unmapped notes (lr models kernel/static routes via
 //!   `networks`, not via a redistribute pipe). `route-map NAME` is
-//!   noted (lr's `[[redistribute]]` has no per-pipe filter hook).
+//!   translated onto the pipe's `allow` list when the route-map is a
+//!   pure prefix-list allow (every entry is `permit` with only
+//!   `match ip address prefix-list NAME`, the referenced prefix-list
+//!   is all-`permit` and every row carries `le 32` (v4) / `le 128`
+//!   (v6) so its semantics is "any prefix inside this network"); any
+//!   shape richer than that (deny entries, as-path/community matches,
+//!   set clauses, `ge` qualifiers, exact-match prefix-list rows)
+//!   carries an unmapped note describing what was lost. The pipe's
+//!   `allow` field is the bit-level containment check executed by
+//!   `RedistributionPipe::matches` (see `lr-router::redistribution`).
 //!   A pipe whose source engine is not `bgp` triggers a top-level
 //!   `protocols = ["bgp", "<engine>", …]` emission so the generated
 //!   config is loadable as-is (the daemon's `finalize` rejects a
@@ -288,14 +297,29 @@ pub(super) struct ConfigOut {
     /// `router bgp` + `address-family …`) → `[[redistribute]]` rows.
     /// Only `bgp`, `ospf`, `babel` sources map (the daemon's
     /// injection surface); `connected`, `static`, `kernel`, `rip`,
-    /// `isis` carry unmapped notes instead. `route-map NAME` is also
-    /// unmapped (lr's `[[redistribute]]` has no per-pipe filter hook).
+    /// `isis` carry unmapped notes instead. `route-map NAME` is
+    /// resolved against the parsed `route_maps` and `prefix_lists` by
+    /// `resolve_redistribute_route_maps` after the file is scanned
+    /// (FRR allows forward references) and either lands on the
+    /// `RedistributeSpec.allow` field (when the route-map is a pure
+    /// prefix-list allow) or carries an unmapped note describing what
+    /// was lost.
     redistributes: Vec<RedistributeSpec>,
     /// Engine names a translated `[[redistribute]]` needs beyond
     /// `bgp` (e.g. `["ospf"]` for `redistribute ospf` inside
     /// `router bgp`). Drives the top-level `protocol = "bgp,ospf"`
     /// emission at render so the generated config is loadable as-is.
     redistribute_engines: Vec<String>,
+    /// `(redistribute index, route-map name, original line)` triples
+    /// captured by `apply_frr_redistribute` for the post-pass that
+    /// resolves `route-map NAME` against the already-parsed
+    /// `route_maps` and `prefix_lists`. FRR allows the route-map and
+    /// prefix-list definitions to appear *after* the `redistribute`
+    /// line, so the resolution cannot run inline; this side-channel
+    /// keeps the order so multiple `redistribute … route-map …`
+    /// lines each get their own resolution. Drained by
+    /// `resolve_redistribute_route_maps`.
+    pending_redistribute_route_maps: Vec<(usize, String, String)>,
     /// Whole-peer notes rendered near the header (peers dropped
     /// because they can never start, e.g. FRR stubs without a
     /// `remote-as`).
@@ -1916,6 +1940,17 @@ fn translate_frr(text: &str) -> ConfigOut {
             "ip" if tokens.len() >= 4 && tokens[1] == "prefix-list" => {
                 parse_frr_prefix_list(&mut out, line);
             }
+            // FRR's `ipv6 prefix-list NAME [seq N] permit|deny PREFIX
+            // [ge G] [le L]` is the IPv6 equivalent of `ip prefix-list`
+            // — same name slot, same shape, v6 prefix. Both share the
+            // same `out.prefix_lists` table (FRR allows the same name
+            // for v4 and v6 lists; the redistribute route-map's
+            // `match ip address prefix-list NAME` only matches v4 and
+            // `match ipv6 address prefix-list NAME` only matches v6, so
+            // the families never collide on a single route).
+            "ipv6" if tokens.len() >= 4 && tokens[1] == "prefix-list" => {
+                parse_frr_prefix_list(&mut out, line);
+            }
             "ip" if iface_ctx.is_some() && tokens.len() >= 3 && tokens[1] == "ospf" => {
                 // `ip ospf cost|hello-interval|dead-interval|priority|
                 // network|area …` inside an `interface IFNAME` block
@@ -2270,13 +2305,23 @@ fn translate_frr(text: &str) -> ConfigOut {
             }
         }
     }
+    // Resolve `redistribute … route-map NAME` references now that the
+    // route_map and prefix_list tables are complete and the dangling
+    // `match_*` references above have been cleared. The resolver
+    // either copies the prefix-list entries onto the pipe's `allow`
+    // list (when the route-map is a pure prefix-list allow) or pushes
+    // an unmapped note describing what was lost.
+    resolve_redistribute_route_maps(&mut out);
     out
 }
 
-/// `ip prefix-list NAME [seq N] permit|deny PREFIX [ge G] [le L]`.
+/// `ip prefix-list NAME [seq N] permit|deny PREFIX [ge G] [le L]` and
+/// the IPv6 equivalent `ipv6 prefix-list NAME …` — both share the
+/// same shape (name at index 2).
 fn parse_frr_prefix_list(out: &mut ConfigOut, line: &str) {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    // ip prefix-list NAME ...
+    // `ip prefix-list NAME ...` and `ipv6 prefix-list NAME ...` share
+    // the same shape — the name is at index 2 in both forms.
     let name = tokens[2].to_string();
     let mut idx = 3;
     let mut seq = 10u32;
@@ -2681,7 +2726,11 @@ fn peer_for_or_create<'a>(out: &'a mut ConfigOut, addr: &str) -> Option<&'a mut 
 /// `connected`/`static`/`kernel`/`rip`/`isis` carry unmapped notes
 /// since lr seeds kernel/static routes via `networks`, not via a
 /// redistribute pipe. `metric M` carries through; `route-map NAME` is
-/// noted (lr's `[[redistribute]]` has no per-pipe filter hook today).
+/// recorded into `out.pending_redistribute_route_maps` for the
+/// post-pass that runs after the whole file is scanned (FRR allows
+/// forward references) — see `resolve_redistribute_route_maps` for the
+/// shapes it can map onto the pipe's `allow` list and the unmapped
+/// notes it emits when it cannot.
 ///
 /// `tokens` is the slice after the `redistribute` keyword (`PROTO
 /// [metric M] [route-map NAME]`); `line` is the original (trimmed)
@@ -2751,7 +2800,12 @@ fn apply_frr_redistribute(
     let Some(source) = source else { return };
     let Some(target) = target else { return };
     // Walk the optional qualifiers: `metric M` and `route-map NAME`.
+    // FRR accepts at most one `route-map NAME` per `redistribute`
+    // (the route-map name is what the post-pass resolves against
+    // `out.route_maps` and `out.prefix_lists`); a missing name after
+    // the keyword is a config error in FRR and we record nothing.
     let mut metric: Option<u32> = None;
+    let mut route_map: Option<String> = None;
     let mut i = 1;
     while i < tokens.len() {
         match tokens[i] {
@@ -2770,9 +2824,14 @@ fn apply_frr_redistribute(
             }
             "route-map" => {
                 if let Some(name) = tokens.get(i + 1) {
-                    out.unmapped_global.push(format!(
-                        "{line} — lr's [[redistribute]] has no per-pipe filter hook; route-map {name} dropped"
-                    ));
+                    // Defer to `resolve_redistribute_route_maps` so the
+                    // route-map and prefix-list definitions can appear
+                    // later in the file than this `redistribute` line
+                    // (FRR allows forward references). Only the last
+                    // `route-map NAME` on this line survives — matching
+                    // FRR's own "last write wins" for repeated
+                    // qualifiers on one line.
+                    route_map = Some(name.to_string());
                     i += 2;
                 } else {
                     i += 1;
@@ -2813,6 +2872,164 @@ fn apply_frr_redistribute(
         tag: None,
         allow: Vec::new(),
     });
+    // Hand the route-map reference to the post-pass along with the
+    // index of the spec we just pushed; the post-pass runs after the
+    // whole file is scanned so the route-map and prefix-list tables
+    // are complete (FRR allows forward references).
+    if let Some(name) = route_map {
+        let idx = out.redistributes.len() - 1;
+        out.pending_redistribute_route_maps
+            .push((idx, name, line.to_string()));
+    }
+}
+
+/// Resolve every `redistribute … route-map NAME` recorded by
+/// `apply_frr_redistribute` against the parsed `route_maps` and
+/// `prefix_lists` tables. FRR allows the route-map and prefix-list
+/// definitions to appear after the `redistribute` line, so this pass
+/// runs once the whole file has been scanned (and after the existing
+/// route-map reference-validation pass that clears dangling
+/// `match_prefix` / `match_as_path` / `match_community` references).
+///
+/// A route-map lands on the pipe's `allow` list when every entry is
+/// `permit`, has only `match ip address prefix-list NAME` (no
+/// as-path / community match, no set clause, no unmapped tail), and
+/// every referenced prefix-list contains only `permit` rows whose
+/// `le` equals the family's max prefix length (32 for v4, 128 for v6)
+/// and whose `ge` is unset — that is the only shape whose FRR
+/// semantics ("any prefix inside one of these networks") matches
+/// `RedistributionPipe::matches`'s bit-level containment check
+/// against `allow`. Any richer shape (deny entries, `ge` ranges,
+/// exact-match rows, set clauses, as-path / community matches) would
+/// silently change behaviour if flattened into `allow`, so it
+/// carries an unmapped note describing what was lost instead.
+fn resolve_redistribute_route_maps(out: &mut ConfigOut) {
+    // Take ownership so we can borrow `out.redistributes` mutably in
+    // the loop without a second mutable borrow of the side-channel.
+    let pending = std::mem::take(&mut out.pending_redistribute_route_maps);
+    for (idx, rm_name, line) in pending {
+        // `apply_frr_redistribute` always pushes the spec before the
+        // side-channel triple, so the index is in range by
+        // construction. Guard anyway in case future edits reorder
+        // the pushes.
+        let Some(spec) = out.redistributes.get_mut(idx) else {
+            continue;
+        };
+        let entries: Vec<&RouteMapRow> = out
+            .route_maps
+            .iter()
+            .filter(|r| r.name == rm_name)
+            .collect();
+        if entries.is_empty() {
+            out.unmapped_global.push(format!(
+                "{line} — route-map {rm_name} not defined; route-map dropped"
+            ));
+            continue;
+        }
+        // Reject any route-map shape whose semantics is richer than
+        // `allow`. Each check collects one human-readable reason; the
+        // note lists every reason so the operator sees the full gap.
+        let mut reasons: Vec<&'static str> = Vec::new();
+        if entries.iter().any(|e| !e.permit) {
+            reasons.push("route-map has deny entries");
+        }
+        if entries.iter().any(|e| e.match_prefix.is_none()) {
+            reasons.push("route-map entries without `match ip address prefix-list`");
+        }
+        if entries
+            .iter()
+            .any(|e| e.match_as_path.is_some() || e.match_community.is_some())
+        {
+            reasons.push("route-map has as-path/community matches");
+        }
+        if entries.iter().any(|e| {
+            e.set_local_pref.is_some()
+                || e.set_med.is_some()
+                || e.set_next_hop.is_some()
+                || e.prepend.is_some()
+                || e.add_community.is_some()
+        }) {
+            reasons.push("route-map has set clauses");
+        }
+        if entries.iter().any(|e| !e.unmapped.is_empty()) {
+            reasons.push("route-map has unmapped clauses");
+        }
+        if !reasons.is_empty() {
+            out.unmapped_global.push(format!(
+                "{line} — route-map {rm_name} cannot be translated to [[redistribute]] \
+                 allow list ({}); route-map dropped",
+                reasons.join(", ")
+            ));
+            continue;
+        }
+        // Collect the prefix-list names this route-map references
+        // (every entry has `match_prefix = Some(...)` after the
+        // checks above, but the validation pass earlier may have
+        // cleared a dangling `match_prefix` to `None` and pushed an
+        // `unmapped` note — that surfaced as "route-map has unmapped
+        // clauses" above, so we never reach this branch with a
+        // cleared match).
+        let pl_names: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e.match_prefix.as_deref())
+            .collect();
+        let mut allow_prefixes: Vec<String> = Vec::new();
+        let mut pl_reasons: Vec<String> = Vec::new();
+        for pl_name in pl_names {
+            let pl_entries: Vec<&PrefixListRow> = out
+                .prefix_lists
+                .iter()
+                .filter(|(n, _, _, _, _, _)| *n == pl_name)
+                .collect();
+            if pl_entries.is_empty() {
+                pl_reasons.push(format!("prefix-list {pl_name} not defined"));
+                continue;
+            }
+            for (_, _, permit, prefix, ge, le) in &pl_entries {
+                if !permit {
+                    pl_reasons.push(format!("prefix-list {pl_name} has deny entries"));
+                    continue;
+                }
+                // `RedistributionPipe::matches` is bit-level
+                // containment, which is FRR's `permit PREFIX le MAX`
+                // semantics (any prefix inside the network). FRR's
+                // bare `permit PREFIX` (no `le`) is *exact-match*
+                // and would change behaviour if flattened into
+                // `allow`; `ge` ranges are also stricter than
+                // containment. Only the all-`le MAX` / no-`ge` shape
+                // is a faithful translation.
+                let is_v4 = !prefix.contains(':');
+                let max_plen: u8 = if is_v4 { 32 } else { 128 };
+                if ge.is_some() || *le != Some(max_plen) {
+                    pl_reasons.push(format!(
+                        "prefix-list {pl_name} has ge/le qualifier (only `le {max_plen}` is supported)"
+                    ));
+                    continue;
+                }
+                allow_prefixes.push(prefix.clone());
+            }
+        }
+        if !pl_reasons.is_empty() {
+            out.unmapped_global.push(format!(
+                "{line} — route-map {rm_name} references prefix-lists that cannot be \
+                 translated ({}); route-map dropped",
+                pl_reasons.join(", ")
+            ));
+            continue;
+        }
+        // Success: deduplicate (a route-map may legitimately list the
+        // same prefix-list twice, and a prefix-list may carry the
+        // same prefix in two rows — FRR evaluates both, but `allow`
+        // is a set membership check) and write into the spec.
+        if !allow_prefixes.is_empty() {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for p in allow_prefixes {
+                if seen.insert(p.clone()) {
+                    spec.allow.push(p);
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3136,11 +3353,16 @@ fn render(out: ConfigOut) -> String {
         }
         s.push('\n');
     }
-    // FRR `redistribute <proto> [metric M]` (inside `router bgp` /
-    // `router ospf`/`ospfv3`). The daemon's `[[redistribute]]`
-    // schema is `(source, target, metric, tag, allow)`; only the
-    // first three carry through from FRR today. `route-map NAME`
-    // was noted at parse time.
+    // FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
+    // `router bgp` / `router ospf`/`ospfv3`). The daemon's
+    // `[[redistribute]]` schema is `(source, target, metric, tag,
+    // allow)`; `metric` and `route-map NAME` carry through from FRR
+    // (the route-map is resolved onto `allow` by
+    // `resolve_redistribute_route_maps` when its shape is a pure
+    // prefix-list allow). `tag` is not set by the converter today
+    // (FRR's `redistribute <proto>` has no tag qualifier; OSPF
+    // external route tags are an lr-side concept), so it is omitted
+    // to keep the rendered TOML minimal.
     for rd in &out.redistributes {
         s.push_str("[[redistribute]]\n");
         if let Some(src) = &rd.source {
@@ -3151,6 +3373,14 @@ fn render(out: ConfigOut) -> String {
         }
         if let Some(m) = rd.metric {
             s.push_str(&format!("metric = {m}\n"));
+        }
+        if !rd.allow.is_empty() {
+            // Render as a TOML array of quoted strings, matching
+            // the daemon parser's `parse_str_array` shape.
+            // (`parse_str_array` accepts both inline and multi-line
+            // arrays, so a single-line form is the most diff-friendly.)
+            let items: Vec<String> = rd.allow.iter().map(|p| toml_str(p)).collect();
+            s.push_str(&format!("allow = [{}]\n", items.join(", ")));
         }
         s.push('\n');
     }
