@@ -839,4 +839,66 @@ mod tests {
             }
         }
     }
+
+    /// IPv6 parity with [`plain_connect_rejected_by_gtsm_listener`]: a
+    /// native IPv6 listener armed with single-hop GTSM drops an inbound
+    /// IPv6 SYN whose hop limit is below 255. Linux loopback does not
+    /// decrement the hop limit, so a plain `TcpStream::connect` to
+    /// `[::1]:port` arrives with hop limit 64 (kernel default for
+    /// IPv6 unicast), well below the 255 the filter requires.
+    ///
+    /// Regression coverage for the LDP daemon's listener arming
+    /// (RFC 7552 §9 GTSM receive-side enforcement): a kernel that does
+    /// not honour `IPV6_MINHOPCOUNT` would let the SYN through and
+    /// `accept()` would succeed, failing this test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn plain_connect_rejected_by_v6_gtsm_listener() {
+        use std::io::Read;
+        let listener = TcpListener::bind("[::1]:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let gtsm = Gtsm::single_hop();
+        arm_listener_gtsm(&listener, &gtsm).expect("arm listener");
+
+        // Plain connect: hop limit 64 (kernel default), below min=255.
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+        if let Ok(mut s) = stream {
+            s.set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            let mut buf = [0u8; 1];
+            let _ = s.read(&mut buf);
+            listener.set_nonblocking(true).unwrap();
+            if listener.accept().is_ok() {
+                panic!("v6 GTSM listener accepted a low-hop-limit connection");
+            }
+        }
+    }
+
+    /// IPv6 happy path: a connector that also uses GTSM (hop limit 255)
+    /// is admitted by the v6 GTSM listener. Confirms `IPV6_MINHOPCOUNT`
+    /// does not over-filter — a SYN that carries the high hop limit
+    /// the filter requires still gets through.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v6_gtsm_listener_accepts_gtsm_connect() {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind("[::1]:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let gtsm = Gtsm::single_hop();
+        arm_listener_gtsm(&listener, &gtsm).expect("arm listener");
+
+        let mut stream =
+            connect_gtsm(addr, &gtsm, Duration::from_secs(2), None).expect("v6 gtsm connect");
+        let (mut accepted, peer) = listener.accept().expect("v6 gtsm accept");
+        assert!(
+            peer.is_ipv6(),
+            "v6 GTSM listener must accept a v6 peer, got {peer:?}"
+        );
+
+        // Round-trip a byte to prove the connection is usable end-to-end.
+        stream.write_all(b"hi").unwrap();
+        let mut buf = [0u8; 2];
+        accepted.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"hi");
+    }
 }
