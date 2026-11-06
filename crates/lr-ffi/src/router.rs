@@ -1596,6 +1596,209 @@ pub unsafe extern "C" fn lr_router_uninstall_static_v6(
     )
 }
 
+/// Install an interface-connected IPv4 route into the Loc-RIB (BIRD
+/// `protocol direct`, FRR `redistribute connected`).
+///
+/// The route's `protocol` is `Protocol::Connected` and its admin
+/// distance is 0, so it wins over a static route of the same prefix
+/// (admin distance 1) and competes with the dynamic protocols' lower
+/// preferences by admin distance. When `next_hop` is NULL, the route
+/// is a blackhole (a kernel p2p /32 the daemon has no gateway for).
+/// Returns 0 on success, negative on error.
+///
+/// `metric` is the per-route metric within the connected protocol;
+/// lower wins. `if_id` is a small opaque stable id the daemon
+/// allocates per interface — it is carried in the route's
+/// `origin.peer` field so a status renderer can attribute the route
+/// back to the interface it came from. Pass 0 when the caller does
+/// not allocate per-interface ids (the daemon's
+/// `install_connected_routes` helper allocates a fresh id per
+/// non-loopback UP interface).
+///
+/// # Safety
+///
+/// `prefix_addr` and `next_hop` (when non-NULL) must be valid
+/// pointers to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_install_connected_v4(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+    next_hop: *const u8,
+    metric: u32,
+    if_id: u64,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 32 {
+                set_last_error(format!(
+                    "invalid IPv4 prefix length {prefix_len}: must be <= 32"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 4];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 4)) };
+            let nh = if next_hop.is_null() {
+                None
+            } else {
+                let mut n = [0u8; 4];
+                unsafe { n.copy_from_slice(std::slice::from_raw_parts(next_hop, 4)) };
+                Some(lr_core::addr::IpAddr::V4(n))
+            };
+            router.install_connected(
+                lr_core::addr::Prefix::new_v4(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+                nh,
+                metric,
+                if_id,
+            );
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Install an interface-connected IPv6 route into the Loc-RIB. The
+/// v6 counterpart of [`lr_router_install_connected_v4`]; see that
+/// function for the semantics. `prefix_len` must be <= 128.
+///
+/// # Safety
+///
+/// `prefix_addr` and `next_hop` (when non-NULL) must be valid
+/// pointers to 16 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_install_connected_v6(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+    next_hop: *const u8,
+    metric: u32,
+    if_id: u64,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 128 {
+                set_last_error(format!(
+                    "invalid IPv6 prefix length {prefix_len}: must be <= 128"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 16];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 16)) };
+            let nh = if next_hop.is_null() {
+                None
+            } else {
+                let mut n = [0u8; 16];
+                unsafe { n.copy_from_slice(std::slice::from_raw_parts(next_hop, 16)) };
+                Some(lr_core::addr::IpAddr::V6(n))
+            };
+            router.install_connected(
+                lr_core::addr::Prefix::new_v6(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV6_UNICAST,
+                nh,
+                metric,
+                if_id,
+            );
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Withdraw a previously-installed connected IPv4 route. Returns 0
+/// when a connected route was removed, **1 when the prefix was not
+/// a connected route** (idempotent no-op, matching
+/// [`lr_router_uninstall_static_v4`]'s contract), negative on error.
+///
+/// # Safety
+///
+/// `prefix_addr` must point to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_uninstall_connected_v4(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 32 {
+                set_last_error(format!(
+                    "invalid IPv4 prefix length {prefix_len}: must be <= 32"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 4];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 4)) };
+            let key = RouteKey::new(
+                lr_core::addr::Prefix::new_v4(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            );
+            i32::from(!router.uninstall_connected(&key))
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Withdraw a previously-installed connected IPv6 route. The v6
+/// counterpart of [`lr_router_uninstall_connected_v4`].
+///
+/// # Safety
+///
+/// `prefix_addr` must point to 16 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_uninstall_connected_v6(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 128 {
+                set_last_error(format!(
+                    "invalid IPv6 prefix length {prefix_len}: must be <= 128"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 16];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 16)) };
+            let key = RouteKey::new(
+                lr_core::addr::Prefix::new_v6(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            );
+            i32::from(!router.uninstall_connected(&key))
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 /// Build a `LabelStack` from a flat C array of 20-bit label values.
 /// Returns `None` (after recording the last error) when any value exceeds
 /// `Label::MAX_VALUE` or when `n_labels` exceeds [`MAX_LABEL_STACK_DEPTH`] —

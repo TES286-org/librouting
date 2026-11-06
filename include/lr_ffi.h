@@ -18588,6 +18588,81 @@ int32_t lr_router_uninstall_static_v6(lr_router_t r,
                                       uint8_t prefix_len);
 
 /**
+ * Install an interface-connected IPv4 route into the Loc-RIB (BIRD
+ * `protocol direct`, FRR `redistribute connected`).
+ *
+ * The route's `protocol` is `Protocol::Connected` and its admin
+ * distance is 0, so it wins over a static route of the same prefix
+ * (admin distance 1) and competes with the dynamic protocols' lower
+ * preferences by admin distance. When `next_hop` is NULL, the route
+ * is a blackhole (a kernel p2p /32 the daemon has no gateway for).
+ * Returns 0 on success, negative on error.
+ *
+ * `metric` is the per-route metric within the connected protocol;
+ * lower wins. `if_id` is a small opaque stable id the daemon
+ * allocates per interface — it is carried in the route's
+ * `origin.peer` field so a status renderer can attribute the route
+ * back to the interface it came from. Pass 0 when the caller does
+ * not allocate per-interface ids (the daemon's
+ * `install_connected_routes` helper allocates a fresh id per
+ * non-loopback UP interface).
+ *
+ * # Safety
+ *
+ * `prefix_addr` and `next_hop` (when non-NULL) must be valid
+ * pointers to 4 readable bytes.
+ */
+int32_t lr_router_install_connected_v4(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint8_t *next_hop,
+                                       uint32_t metric,
+                                       uint64_t if_id);
+
+/**
+ * Install an interface-connected IPv6 route into the Loc-RIB. The
+ * v6 counterpart of [`lr_router_install_connected_v4`]; see that
+ * function for the semantics. `prefix_len` must be <= 128.
+ *
+ * # Safety
+ *
+ * `prefix_addr` and `next_hop` (when non-NULL) must be valid
+ * pointers to 16 readable bytes.
+ */
+int32_t lr_router_install_connected_v6(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint8_t *next_hop,
+                                       uint32_t metric,
+                                       uint64_t if_id);
+
+/**
+ * Withdraw a previously-installed connected IPv4 route. Returns 0
+ * when a connected route was removed, **1 when the prefix was not
+ * a connected route** (idempotent no-op, matching
+ * [`lr_router_uninstall_static_v4`]'s contract), negative on error.
+ *
+ * # Safety
+ *
+ * `prefix_addr` must point to 4 readable bytes.
+ */
+int32_t lr_router_uninstall_connected_v4(lr_router_t r,
+                                         const uint8_t *prefix_addr,
+                                         uint8_t prefix_len);
+
+/**
+ * Withdraw a previously-installed connected IPv6 route. The v6
+ * counterpart of [`lr_router_uninstall_connected_v4`].
+ *
+ * # Safety
+ *
+ * `prefix_addr` must point to 16 readable bytes.
+ */
+int32_t lr_router_uninstall_connected_v6(lr_router_t r,
+                                         const uint8_t *prefix_addr,
+                                         uint8_t prefix_len);
+
+/**
  * Query the kernel's MPLS platform-labels capability (Linux only).
  * Returns the value of `/proc/sys/net/mpls/platform_labels` (0 when
  * MPLS routing is not enabled, 16 or 20 when it is). On non-Linux

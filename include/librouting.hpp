@@ -509,6 +509,82 @@ inline bool uninstall_static_v6(Router& r,
     return rc == 0;
 }
 
+// ===== Connected routes (BIRD `protocol direct`, FRR `redistribute connected`) =====
+
+/// Install an interface-connected IPv4 route into the Loc-RIB. The
+/// route's protocol is `Protocol::Connected` and its admin distance
+/// is 0, so it wins over a static route of the same prefix (admin
+/// distance 1) and competes with the dynamic protocols' lower
+/// preferences by admin distance. Pass `nullptr` for `next_hop` to
+/// install a blackhole route (a kernel p2p /32 the daemon has no
+/// gateway for). `metric` is the per-route metric within the
+/// connected protocol (lower wins); `if_id` is a small opaque
+/// stable id the daemon allocates per interface — it is carried in
+/// the route's `origin.peer` field so a status renderer can
+/// attribute the route back to the interface it came from. Pass 0
+/// when the caller does not allocate per-interface ids.
+inline void install_connected_v4(Router& r,
+                                 const std::array<std::uint8_t, 4>& prefix,
+                                 std::uint8_t prefix_len,
+                                 const std::uint8_t* next_hop,
+                                 std::uint32_t metric = 0,
+                                 std::uint64_t if_id = 0) {
+    int rc = lr_router_install_connected_v4(r.get(), prefix.data(), prefix_len,
+                                            next_hop, metric, if_id);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_install_connected_v4 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Install an interface-connected IPv6 route into the Loc-RIB. See
+/// `install_connected_v4` for the semantics.
+inline void install_connected_v6(Router& r,
+                                 const std::array<std::uint8_t, 16>& prefix,
+                                 std::uint8_t prefix_len,
+                                 const std::uint8_t* next_hop,
+                                 std::uint32_t metric = 0,
+                                 std::uint64_t if_id = 0) {
+    int rc = lr_router_install_connected_v6(r.get(), prefix.data(), prefix_len,
+                                            next_hop, metric, if_id);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_install_connected_v6 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Withdraw a previously-installed connected IPv4 route. Returns
+/// true when a connected route was removed; false when the prefix
+/// was not a connected route (idempotent no-op, matching
+/// `uninstall_static_v4`'s contract).
+inline bool uninstall_connected_v4(Router& r,
+                                    const std::array<std::uint8_t, 4>& prefix,
+                                    std::uint8_t prefix_len) {
+    int rc = lr_router_uninstall_connected_v4(r.get(), prefix.data(), prefix_len);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_uninstall_connected_v4 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 0;
+}
+
+/// Withdraw a previously-installed connected IPv6 route. See
+/// `uninstall_connected_v4` for the semantics and the return value.
+inline bool uninstall_connected_v6(Router& r,
+                                    const std::array<std::uint8_t, 16>& prefix,
+                                    std::uint8_t prefix_len) {
+    int rc = lr_router_uninstall_connected_v6(r.get(), prefix.data(), prefix_len);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_uninstall_connected_v6 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 0;
+}
+
 // ===== D4.4 — redistribution / aggregation / damping =====
 
 /// Wire protocol identifiers for redistribution pipes. Mirrors
