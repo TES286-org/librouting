@@ -1536,6 +1536,76 @@ INCOMPLETE-IMPL | "removing the RTR thread live is not supported"`
 "RpkiCommand enum only defines Reconnect variant"` is closed by
 the same change — the enum now also carries `Shutdown`).
 
+### OSPF daemon honours `--user` / `--group` (issue #92)
+
+`crates/lr-cli/src/daemon_ospf.rs` previously rejected the
+`--user` / `--group` combination outright when `--protocol ospf`
+was used, returning exit code 2 before any raw socket work happened:
+
+```
+--user/--group are not supported with --protocol ospf yet
+(raw sockets are opened before the drop would happen)
+```
+
+The OSPFv3 daemon (`crates/lr-cli/src/daemon_ospf3.rs`) had no
+early reject, but it also never called `do_privdrop`, so `--user`
+was silently accepted and ignored — the daemon kept running as
+the invoking user. Both shapes are now closed. Every configured
+interface's raw `IPPROTO_OSPF` socket is bound first (in
+`resolve_interface`, before the daemon reaches the standalone /
+embedded dispatch), so the kernel sees the bind as root (or a
+user/network namespace with `CAP_NET_RAW`); the privilege drop then
+runs in the standalone arm of the `match &host` block — exactly
+mirroring the BGP (`daemon.rs`) and LDP (`daemon_ldp.rs`) standalone
+privdrop+spawn sequence.
+
+The fix:
+
+- `crates/lr-cli/src/daemon_ospf.rs` — the early reject that
+  returned `ExitCode::from(2)` when `cfg.user.is_some() ||
+  cfg.group.is_some()` is removed; a `do_privdrop(cfg)` call is
+  inserted in the standalone `None` arm of `match &host`, before
+  `spawn_api` / `spawn_metrics` / `spawn_ticker`. The embedded
+  `Some(h)` arm is unchanged: the multi-protocol supervisor
+  (`daemon_multi.rs`) already calls `do_privdrop(cfg)` before
+  releasing each engine's startup gate, so the embedded path
+  already dropped privileges correctly — only the standalone path
+  was missing the call.
+- `crates/lr-cli/src/daemon_ospf3.rs` — same `do_privdrop(cfg)`
+  call inserted in the standalone `None` arm. The embedded path
+  was already correct via the supervisor; the standalone path
+  silently ignored the flag.
+
+The drop is a no-op when `--user` is unset, so unconditional
+invocation matches the BGP and LDP shapes — every standalone
+engine entry point now calls `do_privdrop(cfg)` even when the
+flag is absent, keeping the privileged-work → drop → unprivileged-
+work ordering identical across every protocol.
+
+Tests:
+
+- `crates/lr-cli/tests/daemon_ospf_privdrop.rs` — three new
+  end-to-end tests spawn the real `lr-daemon` binary:
+  `ospf_v2_user_no_longer_rejected_outright` verifies the
+  early-reject string is gone and the daemon exits non-zero when
+  `--user` names a non-existent user; `ospf_v3_user_no_longer_silently_ignored`
+  verifies the v3 daemon now exits non-zero on the same input
+  (the pre-fix shape silently kept running as the invoking user);
+  `ospf_v2_without_user_still_reaches_socket_bind` guards the
+  no-`--user` case against a future regression that makes
+  `do_privdrop` non-optional.
+
+No public Rust API change (`run_ospf_daemon` / `run_ospf3_daemon`
+are `pub(super)` and unchanged in signature), no C ABI change (no
+`lr_*` symbol touched), no protocol-on-the-wire change, no version
+bump. The defects.txt entry this closes is
+`crates/lr-cli/src/daemon_ospf.rs:L359-L366 | INCOMPLETE-IMPL |
+"--user / --group are not supported with --protocol ospf yet
+(raw sockets are opened before the drop would happen)"`. The v3
+silent-ignore gap had no defects.txt line of its own (the audit
+listed only the v2 early-reject); the v3 fix is the same shape
+landed in the same commit.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
