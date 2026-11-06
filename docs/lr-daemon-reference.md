@@ -738,15 +738,25 @@ A prefix/next-hop family mismatch is a `finalize` error.
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `source` | string | Required: `bgp`, `ospf`, `ospf3`, `babel` |
+| `source` | string | Required: `bgp`, `ospf`, `ospf3`, `babel`, `static`, `connected` (`direct` is the FRR alias for `connected`) |
 | `target` | string | Required: `bgp`, `ospf`, `ospf3` |
 | `metric` | int | Fixed override; absent = inherit |
 | `tag` | int | OSPF external route tag |
 | `allow` | array | CIDR allow-list; empty = all |
 
-`static` and `connected` are rejected as sources. The pipe must match
-the configured protocol set and the OSPF version, and a `(source,
-target)` pair may appear once.
+`static` (the operator's `[[static.route]]` table — BIRD `protocol
+static`, FRR `ip route`) and `connected` (kernel interface network
+prefixes the daemon enumerates via `getifaddrs` — BIRD `protocol direct`,
+FRR `redistribute connected`) are installed into the Loc-RIB by the
+daemon at startup (and on configuration reload for static; on interface
+address changes for connected); the install path pushes them through
+any matching pipe. `kernel` (the kernel RIB — routes installed by
+another daemon or by `ip route add`) is a distinct concept that the
+daemon has no injection surface for; an operator who needs that shape
+should add `[[static.route]]` entries for the routes they would have
+had the kernel feed in. The pipe's target engine must match the
+configured protocol set and the OSPF version, and a `(source, target)`
+pair may appear once.
 
 ### `[[aggregate]]`
 

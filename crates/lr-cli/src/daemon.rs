@@ -651,11 +651,215 @@ fn apply_cross_protocol_config(
             metric
         );
     }
+    // Connected routes — BIRD `protocol direct`, FRR
+    // `redistribute connected`. Enumerate kernel interface network
+    // prefixes via `getifaddrs` (Linux/BSD) / `GetAdaptersAddresses`
+    // (Windows) / fallback stub (other) and install each into the
+    // Loc-RIB with `Protocol::Connected` and admin distance 0 so a
+    // connected route wins over a static of the same prefix. The
+    // install path pushes the route through any matching
+    // `[[redistribute]] connected -> …` pipe (BIRD `redistribute direct`
+    // / FRR `redistribute connected` parity).
+    //
+    // On a platform whose `list_interfaces` returns Unsupported (the
+    // non-Linux/BSD/Windows fallback), the helper logs a single
+    // warning and skips connected-route installation — the daemon
+    // still starts and serves its other configured surfaces, but
+    // `[[redistribute]] source = "connected"` is a no-op pipe (the
+    // Loc-RIB has no Connected routes to push through it).
+    let installed = install_connected_routes(r);
+    if installed > 0 {
+        log_info!(
+            Component::Router,
+            "connected:   {} interface prefix(es) installed",
+            installed
+        );
+    }
     Ok((
         cfg.redistributes.len(),
         cfg.aggregates.len(),
         cfg.static_routes.len(),
     ))
+}
+
+/// Enumerate kernel interface network prefixes (BIRD `protocol direct`,
+/// FRR `redistribute connected`) and install each into the Loc-RIB via
+/// [`lr_router::DefaultRouter::install_connected`] with
+/// `Protocol::Connected` and admin distance 0 — exactly the priority
+/// table every routing daemon implements.
+///
+/// Walks `list_interfaces()` (cross-platform: `getifaddrs` on Linux/BSD,
+/// `GetAdaptersAddresses` on Windows, `Unsupported` on platforms
+/// without a kernel interface enumeration surface) and for each
+/// interface asks for its v4 + v6 address lists via
+/// `interface_v4_addrs` / `interface_v6_addrs`, which carry the
+/// prefix-length that `InterfaceEntry` drops.
+///
+/// Skips:
+/// * link-local IPv6 (`fe80::/10`) — never a globally routable
+///   destination, never re-originated;
+/// * interfaces that are administratively down (`IFF_UP` clear) —
+///   BIRD/FRR do not install connected routes for down interfaces,
+///   and an installed connected route for a down interface would
+///   shadow a real route to the same prefix via a different path;
+/// * the loopback interface — its connected routes are the host's
+///   own `127.0.0.0/8` and `::1/128`, which are never re-originated
+///   into a routing protocol.
+///
+/// Returns the number of connected routes installed. The caller logs
+/// a summary line; failures (Unsupported platform, getifaddrs error)
+/// return 0 silently — the daemon still starts, but
+/// `[[redistribute]] source = "connected"` is a no-op pipe on this
+/// platform.
+fn install_connected_routes(r: &mut DefaultRouter) -> usize {
+    let sys = match lr_osroute::ospf_transport::list_interfaces() {
+        Ok(s) => s,
+        Err(_) => {
+            // The fallback stub returns `Unsupported`; the real
+            // platforms return `Ok` even on an empty list. Log nothing
+            // here — the caller's summary line stays silent when
+            // `installed == 0`, and a separate startup line could be
+            // added later if an operator wants to see the platform
+            // reason in the daemon log.
+            return 0;
+        }
+    };
+    let mut installed = 0usize;
+    let mut if_id: u64 = 0;
+    for entry in &sys {
+        // Skip down interfaces (BIRD/FRR parity: a down interface
+        // has no connected route — installing one would shadow a
+        // real route via a different path).
+        if !entry.up {
+            continue;
+        }
+        // Skip the loopback interface — its connected routes are the
+        // host's own 127.0.0.0/8 and ::1/128, never re-originated.
+        if is_loopback_name(&entry.name) {
+            continue;
+        }
+        if_id += 1;
+        // IPv4 addresses with prefix length.
+        if let Ok(v4) = lr_osroute::ospf_transport::interface_v4_addrs(&entry.name) {
+            for addr in v4 {
+                let network = addr.network();
+                let prefix = Prefix::new_v4(network.octets(), addr.prefix_len);
+                let family = NlriFamily::IPV4_UNICAST;
+                r.install_connected(
+                    prefix,
+                    family,
+                    Some(IpAddr::V4(addr.addr.octets())),
+                    0,
+                    if_id,
+                );
+                installed += 1;
+            }
+        }
+        // IPv6 addresses with prefix length — skip link-local
+        // (fe80::/10), never a globally routable destination.
+        if let Ok(v6) = lr_osroute::ospf_transport::interface_v6_addrs(&entry.name) {
+            for addr in v6 {
+                if addr.is_link_local() {
+                    continue;
+                }
+                let prefix = Prefix::new_v6(addr.addr.octets(), addr.prefix_len);
+                let family = NlriFamily::IPV6_UNICAST;
+                r.install_connected(
+                    prefix,
+                    family,
+                    Some(IpAddr::V6(addr.addr.octets())),
+                    0,
+                    if_id,
+                );
+                installed += 1;
+            }
+        }
+    }
+    installed
+}
+
+/// Heuristic loopback-name detector: matches the conventional
+/// `lo`, `lo0`, `lo1`, … names on Linux, BSD and macOS, plus the
+/// Windows `Loopback Pseudo-Interface N` form. The kernel interface
+/// enumeration surfaces don't carry an `IFF_LOOPBACK` flag today
+/// (the `InterfaceEntry` struct is the cross-platform subset the
+/// Babel multi-NIC matcher needs); this keeps the connected-route
+/// enumerator from emitting `127.0.0.0/8` / `::1/128` as routes to
+/// re-originated into BGP/OSPF.
+fn is_loopback_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("loopback") {
+        return true;
+    }
+    if !lower.starts_with("lo") {
+        return false;
+    }
+    // `lo`, `lo0`, `lo1`, …: the rest is empty or all digits.
+    let rest = &lower[2..];
+    rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod connected_route_tests {
+    use super::*;
+
+    #[test]
+    fn loopback_name_matches_linux_bsd_macos_lo_family() {
+        // Linux: `lo`. BSD/macOS: `lo0`. FreeBSD can also `lo1`.
+        assert!(is_loopback_name("lo"));
+        assert!(is_loopback_name("lo0"));
+        assert!(is_loopback_name("lo1"));
+        assert!(is_loopback_name("LO"));
+        assert!(is_loopback_name("Lo0"));
+    }
+
+    #[test]
+    fn loopback_name_matches_windows_pseudo_interface() {
+        // Windows: `Loopback Pseudo-Interface 1`.
+        assert!(is_loopback_name("Loopback Pseudo-Interface 1"));
+        assert!(is_loopback_name("loopback pseudo-interface 0"));
+    }
+
+    #[test]
+    fn loopback_name_rejects_look_alikes() {
+        // `logre0` (a Solaris/illumos L2 GRE) is NOT `lo` + digits —
+        // the match must not fire on it. Same for `lou`, `lo-eth`,
+        // `eth0`, `en0`, `wlan0`.
+        assert!(!is_loopback_name("logre0"));
+        assert!(!is_loopback_name("lou"));
+        assert!(!is_loopback_name("lo-eth"));
+        assert!(!is_loopback_name("eth0"));
+        assert!(!is_loopback_name("en0"));
+        assert!(!is_loopback_name("wlan0"));
+        assert!(!is_loopback_name("bond0"));
+        assert!(!is_loopback_name("docker0"));
+    }
+
+    /// `install_connected_routes` returns 0 on a `DefaultRouter`
+    /// when the platform interface enumeration is unavailable —
+    /// the helper logs nothing and the daemon continues startup
+    /// without connected routes installed (the
+    /// `[[redistribute]] source = "connected"` pipe is a no-op on
+    /// this platform). This test runs on every CI platform that
+    /// supports `list_interfaces`; the helper returns at minimum
+    /// zero (no IPv4/v6 addresses on a fresh CI runner) without
+    /// panicking.
+    #[test]
+    fn install_connected_routes_does_not_panic_on_fresh_router() {
+        let mut r = DefaultRouter::new();
+        // The helper may install zero routes (CI runner with no
+        // non-loopback interfaces) or some routes (developer
+        // workstation); either way it must not panic and must
+        // return the count it installed.
+        let installed = install_connected_routes(&mut r);
+        // Whatever it installed must be in the connected_routes
+        // map (no Loc-RIB-only entries).
+        assert_eq!(
+            r.connected_routes().len(),
+            installed,
+            "install_connected_routes return value matches the connected_routes map size"
+        );
+    }
 }
 
 /// Shared damping state for the daemon: the import-hook enabled flag

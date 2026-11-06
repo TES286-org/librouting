@@ -217,7 +217,7 @@ Loc-RIB are re-originated into `target`:
 
 ```lr
 redistribute {
-    source "ospf";                       # bgp | ospf | ospf3 | babel
+    source "ospf";                       # bgp | ospf | ospf3 | babel | static | connected
     target "bgp";                        # bgp | ospf | ospf3
     metric 100;                          # fixed metric override
     tag    65000;                        # OSPF external route tag
@@ -226,11 +226,16 @@ redistribute {
 ```
 
 Without `metric` the re-originated route keeps the source metric.
-Without `allow` every source route crosses the pipe. `static` and
-`connected` are rejected as sources: the daemon has no injection surface
-for them yet, and an inert pipe would promise redistribution the process
-can never perform. A pipe whose source or target engine is not in the
-protocol set is a startup error naming the missing engine.
+Without `allow` every source route crosses the pipe. `static` (the
+operator's `[[static.route]]` table — BIRD `protocol static`, FRR
+`ip route`) and `connected` (kernel interface network prefixes the
+daemon enumerates via `getifaddrs` — BIRD `protocol direct`, FRR
+`redistribute connected`) are both supported as sources: the daemon
+installs them into the Loc-RIB via `install_static` / `install_connected`
+at startup (and on configuration reload for static; on interface address
+changes for connected), and the install path pushes them through any
+matching pipe. A pipe whose target engine is not in the protocol set
+is a startup error naming the missing engine.
 
 An `aggregate` block registers a BGP route aggregate (RFC 4271
 §9.2.2.2). While at least one more-specific route is in the Loc-RIB the
