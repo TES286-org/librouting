@@ -20,6 +20,17 @@
 //!   within the RFC 7552 §6.1.1 chosen family). The listener is a
 //!   dual-stack IPv6 socket (IPV6_V6ONLY = 0) when the speaker has an
 //!   IPv6 transport address, so one socket serves both families.
+//!   RFC 7552 §9 GTSM is enforced on the receive side for native
+//!   IPv6 sessions: the listener's `IPV6_MINHOPCOUNT = 255` filter
+//!   drops any inbound native IPv6 SYN that arrives with a hop limit
+//!   below 255, matching FRR ldpd's default for AF_INET6 sessions
+//!   (`nbr_gtsm_enabled`). v4-mapped sessions on the dual-stack
+//!   socket are routed through the v4 stack and bypass the v6
+//!   filter, so they are not subject to GTSM (RFC 7552 §9 does not
+//!   mandate GTSM for LDPoIPv4). On kernels without `IPV6_MINHOPCOUNT`
+//!   support the daemon logs a warning and falls back to the
+//!   historical fail-open receive-side behaviour; the outbound hop
+//!   limit 255 is still set on every IPv6 session socket.
 //! - **Local bindings** — the configured `[[ldp.bind]]` FEC-label
 //!   pairs are advertised downstream-unsolicited to every peer that
 //!   becomes operational (and re-advertised on each new session, since
@@ -75,6 +86,7 @@ use lr_ldp::engine::{EngineEvent, LdpEngine, LdpEngineConfig};
 use lr_ldp::session::SessionDownReason;
 use lr_ldp::{GenericLabel, LdpId};
 use lr_osroute::bfd_transport::{arm_ttl_rx, recv_from_with_ttl, BfdTransportError};
+use lr_osroute::gtsm::{arm_listener_gtsm, Gtsm};
 use lr_osroute::ospf_transport::{
     ifindex_of, interface_v4_addrs, interface_v6_addrs, InterfaceV6Addr,
 };
@@ -314,7 +326,11 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let listener = if dual_stack {
         // Bind via socket2 so the SYN-ACKs the listener's kernel
         // generates carry the GTSM hop limit (the accepted sockets set
-        // their own below).
+        // their own below). The receive-side min-TTL filter
+        // (IPV6_MINHOPCOUNT) is armed after listen() via
+        // `arm_listener_gtsm`; it filters only native IPv6 SYNs, so
+        // IPv4-mapped sessions on the dual-stack socket (which the
+        // kernel routes through the v4 stack) are not affected.
         match Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
             Ok(s) => {
                 set_v6_session_hops(&s);
@@ -325,7 +341,34 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     &std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into(),
                 ) {
                     Ok(()) => match s.listen(128) {
-                        Ok(()) => TcpListener::from(s),
+                        Ok(()) => {
+                            let listener = TcpListener::from(s);
+                            // RFC 7552 §9: arm the receive-side GTSM
+                            // filter on the listener so inbound native
+                            // IPv6 SYNs that arrive with a hop limit
+                            // below 255 are dropped by the kernel
+                            // (matching FRR ldpd's default
+                            // `nbr_gtsm_enabled` for AF_INET6). On a
+                            // dual-stack listener `IPV6_MINHOPCOUNT`
+                            // filters only native v6 packets — v4-mapped
+                            // sessions are routed through the v4 stack
+                            // and bypass this filter. Accepted sockets
+                            // inherit the policy. On kernels without
+                            // `IPV6_MINHOPCOUNT` support the call
+                            // returns `Unsupported`; the outbound TTL
+                            // is still set, and the receive side stays
+                            // fail-open (the historical behaviour).
+                            if let Err(e) = arm_listener_gtsm(&listener, &Gtsm::single_hop()) {
+                                log_warn!(
+                                    Component::Ldp,
+                                    "ldp v6 GTSM receive-side filter not \
+                                     enforced: {} (outbound TTL still set; \
+                                     receive side stays fail-open)",
+                                    e
+                                );
+                            }
+                            listener
+                        }
                         Err(e) => {
                             log_error!(
                                 Component::Daemon,
@@ -705,8 +748,15 @@ fn bind_ldp_udp(port: u16, interfaces: &[LdpInterface]) -> std::io::Result<(Sock
 /// 255: the listener (so the SYN-ACK passes the peer's check), the
 /// accepted sockets (SYN-ACK options are not inherited), and active
 /// connects. The peer's SYN-ACK similarly arrives at 255 only if it
-/// does the same; lr does not enforce the receive side (fail-open),
-/// matching an FRR deployment without `[no] gtsm`.
+/// does the same.
+///
+/// The receive-side min-TTL filter (`IPV6_MINHOPCOUNT = 255`) is the
+/// listener's job and is armed separately by `arm_listener_gtsm`
+/// after the listener is created — see the dual-stack listener
+/// setup in [`run_ldp_daemon`]. Accepted sockets inherit the
+/// filter; this function only re-arms the outbound hop limit on
+/// accepted sockets and active connectors, which the kernel does
+/// not inherit from the listener.
 fn set_v6_session_hops(sock: &Socket) {
     if let Err(e) = sock.set_unicast_hops_v6(255) {
         log_error!(
