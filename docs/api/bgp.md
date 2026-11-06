@@ -211,7 +211,11 @@ GTSM is a transport concern: the kernel writes the outbound TTL and
 drops inbound segments below the minimum, and the library never inspects
 a TTL on the wire. `Gtsm::single_hop()` arms TTL 255 in both directions
 via `arm_listener_gtsm(&listener, &gtsm)` and
-`connect_gtsm(addr, &gtsm, Duration::from_secs(5))`.
+`connect_gtsm(addr, &gtsm, Duration::from_secs(5), None)`. The fourth
+argument is an optional `local` address — when supplied, the connector
+`bind(2)`s the raw socket to it before `connect(2)` so the SYN carries
+the configured source IP alongside the high outbound TTL (BIRD
+`local <ip>` + `ttl security` parity).
 
 `Gtsm::multihop(hops)` sets the outbound TTL to `hops` and the minimum
 inbound TTL to `255 - hops + 1`. Arm the connector with the outbound TTL

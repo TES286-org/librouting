@@ -1407,6 +1407,65 @@ preserved as a thin wrapper), one new C ABI symbol
 (additive — `scripts/abi_freeze_check.py HEAD~1 HEAD` stays green),
 no protocol-on-the-wire change, no version bump.
 
+### Source binding + TCP-MD5/AO/GTSM
+
+`crates/lr-cli/src/daemon.rs` previously documented a
+`connect_secure` limitation — "Source binding does not yet combine
+with TCP auth (connect_auth creates its own socket); that combination
+is future work." A peer that configured both `local_address` and
+`md5_key` / `tcp_ao_key` / `gtsm` saw the auth-armed SYN depart from
+the kernel-chosen source IP rather than the configured one, so a
+peer matching inbound by source (`neighbor <ip>`) and the kernel's
+per-peer key selection both missed it. The FRR `neighbor A.B.C.D
+local-address W.X.Y.Z + password ...` and the BIRD `local W.X.Y.Z +
+password ...` shapes had no lr equivalent.
+
+The fix widens the connector surface, not the listener surface:
+
+- `lr_osroute::tcp_auth::connect_auth` gains a fourth argument
+  `local: Option<SocketAddr>`. When `Some`, the Linux raw-socket
+  connector `bind(2)`s the fd to `local` (port 0 = ephemeral)
+  between key installation and `connect(2)` so the SYN carries the
+  configured source IP alongside the MAC. The non-Linux stub routes
+  the no-auth + `Some(local)` case through `tcp_bind::connect_bound`,
+  which already works on every platform the crate compiles for.
+- `lr_osroute::gtsm::connect_gtsm` gains the same fourth argument
+  with the same semantics: bind after TTL arming so the high
+  outbound TTL is already in place when the SYN departs.
+- `TcpAuthError::is_addr_not_available()` and
+  `GtsmError::is_addr_not_available()` predicate the lab-config
+  `192.0.2.x` case (`bind(2)` returns `EADDRNOTAVAIL` because the
+  address is not assigned to any interface) so the daemon's
+  connector can fall back to the kernel-chosen source by retrying
+  without the bind — mirroring the existing `connect_bound` arm.
+- `daemon::connect_secure` passes `local` through to both
+  connectors and adds the same fallback on
+  `is_addr_not_available()`. The no-auth + `local` arm is unchanged;
+  the listener side is untouched (the listener's auth keys and
+  GTSM min-TTL filter are still armed before any inbound SYN
+  arrives).
+
+Tests:
+
+- `crates/lr-osroute/src/tcp_auth_tests.rs` — a new
+  `md5_loopback_source_bound_handshake` pins the bind-actually-happened
+  contract: an accepted socket's peer address must match the bound
+  loopback alias `127.0.0.9`, proving the SYN carried the configured
+  source IP alongside the MD5 MAC. Existing call sites updated for
+  the new fourth argument.
+- `crates/lr-osroute/src/gtsm.rs` — a new
+  `single_hop_loopback_connects_bound` mirrors the same contract
+  for GTSM. Existing call sites updated.
+- `crates/lr-tests/tests/gtsm_max_prefix.rs` — call site updated
+  for the new fourth argument.
+
+No public Rust API removal (the new fourth argument is additive:
+existing call sites pass `None`), no C ABI change (the daemon's
+`connect_secure` is private), no protocol-on-the-wire change, no
+version bump. The defects.txt entry this closes is
+`crates/lr-cli/src/daemon.rs:L2548-L2549 | INCOMPLETE-IMPL |
+"Source binding does not yet combine with TCP auth"`.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
