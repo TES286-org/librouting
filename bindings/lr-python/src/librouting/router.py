@@ -561,6 +561,77 @@ class Router:
             )
         return rc == 0
 
+    def install_connected_v4(self, prefix: str, next_hop: str | None = None,
+                             metric: int = 0, if_id: int = 0) -> None:
+        """Install an interface-connected IPv4 route into the Loc-RIB
+        (BIRD ``protocol direct``, FRR ``redistribute connected``).
+
+        The route's protocol is ``Connected`` and its admin distance is
+        0, so it wins over a static route of the same prefix (admin
+        distance 1) and competes with the dynamic protocols' lower
+        preferences by admin distance. Pass ``next_hop=None`` to install
+        a blackhole route (a kernel p2p /32 the daemon has no gateway
+        for). ``metric`` is the per-route metric within the connected
+        protocol (lower wins); ``if_id`` is a small opaque stable id the
+        daemon allocates per interface — it is carried in the route's
+        ``origin.peer`` field so a status renderer can attribute the
+        route back to the interface it came from. Pass 0 when the
+        caller does not allocate per-interface ids.
+        """
+        addr, plen = _parse_v4_prefix(prefix)
+        nh_buf = _parse_v4_next_hop(next_hop)
+        rc = get_lib().lr_router_install_connected_v4(
+            self._ptr, addr, plen, nh_buf, int(metric), int(if_id)
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_install_connected_v4 failed (rc={rc}): {last_error()}"
+            )
+
+    def install_connected_v6(self, prefix: str, next_hop: str | None = None,
+                             metric: int = 0, if_id: int = 0) -> None:
+        """Install an interface-connected IPv6 route into the Loc-RIB.
+
+        See ``install_connected_v4`` for the semantics.
+        """
+        addr, plen = _parse_v6_prefix(prefix)
+        nh_buf = _parse_v6_next_hop(next_hop)
+        rc = get_lib().lr_router_install_connected_v6(
+            self._ptr, addr, plen, nh_buf, int(metric), int(if_id)
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_install_connected_v6 failed (rc={rc}): {last_error()}"
+            )
+
+    def uninstall_connected_v4(self, prefix: str) -> bool:
+        """Remove a previously-installed connected IPv4 route.
+
+        Returns ``True`` when a route was removed; ``False`` when the
+        prefix was not a connected route (an idempotent no-op, matching
+        ``uninstall_static_v4``'s contract).
+        """
+        addr, plen = _parse_v4_prefix(prefix)
+        rc = get_lib().lr_router_uninstall_connected_v4(self._ptr, addr, plen)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_uninstall_connected_v4 failed (rc={rc}): {last_error()}"
+            )
+        return rc == 0
+
+    def uninstall_connected_v6(self, prefix: str) -> bool:
+        """Remove a previously-installed connected IPv6 route.
+
+        See ``uninstall_connected_v4`` for the semantics and the return value.
+        """
+        addr, plen = _parse_v6_prefix(prefix)
+        rc = get_lib().lr_router_uninstall_connected_v6(self._ptr, addr, plen)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_uninstall_connected_v6 failed (rc={rc}): {last_error()}"
+            )
+        return rc == 0
+
     def originate_labeled_v4(self, prefix: str, labels: list[int],
                               next_hop: str | None = None) -> None:
         """Originate an RFC 8277 labelled IPv4 BGP route (AFI=1, SAFI=4).

@@ -162,6 +162,24 @@ int32_t lr_router_uninstall_static_v4(lr_router_t r,
 int32_t lr_router_uninstall_static_v6(lr_router_t r,
                                       const uint8_t *prefix_addr,
                                       uint8_t prefix_len);
+int32_t lr_router_install_connected_v4(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint8_t *next_hop,
+                                       uint32_t metric,
+                                       uint64_t if_id);
+int32_t lr_router_install_connected_v6(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint8_t *next_hop,
+                                       uint32_t metric,
+                                       uint64_t if_id);
+int32_t lr_router_uninstall_connected_v4(lr_router_t r,
+                                         const uint8_t *prefix_addr,
+                                         uint8_t prefix_len);
+int32_t lr_router_uninstall_connected_v6(lr_router_t r,
+                                         const uint8_t *prefix_addr,
+                                         uint8_t prefix_len);
 int32_t lr_router_originate_labeled_v4(lr_router_t r,
                                        const uint8_t *prefix_addr,
                                        uint8_t prefix_len,

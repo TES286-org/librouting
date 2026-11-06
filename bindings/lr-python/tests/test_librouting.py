@@ -419,6 +419,36 @@ def test_static_route_lifecycle():
         assert r.uninstall_static_v6("2001:db8::/32") is False
 
 
+def test_connected_route_lifecycle():
+    """install_connected_v4/v6 + uninstall_connected_v4/v6 mirror BIRD
+    `protocol direct` and FRR `redistribute connected`. Blackhole
+    (next_hop=None), metric, and if_id are exercised; repeated
+    uninstall is an idempotent no-op — exactly the contract
+    `test_static_route_lifecycle` pins for the static surface."""
+    with librouting.Router() as r:
+        # Withdrawing a prefix that was never installed is a no-op.
+        assert r.uninstall_connected_v4("203.0.113.0/24") is False
+        assert r.uninstall_connected_v6("2001:db8::/32") is False
+
+        # install with a real next-hop + metric + if_id.
+        r.install_connected_v4("203.0.113.0/24", "203.0.113.1", metric=0, if_id=1)
+        # install as a blackhole (next_hop=None) with an if_id.
+        r.install_connected_v4("10.0.0.0/8", next_hop=None, if_id=1)
+        # v6 install with a real next-hop.
+        r.install_connected_v6("2001:db8::/32", "2001:db8::1", if_id=1)
+        assert r.rib_len() == 3
+
+        # Uninstall removes the routes one at a time.
+        assert r.uninstall_connected_v4("203.0.113.0/24") is True
+        assert r.uninstall_connected_v4("10.0.0.0/8") is True
+        assert r.uninstall_connected_v6("2001:db8::/32") is True
+        assert r.rib_len() == 0
+
+        # Repeated uninstall is a no-op.
+        assert r.uninstall_connected_v4("203.0.113.0/24") is False
+        assert r.uninstall_connected_v6("2001:db8::/32") is False
+
+
 def test_bgp_message_encoders():
     # OPEN with the ASN4 capability.
     open_msg = librouting.encode_open(64512, 90, "10.0.0.1")
