@@ -94,6 +94,73 @@ recompiling.
 
 ### Added
 
+**`lr-cli` `redistribute … route-map NAME` translation onto the
+pipe's `allow` list** (`compat`, issue #92). The FRR `redistribute
+<proto> [metric M] [route-map NAME]` line previously dropped the
+`route-map NAME` qualifier with an unmapped note claiming "lr's
+`[[redistribute]]` has no per-pipe filter hook" (`defects.txt` L74,
+`crates/lr-cli/src/translate.rs:L62`) — but the daemon-side pipe
+already carried the per-pipe `allow` field (a CIDR list passed to
+`RedistributionPipe::with_allow_prefixes` whose `matches` runs
+bit-level containment), the daemon's TOML parser already accepted
+the `allow` key, and the FFI's `lr_router_add_redistribution_pipe`
+already exposed the same surface to C / C++ / Go / Python
+embedders. The gap was on the converter side only: it never
+populated the field from a route-map.
+
+The converter now resolves `redistribute … route-map NAME` against
+the already-parsed `route_maps` and `prefix_lists` tables in a
+post-pass that runs once the whole source file has been scanned
+(FRR allows the route-map and prefix-list definitions to appear
+*after* the `redistribute` line — forward references). A route-map
+lands on the pipe's `allow` list when its shape is a *pure
+prefix-list allow*:
+
+- every entry is `permit` (a `deny` entry would need an exclusion
+  mechanism `allow` does not have);
+- every entry's only match is `match ip address prefix-list NAME`
+  (no `match as-path`, `match community`, no `set` clause, no
+  other unmapped clause — those carry attribute-rewrite or
+  richer-match semantics `allow` cannot express);
+- every referenced prefix-list contains only `permit` rows (a
+  prefix-list `deny` row would also need an exclusion mechanism);
+- every prefix-list row carries `le 32` (v4) / `le 128` (v6) with
+  no `ge` qualifier — that is the only shape whose FRR semantics
+  ("any prefix inside this network") matches
+  `RedistributionPipe::matches`'s bit-level containment. FRR's
+  bare `permit PREFIX` (no `le`) is *exact-match* (ge=plen, le=plen),
+  which `allow` would silently widen; `ge G` ranges are also
+  stricter than containment.
+
+Any richer shape carries an unmapped note describing what was lost
+(e.g. "route-map RM cannot be translated to `[[redistribute]]` allow
+list (route-map has set clauses); route-map dropped", or
+"route-map RM references prefix-lists that cannot be translated
+(prefix-list PL has ge/le qualifier (only `le 32` is supported));
+route-map dropped") so the operator sees the gap and can either
+simplify the route-map or accept the wider `allow` semantics
+manually. An undefined route-map name carries "route-map NAME not
+defined; route-map dropped".
+
+The converter now also accepts `ipv6 prefix-list NAME permit|deny
+PREFIX [ge G] [le L]` — the IPv6 equivalent of `ip prefix-list` —
+which it previously ignored (the v6 form shares the same name slot
+and shape as the v4 form, so the existing `parse_frr_prefix_list`
+handles both; only the dispatch was missing).
+
+No public Rust API change, no C ABI change, no protocol-on-the-wire
+change, no version bump. The `RedistributionPipe::with_allow_prefixes`
+surface, the daemon's TOML `allow` key, and the FFI's
+`lr_router_add_redistribution_pipe` `allow` / `allow_count`
+parameters are all unchanged — the converter now feeds them. Twelve
+new tests in `crates/lr-cli/src/translate_tests.rs` cover the
+happy paths (v4 / v6 / OSPF target / metric + route-map / multiple
+permit entries / deduplicated prefix-list rows) and every rejection
+shape (undefined route-map, deny entries, set clauses, `ge`
+qualifier, exact-match rows, prefix-list deny entries, undefined
+prefix-list); the existing `frr_redistribute_route_map_is_unmapped`
+test was updated to assert the more specific "not defined" note.
+
 **`lr-ospf` per-area SRv6 database cache for the v3 SPF** (`ospf`,
 issue #92). The v3 SPF consumes the per-area SRv6 database projection
 (RFC 9513 §2/§5 — `Srv6Database::from_lsdb`) to install the §5 locator
