@@ -94,6 +94,46 @@ recompiling.
 
 ### Added
 
+**`lr-ospf` per-area SRv6 database cache for the v3 SPF** (`ospf`,
+issue #92). The v3 SPF consumes the per-area SRv6 database projection
+(RFC 9513 §2/§5 — `Srv6Database::from_lsdb`) to install the §5 locator
+routes; the projection walks the entire area LSDB on every SPF run,
+re-deriving the same per-node locator / End-SID view from the same
+LSA bodies every time. `Lsdb` now carries a `version: u64` content
+revision counter — bumped on every `install` whose outcome is `New`,
+`Replaced` or `Purged` and on every `remove` / `age_out` that drops
+an entry, but not on the `refresh_due` path (RFC 2328 §14.1) which
+re-writes the same LSA body under a new sequence number with reset
+age (a pure refresh tick leaves the body content the projection
+depends on unchanged). The OSPFv3 recompute path in `lr-router`
+caches the SRv6 database per area, keyed by `Lsdb::version`; an SPF
+run that lands on a cache hit reuses the projection without
+re-walking the LSDB, paying zero `from_lsdb` cost on the common
+case (refresh ticks, periodic SPF re-runs against the same LSDB,
+consecutive LSDB-change recomputes that did not move any LSA body).
+
+The new public API is additive:
+
+- `lr_ospf::lsdb::Lsdb::version() -> u64` — the monotonic content
+  revision counter, the cache invalidation token.
+- `lr_ospf::spf::run_spf_v3_with_srv6(lsdb, root, srv6)` and
+  `lr_ospf::spf::run_spf_v3_extended_with_srv6(lsdb, root, srv6)` —
+  variants of `run_spf_v3` / `run_spf_v3_extended` that take a
+  pre-projected `&Srv6Database`. The legacy entry points stay and
+  internally call the new variants after computing the projection.
+
+The cache is owned by `lr_router::DefaultRouter` (private field
+`ospf_v3_srv6_db_cache: BTreeMap<u32, (u64, Srv6Database)>`) and is
+populated by `ospf_v3_refresh_srv6_db_cache`, called at the top of
+both `ospf_summarize_areas_v3` and `ospf_recompute`. Detached areas
+are pruned; the cached version tracks `area.lsdb.version()` after
+every refresh.
+
+`lr-ospf` test count: 374 / 374 ✅ (six new `Lsdb::version` tests);
+`lr-router`: 210 / 210 ✅ (five new SRv6 database cache tests pin
+the empty-state, populated-after-recompute, cache-hit,
+body-change-invalidation and sequence-only-reinstall contracts).
+
 **`lr-ospf` SRv6 locator reachability for every route type**
 (`ospf`, issue #92). The SRv6 Locator TLV (RFC 9513 §7.1) carries a
 `Route Type` field that selects the reachability calculation per
