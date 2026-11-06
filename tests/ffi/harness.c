@@ -424,6 +424,40 @@ int main(void) {
     rc = lr_router_uninstall_static_v4(r, prefix, 24);
     check(rc == 1, "uninstall_static_v4 of an already-removed route (rc=1)");
 
+    /* Connected routes (BIRD `protocol direct`, FRR `redistribute connected`). */
+    /* install_connected_v4 with a real next-hop + if_id. */
+    rc = lr_router_install_connected_v4(r, prefix, 24, nh, 0, 1);
+    check(rc == 0, "install_connected_v4 203.0.113.0/24 via 192.0.2.1 if_id=1");
+    /* install_connected_v4 as a blackhole (NULL next-hop). */
+    rc = lr_router_install_connected_v4(r, bh_prefix, 8, NULL, 0, 1);
+    check(rc == 0, "install_connected_v4 10.0.0.0/8 blackhole if_id=1");
+    /* install_connected_v6 with a real next-hop. */
+    rc = lr_router_install_connected_v6(r, v6_prefix, 32, v6_nh, 0, 1);
+    check(rc == 0, "install_connected_v6 2001:db8::/32 via fe80::1 if_id=1");
+    /* Bad prefix length is rejected before the Loc-RIB is touched. */
+    rc = lr_router_install_connected_v4(r, prefix, 33, nh, 0, 1);
+    check(rc == -3, "install_connected_v4 rejects prefix length 33");
+    rc = lr_router_install_connected_v6(r, v6_prefix, 129, v6_nh, 0, 1);
+    check(rc == -3, "install_connected_v6 rejects prefix length 129");
+    /* NULL prefix pointer is rejected. */
+    rc = lr_router_install_connected_v4(r, NULL, 24, nh, 0, 1);
+    check(rc == -1, "install_connected_v4 rejects NULL prefix");
+    /* uninstall_connected_v4 of an installed route succeeds (rc=0). */
+    rc = lr_router_uninstall_connected_v4(r, prefix, 24);
+    check(rc == 0, "uninstall_connected_v4 of an installed route");
+    /* uninstall_connected_v4 of a never-installed prefix is a no-op (rc=1). */
+    rc = lr_router_uninstall_connected_v4(r, absent, 24);
+    check(rc == 1, "uninstall_connected_v4 of an absent prefix is a no-op (rc=1)");
+    /* uninstall_connected_v6 of an installed route succeeds (rc=0). */
+    rc = lr_router_uninstall_connected_v6(r, v6_prefix, 32);
+    check(rc == 0, "uninstall_connected_v6 of an installed route");
+    /* uninstall_connected_v4 of the blackhole route (left for last). */
+    rc = lr_router_uninstall_connected_v4(r, bh_prefix, 8);
+    check(rc == 0, "uninstall_connected_v4 of the blackhole route");
+    /* uninstall_connected_v4 of the already-removed v4 route is a no-op. */
+    rc = lr_router_uninstall_connected_v4(r, prefix, 24);
+    check(rc == 1, "uninstall_connected_v4 of an already-removed route (rc=1)");
+
     /* MPLS platform-labels query (Linux: 0 in CI; lab: 16/20). */
     uint32_t mpls = lr_mpls_platform_labels();
     check(mpls == 0 || mpls == 16 || mpls == 20,
