@@ -289,7 +289,7 @@ What reload actually re-applies:
 | `networks` | Added prefixes are originated, removed ones unoriginated |
 | `[[static.route]]` | Added and changed routes installed, removed ones withdrawn |
 | `[[roa]]` | The static ROA layer is replaced wholesale |
-| `[bgp.rpki]` | Cache address change re-points the RTR client; same address re-syncs |
+| `[bgp.rpki]` | Cache address change re-points the RTR client; same address re-syncs; removing the `[bgp.rpki] cache` block tears the live RTR thread down (transport closed, RTR-sourced ROAs withdrawn, thread exits) — restart the daemon to re-enable RPKI from a re-added block |
 | everything else | Reported as needing a restart |
 
 If nothing changed, reload prints `reload: no network changes`. It

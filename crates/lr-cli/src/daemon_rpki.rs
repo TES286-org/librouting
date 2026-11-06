@@ -15,7 +15,11 @@
 //! * on data expiry (§6) the RTR-sourced ROAs are withdrawn and the
 //!   session resets — a stale serial is worse than none,
 //! * SIGHUP reload swaps the cache address through the control
-//!   channel ([`RpkiCommand::Reconnect`]).
+//!   channel ([`RpkiCommand::Reconnect`]); removing the
+//!   `[bgp.rpki] cache` block tears the thread down through
+//!   [`RpkiCommand::Shutdown`] (RTR-sourced ROAs withdrawn, thread
+//!   exits, the channel dies — restart the daemon to re-enable
+//!   RPKI from a re-added `[bgp.rpki]` block).
 //!
 //! Operational visibility: [`RpkiHandle::status_line`] renders the
 //! one-line status the runtime API `status` command appends after its
@@ -60,8 +64,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_BURST: usize = 64;
 
 /// One command from the daemon's control plane (the SIGHUP reload
-/// path) to the RTR thread. Shutdown is deliberately absent — the
-/// daemon's shared `running` flag stops the thread.
+/// path) to the RTR thread. The daemon-wide `running` flag stops the
+/// thread on shutdown; this enum carries the live-config changes the
+/// reload path needs to push to a still-running thread.
+#[derive(Debug)]
 pub(crate) enum RpkiCommand {
     /// Drop the transport and re-sync. With a new address the session
     /// memory is reset too (the old cache's serial is meaningless);
@@ -76,15 +82,30 @@ pub(crate) enum RpkiCommand {
         retry_interval: u32,
         expire_interval: u32,
     },
+    /// Stop the RTR client thread and withdraw every RTR-sourced
+    /// ROA. The reload path sends this when the `[bgp.rpki] cache`
+    /// section was removed from the configuration: the live RTR
+    /// thread is torn down (transport closed, RTR layer of the
+    /// [`RoaStore`] cleared) so the import hook stops validating
+    /// against a stale cache. The thread exits; the channel's
+    /// receiver dies, so a subsequent [`RpkiHandle::reconnect`] /
+    /// [`RpkiHandle::shutdown`] call returns `Err` (the operator
+    /// must restart the daemon to re-enable RPKI from a removed
+    /// `[bgp.rpki]` block).
+    Shutdown,
 }
 
 /// Outcome of draining the control channel.
+#[derive(Debug)]
 enum Control {
     /// Nothing pending — keep doing what the loop was doing.
     Continue,
     /// A Reconnect was processed — skip any backoff in progress and
     /// return to the loop head (it reconnects immediately).
     Interrupt,
+    /// A Shutdown was processed — the outer loop breaks, the thread
+    /// exits, the RTR-sourced ROAs are withdrawn from the store.
+    Stop,
 }
 
 /// A point-in-time snapshot of the RTR thread, rendered for the
@@ -183,6 +204,23 @@ impl RpkiHandle {
             Err(_) => "rpki: client thread is gone (no reconnect possible)".to_string(),
         }
     }
+
+    /// Ask the thread to stop and withdraw every RTR-sourced ROA
+    /// (the reload path) — the configured `[bgp.rpki] cache` was
+    /// removed from the live config. Returns the log line describing
+    /// what was requested.
+    ///
+    /// After this call the thread exits and the channel's receiver
+    /// dies; a subsequent [`Self::reconnect`] or [`Self::shutdown`]
+    /// call on the same handle returns the "client thread is gone"
+    /// diagnostic. The operator must restart the daemon to re-enable
+    /// RPKI from a re-added `[bgp.rpki]` block.
+    pub(crate) fn shutdown(&self) -> String {
+        match self.control.send(RpkiCommand::Shutdown) {
+            Ok(()) => "rpki: shutdown requested".to_string(),
+            Err(_) => "rpki: client thread is gone (already shut down)".to_string(),
+        }
+    }
 }
 
 /// Spawn the RTR client thread. `store` is shared with the filter
@@ -231,6 +269,7 @@ pub(crate) fn spawn_rpki(
                 buf: Vec::new(),
                 start: Instant::now(),
                 last_sync: None,
+                stopped: false,
             };
             state
                 .client
@@ -259,6 +298,15 @@ struct RpkiLoop {
     buf: Vec<u8>,
     start: Instant,
     last_sync: Option<Instant>,
+    /// Latched when a [`RpkiCommand::Shutdown`] arrives — the outer
+    /// loop breaks, `refresh_status` renders the phase as `"stopped"`
+    /// so the runtime API `status` line reflects the live state, and
+    /// every later control command fails on a closed channel (the
+    /// thread is gone). Distinct from the daemon-wide `running` flag,
+    /// which only moves on process shutdown; this flag moves on a
+    /// SIGHUP that removes the `[bgp.rpki] cache` block while the
+    /// daemon keeps serving BGP / OSPF / Babel.
+    stopped: bool,
 }
 
 impl RpkiLoop {
@@ -276,8 +324,11 @@ impl RpkiLoop {
             if !self.running.load(Ordering::Relaxed) {
                 break;
             }
-            // Control plane first: a reload may swap the cache under us.
+            // Control plane first: a reload may swap the cache under us
+            // or signal a shutdown (the `[bgp.rpki] cache` block was
+            // removed from the live config).
             match self.drain_control() {
+                Control::Stop => break,
                 Control::Interrupt => continue,
                 Control::Continue => {}
             }
@@ -312,17 +363,22 @@ impl RpkiLoop {
         // One command per drain: the outer loop re-enters here every
         // few hundred milliseconds at most, so a queued reload batch
         // drains quickly without a self-recursive loop here.
-        if let Ok(RpkiCommand::Reconnect {
-            cache,
-            refresh_interval,
-            retry_interval,
-            expire_interval,
-        }) = self.control.try_recv()
-        {
-            self.handle_reconnect(cache, refresh_interval, retry_interval, expire_interval);
-            return Control::Interrupt;
+        match self.control.try_recv() {
+            Ok(RpkiCommand::Reconnect {
+                cache,
+                refresh_interval,
+                retry_interval,
+                expire_interval,
+            }) => {
+                self.handle_reconnect(cache, refresh_interval, retry_interval, expire_interval);
+                Control::Interrupt
+            }
+            Ok(RpkiCommand::Shutdown) => {
+                self.handle_shutdown();
+                Control::Stop
+            }
+            Err(_) => Control::Continue,
         }
-        Control::Continue
     }
 
     /// Apply one Reconnect command (the §8.2 cache-change / §8.1
@@ -373,6 +429,29 @@ impl RpkiLoop {
         // a Reset Query when it did).
         self.stream = None;
         self.buf.clear();
+        self.refresh_status();
+    }
+
+    /// Apply a [`RpkiCommand::Shutdown`]: the `[bgp.rpki] cache` block
+    /// was removed from the live configuration. The transport comes
+    /// down, the RTR-sourced ROAs are withdrawn from the shared
+    /// [`RoaStore`] (the static layer is untouched — a `[[roa]]`
+    /// table the operator still keeps in the config stays valid),
+    /// the client resets to a cold-start state so any stray timer
+    /// expiry can not re-introduce stale data, and the loop's
+    /// `stopped` flag latches so the outer loop breaks and
+    /// `refresh_status` reports `phase=stopped`.
+    fn handle_shutdown(&mut self) {
+        log_info!(
+            Component::Rpki,
+            " cache removed via reload — shutting down RTR client thread (RTR ROAs withdrawn)"
+        );
+        self.stream = None;
+        self.buf.clear();
+        self.client = RtrClient::new();
+        self.last_sync = None;
+        self.store.clear_rtr();
+        self.stopped = true;
         self.refresh_status();
     }
 
@@ -436,17 +515,25 @@ impl RpkiLoop {
         for _ in 0..READ_BURST {
             // A reload command pending behind a trickle must not wait
             // out the whole burst: consume it through the normal
-            // control path (drops the transport / updates intervals)
-            // and let the outer loop reconnect immediately.
-            if let Ok(RpkiCommand::Reconnect {
-                cache,
-                refresh_interval,
-                retry_interval,
-                expire_interval,
-            }) = self.control.try_recv()
-            {
-                self.handle_reconnect(cache, refresh_interval, retry_interval, expire_interval);
-                return false;
+            // control path (drops the transport / updates intervals
+            // for Reconnect, latches stopped and clears RTR ROAs
+            // for Shutdown) and let the outer loop reconnect or exit
+            // immediately.
+            match self.control.try_recv() {
+                Ok(RpkiCommand::Reconnect {
+                    cache,
+                    refresh_interval,
+                    retry_interval,
+                    expire_interval,
+                }) => {
+                    self.handle_reconnect(cache, refresh_interval, retry_interval, expire_interval);
+                    return false;
+                }
+                Ok(RpkiCommand::Shutdown) => {
+                    self.handle_shutdown();
+                    return false;
+                }
+                Err(_) => {}
             }
             let Some(stream) = self.stream.as_mut() else {
                 return false;
@@ -623,8 +710,9 @@ impl RpkiLoop {
         let total = Duration::from_secs(u64::from(self.client.intervals().1));
         let mut remaining = total;
         while !remaining.is_zero() && self.running.load(Ordering::Relaxed) {
-            if matches!(self.drain_control(), Control::Interrupt) {
-                return;
+            match self.drain_control() {
+                Control::Interrupt | Control::Stop => return,
+                Control::Continue => {}
             }
             // Cached data must expire while the transport is disconnected.
             self.poll_timers();
@@ -640,7 +728,16 @@ impl RpkiLoop {
         st.cache = self.cache.clone();
         st.connected = self.stream.is_some();
         st.version = self.client.version();
-        st.phase = self.client.phase_name();
+        // After a Shutdown the thread is on its way out; render the
+        // phase as `stopped` so the runtime API `status` line matches
+        // the live state (the cold-start client's `phase_name` would
+        // otherwise say `awaiting-reset`, suggesting a reconnect is
+        // imminent when the thread is in fact gone).
+        st.phase = if self.stopped {
+            "stopped"
+        } else {
+            self.client.phase_name()
+        };
         st.session_id = self.client.session_id();
         st.serial = self.client.serial();
         st.static_roas = self.store.static_len();

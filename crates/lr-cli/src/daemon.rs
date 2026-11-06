@@ -7335,8 +7335,10 @@ fn reload_config(
     // the transport, resets the session memory (the old cache's
     // serial is meaningless) and withdraws the old cache's records;
     // a same-address reload forces a fresh incremental query with the
-    // reloaded intervals. Removing the cache entirely is a restart:
-    // report it instead of silently ignoring the change.
+    // reloaded intervals. Removing the cache entirely tears the live
+    // RTR thread down: the transport closes, the RTR-sourced ROAs
+    // are withdrawn from the store, and the thread exits — restart
+    // the daemon to re-enable RPKI from a re-added `[bgp.rpki]` block.
     if let Some(handle) = rpki {
         match fresh.rpki.cache.as_ref() {
             Some(cache) => {
@@ -7364,9 +7366,23 @@ fn reload_config(
                 );
             }
             None => {
+                // The reload path removed the `[bgp.rpki] cache` block:
+                // tear down the live RTR thread (transport closed,
+                // RTR-sourced ROAs withdrawn, thread exits). The
+                // previous behaviour kept the thread running against
+                // the stale cache address and only logged that the
+                // reload was not honoured — the import hook then
+                // kept validating against the withdrawn-but-still-
+                // resident ROAs until the daemon restarted. The
+                // thread exits after this; a subsequent reload that
+                // re-adds `[bgp.rpki] cache` would find the channel
+                // disconnected and report "client thread is gone"
+                // (the operator restarts the daemon to re-enable
+                // RPKI from a fresh config).
+                lines.push(handle.shutdown());
                 lines.push(
-                    "reload: rpki cache removed — RPKI keeps running until a restart \
-                     (removing the RTR thread live is not supported)"
+                    "reload: rpki cache removed — RTR thread stopped, \
+                     RTR-sourced ROAs withdrawn"
                         .to_string(),
                 );
             }

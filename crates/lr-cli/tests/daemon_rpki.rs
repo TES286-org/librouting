@@ -475,3 +475,113 @@ fn rpki_reload_repoints_the_cache_and_roa_table() {
         thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn rpki_reload_removing_cache_stops_thread_and_withdraws_rtr_roas() {
+    // Issue #92: SIGHUP that *removes* the `[bgp.rpki] cache` block
+    // tears the live RTR thread down. Before the fix the daemon
+    // only logged "removing the RTR thread live is not supported"
+    // and the thread kept running against the stale cache address
+    // — the import hook kept validating against the withdrawn-but-
+    // still-resident RTR ROAs. After the fix the thread exits, the
+    // RTR-sourced ROAs are withdrawn from the store, the static
+    // [[roa]] layer is untouched, and the status line reports
+    // phase=stopped.
+    let cache = spawn_mock_cache(0x00ff, 1, dataset(), true);
+
+    let socket = std::env::temp_dir().join(format!(
+        "lr-daemon-rpki-shutdown-{}.sock",
+        std::process::id()
+    ));
+    let config = std::env::temp_dir().join(format!(
+        "lr-daemon-rpki-shutdown-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &config,
+        format!(
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\n\
+             [bgp.rpki]\ncache = \"127.0.0.1:{}\"\nretry_interval = 1\n\n\
+             [[roa]]\nprefix = \"198.51.100.0/24\"\nasn = 64513\n",
+            cache.port
+        ),
+    )
+    .unwrap();
+
+    let d = Daemon::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "rpki-shutdown",
+    );
+    d.wait_log("sync complete", "first RTR sync");
+
+    // The first sync landed: status reports 3 ROAs (1 static, 2 RTR).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = api_ask(&socket, "status");
+        if let Some(line) = status.lines().find(|l| l.starts_with("rpki: cache=")) {
+            if line.contains("roas=3 (static=1 rtr=2)") {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!("first sync never reflected in status: {status}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Rewrite the config: drop the [bgp.rpki] block entirely.
+    // Keep the [[roa]] table so the static layer survives — that
+    // proves the shutdown only withdraws the RTR-sourced ROAs, not
+    // every ROA in the store.
+    std::fs::write(
+        &config,
+        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\n\
+         [[roa]]\nprefix = \"198.51.100.0/24\"\nasn = 64513\n",
+    )
+    .unwrap();
+
+    d.signal(SIGHUP);
+
+    // The reload path's log line — `cache removed via reload —
+    // shutting down RTR client thread` — surfaces before the thread
+    // actually exits. Poll for the post-shutdown state.
+    d.wait_log("cache removed via reload", "RTR thread shutdown notice");
+
+    // After the shutdown: status shows 1 ROA (1 static, 0 RTR) and
+    // phase=stopped. The thread has exited; the channel is dead.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = api_ask(&socket, "status");
+        if let Some(line) = status.lines().find(|l| l.starts_with("rpki: cache=")) {
+            if line.contains("roas=1 (static=1 rtr=0)") && line.contains("phase=stopped") {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            let text = std::fs::read_to_string(&d.log).unwrap_or_default();
+            panic!("rpki status never reflected the shutdown: {status}\nlog: {text}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // The mock cache must not have seen a reconnect attempt after
+    // the shutdown (the thread has exited; no further Serial Query
+    // should land on the cache). The mock cache's accept loop runs
+    // for the test lifetime, but no new connection from the daemon
+    // arrives after the shutdown — verified by the daemon's log
+    // having no `connected to` line *after* the `cache removed` line.
+    let text = std::fs::read_to_string(&d.log).unwrap_or_default();
+    let shutdown_idx = text
+        .find("cache removed via reload")
+        .expect("shutdown log line landed");
+    let after = &text[shutdown_idx..];
+    assert!(
+        !after.contains("connected to"),
+        "RTR thread must not reconnect after shutdown; tail: {after}"
+    );
+}
