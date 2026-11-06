@@ -2879,15 +2879,24 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
 }
 
 /// Connect with the appropriate transport security:
-/// - TCP auth (MD5/AO) + GTSM: connect_auth creates the socket and
+/// - TCP auth (MD5/AO) + GTSM: `connect_auth` creates the socket and
 ///   signs the SYN; GTSM's outbound TTL is set on the returned
-///   TcpStream via set_ttl. The min-TTL filter is listener-side only.
-/// - GTSM only: connect_gtsm creates the socket with TTL set.
+///   TcpStream via `set_ttl`. The min-TTL filter is listener-side only.
+/// - GTSM only: `connect_gtsm` creates the socket with TTL set.
 /// - Neither: plain connect — bound to `local` when configured so the
 ///   peer sees the configured source address.
 ///
-/// Source binding does not yet combine with TCP auth (connect_auth
-/// creates its own socket); that combination is future work.
+/// `local` is honoured in every branch: the auth and GTSM paths
+/// `bind(2)` the raw socket to it before `connect(2)` so the SYN
+/// carries the operator's chosen source IP (the same combined posture
+/// BIRD/FRR offer via `local <ip>` + `password` / `ttl security`).
+///
+/// Lab-config tolerance: when `local` names an address this host does
+/// not own (the `192.0.2.x` next-hop-self-as-hint case), every branch
+/// retries without the bind so the session still comes up — the peer
+/// without GTSM/auth still accepts the kernel-chosen source, and the
+/// peer with auth/GTSM will fail the SYN's MAC/TTL check anyway, so
+/// the retry never makes things worse.
 ///
 /// The Err payload marks kernel-unsupported auth as fatal for this peer
 /// (fail closed: the key was configured, running without it is worse
@@ -2899,7 +2908,7 @@ fn connect_secure(
     gtsm: &Gtsm,
 ) -> Result<TcpStream, (String, bool)> {
     if !auth.is_none() {
-        match lr_osroute::tcp_auth::connect_auth(sockaddr, auth, Duration::from_secs(5)) {
+        match lr_osroute::tcp_auth::connect_auth(sockaddr, auth, Duration::from_secs(5), local) {
             Ok(s) => {
                 if !gtsm.is_disabled() {
                     let _ = s.set_ttl(gtsm.outbound_ttl as u32);
@@ -2909,17 +2918,70 @@ fn connect_secure(
             Err(e) => {
                 if e.is_kernel_unsupported() {
                     Err((format!("session auth not supported by kernel: {e}"), true))
+                } else if e.is_addr_not_available() && local.is_some() {
+                    // Lab-config tolerance: the local address is not
+                    // assigned to any interface. Fall back to the
+                    // kernel-chosen source by retrying without the
+                    // bind — mirrors the `connect_bound` arm below.
+                    log_warn!(
+                        Component::Bgp,
+                        "local address {} not assigned to any interface; \
+                         falling back to kernel-chosen source (auth path)",
+                        local.unwrap().ip()
+                    );
+                    match lr_osroute::tcp_auth::connect_auth(
+                        sockaddr,
+                        auth,
+                        Duration::from_secs(5),
+                        None,
+                    ) {
+                        Ok(s) => {
+                            if !gtsm.is_disabled() {
+                                let _ = s.set_ttl(gtsm.outbound_ttl as u32);
+                            }
+                            Ok(s)
+                        }
+                        Err(e2) => {
+                            if e2.is_kernel_unsupported() {
+                                Err((format!("session auth not supported by kernel: {e2}"), true))
+                            } else {
+                                Err((format!("{e2}"), false))
+                            }
+                        }
+                    }
                 } else {
                     Err((format!("{e}"), false))
                 }
             }
         }
     } else if !gtsm.is_disabled() {
-        match lr_osroute::gtsm::connect_gtsm(sockaddr, gtsm, Duration::from_secs(5)) {
+        match lr_osroute::gtsm::connect_gtsm(sockaddr, gtsm, Duration::from_secs(5), local) {
             Ok(s) => Ok(s),
             Err(e) => {
                 if e.is_kernel_unsupported() {
                     Err((format!("GTSM not supported by kernel: {e}"), true))
+                } else if e.is_addr_not_available() && local.is_some() {
+                    log_warn!(
+                        Component::Bgp,
+                        "local address {} not assigned to any interface; \
+                         falling back to kernel-chosen source (GTSM path)",
+                        local.unwrap().ip()
+                    );
+                    match lr_osroute::gtsm::connect_gtsm(
+                        sockaddr,
+                        gtsm,
+                        Duration::from_secs(5),
+                        None,
+                    ) {
+                        Ok(s) => Ok(s),
+                        Err(e2) => {
+                            if e2.is_kernel_unsupported() {
+                                Err((format!("GTSM not supported by kernel: {e2}"), true))
+                            } else {
+                                Err((format!("{e2}"), false))
+                            }
+                        }
+                    }
                 } else {
                     Err((format!("{e}"), false))
                 }

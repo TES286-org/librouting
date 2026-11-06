@@ -138,7 +138,7 @@ mod live {
             panic!("arm_listener: {e}");
         }
         let addr = listener.local_addr().unwrap();
-        let mut client = match connect_auth(addr, &auth, Duration::from_secs(5)) {
+        let mut client = match connect_auth(addr, &auth, Duration::from_secs(5), None) {
             Ok(s) => s,
             Err(e) if skip(&e) => {
                 eprintln!("skipped (kernel): {e}");
@@ -171,7 +171,7 @@ mod live {
         let addr = listener.local_addr().unwrap();
         // The listener drops SYNs signed with the wrong key: connect
         // must fail (timeout or reset), never succeed.
-        let r = connect_auth(addr, &client_auth, Duration::from_secs(1));
+        let r = connect_auth(addr, &client_auth, Duration::from_secs(1), None);
         match r {
             Ok(_) => panic!("connection with wrong MD5 key was accepted"),
             Err(e) if skip(&e) => {
@@ -203,7 +203,7 @@ mod live {
             panic!("arm_listener: {e}");
         }
         let addr = listener.local_addr().unwrap();
-        let mut client = match connect_auth(addr, &auth, Duration::from_secs(5)) {
+        let mut client = match connect_auth(addr, &auth, Duration::from_secs(5), None) {
             Ok(s) => s,
             Err(e) if skip(&e) => {
                 eprintln!("skipped (kernel): {e}");
@@ -245,7 +245,7 @@ mod live {
             panic!("arm_listener: {e}");
         }
         let addr = listener.local_addr().unwrap();
-        let r = connect_auth(addr, &client_auth, Duration::from_secs(1));
+        let r = connect_auth(addr, &client_auth, Duration::from_secs(1), None);
         match r {
             Ok(_) => panic!("connection with wrong TCP-AO key was accepted"),
             Err(e) if skip(&e) => {
@@ -264,8 +264,59 @@ mod live {
     fn connect_auth_none_is_plain_connect() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut s = connect_auth(addr, &TcpAuth::None, Duration::from_secs(5)).unwrap();
+        let mut s = connect_auth(addr, &TcpAuth::None, Duration::from_secs(5), None).unwrap();
         let (_c, _) = listener.accept().unwrap();
         s.write_all(b"x").unwrap();
+    }
+
+    /// Source binding + MD5: the SYN must carry both the configured
+    /// source IP (so the peer's `neighbor <ip>` match and the kernel's
+    /// per-peer key selection both find it) and the MAC. The accepted
+    /// socket's peer address must match the bound source, proving the
+    /// bind happened before connect.
+    #[test]
+    fn md5_loopback_source_bound_handshake() {
+        // 127.0.0.9 is a valid loopback alias on Linux; binding to it
+        // sources the SYN from 127.0.0.9 instead of the kernel's
+        // default 127.0.0.1. On macOS/other platforms where 127.0.0.9
+        // is not configured on lo0, the bind returns EADDRNOTAVAIL
+        // and the test skips — the daemon's `connect_secure` retries
+        // without the bind in that case, but this test pins the
+        // bind-actually-happened contract.
+        let local = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 9)),
+            0,
+        );
+        let auth = TcpAuth::md5(b"interop-secret".as_slice()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        if let Err(e) = arm_listener(&listener, &auth) {
+            if skip(&e) {
+                eprintln!("skipped (kernel): {e}");
+                return;
+            }
+            panic!("arm_listener: {e}");
+        }
+        let addr = listener.local_addr().unwrap();
+        let mut client = match connect_auth(addr, &auth, Duration::from_secs(5), Some(local)) {
+            Ok(s) => s,
+            Err(e) if skip(&e) => {
+                eprintln!("skipped (kernel): {e}");
+                return;
+            }
+            Err(e) if e.is_addr_not_available() => {
+                eprintln!("skipped (loopback alias 127.0.0.9 not assigned): {e}");
+                return;
+            }
+            Err(e) => panic!("connect_auth with bind: {e}"),
+        };
+        let (_server, peer) = listener.accept().expect("authenticated accept");
+        // The accepted socket's peer address carries the bound source
+        // IP (127.0.0.9), proving the bind happened before connect.
+        assert_eq!(
+            peer.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 9)),
+            "accepted connection sourced from the bound local address"
+        );
+        client.write_all(b"ping").unwrap();
     }
 }

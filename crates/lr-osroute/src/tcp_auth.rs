@@ -27,7 +27,11 @@
 //! - **Connector** ([`connect_auth`]): the socket is created by hand so the
 //!   keys can be installed *before* `connect(2)` — the SYN itself carries
 //!   the MAC. A non-blocking connect plus `poll(2)` preserves the
-//!   connect-with-timeout behaviour embedders expect.
+//!   connect-with-timeout behaviour embedders expect. When the caller
+//!   supplies a `local` address, the socket is `bind(2)`-ed to it
+//!   between key installation and `connect(2)` so the SYN also carries
+//!   the configured source IP — the same combined posture BIRD/FRR
+//!   offer via `local <ip>` + `password`/`ttl security`.
 //!
 //! ## Platform support
 //!
@@ -53,7 +57,7 @@
 //! let listener = TcpListener::bind("127.0.0.1:1179").unwrap();
 //! arm_listener(&listener, &auth).unwrap();
 //! let stream = connect_auth("127.0.0.1:1179".parse().unwrap(), &auth,
-//!                          Duration::from_secs(5)).unwrap();
+//!                          Duration::from_secs(5), None).unwrap();
 //! # let _ = stream;
 //! ```
 
@@ -262,6 +266,17 @@ impl TcpAuthError {
     pub fn is_kernel_unsupported(&self) -> bool {
         matches!(self, TcpAuthError::Os { errno, .. } if *errno == ENOPROTOOPT)
     }
+
+    /// True when the failure is `bind(2)` rejecting the requested local
+    /// address — typically `EADDRNOTAVAIL` because the address is not
+    /// assigned to any interface (the lab-config `192.0.2.x` case). The
+    /// daemon's connector uses this to fall back to the kernel-chosen
+    /// source address, mirroring [`crate::tcp_bind::connect_bound`]'s
+    /// `AddrNotAvailable` arm. Only the Linux value is produced by this
+    /// module; the non-Linux stubs return [`TcpAuthError::Unsupported`].
+    pub fn is_addr_not_available(&self) -> bool {
+        matches!(self, TcpAuthError::Os { context, errno } if *context == "bind" && *errno == EADDRNOTAVAIL)
+    }
 }
 
 impl fmt::Display for TcpAuthError {
@@ -304,11 +319,32 @@ const ENOPROTOOPT: i32 = 42;
 )))]
 const ENOPROTOOPT: i32 = 10042;
 
+/// `EADDRNOTAVAIL` — the errno `bind(2)` returns when the requested
+/// local address is not assigned to any interface. Only the Linux
+/// value is produced by this module's own `bind(2)` call (the non-Linux
+/// stubs return [`TcpAuthError::Unsupported`]); the per-platform
+/// values keep `is_addr_not_available()` honest everywhere.
+#[cfg(target_os = "linux")]
+const EADDRNOTAVAIL: i32 = 99;
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd"))]
+const EADDRNOTAVAIL: i32 = 49;
+#[cfg(target_os = "windows")]
+const EADDRNOTAVAIL: i32 = 10049; // WSAEADDRNOTAVAIL
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "windows"
+)))]
+const EADDRNOTAVAIL: i32 = -1; // unknown platform — sentinel
+
 // ---------------------------------------------------------------------------
 // Public API — Linux implementation
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "std", target_os = "linux"))]
+#[allow(clashing_extern_declarations)]
 mod imp {
     use super::{TcpAoAlgorithm, TcpAuth, TcpAuthError, MAX_KEY_LEN};
     use std::mem::{size_of, zeroed};
@@ -339,6 +375,8 @@ mod imp {
     const POLL_HUP: i16 = 0x10;
     const EINPROGRESS: i32 = 115;
     const EINTR: i32 = 4;
+    const EADDRNOTAVAIL: i32 = 99;
+    const EINVAL: i32 = 22;
 
     /// `struct sockaddr_storage` (128 bytes).
     #[repr(C)]
@@ -422,6 +460,13 @@ mod imp {
             optval: *mut core::ffi::c_void,
             optlen: *mut u32,
         ) -> i32;
+        // `bind` is also declared in `linux.rs`, `tcp_bind.rs` and
+        // `seg6_route.rs` with the same `*const c_void` second arg
+        // (the C signature is `const struct sockaddr *`, opaque to
+        // Rust). Keeping the same shape keeps the linker honest; the
+        // `#[allow(clashing_extern_declarations)]` above suppresses
+        // the rustc lint for the redeclaration.
+        fn bind(fd: i32, addr: *const core::ffi::c_void, addrlen: u32) -> i32;
         fn connect(fd: i32, addr: *const SockaddrStorage, addrlen: u32) -> i32;
         fn poll(fds: *mut PollFd, nfds: u64, timeout_ms: i32) -> i32;
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
@@ -483,6 +528,32 @@ mod imp {
             SocketAddr::V6(v6) => {
                 s.ss_family = AF_INET6;
                 s.__pad[0..2].copy_from_slice(&port);
+                // __pad[2..6] is sin6_flowinfo, left zeroed.
+                s.__pad[6..22].copy_from_slice(&v6.ip().octets());
+                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
+                (s, 28)
+            }
+        }
+    }
+
+    /// Like [`sock_addr`] but with the port forced to 0 (ephemeral) —
+    /// the shape `bind(2)` wants for the local side of an outbound
+    /// connection (the kernel picks an unused port from the ephemeral
+    /// range). The caller's `local.port()` is meaningful only for
+    /// `connect(2)`'s remote side; for `bind(2)` it would request a
+    /// specific port, which is wrong for a client socket.
+    fn bind_addr(addr: SocketAddr) -> (SockaddrStorage, u32) {
+        let mut s: SockaddrStorage = unsafe { zeroed() };
+        match addr {
+            SocketAddr::V4(v4) => {
+                s.ss_family = AF_INET;
+                // port stays zeroed — kernel picks the ephemeral port.
+                s.__pad[2..6].copy_from_slice(&v4.ip().octets());
+                (s, 16)
+            }
+            SocketAddr::V6(v6) => {
+                s.ss_family = AF_INET6;
+                // __pad[0..2] is sin6_port, left zeroed.
                 // __pad[2..6] is sin6_flowinfo, left zeroed.
                 s.__pad[6..22].copy_from_slice(&v6.ip().octets());
                 s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
@@ -694,8 +765,28 @@ mod imp {
         addr: SocketAddr,
         auth: &TcpAuth,
         timeout: Duration,
+        local: Option<SocketAddr>,
     ) -> Result<TcpStream, TcpAuthError> {
         if auth.is_none() {
+            // Without a kernel key to install the SYN does not need a
+            // raw socket — fall back to the plain std connect path,
+            // going through `tcp_bind::connect_bound` when the caller
+            // asked for a source address (it owns the bind + non-block
+            // + poll dance for the no-auth case).
+            if let Some(local) = local {
+                return crate::tcp_bind::connect_bound(local, addr, timeout).map_err(|e| {
+                    // The daemon's connector inspects `is_addr_not_available()`
+                    // for the lab-config fallback; preserve the errno so
+                    // the predicate fires on a bind failure.
+                    let errno = e.raw_os_error().unwrap_or(0);
+                    let context: &'static str = if errno == EADDRNOTAVAIL {
+                        "bind"
+                    } else {
+                        "connect"
+                    };
+                    TcpAuthError::Os { context, errno }
+                });
+            }
             return TcpStream::connect_timeout(&addr, timeout).map_err(|e| TcpAuthError::Os {
                 context: "connect",
                 errno: e.raw_os_error().unwrap_or(0),
@@ -714,6 +805,37 @@ mod imp {
             if let Err(e) = arm_outgoing(fd, addr.ip(), auth) {
                 close(fd);
                 return Err(e);
+            }
+            // Optional source bind: a configured `local_address` makes
+            // the SYN carry the operator's chosen source IP, which a
+            // peer matching inbound by source (`neighbor <ip>`) and
+            // the kernel's per-peer TCP-MD5/AO key selection both
+            // depend on. The bind happens *after* key installation so
+            // the key set is in place even if the SYN departs with a
+            // source address the kernel would have picked itself. The
+            // address family must agree; the daemon's connector
+            // catches a mismatch upstream and falls back to a plain
+            // connect when the local address is not assigned to any
+            // interface (the lab-config `192.0.2.x` case).
+            if let Some(local) = local {
+                if local.is_ipv4() != addr.is_ipv4() {
+                    close(fd);
+                    return Err(TcpAuthError::Os {
+                        context: "bind",
+                        errno: EINVAL,
+                    });
+                }
+                let (local_sa, local_len) = bind_addr(local);
+                let rc = bind(
+                    fd,
+                    (&local_sa as *const _) as *const core::ffi::c_void,
+                    local_len,
+                );
+                if rc < 0 {
+                    let e = os_error("bind");
+                    close(fd);
+                    return Err(e);
+                }
             }
             let (sa, len) = sock_addr(addr);
             let rc = connect(fd, &sa, len);
@@ -872,9 +994,27 @@ mod stub {
         addr: SocketAddr,
         auth: &TcpAuth,
         timeout: Duration,
+        local: Option<SocketAddr>,
     ) -> Result<TcpStream, TcpAuthError> {
         match auth {
             TcpAuth::None => {
+                // Even on platforms without kernel TCP-MD5/AO support,
+                // a caller that wants a source-bound no-auth connection
+                // gets one — `tcp_bind::connect_bound` works on every
+                // platform the crate compiles for. The bind error
+                // surfaces as `Os { context: "bind", errno }` so the
+                // daemon's `is_addr_not_available()` fallback fires.
+                if let Some(local) = local {
+                    return crate::tcp_bind::connect_bound(local, addr, timeout).map_err(|e| {
+                        let errno = e.raw_os_error().unwrap_or(0);
+                        let context: &'static str = if errno == super::EADDRNOTAVAIL {
+                            "bind"
+                        } else {
+                            "connect"
+                        };
+                        TcpAuthError::Os { context, errno }
+                    });
+                }
                 TcpStream::connect_timeout(&addr, timeout).map_err(|e| TcpAuthError::Os {
                     context: "connect",
                     errno: e.raw_os_error().unwrap_or(0),

@@ -46,7 +46,7 @@
 //! let listener = TcpListener::bind("127.0.0.1:1179").unwrap();
 //! arm_listener_gtsm(&listener, &gtsm).unwrap();
 //! let stream = connect_gtsm("127.0.0.1:1179".parse().unwrap(), &gtsm,
-//!                          Duration::from_secs(5)).unwrap();
+//!                          Duration::from_secs(5), None).unwrap();
 //! # let _ = stream;
 //! ```
 
@@ -114,6 +114,27 @@ impl std::fmt::Display for Gtsm {
     }
 }
 
+/// `EADDRNOTAVAIL` — the errno `bind(2)` returns when the requested
+/// local address is not assigned to any interface. Only the Linux
+/// value is produced by this module's own `bind(2)` call (the
+/// non-Linux fallback routes through `tcp_bind::connect_bound`, which
+/// surfaces the error as a `std::io::Error`); the per-platform values
+/// keep `is_addr_not_available()` honest everywhere.
+#[cfg(target_os = "linux")]
+const EADDRNOTAVAIL: i32 = 99;
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd"))]
+const EADDRNOTAVAIL: i32 = 49;
+#[cfg(target_os = "windows")]
+const EADDRNOTAVAIL: i32 = 10049; // WSAEADDRNOTAVAIL
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "windows"
+)))]
+const EADDRNOTAVAIL: i32 = -1; // unknown platform — sentinel
+
 /// Error returned by GTSM socket operations.
 #[derive(Debug)]
 pub enum GtsmError {
@@ -145,6 +166,16 @@ impl GtsmError {
     /// caller should fail closed rather than retry.
     pub fn is_kernel_unsupported(&self) -> bool {
         matches!(self, Self::Unsupported(_))
+    }
+
+    /// True when the failure is `bind(2)` rejecting the requested local
+    /// address — typically `EADDRNOTAVAIL` because the address is not
+    /// assigned to any interface (the lab-config `192.0.2.x` case).
+    /// Mirrors [`crate::tcp_auth::TcpAuthError::is_addr_not_available`]
+    /// so the daemon's connector can apply the same fallback uniformly
+    /// across the auth, GTSM and no-auth-no-gtsm branches.
+    pub fn is_addr_not_available(&self) -> bool {
+        matches!(self, Self::Os { context, errno } if *context == "bind" && *errno == EADDRNOTAVAIL)
     }
 }
 
@@ -195,6 +226,8 @@ mod imp {
     const EINPROGRESS: i32 = 115;
     const EINTR: i32 = 4;
     const ENOPROTOOPT: i32 = 92;
+    const EINVAL: i32 = 22;
+    const EADDRNOTAVAIL: i32 = 99;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -221,6 +254,13 @@ mod imp {
             optval: *mut c_void,
             optlen: *mut u32,
         ) -> i32;
+        // `bind` is also declared in `linux.rs`, `tcp_bind.rs` and
+        // `seg6_route.rs` with the same `*const c_void` second arg
+        // (the C signature is `const struct sockaddr *`, opaque to
+        // Rust). Keeping the same shape keeps the linker honest; the
+        // `#[allow(clashing_extern_declarations)]` above suppresses
+        // the rustc lint for the redeclaration.
+        fn bind(fd: i32, addr: *const c_void, addrlen: u32) -> i32;
         fn connect(fd: i32, addr: *const SockaddrStorage, addrlen: u32) -> i32;
         fn poll(fds: *mut PollFd, nfds: u64, timeout_ms: i32) -> i32;
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
@@ -262,6 +302,32 @@ mod imp {
             SocketAddr::V6(v6) => {
                 s.ss_family = AF_INET6;
                 s.__pad[0..2].copy_from_slice(&port);
+                // __pad[2..6] is sin6_flowinfo, left zeroed.
+                s.__pad[6..22].copy_from_slice(&v6.ip().octets());
+                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
+                (s, 28)
+            }
+        }
+    }
+
+    /// Like [`sock_addr`] but with the port forced to 0 (ephemeral) —
+    /// the shape `bind(2)` wants for the local side of an outbound
+    /// connection (the kernel picks an unused port from the ephemeral
+    /// range). The caller's `local.port()` is meaningful only for
+    /// `connect(2)`'s remote side; for `bind(2)` it would request a
+    /// specific port, which is wrong for a client socket.
+    fn bind_addr(addr: SocketAddr) -> (SockaddrStorage, u32) {
+        let mut s: SockaddrStorage = unsafe { std::mem::zeroed() };
+        match addr {
+            SocketAddr::V4(v4) => {
+                s.ss_family = AF_INET;
+                // port stays zeroed — kernel picks the ephemeral port.
+                s.__pad[2..6].copy_from_slice(&v4.ip().octets());
+                (s, 16)
+            }
+            SocketAddr::V6(v6) => {
+                s.ss_family = AF_INET6;
+                // __pad[0..2] is sin6_port, left zeroed.
                 // __pad[2..6] is sin6_flowinfo, left zeroed.
                 s.__pad[6..22].copy_from_slice(&v6.ip().octets());
                 s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
@@ -362,8 +428,24 @@ mod imp {
         addr: SocketAddr,
         gtsm: &Gtsm,
         timeout: Duration,
+        local: Option<SocketAddr>,
     ) -> Result<TcpStream, GtsmError> {
         if gtsm.is_disabled() {
+            // No kernel TTL arming to do — fall back to the plain std
+            // connect path, going through `tcp_bind::connect_bound`
+            // when the caller asked for a source address (it owns the
+            // bind + non-block + poll dance for the no-GTSM case).
+            if let Some(local) = local {
+                return crate::tcp_bind::connect_bound(local, addr, timeout).map_err(|e| {
+                    let errno = e.raw_os_error().unwrap_or(0);
+                    let context: &'static str = if errno == EADDRNOTAVAIL {
+                        "bind"
+                    } else {
+                        "connect"
+                    };
+                    GtsmError::Os { context, errno }
+                });
+            }
             return TcpStream::connect_timeout(&addr, timeout).map_err(|e| GtsmError::Os {
                 context: "connect",
                 errno: e.raw_os_error().unwrap_or(0),
@@ -385,6 +467,33 @@ mod imp {
             if let Err(e) = arm_fd(fd, family_of(&addr), gtsm, false) {
                 close(fd);
                 return Err(e);
+            }
+            // Optional source bind: a configured `local_address` makes
+            // the SYN carry the operator's chosen source IP, which a
+            // peer matching inbound by source (`neighbor <ip>`) and
+            // the listener's GTSM min-TTL filter both depend on. The
+            // bind happens *after* TTL arming so the high outbound
+            // TTL is already in place even if the SYN departs with a
+            // source address the kernel would have picked itself.
+            // The address family must agree; the daemon's connector
+            // catches a mismatch upstream and falls back to a plain
+            // connect when the local address is not assigned to any
+            // interface (the lab-config `192.0.2.x` case).
+            if let Some(local) = local {
+                if local.is_ipv4() != addr.is_ipv4() {
+                    close(fd);
+                    return Err(GtsmError::Os {
+                        context: "bind",
+                        errno: EINVAL,
+                    });
+                }
+                let (local_sa, local_len) = bind_addr(local);
+                let rc = bind(fd, (&local_sa as *const _) as *const c_void, local_len);
+                if rc < 0 {
+                    let e = os_error("bind");
+                    close(fd);
+                    return Err(e);
+                }
             }
             let (sa, len) = sock_addr(addr);
             let rc = connect(fd, &sa, len);
@@ -505,17 +614,51 @@ mod fallback {
         addr: SocketAddr,
         gtsm: &Gtsm,
         timeout: Duration,
+        local: Option<SocketAddr>,
     ) -> Result<TcpStream, GtsmError> {
         if gtsm.is_disabled() {
+            // No kernel TTL arming to do — a caller that wants a
+            // source-bound no-GTSM connection gets one through
+            // `tcp_bind::connect_bound` (it works on every platform
+            // the crate compiles for). The bind error surfaces as
+            // `Os { context: "bind", errno }` so the daemon's
+            // `is_addr_not_available()` fallback fires.
+            if let Some(local) = local {
+                return crate::tcp_bind::connect_bound(local, addr, timeout).map_err(|e| {
+                    let errno = e.raw_os_error().unwrap_or(0);
+                    let context: &'static str = if errno == super::EADDRNOTAVAIL {
+                        "bind"
+                    } else {
+                        "connect"
+                    };
+                    GtsmError::Os { context, errno }
+                });
+            }
             return TcpStream::connect_timeout(&addr, timeout).map_err(|e| GtsmError::Os {
                 context: "connect",
                 errno: e.raw_os_error().unwrap_or(0),
             });
         }
-        let stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| GtsmError::Os {
-            context: "connect",
-            errno: e.raw_os_error().unwrap_or(0),
-        })?;
+        // GTSM enabled: connect (optionally bound to `local`) and then
+        // set the outbound TTL. The non-Linux fallback has no raw-socket
+        // surface, so the bind (when requested) goes through
+        // `tcp_bind::connect_bound` and the TTL through `TcpStream::set_ttl`.
+        let stream = if let Some(local) = local {
+            crate::tcp_bind::connect_bound(local, addr, timeout).map_err(|e| {
+                let errno = e.raw_os_error().unwrap_or(0);
+                let context: &'static str = if errno == super::EADDRNOTAVAIL {
+                    "bind"
+                } else {
+                    "connect"
+                };
+                GtsmError::Os { context, errno }
+            })?
+        } else {
+            TcpStream::connect_timeout(&addr, timeout).map_err(|e| GtsmError::Os {
+                context: "connect",
+                errno: e.raw_os_error().unwrap_or(0),
+            })?
+        };
         if gtsm.outbound_ttl > 0 {
             stream
                 .set_ttl(gtsm.outbound_ttl as u32)
@@ -623,7 +766,7 @@ mod tests {
         let gtsm = Gtsm::single_hop();
         arm_listener_gtsm(&listener, &gtsm).expect("arm listener");
 
-        let mut stream = connect_gtsm(addr, &gtsm, Duration::from_secs(2)).expect("connect");
+        let mut stream = connect_gtsm(addr, &gtsm, Duration::from_secs(2), None).expect("connect");
         let (mut accepted, _) = listener.accept().expect("accept");
 
         // Round-trip a byte to prove the connection is usable.
@@ -631,6 +774,41 @@ mod tests {
         let mut buf = [0u8; 2];
         accepted.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"hi");
+    }
+
+    /// Source binding + GTSM: the SYN carries both the configured source
+    /// IP and the high outbound TTL. The accepted socket's peer address
+    /// must match the bound source, proving the bind happened before
+    /// connect. Skips cleanly when 127.0.0.9 is not assigned (the macOS
+    /// lo0 case — only 127.0.0.1 is configured there by default).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn single_hop_loopback_connects_bound() {
+        use std::io::Write;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let gtsm = Gtsm::single_hop();
+        arm_listener_gtsm(&listener, &gtsm).expect("arm listener");
+
+        let local = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 9)),
+            0,
+        );
+        let mut stream = match connect_gtsm(addr, &gtsm, Duration::from_secs(2), Some(local)) {
+            Ok(s) => s,
+            Err(e) if e.is_addr_not_available() => {
+                eprintln!("skipped (loopback alias 127.0.0.9 not assigned): {e}");
+                return;
+            }
+            Err(e) => panic!("connect_gtsm with bind: {e}"),
+        };
+        let (_accepted, peer) = listener.accept().expect("accept");
+        assert_eq!(
+            peer.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 9)),
+            "accepted connection sourced from the bound local address"
+        );
+        stream.write_all(b"hi").unwrap();
     }
 
     /// A connector without GTSM (TTL=64 default) is rejected by a

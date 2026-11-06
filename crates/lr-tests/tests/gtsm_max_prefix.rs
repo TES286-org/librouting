@@ -400,7 +400,7 @@ fn gtsm_loopback_both_sides_succeeds() {
     lr_osroute::gtsm::arm_listener_gtsm(&listener, &gtsm).expect("arm listener");
 
     let mut stream =
-        lr_osroute::gtsm::connect_gtsm(addr, &gtsm, Duration::from_secs(2)).expect("connect");
+        lr_osroute::gtsm::connect_gtsm(addr, &gtsm, Duration::from_secs(2), None).expect("connect");
     let (mut accepted, _) = listener.accept().expect("accept");
 
     stream.write_all(b"hello").unwrap();
