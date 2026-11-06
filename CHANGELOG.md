@@ -1606,6 +1606,93 @@ silent-ignore gap had no defects.txt line of its own (the audit
 listed only the v2 early-reject); the v3 fix is the same shape
 landed in the same commit.
 
+### LDPoIPv6 GTSM receive-side enforcement (RFC 7552 §9)
+
+`crates/lr-cli/src/daemon_ldp.rs` previously armed only the
+outbound hop limit (255) on every IPv6 LDP session TCP socket
+(listener, accepted sockets, active connectors) but did not arm
+the receive-side kernel filter — the listener had no
+`IPV6_MINHOPCOUNT = 255` set, so an inbound native IPv6 SYN with a
+hop limit below 255 (the kernel default of 64, or any value a
+remote attacker's packets would arrive with after routing
+decrement) was admitted to the listener's accept queue. The
+defects.txt entry characterised this as
+`crates/lr-cli/src/daemon_ldp.rs:L698-L700 | INCOMPLETE-IMPL |
+"lr does not enforce the receive side (fail-open)" - RFC 7552 §9
+GTSM receive side not enforced`. The original
+`feat(lr-daemon): LDPoIPv6 GTSM hop limit + FRR dual-stack interop`
+commit (`5f07d73`) deliberately kept the receive side fail-open at
+the time, matching an FRR deployment without `[no] gtsm`; the
+protocol's recommendation (RFC 7552 §9) and FRR ldpd's default
+(`nbr_gtsm_enabled` returns true for `AF_INET6`) both expect the
+filter to be on, so the gap was a real deficiency rather than a
+design choice.
+
+The fix arms the listener with
+`lr_osroute::gtsm::arm_listener_gtsm(&listener, &Gtsm::single_hop())`
+after `listen(2)`. `arm_listener_gtsm` is the same primitive the
+BGP daemon uses on its per-peer listeners; on Linux it sets
+`IP_MINTTL` (v4) or `IPV6_MINHOPCOUNT` (v6) on the listener fd, so
+the kernel drops any inbound SYN whose TTL/hop limit is below the
+configured minimum before the SYN reaches the listener's accept
+queue. On the LDP daemon's dual-stack v6 listener (`IPV6_V6ONLY=0`)
+the filter applies only to native IPv6 packets — v4-mapped
+sessions are routed through the v4 stack and bypass
+`IPV6_MINHOPCOUNT`, so they continue to be admitted (RFC 7552 §9
+does not mandate GTSM for LDPoIPv4, and the LDP daemon's v4
+transport already sends with the default TTL). Accepted sockets
+inherit the policy from the listener, so no per-accepted-socket
+arming is needed for the receive-side filter; the existing
+`set_v6_session_hops` call on accepted sockets stays (it re-arms
+the outbound hop limit, which the kernel does not inherit on
+`accept(2)`). Active connectors continue to set only the outbound
+hop limit via `set_v6_session_hops` — setting `IPV6_MINHOPCOUNT`
+on a connector would drop the SYN-ACK from a peer that is more
+than one hop away (correct for single-hop GTSM, but lr's LDP
+daemon does not yet have a per-peer multihop GTSM knob, so the
+connector stays at the no-receive-filter default).
+
+On kernels without `IPV6_MINHOPCOUNT` support (non-Linux targets
+where the `lr_osroute::gtsm` fallback returns
+`GtsmError::Unsupported`), the daemon logs a warning via
+`log_warn!(Component::Ldp, ...)` and continues — the outbound hop
+limit 255 is still set, and the receive side stays fail-open (the
+historical behaviour). The LDP daemon's module doc and the
+`set_v6_session_hops` doc comment are updated to reflect the new
+behaviour.
+
+Tests:
+
+- `crates/lr-osroute/src/gtsm.rs` — two new live-socket tests pin
+  the v6 receive-side contract: `plain_connect_rejected_by_v6_gtsm_listener`
+  arms a v6 listener with `arm_listener_gtsm(&listener, &Gtsm::single_hop())`
+  and verifies a plain `TcpStream::connect` (kernel-default hop
+  limit 64) is rejected (no `accept` succeeds); `v6_gtsm_listener_accepts_gtsm_connect`
+  arms the same listener and verifies `connect_gtsm` with hop
+  limit 255 is admitted and the accepted socket round-trips a
+  byte. Both are `#[cfg(target_os = "linux")]` (the `IPV6_MINHOPCOUNT`
+  filter is Linux-specific) and mirror the existing
+  `plain_connect_rejected_by_gtsm_listener` / `single_hop_loopback_connects`
+  pair for v4.
+- `tests/interop/ldp_v6_gtsm.sh` — a new end-to-end interop script
+  that spawns the real `lr-daemon --protocol ldp` in a rootless
+  `unshare -Urn` namespace with a non-loopback IPv6 address on
+  `lo`, waits for the listener on `[::]:6460`, then asserts (1)
+  a plain (default hop-limit 64) IPv6 TCP connect to the daemon's
+  listener is rejected (no SYN-ACK is sent; the connect times
+  out, and the daemon never logs `accepted connection from`); (2)
+  a high-hop-limit (255) IPv6 TCP connect via a GTSM-enforcing
+  peer is admitted (the connect succeeds and the daemon logs
+  `accepted connection from [fd00:99::1]:...`). Wired into
+  `.github/workflows/ci.yml` as
+  `LDPoIPv6 GTSM receive-side enforcement (RFC 7552 §9)`.
+
+No public Rust API change (`set_v6_session_hops` is private to
+the LDP daemon module; `arm_listener_gtsm` and `Gtsm::single_hop`
+are existing public surfaces of `lr-osroute::gtsm`, used here
+unchanged), no C ABI change (no `lr_*` symbol touched), no
+protocol-on-the-wire change, no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
