@@ -223,6 +223,87 @@ impl DefaultRouter {
         table
     }
 
+    /// Refresh `ospf_v3_srv6_db_cache` for every attached OSPFv3 area
+    /// whose LSDB version has moved past the cached value. After this
+    /// returns, every OSPFv3 area in `self.ospf_areas` has an entry in
+    /// `ospf_v3_srv6_db_cache` whose `0` element matches
+    /// `area.lsdb.version()`. Detached areas (still cached but no
+    /// longer in `ospf_areas`) are pruned.
+    ///
+    /// Cost: one `Srv6Database::from_lsdb` call per area whose LSDB
+    /// changed since the last refresh. Areas whose `version` matches
+    /// the cached value (the common case — a §14.1 refresh re-writes
+    /// the same body under a new sequence number; an SPF re-run sees
+    /// the same LSDB; periodic ticks see the same LSDB) skip the
+    /// O(LSDB) re-walk entirely.
+    fn ospf_v3_refresh_srv6_db_cache(&mut self) {
+        // Prune detached areas — keep only the area IDs still in
+        // `ospf_areas`. `BTreeMap::retain` is O(N) on the cache size,
+        // not on the LSDB, so it stays cheap even for a router with a
+        // large area LSDB.
+        self.ospf_v3_srv6_db_cache
+            .retain(|id, _| self.ospf_areas.contains_key(id));
+        // Collect the (id, version, projection) tuples for every
+        // area whose cache is stale. The collection is the only step
+        // that holds an immutable borrow of `ospf_areas`; the
+        // subsequent `insert` loop releases it before any `&mut self`
+        // access on the cache.
+        let to_refresh: Vec<(u32, u64, lr_ospf::srv6db::Srv6Database)> = self
+            .ospf_areas
+            .iter()
+            .filter(|(_, area)| area.protocol == Protocol::Ospfv3)
+            .filter_map(|(id, area)| {
+                let cached_version = self.ospf_v3_srv6_db_cache.get(id).map(|(v, _)| *v);
+                let current = area.lsdb.version();
+                // `None` (no entry yet) and `Some(v) if v != current`
+                // both refresh; `Some(v) if v == current` skips. The
+                // `!= Some(current)` form pins both arms in one
+                // comparison.
+                if cached_version != Some(current) {
+                    let db = lr_ospf::srv6db::Srv6Database::from_lsdb(&area.lsdb);
+                    Some((*id, current, db))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (id, version, db) in to_refresh {
+            self.ospf_v3_srv6_db_cache.insert(id, (version, db));
+        }
+    }
+
+    /// Run the v3 SPF for `area_id` against `lsdb`, reusing the cached
+    /// SRv6 database projection when `ospf_v3_refresh_srv6_db_cache`
+    /// populated one for the area. A cache miss (an area not yet seen
+    /// by the cache, or an area that was just attached) falls back to
+    /// the no-cache path — the SPF still produces a correct result.
+    /// The cache hit path is the common case and avoids the
+    /// O(LSDB) `Srv6Database::from_lsdb` re-walk on every SPF run.
+    fn ospf_v3_run_spf(&self, area_id: u32, lsdb: &Lsdb, router_id: u32) -> spf::SpfResultV3 {
+        match self.ospf_v3_srv6_db_cache.get(&area_id) {
+            Some((_, srv6)) => {
+                if self.ospf_v3_extended_lsas {
+                    spf::run_spf_v3_extended_with_srv6(lsdb, router_id, srv6)
+                } else {
+                    spf::run_spf_v3_with_srv6(lsdb, router_id, srv6)
+                }
+            }
+            None => {
+                // Cache miss: `ospf_v3_refresh_srv6_db_cache` should
+                // have populated an entry for every attached v3 area,
+                // but a code path that constructs an area without
+                // refreshing the cache would land here. Fall back to
+                // the no-cache path; the SPF result is correct, just
+                // without the cache hit.
+                if self.ospf_v3_extended_lsas {
+                    spf::run_spf_v3_extended(lsdb, router_id)
+                } else {
+                    spf::run_spf_v3(lsdb, router_id)
+                }
+            }
+        }
+    }
+
     /// Rebuild the merged OSPF route table across all areas and diff it
     /// against the published set. Across areas: intra-area beats
     /// inter-area, then lowest metric, then lowest area ID (areas iterate
@@ -233,6 +314,13 @@ impl DefaultRouter {
             return self.ospf_diff_published(BTreeMap::new());
         };
         let abr = self.ospf_is_abr();
+        // Refresh the per-area SRv6 database cache once for the whole
+        // recompute so every v3 area's SPF run reuses the projection
+        // `ospf_summarize_areas_v3` already paid for (or builds, on the
+        // first call after a body-changing LSA install). The cache key
+        // is `Lsdb::version`; a refresh tick that re-writes the same
+        // body under a new sequence number does not invalidate it.
+        self.ospf_v3_refresh_srv6_db_cache();
         // Best entry per prefix across areas.
         let mut global: BTreeMap<Prefix, (OspfTableEntry, u32, Protocol)> = BTreeMap::new();
         for (area_id, area) in &self.ospf_areas {
@@ -242,11 +330,14 @@ impl DefaultRouter {
                 // with `ospf_srv6_receive` on, the RFC 9513 §5 SRv6
                 // locators; then the inter-area summaries (§4.8.3,
                 // 0x2003) and AS externals (§4.8.5, 0x4005).
-                let spf3 = if self.ospf_v3_extended_lsas {
-                    spf::run_spf_v3_extended(&area.lsdb, router_id)
-                } else {
-                    spf::run_spf_v3(&area.lsdb, router_id)
-                };
+                //
+                // The SRv6 database the §5 locator attachment reads
+                // comes from the per-area cache populated by
+                // `ospf_v3_refresh_srv6_db_cache` above. The cache
+                // hit path skips the O(LSDB) re-walk that
+                // `Srv6Database::from_lsdb` would otherwise pay on
+                // every SPF run.
+                let spf3 = self.ospf_v3_run_spf(*area_id, &area.lsdb, router_id);
                 let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
                     table.entry(r.prefix).or_insert_with(|| {
@@ -933,6 +1024,13 @@ impl DefaultRouter {
     /// instance's LS ID is reused when one exists, else the next free
     /// ID is allocated (FRR `ospf6_new_ls_id` parity).
     pub(super) fn ospf_summarize_areas_v3(&mut self, router_id: u32) -> bool {
+        // 0. Refresh the per-area SRv6 database cache so every v3 area
+        //    in the loop below reuses the projection this call paid for
+        //    (or builds, on the first run after a body-changing LSA
+        //    install). The cache key is `Lsdb::version`; a refresh
+        //    tick that re-writes the same body under a new sequence
+        //    number does not invalidate it.
+        self.ospf_v3_refresh_srv6_db_cache();
         // 1. Fresh per-area v3 SPF results and route tables (the same
         //    merge the recompute uses: intra + inter, externals
         //    excluded from the sources).
@@ -940,16 +1038,7 @@ impl DefaultRouter {
             .ospf_areas
             .iter()
             .filter(|(_, area)| area.protocol == Protocol::Ospfv3)
-            .map(|(id, area)| {
-                (
-                    *id,
-                    if self.ospf_v3_extended_lsas {
-                        spf::run_spf_v3_extended(&area.lsdb, router_id)
-                    } else {
-                        spf::run_spf_v3(&area.lsdb, router_id)
-                    },
-                )
-            })
+            .map(|(id, area)| (*id, self.ospf_v3_run_spf(*id, &area.lsdb, router_id)))
             .collect();
         let tables: BTreeMap<u32, BTreeMap<Prefix, OspfTableEntry>> = self
             .ospf_areas

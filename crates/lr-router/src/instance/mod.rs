@@ -552,6 +552,20 @@ pub struct DefaultRouter {
     /// translation attempt — so the first election sees a populated
     /// set rather than a stale `None` filter.
     ospf_as_reachable_routers: HashSet<u32>,
+    /// Per-area SRv6 database cache (RFC 9513 §2/§5). The SRv6
+    /// database is a pure projection of the area LSDB's
+    /// Router-Information LSAs, Locator LSAs and E-Router-LSAs; the
+    /// v3 SPF (`spf::run_spf_v3` / `spf::run_spf_v3_extended`) consumes
+    /// it to install the §5 locator routes. Re-projecting it on every
+    /// SPF run re-walks the entire LSDB; the cache reuses the prior
+    /// projection whenever the area's [`Lsdb::version`] has not
+    /// moved (the counter bumps only on a body change — a §14.1
+    /// refresh that re-writes the same body under a new sequence
+    /// number leaves it untouched, so a refresh tick never pays the
+    /// re-projection cost). Keyed by area id; the cached value is the
+    /// `(version, projection)` pair. Empty until the first v3 SPF
+    /// run; cleared whenever an OSPFv3 area is detached.
+    ospf_v3_srv6_db_cache: BTreeMap<u32, (u64, lr_ospf::srv6db::Srv6Database)>,
     /// Configured virtual links (RFC 2328 §15), keyed by
     /// (transit area, endpoint router ID).
     ospf_vlinks: BTreeMap<(u32, u32), OspfVirtualLink>,
@@ -740,6 +754,7 @@ impl Default for DefaultRouter {
             ospf_v3_summary_lsids: BTreeMap::new(),
             ospf_translations: BTreeSet::new(),
             ospf_as_reachable_routers: HashSet::new(),
+            ospf_v3_srv6_db_cache: BTreeMap::new(),
             ospf_vlinks: BTreeMap::new(),
             mrai: BTreeMap::new(),
             graceful_restart: BTreeMap::new(),

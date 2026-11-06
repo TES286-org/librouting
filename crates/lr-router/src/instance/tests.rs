@@ -3515,6 +3515,548 @@ fn ospfv3_srv6_locator_publishes_with_receive_on() {
     assert_eq!(node.locators[0].end_sids[0].behavior, 1);
 }
 
+/// The per-area SRv6 database cache (RFC 9513 §2/§5) is empty until
+/// the first v3 SPF run reaches it through `ospf_recompute` (or
+/// `ospf_summarize_areas_v3`). This pins the empty-state contract a
+/// caller can rely on.
+#[test]
+fn ospf_v3_srv6_db_cache_starts_empty() {
+    let r = DefaultRouter::new();
+    assert!(
+        r.ospf_v3_srv6_db_cache.is_empty(),
+        "fresh router has no SRv6 database cache entries"
+    );
+}
+
+/// Feeding one set of v3 SRv6 LSAs through `feed_input` triggers
+/// `ospf_on_lsdb_change` → `ospf_recompute`, which calls
+/// `ospf_v3_refresh_srv6_db_cache`. After the call returns the cache
+/// has one entry per attached OSPFv3 area, the entry's version
+/// matches `area.lsdb.version()`, and the cached projection carries
+/// the locator LSA's prefix.
+#[test]
+fn ospf_v3_srv6_db_cache_populated_after_recompute() {
+    let mut r = DefaultRouter::new();
+    r.set_ospf_srv6_receive(true);
+    let r1 = RouterId::from_u32(0x0a00_0001);
+    let r2 = 0x0a00_0002u32;
+    let h = r
+        .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+        .expect("v3 session");
+
+    use lr_ospf::lsa::srv6::{
+        locator_route_type, originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa,
+        Srv6EndSidSubTlv, Srv6LocatorTlv, PREFIX_OPT_AC, SRV6_CAP_O_FLAG,
+    };
+    use lr_ospf::lsa::v3::{
+        originate_v3_link_lsa, originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+    };
+    let mut ll2 = [0u8; 16];
+    ll2[0] = 0xfe;
+    ll2[1] = 0x80;
+    ll2[15] = 2;
+    let router_lsa = originate_v3_router_lsa(
+        r2,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: 0x0a00_0001,
+        }],
+        None,
+    )
+    .unwrap();
+    let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+    let ri_lsa = originate_v3_srv6_ri_lsa(r2, SRV6_CAP_O_FLAG, &[0], &[], None).unwrap();
+    let mut prefix_bytes = [0u8; 16];
+    prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+    let mut end_sid = [0u8; 16];
+    end_sid[..6].copy_from_slice(&prefix_bytes[..6]);
+    end_sid[15] = 1;
+    let locator_tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTRA_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: PREFIX_OPT_AC,
+        metric: 0,
+        prefix: prefix_bytes,
+        end_sids: vec![Srv6EndSidSubTlv {
+            flags: 0,
+            behavior: 1, // End
+            sid: end_sid,
+            structure: None,
+        }],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    let locator_lsa =
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&locator_tlv), None).unwrap();
+    let own_lsa = originate_v3_router_lsa(
+        0x0a00_0001,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: r2,
+        }],
+        None,
+    )
+    .unwrap();
+    let bytes = ospf3_lsu_bytes(
+        r2,
+        0,
+        vec![router_lsa, link_lsa, ri_lsa, locator_lsa, own_lsa],
+    );
+    r.feed_input(h, &bytes).expect("feed v3 LSU");
+    let _ = r.drain_output(h);
+
+    // The cache now holds one entry for area 0.
+    let entry = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .expect("cache populated for area 0");
+    let lsdb_version = r
+        .ospf_areas
+        .get(&0)
+        .map(|a| a.lsdb.version())
+        .expect("area 0 attached");
+    assert_eq!(
+        entry.0, lsdb_version,
+        "cached version tracks the area's LSDB version after a recompute"
+    );
+    // The cached projection carries r2's locator.
+    let node = entry.1.node(r2).expect("r2 projected in cached db");
+    assert!(node.is_srv6_enabled());
+    assert_eq!(node.locators.len(), 1);
+    assert_eq!(node.locators[0].prefix, Prefix::new_v6(prefix_bytes, 48));
+}
+
+/// A second recompute against an unchanged LSDB does not move the
+/// cached version — the cache hit avoids the O(LSDB) re-projection.
+/// This pins the cache-hit contract: the cached version is stable
+/// across `ospf_recompute` calls when no LSA install/remove changes
+/// the body.
+#[test]
+fn ospf_v3_srv6_db_cache_hit_skips_reprojection() {
+    let mut r = DefaultRouter::new();
+    r.set_ospf_srv6_receive(true);
+    let r1 = RouterId::from_u32(0x0a00_0001);
+    let r2 = 0x0a00_0002u32;
+    let h = r
+        .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+        .expect("v3 session");
+    use lr_ospf::lsa::srv6::{
+        locator_route_type, originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa,
+        Srv6EndSidSubTlv, Srv6LocatorTlv, PREFIX_OPT_AC, SRV6_CAP_O_FLAG,
+    };
+    use lr_ospf::lsa::v3::{
+        originate_v3_link_lsa, originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+    };
+    let mut ll2 = [0u8; 16];
+    ll2[0] = 0xfe;
+    ll2[1] = 0x80;
+    ll2[15] = 2;
+    let router_lsa = originate_v3_router_lsa(
+        r2,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: 0x0a00_0001,
+        }],
+        None,
+    )
+    .unwrap();
+    let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+    let ri_lsa = originate_v3_srv6_ri_lsa(r2, SRV6_CAP_O_FLAG, &[0], &[], None).unwrap();
+    let mut prefix_bytes = [0u8; 16];
+    prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+    let mut end_sid = [0u8; 16];
+    end_sid[..6].copy_from_slice(&prefix_bytes[..6]);
+    end_sid[15] = 1;
+    let locator_tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTRA_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: PREFIX_OPT_AC,
+        metric: 0,
+        prefix: prefix_bytes,
+        end_sids: vec![Srv6EndSidSubTlv {
+            flags: 0,
+            behavior: 1,
+            sid: end_sid,
+            structure: None,
+        }],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    let locator_lsa =
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&locator_tlv), None).unwrap();
+    let own_lsa = originate_v3_router_lsa(
+        0x0a00_0001,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: r2,
+        }],
+        None,
+    )
+    .unwrap();
+    let bytes = ospf3_lsu_bytes(
+        r2,
+        0,
+        vec![router_lsa, link_lsa, ri_lsa, locator_lsa, own_lsa],
+    );
+    r.feed_input(h, &bytes).expect("feed v3 LSU");
+    let _ = r.drain_output(h);
+
+    // First recompute populated the cache. Snapshot its identity
+    // via the cached version + the locator count.
+    let cached_after_first = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(v, db)| (*v, db.node(r2).map(|n| n.locators.len()).unwrap_or(0)))
+        .expect("cache populated");
+    assert_eq!(cached_after_first.1, 1, "r2 carries one locator");
+
+    // A second recompute against the unchanged LSDB does not move the
+    // version — the cache hit returns the same projection.
+    let _delta = r.ospf_recompute();
+    let cached_after_second = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(v, db)| (*v, db.node(r2).map(|n| n.locators.len()).unwrap_or(0)))
+        .expect("cache still populated");
+    assert_eq!(
+        cached_after_second.0, cached_after_first.0,
+        "second recompute against the same LSDB is a cache hit (version stable)"
+    );
+    assert_eq!(
+        cached_after_second.1, cached_after_first.1,
+        "cache hit returns the same projection (locator count unchanged)"
+    );
+}
+
+/// Installing a second locator LSA from the same neighbor with a
+/// different body changes the area LSDB version; the next recompute
+/// rebuilds the cached projection and the new locator appears in it.
+/// This pins the cache-invalidation contract: a body change moves
+/// the cached version, and the rebuilt projection reflects the new
+/// LSDB content.
+#[test]
+fn ospf_v3_srv6_db_cache_invalidated_on_body_change() {
+    let mut r = DefaultRouter::new();
+    r.set_ospf_srv6_receive(true);
+    let r1 = RouterId::from_u32(0x0a00_0001);
+    let r2 = 0x0a00_0002u32;
+    let h = r
+        .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+        .expect("v3 session");
+    use lr_ospf::lsa::srv6::{
+        locator_route_type, originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa,
+        Srv6EndSidSubTlv, Srv6LocatorTlv, PREFIX_OPT_AC, SRV6_CAP_O_FLAG,
+    };
+    use lr_ospf::lsa::v3::{
+        originate_v3_link_lsa, originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+    };
+    let mut ll2 = [0u8; 16];
+    ll2[0] = 0xfe;
+    ll2[1] = 0x80;
+    ll2[15] = 2;
+    let router_lsa = originate_v3_router_lsa(
+        r2,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: 0x0a00_0001,
+        }],
+        None,
+    )
+    .unwrap();
+    let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+    let ri_lsa = originate_v3_srv6_ri_lsa(r2, SRV6_CAP_O_FLAG, &[0], &[], None).unwrap();
+    let mut prefix_bytes = [0u8; 16];
+    prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+    let mut end_sid = [0u8; 16];
+    end_sid[..6].copy_from_slice(&prefix_bytes[..6]);
+    end_sid[15] = 1;
+    let locator_tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTRA_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: PREFIX_OPT_AC,
+        metric: 0,
+        prefix: prefix_bytes,
+        end_sids: vec![Srv6EndSidSubTlv {
+            flags: 0,
+            behavior: 1,
+            sid: end_sid,
+            structure: None,
+        }],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    let locator_lsa =
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&locator_tlv), None).unwrap();
+    let own_lsa = originate_v3_router_lsa(
+        0x0a00_0001,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: r2,
+        }],
+        None,
+    )
+    .unwrap();
+    let bytes = ospf3_lsu_bytes(
+        r2,
+        0,
+        vec![
+            router_lsa.clone(),
+            link_lsa.clone(),
+            ri_lsa.clone(),
+            locator_lsa,
+            own_lsa.clone(),
+        ],
+    );
+    r.feed_input(h, &bytes).expect("feed v3 LSU");
+    let _ = r.drain_output(h);
+
+    let cached_version_first = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(v, _)| *v)
+        .expect("cache populated after first feed");
+    let locator_count_first = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(_, db)| db.node(r2).map(|n| n.locators.len()).unwrap_or(0))
+        .expect("cache populated");
+
+    // A second locator under a different Link State ID (so it
+    // does not collide with the first) — the body of the area LSDB
+    // changes; the cached version must move and the rebuilt
+    // projection must carry both locators.
+    let mut second_prefix = [0u8; 16];
+    second_prefix[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02]);
+    let mut second_end_sid = [0u8; 16];
+    second_end_sid[..6].copy_from_slice(&second_prefix[..6]);
+    second_end_sid[15] = 1;
+    let second_locator_tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTRA_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: PREFIX_OPT_AC,
+        metric: 0,
+        prefix: second_prefix,
+        end_sids: vec![Srv6EndSidSubTlv {
+            flags: 0,
+            behavior: 1,
+            sid: second_end_sid,
+            structure: None,
+        }],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    let second_locator_lsa =
+        originate_v3_srv6_locator_lsa(r2, 1, std::slice::from_ref(&second_locator_tlv), None)
+            .unwrap();
+    let bytes = ospf3_lsu_bytes(r2, 0, vec![second_locator_lsa]);
+    r.feed_input(h, &bytes).expect("feed second v3 LSU");
+    let _ = r.drain_output(h);
+
+    let cached_version_second = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(v, _)| *v)
+        .expect("cache still populated after second feed");
+    assert_ne!(
+        cached_version_first, cached_version_second,
+        "body-changing install invalidates the cache (version moves)"
+    );
+    let locator_count_second = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(_, db)| db.node(r2).map(|n| n.locators.len()).unwrap_or(0))
+        .expect("cache populated after second feed");
+    assert_eq!(
+        locator_count_first, 1,
+        "first projection carries one locator"
+    );
+    assert_eq!(
+        locator_count_second, 2,
+        "rebuilt projection after body change carries both locators"
+    );
+}
+
+/// A `Lsdb::install` of an LSA whose body is byte-identical to the
+/// installed instance but whose sequence number is higher still
+/// classifies as a `Replaced` install — `Lsdb::version` bumps (the
+/// watermark moves). The cache invalidates correctly: the next
+/// recompute rebuilds the projection (whose body content is the same
+/// — one locator), but the cached version moves so a stale
+/// projection is never returned. This pins the contract for
+/// refresh-style re-installs that arrive via the regular install
+/// path (a peer re-flooding the same body): the cache key is the
+/// `Lsdb::version`, which moves on every body change AND on every
+/// sequence-only replacement.
+#[test]
+fn ospf_v3_srv6_db_cache_invalidated_on_sequence_only_reinstall() {
+    let mut r = DefaultRouter::new();
+    r.set_ospf_srv6_receive(true);
+    let r1 = RouterId::from_u32(0x0a00_0001);
+    let r2 = 0x0a00_0002u32;
+    let h = r
+        .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+        .expect("v3 session");
+    use lr_ospf::lsa::srv6::{
+        locator_route_type, originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa,
+        Srv6EndSidSubTlv, Srv6LocatorTlv, PREFIX_OPT_AC, SRV6_CAP_O_FLAG,
+    };
+    use lr_ospf::lsa::v3::{
+        originate_v3_link_lsa, originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+    };
+    let mut ll2 = [0u8; 16];
+    ll2[0] = 0xfe;
+    ll2[1] = 0x80;
+    ll2[15] = 2;
+    let router_lsa = originate_v3_router_lsa(
+        r2,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: 0x0a00_0001,
+        }],
+        None,
+    )
+    .unwrap();
+    let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+    let ri_lsa = originate_v3_srv6_ri_lsa(r2, SRV6_CAP_O_FLAG, &[0], &[], None).unwrap();
+    let mut prefix_bytes = [0u8; 16];
+    prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+    let mut end_sid = [0u8; 16];
+    end_sid[..6].copy_from_slice(&prefix_bytes[..6]);
+    end_sid[15] = 1;
+    let locator_tlv = Srv6LocatorTlv {
+        route_type: locator_route_type::INTRA_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: PREFIX_OPT_AC,
+        metric: 0,
+        prefix: prefix_bytes,
+        end_sids: vec![Srv6EndSidSubTlv {
+            flags: 0,
+            behavior: 1,
+            sid: end_sid,
+            structure: None,
+        }],
+        fwd_addr: None,
+        route_tag: None,
+        ..Default::default()
+    };
+    let locator_lsa =
+        originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&locator_tlv), None).unwrap();
+    let own_lsa = originate_v3_router_lsa(
+        0x0a00_0001,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: r2,
+        }],
+        None,
+    )
+    .unwrap();
+    let bytes = ospf3_lsu_bytes(
+        r2,
+        0,
+        vec![router_lsa, link_lsa, ri_lsa, locator_lsa.clone(), own_lsa],
+    );
+    r.feed_input(h, &bytes).expect("feed v3 LSU");
+    let _ = r.drain_output(h);
+
+    let cached_version_first = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(v, _)| *v)
+        .expect("cache populated");
+
+    // Re-flood the same locator LSA under a bumped sequence number —
+    // a peer re-announcing its own LSA, or a §14.1 refresh that
+    // arrives over the wire. `Lsdb::install` accepts this as a
+    // `Replaced` (the sequence is higher than the watermark), so
+    // `Lsdb::version` bumps even though the body is byte-identical.
+    let mut refreshed_locator_lsa = locator_lsa;
+    refreshed_locator_lsa.header.ls_sequence_number = refreshed_locator_lsa
+        .header
+        .ls_sequence_number
+        .wrapping_add(1);
+    refreshed_locator_lsa.header.ls_age = 0;
+    let bytes = ospf3_lsu_bytes(r2, 0, vec![refreshed_locator_lsa]);
+    r.feed_input(h, &bytes).expect("feed refreshed v3 LSU");
+    let _ = r.drain_output(h);
+
+    let cached_version_after_refresh = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(v, _)| *v)
+        .expect("cache still populated after refresh-style install");
+    let lsdb_version_after_refresh = r
+        .ospf_areas
+        .get(&0)
+        .map(|a| a.lsdb.version())
+        .expect("area 0 attached");
+    assert_eq!(
+        cached_version_after_refresh, lsdb_version_after_refresh,
+        "cached version still tracks lsdb.version() after a refresh-style install"
+    );
+    assert_ne!(
+        cached_version_first, cached_version_after_refresh,
+        "re-install with a new sequence bumps the LSDB version (replacement path)"
+    );
+    let locator_count = r
+        .ospf_v3_srv6_db_cache
+        .get(&0)
+        .map(|(_, db)| db.node(r2).map(|n| n.locators.len()).unwrap_or(0))
+        .expect("cache populated after refresh");
+    assert_eq!(
+        locator_count, 1,
+        "projection content unchanged after a refresh-style re-install"
+    );
+}
+
 /// §4.8.3/§4.8.5 over a live v3 exchange: a 0x2003 summary from the
 /// neighbor publishes an inter-area Ospfv3 route at
 /// dist(border) + metric with the border router's link-local next
