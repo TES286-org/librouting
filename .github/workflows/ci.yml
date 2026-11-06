@@ -1236,6 +1236,9 @@ jobs:
       - name: LDP x FRR dual-stack interop (RFC 7552, zebra + ldpd)
         timeout-minutes: 10
         run: ./tests/interop/ldp_frr_v6.sh
+      - name: LDPoIPv6 GTSM receive-side enforcement (RFC 7552 §9)
+        timeout-minutes: 10
+        run: ./tests/interop/ldp_v6_gtsm.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
         timeout-minutes: 10
         run: ./tests/interop/frr.sh

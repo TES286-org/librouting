@@ -165,6 +165,7 @@ portable ones.
 | `ldp.sh` | two lr LSRs in namespaces, multicast discovery | LDP end to end: Hello discovery, TCP 646 session, label bindings, and the kernel dataplane phase |
 | `ldp_frr.sh` | lr-daemon and FRR zebra plus ldpd | RFC 5036 wire compatibility with ldpd over a veth pair |
 | `ldp_frr_v6.sh` | lr-daemon and FRR zebra plus ldpd, both address families | RFC 7552: the session runs over the IPv6 transport, IPv4 bindings exchange both ways, and the IPv6 FEC is learned from FRR's address family |
+| `ldp_v6_gtsm.sh` | lr-daemon LDPoIPv6 in a rootless namespace | RFC 7552 §9 receive-side enforcement: a low-hop-limit (64) IPv6 SYN is dropped by the listener's `IPV6_MINHOPCOUNT = 255` filter, while a high-hop-limit (255) SYN from a GTSM-enforcing peer is admitted |
 | `rtr_bird.sh` | BIRD's RPKI client and lr's mock RTR cache | RFC 8210 codec interop: BIRD's Reset and Serial Query decode through `lr_bgp::rtr` and BIRD installs the served ROAs |
 | `rtr_lr.sh` | lr-daemon `[bgp.rpki]` client and lr's mock RTR cache | the daemon client end to end: sync, delta application, expiry withdrawal while disconnected, and `SIGHUP` re-point |
 | `yang.sh` | `lr-daemon yang render` and yanglint | the shipped `yang/` modules parse with imports resolved and the RFC 9647 instance data validates as config |
