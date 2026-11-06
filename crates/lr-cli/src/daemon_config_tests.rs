@@ -2165,7 +2165,7 @@ fn redistribute_finalize_rejects_unsupported_target() {
 }
 
 #[test]
-fn redistribute_finalize_rejects_static_source() {
+fn redistribute_finalize_accepts_static_source() {
     let mut cfg = DaemonConfig::with_defaults();
     parse_toml_subset(
         "protocol = \"bgp\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
@@ -2173,11 +2173,37 @@ fn redistribute_finalize_rejects_static_source() {
         &mut cfg,
     )
     .unwrap();
-    let err = cfg.finalize().expect_err("static has no injection surface");
-    assert!(
-        err.contains("no daemon injection surface"),
-        "unexpected error: {err}"
-    );
+    cfg.finalize()
+        .expect("`[[redistribute]] source = \"static\"` is now accepted: the daemon installs `[[static.route]]` entries via `install_static`, and `install_static` pushes them through any matching redistribution pipe (BIRD `redistribute static` / FRR `redistribute static` parity)");
+}
+
+#[test]
+fn redistribute_finalize_accepts_connected_source() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "protocol = \"bgp\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"connected\"\ntarget = \"bgp\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize()
+        .expect("`[[redistribute]] source = \"connected\"` is now accepted: the daemon enumerates kernel interface network prefixes at startup via `install_connected`, and `install_connected` pushes them through any matching redistribution pipe (BIRD `redistribute direct` / FRR `redistribute connected` parity)");
+}
+
+#[test]
+fn redistribute_finalize_accepts_direct_alias_for_connected() {
+    // FRR accepts `direct` as an alias for `connected` in `redistribute
+    // connected`; lr's `parse_daemon_protocol` accepts both spellings,
+    // so the redistribute validation should too.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "protocol = \"bgp\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"direct\"\ntarget = \"bgp\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize()
+        .expect("`source = \"direct\"` is the FRR spelling of `connected` and resolves to the same `Protocol::Connected`");
 }
 
 #[test]

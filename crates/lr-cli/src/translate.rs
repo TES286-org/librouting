@@ -2721,19 +2721,29 @@ fn apply_frr_redistribute(
         ));
         return;
     };
-    // Map the source protocol onto lr's daemon naming. `connected`,
-    // `static`, `kernel` are kernel-table categories lr does not
-    // expose as a redistribute source; `rip`, `isis` are protocols
-    // the daemon does not run. Each lands an unmapped note so the
-    // operator sees the gap.
+    // Map the source protocol onto lr's daemon naming. `connected`
+    // (interface network prefixes the daemon enumerates from
+    // `getifaddrs`) and `static` (operator `[[static.route]]` table)
+    // both map onto lr's `[[redistribute]] source` columns since the
+    // daemon's `install_connected` / `install_static` push the routes
+    // through any matching pipe (BIRD `redistribute direct` /
+    // `redistribute static` and FRR `redistribute connected` /
+    // `redistribute static` parity). `kernel` (the kernel RIB — i.e.
+    // routes installed by another daemon or by `ip route add`) is a
+    // distinct concept that lr does not have an injection surface for;
+    // `rip`, `isis` are protocols the daemon does not run. Each lands
+    // an unmapped note so the operator sees the gap.
     let source = match proto {
         "bgp" => Some("bgp"),
         "ospf" | "ospfv2" => Some("ospf"),
         "ospf3" | "ospfv3" => Some("ospf3"),
         "babel" => Some("babel"),
+        "connected" | "direct" => Some("connected"),
+        "static" => Some("static"),
         _ => {
             out.unmapped_global.push(format!(
-                "{line} — lr models kernel/static routes via `networks`, not via a redistribute pipe; source '{proto}' not mapped"
+                "{line} — lr has no daemon injection surface for source '{proto}' \
+                 (kernel RIB or unsupported protocol); not mapped"
             ));
             return;
         }

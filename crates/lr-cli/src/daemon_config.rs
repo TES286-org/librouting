@@ -558,12 +558,21 @@ pub(crate) struct DampingSpec {
 /// (re-origination into BGP, RFC 4271) and `ospf` / `ospf3`
 /// (type-5 AS-external LSA, RFC 2328 §12.4.5 / RFC 5340). Supported
 /// sources are the protocols the daemon can actually learn routes
-/// with: `bgp`, `ospf`, `ospf3`, `babel` (`static` / `connected` have
-/// no daemon injection surface yet and are rejected fail-closed).
+/// with: `bgp`, `ospf`, `ospf3`, `babel`, `static` (operator-configured
+/// `[[static.route]]` table, BIRD `protocol static`, FRR `ip route`)
+/// and `connected` (kernel interface network prefixes the daemon
+/// enumerates from `getifaddrs`, BIRD `protocol direct`, FRR
+/// `redistribute connected`). The `static` and `connected` injection
+/// surfaces were previously rejected fail-closed even though the
+/// daemon already installs static routes via `install_static`; the
+/// daemon's `install_connected` mirrors it for interface networks so
+/// `[[redistribute]] source = "static"` / `source = "connected"` flow
+/// through the pipe into the target protocol exactly the way BIRD/FRR
+/// operators expect.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RedistributeSpec {
     /// Source protocol name (`"bgp"`, `"ospf"`, `"ospf3"`,
-    /// `"babel"`). Required.
+    /// `"babel"`, `"static"`, `"connected"`). Required.
     pub source: Option<String>,
     /// Target protocol name (`"bgp"`, `"ospf"`, `"ospf3"`). Required.
     pub target: Option<String>,
@@ -1717,11 +1726,16 @@ impl DaemonConfig {
                 }
             }
             match source_proto {
-                Protocol::Bgp | Protocol::Ospfv2 | Protocol::Ospfv3 | Protocol::Babel => {}
+                Protocol::Bgp
+                | Protocol::Ospfv2
+                | Protocol::Ospfv3
+                | Protocol::Babel
+                | Protocol::Static
+                | Protocol::Connected => {}
                 _ => {
                     return Err(format!(
-                        "[[redistribute]] source '{source}' has no daemon injection surface \
-                         (expected bgp | ospf | ospf3 | babel)"
+                        "[[redistribute]] source '{source}' is not supported \
+                         (expected bgp | ospf | ospf3 | babel | static | connected)"
                     ));
                 }
             }
@@ -1755,18 +1769,30 @@ impl DaemonConfig {
                 }
             };
             let source_engine = match source_proto {
-                Protocol::Bgp => "bgp",
-                Protocol::Ospfv2 => "ospf",
-                Protocol::Ospfv3 => "ospf",
-                Protocol::Babel => "babel",
+                Protocol::Bgp => Some("bgp"),
+                Protocol::Ospfv2 => Some("ospf"),
+                Protocol::Ospfv3 => Some("ospf"),
+                Protocol::Babel => Some("babel"),
+                // `static` and `connected` are daemon-injected
+                // (operator `[[static.route]]` table / kernel
+                // interface enumeration); they do not require a
+                // routing-protocol engine to be in `--protocol`, so
+                // skip the engine-presence cross-check for them. The
+                // daemon's `apply_cross_protocol_config` (BGP daemon)
+                // and the OSPF/Babel daemon's startup paths call
+                // `install_static` / `install_connected` before the
+                // session loop starts.
+                Protocol::Static | Protocol::Connected => None,
                 _ => unreachable!(),
             };
-            if !runs(source_engine) || !ospf_version_matches(source_proto) {
-                return Err(format!(
-                    "[[redistribute]] source '{source}' but the daemon does not run the \
-                     {source_engine} engine (add it to --protocol{})",
-                    ospf_hint(source_proto)
-                ));
+            if let Some(engine) = source_engine {
+                if !runs(engine) || !ospf_version_matches(source_proto) {
+                    return Err(format!(
+                        "[[redistribute]] source '{source}' but the daemon does not run the \
+                         {engine} engine (add it to --protocol{})",
+                        ospf_hint(source_proto)
+                    ));
+                }
             }
             let target_engine = match target_proto {
                 Protocol::Bgp => "bgp",

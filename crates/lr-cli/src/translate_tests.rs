@@ -1288,7 +1288,15 @@ fn frr_redistribute_bgp_into_bgp_no_extra_engine() {
 }
 
 #[test]
-fn frr_redistribute_connected_is_unmapped() {
+fn frr_redistribute_connected_maps_to_connected_source() {
+    // FRR `redistribute connected` (in `router bgp` → address-family
+    // ipv4 unicast) now maps onto lr's `[[redistribute]] source =
+    // "connected" target = "bgp"` pipe — the daemon enumerates
+    // kernel interface network prefixes at startup via
+    // `install_connected` and pushes them through any matching
+    // pipe (BIRD `redistribute direct` / FRR `redistribute connected`
+    // parity). Previously this was unmapped because the daemon had
+    // no `install_connected` surface.
     let toml = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
@@ -1297,13 +1305,63 @@ fn frr_redistribute_connected_is_unmapped() {
              !\n",
     ));
     let cfg = roundtrip(&toml);
+    assert_eq!(
+        cfg.redistributes.len(),
+        1,
+        "connected source must produce exactly one [[redistribute]] row, got: {toml}"
+    );
+    assert_eq!(cfg.redistributes[0].source.as_deref(), Some("connected"));
+    assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
+}
+
+#[test]
+fn frr_redistribute_static_maps_to_static_source() {
+    // FRR `redistribute static` (in `router bgp` → address-family
+    // ipv4 unicast) now maps onto lr's `[[redistribute]] source =
+    // "static" target = "bgp"` pipe — the daemon installs
+    // operator-configured `[[static.route]]` entries via
+    // `install_static` and pushes them through any matching pipe
+    // (BIRD `redistribute static` / FRR `redistribute static` parity).
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute static\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(
+        cfg.redistributes.len(),
+        1,
+        "static source must produce exactly one [[redistribute]] row, got: {toml}"
+    );
+    assert_eq!(cfg.redistributes[0].source.as_deref(), Some("static"));
+    assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
+}
+
+#[test]
+fn frr_redistribute_kernel_is_still_unmapped() {
+    // FRR `redistribute kernel` (the kernel RIB — routes installed
+    // by another daemon or by `ip route add`) is a distinct concept
+    // that lr does not have an injection surface for; the converter
+    // still leaves it as an unmapped note so the operator sees the
+    // gap and converts manually (e.g. by adding `[[static.route]]`
+    // entries for the routes they would have had the kernel feed in).
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute kernel\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
     assert!(
         cfg.redistributes.is_empty(),
-        "connected source must not produce a [[redistribute]] row"
+        "kernel source must not produce a [[redistribute]] row"
     );
     assert!(
-        toml.contains("redistribute connected — lr models kernel/static routes via `networks`"),
-        "expected unmapped note for connected, got:\n{toml}"
+        toml.contains("no daemon injection surface for source 'kernel'"),
+        "expected unmapped note for kernel, got:\n{toml}"
     );
 }
 
