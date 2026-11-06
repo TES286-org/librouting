@@ -277,9 +277,23 @@ fn multi_protocol_bgp_babel_share_one_process() {
         status.contains("sessions 2"),
         "status must count both engines' sessions: {status}"
     );
+    // The Loc-RIB carries the originated BGP network plus any
+    // connected routes the daemon enumerated from the kernel
+    // interface table at startup (`install_connected` — BIRD
+    // `protocol direct` / FRR `redistribute connected` parity). A
+    // CI runner with a non-loopback UP interface contributes one
+    // extra `proto=direct` route, so the total `rib-entries` is
+    // host-dependent — assert the BGP-originated route is present
+    // via `routes count`'s per-protocol breakdown instead of the
+    // exact total.
+    let routes_count = api_ask(&socket, "show routes count");
     assert!(
-        status.contains("rib-entries 1"),
-        "status must count the shared Loc-RIB: {status}"
+        routes_count.contains("proto=bgp routes=1"),
+        "show routes count must show the BGP-originated network: {routes_count}"
+    );
+    assert!(
+        routes_count.contains("total ") && !routes_count.contains("total 0\n"),
+        "show routes count must show a non-empty total: {routes_count}"
     );
     let sessions = api_ask(&socket, "sessions");
     assert!(

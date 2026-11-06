@@ -210,7 +210,20 @@ fn api_socket_serves_status_sessions_routes_and_shutdown() {
     let status = api_ask(&socket, "status");
     assert!(status.contains("local-as 64512"), "status: {status}");
     assert!(status.contains("router-id 10.0.0.1"));
-    assert!(status.contains("rib-entries 1"), "status: {status}");
+    // The Loc-RIB carries the BGP-originated `--network 203.0.113.0/24`
+    // route plus any connected routes the daemon enumerated from the
+    // kernel interface table at startup (`install_connected` — BIRD
+    // `protocol direct` / FRR `redistribute connected` parity). A CI
+    // runner with a non-loopback UP interface contributes one extra
+    // `proto=direct` route, so the exact `rib-entries` total is
+    // host-dependent — assert the BGP-originated route is present via
+    // `routes count`'s per-protocol breakdown instead of the exact
+    // total.
+    let routes_count = api_ask(&socket, "show routes count");
+    assert!(
+        routes_count.contains("proto=bgp routes=1"),
+        "show routes count must show the BGP-originated network: {routes_count}"
+    );
     assert!(status.contains("sessions 1"));
 
     let sessions = api_ask(&socket, "sessions");

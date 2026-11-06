@@ -252,10 +252,22 @@ fn metrics_endpoint_serves_prometheus_exposition() {
         "established_sessions line missing or wrong; body:\n{body}"
     );
 
-    // The Loc-RIB carries the originated network.
+    // The Loc-RIB carries the originated network. The total may be
+    // higher because the daemon also installs connected routes from
+    // the kernel interface enumeration (`install_connected` — BIRD
+    // `protocol direct` / FRR `redistribute connected` parity) —
+    // every non-loopback UP interface the host has contributes one
+    // entry per address. The BGP-protocol counter still pins to
+    // exactly 1 (the `--network 203.0.113.0/24` originated route); a
+    // CI runner with an extra interface would otherwise break this
+    // test on the total.
     assert!(
-        body.contains("lr_rib_entries 1"),
-        "rib_entries line missing or wrong; body:\n{body}"
+        body.contains("lr_rib_entries_by_protocol{protocol=\"bgp\"} 1"),
+        "rib_entries_by_protocol {{ protocol=bgp }} line missing or wrong; body:\n{body}"
+    );
+    assert!(
+        body.contains("lr_rib_entries ") && !body.contains("lr_rib_entries 0\n"),
+        "rib_entries line missing or zero; body:\n{body}"
     );
 
     // The ROA store is present (the BGP daemon always builds a

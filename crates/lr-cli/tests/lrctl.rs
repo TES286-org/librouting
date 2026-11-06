@@ -171,7 +171,26 @@ fn lrctl_status_proxies_daemon_reply() {
         stdout.contains("router-id 10.0.0.1"),
         "status stdout: {stdout}"
     );
-    assert!(stdout.contains("rib-entries 1"), "status stdout: {stdout}");
+    // The Loc-RIB total (`rib-entries N`) is host-dependent: the
+    // daemon also installs connected routes from the kernel
+    // interface enumeration (`install_connected` — BIRD `protocol
+    // direct` / FRR `redistribute connected` parity). A CI runner
+    // with a non-loopback UP interface contributes one extra
+    // `proto=direct` route. Assert the BGP-originated network is
+    // present via `show routes count`'s per-protocol breakdown
+    // instead of the exact total.
+    let (ok_count, count_stdout, _count_stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "show",
+        "routes",
+        "count",
+    ]);
+    assert!(ok_count, "lrctl show routes count failed");
+    assert!(
+        count_stdout.contains("proto=bgp routes=1"),
+        "show routes count must show the BGP-originated network: {count_stdout}"
+    );
 
     // `--socket` placement after the subcommand works too.
     let (ok, stdout, _stderr) = lrctl(&["status", "--socket", socket.to_str().unwrap()]);
@@ -573,9 +592,22 @@ fn lrctl_show_status_renders_extended_summary() {
         stdout.contains("sessions 1 established 0"),
         "show status stdout: {stdout}"
     );
+    // The `rib-entries N` total is host-dependent (see
+    // `lrctl_status_proxies_daemon_reply`): the daemon installs
+    // connected routes from the kernel interface enumeration. Assert
+    // the BGP-protocol count is 1 via `show routes count` instead of
+    // the exact total.
+    let (ok_count, count_stdout, _count_stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "show",
+        "routes",
+        "count",
+    ]);
+    assert!(ok_count, "lrctl show routes count failed");
     assert!(
-        stdout.contains("rib-entries 1"),
-        "show status stdout: {stdout}"
+        count_stdout.contains("proto=bgp routes=1"),
+        "show routes count must show the BGP-originated network: {count_stdout}"
     );
     assert!(
         stdout.contains("kind=bgp total=1 established=0"),
@@ -738,9 +770,20 @@ fn lrctl_show_routes_count_groups_by_protocol() {
         "count",
     ]);
     assert!(ok, "lrctl show routes count failed: stderr={stderr}");
+    // The `total N` line is host-dependent: the daemon also installs
+    // connected routes from the kernel interface enumeration
+    // (`install_connected` — BIRD `protocol direct` / FRR
+    // `redistribute connected` parity). A CI runner with a non-loopback
+    // UP interface contributes one extra `proto=direct` route. Assert
+    // the BGP-originated network is present (`proto=bgp routes=1`) and
+    // that the total is non-zero, instead of the exact total.
     assert!(
-        stdout.contains("total 1"),
-        "show routes count stdout: {stdout}"
+        stdout.contains("proto=bgp routes=1"),
+        "show routes count must show the BGP-originated network: {stdout}"
+    );
+    assert!(
+        stdout.contains("total ") && !stdout.contains("total 0\n"),
+        "show routes count must show a non-empty total: {stdout}"
     );
     assert!(
         stdout.contains("proto="),
@@ -915,9 +958,18 @@ fn lrctl_routes_count_alias_matches_show_routes_count() {
     let (socket, d) = spawn_show_daemon("routes-count-alias", "18114");
     let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "routes", "count"]);
     assert!(ok, "lrctl routes count should exit 0: stderr={stderr}");
+    // The `total N` line is host-dependent (see
+    // `lrctl_show_routes_count_groups_by_protocol`): the daemon also
+    // installs connected routes from the kernel interface
+    // enumeration. Assert the BGP-originated network is present and
+    // the total is non-zero, instead of the exact total.
     assert!(
-        stdout.contains("total 1"),
-        "routes count stdout should report total 1: {stdout}"
+        stdout.contains("proto=bgp routes=1"),
+        "routes count must show the BGP-originated network: {stdout}"
+    );
+    assert!(
+        stdout.contains("total ") && !stdout.contains("total 0\n"),
+        "routes count must show a non-empty total: {stdout}"
     );
     assert!(
         stdout.contains("proto="),
