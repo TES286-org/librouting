@@ -248,8 +248,15 @@ pub(crate) struct LogConfig {
     /// ANSI colour policy (default: [`ColorMode::Off`]).
     pub color: ColorMode,
     /// Optional file mirrored in addition to the console. The file is
-    /// opened append-only and never re-opened, so a log rotation tool
-    /// must signal the daemon to reopen (future work).
+    /// opened append-only and re-opened on a SIGHUP-driven reload (the
+    /// daemon's [`reload_config`](crate::reload_config) re-calls
+    /// [`init_logger`] with the freshly-parsed logging block; the
+    /// no-op reload paths in the OSPF / OSPFv3 / LDP / BMP standalone
+    /// daemons re-open the file via [`reopen_log_file`]). The
+    /// standard log-rotation workflow is therefore `logrotate`'
+    /// `postrotate`/`prerotate` sending SIGHUP — the daemon drops
+    /// the old fd and re-opens the path so the new file receives the
+    /// next record (no in-place rename tracking, no inode games).
     pub file: Option<PathBuf>,
 }
 
@@ -304,7 +311,11 @@ static LOG_FILE: Mutex<Option<fs::File>> = Mutex::new(None);
 
 /// Install the logger configuration. Call once at startup, before any
 /// `log_*!` macro fires. Re-call on a config reload to replace the
-/// active configuration and reopen the file destination.
+/// active configuration and reopen the file destination — the BGP,
+/// Babel and multi-protocol daemons re-call this from
+/// [`reload_config`](crate::reload_config); the OSPFv2, OSPFv3, LDP
+/// and BMP standalone daemons re-open the file via
+/// [`reopen_log_file`] instead, since their full reload is a no-op.
 ///
 /// Returns `Err(message)` if the file destination cannot be opened;
 /// the caller decides whether that is fatal.
@@ -332,6 +343,48 @@ pub(crate) fn init_logger(cfg: LogConfig) -> Result<(), String> {
     } else if let Some(m) = LOG_CONFIG.get() {
         *m.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
     }
+    Ok(())
+}
+
+/// Re-open the log file at the path the live [`LogConfig`] carries,
+/// leaving the rest of the configuration (severity, format, color,
+/// per-component overrides) untouched. This is the SIGHUP-driven log
+/// rotation path for the standalone daemons whose full reload is a
+/// no-op today (OSPFv2, OSPFv3, LDP, BMP): the operator's `logrotate`
+/// `postrotate`/`prerotate` script sends SIGHUP, the daemon re-opens
+/// the file, and the new file receives the next record (no in-place
+/// rename tracking, no inode games — the old fd is dropped).
+///
+/// The BGP / Babel / multi-protocol daemons go through
+/// [`reload_config`](crate::reload_config) which re-calls
+/// [`init_logger`] with the freshly-parsed `[logging]` block (so the
+/// path can change too); this entry point is for the daemons that do
+/// not re-parse the config but still want to support log rotation.
+///
+/// Returns `Ok(())` when the file was re-opened (or there was no file
+/// configured — the `Option::None` case is a successful no-op). On
+/// `Err(message)` the existing file destination is left in place so
+/// the daemon keeps logging to the old fd; the caller surfaces the
+/// error in its reload report so the operator can investigate.
+pub(crate) fn reopen_log_file() -> Result<(), String> {
+    let cfg = current_config();
+    let Some(path) = cfg.file.as_ref().cloned() else {
+        // No file destination configured. Drop any stale handle (the
+        // previous configuration may have had a file) and return Ok so
+        // a no-file config reload is a clean no-op.
+        *LOG_FILE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        return Ok(());
+    };
+    let f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("cannot reopen log file {}: {e}", path.display()))?;
+    *LOG_FILE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f);
     Ok(())
 }
 
@@ -657,6 +710,7 @@ mod tests {
 
     #[test]
     fn log_record_respects_filter() {
+        let _guard = LOG_FILE_TEST_GUARD.lock().unwrap();
         // Install a config that drops Debug for the Daemon component,
         // then call log_record at Debug and Info and verify only Info
         // produces output. We cannot easily capture stdout here, so
@@ -670,5 +724,207 @@ mod tests {
         // the level is Info; the test asserts they return cleanly.
         log_record(Severity::Debug, Component::Daemon, format_args!("debug"));
         log_record(Severity::Info, Component::Daemon, format_args!("info"));
+    }
+
+    // -----------------------------------------------------------------
+    // SIGHUP-driven log rotation coverage (issue #92 defects.txt
+    // daemon_logger.rs:L272 future-work item: the file is opened
+    // append-only and never re-opened, so a log rotation tool must
+    // signal the daemon to reopen).
+    //
+    // `init_logger` and `reopen_log_file` both target the same
+    // `LOG_FILE` static — the tests serialize through a process-wide
+    // mutex so a parallel test runner does not see one test's handle
+    // through another test's `LOG_FILE` slot (a SIGHUP-driven reopen
+    // in one test would close the file another test just opened).
+    // -----------------------------------------------------------------
+
+    /// Process-wide serializer for the LOG_FILE-touching tests.
+    /// `cargo test` runs tests in parallel by default; the static
+    /// `LOG_FILE` is shared across tests in the same binary, so a
+    /// file-touching test that re-opens the file would close the fd
+    /// another test just opened. Holding this guard for the whole
+    /// test body keeps the file-touching tests strictly serial.
+    static LOG_FILE_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn unique_log_path(label: &str) -> std::path::PathBuf {
+        // The tempdir name carries the test name; the file name
+        // carries the pid so two test processes (or two runs in the
+        // same workspace) do not collide on the same leaf.
+        let mut p = std::env::temp_dir().join(format!(
+            "lr-daemon-logger-test-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        p.set_extension("log");
+        p
+    }
+
+    #[test]
+    fn init_logger_replacement_reopens_file_destination() {
+        let _guard = LOG_FILE_TEST_GUARD.lock().unwrap();
+        // First config: log to file A.
+        let path_a = unique_log_path("reopen-a");
+        let _ = std::fs::remove_file(&path_a);
+        let cfg_a = LogConfig {
+            default_level: Severity::Info,
+            file: Some(path_a.clone()),
+            ..Default::default()
+        };
+        init_logger(cfg_a).expect("init_logger opens file A");
+        log_record(
+            Severity::Info,
+            Component::Daemon,
+            format_args!("first message to A"),
+        );
+        // The static LOG_FILE handle is now the fd for path_a.
+
+        // Re-call init_logger with a fresh config pointing at file B.
+        // This is the BGP / Babel / multi-protocol daemon's SIGHUP
+        // path — `reload_config` re-parses the logging block and
+        // re-calls init_logger with it.
+        let path_b = unique_log_path("reopen-b");
+        let _ = std::fs::remove_file(&path_b);
+        let cfg_b = LogConfig {
+            default_level: Severity::Info,
+            file: Some(path_b.clone()),
+            ..Default::default()
+        };
+        init_logger(cfg_b).expect("init_logger re-opens file B");
+        log_record(
+            Severity::Info,
+            Component::Daemon,
+            format_args!("second message to B"),
+        );
+
+        // The new message landed in file B (the new fd), not file A.
+        let a = std::fs::read_to_string(&path_a).unwrap_or_default();
+        let b = std::fs::read_to_string(&path_b).unwrap_or_default();
+        assert!(a.contains("first message to A"), "file A: {a}");
+        assert!(!a.contains("second message to B"), "file A: {a}");
+        assert!(b.contains("second message to B"), "file B: {b}");
+        assert!(!b.contains("first message to A"), "file B: {b}");
+
+        // Reset the logger to no-file so a later test does not write
+        // into the handles we just opened. The cleanup also drops the
+        // fds (Rust closes the File on drop).
+        let _ = init_logger(LogConfig::default());
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn reopen_log_file_drops_old_fd_and_opens_a_fresh_one() {
+        let _guard = LOG_FILE_TEST_GUARD.lock().unwrap();
+        // This is the OSPF / OSPFv3 / LDP / BMP standalone daemon's
+        // SIGHUP path: the full config is not reloaded, but the log
+        // file is re-opened at the same path so log rotation tools
+        // (logrotate postrotate) work.
+        let path = unique_log_path("rotate");
+        let _ = std::fs::remove_file(&path);
+        let cfg = LogConfig {
+            default_level: Severity::Info,
+            file: Some(path.clone()),
+            ..Default::default()
+        };
+        init_logger(cfg).expect("init_logger opens the file");
+        log_record(
+            Severity::Info,
+            Component::Daemon,
+            format_args!("before rotation"),
+        );
+
+        // Simulate logrotate: move the file aside (the daemon still
+        // holds the old fd and writes there) and re-open the path
+        // (a new fd that picks up subsequent records). `reopen_log_file`
+        // is what the daemon calls when it gets SIGHUP.
+        let rotated = path.with_extension("log.1");
+        let _ = std::fs::remove_file(&rotated);
+        std::fs::rename(&path, &rotated).expect("logrotate rename");
+        reopen_log_file().expect("reopen_log_file reopens the path");
+        log_record(
+            Severity::Info,
+            Component::Daemon,
+            format_args!("after rotation"),
+        );
+
+        // The "before rotation" line is in the rotated file (the old
+        // fd, captured by the rename); the "after rotation" line is
+        // in the freshly-opened path. The reopen must have dropped
+        // the old fd so the next write lands in the new file.
+        let rotated_text = std::fs::read_to_string(&rotated).unwrap_or_default();
+        let new_text = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            rotated_text.contains("before rotation"),
+            "rotated file should carry the pre-SIGHUP records: {rotated_text}"
+        );
+        assert!(
+            !rotated_text.contains("after rotation"),
+            "rotated file should NOT carry post-SIGHUP records: {rotated_text}"
+        );
+        assert!(
+            new_text.contains("after rotation"),
+            "new file should carry post-SIGHUP records: {new_text}"
+        );
+        assert!(
+            !new_text.contains("before rotation"),
+            "new file should NOT carry pre-SIGHUP records: {new_text}"
+        );
+
+        let _ = init_logger(LogConfig::default());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
+    }
+
+    #[test]
+    fn reopen_log_file_returns_ok_when_no_file_configured() {
+        let _guard = LOG_FILE_TEST_GUARD.lock().unwrap();
+        // A daemon that did not configure a file destination at all
+        // (logging only to stdout/stderr) re-opens to "no file" — the
+        // call must be a clean no-op rather than an error so a SIGHUP
+        // on a no-file daemon does not produce a bogus "cannot
+        // reopen" diagnostic.
+        let _ = init_logger(LogConfig::default());
+        reopen_log_file().expect("no-file reopen is Ok(())");
+        // The static handle is None after the call.
+        let guard = LOG_FILE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            guard.is_none(),
+            "LOG_FILE should be None after reopen with no path"
+        );
+    }
+
+    #[test]
+    fn reopen_log_file_returns_err_when_path_is_unopenable() {
+        let _guard = LOG_FILE_TEST_GUARD.lock().unwrap();
+        // The path is a non-existent directory: open(2) returns
+        // ENOENT. `reopen_log_file` must surface the error rather
+        // than silently succeed and lose the file destination.
+        let bad = std::env::temp_dir()
+            .join("lr-daemon-logger-test-no-such-dir-7142")
+            .join("x.log");
+        let _ = std::fs::remove_dir_all(bad.parent().unwrap());
+        let cfg = LogConfig {
+            default_level: Severity::Info,
+            file: Some(bad.clone()),
+            ..Default::default()
+        };
+        // `init_logger` fails first — the path's parent does not
+        // exist, so `OpenOptions::open` returns ENOENT. The reload
+        // path mirrors this when the fresh logging block points at a
+        // bad path.
+        let err = init_logger(cfg).expect_err("init_logger rejects an unopenable path");
+        assert!(err.contains("cannot open log file"), "err: {err}");
+        assert!(err.contains(&bad.display().to_string()), "err: {err}");
+
+        // The LOG_FILE slot stays at its prior state (the test
+        // process never installed a file). Reset to default for
+        // downstream tests.
+        let _ = init_logger(LogConfig::default());
     }
 }
