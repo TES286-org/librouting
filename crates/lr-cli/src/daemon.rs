@@ -300,6 +300,9 @@ fn print_usage() {
          integer or dotted quad)\n  \
          --ospf-hello-interval S  OSPF hello interval (default 10)\n  \
          --ospf-dead-interval S   OSPF dead interval (default 40)\n  \
+         --ospf-rxmt-interval S   OSPF retransmit interval (default 5,\n  \
+                                  RFC 2328 App. B RxmtInterval;\n  \
+                                  alias --ospf-retransmit-interval)\n  \
          --ldp-transport ADDR     LDP transport address advertised in\n  \
                                   Hellos (default: first interface addr)\n  \
          --ldp-port PORT          LDP UDP/TCP port (646)\n  \
