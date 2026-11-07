@@ -69,7 +69,7 @@
 //! labels; the two paths share `lr-osroute::mpls_route`.
 
 use crate::Component;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::ExitCode;
@@ -128,6 +128,234 @@ fn normalize_v6(v6: std::net::Ipv6Addr) -> IpAddr {
     }
 }
 
+/// One operation the SIGHUP-driven reload path queues for the main
+/// loop to apply against the live LDP engine.
+///
+/// The reload closure (`Runtime::reload`) runs synchronously inside
+/// the main loop's `dispatch_signals` call, but the engine is
+/// exclusively borrowed by [`LdpDaemon::pump`] for the duration of
+/// each iteration, so the closure cannot mutate the engine directly.
+/// Instead it computes the diff between the freshly re-parsed
+/// `[[ldp.bind]]` table and the live binds set, and pushes one
+/// [`RebindOp`] per change onto the [`LdpDaemon::pending_rebinds`]
+/// queue. [`LdpDaemon::pump`] drains the queue right after
+/// `dispatch_signals` returns, before the next packet pump iteration
+/// — so a SIGHUP that lands between two iterations applies
+/// atomically on the next.
+///
+/// RFC 5036 §3.5.7: a label change for an existing FEC is a withdraw
+/// of the old label followed by an advertise of the new one. The
+/// [`compute_rebind_diff`] helper emits one [`RebindOp::Withdraw`]
+/// then one [`RebindOp::Advertise`] for that case, in that order;
+/// the pump's drainer walks the `Vec` in order so the engine sees
+/// the withdraw before the advertise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RebindOp {
+    /// Advertise (or re-advertise with a different label) the
+    /// FEC-label binding to every operational peer (RFC 5036
+    /// §3.5.7.1, downstream-unsolicited independent control).
+    Advertise { prefix: Prefix, label: GenericLabel },
+    /// Withdraw the FEC-label binding from every operational peer
+    /// (RFC 5036 §3.5.10). Carries the previously-advertised label so
+    /// the kernel-mirror uninstall (`uninstall_tail` on Linux)
+    /// matches the original install.
+    Withdraw { prefix: Prefix, label: GenericLabel },
+}
+
+/// Parse the `[[ldp.bind]]` entries of a [`DaemonConfig`] into the
+/// `BTreeMap<Prefix, GenericLabel>` shape the diff computation uses.
+/// Reused by the startup path and the SIGHUP-driven reload path so
+/// the two cannot drift apart.
+///
+/// `DaemonConfig::finalize_ldp` already rejects duplicate prefixes
+/// and validates the prefix parses and the label sits in the
+/// platform-writable range, so by the time a `DaemonConfig` reaches
+/// this function the entries are well-formed. Returns `Err(String)`
+/// on the first parse failure anyway so a caller that bypasses
+/// `finalize` (or hits a parse drift between `Prefix::from_str` and
+/// the parser the daemon used at startup) surfaces the failure
+/// instead of silently dropping the entry.
+fn parse_ldp_binds(cfg: &DaemonConfig) -> Result<BTreeMap<Prefix, GenericLabel>, String> {
+    let mut binds = BTreeMap::new();
+    for bind in &cfg.ldp_binds {
+        let Some(p) = bind.prefix.as_deref() else {
+            continue; // finalize_ldp already rejected this
+        };
+        let prefix = Prefix::from_str(p).map_err(|e| format!("ldp bind {p}: {e}"))?;
+        binds.insert(prefix, GenericLabel(bind.label));
+    }
+    Ok(binds)
+}
+
+/// Compute the smallest set of [`RebindOp`]s that brings `current`
+/// to match `target`. Pure function — the reload closure and the
+/// unit tests both call it.
+///
+/// Ordering (RFC 5036 §3.5.7): all withdraws come before all
+/// advertises so a label change for an existing FEC reaches the
+/// engine as a withdraw of the old label followed by an advertise
+/// of the new one (a receiver that updates its received-bindings
+/// table on the advertise alone would lose the half-of-the-table
+/// keyed by the old label; the explicit withdraw signals "release
+/// what you have for this FEC" first).
+///
+/// Within each phase the order is the `BTreeMap`'s key-ascending
+/// iteration order — `Prefix` is `Ord` by `(address, prefix_len)` —
+/// so the diff is deterministic for a given `(current, target)` pair.
+fn compute_rebind_diff(
+    current: &BTreeMap<Prefix, GenericLabel>,
+    target: &BTreeMap<Prefix, GenericLabel>,
+) -> Vec<RebindOp> {
+    let mut ops: Vec<RebindOp> = Vec::new();
+    // First pass: withdraws (prefix gone, or label changed).
+    for (prefix, label) in current {
+        match target.get(prefix) {
+            None => ops.push(RebindOp::Withdraw {
+                prefix: *prefix,
+                label: *label,
+            }),
+            Some(new_label) if new_label != label => ops.push(RebindOp::Withdraw {
+                prefix: *prefix,
+                label: *label,
+            }),
+            _ => {}
+        }
+    }
+    // Second pass: advertises (new prefix, or label changed).
+    for (prefix, label) in target {
+        match current.get(prefix) {
+            None => ops.push(RebindOp::Advertise {
+                prefix: *prefix,
+                label: *label,
+            }),
+            Some(old_label) if old_label != label => ops.push(RebindOp::Advertise {
+                prefix: *prefix,
+                label: *label,
+            }),
+            _ => {}
+        }
+    }
+    ops
+}
+
+/// SIGHUP-driven reload of the LDP daemon's `[[ldp.bind]]` table.
+///
+/// Re-parses the config file `path` (using the same `load_config_file`
+/// startup uses, so a BIRD / FRR / TOML-loaded daemon re-parses
+/// through the same dialect path), finalises it (which validates the
+/// `[[ldp.bind]]` prefixes and label range), computes the diff
+/// against the live `current_binds` set, pushes one [`RebindOp`] per
+/// change onto `pending_rebinds`, and updates `current_binds` to the
+/// new target so a second SIGHUP arriving before the pump drains
+/// computes its diff against the already-targeted state.
+///
+/// On parse / finalize failure: the queue and `current_binds` are
+/// left untouched (the operator's existing config keeps running) and
+/// the failure surfaces in the returned `Vec<String>` so the daemon
+/// log and the API `reload` reply both carry it.
+///
+/// The closure that captures `pending_rebinds` / `current_binds`
+/// (set up in [`run_ldp_daemon`]) is a thin wrapper that delegates
+/// here so the unit tests can exercise the diff + queue + log-line
+/// shape without spinning up a full daemon.
+fn reload_ldp_binds(
+    path: Option<&str>,
+    dialect: Option<&str>,
+    pending_rebinds: &Arc<Mutex<Vec<RebindOp>>>,
+    current_binds: &Arc<Mutex<BTreeMap<Prefix, GenericLabel>>>,
+) -> Vec<String> {
+    // The log-file reopen happens unconditionally so the operator's
+    // `logrotate` postrotate SIGHUP works on the LDP daemon the same
+    // way it does on the OSPF and BMP daemons (whose full config
+    // reload is still future work). The reload report carries the
+    // reopen status so a SIGHUP that fails to re-parse still
+    // re-opens the log.
+    let mut lines = Vec::new();
+    match crate::daemon_logger::reopen_log_file() {
+        Ok(()) => lines.push("ldp: log file re-opened (SIGHUP)".to_string()),
+        Err(e) => lines.push(format!("ldp: log file reopen failed: {e}")),
+    }
+
+    let Some(path) = path else {
+        lines.push(
+            "ldp: no config file in use; nothing to reload (only log file re-opened)".to_string(),
+        );
+        return lines;
+    };
+
+    // Resolve the dialect the daemon was started with through the
+    // same `Dialect::from_flag` parser the BGP daemon's reload path
+    // uses, so a `--config-dialect bird` daemon re-parses through
+    // the BIRD path (and not the TOML fallback).
+    let forced = match dialect {
+        Some(name) => match crate::compat::Dialect::from_flag(name) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                lines.push(format!("ldp: {e} (keeping current config)"));
+                return lines;
+            }
+        },
+        None => Some(crate::compat::Dialect::Toml),
+    };
+
+    let mut fresh = DaemonConfig::with_defaults();
+    if let Err(e) = crate::daemon_config::load_config_file(path, forced, &mut fresh) {
+        lines.push(format!("ldp: {e} (keeping current config)"));
+        return lines;
+    }
+    // Finalize exactly like startup: `finalize_ldp` validates the
+    // `[[ldp.bind]]` prefixes and label range, and the auto-label
+    // allocation needs the same `label_min` / `label_max` window the
+    // startup path used. A validation failure keeps the current
+    // configuration running (never half-apply).
+    if let Err(e) = fresh.finalize() {
+        lines.push(format!("ldp: {e} (keeping current config)"));
+        return lines;
+    }
+    // Surface parse warnings so the operator sees them on every
+    // SIGHUP, not just at startup.
+    for w in &fresh.warnings {
+        lines.push(format!("ldp: config warning: {w}"));
+    }
+    if let Some(notice) = crate::daemon_config::deprecation_notice(fresh.config_dialect.as_deref())
+    {
+        lines.push(format!("ldp: config deprecation: {notice}"));
+    }
+
+    let target = match parse_ldp_binds(&fresh) {
+        Ok(b) => b,
+        Err(e) => {
+            lines.push(format!("ldp: {e} (keeping current config)"));
+            return lines;
+        }
+    };
+
+    // Diff against the live `current_binds` set, push the ops to the
+    // queue, and update `current_binds` to the new target. Both
+    // mutations happen under one combined lock window so a second
+    // SIGHUP that arrives between the diff computation and the
+    // `current_binds` update (an impossibility — the closure runs
+    // synchronously inside `dispatch_signals`, and signals are
+    // queued, not preemptive — but the explicit lock pairing makes
+    // the invariant self-documenting) sees a consistent view.
+    let ops = {
+        let mut live = current_binds.lock().expect("current_binds poisoned");
+        let ops = compute_rebind_diff(&live, &target);
+        *live = target;
+        ops
+    };
+    let n_ops = ops.len();
+    {
+        let mut queue = pending_rebinds.lock().expect("pending_rebinds poisoned");
+        queue.extend(ops);
+    }
+    lines.push(format!(
+        "ldp: reloaded [[ldp.bind]] ({} op(s) queued — apply on next pump iteration)",
+        n_ops
+    ));
+    lines
+}
+
 /// One discovery interface, resolved against the running kernel.
 struct LdpInterface {
     name: String,
@@ -180,10 +408,30 @@ struct LdpDaemon {
     interfaces: Vec<LdpInterface>,
     conns: HashMap<u64, TcpStream>,
     next_conn: u64,
-    /// The configured local bindings, re-advertised on every new
+    /// The configured local bindings (the LIB half the daemon
+    /// advertises downstream-unsolicited), keyed by FEC for O(log n)
+    /// membership checks and label lookup. Re-advertised on every new
     /// session (the engine only sends mappings to peers that were
-    /// operational when advertise_mapping ran).
-    binds: Vec<(Prefix, GenericLabel)>,
+    /// operational when `advertise_mapping` ran).
+    ///
+    /// Mutated by:
+    /// - startup (`run_ldp_daemon`) — initial install from the parsed
+    ///   `[[ldp.bind]]` table;
+    /// - [`LdpDaemon::drain_rebinds`] — applied [`RebindOp`]s from the
+    ///   SIGHUP-driven reload closure keep this in sync with the
+    ///   engine + kernel mirror.
+    binds: BTreeMap<Prefix, GenericLabel>,
+    /// SIGHUP-driven reload queue. The reload closure (set up by
+    /// [`run_ldp_daemon`]) pushes [`RebindOp`]s here; the pump drains
+    /// it at the top of every iteration so a SIGHUP that lands
+    /// between two iterations applies atomically on the next.
+    ///
+    /// Shared with the closure via `Arc<Mutex<...>` because the
+    /// closure runs inside `dispatch_signals` (synchronously, on the
+    /// same thread as the pump) but the engine is exclusively
+    /// borrowed by `pump` for the iteration's duration — the closure
+    /// cannot call `engine.advertise_mapping` directly.
+    pending_rebinds: Arc<Mutex<Vec<RebindOp>>>,
     /// Peers that reached Operational — iterated on graceful shutdown.
     peers_up: BTreeSet<LdpId>,
     /// Per-targeted-peer UDP/TCP port overrides (`ADDR:PORT` form);
@@ -419,19 +667,18 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
 
     // ---- Local bindings (parsed before the engine: their labels are
     // reserved out of the transit allocator's range). ----
-    let mut binds: Vec<(Prefix, GenericLabel)> = Vec::new();
-    for bind in &cfg.ldp_binds {
-        let Some(p) = bind.prefix.as_deref() else {
-            continue; // finalize() already rejected this
-        };
-        match Prefix::from_str(p) {
-            Ok(prefix) => binds.push((prefix, GenericLabel(bind.label))),
-            Err(e) => {
-                log_warn!(Component::Daemon, "ldp bind {}: {}", p, e);
-                return ExitCode::from(1);
-            }
+    //
+    // `parse_ldp_binds` is the same helper the SIGHUP-driven reload
+    // closure uses, so the startup and reload paths cannot drift
+    // apart on the parsing shape (a regression that changed one
+    // would surface as a failing diff against the other).
+    let binds: BTreeMap<Prefix, GenericLabel> = match parse_ldp_binds(cfg) {
+        Ok(b) => b,
+        Err(e) => {
+            log_warn!(Component::Daemon, "{e}");
+            return ExitCode::from(1);
         }
-    }
+    };
     for (prefix, label) in &binds {
         log_info!(
             Component::Daemon,
@@ -458,7 +705,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     engine_cfg.transit_allocation = cfg.ldp_transit_allocation;
     engine_cfg.label_min = cfg.ldp_label_min;
     engine_cfg.label_max = cfg.ldp_label_max;
-    engine_cfg.reserved_labels = binds.iter().map(|(_, l)| l.0).collect();
+    engine_cfg.reserved_labels = binds.values().map(|l| l.0).collect();
     // RFC 3478 graceful restart: advertise the FT Session TLV and
     // retain a failed peer's bindings (§3.3) when enabled.
     engine_cfg.graceful_restart = cfg.ldp_graceful_restart;
@@ -555,25 +802,49 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     // the Arc. The LDP daemon's queue is its [[static.route]] +
     // LDP label bindings (the latter via the FEC mapping table).
     let shutdown = crate::build_shutdown(cfg, &router);
+
+    // SIGHUP-driven reload (issue #92): the LDP daemon now re-applies
+    // the `[[ldp.bind]]` table at runtime instead of returning the
+    // "configuration reload is not supported yet" line. The closure
+    // re-parses the config file (the same `load_config_file` startup
+    // uses), computes the diff between the freshly-parsed `ldp_binds`
+    // and the live `current_binds` set, and pushes one `RebindOp` per
+    // change onto the `pending_rebinds` queue. The pump's drainer
+    // (`LdpDaemon::drain_rebinds`) applies the ops against the engine
+    // and the kernel MPLS mirror on the next iteration.
+    //
+    // The closure captures the shared queue + current-binds set plus
+    // the config path and dialect the daemon was started with
+    // (mirroring the BGP daemon's `reload_config` shape) so a BIRD/
+    // FRR/TOML-loaded daemon re-parses through the same dialect path
+    // startup used. A parse or finalize failure aborts the reload
+    // (the operator's existing config keeps running) and surfaces in
+    // the daemon's log stream and the API `reload` reply.
+    //
+    // The session table, transit bookkeeping and interface set are
+    // out of scope for this slice — those need a real diff/apply pass
+    // (a session-up handler has to re-evaluate the targeted-peer list
+    // against the new config, etc.) and are tracked as a separate
+    // follow-up. The `[[ldp.bind]]` slice is the operator's
+    // highest-frequency reload: a label change, a new FEC, or a
+    // removed FEC all flow through here.
+    let pending_rebinds: Arc<Mutex<Vec<RebindOp>>> = Arc::new(Mutex::new(Vec::new()));
+    let current_binds: Arc<Mutex<BTreeMap<Prefix, GenericLabel>>> =
+        Arc::new(Mutex::new(binds.clone()));
     let runtime = Arc::new(crate::Runtime {
-        reload: Arc::new(|| {
-            // LDP reload is not wired yet — the engine's session
-            // table, LIB, transit bookkeeping and kernel MPLS mirror
-            // all need a real diff/apply pass to re-sync to a fresh
-            // config; for now the operator restarts. The log file is
-            // still re-opened so the operator's `logrotate`
-            // postrotate SIGHUP works on the LDP daemon — the
-            // `reopen_log_file` helper re-opens the path the live
-            // `[logging] file` carries without touching the rest of
-            // the configuration.
-            let mut lines = vec![
-                "ldp: configuration reload is not supported yet; shutdown still works".to_string(),
-            ];
-            match crate::daemon_logger::reopen_log_file() {
-                Ok(()) => lines.push("ldp: log file re-opened (SIGHUP)".to_string()),
-                Err(e) => lines.push(format!("ldp: log file reopen failed: {e}")),
+        reload: Arc::new({
+            let pending_rebinds = Arc::clone(&pending_rebinds);
+            let current_binds = Arc::clone(&current_binds);
+            let config_path = cfg.config_path.clone();
+            let config_dialect = cfg.config_dialect.clone();
+            move || {
+                reload_ldp_binds(
+                    config_path.as_deref(),
+                    config_dialect.as_deref(),
+                    &pending_rebinds,
+                    &current_binds,
+                )
             }
-            lines
         }),
         router: Arc::clone(&router),
         running: Arc::clone(&running),
@@ -658,6 +929,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         conns: HashMap::new(),
         next_conn: 1,
         binds,
+        pending_rebinds,
         peers_up: BTreeSet::new(),
         peer_ports,
         counters,
@@ -834,6 +1106,15 @@ fn bind_ldp_udp_v6(
 impl LdpDaemon {
     /// One main-loop pass: receive, originate, tick, log, transmit.
     fn pump(&mut self, now_ms: u64, now: Instant) {
+        // SIGHUP-driven reload: dispatch_signals already ran the
+        // reload closure (which pushed [`RebindOp`]s to the queue)
+        // before pump() was called. Drain the queue first so the
+        // engine + kernel mirror reflect the freshly-reloaded binds
+        // before any packet pump iteration processes them — a
+        // session that comes up in `handle_events` below sees the
+        // new binds, not the stale ones, and a withdrawal that fires
+        // against an old label matches the engine's current state.
+        self.drain_rebinds();
         self.pump_udp(now);
         self.pump_tcp(now);
         self.pump_link_hellos(now_ms);
@@ -841,6 +1122,81 @@ impl LdpDaemon {
         self.handle_events(now);
         self.flush_tcp();
         self.flush_udp();
+    }
+
+    /// Drain [`Self::pending_rebinds`] and apply each [`RebindOp`]
+    /// against the engine + the kernel MPLS mirror + the live
+    /// [`Self::binds`] map. Called once per pump iteration, after
+    /// `dispatch_signals` ran the reload closure.
+    ///
+    /// The queue is drained under one short lock window (the lock
+    /// is dropped before the engine calls run so a slow `advertise`
+    /// flush doesn't hold the queue closed against a second SIGHUP
+    /// arriving on the signal thread).
+    ///
+    /// Each [`RebindOp`] is applied atomically: the engine call
+    /// (`advertise_mapping` / `withdraw_mapping`), the kernel-mirror
+    /// install/uninstall (Linux only) and the `binds` map update all
+    /// happen together — a failure in one (e.g. kernel mirror
+    /// install) leaves the engine state advanced but the kernel
+    /// mirror behind, which is the same shape as the startup path
+    /// (the daemon's contract is "best-effort install"; the engine
+    /// is the source of truth and the kernel mirror is a
+    /// best-effort dataplane reflection).
+    fn drain_rebinds(&mut self) {
+        let ops: Vec<RebindOp> = {
+            let mut guard = match self.pending_rebinds.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            std::mem::take(guard.as_mut())
+        };
+        if ops.is_empty() {
+            return;
+        }
+        for op in ops {
+            match op {
+                RebindOp::Advertise { prefix, label } => {
+                    self.engine.advertise_mapping(prefix, label);
+                    #[cfg(target_os = "linux")]
+                    {
+                        // A label change for an existing FEC reaches
+                        // us as Withdraw + Advertise, so the prior
+                        // tail install (under the old label) was
+                        // already uninstalled by the matching
+                        // RebindOp::Withdraw. A pure add (new FEC)
+                        // installs a fresh tail here; a label-change
+                        // (the `Occupied` arm of the entry) records
+                        // the new label so a future withdraw
+                        // uninstalls the right one. The kernel route
+                        // is already in place under the new label
+                        // (the Withdraw arm deleted the old one).
+                        match self.tails.entry(prefix) {
+                            std::collections::hash_map::Entry::Occupied(mut e) => {
+                                e.insert(label);
+                            }
+                            std::collections::hash_map::Entry::Vacant(_) => {
+                                self.install_tail(&prefix, label);
+                            }
+                        }
+                    }
+                    self.binds.insert(prefix, label);
+                }
+                RebindOp::Withdraw { prefix, label: _ } => {
+                    self.engine.withdraw_mapping(prefix);
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.uninstall_tail(&prefix);
+                    }
+                    self.binds.remove(&prefix);
+                }
+            }
+        }
+        // `current_binds` is the closure's source of truth and is
+        // updated by the closure before pushing ops; the pump's
+        // `binds` field is now in sync with it. No explicit sync
+        // here — the closure already wrote the target state to
+        // `current_binds` and we applied the diff.
     }
 
     /// Feed every pending UDP datagram into the engine (both address
@@ -1344,7 +1700,7 @@ impl LdpDaemon {
                         // and for bound FECs that already carry a head,
                         // so IP traffic enters the LSP at the current
                         // next hop. Bound FECs keep their own head.
-                        let bound = self.binds.iter().any(|(p, _)| *p == prefix);
+                        let bound = self.binds.contains_key(&prefix);
                         if !bound || self.heads.contains_key(&prefix) {
                             self.install_head_route(prefix, out_label, next_hop);
                         }
@@ -1731,3 +2087,7 @@ fn down_reason_label(reason: SessionDownReason) -> &'static str {
         SessionDownReason::LocalShutdown => "local shutdown",
     }
 }
+
+#[cfg(test)]
+#[path = "daemon_ldp_tests.rs"]
+mod tests;
