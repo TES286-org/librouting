@@ -1394,3 +1394,220 @@ fn trait_adapter_surfaces_end_of_rib() {
          to Action::None"
     );
 }
+
+// ===== RFC 7313 §3.2 receive-side BoRR / EoRR demarcation =====
+//
+// `enhanced_route_refresh_emits_demarcation_messages` (above) covers the
+// *send* side: the FSM produces a BoRR/EoRR on the wire when the local
+// config calls `begin_enhanced_route_refresh` /
+// `end_enhanced_route_refresh`. The receive side previously dropped
+// the demarcation subtypes silently — only `Normal` produced an action
+// — so an embedder that negotiated RFC 7313 and relied on the
+// demarcation to coordinate a route-refresh response saw the markers
+// vanish at the wire boundary. The fix dispatches `BeginOfRib` /
+// `EndOfRib` through the FSM receive arm; these tests pin the contract.
+
+/// A negotiated BoRR received by peer `a` surfaces through
+/// `BgpPeer::step()` as `BgpAction::BeginOfRouteRefresh(family)`. The
+/// action is only emitted when both speakers advertised the Enhanced
+/// Route Refresh capability (RFC 7313 §3.1) — a peer that sends a BoRR
+/// without negotiating the capability is silently ignored per §3.2.
+#[test]
+fn enhanced_route_refresh_borr_emits_action_when_negotiated() {
+    use crate::message::route_refresh::RouteRefresh;
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    // Default `PeerConfig::new` enables `enhanced_rr`; the OPEN
+    // exchange advertises the capability on both sides, so the
+    // negotiation must succeed.
+    assert!(a.enhanced_route_refresh_negotiated());
+    assert!(b.enhanced_route_refresh_negotiated());
+    let actions = a.step(BgpEvent::Message(BgpMessage::RouteRefresh(
+        RouteRefresh::begin_of_rib(NlriFamily::IPV4_UNICAST),
+    )));
+    let found = actions.iter().any(|a| {
+        matches!(
+            a,
+            BgpAction::BeginOfRouteRefresh(NlriFamily { afi: 1, safi: 1 })
+        )
+    });
+    assert!(
+        found,
+        "the FSM must surface a negotiated BoRR as \
+         BgpAction::BeginOfRouteRefresh; if this assertion fails, the \
+         receive-side dispatch has regressed to silently dropping the \
+         demarcation marker (issue #92 fix)"
+    );
+}
+
+/// A negotiated EoRR received by peer `a` surfaces through
+/// `BgpPeer::step()` as `BgpAction::EndOfRib(family)`. RFC 7313 §3.3
+/// says the EoRR is treated as the End-of-RIB marker (RFC 4724 §4) for
+/// the family, so the existing action runs the same helper in the
+/// router (`on_end_of_rib`): the GR-retention purge for the family
+/// ends, and stale routes the peer did not refresh are removed.
+#[test]
+fn enhanced_route_refresh_eorr_emits_end_of_rib_action_when_negotiated() {
+    use crate::message::route_refresh::RouteRefresh;
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    assert!(a.enhanced_route_refresh_negotiated());
+    let actions = a.step(BgpEvent::Message(BgpMessage::RouteRefresh(
+        RouteRefresh::end_of_rib(NlriFamily::IPV4_UNICAST),
+    )));
+    let found = actions
+        .iter()
+        .any(|a| matches!(a, BgpAction::EndOfRib(NlriFamily { afi: 1, safi: 1 })));
+    assert!(
+        found,
+        "the FSM must surface a negotiated EoRR as BgpAction::EndOfRib \
+         (reused for RFC 4724 §4 implicit EoR marker); if this \
+         assertion fails, the receive-side dispatch has regressed to \
+         silently dropping the demarcation marker (issue #92 fix)"
+    );
+}
+
+/// A peer that did not negotiate the Enhanced Route Refresh
+/// capability must not produce `BeginOfRouteRefresh` /
+/// `EndOfRib` actions when it receives a BoRR/EoRR — RFC 7313 §3.2
+/// says the receiver silently ignores subtypes it does not
+/// recognise. Without the capability, the demarcation markers stay
+/// inert on the wire (the existing behaviour).
+#[test]
+fn enhanced_route_refresh_demarcation_silently_ignored_when_not_negotiated() {
+    use crate::message::route_refresh::RouteRefresh;
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.enhanced_rr = false;
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.enhanced_rr = false;
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+    // The capability was not negotiated on either side.
+    assert!(!a.enhanced_route_refresh_negotiated());
+    assert!(!b.enhanced_route_refresh_negotiated());
+    // A BoRR from the peer must not produce an action.
+    let actions = a.step(BgpEvent::Message(BgpMessage::RouteRefresh(
+        RouteRefresh::begin_of_rib(NlriFamily::IPV4_UNICAST),
+    )));
+    let borr = actions
+        .iter()
+        .any(|a| matches!(a, BgpAction::BeginOfRouteRefresh(_)));
+    let eorr_as_borr = actions.iter().any(|a| matches!(a, BgpAction::EndOfRib(_)));
+    assert!(
+        !borr && !eorr_as_borr,
+        "the FSM must silently ignore a BoRR from a peer that did not \
+         negotiate the Enhanced Route Refresh capability (RFC 7313 §3.2)"
+    );
+    // Same for an EoRR.
+    let actions = a.step(BgpEvent::Message(BgpMessage::RouteRefresh(
+        RouteRefresh::end_of_rib(NlriFamily::IPV4_UNICAST),
+    )));
+    let eorr = actions.iter().any(|a| matches!(a, BgpAction::EndOfRib(_)));
+    assert!(
+        !eorr,
+        "the FSM must silently ignore an EoRR from a peer that did \
+         not negotiate the Enhanced Route Refresh capability (RFC \
+         7313 §3.2)"
+    );
+}
+
+/// A negotiated BoRR surfaces through the `StateMachine` trait
+/// adapter as `Action::EmitEvent(Event::BeginOfRouteRefresh { .. })`,
+/// not `Action::None`. Mirrors `trait_adapter_surfaces_route_refresh`
+/// for the new RFC 7313 §3.2 demarcation marker.
+#[test]
+fn trait_adapter_surfaces_begin_of_route_refresh() {
+    use crate::message::route_refresh::RouteRefresh;
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    assert!(a.enhanced_route_refresh_negotiated());
+    let actions = trait_step(
+        &mut a,
+        BgpEvent::Message(BgpMessage::RouteRefresh(RouteRefresh::begin_of_rib(
+            NlriFamily::IPV4_UNICAST,
+        ))),
+    );
+    let found = actions.iter().any(|a| {
+        matches!(
+            a,
+            Action::EmitEvent(lr_core::event::Event::BeginOfRouteRefresh {
+                family: NlriFamily { afi: 1, safi: 1 },
+                session: 0,
+            })
+        )
+    });
+    assert!(
+        found,
+        "the trait adapter must surface BeginOfRouteRefresh as \
+         Action::EmitEvent(Event::BeginOfRouteRefresh); if this \
+         assertion fails, the adapter has regressed to mapping \
+         BgpAction::BeginOfRouteRefresh to Action::None"
+    );
+}
+
+/// A negotiated EoRR surfaces through the `StateMachine` trait
+/// adapter as `Action::EmitEvent(Event::EndOfRib { .. })` — the same
+/// shape the implicit EoR marker (RFC 4724 §4) takes.
+#[test]
+fn trait_adapter_surfaces_eorr_as_end_of_rib() {
+    use crate::message::route_refresh::RouteRefresh;
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    assert!(a.enhanced_route_refresh_negotiated());
+    let actions = trait_step(
+        &mut a,
+        BgpEvent::Message(BgpMessage::RouteRefresh(RouteRefresh::end_of_rib(
+            NlriFamily::IPV4_UNICAST,
+        ))),
+    );
+    let found = actions.iter().any(|a| {
+        matches!(
+            a,
+            Action::EmitEvent(lr_core::event::Event::EndOfRib {
+                family: NlriFamily { afi: 1, safi: 1 },
+                session: 0,
+            })
+        )
+    });
+    assert!(
+        found,
+        "the trait adapter must surface a negotiated EoRR as \
+         Action::EmitEvent(Event::EndOfRib); if this assertion fails, \
+         the adapter has regressed to mapping BgpAction::EndOfRib (for \
+         the EoRR subtype) to Action::None"
+    );
+}
+
+/// A Normal ROUTE-REFRESH received from a peer that did *not*
+/// negotiate the Enhanced Route Refresh capability still produces
+/// `BgpAction::RouteRefreshRequested` — RFC 2918 §2 (the base
+/// capability) is the precondition; the demarcation subtypes are the
+/// only piece the Enhanced Route Refresh capability adds. This test
+/// pins the contract so the receive-side fix does not regress the
+/// `Normal` path.
+#[test]
+fn route_refresh_normal_subtype_still_dispatched_without_enhanced_rr() {
+    use crate::message::route_refresh::RouteRefresh;
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.enhanced_rr = false;
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.enhanced_rr = false;
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+    assert!(!a.enhanced_route_refresh_negotiated());
+    assert!(a.route_refresh_negotiated());
+    let actions = a.step(BgpEvent::Message(BgpMessage::RouteRefresh(
+        RouteRefresh::new(NlriFamily::IPV4_UNICAST),
+    )));
+    let found = actions
+        .iter()
+        .any(|a| matches!(a, BgpAction::RouteRefreshRequested(_)));
+    assert!(
+        found,
+        "the FSM must still surface a Normal ROUTE-REFRESH as \
+         BgpAction::RouteRefreshRequested when the Enhanced Route \
+         Refresh capability was not negotiated; if this assertion \
+         fails, the receive-side dispatch has regressed the RFC 2918 \
+         base capability path"
+    );
+}
