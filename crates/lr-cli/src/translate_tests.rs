@@ -1172,7 +1172,7 @@ fn frr_aggregate_address_maps_to_aggregate_table() {
 }
 
 #[test]
-fn frr_aggregate_address_summary_only_carries_unmapped_note() {
+fn frr_aggregate_address_summary_only_carries_through() {
     let toml = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
@@ -1184,15 +1184,73 @@ fn frr_aggregate_address_summary_only_carries_unmapped_note() {
     assert_eq!(cfg.aggregates.len(), 1);
     assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
     assert!(
-        toml.contains(
-            "# UNMAPPED: aggregate-address 192.0.2.0/24 — summary-only carried but lr's [[aggregate]] models only the prefix"
-        ),
-        "summary-only must surface as an UNMAPPED note"
+        cfg.aggregates[0].summary_only,
+        "summary-only must round-trip to the [[aggregate]] summary_only key"
+    );
+    assert!(
+        !cfg.aggregates[0].as_set,
+        "summary-only alone must not set as_set"
+    );
+    assert!(
+        toml.contains("summary_only = true"),
+        "rendered TOML must carry summary_only = true"
+    );
+    assert!(
+        !toml.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — summary-only"),
+        "summary-only is no longer unmapped"
     );
 }
 
 #[test]
-fn frr_aggregate_address_as_set_and_route_map_notes() {
+fn frr_aggregate_address_as_set_carries_through() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              aggregate-address 192.0.2.0/24 as-set\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.aggregates.len(), 1);
+    assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
+    assert!(
+        cfg.aggregates[0].as_set,
+        "as-set must round-trip to the [[aggregate]] as_set key"
+    );
+    assert!(
+        !cfg.aggregates[0].summary_only,
+        "as-set alone must not set summary_only"
+    );
+    assert!(
+        toml.contains("as_set = true"),
+        "rendered TOML must carry as_set = true"
+    );
+    assert!(
+        !toml.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — as-set"),
+        "as-set is no longer unmapped"
+    );
+}
+
+#[test]
+fn frr_aggregate_address_summary_only_and_as_set_combine() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              aggregate-address 192.0.2.0/24 summary-only as-set\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.aggregates.len(), 1);
+    assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
+    assert!(cfg.aggregates[0].summary_only);
+    assert!(cfg.aggregates[0].as_set);
+    assert!(toml.contains("summary_only = true"));
+    assert!(toml.contains("as_set = true"));
+}
+
+#[test]
+fn frr_aggregate_address_route_map_carries_unmapped_note() {
     let toml = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
@@ -1203,13 +1261,18 @@ fn frr_aggregate_address_as_set_and_route_map_notes() {
     let cfg = roundtrip(&toml);
     assert_eq!(cfg.aggregates.len(), 1);
     assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
-    assert!(
-        toml.contains("aggregate-address 192.0.2.0/24 — as-set, route-map carried"),
-        "as-set + route-map must surface as a single UNMAPPED note"
-    );
+    assert!(cfg.aggregates[0].as_set);
+    // `route-map NAME` carries an unmapped note — lr's [[aggregate]]
+    // has no per-aggregate route-map surface today.
     assert!(
         toml.contains("route-map RM-AGG — lr's [[aggregate]] has no per-aggregate attribute hook"),
         "route-map NAME must surface its own UNMAPPED note"
+    );
+    // The summary-only/as-set qualifiers are mapped (no UNMAPPED note
+    // for them); only the route-map is unmapped.
+    assert!(
+        !toml.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — as-set"),
+        "as-set is no longer unmapped; only route-map is"
     );
 }
 

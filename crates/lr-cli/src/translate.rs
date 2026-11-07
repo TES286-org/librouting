@@ -61,8 +61,12 @@
 //!   per-peer `route_reflector_client = true`.
 //! - FRR `aggregate-address A.B.C.D/M [summary-only] [as-set]
 //!   [route-map NAME]` → `[[aggregate]]` rows (RFC 4271 §9.2.2.2);
-//!   `summary-only`/`as-set`/`route-map` carry unmapped notes — lr's
-//!   `[[aggregate]]` models only the prefix today.
+//!   `summary-only` (suppress the specifics from the Adj-RIB-Out)
+//!   and `as-set` (build an `AS_SET` segment in the aggregate's
+//!   AS_PATH) carry through to the `summary_only` / `as_set` keys;
+//!   `route-map NAME` (per-aggregate attribute hook) carries an
+//!   unmapped note — lr's `[[aggregate]]` has no per-aggregate
+//!   route-map surface today.
 //! - FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
 //!   `router bgp`/`router ospf`/`router ospfv3`) → `[[redistribute]]`
 //!   rows. Only `bgp`/`ospf`/`ospf3`/`babel` sources map (the
@@ -288,10 +292,12 @@ pub(super) struct ConfigOut {
     /// silent.
     ospf_areas: Vec<(OspfAreaSpec, Vec<String>)>,
     ospf_ifaces: Vec<(OspfIfSpec, Vec<String>)>,
-    /// FRR `aggregate-address A.B.C.D/M [summary-only]` (RFC 4271
-    /// §9.2.2.2) → `[[aggregate]]` rows. `summary-only`, `as-set` and
-    /// `route-map NAME` carry unmapped notes — lr's `[[aggregate]]`
-    /// only models the prefix today.
+    /// FRR `aggregate-address A.B.C.D/M [summary-only] [as-set]
+    /// [route-map NAME]` (RFC 4271 §9.2.2.2) → `[[aggregate]]` rows.
+    /// `summary-only` and `as-set` carry through to the row's
+    /// `summary_only` / `as_set` keys; `route-map NAME` carries an
+    /// unmapped note — lr's `[[aggregate]]` has no per-aggregate
+    /// route-map surface today.
     aggregates: Vec<AggregateSpec>,
     /// FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
     /// `router bgp` + `address-family …`) → `[[redistribute]]` rows.
@@ -2168,27 +2174,32 @@ fn translate_frr(text: &str) -> ConfigOut {
             }
             // `aggregate-address A.B.C.D/M [summary-only] [as-set]
             // [route-map NAME]` (RFC 4271 §9.2.2.2, FRR `router bgp`
-            // + `address-family …`). lr's `[[aggregate]]` models only
-            // the prefix — the aggregate is originated with a zeroed
-            // AS_PATH plus ATOMIC_AGGREGATE and AGGREGATOR while any
-            // more-specific route is present. `summary-only` (suppress
-            // the specifics), `as-set` (include AS-SET in the
-            // aggregate's AS_PATH) and `route-map NAME` (per-aggregate
-            // attribute hook) carry unmapped notes — the lr schema has
-            // no knobs for them today.
+            // + `address-family …`). lr's `[[aggregate]]` carries the
+            // `summary_only` and `as_set` knobs (mirrors of the FRR
+            // qualifiers); the aggregate is originated while any more-
+            // specific route is present, suppressed from the Adj-RIB-Out
+            // toward every peer when `summary_only` is set, and the
+            // AS_PATH carries an `AS_SET` of contributing ASes when
+            // `as_set` is set. `route-map NAME` (per-aggregate attribute
+            // hook) carries an unmapped note — the lr schema has no
+            // per-aggregate route-map surface today.
             "aggregate-address" if tokens.len() >= 2 && in_router_bgp => {
                 let prefix = tokens[1].to_string();
-                let mut notes: Vec<&str> = Vec::new();
+                let mut summary_only = false;
+                let mut as_set = false;
                 let mut i = 2;
                 while i < tokens.len() {
                     match tokens[i] {
-                        "summary-only" | "as-set" => {
-                            notes.push(tokens[i]);
+                        "summary-only" => {
+                            summary_only = true;
+                            i += 1;
+                        }
+                        "as-set" => {
+                            as_set = true;
                             i += 1;
                         }
                         "route-map" => {
                             if let Some(name) = tokens.get(i + 1) {
-                                notes.push("route-map");
                                 out.unmapped_global.push(format!(
                                     "aggregate-address {prefix} route-map {name} — lr's [[aggregate]] has no per-aggregate attribute hook; route-map dropped"
                                 ));
@@ -2203,14 +2214,10 @@ fn translate_frr(text: &str) -> ConfigOut {
                         _ => i += 1,
                     }
                 }
-                if !notes.is_empty() {
-                    out.unmapped_global.push(format!(
-                        "aggregate-address {prefix} — {} carried but lr's [[aggregate]] models only the prefix",
-                        notes.join(", ")
-                    ));
-                }
                 out.aggregates.push(AggregateSpec {
                     prefix: Some(prefix),
+                    summary_only,
+                    as_set,
                 });
             }
             // `redistribute <proto> [metric M] [route-map NAME]` —
@@ -3340,16 +3347,25 @@ fn render(out: ConfigOut) -> String {
             notes.join("; ")
         ));
     }
-    // FRR `aggregate-address A.B.C.D/M` (RFC 4271 §9.2.2.2). The lr
-    // daemon originates the aggregate while any more-specific route
-    // is present and withdraws it when the last specific disappears.
-    // `summary-only`/`as-set`/`route-map` qualifiers were already
-    // noted as unmapped at parse time — only the prefix reaches the
-    // `[[aggregate]]` row.
+    // FRR `aggregate-address A.B.C.D/M [summary-only] [as-set]
+    // [route-map NAME]` (RFC 4271 §9.2.2.2). The lr daemon originates
+    // the aggregate while any more-specific route is present and
+    // withdraws it when the last specific disappears. `summary-only`
+    // (suppress the specifics from the Adj-RIB-Out) and `as-set`
+    // (build an `AS_SET` segment in the aggregate's AS_PATH) carry
+    // through to the `summary_only` / `as_set` keys on the
+    // `[[aggregate]]` row. `route-map NAME` was already noted as
+    // unmapped at parse time.
     for agg in &out.aggregates {
         s.push_str("[[aggregate]]\n");
         if let Some(p) = &agg.prefix {
             s.push_str(&format!("prefix = {}\n", toml_str(p)));
+        }
+        if agg.summary_only {
+            s.push_str("summary_only = true\n");
+        }
+        if agg.as_set {
+            s.push_str("as_set = true\n");
         }
         s.push('\n');
     }
