@@ -16,6 +16,7 @@ use core::fmt;
 use crate::capabilities::Capability;
 use crate::codec::BgpCodec;
 use crate::error::{BgpCeaseSubcode, BgpError, BgpErrorCode, BgpNotification};
+use crate::extensions::asn4;
 use crate::extensions::extended_next_hop::ExtNextHopTuple;
 use crate::message::{keepalive::Keepalive, open::Open, update::Update, BgpMessage};
 use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
@@ -580,8 +581,15 @@ impl BgpPeer {
 
     fn enqueue_open(&mut self) {
         let mut caps: Vec<Capability> = Vec::new();
-        if self.cfg.asn4 {
-            caps.push(Capability::four_octet_as(self.cfg.local_as.as_u32()));
+        // RFC 4893 / RFC 6793 4-byte AS capability: the local knob
+        // (`cfg.asn4`) gates advertisement. The capability value is
+        // the local AS (even when it fits in 2 bytes — RFC 6793 §4.2.2
+        // lets the peer use the 4-byte form). The helper centralises
+        // the construction so a future change to the capability shape
+        // lands in one place (mirrors `enhanced_rr::open_capability`
+        // / `long_lived::open_capability`).
+        if let Some(cap) = asn4::open_capability(&self.cfg) {
+            caps.push(cap);
         }
         for fam in &self.cfg.mp_families {
             caps.push(Capability::multiprotocol(fam.afi, fam.safi));
@@ -887,18 +895,25 @@ impl BgpPeer {
         // applied to the codec only — `cfg.asn4` keeps the configured
         // value so a later re-establishment re-negotiates fresh (RFC 6793
         // negotiation is per-session).
-        let peer_offered_as4 = caps
-            .iter()
-            .any(|c| c.code == crate::capabilities::CapabilityCode::FourOctetAs);
-        let session_asn4 = self.cfg.asn4 && peer_offered_as4;
+        //
+        // `asn4::negotiated` requires the local knob and any peer AS4
+        // capability (the value is read separately via `asn4::peer_as4`,
+        // which validates the length and falls back to the OPEN's 2-byte
+        // field when the value is malformed). The helper centralises
+        // the negotiation so a future change to the posture lands in
+        // one place (mirrors `enhanced_rr::negotiated`).
+        let session_asn4 = asn4::negotiated(&self.cfg, &caps);
         self.codec.set_asn4(session_asn4);
-        if let Some(c) = caps
-            .iter()
-            .find(|c| c.code == crate::capabilities::CapabilityCode::FourOctetAs)
-        {
-            if let Some(as4) = c.as_four_octet() {
-                peer_as = Asn(as4);
-            }
+        // RFC 6793 §4: when the peer's AS does not fit in 2 bytes,
+        // the OPEN's 2-byte `My Autonomous System` field is set to
+        // `AS_TRANS` (23456) and the real value rides the 4-byte AS
+        // capability. `asn4::peer_as4` extracts that value (returns
+        // `None` when the capability is absent or malformed, so the
+        // 2-byte `peer_as` set above stays). The helper follows the
+        // "first occurrence wins" rule on a duplicate, matching
+        // RFC 6793 §4's receiver-side prescription.
+        if let Some(as4) = asn4::peer_as4(&caps) {
+            peer_as = Asn(as4);
         }
         if peer_as != self.cfg.peer_as && !self.cfg.confederation_member {
             self.enqueue_notification(BgpErrorCode::Open, 2);
