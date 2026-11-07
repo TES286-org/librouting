@@ -211,6 +211,14 @@ pub(crate) struct OspfIfSpec {
     pub cost: Option<u16>,
     pub hello_interval: Option<u16>,
     pub dead_interval: Option<u32>,
+    /// RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`, FRR
+    /// `retransmit-interval`) in seconds. `None` inherits the global
+    /// [`DaemonConfig::ospf_rxmt_interval`] (which itself defaults to
+    /// 5 s, the BIRD/FRR default). The daemon converts to ms at
+    /// session-build time (BIRD/FRR expose the knob in seconds; the
+    /// underlying [`lr_ospf::exchange::DbExchange`] clock is
+    /// millisecond-grained).
+    pub rxmt_interval: Option<u32>,
     /// DR election priority (default 1).
     pub priority: Option<u8>,
     /// RFC 2328 §9.1 network type: "p2p" (default) or "broadcast".
@@ -1092,6 +1100,15 @@ pub(crate) struct DaemonConfig {
     pub ospf_hello_interval: u16,
     /// OSPF dead interval default (seconds; RFC 2328 default 4× hello).
     pub ospf_dead_interval: u32,
+    /// OSPF retransmit interval default (seconds; RFC 2328 Appendix B
+    /// `RxmtInterval`, BIRD `rxmtint`, FRR `retransmit-interval`). The
+    /// default 5 s matches BIRD/FRR and the
+    /// [`lr_ospf::exchange::RXMT_INTERVAL_MS`] constant; per-interface
+    /// overrides land in [`OspfIfSpec::rxmt_interval`]. The daemon
+    /// converts to ms at session-build time (BIRD/FRR expose the knob
+    /// in seconds; the underlying `DbExchange::poll` clock is
+    /// millisecond-grained).
+    pub ospf_rxmt_interval: u32,
     /// Default area for interfaces without one. Set by `--ospf-area` or the
     /// `[ospf] area = N` config key (the file-side counterpart of the flag);
     /// defaults to 0 (the backbone).
@@ -1536,6 +1553,7 @@ impl DaemonConfig {
             ospf_version: "v2".to_string(),
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
+            ospf_rxmt_interval: 5,
             ospf_area: 0,
             ospf_sr_receive: false,
             ospf_srv6_receive: false,
@@ -3943,6 +3961,27 @@ fn apply_ospf_key(
                     .parse()
                     .map_err(|_| format!("bad dead_interval '{value}'"))?;
             }
+            // RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`, FRR
+            // `retransmit-interval`). Whole seconds; the daemon
+            // multiplies by 1_000 at session-build time so the
+            // underlying `DbExchange::poll` clock (millisecond-grained)
+            // reads the right gap. A 0 s value is rejected here so the
+            // poll loop never busy-spins — `OspfRuntime::new` would
+            // otherwise clamp a 0 ms override to 1 ms (the same
+            // `DbExchange::with_rxmt_interval` contract), but a 0 in
+            // the operator's config is almost certainly a typo.
+            "rxmt_interval" | "retransmit_interval" => {
+                let secs: u32 = value
+                    .parse()
+                    .map_err(|_| format!("bad rxmt_interval '{value}' (expected whole seconds)"))?;
+                if secs == 0 {
+                    return Err(
+                        "rxmt_interval 0 is invalid — use a positive whole-seconds value"
+                            .to_string(),
+                    );
+                }
+                cfg.ospf_rxmt_interval = secs;
+            }
             // Default area for interfaces without an explicit one. Mirrors
             // `--ospf-area` so the daemon can be fully configured from a
             // file instead of only the command line (issue #41 §5).
@@ -4123,6 +4162,26 @@ fn apply_ospf_key(
                             .parse()
                             .map_err(|_| format!("bad dead_interval '{value}'"))?,
                     );
+                }
+                // RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`,
+                // FRR `retransmit-interval`). Whole seconds; the
+                // daemon multiplies by 1_000 at session-build time.
+                // `None` inherits [`DaemonConfig::ospf_rxmt_interval`].
+                // A 0 s value is rejected for the same reason as the
+                // global key — see the `ospf.rxmt_interval` arm above.
+                "rxmt_interval" | "retransmit_interval" => {
+                    let secs: u32 = value
+                        .parse()
+                        .map_err(|_| {
+                            format!("bad rxmt_interval '{value}' (expected whole seconds)")
+                        })?;
+                    if secs == 0 {
+                        return Err(
+                            "rxmt_interval 0 is invalid — use a positive whole-seconds value"
+                                .to_string(),
+                        );
+                    }
+                    iface.rxmt_interval = Some(secs);
                 }
                 "priority" => {
                     iface.priority = Some(
@@ -5312,6 +5371,17 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--ospf-dead-interval" if i + 1 < args.len() => {
                 cfg.ospf_dead_interval = args[i + 1].parse().unwrap_or(40);
+                i += 2;
+            }
+            // RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`, FRR
+            // `retransmit-interval`). Whole seconds; the daemon multiplies
+            // by 1_000 at session-build time. A 0 s value falls back to
+            // the default 5 s — the same fail-safe the global TOML
+            // parser rejects as a typo, but the CLI parser keeps the
+            // historical "unwrap_or" pattern every other OSPF CLI flag
+            // uses here so a bad CLI value still starts the daemon.
+            "--ospf-rxmt-interval" | "--ospf-retransmit-interval" if i + 1 < args.len() => {
+                cfg.ospf_rxmt_interval = args[i + 1].parse().unwrap_or(5).max(1);
                 i += 2;
             }
             // RFC 3623 graceful restart (restarting + helper sides).

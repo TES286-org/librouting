@@ -350,6 +350,14 @@ struct Ospf3Interface {
     mtu: u16,
     hello_interval: u16,
     dead_interval: u32,
+    /// RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`, FRR
+    /// `retransmit-interval`) in milliseconds. Resolved from the
+    /// per-interface `OspfIfSpec::rxmt_interval` (seconds) → global
+    /// `DaemonConfig::ospf_rxmt_interval` (seconds) → 5 s default,
+    /// multiplied by 1_000 so the underlying `DbExchange::poll` clock
+    /// reads the right gap. OSPFv3 carries the same per-interface
+    /// constant as v2 (RFC 5340 §4.2.1).
+    rxmt_interval_ms: u64,
     /// The kernel ifindex — our OSPFv3 Interface ID on this link
     /// (FRR convention, and the value the kernel mirror needs).
     interface_id: u32,
@@ -639,7 +647,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                 log_info!(
                     Component::Ospfv3,
                     "ospf3 interface {} area {} — ifindex {} (interface id), \
-                     link-local {}, {} global prefix(es), cost {}, hello {}s dead {}s, {}",
+                     link-local {}, {} global prefix(es), cost {}, hello {}s dead {}s rxmt {}s, {}",
                     iface.name,
                     area_label(iface.area),
                     iface.interface_id,
@@ -648,6 +656,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                     iface.cost,
                     iface.hello_interval,
                     iface.dead_interval,
+                    iface.rxmt_interval_ms / 1_000,
                     match iface.network_type {
                         OspfNetworkType::PointToPoint => "point-to-point",
                         OspfNetworkType::Broadcast => "broadcast",
@@ -780,6 +789,15 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         }
     }
     let iface_mtu = daemon.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
+    // Same anchor-session note as v2: the area-level anchor reflects
+    // the operator's first-interface RxmtInterval; per-neighbor
+    // overrides land in the per-neighbor builder below. The anchor is a
+    // Loc-RIB entry, so its RxmtInterval is informational only.
+    let iface_rxmt_ms = daemon
+        .interfaces
+        .first()
+        .map(|i| i.rxmt_interval_ms)
+        .unwrap_or(u64::from(cfg.ospf_rxmt_interval.max(1)) * 1_000);
     {
         let router_arc = Arc::clone(&daemon.router);
         let mut router = router_arc.write().unwrap();
@@ -800,7 +818,11 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             if daemon.anchors.contains_key(&area) {
                 continue;
             }
-            match router.add_session(SessionConfig::ospfv3(rid, area).with_ospf_mtu(iface_mtu)) {
+            match router.add_session(
+                SessionConfig::ospfv3(rid, area)
+                    .with_ospf_mtu(iface_mtu)
+                    .with_ospf_rxmt_interval(iface_rxmt_ms),
+            ) {
                 Ok(h) => {
                     daemon.anchors.insert(area, h);
                 }
@@ -1070,6 +1092,16 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
         .dead_interval
         .unwrap_or(cfg.ospf_dead_interval)
         .max(u32::from(hello));
+    // RFC 2328 Appendix B `RxmtInterval` (carried over by RFC 5340
+    // §4.2.1 for OSPFv3). BIRD/FRR expose the knob in seconds; the
+    // underlying `DbExchange::poll` clock is millisecond-grained so
+    // multiply by 1_000. A 0 s value is clamped to 1 ms inside
+    // `DbExchange::with_rxmt_interval` (matches the
+    // `SessionConfig::with_ospf_rxmt_interval` contract) so the poll
+    // loop never busy-spins; the TOML / CLI parser rejects 0 s
+    // upstream so this is defense-in-depth only.
+    let rxmt_secs = spec.rxmt_interval.unwrap_or(cfg.ospf_rxmt_interval).max(1);
+    let rxmt_interval_ms = u64::from(rxmt_secs) * 1_000;
     // RFC 2328 §9.1 network type (the §9.4 election applies only on
     // broadcast segments; RFC 5340 §4.1.2 keeps the v2 algorithm).
     let network_type = match spec.network_type.as_deref() {
@@ -1110,6 +1142,7 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
         mtu: iface_mtu,
         hello_interval: hello,
         dead_interval: dead,
+        rxmt_interval_ms,
         interface_id,
         link_local,
         prefixes,
@@ -1433,7 +1466,8 @@ impl Ospf3Daemon {
                     .map(|iface| {
                         let cfg = SessionConfig::ospfv3(self.router_id, area)
                             .with_ospf_mtu(mtu)
-                            .with_ospf_network_type(iface.network_type);
+                            .with_ospf_network_type(iface.network_type)
+                            .with_ospf_rxmt_interval(iface.rxmt_interval_ms);
                         match iface.network_type {
                             OspfNetworkType::Broadcast => cfg
                                 .with_ospf_interface_ip(self.router_id.as_u32())

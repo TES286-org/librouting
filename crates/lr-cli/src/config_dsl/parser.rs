@@ -151,6 +151,8 @@ fn unit_scale(section: &str, key: &str) -> Option<Scale> {
             | "helper_grace_cap"
             | "dead_interval"
             | "hello_interval"
+            | "rxmt_interval"
+            | "retransmit_interval"
             | "keepalive_time"
             | "link_hold_time"
             | "targeted_hold_time"

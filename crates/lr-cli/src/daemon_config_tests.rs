@@ -928,6 +928,103 @@ fn ospf_tables_parse() {
 }
 
 #[test]
+fn ospf_rxmt_interval_global_and_per_interface_parse() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    parse_toml_subset(
+        "[ospf]\nrxmt_interval = 10\n\n\
+         [[ospf.interface]]\nname = \"eth0\"\nrxmt_interval = 30\n\n\
+         [[ospf.interface]]\nname = \"eth1\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    // Global default — BIRD `rxmtint 10` / FRR `retransmit-interval 10`
+    // (RFC 2328 Appendix B `RxmtInterval`).
+    assert_eq!(cfg.ospf_rxmt_interval, 10, "global rxmt_interval parses");
+    // Per-interface override on eth0; eth1 inherits the global default.
+    assert_eq!(
+        cfg.ospf_interfaces[0].rxmt_interval,
+        Some(30),
+        "per-interface override parses"
+    );
+    assert_eq!(
+        cfg.ospf_interfaces[1].rxmt_interval, None,
+        "absent per-interface rxmt_interval leaves the field unset \
+         (the daemon falls back to the global default at resolve time)"
+    );
+    assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+}
+
+#[test]
+fn ospf_rxmt_interval_alias_retransmit_interval_is_accepted() {
+    // The TOML parser accepts both `rxmt_interval` (lr's native name)
+    // and `retransmit_interval` (FRR's snake-cased `retransmit-interval`
+    // key, mirrored for operator familiarity) so a config that came in
+    // through `lr translate frr` keeps the field name the source
+    // operator recognizes.
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    parse_toml_subset(
+        "[ospf]\nretransmit_interval = 8\n\n\
+         [[ospf.interface]]\nname = \"eth0\"\nretransmit_interval = 15\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(
+        cfg.ospf_rxmt_interval, 8,
+        "alias `retransmit_interval` parses for the global key"
+    );
+    assert_eq!(
+        cfg.ospf_interfaces[0].rxmt_interval,
+        Some(15),
+        "alias `retransmit_interval` parses for the per-interface key"
+    );
+}
+
+#[test]
+fn ospf_rxmt_interval_zero_is_rejected() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    let err = parse_toml_subset("[ospf]\nrxmt_interval = 0\n", &mut cfg).unwrap_err();
+    assert!(
+        err.contains("rxmt_interval 0 is invalid"),
+        "expected a 0 s rejection; got: {err}"
+    );
+}
+
+#[test]
+fn ospf_rxmt_interval_per_interface_zero_is_rejected() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    let err = parse_toml_subset(
+        "[[ospf.interface]]\nname = \"eth0\"\nrxmt_interval = 0\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("rxmt_interval 0 is invalid"),
+        "expected a 0 s per-interface rejection; got: {err}"
+    );
+}
+
+#[test]
+fn ospf_rxmt_interval_defaults_to_bird_frr_5s() {
+    // The BIRD/FRR default `RxmtInterval` is 5 s (RFC 2328 Appendix B).
+    // The daemon's global default matches so a config that does not
+    // mention `rxmt_interval` behaves the same as a stock BIRD/FRR
+    // daemon — the underlying `DbExchange::with_rxmt_interval` clamps
+    // 0 to 1 ms (the poll-loop busy-spin guard), but the daemon
+    // surfaces the BIRD/FRR-aligned 5 s default at the config layer.
+    let cfg = DaemonConfig::with_defaults();
+    assert_eq!(
+        cfg.ospf_rxmt_interval, 5,
+        "default matches BIRD `rxmtint` / FRR `retransmit-interval`"
+    );
+}
+
+#[test]
 fn ospf_interface_area_defaults_to_backbone() {
     let mut cfg = DaemonConfig::with_defaults();
     cfg.protocol = "ospf".to_string();
