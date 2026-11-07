@@ -30,6 +30,6 @@ network_type = "broadcast"
 name = "eth1"
 area = 2
 cost = 20
+rxmt_interval = 5
 network_type = "p2p"
-# UNMAPPED: retransmit … — no lr equivalent (BIRD OSPF timer)
 

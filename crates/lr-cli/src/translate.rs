@@ -1479,11 +1479,12 @@ fn absorb_ospf_area_line(
 
 /// One line inside an `interface "…" { … }` block (BIRD 2 OSPF): the
 /// interface parameters from RFC 2328 §C.1 — `cost`, `hello`,
-/// `retransmit`, `transmit delay`, `dead count`, `dead interval`,
-/// `wait`, `type broadcast|pointopoint|nbma|ptmp`, `priority`,
-/// `authentication …`, `password "…"`, `neighbors { … }`, `stub yes`.
-/// The ones lr carries map directly onto [`OspfIfSpec`]; the rest are
-/// noted so a gap is visible instead of silent.
+/// `retransmit` (RFC 2328 Appendix B `RxmtInterval`), `transmit delay`,
+/// `dead count`, `dead interval`, `wait`, `type
+/// broadcast|pointopoint|nbma|ptmp`, `priority`, `authentication …`,
+/// `password "…"`, `neighbors { … }`, `stub yes`. The ones lr carries
+/// map directly onto [`OspfIfSpec`]; the rest are noted so a gap is
+/// visible instead of silent.
 fn absorb_ospf_iface_line(proto: &mut OspfProtoCapture, trimmed: &str, t0: &str) {
     let mut tokens = trimmed.split_whitespace();
     let _ = tokens.next(); // already consumed as `t0` by the caller
@@ -1535,8 +1536,30 @@ fn absorb_ospf_iface_line(proto: &mut OspfProtoCapture, trimmed: &str, t0: &str)
                     .push(format!("type {other} — lr supports broadcast and p2p only")),
             }
         }
+        // BIRD `retransmit N;` (RFC 2328 Appendix B `RxmtInterval`):
+        // seconds, mirroring lr's `[[ospf.interface]] rxmt_interval`
+        // (whole seconds). A non-numeric value carries an unmapped
+        // note so a typo stays visible instead of silently becoming 0 s.
+        "retransmit" => {
+            let raw = tokens.next().unwrap_or("").trim_end_matches(';');
+            match raw.parse::<u32>() {
+                Ok(secs) if secs > 0 => {
+                    iface.rxmt_interval = Some(secs);
+                }
+                Ok(_) => {
+                    proto
+                        .iface_notes
+                        .push("retransmit 0 — lr rejects 0 s; use a positive value".to_string());
+                }
+                Err(_) => {
+                    proto.iface_notes.push(format!(
+                        "retransmit {raw} — not a whole-seconds value; rxmt_interval not set"
+                    ));
+                }
+            }
+        }
         // BIRD OSPF parameters with no direct lr equivalent — noted.
-        "retransmit" | "wait" => {
+        "wait" => {
             proto
                 .iface_notes
                 .push(format!("{t0} … — no lr equivalent (BIRD OSPF timer)"));
@@ -2452,6 +2475,28 @@ fn apply_frr_ospf_iface(prefix: &str, iface_name: &str, tokens: &[&str], out: &m
                 spec.dead_interval = Some(v);
             }
         }
+        // FRR `ip ospf retransmit-interval N` /
+        // `ipv6 ospf retransmit-interval N` (RFC 2328 Appendix B
+        // `RxmtInterval`): whole seconds, mirroring lr's
+        // `[[ospf.interface]] rxmt_interval`. A 0 s value carries an
+        // unmapped note (lr rejects it as a typo at TOML parse time);
+        // a non-numeric value also carries a note so a typo stays
+        // visible.
+        "retransmit-interval" => match tokens.get(1).and_then(|v| v.parse::<u32>().ok()) {
+            Some(secs) if secs > 0 => {
+                spec.rxmt_interval = Some(secs);
+            }
+            Some(_) => {
+                spec_notes.push(format!(
+                    "{prefix} retransmit-interval 0 — lr rejects 0 s; use a positive value"
+                ));
+            }
+            None => {
+                spec_notes.push(format!(
+                        "{prefix} retransmit-interval … — not a whole-seconds value; rxmt_interval not set"
+                    ));
+            }
+        },
         "priority" => {
             if let Some(v) = tokens.get(1).and_then(|v| v.parse().ok()) {
                 spec.priority = Some(v);
@@ -2478,11 +2523,7 @@ fn apply_frr_ospf_iface(prefix: &str, iface_name: &str, tokens: &[&str], out: &m
         }
         // FRR OSPF interface directives with no direct lr equivalent
         // — noted so the operator sees the gap.
-        "authentication"
-        | "authentication-key"
-        | "message-digest-key"
-        | "retransmit-interval"
-        | "transmit-delay"
+        "authentication" | "authentication-key" | "message-digest-key" | "transmit-delay"
         | "instance-id" => {
             spec_notes.push(format!(
                 "{prefix} {keyword} … — no lr equivalent (FRR OSPF interface option)"
@@ -2581,6 +2622,7 @@ fn finish_frr_ospf_iface(out: &mut ConfigOut, iface_ctx: &Option<String>) {
             || spec.cost.is_some()
             || spec.hello_interval.is_some()
             || spec.dead_interval.is_some()
+            || spec.rxmt_interval.is_some()
             || spec.priority.is_some()
             || spec.network_type.is_some()
             || spec.area.is_some()
@@ -3382,6 +3424,9 @@ fn render(out: ConfigOut) -> String {
         }
         if let Some(v) = spec.dead_interval {
             s.push_str(&format!("dead_interval = {v}\n"));
+        }
+        if let Some(v) = spec.rxmt_interval {
+            s.push_str(&format!("rxmt_interval = {v}\n"));
         }
         if let Some(v) = spec.priority {
             s.push_str(&format!("priority = {v}\n"));

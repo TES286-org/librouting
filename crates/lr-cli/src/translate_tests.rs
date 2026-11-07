@@ -998,8 +998,13 @@ protocol ospf my_ospf {
 
 #[test]
 fn bird_ospf_unmapped_interface_parameters_stay_visible() {
-    // retransmit, transmit delay, wait, authentication, password —
-    // all noted per-interface so the operator sees the gap.
+    // transmit delay, wait, authentication, password — all noted
+    // per-interface so the operator sees the gap. `retransmit 5;` is
+    // now mapped onto [[ospf.interface]] rxmt_interval = 5 (RFC 2328
+    // Appendix B `RxmtInterval`, BIRD `rxmtint` parity — the previous
+    // unmapped note is gone); the rest of the BIRD OSPF interface
+    // parameters with no lr equivalent still surface as `# UNMAPPED:`
+    // comments so a gap is visible instead of silent.
     let toml = render(translate_bird(
         r#"
 router id 10.0.0.1;
@@ -1016,11 +1021,135 @@ protocol ospf my_ospf {
 }
 "#,
     ));
-    assert!(toml.contains("retransmit"));
+    // retransmit 5 now lands in the rendered TOML as a real key, not
+    // as an unmapped note.
+    assert!(
+        toml.contains("rxmt_interval = 5"),
+        "expected `rxmt_interval = 5` in rendered TOML; got:\n{toml}"
+    );
+    assert!(!toml.contains("UNMAPPED: retransmit"));
     assert!(toml.contains("transmit delay"));
     assert!(toml.contains("wait"));
     assert!(toml.contains("authentication"));
     assert!(toml.contains("password"));
+}
+
+#[test]
+fn bird_ospf_retransmit_maps_onto_rxmt_interval() {
+    // BIRD `retransmit N;` (RFC 2328 Appendix B `RxmtInterval`)
+    // carries through to `[[ospf.interface]] rxmt_interval = N`.
+    let cfg = roundtrip_ospf(&render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    area 0 {
+        interface "eth0" {
+            retransmit 30;
+        };
+    };
+}
+"#,
+    )));
+    assert_eq!(cfg.ospf_interfaces.len(), 1);
+    assert_eq!(
+        cfg.ospf_interfaces[0].rxmt_interval,
+        Some(30),
+        "BIRD `retransmit 30;` maps onto rxmt_interval = 30"
+    );
+}
+
+#[test]
+fn bird_ospf_retransmit_zero_carries_unmapped_note() {
+    // BIRD `retransmit 0;` is a typo (RFC 2328 Appendix B `RxmtInterval`
+    // is the gap between retransmits; 0 s would busy-spin the poll loop).
+    // lr's TOML parser rejects 0 s, so the converter surfaces the gap
+    // as an unmapped note instead of silently emitting a config the
+    // daemon would reject at parse time.
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    area 0 {
+        interface "eth0" {
+            retransmit 0;
+        };
+    };
+}
+"#,
+    ));
+    assert!(
+        toml.contains("retransmit 0 — lr rejects 0 s; use a positive value"),
+        "expected an unmapped note for `retransmit 0;`; got:\n{toml}"
+    );
+    assert!(
+        !toml.contains("rxmt_interval = 0"),
+        "no `rxmt_interval = 0` should land in the rendered TOML"
+    );
+}
+
+#[test]
+fn bird_ospf_retransmit_non_numeric_carries_unmapped_note() {
+    // A non-numeric `retransmit` value is a typo; the converter surfaces
+    // it as an unmapped note so the operator sees the gap.
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    area 0 {
+        interface "eth0" {
+            retransmit oops;
+        };
+    };
+}
+"#,
+    ));
+    assert!(
+        toml.contains("retransmit oops — not a whole-seconds value"),
+        "expected an unmapped note for the non-numeric retransmit; got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_ospf_retransmit_interval_maps_onto_rxmt_interval() {
+    // FRR `ip ospf retransmit-interval N` (RFC 2328 Appendix B
+    // `RxmtInterval`) carries through to `[[ospf.interface]]
+    // rxmt_interval = N`.
+    let cfg = roundtrip_ospf(&render(translate_frr(
+        r#"
+interface eth0
+ ip ospf retransmit-interval 30
+!
+router ospf
+ network 10.0.0.0/24 area 0
+"#,
+    )));
+    let eth0 = cfg
+        .ospf_interfaces
+        .iter()
+        .find(|i| i.name.as_deref() == Some("eth0"))
+        .expect("eth0 should be in the rendered TOML");
+    assert_eq!(
+        eth0.rxmt_interval,
+        Some(30),
+        "FRR `ip ospf retransmit-interval 30` maps onto rxmt_interval = 30"
+    );
+}
+
+#[test]
+fn frr_ospf_retransmit_interval_zero_carries_unmapped_note() {
+    let toml = render(translate_frr(
+        r#"
+interface eth0
+ ip ospf retransmit-interval 0
+!
+router ospf
+ network 10.0.0.0/24 area 0
+"#,
+    ));
+    assert!(
+        toml.contains("retransmit-interval 0 — lr rejects 0 s; use a positive value"),
+        "expected an unmapped note for `ip ospf retransmit-interval 0`; got:\n{toml}"
+    );
 }
 
 #[test]
