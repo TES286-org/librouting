@@ -539,6 +539,16 @@ struct PeerEntry {
     /// dial-into-Established-winner churn (every retry would only earn
     /// another Cease/7).
     outbound_lost_collision: Arc<AtomicBool>,
+    /// FRR `neighbor X shutdown` / BIRD `disabled`: the peer is
+    /// administratively down. Resolved from `spec.shutdown.unwrap_or(false)`
+    /// at startup so the connector and listener do not re-evaluate the
+    /// Option on every iteration. The outbound connector is not spawned
+    /// when this is `true`; the listener refuses inbound SYNs from this
+    /// peer's address with a `peer X admin-down` log line. Toggling
+    /// `shutdown` live via SIGHUP is a follow-up — the operator restarts
+    /// the daemon to flip the flag (the connector and listener read it
+    /// at startup).
+    admin_down: bool,
 }
 
 impl PeerEntry {
@@ -1306,6 +1316,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         bfd: None,
                         busy: Arc::new(AtomicBool::new(false)),
                         outbound_lost_collision: Arc::new(AtomicBool::new(false)),
+                        admin_down: spec.shutdown.unwrap_or(false),
                     })
                 }
                 Err(e) => {
@@ -2075,9 +2086,27 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             diagnose_source_address(cfg, entry);
         }
         for entry in &entries {
-            if entry.spec.is_outbound() {
-                spawn_connector(&runtime, entry, cfg, Arc::clone(&live_sessions));
+            if !entry.spec.is_outbound() {
+                continue;
             }
+            // FRR `neighbor X shutdown` / BIRD `disabled`: the peer is
+            // administratively down. Do NOT spawn the connector — the
+            // peer neither dials out nor accepts inbound (the listener
+            // gate below). The connector's own loop reads the spec
+            // again on every iteration, but never starting the thread
+            // keeps the OS resource cost at zero and avoids a busy
+            // connect-fail loop. The startup banner prints one line so
+            // the operator sees the admin-down state in `lrctl status`
+            // output.
+            if entry.admin_down {
+                log_info!(
+                    Component::Bgp,
+                    "peer {}: admin-down (shutdown = true); connector stays passive",
+                    entry.label()
+                );
+                continue;
+            }
+            spawn_connector(&runtime, entry, cfg, Arc::clone(&live_sessions));
         }
     }
 
@@ -2109,6 +2138,28 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         // Historical accept-any: session #1.
                         &entries[0]
                     };
+                    // FRR `neighbor X shutdown` / BIRD `disabled`:
+                    // `match_inbound_peer` already proved this peer is
+                    // configured for inbound (its `address`/`remote`
+                    // matches the source IP). When the peer is admin-
+                    // down the listener drops the inbound TCP without
+                    // a NOTIFICATION — the operator has explicitly
+                    // asked the daemon not to talk to this peer, so
+                    // half-opening a session only to send a Cease/2
+                    // would defeat the purpose. RFC 4486 §3 says the
+                    // shutdown NOTIFICATION is for an Established
+                    // session being torn down, not for an inbound SYN
+                    // arriving while the peer is already configured
+                    // down.
+                    if entry.admin_down {
+                        log_warn!(
+                            Component::Bgp,
+                            "inbound connection from {peer} rejected: \
+                             peer {} admin-down (shutdown = true)",
+                            entry.label()
+                        );
+                        continue;
+                    }
                     // RFC 4271 §6.8: a bidirectional peer's inbound
                     // connections run on the challenger session so they
                     // can coexist with the outbound transport while the
