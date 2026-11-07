@@ -365,12 +365,16 @@ mod tests {
         let mut cfg = PeerConfig::new(Asn(100), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
         cfg.hold_time = 30;
         cfg.route_reflector_client = true;
-        cfg.mp_families.push(lr_core::nlri::NlriFamily::IPV6_UNICAST);
+        cfg.mp_families
+            .push(lr_core::nlri::NlriFamily::IPV6_UNICAST);
         cfg.admin_down = true;
         assert!(cfg.admin_down);
         assert_eq!(cfg.hold_time, 30);
         assert!(cfg.route_reflector_client);
-        assert_eq!(cfg.mp_families, vec![lr_core::nlri::NlriFamily::IPV6_UNICAST]);
+        assert_eq!(
+            cfg.mp_families,
+            vec![lr_core::nlri::NlriFamily::IPV6_UNICAST]
+        );
         // Flipping the flag back off is a one-line change.
         cfg.admin_down = false;
         assert!(!cfg.admin_down);

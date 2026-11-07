@@ -104,10 +104,7 @@ fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
 ///   * B's log never sees an inbound connection from A.
 #[test]
 fn shutdown_true_keeps_connector_passive() {
-    let dir = std::env::temp_dir().join(format!(
-        "lr-daemon-shutdown-out-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("lr-daemon-shutdown-out-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let port_b = 19101u16;
 
@@ -184,10 +181,7 @@ fn shutdown_true_keeps_connector_passive() {
 /// `peer X admin-down` log line and never establishes.
 #[test]
 fn shutdown_true_refuses_inbound_syns() {
-    let dir = std::env::temp_dir().join(format!(
-        "lr-daemon-shutdown-in-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("lr-daemon-shutdown-in-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let port_a = 19201u16;
 
@@ -226,7 +220,10 @@ fn shutdown_true_refuses_inbound_syns() {
     // A's listener rejects the inbound with the admin-down message.
     wait_log_all(
         &a.log,
-        &["inbound connection from 127.0.0.1", "admin-down (shutdown = true)"],
+        &[
+            "inbound connection from 127.0.0.1",
+            "admin-down (shutdown = true)",
+        ],
     );
 
     // B's connector retries but A never accepts; B never establishes.
@@ -247,10 +244,7 @@ fn shutdown_true_refuses_inbound_syns() {
 /// `disabled no`).
 #[test]
 fn shutdown_false_is_un_shutdown() {
-    let dir = std::env::temp_dir().join(format!(
-        "lr-daemon-shutdown-false-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("lr-daemon-shutdown-false-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let port_b = 19301u16;
 
