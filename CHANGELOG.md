@@ -1875,6 +1875,74 @@ through the C ABI), no protocol-on-the-wire change (the BoRR/EoRR
 wire format is unchanged — the FSM already produced and parsed the
 demarcation subtypes before this change), no version bump.
 
+### `lr-cli`: SIGHUP re-opens the log file destination (issue #92)
+
+`crates/lr-cli/src/daemon_logger.rs:L272 | FUTURE-WORK | "The file
+is opened append-only and never re-opened, so a log rotation tool
+must signal the daemon to reopen (future work) - log rotation
+unsupported"` — the daemon's file destination was opened once at
+startup and never re-opened, so the standard `logrotate` postrotate
+contract did not work: the operator's `logrotate` config would move
+the live log file aside (the daemon still held the old fd and kept
+writing to the rotated inode), and the new file at the original
+path stayed empty until the daemon was restarted.
+
+The fix lands in three pieces:
+
+- **`daemon_logger::reopen_log_file()`** — a new public-crate
+  helper that re-opens the file destination at the path the live
+  `LogConfig` carries, leaving the rest of the configuration
+  (severity, format, color, per-component overrides) untouched.
+  The old fd is dropped (Rust closes the `File` on drop), so the
+  kernel sees the rotation tool's rename + create the way it
+  expects: the next record lands in the freshly-created file.
+  `Ok(())` is returned when the file was re-opened or when no
+  file destination is configured (a no-file config is a clean
+  no-op). `Err(message)` keeps the existing fd in place so the
+  daemon keeps logging to the old file the rotation tool left
+  behind; the caller surfaces the error in its reload report.
+- **`reload_config` re-applies the `[logging]` block** — the
+  BGP / Babel / multi-protocol daemons' SIGHUP-driven
+  `reload_config` re-finalises the fresh `[logging]` block and
+  re-calls `init_logger` with it. When the fresh config has a
+  `[logging] file` set, the path can change too (an operator who
+  edits the file path on SIGHUP sees the new path take effect).
+  When the fresh config has no `[logging]` block (the operator
+  passed `--log-file` on the command line at startup, and the
+  config file does not re-set it), the reload falls back to
+  `reopen_log_file()` so the startup `--log-file` path is
+  re-opened instead of being closed by an `init_logger` call
+  with `file: None`. The reload report carries
+  `reload: log destination re-opened (SIGHUP)` on success and
+  `reload: log destination rejected (...) — keeping current file`
+  on failure.
+- **OSPF / OSPFv3 / LDP / BMP standalone daemons re-open the
+  file via the no-op reload closure** — these daemons do not
+  re-parse the config on SIGHUP (the full reload is a no-op for
+  OSPF interface set changes, LDP session table, etc.). The
+  reload closure now calls `daemon_logger::reopen_log_file()`
+  so the operator's `logrotate` postrotate SIGHUP re-opens the
+  file the daemon was started with. The reload report carries
+  `<proto>: log file re-opened (SIGHUP)` on success and
+  `<proto>: log file reopen failed: ...` on failure.
+
+Test coverage: four new unit tests in
+`crates/lr-cli/src/daemon_logger.rs` (`init_logger_replacement_reopens_file_destination`,
+`reopen_log_file_drops_old_fd_and_opens_a_fresh_one`,
+`reopen_log_file_returns_ok_when_no_file_configured`,
+`reopen_log_file_returns_err_when_path_is_unopenable`) plus a
+new end-to-end test in
+`crates/lr-cli/tests/daemon_runtime.rs`
+(`sighup_reopens_log_file_for_rotation`) that spawns the real
+`lr-daemon` binary with `--log-file`, simulates `logrotate`
+(rename + SIGHUP), and verifies the next log line lands in the
+re-opened path (and not in the rotated file).
+
+`docs/lr-daemon.md` and `docs/RUNBOOK.md` SIGHUP reload tables
+now list the log file reopen behaviour. No public Rust API
+change, no C ABI change, no protocol-on-the-wire change, no
+version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
