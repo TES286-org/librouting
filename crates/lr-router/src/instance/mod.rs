@@ -420,6 +420,28 @@ impl SessionState {
     }
 }
 
+/// Per-aggregate options carried alongside every registered BGP route
+/// aggregate (RFC 4271 §9.2.2.2). Mirrors the FRR `aggregate-address`
+/// qualifiers and the BIRD `aggregate { … }` block's `summary only` /
+/// `merge by as` toggles.
+///
+/// Defaults (`summary_only = false`, `as_set = false`) match FRR's
+/// `aggregate-address` defaults — both the aggregate and the more-
+/// specific routes are advertised, and the aggregate carries an empty
+/// AS_SEQUENCE + ATOMIC_AGGREGATE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AggregateOptions {
+    /// `summary-only`: suppress more-specific routes from the
+    /// Adj-RIB-Out toward every peer (RFC 4271 §9.2.2.2 c). The
+    /// Loc-RIB is unchanged.
+    pub summary_only: bool,
+    /// `as-set`: build an `AS_SET` segment in the aggregate's AS_PATH
+    /// enumerating every AS that contributed a more-specific route
+    /// (RFC 4271 §9.2.2.2 d). `ATOMIC_AGGREGATE` is omitted in this
+    /// mode.
+    pub as_set: bool,
+}
+
 /// Default router implementation. Poll-based, embedder-driven.
 pub struct DefaultRouter {
     sessions: BTreeMap<u64, SessionState>,
@@ -626,10 +648,10 @@ pub struct DefaultRouter {
     bmp_sink: Option<Box<dyn Fn(&[u8]) + Send + Sync>>,
     /// Registered BGP route aggregates (RFC 4271 §9.2.2.2). When the
     /// Loc-RIB contains at least one route more specific than a
-    /// registered aggregate, the aggregate is originated with a zeroed
-    /// AS_PATH and ATOMIC_AGGREGATE. When all specifics disappear, the
-    /// aggregate is withdrawn.
-    aggregates: BTreeSet<lr_core::addr::Prefix>,
+    /// registered aggregate, the aggregate is originated (with the
+    /// options the registration carries — see [`AggregateOptions`]).
+    /// When all specifics disappear, the aggregate is withdrawn.
+    aggregates: BTreeMap<lr_core::addr::Prefix, AggregateOptions>,
     /// RFC 8212 mode: external BGP sessions (eBGP *and* confederation
     /// boundaries, per §1) without an explicit import policy discard
     /// all received routes, and without an explicit export policy
@@ -767,7 +789,7 @@ impl Default for DefaultRouter {
             redistributed_bgp: BTreeMap::new(),
             direct_rib: BTreeMap::new(),
             bmp_sink: None,
-            aggregates: BTreeSet::new(),
+            aggregates: BTreeMap::new(),
             ebgp_requires_policy: false,
             enforce_first_as: false,
             session_policy: BTreeMap::new(),
@@ -1905,25 +1927,94 @@ impl DefaultRouter {
     /// is the queue; the caller drops the lock before calling
     /// [`Self::remove_aggregate`].
     pub fn aggregate_prefixes(&self) -> Vec<lr_core::addr::Prefix> {
-        self.aggregates.iter().copied().collect()
+        self.aggregates.keys().copied().collect()
     }
 
-    /// Register a BGP route aggregate (RFC 4271 §9.2.2.2). When the
-    /// Loc-RIB contains at least one route more specific than `prefix`,
+    /// Register a BGP route aggregate (RFC 4271 §9.2.2.2) with the
+    /// default options (`summary_only = false`, `as_set = false`):
     /// the aggregate is originated with a zeroed AS_PATH,
-    /// ATOMIC_AGGREGATE, and AGGREGATOR attributes. When all specifics
-    /// disappear, the aggregate is withdrawn.
+    /// ATOMIC_AGGREGATE, and AGGREGATOR attributes while at least one
+    /// more-specific route is present in the Loc-RIB, and withdrawn
+    /// when the last specific disappears. Both the specific and the
+    /// aggregate are advertised to peers.
     ///
-    /// This is the BIRD `aggregate` / FRR `aggregate-address` equivalent.
+    /// This is the BIRD `aggregate` / FRR `aggregate-address` equivalent
+    /// for the no-qualifier form. Use [`Self::add_aggregate_with_options`]
+    /// for the FRR `aggregate-address … summary-only` / `… as-set`
+    /// qualifier forms.
     pub fn add_aggregate(&mut self, prefix: lr_core::addr::Prefix) {
-        self.aggregates.insert(prefix);
+        self.aggregates.insert(prefix, AggregateOptions::default());
         self.recompute_aggregates();
+    }
+
+    /// Register a BGP route aggregate (RFC 4271 §9.2.2.2) with the
+    /// supplied [`AggregateOptions`]. Re-registering an existing prefix
+    /// replaces its options (matches FRR's last-write-wins semantics
+    /// when the same `aggregate-address` line appears twice in a
+    /// config). The aggregate's presence/withdrawal follows the same
+    /// rule as [`Self::add_aggregate`]; the options shape the
+    /// aggregate's AS_PATH construction and the suppression of
+    /// more-specific routes from the Adj-RIB-Out.
+    ///
+    /// When the `summary_only` flag changes (turning suppression on or
+    /// off), the more-specific routes' export pipeline must be re-flushed
+    /// for the change to take effect on the Adj-RIB-Out — the
+    /// per-prefix `export_work_for` was last computed against the old
+    /// flag, and the router does not auto-flush every affected prefix
+    /// when an aggregate is re-registered. This method walks the
+    /// Loc-RIB for every prefix more-specific than `prefix` and re-runs
+    /// `export_selection` for each, so turning `summary_only` on
+    /// produces the per-peer withdrawals and turning it off produces
+    /// the per-peer re-advertisements.
+    pub fn add_aggregate_with_options(
+        &mut self,
+        prefix: lr_core::addr::Prefix,
+        options: AggregateOptions,
+    ) {
+        let prev_summary_only = self
+            .aggregates
+            .get(&prefix)
+            .map(|o| o.summary_only)
+            .unwrap_or(false);
+        self.aggregates.insert(prefix, options);
+        self.recompute_aggregates();
+        // When `summary_only` changed, the more-specific routes' export
+        // state was last computed against the old flag. Walk the
+        // Loc-RIB for every prefix more-specific than `prefix` and
+        // re-run `export_selection` for each so the Adj-RIB-Out diff
+        // reflects the new suppression policy (withdrawals when
+        // turning on, re-advertisements when turning off).
+        if prev_summary_only != options.summary_only {
+            self.reflush_summary_only_specifics(&prefix);
+        }
+    }
+
+    /// Re-run [`Self::export_selection`] for every Loc-RIB prefix more-
+    /// specific than `agg`. Used by [`Self::add_aggregate_with_options`]
+    /// when the `summary_only` flag changes — the more-specific routes'
+    /// export state was last computed against the old flag, and the
+    /// router needs a fresh `export_work_for` for each affected prefix
+    /// so the Adj-RIB-Out diff reflects the new suppression policy.
+    fn reflush_summary_only_specifics(&mut self, agg: &lr_core::addr::Prefix) {
+        // Collect the affected (key, ranked) pairs first to avoid
+        // borrowing self.loc_rib while we mutate it inside
+        // `export_selection`. `iter_sets` returns `(key, &[Route])`
+        // pairs (the ranked path set per key, Add-Path included).
+        let affected: Vec<(RouteKey, Vec<Route>)> = self
+            .loc_rib
+            .iter_sets()
+            .filter(|(k, _)| agg.contains_prefix(&k.prefix) && k.prefix.prefix_len > agg.prefix_len)
+            .map(|(k, ranked)| (k.clone(), ranked.to_vec()))
+            .collect();
+        for (key, ranked) in affected {
+            self.export_selection(&key, &ranked);
+        }
     }
 
     /// Remove a registered aggregate. The aggregate route (if currently
     /// originated) is withdrawn.
     pub fn remove_aggregate(&mut self, prefix: &lr_core::addr::Prefix) {
-        if self.aggregates.remove(prefix) {
+        if self.aggregates.remove(prefix).is_some() {
             // Withdraw the aggregate if it was originated.
             let family = match prefix.addr {
                 lr_core::addr::IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
@@ -1934,18 +2025,45 @@ impl DefaultRouter {
         }
     }
 
+    /// True when `key`'s prefix is more-specific than a registered
+    /// `summary_only` aggregate (RFC 4271 §9.2.2.2 c) — the route must
+    /// not be exported to any peer; only the aggregate is advertised.
+    /// The aggregate's own prefix is not more-specific than itself, so
+    /// the aggregate escapes this filter. Used by [`Self::export_work_for`]
+    /// to suppress the more-specific routes from the Adj-RIB-Out while
+    /// leaving the Loc-RIB untouched.
+    fn summary_only_suppresses(&self, key: &RouteKey) -> bool {
+        self.aggregates.iter().any(|(agg, opts)| {
+            opts.summary_only
+                && agg.contains_prefix(&key.prefix)
+                && key.prefix.prefix_len > agg.prefix_len
+        })
+    }
+
     /// Scan the Loc-RIB for routes more specific than each registered
     /// aggregate. Originates or withdraws aggregate routes as needed.
+    /// When an aggregate carries [`AggregateOptions::as_set`], the
+    /// aggregate's AS_PATH is rebuilt with an `AS_SET` segment
+    /// enumerating every AS that contributed a more-specific route
+    /// (RFC 4271 §9.2.2.2 d); the aggregate is re-originated when the
+    /// contributing-AS set changes so the wire AS_SET tracks the live
+    /// Loc-RIB.
     fn recompute_aggregates(&mut self) {
         if self.aggregates.is_empty() {
             return;
         }
-        // Collect the current Loc-RIB prefixes (best routes only).
-        let loc_rib_prefixes: Vec<lr_core::addr::Prefix> =
-            self.loc_rib.iter_best().map(|r| r.key.prefix).collect();
-        // Collect the aggregate list and local AS first to avoid
+        // Collect the current Loc-RIB best routes (prefix + attributes)
+        // so the as_set path can walk the contributing routes' AS_PATHs
+        // without re-borrowing `self.loc_rib` inside the mutation loop.
+        let loc_rib_best: Vec<(lr_core::addr::Prefix, lr_bgp::path::PathAttributes)> = self
+            .loc_rib
+            .iter_best()
+            .map(|r| (r.key.prefix, r.attributes.clone().into()))
+            .collect();
+        // Collect the aggregate list with its options first to avoid
         // borrowing self while we mutate it below.
-        let aggregates: Vec<lr_core::addr::Prefix> = self.aggregates.iter().copied().collect();
+        let aggregates: Vec<(lr_core::addr::Prefix, AggregateOptions)> =
+            self.aggregates.iter().map(|(p, o)| (*p, *o)).collect();
         // RFC 4271 §9.2.2.2: the AGGREGATOR carries "the AS number and
         // BGP Identifier of the last BGP speaker that performed route
         // aggregation" — both come from the originating session.
@@ -1959,15 +2077,96 @@ impl DefaultRouter {
                 _ => None,
             })
             .unwrap_or((0, lr_core::addr::RouterId::from_u32(0)));
-        for agg in &aggregates {
+        for (agg, options) in &aggregates {
             let family = match agg.addr {
                 lr_core::addr::IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
                 lr_core::addr::IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
             };
             let key = RouteKey::new(*agg, family);
-            let has_specific = loc_rib_prefixes
-                .iter()
-                .any(|p| agg.contains_prefix(p) && p.prefix_len > agg.prefix_len);
+            // The more-specific routes that fall inside this aggregate
+            // (the contributing routes for AS_SET construction and the
+            // presence/withdraw decision).
+            let contributing: Vec<&(lr_core::addr::Prefix, lr_bgp::path::PathAttributes)> =
+                loc_rib_best
+                    .iter()
+                    .filter(|(p, _)| agg.contains_prefix(p) && p.prefix_len > agg.prefix_len)
+                    .collect();
+            let has_specific = !contributing.is_empty();
+            let already_originated = self.originated.contains_key(&key);
+            // RFC 4271 §9.2.2.2 d: when `as_set` is set, the aggregate's
+            // AS_PATH carries an `AS_SET` segment enumerating every AS
+            // that contributed a more-specific route. The set is rebuilt
+            // from the contributing routes' AS_PATHs on every recompute;
+            // a single segment holds the unique ASes in stable ascending
+            // order so the wire encoding is deterministic for a given
+            // Loc-RIB (RFC 4271 §5.1.2 does not constrain the order,
+            // but BIRD sorts the set numerically — match that to keep
+            // tests stable and the wire diff-free across recomputes).
+            let contributing_ases: Vec<lr_core::addr::Asn> = if options.as_set {
+                let mut set: BTreeSet<u32> = BTreeSet::new();
+                for (_, attrs) in &contributing {
+                    if let Some(path) = attrs.as_path() {
+                        for seg in &path.segments {
+                            // AS_SEQUENCE / AS_SET members both contribute
+                            // their AS numbers; AS_CONFED_* segments are
+                            // local to the confederation and do not cross
+                            // the aggregate boundary (RFC 5065 §6).
+                            if matches!(
+                                seg.kind,
+                                lr_bgp::path::AsPathType::Sequence | lr_bgp::path::AsPathType::Set
+                            ) {
+                                for asn in &seg.ases {
+                                    set.insert(asn.as_u32());
+                                }
+                            }
+                        }
+                    }
+                }
+                set.into_iter().map(lr_core::addr::Asn).collect()
+            } else {
+                Vec::new()
+            };
+            // Re-originate the aggregate when its AS_SET changed under
+            // `as_set` — the contributing ASes can shift as specifics
+            // come and go, and the wire AS_SET must track the live
+            // Loc-RIB. The re-origination path is `unoriginate` followed
+            // by the standard originate path below, mirroring the
+            // summary-only / withdraw + re-install cycle a config
+            // reload drives.
+            let needs_re_originate = already_originated
+                && options.as_set
+                && self
+                    .originated
+                    .get(&key)
+                    .and_then(|r| {
+                        let attrs: lr_bgp::path::PathAttributes = r.attributes.clone().into();
+                        attrs.as_path()
+                    })
+                    .map(|current| {
+                        // Compare the current AS_SET against the freshly
+                        // computed one. The current path either has no
+                        // segments (legacy empty AS_SEQUENCE) or one
+                        // AS_SET segment; in either case we re-originate
+                        // when the new contributing-AS set differs from
+                        // the segment's ASes.
+                        let current_ases: BTreeSet<u32> = current
+                            .segments
+                            .iter()
+                            .find(|s| s.kind == lr_bgp::path::AsPathType::Set)
+                            .map(|s| s.ases.iter().map(|a| a.as_u32()).collect())
+                            .unwrap_or_default();
+                        let new_ases: BTreeSet<u32> =
+                            contributing_ases.iter().map(|a| a.as_u32()).collect();
+                        current_ases != new_ases
+                    })
+                    .unwrap_or(true);
+            if needs_re_originate {
+                self.unoriginate(&key);
+                // `unoriginate` removed the entry from `originated`;
+                // the originate path below re-creates it.
+                // already_originated is now stale; the rest of the loop
+                // proceeds as if the aggregate were not originated.
+            }
             let already_originated = self.originated.contains_key(&key);
             if has_specific && !already_originated {
                 let mut attrs = PathAttributes::new();
@@ -1976,16 +2175,37 @@ impl DefaultRouter {
                     AttrType::Origin,
                     vec![0],
                 ));
-                attrs.insert(PathAttribute::new(
-                    PathAttrFlags::new().set_transitive(true),
-                    AttrType::AsPath,
-                    Vec::new(),
-                ));
-                attrs.insert(PathAttribute::new(
-                    PathAttrFlags::new().set_transitive(true),
-                    AttrType::AtomicAggregate,
-                    Vec::new(),
-                ));
+                if options.as_set {
+                    // RFC 4271 §9.2.2.2 d: build an AS_SET segment
+                    // carrying every contributing AS. `ATOMIC_AGGREGATE`
+                    // is omitted in this mode — the AS_SET itself is the
+                    // signal that the path may be incomplete (RFC 4271
+                    // §5.1.4: ATOMIC_AGGREGATE "MUST NOT be used when
+                    // the BGP speaker aggregates ... and includes the
+                    // AS_PATH ... in the AS_SET").
+                    let as_path = lr_bgp::path::AsPath {
+                        segments: vec![lr_bgp::path::AsPathSegment {
+                            kind: lr_bgp::path::AsPathType::Set,
+                            ases: contributing_ases.clone(),
+                        }],
+                    };
+                    attrs.insert(PathAttribute::new(
+                        PathAttrFlags::new().set_transitive(true),
+                        AttrType::AsPath,
+                        as_path.encode_4(),
+                    ));
+                } else {
+                    attrs.insert(PathAttribute::new(
+                        PathAttrFlags::new().set_transitive(true),
+                        AttrType::AsPath,
+                        Vec::new(),
+                    ));
+                    attrs.insert(PathAttribute::new(
+                        PathAttrFlags::new().set_transitive(true),
+                        AttrType::AtomicAggregate,
+                        Vec::new(),
+                    ));
+                }
                 let mut agg_val = Vec::with_capacity(8);
                 agg_val.extend_from_slice(&local_as.to_be_bytes());
                 agg_val.extend_from_slice(&bgp_id.to_v4_bytes());
@@ -2770,9 +2990,18 @@ impl DefaultRouter {
         // session still advertises (e.g. exported before the mode was
         // enabled or the policy removed).
         let (_, rfc8212_deny_export) = self.rfc8212_denies(session);
+        // RFC 4271 §9.2.2.2 c (`summary-only`): a more-specific route
+        // that falls inside a registered `summary_only` aggregate is
+        // suppressed from the Adj-RIB-Out — only the aggregate is
+        // advertised. `desired` stays empty so the diff below withdraws
+        // any previously-advertised more-specific (e.g. advertised
+        // before `summary_only` was turned on, or before the aggregate
+        // was registered). The aggregate's own prefix is not more-
+        // specific than itself, so the aggregate is not suppressed.
+        let summary_only_suppressed = self.summary_only_suppresses(key);
         let add_path_tx = peer.add_path_tx_for(key.family);
         let mut desired: Vec<Route> = Vec::new();
-        if add_path_tx && !rfc8212_deny_export {
+        if !summary_only_suppressed && add_path_tx && !rfc8212_deny_export {
             for (slot, route) in ranked.iter().enumerate() {
                 if route.protocol != Protocol::Bgp {
                     // rc.3 shared RIB: protocol-direct contributions
@@ -2795,16 +3024,20 @@ impl DefaultRouter {
                 }
                 desired.push(candidate);
             }
-        } else if let Some(best) = ranked.first() {
-            if best.protocol == Protocol::Bgp && best.origin.peer != session && !rfc8212_deny_export
-            {
-                let mut candidate = best.clone();
-                candidate.path_id = 0;
-                if !matches!(
-                    hooks.run_export_to(&mut candidate, session),
-                    HookVerdict::Drop
-                ) {
-                    desired.push(candidate);
+        } else if !summary_only_suppressed {
+            if let Some(best) = ranked.first() {
+                if best.protocol == Protocol::Bgp
+                    && best.origin.peer != session
+                    && !rfc8212_deny_export
+                {
+                    let mut candidate = best.clone();
+                    candidate.path_id = 0;
+                    if !matches!(
+                        hooks.run_export_to(&mut candidate, session),
+                        HookVerdict::Drop
+                    ) {
+                        desired.push(candidate);
+                    }
                 }
             }
         }
