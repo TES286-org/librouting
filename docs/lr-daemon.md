@@ -290,6 +290,7 @@ What reload actually re-applies:
 | `[[static.route]]` | Added and changed routes installed, removed ones withdrawn |
 | `[[roa]]` | The static ROA layer is replaced wholesale |
 | `[bgp.rpki]` | Cache address change re-points the RTR client; same address re-syncs; removing the `[bgp.rpki] cache` block tears the live RTR thread down (transport closed, RTR-sourced ROAs withdrawn, thread exits) — restart the daemon to re-enable RPKI from a re-added block |
+| `[logging] file` (or `--log-file`) | Re-opens the file destination — the standard `logrotate` postrotate contract. The daemon drops the old fd and re-opens the path so the next record lands in the new file (no in-place rename tracking, no inode games). A fresh `[logging] file = ...` in the config changes the path; an absent `[logging]` block re-opens the startup `--log-file` path. The OSPF / OSPFv3 / LDP / BMP standalone daemons re-open the file too even though their full config reload is a no-op. |
 | everything else | Reported as needing a restart |
 
 If nothing changed, reload prints `reload: no network changes`. It

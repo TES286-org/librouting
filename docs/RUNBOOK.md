@@ -38,7 +38,7 @@ load and every reload.
 | Signal (Unix) / event (Windows) | Effect |
 | --- | --- |
 | `SIGTERM`, `SIGINT` | Graceful: Cease NOTIFICATION per session, RIB torn down, exit 0 |
-| `SIGHUP` | Reload: `networks`, static routes, `[[roa]]`, `[bgp.rpki]` |
+| `SIGHUP` | Reload: `networks`, static routes, `[[roa]]`, `[bgp.rpki]`, log file reopen |
 | Ctrl-C, console close/logoff/shutdown (Windows) | Graceful shutdown |
 
 The daemon logs `daemon: signal 15 received — shutting down` (the number
@@ -55,10 +55,19 @@ reload: unoriginating 198.51.100.0/24
 reload: static 10.0.0.0/8 installed
 reload: roa table: 2 -> 3 static entries
 reload: rpki re-sync requested from rpki.example.net:8282
+reload: log destination re-opened (SIGHUP)
 reload: config warning: line 12: unknown key 'bgp.typo' (ignored)
 reload: no network changes
 reload: note: AS, router-id, peer and auth changes require a restart
 ```
+
+The `reload: log destination re-opened (SIGHUP)` line is the standard
+`logrotate` postrotate contract: the daemon drops the old fd and
+re-opens the path the live `[logging] file` (or the startup `--log-file`
+flag) carries, so the next record lands in the new file the rotation
+tool just left in place. The OSPF / OSPFv3 / LDP / BMP standalone
+daemons re-open the file too even though their full config reload is a
+no-op — `logrotate` works the same way on every protocol daemon.
 
 The last two lines: `reload: no network changes` appears only when
 nothing else changed, and the note is always printed. A parse or
