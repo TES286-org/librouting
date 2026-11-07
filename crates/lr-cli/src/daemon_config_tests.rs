@@ -2286,14 +2286,46 @@ fn aggregate_missing_prefix_fails() {
 fn aggregate_unknown_key_fails_closed() {
     let mut cfg = DaemonConfig::with_defaults();
     let err = parse_toml_subset(
-        "[[aggregate]]\nprefix = \"198.51.100.0/23\"\nsummary_only = true\n",
+        "[[aggregate]]\nprefix = \"198.51.100.0/23\"\nfoo = true\n",
         &mut cfg,
     )
     .unwrap_err();
     assert!(
-        err.contains("unknown [[aggregate]] key 'summary_only'"),
+        err.contains("unknown [[aggregate]] key 'foo'"),
         "error should name the bad key: {err}"
     );
+}
+
+#[test]
+fn aggregate_summary_only_and_as_set_parse() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[aggregate]]\nprefix = \"198.51.100.0/23\"\nsummary_only = true\nas_set = true\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.aggregates.len(), 1);
+    assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("198.51.100.0/23"));
+    assert!(
+        cfg.aggregates[0].summary_only,
+        "summary_only = true must round-trip"
+    );
+    assert!(cfg.aggregates[0].as_set, "as_set = true must round-trip");
+}
+
+#[test]
+fn aggregate_summary_only_and_as_set_default_false() {
+    // Without the keys, defaults must remain `false` (FRR's default
+    // for both qualifiers — both the aggregate and the specifics are
+    // advertised, and the AS_PATH carries an empty AS_SEQUENCE +
+    // ATOMIC_AGGREGATE).
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset("[[aggregate]]\nprefix = \"198.51.100.0/23\"\n", &mut cfg).unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.aggregates.len(), 1);
+    assert!(!cfg.aggregates[0].summary_only);
+    assert!(!cfg.aggregates[0].as_set);
 }
 
 #[test]

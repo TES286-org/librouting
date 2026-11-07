@@ -610,12 +610,30 @@ fn apply_cross_protocol_config(
         let prefix: Prefix = text
             .parse()
             .map_err(|_| format!("[[aggregate]] bad prefix '{text}'"))?;
-        log_info!(
-            Component::Bgp,
-            "aggregate:    {} (rfc4271 §9.2.2.2)",
-            prefix
-        );
-        r.add_aggregate(prefix);
+        let options = lr_router::AggregateOptions {
+            summary_only: spec.summary_only,
+            as_set: spec.as_set,
+        };
+        if options.summary_only || options.as_set {
+            log_info!(
+                Component::Bgp,
+                "aggregate:    {} (rfc4271 §9.2.2.2{}{})",
+                prefix,
+                if options.summary_only {
+                    ", summary-only"
+                } else {
+                    ""
+                },
+                if options.as_set { ", as-set" } else { "" },
+            );
+        } else {
+            log_info!(
+                Component::Bgp,
+                "aggregate:    {} (rfc4271 §9.2.2.2)",
+                prefix
+            );
+        }
+        r.add_aggregate_with_options(prefix, options);
     }
     // Static routes — BIRD `protocol static`, FRR `ip route`. Installed
     // into the Loc-RIB with `Protocol::Static` and admin distance 1

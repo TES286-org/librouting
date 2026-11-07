@@ -599,6 +599,31 @@ pub(crate) struct AggregateSpec {
     /// with a zeroed AS_PATH plus ATOMIC_AGGREGATE and AGGREGATOR, and
     /// withdrawn when the last specific disappears.
     pub prefix: Option<String>,
+    /// `summary-only` (FRR `aggregate-address … summary-only`,
+    /// RFC 4271 §9.2.2.2 c): when set, the daemon suppresses every
+    /// more-specific route that falls inside the aggregate from the
+    /// Adj-RIB-Out toward every BGP peer — only the aggregate is
+    /// advertised. The Loc-RIB is unchanged (the specifics stay
+    /// reachable inside the daemon and feed the aggregate's
+    /// presence/withdraw decision); the suppression is purely an
+    /// egress filter so a downstream router that learns the aggregate
+    /// does not also install a more-specific path that would shadow
+    /// it. Defaults to `false` (FRR's default — both the aggregate
+    /// and the specifics are advertised).
+    pub summary_only: bool,
+    /// `as-set` (FRR `aggregate-address … as-set`,
+    /// RFC 4271 §9.2.2.2 d): when set, the aggregate's AS_PATH
+    /// carries an `AS_SET` segment enumerating every AS that
+    /// contributed a more-specific route, instead of an empty
+    /// `AS_SEQUENCE` plus `ATOMIC_AGGREGATE`. The contributing ASes
+    /// are collected from the Loc-RIB's more-specific routes' AS_PATH
+    /// attributes on every recompute (the set reflects the current
+    /// contributing peers). `ATOMIC_AGGREGATE` is omitted in this
+    /// mode (RFC 4271 §9.2.2.2: an aggregate that carries an AS_SET
+    /// already signals "the path may be incomplete"; ATOMIC_AGGREGATE
+    /// is the alternative signal for the empty-AS_PATH shape).
+    /// Defaults to `false`.
+    pub as_set: bool,
 }
 
 /// One `[[ldp.interface]]` table (or `--ldp-interface` flag): an
@@ -3814,6 +3839,12 @@ fn apply_aggregate_key(
                 .parse()
                 .map_err(|_| format!("bad aggregate prefix '{v}' (expected CIDR)"))?;
             spec.prefix = Some(p.to_string());
+        }
+        "summary_only" => {
+            spec.summary_only = parse_bool(value);
+        }
+        "as_set" => {
+            spec.as_set = parse_bool(value);
         }
         _ => {
             return Err(format!(
