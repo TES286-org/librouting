@@ -94,6 +94,54 @@ recompiling.
 
 ### Added
 
+**`lr-bgp` / `lr-router` / `lr-cli` per-peer administrative-down
+(`PeerConfig::admin_down`, `SessionConfig::admin_down`,
+`[[peer]] shutdown`, FRR `neighbor X shutdown` + BIRD `disabled`
+translation)** (issue #92 — `defects.txt` L93-L101 INCOMPLETE-IMPL
+subset). A peer that the operator has administratively shut down
+keeps the daemon's outbound connector passive (no dial), refuses
+inbound SYNs from that peer's address, and tears down any already-
+Established session with a Cease NOTIFICATION carrying subcode 2
+"Administrative Shutdown" (RFC 4486 §3, RFC 8203 §2). The previous
+shape noted FRR `neighbor X shutdown` as `# UNMAPPED:` and silently
+dialled the peer anyway; BIRD `disabled` was not handled at all.
+
+`lr-bgp::PeerConfig` gains a public `admin_down: bool` field
+(default `false`). `lr_router::SessionConfig` gains the same field
+plus a `with_admin_down(bool)` builder; `DefaultRouter::add_session`
+propagates it through to `PeerConfig::admin_down`. The daemon's
+`PeerSpec` gains a `shutdown: Option<bool>` field with a TOML key
+(`shutdown = true|false`) in `[[peer]]` blocks; `build_session_config`
+propagates the resolved value through `with_admin_down`. The
+daemon's `PeerEntry` carries a resolved `admin_down: bool` so the
+connector and listener do not re-evaluate the Option on every
+iteration. Toggling `shutdown` live via SIGHUP is a follow-up —
+the operator restarts the daemon to flip the flag (the connector
+and listener read it at startup).
+
+`lr translate frr` maps `neighbor X shutdown` to `shutdown = true`
+and `no neighbor X shutdown` to `shutdown = false` (the explicit
+un-shutdown — preserves the operator's re-enable statement so a
+reload that flips the source back to `shutdown` lands as `true`
+rather than the implicit `None`). `neighbor X shutdown message
+MSG...` (RFC 8203 §2 shutdown communication) is accepted but the
+message is silently stripped (a follow-up can surface it as a
+`lr:` directive). `lr translate bird` maps `disabled;` / `disabled
+yes;` / `disabled "reason";` to `shutdown = true` and `disabled
+no;` to `shutdown = false`.
+
+Test coverage: 2 `lr-bgp` unit tests, 3 `lr-cli` TOML parser unit
+tests, 11 `lr-cli` translate unit tests (FRR shutdown / no shutdown
+/ shutdown message / no-key default, BIRD disabled / disabled yes /
+disabled no / disabled "reason" / no-key default), and 3 `lr-cli`
+e2e integration tests against the real `lr-daemon` binary
+(`tests/daemon_peer_shutdown.rs`: shutdown = true keeps the
+connector passive, shutdown = true on an inbound-only peer refuses
+SYNs, shutdown = false is the explicit un-shutdown). The
+top-of-file doc in `translate.rs` drops `shutdown` from the
+not-mapped list (BIRD `multihop`, FRR `ebgp-multihop` and VRFs
+stay).
+
 **`lr-cli` `aggregate-address … summary-only` / `… as-set`
 translation onto the `[[aggregate]]` row's `summary_only` /
 `as_set` keys** (`compat`, issue #92). The FRR `aggregate-address

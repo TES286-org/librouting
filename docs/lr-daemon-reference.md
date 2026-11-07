@@ -420,6 +420,8 @@ template it is a hard error. A peer with `remote` dials out; one with
 | `max_prefix_threshold` | int | global | |
 | `bfd` | bool | global | |
 | `bfd_multihop` | bool | global | |
+| `route_reflector_client` | bool | global | `true` marks an RFC 4456 RR client |
+| `shutdown` | bool | `false` | `true` keeps the connector passive and refuses inbound SYNs (FRR `neighbor X shutdown` / BIRD `disabled`; RFC 4486 §3 + RFC 8203 §2). `false` is the explicit un-shutdown (FRR `no neighbor X shutdown` / BIRD `disabled no`). |
 
 Every field left unset inherits the `[bgp]` global of the same name, so
 a peer can be as short as `remote "192.0.2.2:179"`. `extends` chains are

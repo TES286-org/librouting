@@ -51,6 +51,7 @@ file changes how lr routes.
 | FRR `aggregate-address A.B.C.D/M [summary-only] [as-set] [route-map NAME]` | `[[aggregate]]` (qualifiers noted) |
 | FRR `redistribute <proto> [metric M] [route-map NAME]` (inside `router bgp`/`router ospf`/`router ospfv3`) | `[[redistribute]]` (`bgp`/`ospf`/`ospf3`/`babel` sources map; `connected`/`static`/`kernel`/`rip`/`isis` noted; route-map noted) |
 | FRR `no bgp ebgp-requires-policy` | consumed silently (`ebgp_policy = "accept-all"` is the converter's default) |
+| FRR `neighbor X shutdown` / `no neighbor X shutdown`, BIRD `disabled (yes\|no\|"reason")` | per-peer `shutdown` (RFC 4486 §3 + RFC 8203 §2: `true` keeps the connector passive and refuses inbound SYNs; the RFC 8203 message is silently stripped) |
 
 Anything the source file contains that has no lr equivalent is never
 dropped silently. It becomes a `config warning: unmapped: …` line at
