@@ -206,6 +206,68 @@ top-of-file doc in `translate.rs` drops `shutdown` from the
 not-mapped list (BIRD `multihop`, FRR `ebgp-multihop` and VRFs
 stay).
 
+**`lr-bgp` RFC 4893 / RFC 6793 4-byte AS extension orchestration
+helpers** (`bgp`, issue #92 — `defects.txt`
+`crates/lr-bgp/src/extensions/asn4.rs:L1-L5` PLACEHOLDER). The
+`extensions/asn4.rs` module was a placeholder: a 5-line file whose
+only body was `#![allow(dead_code)]` and a doc note saying the
+wire-level support lives in `path` / `capabilities` and "this module
+will hold high-level orchestration helpers in future revisions". The
+FSM inlined the negotiation logic at every call site (the OPEN
+builder inlined `if self.cfg.asn4 { caps.push(Capability::four_octet_as(...)) }`,
+the OPEN handler inlined
+`peer_offered_as4 = caps.iter().any(|c| c.code == FourOctetAs)` and
+a separate `caps.iter().find(...).as_four_octet()` chain), so a
+future change to the negotiation posture landed in three places at
+once.
+
+This round replaces the placeholder with the actual orchestration
+helpers, mirroring the `enhanced_rr` / `long_lived` pattern:
+
+- `asn4::advertised(cfg)` — whether the local config opts the session
+  into the 4-byte AS capability. Thin wrapper around `cfg.asn4`;
+  exists so every extension's `advertised` / `negotiated` /
+  `open_capability` triple has the same shape.
+- `asn4::peer_offered_as4(peer_caps)` — whether the peer advertised
+  the capability in its OPEN, regardless of value well-formedness
+  (preserves the historical negotiation posture so the helper
+  refactor does not change which OPENs the FSM accepts).
+- `asn4::negotiated(cfg, peer_caps)` — whether *both* speakers
+  advertised the capability, so the 4-byte AS_PATH encoding can be
+  used in both directions (RFC 6793 §4.2.2).
+- `asn4::open_capability(cfg)` — the capability to put in the OPEN,
+  or `None` when the knob is off.
+- `asn4::peer_as4(peer_caps)` — extracts the 4-byte AS the peer
+  advertised; returns `None` when absent or malformed, follows the
+  RFC 6793 §4 "first occurrence wins" rule on a duplicate.
+
+The FSM's `enqueue_open` now calls `asn4::open_capability`, the
+`handle_open_in_opensent` AS4 negotiation block calls
+`asn4::negotiated` and `asn4::peer_as4`, and the inline
+`peer_offered_as4 = caps.iter().any(...)` /
+`caps.iter().find(...).as_four_octet()` chains are gone. The
+negotiation posture is byte-for-byte unchanged — the same OPENs
+are accepted, the same codecs flip to 4-byte, the same peer AS
+values land on `peer_as`.
+
+Sixteen new unit tests in `extensions/asn4.rs` pin every helper:
+`advertised_tracks_knob`, `open_capability_off_when_knob_on` /
+`_off_when_knob_off` / `_carries_local_as_value`,
+`peer_offered_when_capability_present` / `_when_capability_value_is_malformed`,
+`peer_not_offered_when_capability_absent`,
+`negotiated_requires_local_knob` / `_requires_peer_cap` /
+`_when_both_sides_advertise` / `_when_peer_cap_is_malformed`,
+`peer_as4_returns_none_when_absent` /
+`_returns_value_when_present` / `_returns_none_when_value_is_malformed`
+/ `_uses_first_occurrence_on_duplicate` /
+`_skips_unrelated_capabilities`.
+
+No public Rust API change (the helpers are additive; the existing
+`Capability::four_octet_as` / `as_four_octet` surface is unchanged),
+no C ABI change (no `lr_*` symbol touched), no wire-format change
+(the codec's `with_asn4` / `set_asn4` calls consume the same boolean
+the helpers produce), no version bump.
+
 **`lr-cli` `aggregate-address … summary-only` / `… as-set`
 translation onto the `[[aggregate]]` row's `summary_only` /
 `as_set` keys** (`compat`, issue #92). The FRR `aggregate-address
