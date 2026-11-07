@@ -1693,6 +1693,87 @@ are existing public surfaces of `lr-osroute::gtsm`, used here
 unchanged), no C ABI change (no `lr_*` symbol touched), no
 protocol-on-the-wire change, no version bump.
 
+### `lr-cli`: RTR thread shutdown race on macOS / Windows (issue #92 follow-up)
+
+`crates/lr-cli/src/daemon_rpki.rs`'s `RpkiLoop::run()` loop never
+re-checked the latched `stopped` flag at the top of the iteration.
+When the SIGHUP-driven `RpkiCommand::Shutdown` was queued while
+the RTR thread was inside `read_available()` — the inline
+control-drain at the head of the read burst consumed the command
+(`handle_shutdown()` latched `stopped = true`, cleared the
+transport, returned `false`) — the outer `run()` loop continued
+past `drain_control()` (the channel was now empty, so
+`drain_control()` returned `Control::Continue`), fell through to
+`connect()`, and re-established the transport against the cache
+address the operator had just removed from the config. The thread
+kept running, the next `status` poll reported `phase=stopped` but
+`roas=3 (static=1 rtr=2)` (the RTR-sourced ROAs were re-installed
+by the re-sync), and the test
+`rpki_reload_removing_cache_stops_thread_and_withdraws_rtr_roas`
+timed out waiting for the post-shutdown state.
+
+On Linux the `drain_control()` arm happened to win the race in CI
+— the reload command was queued while the thread was idle (between
+read bursts), so the loop-head `drain_control()` consumed the
+Shutdown first, returned `Control::Stop`, and the loop broke
+before `connect()` ran. On macOS / Windows the tighter
+read-timeout granularity (the macOS `TcpStream::set_read_timeout`
+and the Windows named-pipe transport's overlapped I/O timing)
+shifted the race the other way: the inline `read_available()`
+drain won, and the bug surfaced.
+
+The fix adds a `self.stopped` check at the top of the `run()` loop
+and at the head of the `sleep_backoff()` retry loop. The flag
+latches in `handle_shutdown()` and never clears, so a single
+check at each entry point is sufficient — the loop breaks before
+`connect()` runs, the post-loop `client thread stopping` log line
+lands, and the next `status` poll observes `phase=stopped` +
+`roas=1 (static=1 rtr=0)` (the static `[[roa]]` layer survives
+because `handle_shutdown()` only calls `clear_rtr()`, not
+`clear_static()`).
+
+Tests: the existing
+`rpki_reload_removing_cache_stops_thread_and_withdraws_rtr_roas`
+test (introduced by the previous issue #92 fix that landed the
+shutdown path) now passes on macOS / Windows too — the race was
+already covered by the test's assertion; the platform difference
+was which side of the race the CI runner hit. The Linux CI leg
+continues to pass (the fix is a strict superset of the previous
+behaviour — the new check only fires when the inline drain won).
+
+Public Rust API change: none (the `RpkiLoop` struct is private to
+the `daemon_rpki` module). No C ABI change, no protocol-on-the-wire
+change, no version bump.
+
+### `lr-cli`: Windows status test host-tolerant after connected routes (issue #92)
+
+`crates/lr-cli/tests/lrctl_windows.rs`'s
+`lrctl_status_round_trips_over_named_pipe` test asserted
+`rib-entries 1` against the daemon's `status` reply. The daemon
+installs connected routes from the kernel interface enumeration
+(`install_connected` — BIRD `protocol direct` / FRR
+`redistribute connected` parity, landed earlier in this issue
+#92 round), so the Loc-RIB total is `N + 1 + (extra UP
+interfaces)`. The GitHub Actions `windows-latest` image carries
+several virtual / Hyper-V adapters that contribute `proto=direct`
+routes, so the total came out to `3` on that runner and the test
+failed with `rib-entries 3` instead of `1`.
+
+The fix mirrors the shape `crates/lr-cli/tests/lrctl.rs` and
+`crates/lr-cli/tests/daemon_runtime.rs` already use: assert the
+BGP-originated network is present via `show routes count`'s
+per-protocol breakdown (`proto=bgp routes=1`) instead of the
+exact total. The cross-platform `show routes count` command
+exists on every platform the daemon compiles for, so the same
+assertion works on Windows as on Linux.
+
+Tests: `lrctl_status_round_trips_over_named_pipe` no longer
+depends on the runner's interface inventory. The other Windows
+tests in the file (`lrctl_sessions_lists_configured_session`,
+`unix_style_socket_path_works_on_windows`) are unaffected.
+
+No public Rust API change, no C ABI change, no version bump.
+
 ### `lr-bgp` / `lr-core`: RFC 7313 §3.2 BoRR/EoRR demarcation dispatch (issue #92)
 
 `crates/lr-bgp/src/extensions/enhanced_rr.rs` was a placeholder
