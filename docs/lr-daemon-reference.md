@@ -760,9 +760,11 @@ pair may appear once.
 
 ### `[[aggregate]]`
 
-| Key | Type | Notes |
-| --- | --- | --- |
-| `prefix` | string | Required CIDR; once per config |
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `prefix` | string | — | Required CIDR; once per config |
+| `summary_only` | bool | `false` | RFC 4271 §9.2.2.2 c — suppress every more-specific route that falls inside the aggregate from the Adj-RIB-Out toward every BGP peer; only the aggregate is advertised. The Loc-RIB is unchanged. Mirrors FRR `aggregate-address … summary-only`. |
+| `as_set` | bool | `false` | RFC 4271 §9.2.2.2 d — build an `AS_SET` segment in the aggregate's AS_PATH enumerating every AS that contributed a more-specific route; `ATOMIC_AGGREGATE` is omitted in this mode. The aggregate is re-originated when the contributing-AS set changes. Mirrors FRR `aggregate-address … as-set`. |
 
 ### `[shutdown]`
 

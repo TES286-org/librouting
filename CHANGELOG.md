@@ -94,6 +94,94 @@ recompiling.
 
 ### Added
 
+**`lr-cli` `aggregate-address … summary-only` / `… as-set`
+translation onto the `[[aggregate]]` row's `summary_only` /
+`as_set` keys** (`compat`, issue #92). The FRR `aggregate-address
+A.B.C.D/M [summary-only] [as-set] [route-map NAME]` line previously
+dropped the `summary-only` and `as-set` qualifiers with unmapped
+notes claiming "lr's `[[aggregate]]` models only the prefix"
+(`defects.txt` L62-L65, `crates/lr-cli/src/translate.rs:L55`).
+`route-map NAME` (the per-aggregate attribute hook) still carries
+an unmapped note — the daemon's `[[aggregate]]` schema has no
+per-aggregate route-map surface today; that follow-up is tracked
+separately.
+
+`summary-only` (RFC 4271 §9.2.2.2 c) suppresses every more-specific
+route that falls inside the aggregate from the Adj-RIB-Out toward
+every BGP peer — only the aggregate is advertised. The Loc-RIB is
+unchanged (the specifics stay reachable inside the daemon and
+feed the aggregate's presence/withdraw decision); the suppression
+is purely an egress filter so a downstream router that learns the
+aggregate does not also install a more-specific path that would
+shadow it. The router's `export_work_for` consults a new
+`summary_only_suppresses` predicate that returns true when a
+prefix key is more-specific than a registered `summary_only`
+aggregate, and the `desired` vector stays empty so the Adj-RIB-Out
+diff withdraws any previously-advertised more-specific. Re-registering
+the aggregate with `summary_only = false` re-flushes the export
+pipeline for every affected prefix so the more-specific routes are
+re-advertised.
+
+`as-set` (RFC 4271 §9.2.2.2 d) builds an `AS_SET` segment in the
+aggregate's AS_PATH enumerating every AS that contributed a
+more-specific route (collected from the contributing routes'
+AS_PATH attributes on every recompute, deduplicated and sorted
+into stable ascending order for a deterministic wire encoding).
+`ATOMIC_AGGREGATE` is omitted in this mode (RFC 4271 §5.1.4:
+the AS_SET itself is the "path may be incomplete" signal;
+ATOMIC_AGGREGATE is the alternative signal for the empty-AS_PATH
+shape). The aggregate is re-originated when the contributing-AS
+set changes (a new peer's AS enters the set when its route
+arrives; a withdrawing peer's AS leaves when the last specific
+from that AS goes), so the wire AS_SET tracks the live Loc-RIB.
+
+The public Rust API gains a new `AggregateOptions` struct in
+`lr_router` (carrying `summary_only: bool` and `as_set: bool`,
+`#[derive(Default, Copy)]` — both default to `false`, matching
+FRR's `aggregate-address` defaults) and a new
+`DefaultRouter::add_aggregate_with_options(prefix, options)`
+method. The existing `DefaultRouter::add_aggregate(prefix)` is
+unchanged (it uses the default options); the existing
+`DefaultRouter::remove_aggregate` and
+`DefaultRouter::aggregate_prefixes` are unchanged. The internal
+representation changed from `BTreeSet<Prefix>` to
+`BTreeMap<Prefix, AggregateOptions>` (the public API's stability
+guarantee covers `add_aggregate` / `remove_aggregate` /
+`aggregate_prefixes`; the field's type was private). The C ABI
+surface is unchanged (`lr_router_add_aggregate` still takes a
+prefix only; a future `lr_router_add_aggregate_with_options`
+that takes an options struct is a follow-up).
+
+The TOML parser accepts the new `summary_only = true|false` and
+`as_set = true|false` keys on the `[[aggregate]]` table
+(fail-closed on unknown keys, matching the existing
+`apply_aggregate_key` posture). The `.lr` DSL parser inherits
+the keys via the shared `apply_config_key` dispatch. The FRR
+`aggregate-address` parser in `translate.rs` populates the new
+fields from the `summary-only` / `as-set` qualifiers; the
+rendered TOML emits the keys when set.
+
+Tests: four new e2e tests in
+`crates/lr-tests/tests/route_aggregation.rs`
+(`aggregate_summary_only_suppresses_specifics_from_export`,
+`aggregate_summary_only_release_re_advertises_specifics`,
+`aggregate_as_set_builds_as_set_segment_in_as_path`,
+`aggregate_as_set_tracks_live_loc_rib`); three new unit tests
+in `crates/lr-cli/src/daemon_config_tests.rs`
+(`aggregate_unknown_key_fails_closed` updated to use a
+genuinely-unknown key, `aggregate_summary_only_and_as_set_parse`
+for the TOML round-trip, and
+`aggregate_summary_only_and_as_set_default_false` for the
+default); four new translate tests in
+`crates/lr-cli/src/translate_tests.rs`
+(`frr_aggregate_address_summary_only_carries_through`,
+`frr_aggregate_address_as_set_carries_through`,
+`frr_aggregate_address_summary_only_and_as_set_combine`,
+`frr_aggregate_address_route_map_carries_unmapped_note`); the
+`tests/corpus/frr/bgp-aggregate.conf` golden file regenerates
+with `summary_only = true` in place of the prior `# UNMAPPED:`
+note.
+
 **`lr-cli` `redistribute … route-map NAME` translation onto the
 pipe's `allow` list** (`compat`, issue #92). The FRR `redistribute
 <proto> [metric M] [route-map NAME]` line previously dropped the
