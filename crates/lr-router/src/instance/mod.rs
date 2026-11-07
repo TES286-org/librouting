@@ -4284,6 +4284,16 @@ impl RouterInstance for DefaultRouter {
                 // docs/examples/bgp_route_reflector.md.
                 p_cfg.route_reflector_client = cfg.route_reflector_client;
                 p_cfg.route_reflector = cfg.route_reflector.clone();
+                // FRR `neighbor X shutdown` / BIRD `disabled` (RFC 4486
+                // §3, RFC 8203 §2): the per-peer admin-down flag flips
+                // the daemon's connector passive and refuses inbound
+                // SYNs from this peer's address. The router core does
+                // not itself short-circuit the FSM — the daemon
+                // consults the propagated `PeerConfig::admin_down`
+                // before invoking `start_session` (ManualStart) on the
+                // outbound transport and before handing an accepted
+                // inbound TCP connection to `run_peer_session`.
+                p_cfg.admin_down = cfg.admin_down;
                 let peer = BgpPeer::new(p_cfg);
                 if let Some(group) = cfg.collision_group {
                     self.collision_meta

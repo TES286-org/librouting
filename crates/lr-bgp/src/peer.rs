@@ -123,6 +123,17 @@ pub struct PeerConfig {
     /// `bgp maximum-prefix restart <secs>` and BIRD's `restart time`.
     /// `0` disables the cooldown so `Restart` behaves like [`Self::Teardown`].
     pub maximum_prefix_restart_time: u32,
+    /// FRR `neighbor X shutdown` / BIRD `disabled`: the peer is
+    /// administratively down. The connector stays passive (no outbound
+    /// dial), the listener refuses inbound SYNs from this peer's
+    /// address, and a peer that was already Established is torn down
+    /// with a Cease NOTIFICATION carrying subcode 2 "Administrative
+    /// Shutdown" (RFC 4486 §3, RFC 8203 §2). The flag is the
+    /// configuration-side mirror of the operator's CLI knob — it does
+    /// not by itself drive the FSM, the daemon's connector and
+    /// listener consult it before starting or accepting a transport.
+    /// Default `false` (peer is up).
+    pub admin_down: bool,
 }
 
 /// Action taken when a peer exceeds its configured maximum-prefix limit.
@@ -191,6 +202,7 @@ impl PeerConfig {
             maximum_prefix_action: MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
             maximum_prefix_restart_time: 0,
+            admin_down: false,
         }
     }
 
@@ -331,5 +343,38 @@ mod tests {
         cfg.mp_families
             .push(lr_core::nlri::NlriFamily::IPV6_UNICAST);
         assert!(!cfg.ipv4_unicast_active());
+    }
+
+    // ===== FRR `neighbor X shutdown` / BIRD `disabled` (admin down) =====
+
+    #[test]
+    fn admin_down_defaults_off() {
+        // Library default: a freshly-built PeerConfig is up — the
+        // operator's CLI knob (`neighbor X shutdown` / `disabled`)
+        // is the only path that flips this on.
+        let cfg = PeerConfig::new(Asn(100), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        assert!(!cfg.admin_down);
+    }
+
+    #[test]
+    fn admin_down_is_independent_of_other_knobs() {
+        // Setting `admin_down = true` does not alter any other field —
+        // a peer that comes back up via `no neighbor X shutdown` /
+        // `disabled no` keeps its hold time, families, route-reflector
+        // client flag and every other knob the operator configured.
+        let mut cfg = PeerConfig::new(Asn(100), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.hold_time = 30;
+        cfg.route_reflector_client = true;
+        cfg.mp_families.push(lr_core::nlri::NlriFamily::IPV6_UNICAST);
+        cfg.admin_down = true;
+        assert!(cfg.admin_down);
+        assert_eq!(cfg.hold_time, 30);
+        assert!(cfg.route_reflector_client);
+        assert_eq!(cfg.mp_families, vec![lr_core::nlri::NlriFamily::IPV6_UNICAST]);
+        // Flipping the flag back off is a one-line change.
+        cfg.admin_down = false;
+        assert!(!cfg.admin_down);
+        assert_eq!(cfg.hold_time, 30);
+        assert!(cfg.route_reflector_client);
     }
 }

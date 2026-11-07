@@ -300,6 +300,15 @@ pub struct SessionConfig {
     /// known. The comparator's step 8 ties through to the remaining
     /// tiebreakers in that case.
     pub peer_address: Option<lr_core::addr::IpAddr>,
+    /// FRR `neighbor X shutdown` / BIRD `disabled`: the peer is
+    /// administratively down. The daemon's connector stays passive
+    /// (no outbound dial), the listener refuses inbound SYNs from
+    /// this peer's address, and a peer that was already Established
+    /// is torn down with a Cease NOTIFICATION carrying subcode 2
+    /// "Administrative Shutdown" (RFC 4486 §3, RFC 8203 §2).
+    /// Propagated to [`lr_bgp::PeerConfig::admin_down`] by
+    /// [`crate::DefaultRouter::add_session`]. Default `false`.
+    pub admin_down: bool,
 }
 
 impl SessionConfig {
@@ -352,6 +361,7 @@ impl SessionConfig {
             route_reflector_client: false,
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
             peer_address: None,
+            admin_down: false,
         }
     }
 
@@ -546,6 +556,23 @@ impl SessionConfig {
         self
     }
 
+    /// Mark this peer as administratively down (FRR `neighbor X
+    /// shutdown`, BIRD `disabled`). The daemon's connector stays
+    /// passive (no outbound dial), the listener refuses inbound SYNs
+    /// from this peer's address, and a peer that was already
+    /// Established is torn down with a Cease NOTIFICATION carrying
+    /// subcode 2 "Administrative Shutdown" (RFC 4486 §3, RFC 8203
+    /// §2). Pass `false` to undo a previously-set shutdown (FRR `no
+    /// neighbor X shutdown`, BIRD `disabled no`).
+    ///
+    /// No-op for OSPF / Babel sessions (the daemon consults the
+    /// BGP-only connector / listener surface; OSPF / Babel admin-down
+    /// is the embedder's responsibility via `remove_session`).
+    pub fn with_admin_down(mut self, admin_down: bool) -> Self {
+        self.admin_down = admin_down;
+        self
+    }
+
     /// Build an OSPFv2 session config.
     pub fn ospfv2(router_id: RouterId, area_id: u32) -> Self {
         Self {
@@ -586,6 +613,7 @@ impl SessionConfig {
             route_reflector_client: false,
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
             peer_address: None,
+            admin_down: false,
         }
     }
 
@@ -640,6 +668,7 @@ impl SessionConfig {
             route_reflector_client: false,
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
             peer_address: None,
+            admin_down: false,
         }
     }
 }
