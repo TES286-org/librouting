@@ -1693,6 +1693,107 @@ are existing public surfaces of `lr-osroute::gtsm`, used here
 unchanged), no C ABI change (no `lr_*` symbol touched), no
 protocol-on-the-wire change, no version bump.
 
+### `lr-bgp` / `lr-core`: RFC 7313 §3.2 BoRR/EoRR demarcation dispatch (issue #92)
+
+`crates/lr-bgp/src/extensions/enhanced_rr.rs` was a placeholder
+module (`#![allow(dead_code)]`, three-line doc-only header) — the
+defects.txt entry characterised this as
+`crates/lr-bgp/src/extensions/enhanced_rr.rs:L1-L5 | PLACEHOLDER |
+"Placeholder for the enhanced_rr extension"; `#![allow(dead_code)]``.
+The wire-level pieces lived elsewhere (capability encoding in
+`lr-bgp::capabilities::Capability::enhanced_rr`, message subtypes in
+`lr-bgp::message::RouteRefreshSubtype`, the FSM send-side methods
+`begin_enhanced_route_refresh` / `end_enhanced_route_refresh` in
+`lr-bgp::fsm::BgpPeer`), but the high-level orchestration helpers
+the placeholder promised were never written. In parallel, the FSM's
+receive arm for `BgpMessage::RouteRefresh` dispatched only the
+`Normal` subtype (RFC 2918) to `BgpAction::RouteRefreshRequested`;
+the `BeginOfRib` (BoRR) and `EndOfRib` (EoRR) demarcation subtypes
+(RFC 7313 §3.2) were silently discarded, so an embedder that
+negotiated RFC 7313 and relied on the demarcation to coordinate a
+route-refresh response saw the markers vanish at the wire boundary.
+
+The fix lands in three pieces:
+
+- **`enhanced_rr.rs` orchestration helpers** — the placeholder
+  becomes a real module with `advertised(cfg)`,
+  `negotiated(cfg, peer_caps)`, and `open_capability(cfg)`, mirroring
+  the shape of `addpath` / `long_lived` so a caller can verify the
+  capability posture without constructing a peer. The negotiation
+  check requires both the local `enhanced_rr` knob and the base
+  `route_refresh` knob (RFC 7313 §1 — enhanced refresh extends
+  RFC 2918, so the base capability is the precondition) and a
+  peer capability whose value is empty (RFC 7313 §2 mandates an
+  empty value; a malformed non-empty value is rejected so a
+  malformed OPEN does not turn the demarcation on).
+- **`BgpAction::BeginOfRouteRefresh(NlriFamily)`** — new variant
+  emitted by the FSM receive arm when a negotiated BoRR is received.
+  `Event::BeginOfRouteRefresh { session, family }` is added to
+  `lr-core::event::Event` (the enum is `#[non_exhaustive]`); the
+  `StateMachine for BgpPeer` trait adapter maps the new action to
+  the new event so a trait-only embedder that drives the FSM
+  through the generic `StateMachine::step` sees the demarcation
+  (previously the adapter mapped it to `Action::None`, masking
+  the signal — same shape as the issue #92 fix that surfaced
+  `RouteRefreshRequested` / `EndOfRib`).
+- **EoRR reuses the existing `BgpAction::EndOfRib`** — RFC 7313
+  §3.3 says the EoRR is treated as the End-of-RIB marker (RFC
+  4724 §4) for the family, so the same action runs the same helper
+  in the router (`on_end_of_rib`): the GR-retention purge for
+  the family ends, and stale routes the peer did not refresh are
+  removed. The router's dispatch on `BgpAction::BeginOfRouteRefresh`
+  logs the demarcation marker so the operator can correlate the
+  BoRR with the matching EoRR; the `on_end_of_rib` purge already
+  removes any route the peer did not refresh (matching the
+  implicit EoR marker shape), so a pre-mark step would only be
+  useful for an embedder that wants live visibility into "this
+  route is being refreshed" (a follow-up could add a
+  `RouteRefreshing` flag to the session stats; not needed for
+  correctness).
+
+Both demarcation subtypes are gated by
+`enhanced_route_refresh_negotiated()` — a peer that sends a BoRR
+or EoRR without negotiating the capability is silently ignored
+per RFC 7313 §3.2 ("an implementation that does not recognise a
+subtype must silently ignore the message"). The `Normal` subtype
+(RFC 2918) continues to dispatch through the existing
+`BgpAction::RouteRefreshRequested` path; a session that did not
+negotiate the Enhanced Route Refresh capability still surfaces
+Normal route-refresh requests exactly as before.
+
+Tests:
+
+- `crates/lr-bgp/src/extensions/enhanced_rr.rs` — eight new unit
+  tests pin the helper contract: `advertised_tracks_knob`,
+  `open_capability_off_when_knob_off`,
+  `open_capability_on_when_knob_on`,
+  `negotiated_requires_local_knob_and_peer_cap`,
+  `negotiated_requires_peer_cap`,
+  `negotiated_when_both_sides_advertise`,
+  `negotiated_rejects_malformed_capability`,
+  `negotiated_requires_base_route_refresh_too`.
+- `crates/lr-bgp/src/fsm_tests.rs` — five new tests pin the FSM
+  receive-side dispatch:
+  `enhanced_route_refresh_borr_emits_action_when_negotiated`,
+  `enhanced_route_refresh_eorr_emits_end_of_rib_action_when_negotiated`,
+  `enhanced_route_refresh_demarcation_silently_ignored_when_not_negotiated`,
+  `trait_adapter_surfaces_begin_of_route_refresh`,
+  `trait_adapter_surfaces_eorr_as_end_of_rib`, and
+  `route_refresh_normal_subtype_still_dispatched_without_enhanced_rr`
+  (a regression guard: the receive-side fix must not regress the
+  RFC 2918 base capability path).
+
+Public Rust API change (additive): one new
+`BgpAction::BeginOfRouteRefresh(NlriFamily)` variant, one new
+`Event::BeginOfRouteRefresh { session, family }` variant
+(`#[non_exhaustive]` so the additions are not breaking); the
+`enhanced_rr` module gains three new pub functions
+(`advertised`, `negotiated`, `open_capability`). No C ABI change
+(no `lr_*` symbol touched; `BgpAction` and `Event` are not exposed
+through the C ABI), no protocol-on-the-wire change (the BoRR/EoRR
+wire format is unchanged — the FSM already produced and parsed the
+demarcation subtypes before this change), no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
