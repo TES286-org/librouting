@@ -57,6 +57,24 @@ pub enum Event {
     /// here so a trait-only embedder can react to the request — previously
     /// it was silently dropped to `Action::None`, masking the signal.
     RouteRefreshRequested { session: u64, family: NlriFamily },
+    /// Beginning-of-RIB marker received for an address family (RFC
+    /// 7313 §3.2, BGP enhanced route refresh). The peer is about to
+    /// start sending the refreshed table. Surfaced when a BGP FSM
+    /// running under the generic [`crate::fsm::StateMachine`] trait
+    /// adapter emits
+    /// [`lr_bgp::fsm::BgpAction::BeginOfRouteRefresh`]; router-aware
+    /// embedders that consume `BgpAction` directly (the daemon) handle
+    /// the action through that path and never see this event. The
+    /// trait-only adapter maps `BgpAction::BeginOfRouteRefresh` here
+    /// so a trait-only embedder can react to the demarcation marker —
+    /// pre-mark the session's routes as "expected to be replaced" and
+    /// correlate with the matching [`EndOfRib`] / EoRR.
+    ///
+    /// Only emitted when both speakers advertised the Enhanced Route
+    /// Refresh capability (RFC 7313 §3.1); a peer that sends a BoRR
+    /// without negotiating the capability is silently ignored per
+    /// RFC 7313 §3.2.
+    BeginOfRouteRefresh { session: u64, family: NlriFamily },
     /// End-of-RIB marker received for an address family (RFC 4724 §4
     /// for BGP graceful restart). Emitted for an empty UPDATE
     /// (IPv4 unicast) or an UPDATE whose only content is an empty

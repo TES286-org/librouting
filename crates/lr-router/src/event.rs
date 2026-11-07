@@ -128,6 +128,20 @@ impl From<Event> for RouterEvent {
                 "bgp: route-refresh requested by session {session} for afi={} safi={}",
                 family.afi, family.safi
             )),
+            // RFC 7313 §3.2 BoRR (enhanced route refresh demarcation).
+            // Same shape as the RouteRefreshRequested mapping above —
+            // the trait-only `StateMachine for BgpPeer` adapter surfaces
+            // `Event::BeginOfRouteRefresh` for a trait-only embedder; the
+            // daemon consumes `BgpAction::BeginOfRouteRefresh` directly
+            // through `BgpPeer::step()` and never reaches this arm.
+            // Surfacing as a `Log` line keeps the daemon's event stream
+            // readable while still leaving a trace for the trait-only
+            // path; embedders that want structured access can match on
+            // the source `Event` directly.
+            Event::BeginOfRouteRefresh { session, family } => Self::Log(format!(
+                "bgp: begin-of-rib (BoRR) received from session {session} for afi={} safi={}",
+                family.afi, family.safi
+            )),
             Event::EndOfRib { session, family } => Self::Log(format!(
                 "bgp: end-of-rib received from session {session} for afi={} safi={}",
                 family.afi, family.safi

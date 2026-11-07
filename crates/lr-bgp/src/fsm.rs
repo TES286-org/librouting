@@ -92,11 +92,34 @@ pub enum BgpAction {
         key: lr_core::rib::RouteKey,
         path_id: u32,
     },
-    /// A negotiated peer requested that this family be re-advertised.
+    /// A negotiated peer requested that this family be re-advertised
+    /// (RFC 2918 ROUTE-REFRESH, `subtype = 0`). Emitted only when
+    /// the route-refresh capability is negotiated.
     RouteRefreshRequested(lr_core::nlri::NlriFamily),
+    /// Beginning-of-RIB marker received for an address family (RFC
+    /// 7313 §3.2, `subtype = 1`). Emitted only when both speakers
+    /// advertised the Enhanced Route Refresh capability; a BoRR from
+    /// a peer that did not negotiate the capability is silently
+    /// dropped per RFC 7313 §3.2 ("an implementation that does not
+    /// recognise a subtype must silently ignore the message"). The
+    /// embedder can use the marker to pre-mark the session's
+    /// routes as "expected to be replaced" and correlate the
+    /// matching [`EndOfRib`] / EoRR with the routes the peer
+    /// actually refreshed — purging the rest.
+    ///
+    /// Note: the existing [`EndOfRib`] action is reused for the
+    /// EoRR marker (`subtype = 2`) because RFC 7313 §3.3 says the
+    /// EoRR is treated as the End-of-RIB marker (RFC 4724 §4) for
+    /// the family. The router's `on_end_of_rib` runs the same
+    /// stale-route purge it runs for the implicit EoR marker.
+    BeginOfRouteRefresh(lr_core::nlri::NlriFamily),
     /// End-of-RIB marker received for an address family (RFC 4724 §4).
     /// Emitted for an empty UPDATE (IPv4 unicast) or an UPDATE whose only
-    /// content is an empty MP_UNREACH_NLRI (other families).
+    /// content is an empty MP_UNREACH_NLRI (other families), and — when
+    /// the Enhanced Route Refresh capability (RFC 7313) is negotiated —
+    /// for an explicit EoRR message (`subtype = 2`). RFC 7313 §3.3 says
+    /// the EoRR is treated as the End-of-RIB marker, so the same action
+    /// runs the same helper in the router.
     EndOfRib(lr_core::nlri::NlriFamily),
     Emit(lr_core::event::Event),
     None,
@@ -1021,11 +1044,71 @@ impl BgpPeer {
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::Message(BgpMessage::RouteRefresh(refresh))) => {
-                if self.route_refresh_negotiated()
-                    && refresh.subtype == crate::message::RouteRefreshSubtype::Normal
-                {
-                    my_actions.push(BgpAction::RouteRefreshRequested(refresh.family));
+                // RFC 2918 §2 (Normal subtype) and RFC 7313 §3.2
+                // (BoRR/EoRR demarcation subtypes) dispatch through
+                // this arm. The base route-refresh capability gates
+                // every subtype (RFC 7313 §1: enhanced refresh
+                // extends RFC 2918, so the base capability is the
+                // precondition); the Enhanced Route Refresh
+                // capability additionally gates the demarcation
+                // subtypes (RFC 7313 §3.1: a speaker that did not
+                // advertise the capability must not send BoRR/EoRR,
+                // and a receiver that did not advertise it must
+                // silently ignore them per §3.2).
+                //
+                // Before the issue #92 fix, only the Normal subtype
+                // produced an action; a peer that sent BoRR or EoRR
+                // had its message silently discarded, so an embedder
+                // relying on the demarcation to coordinate a
+                // route-refresh response saw the markers vanish at
+                // the wire boundary.
+                use crate::message::RouteRefreshSubtype;
+                if self.route_refresh_negotiated() {
+                    match refresh.subtype {
+                        RouteRefreshSubtype::Normal => {
+                            my_actions.push(BgpAction::RouteRefreshRequested(refresh.family));
+                        }
+                        RouteRefreshSubtype::BeginOfRib => {
+                            // RFC 7313 §3.2: BoRR. Only surface when
+                            // both speakers advertised the Enhanced
+                            // Route Refresh capability; a peer that
+                            // sends a BoRR without negotiating the
+                            // capability is malformed and the receiver
+                            // silently ignores per §3.2.
+                            if self.enhanced_route_refresh_negotiated() {
+                                my_actions.push(BgpAction::BeginOfRouteRefresh(refresh.family));
+                            }
+                        }
+                        RouteRefreshSubtype::EndOfRib => {
+                            // RFC 7313 §3.3: EoRR is treated as the
+                            // End-of-RIB marker (RFC 4724 §4) for the
+                            // family, so the existing
+                            // `BgpAction::EndOfRib` runs the same
+                            // helper in the router (`on_end_of_rib`):
+                            // the GR-retention purge for the family
+                            // ends, and stale routes the peer did not
+                            // refresh are removed. Only surface when
+                            // the capability is negotiated; a peer
+                            // that sends an EoRR without negotiating
+                            // the capability is malformed (silently
+                            // ignored per §3.2).
+                            if self.enhanced_route_refresh_negotiated() {
+                                my_actions.push(BgpAction::EndOfRib(refresh.family));
+                            }
+                        }
+                        RouteRefreshSubtype::Unknown => {
+                            // RFC 7313 §3.2: an unknown subtype MUST
+                            // be silently ignored. No action emitted.
+                        }
+                    }
                 }
+                // When the base route-refresh capability was not
+                // negotiated the message is a state violation but
+                // RFC 4271 §6 already covers it through the
+                // negotiated capability gate; no action emitted and
+                // stay Established (matching the previous behaviour
+                // for the Normal subtype when the base capability
+                // was off).
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::Message(BgpMessage::Update(_))) => {
@@ -1522,6 +1605,23 @@ impl StateMachine for BgpPeer {
                     session: self.cfg.peer_id,
                     family,
                 }),
+                // RFC 7313 §3.2 BoRR: same shape as the
+                // RouteRefreshRequested / EndOfRib mappings — the
+                // daemon consumes `BgpAction::BeginOfRouteRefresh`
+                // directly (router-aware path); a trait-only
+                // embedder that drives `BgpPeer` through the
+                // `StateMachine` trait would otherwise see
+                // `Action::None`. Surface it as a structured
+                // `Event::BeginOfRouteRefresh` so a trait-only
+                // embedder can react (pre-mark the session's routes
+                // as "expected to be replaced" and correlate with
+                // the matching `Event::EndOfRib`).
+                BgpAction::BeginOfRouteRefresh(family) => {
+                    Action::EmitEvent(lr_core::event::Event::BeginOfRouteRefresh {
+                        session: self.cfg.peer_id,
+                        family,
+                    })
+                }
                 BgpAction::None => Action::None,
             })
             .collect()

@@ -3281,9 +3281,37 @@ impl DefaultRouter {
                 BgpAction::RouteRefreshRequested(family) => {
                     self.reannounce_to_session(session, family);
                 }
+                BgpAction::BeginOfRouteRefresh(family) => {
+                    // RFC 7313 §3.2 BoRR: the peer is about to
+                    // start sending the refreshed table for this
+                    // family. The router logs the demarcation marker
+                    // so the operator can correlate the BoRR with the
+                    // matching EoRR (`BgpAction::EndOfRib` runs the
+                    // existing `on_end_of_rib` purge for the family)
+                    // and any routes the peer did not refresh are
+                    // removed. The router does not pre-mark the
+                    // session's routes as "expected to be replaced"
+                    // in this slice — the `on_end_of_rib` purge
+                    // already removes any route the peer did not
+                    // refresh (matching the implicit EoR marker
+                    // shape), so a pre-mark would only be useful for
+                    // an embedder that wants live visibility into
+                    // "this route is being refreshed" (a follow-up
+                    // could add a `RouteRefreshing` flag to the
+                    // session stats; not needed for correctness).
+                    self.pending_events.push(RouterEvent::Log(format!(
+                        "session {} received Begin-of-Route-Refresh (BoRR) for AFI {}/SAFI {} — enhanced route refresh in progress",
+                        session, family.afi, family.safi
+                    )));
+                }
                 BgpAction::EndOfRib(family) => {
-                    // RFC 4724 §4 / RFC 9494 §4.2: table synchronization for
-                    // this family is complete; retention tracking ends.
+                    // RFC 4724 §4 / RFC 9494 §4.2 / RFC 7313 §3.3:
+                    // table synchronization for this family is
+                    // complete; retention tracking ends. The same
+                    // handler runs for the implicit EoR marker
+                    // (empty UPDATE) and the explicit EoRR message
+                    // (RFC 7313 §3.3 says the EoRR is treated as the
+                    // End-of-RIB marker for the family).
                     self.on_end_of_rib(session, family);
                 }
                 BgpAction::Emit(ev) => {
