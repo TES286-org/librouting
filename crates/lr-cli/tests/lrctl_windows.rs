@@ -203,7 +203,27 @@ fn lrctl_status_round_trips_over_named_pipe() {
         stdout.contains("router-id 10.0.0.1"),
         "status stdout: {stdout}"
     );
-    assert!(stdout.contains("rib-entries 1"), "status stdout: {stdout}");
+    // The Loc-RIB total (`rib-entries N`) is host-dependent: the
+    // daemon also installs connected routes from the kernel
+    // interface enumeration (`install_connected` — BIRD `protocol
+    // direct` / FRR `redistribute connected` parity). A Windows CI
+    // runner with non-loopback UP interfaces (the GitHub Actions
+    // `windows-latest` image carries several virtual / Hyper-V
+    // adapters) contributes one extra `proto=direct` route per UP
+    // interface, so the total is N + 1 + (extra UP interfaces).
+    // Assert the BGP-originated network is present via `show routes
+    // count`'s per-protocol breakdown instead of the exact total —
+    // same shape `lrctl.rs` and `daemon_runtime.rs` already use.
+    let (ok_count, count_stdout, count_stderr) =
+        lrctl(&["--socket", &pipe, "show", "routes", "count"]);
+    assert!(
+        ok_count,
+        "lrctl show routes count failed: stderr={count_stderr}"
+    );
+    assert!(
+        count_stdout.contains("proto=bgp routes=1"),
+        "show routes count must show the BGP-originated network: {count_stdout}"
+    );
 
     // Clean up via `lrctl shutdown` — exercises the shutdown path
     // too. The shutdown round-trip has been racy on the Windows
