@@ -2399,6 +2399,17 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     if p.route_reflector_client.unwrap_or(false) {
         sc = sc.with_route_reflector_client();
     }
+    // FRR `neighbor X shutdown` / BIRD `disabled`: the peer is
+    // administratively down. Propagated to PeerConfig::admin_down by
+    // `add_session`; the daemon's connector and listener consult the
+    // flag (see `spawn_connector` and the inbound dispatch loop) so an
+    // admin-down peer neither dials out nor accepts inbound SYNs. The
+    // `Some(false)` shape carries the FRR `no neighbor X shutdown` /
+    // BIRD `disabled no` semantics — an explicit un-shutdown after a
+    // previously-set shutdown.
+    if let Some(down) = p.shutdown {
+        sc = sc.with_admin_down(down);
+    }
     sc
 }
 

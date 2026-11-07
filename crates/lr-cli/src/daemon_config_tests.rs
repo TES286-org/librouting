@@ -2425,3 +2425,58 @@ fn toml_peer_route_reflector_client_false_parses() {
     assert_eq!(cfg.peers.len(), 1);
     assert_eq!(cfg.peers[0].route_reflector_client, Some(false));
 }
+
+/// Per-peer `shutdown = true` parses into `PeerSpec::shutdown`
+/// (FRR `neighbor X shutdown` / BIRD `disabled`). `false` also parses
+/// (FRR `no neighbor X shutdown` / BIRD `disabled no` — explicit
+/// un-shutdown). The flag is plumbed through `build_session_config`
+/// onto `SessionConfig::admin_down`, which the daemon's connector
+/// and listener consult.
+#[test]
+fn toml_peer_shutdown_true_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64512\nshutdown = true\n",
+        &mut cfg,
+    )
+    .expect("a bool value parses");
+    cfg.finalize()
+        .expect("finalize succeeds with one valid peer");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].shutdown, Some(true));
+}
+
+#[test]
+fn toml_peer_shutdown_false_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64512\nshutdown = false\n",
+        &mut cfg,
+    )
+    .expect("a bool value parses");
+    cfg.finalize()
+        .expect("finalize succeeds with one valid peer");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].shutdown, Some(false));
+}
+
+/// A peer without an explicit `shutdown` key inherits `None` (the
+/// default) — the daemon treats the peer as up unless the operator
+/// wrote `shutdown = true` or the source-dialect translation mapped
+/// a `neighbor X shutdown` / `disabled` line onto it.
+#[test]
+fn toml_peer_shutdown_defaults_to_none() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64512\n",
+        &mut cfg,
+    )
+    .expect("a minimal peer parses");
+    cfg.finalize()
+        .expect("finalize succeeds with one valid peer");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].shutdown, None);
+}

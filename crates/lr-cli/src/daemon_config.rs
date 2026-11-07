@@ -132,6 +132,16 @@ pub(crate) struct PeerSpec {
     ///
     /// [`SessionConfig`]: lr_router::SessionConfig
     pub route_reflector_client: Option<bool>,
+    /// FRR `neighbor X shutdown` / BIRD `disabled`: administratively
+    /// down the peer. `None` (the default) inherits `false`; `Some(true)`
+    /// keeps the outbound connector passive (no dial) and refuses
+    /// inbound SYNs from this peer's address; `Some(false)` explicitly
+    /// brings a previously-shutdown peer back up (FRR `no neighbor X
+    /// shutdown`, BIRD `disabled no`). Translated onto
+    /// [`SessionConfig::admin_down`] by [`build_session_config`].
+    ///
+    /// [`SessionConfig::admin_down`]: lr_router::SessionConfig::admin_down
+    pub shutdown: Option<bool>,
 }
 
 impl PeerSpec {
@@ -4852,6 +4862,13 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         // route reflector), so the per-peer key only flips the client
         // membership for this session.
         "route_reflector_client" => peer.route_reflector_client = Some(parse_bool(value)),
+        // FRR `neighbor X shutdown` / BIRD `disabled`: the peer is
+        // administratively down. The daemon's connector stays passive
+        // and the listener refuses inbound SYNs from this peer's
+        // address. `shutdown = false` explicitly undoes a previously-
+        // set shutdown (FRR `no neighbor X shutdown`, BIRD
+        // `disabled no`).
+        "shutdown" => peer.shutdown = Some(parse_bool(value)),
         "import" => peer.import = Some(value.to_string()),
         "export" => peer.export = Some(value.to_string()),
         "import_filter" => peer.import_filter = Some(value.to_string()),
