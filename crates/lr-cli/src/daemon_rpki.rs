@@ -324,6 +324,29 @@ impl RpkiLoop {
             if !self.running.load(Ordering::Relaxed) {
                 break;
             }
+            // A previous loop iteration may have applied a Shutdown
+            // command inside `read_available()`'s inline control
+            // drain (the loop-body `drain_control()` call would not
+            // re-see it because the channel is now empty, so without
+            // this check the thread would fall through to
+            // `connect()` and re-establish the transport against the
+            // removed cache). The `stopped` flag latches in
+            // `handle_shutdown()` and never clears, so a single
+            // check here is sufficient: the loop breaks before
+            // `connect()` runs, the post-loop `client thread
+            // stopping` log line lands, and the next `status` poll
+            // observes `phase=stopped` + `roas=1 (static=1 rtr=0)`
+            // (the static `[[roa]]` layer survives because
+            // `handle_shutdown()` only calls `clear_rtr()`, not
+            // `clear_static()`). On Linux the `drain_control()` arm
+            // happened to win the race in CI (the reload command was
+            // queued while the thread was idle, not mid-`read`), so
+            // the bug did not surface there; on macOS / Windows the
+            // tighter read-timeout granularity let the inline drain
+            // consume the command first, exposing the gap.
+            if self.stopped {
+                break;
+            }
             // Control plane first: a reload may swap the cache under us
             // or signal a shutdown (the `[bgp.rpki] cache` block was
             // removed from the live config).
@@ -710,6 +733,16 @@ impl RpkiLoop {
         let total = Duration::from_secs(u64::from(self.client.intervals().1));
         let mut remaining = total;
         while !remaining.is_zero() && self.running.load(Ordering::Relaxed) {
+            // The same Shutdown-late-vs-inline-drain race the
+            // outer `run()` loop guards against: if the inline
+            // `read_available()` drain already applied the
+            // shutdown (latched `self.stopped = true`), bail out
+            // here too so the backoff does not spin while the
+            // outer loop's `stopped` check has not been re-entered
+            // yet.
+            if self.stopped {
+                return;
+            }
             match self.drain_control() {
                 Control::Interrupt | Control::Stop => return,
                 Control::Continue => {}
