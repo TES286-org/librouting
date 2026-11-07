@@ -4376,6 +4376,7 @@ impl RouterInstance for DefaultRouter {
                     cfg.ospf_network_type,
                     cfg.ospf_interface_ip,
                     cfg.ospf_neighbor_ip,
+                    cfg.ospf_rxmt_interval_ms,
                 );
                 self.sessions.insert(
                     h.0,
@@ -7152,6 +7153,13 @@ impl DefaultRouter {
                     });
                     // Virtual links are point-to-point by definition
                     // (RFC 2328 §10.4) — no DR relationship applies.
+                    // They use the OSPF default RxmtInterval (5 s,
+                    // [`lr_ospf::exchange::RXMT_INTERVAL_MS`]) since the
+                    // virtual-link session is constructed without an
+                    // OspfIfSpec — the operator's per-interface
+                    // retransmit interval does not propagate to virtual
+                    // links (matches FRR `area virtual-link …` not
+                    // inheriting `ip ospf retransmit-interval`).
                     let runtime = OspfRuntime::new(
                         router_id,
                         0,
@@ -7160,6 +7168,7 @@ impl DefaultRouter {
                         crate::session::OspfNetworkType::PointToPoint,
                         None,
                         None,
+                        lr_ospf::exchange::RXMT_INTERVAL_MS,
                     );
                     self.sessions.insert(
                         handle.0,

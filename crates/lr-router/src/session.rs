@@ -241,6 +241,19 @@ pub struct SessionConfig {
     /// v3 Router ID) — what a received Hello's DR/BDR fields are
     /// compared against when deciding whether the *neighbor* is DR/BDR.
     pub ospf_neighbor_ip: Option<u32>,
+    /// RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`, FRR
+    /// `retransmit-interval`): the gap at which an unacknowledged
+    /// Database Description, LS-Request or LSA-Update is retransmitted
+    /// to this neighbour. Stored in milliseconds because the
+    /// underlying `DbExchange::poll` clock is millisecond-grained; the
+    /// daemon converts the operator's seconds-grained TOML / argv
+    /// value to ms at session-build time. The default 5_000 matches
+    /// BIRD/FRR (and [`lr_ospf::exchange::RXMT_INTERVAL_MS`]); the
+    /// field is per-session so a noisy satellite link can sit at 30 s
+    /// without slowing a LAN neighbour on the same router. The OSPF
+    /// runtime clamps a 0 ms value to 1 ms so the poll loop cannot
+    /// busy-spin on `saturating_sub(now, last) >= 0`.
+    pub ospf_rxmt_interval_ms: u64,
     /// Per-peer maximum-prefix limit (BIRD `maximum prefix`, FRR
     /// `maximum-prefix`). `None` = no limit.
     pub maximum_prefix: Option<u32>,
@@ -352,6 +365,7 @@ impl SessionConfig {
             ospf_network_type: OspfNetworkType::PointToPoint,
             ospf_interface_ip: None,
             ospf_neighbor_ip: None,
+            ospf_rxmt_interval_ms: lr_ospf::exchange::RXMT_INTERVAL_MS,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
@@ -519,6 +533,19 @@ impl SessionConfig {
         self
     }
 
+    /// Set the RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`,
+    /// FRR `retransmit-interval`) in milliseconds — the gap at which
+    /// the OSPF exchange driver retransmits an unacknowledged DBD,
+    /// LS-Request or LSA-Update. A 0 ms value is clamped to 1 ms so
+    /// the poll loop cannot busy-spin on a 0 ms `saturating_sub`
+    /// floor (matches the [`lr_ospf::exchange::DbExchange::with_rxmt_interval`]
+    /// contract). The default 5_000 ms (BIRD/FRR default) is left
+    /// in place when this builder is not called.
+    pub fn with_ospf_rxmt_interval(mut self, ms: u64) -> Self {
+        self.ospf_rxmt_interval_ms = ms.max(1);
+        self
+    }
+
     /// Mark this BGP session as a route-reflector client (RFC 4456 §3).
     /// Sets [`Self::route_reflector_client`] = `true`; the reflection
     /// path also requires [`Self::route_reflector`]`.`[`enabled`]
@@ -604,6 +631,7 @@ impl SessionConfig {
             ospf_network_type: OspfNetworkType::PointToPoint,
             ospf_interface_ip: None,
             ospf_neighbor_ip: None,
+            ospf_rxmt_interval_ms: lr_ospf::exchange::RXMT_INTERVAL_MS,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
@@ -659,6 +687,7 @@ impl SessionConfig {
             ospf_network_type: OspfNetworkType::PointToPoint,
             ospf_interface_ip: None,
             ospf_neighbor_ip: None,
+            ospf_rxmt_interval_ms: lr_ospf::exchange::RXMT_INTERVAL_MS,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,

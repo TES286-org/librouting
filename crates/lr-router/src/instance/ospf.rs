@@ -562,6 +562,15 @@ impl OspfTableEntry {
 }
 
 impl OspfRuntime {
+    /// Construct one OSPF runtime from a `SessionConfig`'s OSPF fields.
+    ///
+    /// The parameter list grew beyond clippy's default threshold once
+    /// `rxmt_interval_ms` joined it (8 args vs the default 7). A struct
+    /// parameter is the cleaner shape, but every call site already
+    /// destructures a `SessionConfig` into the field set, so the
+    /// positional form keeps the construction site readable; the
+    /// `too_many_arguments` lint is suppressed here deliberately.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         router_id: u32,
         area_id: u32,
@@ -570,6 +579,7 @@ impl OspfRuntime {
         network_type: crate::session::OspfNetworkType,
         our_ip: Option<u32>,
         neighbor_ip: Option<u32>,
+        rxmt_interval_ms: u64,
     ) -> Self {
         Self {
             router_id,
@@ -594,7 +604,8 @@ impl OspfRuntime {
                 } else {
                     lr_ospf::packet::OspfVersion::V2
                 },
-            ),
+            )
+            .with_rxmt_interval(rxmt_interval_ms),
             iface_mtu,
             network_type,
             our_ip: our_ip.unwrap_or(0),

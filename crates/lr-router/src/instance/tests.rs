@@ -5990,6 +5990,128 @@ fn ospf_lsa_retransmits_until_acked() {
     );
 }
 
+/// Per-session RxmtInterval override (RFC 2328 Appendix B): the default
+/// 5 s gap is the BIRD/FRR default, but an operator that needs a
+/// shorter or longer retransmit on one neighbour — a noisy satellite
+/// link wants 30 s; a lab link wants 500 ms — sets it through
+/// [`SessionConfig::with_ospf_rxmt_interval`]. The override propagates
+/// to the underlying [`lr_ospf::exchange::DbExchange`] through
+/// [`OspfRuntime::new`], so a session built with a 30 s override does
+/// NOT retransmit at the 5 s default but does at 30 s.
+///
+/// Two sessions on one router — the default-5 s session `a` and the
+/// 30 s override session `b` — share the area 0 LSDB but each has its
+/// own `DbExchange`, so the per-session override does not leak across
+/// sessions. The reverse direction (`b → a`) is exercised by
+/// [`ospf_session_default_rxmt_interval_still_fires_at_5s`] — the
+/// router's `Instant` is a logical millisecond counter that must stay
+/// monotonic per test, so the two directions live in two tests.
+#[test]
+fn ospf_session_rxmt_interval_override_drives_retransmit_gap() {
+    let mut r = DefaultRouter::new();
+    let rid = RouterId::from_u32(0x01010101);
+    // The default-5 s session (`a`) — exercises the BIRD/FRR default.
+    let a = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+    // The 30 s override session (`b`) — exercises the per-session knob.
+    let b = r
+        .add_session(
+            SessionConfig::ospfv2(rid, 0).with_ospf_rxmt_interval(30_000), // 30 s override
+        )
+        .unwrap();
+
+    // Flood one LSA from a → b at t=0. b now holds it on the §13.5
+    // retransmission list and will re-flood at b's RxmtInterval
+    // (30 s, the override).
+    let peer_rid = 0x03030303u32;
+    let lsa = router_lsa(peer_rid, vec![(0x0a0a0a00, 0xffff_ff00, STUB, 10)]);
+    r.feed_input(a, &ospf_lsu_bytes(peer_rid, 0, vec![lsa.clone()]))
+        .unwrap();
+    let _ = r.poll_events();
+    let _ = r.drain_output(b); // drain the initial flood
+
+    // The default 5 s gap does NOT fire on a 30 s session.
+    r.tick(Instant(5_000));
+    assert!(
+        r.drain_output(b).is_empty(),
+        "30 s session must not retransmit at the 5 s default gap"
+    );
+    r.tick(Instant(15_000));
+    assert!(
+        r.drain_output(b).is_empty(),
+        "30 s session must not retransmit at 15 s"
+    );
+
+    // Exactly at 30 s: the override fires.
+    r.tick(Instant(30_000));
+    let retransmits = decode_lsus(&r.drain_output(b));
+    assert_eq!(
+        retransmits.len(),
+        1,
+        "30 s session retransmits at the 30 s override gap"
+    );
+    assert_eq!(retransmits[0].lsas.len(), 1);
+    assert_eq!(retransmits[0].lsas[0].header.advertising_router, peer_rid);
+}
+
+/// Companion to [`ospf_session_rxmt_interval_override_drives_retransmit_gap`]:
+/// the default-5 s session `a` (the BIRD/FRR default) retransmits at
+/// the 5 s gap when it receives a flood. Together with the override
+/// test, this proves the override does not leak into the default
+/// session's `DbExchange`.
+#[test]
+fn ospf_session_default_rxmt_interval_still_fires_at_5s() {
+    let mut r = DefaultRouter::new();
+    let rid = RouterId::from_u32(0x01010101);
+    let a = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+    let b = r
+        .add_session(
+            SessionConfig::ospfv2(rid, 0).with_ospf_rxmt_interval(30_000), // 30 s override
+        )
+        .unwrap();
+
+    // Flood one LSA from b → a at t=0. a now holds it on the §13.5
+    // retransmission list and will re-flood at a's RxmtInterval
+    // (5 s, the default — the override is on b, not a).
+    let peer_rid = 0x04040404u32;
+    let lsa = router_lsa(peer_rid, vec![(0xc0_c0_c0_00, 0xffff_ff00, STUB, 10)]);
+    r.feed_input(b, &ospf_lsu_bytes(peer_rid, 0, vec![lsa.clone()]))
+        .unwrap();
+    let _ = r.poll_events();
+    let _ = r.drain_output(a); // drain the initial flood
+
+    // Tick to 5 s: a (default 5 s) retransmits at the gap. The 30 s
+    // override on b does not affect a's exchange driver.
+    r.tick(Instant(5_000));
+    let a_retransmits = decode_lsus(&r.drain_output(a));
+    assert_eq!(
+        a_retransmits.len(),
+        1,
+        "default-5 s session retransmits at the 5 s gap, regardless of other sessions' overrides"
+    );
+    assert_eq!(a_retransmits[0].lsas.len(), 1);
+    assert_eq!(a_retransmits[0].lsas[0].header.advertising_router, peer_rid);
+}
+
+/// `SessionConfig::with_ospf_rxmt_interval(0)` clamps to 1 ms — the
+/// `DbExchange::with_rxmt_interval` contract — so the poll loop never
+/// busy-spins on a 0 ms `saturating_sub` floor. The session-build path
+/// does not reject 0 (the TOML / CLI parser does, but the builder is
+/// the defense-in-depth layer for embedders that construct a
+/// SessionConfig directly).
+#[test]
+fn ospf_session_with_rxmt_interval_clamps_zero_to_one_ms() {
+    let cfg = SessionConfig::ospfv2(RouterId::from_u32(0x01010101), 0).with_ospf_rxmt_interval(0);
+    assert_eq!(
+        cfg.ospf_rxmt_interval_ms, 1,
+        "0 ms override clamps to 1 ms — matches DbExchange::with_rxmt_interval"
+    );
+    assert_eq!(
+        lr_ospf::exchange::RXMT_INTERVAL_MS,
+        5_000,
+        "the global default stays at 5_000 ms (BIRD/FRR default)"
+    );
+}
+
 /// A stray LS-Ack (one referencing an LSA we never flooded) is accepted
 /// silently per §13.7 step 5 — no panic, no protocol violation, but a
 /// `Log` action is emitted so the operator can correlate it.
