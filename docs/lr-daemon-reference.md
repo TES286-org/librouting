@@ -172,6 +172,7 @@ behaves as an alias for `teardown`.
 | `--ospf-area ID` | `[[ospf.area]] id` / `[[ospf.interface]] area` | 0 | Integer or dotted quad |
 | `--ospf-hello-interval S` | `[ospf] hello_interval` | 10 | |
 | `--ospf-dead-interval S` | `[ospf] dead_interval` | 40 | |
+| `--ospf-rxmt-interval S` | `[ospf] rxmt_interval` (alias `retransmit_interval`) | 5 | RFC 2328 Appendix B `RxmtInterval`; BIRD `rxmtint`, FRR `retransmit-interval` |
 
 `--ospf-area` sets the default area for interfaces that do not name one.
 The configuration-file counterpart is the `[[ospf.area]]` block (landed
@@ -435,6 +436,7 @@ resolved least-specific first; a cycle or an unknown template name fails
 | `version` | enum | `v2` | `v2`/`2`, `v3`/`3` |
 | `hello_interval` | int | 10 | Seconds |
 | `dead_interval` | int | 40 | Seconds |
+| `rxmt_interval` | int | 5 | Seconds; alias `retransmit_interval`. RFC 2328 Appendix B `RxmtInterval` (BIRD `rxmtint`, FRR `retransmit-interval`); the gap at which an unacknowledged Database Description, LS-Request or LSA-Update is retransmitted. A 0 s value is rejected (the underlying `DbExchange::with_rxmt_interval` clamps 0 ms to 1 ms as a poll-loop busy-spin guard, but the config layer surfaces the typo at parse time). |
 | `graceful_restart` | bool | false | RFC 3623 / RFC 5187 |
 | `grace_period` | int | 120 | 1..=1800 |
 | `graceful_restart_helper` | bool | true | |
@@ -478,6 +480,7 @@ interface references must be declared. Each id may appear once.
 | `cost` | int | 10 | Router-LSA link cost |
 | `hello_interval` | int | global | Seconds |
 | `dead_interval` | int | global | Seconds |
+| `rxmt_interval` | int | global | Seconds; alias `retransmit_interval`. RFC 2328 Appendix B `RxmtInterval` per-interface override — see `[ospf] rxmt_interval` above. |
 | `priority` | int | 1 | DR election |
 | `network_type` | enum | `p2p` | Or `broadcast` |
 | `adj_sid` | int | — | RFC 8665 §6, v2; 16..=1048575 |

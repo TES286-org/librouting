@@ -94,6 +94,70 @@ recompiling.
 
 ### Added
 
+**`lr-router` / `lr-cli` per-session OSPF `RxmtInterval` (`SessionConfig::with_ospf_rxmt_interval`,
+`[ospf] rxmt_interval`, `[[ospf.interface]] rxmt_interval`,
+`--ospf-rxmt-interval`, FRR `ip ospf retransmit-interval` + BIRD `retransmit` translation)**
+(issue #92 — `defects.txt` `crates/lr-ospf/src/exchange.rs:L54`
+INCOMPLETE-IMPL). RFC 2328 Appendix B `RxmtInterval` is a per-interface
+constant — the gap at which an unacknowledged Database Description,
+LS-Request or LSA-Update is retransmitted to a neighbour. The BIRD/FRR
+default is 5 s, and the OSPF daemon's `DbExchange` driver hardcoded
+the same 5 s through a module-level `RXMT_INTERVAL_MS` constant. The
+prior `feat(ospf): DbExchange exposes per-neighbor RxmtInterval`
+commit (`93f3406`) added the lower-level `DbExchange::with_rxmt_interval`
+builder so a daemon could override the gap per neighbour — but the
+daemon's `[[ospf.interface]]` schema, the TOML / CLI parser, and the
+BIRD / FRR translation surface did not expose the knob, so every
+operator that needed a non-5 s retransmit (a noisy satellite link
+wants 30 s; a lab link wants 500 ms) had to fork the daemon.
+
+This round wires the knob end-to-end:
+
+- `SessionConfig::ospf_rxmt_interval_ms: u64` field (default
+  `RXMT_INTERVAL_MS`) + `with_ospf_rxmt_interval(ms)` builder; the
+  builder clamps 0 ms to 1 ms so the poll loop never busy-spins on
+  `saturating_sub(now, last) >= 0` (matches `DbExchange::with_rxmt_interval`).
+- `OspfRuntime::new` accepts `rxmt_interval_ms` and applies
+  `.with_rxmt_interval(ms)` to the underlying `DbExchange` at
+  construction; both `mod.rs` call sites (the per-neighbor session
+  builder and the virtual-link session builder) pass
+  `cfg.ospf_rxmt_interval_ms` through.
+- `[ospf] rxmt_interval = S` (global default, seconds) and
+  `[[ospf.interface]] rxmt_interval = S` (per-interface override,
+  seconds) TOML keys. The parser accepts the alias
+  `retransmit_interval` so a config that came in through `lr translate
+  frr` keeps the field name the source operator recognizes. A 0 s
+  value is rejected at parse time (the daemon would otherwise clamp
+  it to 1 ms, but a 0 in the operator's config is almost certainly a
+  typo). `--ospf-rxmt-interval S` (alias
+  `--ospf-retransmit-interval`) wires the same knob on the CLI side.
+- BIRD `retransmit N;` (RFC 2328 §C.1) and FRR `ip ospf
+  retransmit-interval N` / `ipv6 ospf retransmit-interval N` map onto
+  the new field; the previous `# UNMAPPED: retransmit … — no lr
+  equivalent (BIRD OSPF timer)` / `ip ospf retransmit-interval … — no
+  lr equivalent (FRR OSPF interface option)` notes are gone. A 0 s
+  or non-numeric value carries an unmapped note so the typo stays
+  visible instead of silently becoming a config the daemon would
+  reject at parse time.
+- The OSPF and OSPFv3 daemons multiply the operator's seconds-grained
+  value by 1_000 at session-build time so the millisecond-grained
+  `DbExchange::poll` clock reads the right gap. The startup log line
+  surfaces the resolved value: `ospf interface eth0 area 0.0.0.0 …
+  hello 10s dead 40s rxmt 5s, point-to-point (priority 1, state …)`.
+
+The default 5 s (BIRD/FRR parity) is unchanged for configurations that
+do not name the key; the new knob is purely additive. Per-session
+overrides do not leak across sessions on the same router (each
+`OspfRuntime` owns its own `DbExchange`), so a noisy satellite link
+and a LAN link on the same daemon can sit at different retransmit
+gaps. Three new unit tests in `lr-router/src/instance/tests.rs`
+exercise the override path end-to-end through the real router (a 30 s
+session does not retransmit at the 5 s default; a default-5 s session
+still retransmits at 5 s; `with_ospf_rxmt_interval(0)` clamps to 1 ms).
+Five new daemon-config / translate tests cover the TOML / CLI parser
+and the BIRD / FRR translation arms, including the 0 s rejection and
+the `retransmit_interval` alias.
+
 **`lr-bgp` / `lr-router` / `lr-cli` per-peer administrative-down
 (`PeerConfig::admin_down`, `SessionConfig::admin_down`,
 `[[peer]] shutdown`, FRR `neighbor X shutdown` + BIRD `disabled`
