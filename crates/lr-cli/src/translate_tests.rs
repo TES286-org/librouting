@@ -143,6 +143,167 @@ fn frr_no_activate_maps_to_default_off() {
     assert_eq!(out.peers[0].default_ipv4_unicast, Some(false));
 }
 
+/// FRR `neighbor X shutdown` — the peer is administratively down.
+/// Maps onto the per-peer `shutdown = true` key (RFC 4486 §3 +
+/// RFC 8203 §2); the daemon's connector stays passive and the
+/// listener refuses inbound SYNs from this peer's address.
+#[test]
+fn frr_neighbor_shutdown_maps_to_peer_shutdown_true() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n bgp router-id 10.0.0.1\n\
+         neighbor 10.0.0.2 remote-as 64513\n\
+         neighbor 10.0.0.2 shutdown\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].shutdown, Some(true));
+    assert!(toml.contains("shutdown = true"));
+    // No UNMAPPED note — the line is fully mapped now.
+    assert!(!toml.contains("# UNMAPPED: neighbor 10.0.0.2 shutdown"));
+}
+
+/// FRR `no neighbor X shutdown` — the explicit un-shutdown form
+/// (RFC 4486 §3 — re-enable a peer that was administratively down).
+/// Maps onto `shutdown = false` so the operator's explicit
+/// re-enable survives a `lr translate` round-trip (a future reload
+/// that flips the source back to `neighbor X shutdown` lands as
+/// `true` rather than the implicit `None`).
+#[test]
+fn frr_no_neighbor_shutdown_maps_to_peer_shutdown_false() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n bgp router-id 10.0.0.1\n\
+         neighbor 10.0.0.2 remote-as 64513\n\
+         no neighbor 10.0.0.2 shutdown\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].shutdown, Some(false));
+    assert!(toml.contains("shutdown = false"));
+}
+
+/// FRR `neighbor X shutdown message MSG...` (RFC 8203 §2 shutdown
+/// communication) — the message is accepted but not modelled, and
+/// the converter still maps the `shutdown` flag. The message
+/// qualifier is silently stripped (a follow-up can surface it as a
+/// `lr:` directive).
+#[test]
+fn frr_neighbor_shutdown_with_message_still_maps() {
+    let out = translate_frr(
+        "router bgp 64512\n bgp router-id 10.0.0.1\n\
+         neighbor 10.0.0.2 remote-as 64513\n\
+         neighbor 10.0.0.2 shutdown message \"maintenance window\"\n",
+    );
+    assert_eq!(out.peers.len(), 1);
+    assert_eq!(out.peers[0].shutdown, Some(true));
+}
+
+/// A peer without `neighbor X shutdown` carries `shutdown = None`
+/// (the default) — the daemon treats the peer as up.
+#[test]
+fn frr_peer_without_shutdown_defaults_to_none() {
+    let out = translate_frr(
+        "router bgp 64512\n bgp router-id 10.0.0.1\n\
+         neighbor 10.0.0.2 remote-as 64513\n",
+    );
+    assert_eq!(out.peers.len(), 1);
+    assert_eq!(out.peers[0].shutdown, None);
+}
+
+/// BIRD `disabled;` (the bare form, which BIRD treats as `yes`) —
+/// the peer is administratively down. Maps onto `shutdown = true`
+/// in the rendered TOML.
+#[test]
+fn bird_disabled_bare_maps_to_peer_shutdown_true() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol bgp p1 {
+    local as 64512;
+    neighbor 192.168.1.2 as 64513;
+    disabled;
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].shutdown, Some(true));
+    assert!(toml.contains("shutdown = true"));
+}
+
+/// BIRD `disabled yes;` — the explicit form. Same mapping as the
+/// bare form: `shutdown = true`.
+#[test]
+fn bird_disabled_yes_maps_to_peer_shutdown_true() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol bgp p1 {
+    local as 64512;
+    neighbor 192.168.1.2 as 64513;
+    disabled yes;
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.peers[0].shutdown, Some(true));
+}
+
+/// BIRD `disabled no;` — the explicit un-shutdown (lr's default).
+/// Maps onto `shutdown = false` so the operator's explicit
+/// re-enable survives the round-trip.
+#[test]
+fn bird_disabled_no_maps_to_peer_shutdown_false() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol bgp p1 {
+    local as 64512;
+    neighbor 192.168.1.2 as 64513;
+    disabled no;
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.peers[0].shutdown, Some(false));
+    assert!(toml.contains("shutdown = false"));
+}
+
+/// BIRD `disabled "reason string";` (RFC 8203 shutdown
+/// communication) — the message is accepted but not modelled, and
+/// the converter still maps the `shutdown` flag.
+#[test]
+fn bird_disabled_with_reason_string_still_maps() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol bgp p1 {
+    local as 64512;
+    neighbor 192.168.1.2 as 64513;
+    disabled "maintenance window";
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.peers[0].shutdown, Some(true));
+}
+
+/// A BIRD BGP stanza without `disabled` carries `shutdown = None`
+/// (the default) — the daemon treats the peer as up.
+#[test]
+fn bird_peer_without_disabled_defaults_to_none() {
+    let out = translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol bgp p1 {
+    local as 64512;
+    neighbor 192.168.1.2 as 64513;
+}
+"#,
+    );
+    assert_eq!(out.peers.len(), 1);
+    assert_eq!(out.peers[0].shutdown, None);
+}
+
 /// `remote-as` combined with other attributes on one line — the
 /// e2e compat test surfaced this hand-written shape, where the
 /// old first-token-only dispatch silently dropped the peer AS.

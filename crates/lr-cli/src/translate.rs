@@ -114,13 +114,15 @@
 //! config carrying them still loads in real BIRD / FRR.
 //!
 //! Not mapped (no lr equivalent): BIRD `multihop`, FRR
-//! `ebgp-multihop`, `shutdown`, VRFs, and anything inside non-BGP
+//! `ebgp-multihop`, VRFs, and anything inside non-BGP
 //! protocol stanzas. Non-BGP routing protocols (`protocol ospf …`,
 //! `router ospf`, …) are reported as ignored — the converter covers
 //! the BGP control plane. Lines inside a BGP stanza that have no
 //! mapping are kept as `# UNMAPPED:` comments; FRR peers whose
 //! `remote-as` never appears are dropped with a note instead of
-//! emitting a peer that cannot start.
+//! emitting a peer that cannot start. FRR `neighbor X shutdown` /
+//! `no neighbor X shutdown` and BIRD `disabled (yes|no|...);` map
+//! onto the per-peer `shutdown` key (RFC 4486 §3 + RFC 8203 §2).
 
 use std::process::ExitCode;
 
@@ -183,6 +185,13 @@ struct PeerOut {
     /// [`ConfigOut::route_reflector_cluster_id`] (FRR `bgp cluster-id`).
     /// `None` means neither source dialect set the flag for this peer.
     route_reflector_client: Option<bool>,
+    /// FRR `neighbor X shutdown` / BIRD `disabled`: administratively
+    /// down the peer. `None` (the default) means neither source
+    /// dialect set the flag for this peer. `Some(true)` becomes
+    /// `shutdown = true` in the rendered TOML; `Some(false)`
+    /// becomes `shutdown = false` (FRR `no neighbor X shutdown`,
+    /// BIRD `disabled no` — explicit un-shutdown).
+    shutdown: Option<bool>,
     /// Source lines with no lr equivalent.
     unmapped: Vec<String>,
 }
@@ -821,6 +830,41 @@ fn translate_bird(text: &str) -> ConfigOut {
             "rr" if tokens.len() >= 2 && tokens[1].trim_end_matches(';') == "client" => {
                 if let Some(peer) = current.as_mut() {
                     peer.route_reflector_client = Some(true);
+                }
+            }
+            // BIRD `disabled;` / `disabled yes;` / `disabled no;` /
+            // `disabled "reason";` (BIRD User's Guide §3.1: the
+            // protocol-level disable/enable knob — a BIRD BGP
+            // protocol block represents one peer, so the directive
+            // is per-peer in lr's shape). The bare form is `yes`; the
+            // `disabled "reason"` form (RFC 8203 shutdown
+            // communication) is accepted but the message is not
+            // modelled. Maps to `peer.shutdown = Some(true|false)` —
+            // the daemon's connector stays passive and the listener
+            // refuses inbound SYNs when true. The `disabled no;`
+            // form is the explicit un-shutdown (lr's default).
+            //
+            // Two arm spellings because BIRD's tokenizer leaves the
+            // trailing `;` on the last token: `disabled;` (one token,
+            // `disabled;`) and `disabled yes;` / `disabled no;` /
+            // `disabled "reason";` (first token `disabled`, no `;`).
+            "disabled" | "disabled;" if current.is_some() => {
+                if let Some(peer) = current.as_mut() {
+                    // BIRD's default for `disabled` (no value) is `yes`;
+                    // `disabled yes;` is the explicit form; `disabled
+                    // no;` is the explicit un-shutdown. Anything else
+                    // (a quoted reason string) is treated as `yes` —
+                    // BIRD's own grammar accepts a free-form string
+                    // here and treats it as truthy.
+                    let value = tokens.get(1).map(|t| t.trim_end_matches(';'));
+                    let yes = match value {
+                        // The bare `disabled;` form: tokens is
+                        // `["disabled;"]`, so `tokens.get(1)` is None.
+                        None => true,
+                        Some("no") => false,
+                        Some("yes") | Some(_) => true,
+                    };
+                    peer.shutdown = Some(yes);
                 }
             }
             // BIRD `route reflector cluster_id A.B.C.D;` (RFC 4456 §10):
@@ -2592,9 +2636,18 @@ fn apply_frr_neighbor(
                         .push(format!("no neighbor {addr} activate (ipv6-unicast)"));
                 }
             }
-            // `no neighbor ADDR shutdown` re-enables a peer — the
-            // default state in lr, nothing to emit.
-            "shutdown" => {}
+            // `no neighbor ADDR shutdown` re-enables a peer (FRR's
+            // explicit un-shutdown form). lr's default is also "up",
+            // but emitting `shutdown = false` preserves the operator's
+            // explicit statement so a reload or `config check` shows
+            // the source carried the `no` form, and a future reload
+            // that flips the source to `shutdown` (without the `no`)
+            // lands as `true` rather than `None`.
+            "shutdown" => {
+                if let Some(peer) = peer_for_or_create(out, &addr) {
+                    peer.shutdown = Some(false);
+                }
+            }
             _ => {
                 if let Some(peer) = peer_for_or_create(out, &addr) {
                     peer.unmapped
@@ -2655,8 +2708,18 @@ fn apply_frr_neighbor(
             }
         }
         "shutdown" => {
+            // FRR `neighbor ADDR shutdown` — the peer is
+            // administratively down. RFC 4486 §3 / RFC 8203 §2 say a
+            // session that was already Established would be torn down
+            // with a Cease NOTIFICATION carrying subcode 2
+            // "Administrative Shutdown"; lr's daemon additionally
+            // keeps the connector passive and refuses inbound SYNs
+            // (see `crates/lr-cli/tests/daemon_peer_shutdown.rs`).
+            // `neighbor ADDR shutdown message MSG...` (RFC 8203) and
+            // the `rtt`/`count` qualifiers are accepted but not
+            // modelled — the converter strips them.
             if let Some(peer) = peer_for_or_create(out, &addr) {
-                peer.unmapped.push(format!("neighbor {addr} shutdown"));
+                peer.shutdown = Some(true);
             }
         }
         "bfd" => {
@@ -3477,6 +3540,11 @@ fn render(out: ConfigOut) -> String {
             // mapping) both stay quiet to keep the converted config
             // minimal.
             s.push_str("route_reflector_client = true\n");
+        }
+        match peer.shutdown {
+            Some(true) => s.push_str("shutdown = true\n"),
+            Some(false) => s.push_str("shutdown = false\n"),
+            None => {}
         }
         for u in &peer.unmapped {
             s.push_str(&format!("# UNMAPPED: {u}\n"));
