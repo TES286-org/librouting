@@ -2143,6 +2143,85 @@ now list the log file reopen behaviour. No public Rust API
 change, no C ABI change, no protocol-on-the-wire change, no
 version bump.
 
+### `lr-cli`: LDP daemon SIGHUP re-applies `[[ldp.bind]]` (issue #92)
+
+`crates/lr-cli/src/daemon_ldp.rs:L507-L509 | INCOMPLETE-IMPL | LDP
+reload returns `vec!["ldp: configuration reload is not supported
+yet; shutdown still works".to_string()]`; SIGHUP is a no-op for
+LDP` — the LDP daemon's SIGHUP-driven reload was a no-op (only the
+log file was re-opened, mirroring the OSPF / BMP daemons). The
+operator had to restart the daemon to change `[[ldp.bind]]` entries
+even though `[[ldp.bind]]` is the most-frequently-edited LDP table
+(a label change, a new FEC, or a removed FEC all flow through it).
+
+The fix lands in three pieces:
+
+- **`daemon_ldp::RebindOp`** — a small enum carrying one
+  FEC-label-pair operation (`Advertise { prefix, label }` or
+  `Withdraw { prefix, label }`) the SIGHUP closure queues for the
+  main loop to apply. The closure runs synchronously inside
+  `dispatch_signals` (on the same thread as `pump`), but the
+  engine is exclusively borrowed by `pump` for the iteration's
+  duration, so the closure cannot call `engine.advertise_mapping`
+  directly. The queue bridges the two: the closure pushes ops,
+  `pump` drains them at the top of the next iteration, before any
+  packet pump iteration processes them.
+- **`daemon_ldp::compute_rebind_diff` + `parse_ldp_binds`** —
+  pure functions that compute the diff between two `BTreeMap<Prefix,
+  GenericLabel>` sets and parse a `DaemonConfig`'s `[[ldp.bind]]`
+  table into that shape. The diff ordering matches RFC 5036
+  §3.5.7: all withdraws come before all advertises so a label
+  change for an existing FEC reaches the engine as a withdraw of
+  the old label followed by an advertise of the new one (a receiver
+  that updates its received-bindings table on the advertise alone
+  would lose the half-of-the-table keyed by the old label).
+- **`daemon_ldp::reload_ldp_binds`** — the new reload closure
+  body. Re-parses the config file (the same `load_config_file`
+  startup uses, so a BIRD / FRR / TOML-loaded daemon re-parses
+  through the same dialect path), finalizes it (which validates
+  the `[[ldp.bind]]` prefixes and label range), computes the diff
+  against the live `current_binds` set, pushes one `RebindOp` per
+  change onto `pending_rebinds`, and updates `current_binds` to
+  the new target so a second SIGHUP arriving before the pump
+  drains computes its diff against the already-targeted state. A
+  parse or finalize failure aborts the reload (the operator's
+  existing config keeps running) and surfaces in the daemon log
+  and the API `reload` reply. The log file reopen still runs
+  unconditionally so the operator's `logrotate` postrotate SIGHUP
+  works on the LDP daemon.
+
+The session table, transit bookkeeping and interface set are out
+of scope for this slice — those need a real diff/apply pass (a
+session-up handler has to re-evaluate the targeted-peer list
+against the new config, etc.) and are tracked as a separate
+follow-up. The `[[ldp.bind]]` slice is the operator's
+highest-frequency reload.
+
+`LdpDaemon::drain_rebinds` applies each `RebindOp` against the
+engine, the kernel MPLS mirror (Linux only — `install_tail` /
+`uninstall_tail` for the pop routes that deliver locally-bound
+labels) and the live `binds` map atomically (a failure in one
+leaves the engine state advanced but the kernel mirror behind,
+which is the same shape as the startup path). The drainer runs at
+the top of every pump iteration so a SIGHUP that lands between
+two iterations applies atomically on the next; a session that
+comes up in `handle_events` below sees the new binds, not the
+stale ones.
+
+15 new unit tests in `crates/lr-cli/src/daemon_ldp_tests.rs`
+exercise the diff + queue + log-line shape end-to-end:
+`compute_rebind_diff_*` (5 tests for the pure diff contract —
+empty, identical, add, remove, label-change, mixed),
+`parse_ldp_binds_*` (4 tests — empty, explicit labels, skip
+None prefix, reject bad prefix), `reload_ldp_binds_*` (6 tests —
+no path, missing file, same config (zero ops), adds new bind,
+label change + remove).
+
+`docs/lr-daemon.md` and `docs/RUNBOOK.md` SIGHUP reload tables
+now list the LDP `[[ldp.bind]]` re-apply behaviour. No public Rust
+API change, no C ABI change, no protocol-on-the-wire change, no
+version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

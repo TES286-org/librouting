@@ -38,7 +38,7 @@ load and every reload.
 | Signal (Unix) / event (Windows) | Effect |
 | --- | --- |
 | `SIGTERM`, `SIGINT` | Graceful: Cease NOTIFICATION per session, RIB torn down, exit 0 |
-| `SIGHUP` | Reload: `networks`, static routes, `[[roa]]`, `[bgp.rpki]`, log file reopen |
+| `SIGHUP` | Reload: `networks`, static routes, `[[roa]]`, `[bgp.rpki]`, log file reopen, LDP `[[ldp.bind]]` (LDP daemon only) |
 | Ctrl-C, console close/logoff/shutdown (Windows) | Graceful shutdown |
 
 The daemon logs `daemon: signal 15 received — shutting down` (the number
