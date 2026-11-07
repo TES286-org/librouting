@@ -361,6 +361,134 @@ fn sighup_reloads_networks_from_config_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// SIGHUP re-opens the daemon's `--log-file` destination so the
+/// operator's `logrotate` postrotate workflow works: rename the live
+/// log file aside, send SIGHUP, verify the next log line lands in the
+/// re-opened path (and NOT in the rotated file).
+///
+/// Defects.txt `daemon_logger.rs:L272 | FUTURE-WORK | "The file is
+/// opened append-only and never re-opened, so a log rotation tool must
+/// signal the daemon to reopen"` — this test pins the SIGHUP-driven
+/// reopen contract: a successful reload reports
+/// `reload: log destination re-opened (SIGHUP)` and the new fd writes
+/// to the original path the rotation tool just left in place.
+#[test]
+fn sighup_reopens_log_file_for_rotation() {
+    let dir = std::env::temp_dir().join(format!(
+        "lr-daemon-test-hup-logrotate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("daemon.toml");
+    let socket = dir.join("daemon.api");
+    let log_path = dir.join("daemon.log");
+    let rotated_path = dir.join("daemon.log.1");
+
+    std::fs::write(
+        &conf,
+        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+         listen_addr = \"127.0.0.1:17987\"\n\nnetworks = [\"203.0.113.0/24\"]\n",
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&rotated_path);
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+            "--log-file",
+            log_path.to_str().unwrap(),
+        ],
+        "hup-logrotate",
+    );
+    // Wait for the daemon's first record to land in the log file
+    // (the daemon opens the file at startup; the test's stdout/stderr
+    // capture is separate from the daemon's own logging destination).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&log_path) {
+            if text.contains("originating 203.0.113.0/24") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let initial = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        initial.contains("originating 203.0.113.0/24"),
+        "log file should contain the originating line; got: {initial}"
+    );
+    let initial_len = initial.len();
+
+    // Simulate logrotate: move the file aside. The daemon still holds
+    // the old fd, so without a SIGHUP the next log line would land in
+    // the rotated file (the kernel keeps the inode alive until the
+    // last writer closes). Rename is the rotation tool's atomic move.
+    std::fs::rename(&log_path, &rotated_path)
+        .expect("logrotate rename — move the live log file aside");
+
+    // Send SIGHUP — the daemon must re-open the original path so the
+    // next record lands in the new file (not the rotated one).
+    d.signal(SIGHUP);
+
+    // Wait for the reload report to surface in the daemon's log file
+    // (re-opened). The "reload: log destination re-opened (SIGHUP)"
+    // line is written AFTER init_logger re-opened the file, so it
+    // lands in the new file by construction. A reload that *failed*
+    // to reopen would still write the failure line — but to the old
+    // fd (which now points at the rotated path), so the new path
+    // would stay empty.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut new_text = String::new();
+    while Instant::now() < deadline {
+        new_text = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if new_text.contains("reload: log destination re-opened (SIGHUP)") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        new_text.contains("reload: log destination re-opened (SIGHUP)"),
+        "new log file should contain the reopen notice; got: {new_text}"
+    );
+    // The reload's "SIGHUP received" line is logged BEFORE init_logger
+    // re-opens the file, so it lands in the rotated file (the old fd
+    // the daemon still held at that instant). The "log destination
+    // re-opened" line lands in the new file (the reopened fd).
+    let rotated_text = std::fs::read_to_string(&rotated_path).unwrap_or_default();
+    assert!(
+        rotated_text.contains("SIGHUP received"),
+        "rotated file should carry the pre-reopen SIGHUP marker; got: {rotated_text}"
+    );
+    assert!(
+        !rotated_text.contains("reload: log destination re-opened"),
+        "rotated file should NOT carry the post-reopen notice; got: {rotated_text}"
+    );
+    assert!(
+        !new_text.contains("originating 203.0.113.0/24"),
+        "new log file should NOT carry pre-rotation records; got: {new_text}"
+    );
+    // Sanity: the new file grew past its initial empty state.
+    assert!(
+        !new_text.is_empty(),
+        "new log file should be non-empty after SIGHUP; got: {new_text}"
+    );
+    let _ = initial_len; // silence unused warning if the assertion
+                         // above is ever relaxed.
+
+    d.signal(SIGTERM);
+    let (ok, log) = d.wait_exit();
+    assert!(ok, "log:\n{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn unprivileged_user_switch_is_refused_cleanly() {
     // We are (almost certainly) not root in the test environment: asking
