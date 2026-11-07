@@ -759,11 +759,22 @@ pub(super) fn run_ospf_daemon(
                 reload: Arc::new(|| {
                     // OSPF reload is not wired yet (interface set changes need
                     // LSA re-origination + session moves); report it loudly
-                    // instead of pretending to apply.
-                    vec![
+                    // instead of pretending to apply. The log file is
+                    // still re-opened so the operator's `logrotate`
+                    // postrotate SIGHUP works on the OSPF daemon the
+                    // same way it does on the BGP daemon — the
+                    // `reopen_log_file` helper re-opens the path the
+                    // live `[logging] file` carries without touching
+                    // the rest of the configuration.
+                    let mut lines = vec![
                         "ospf: configuration reload is not supported yet; shutdown still works"
                             .to_string(),
-                    ]
+                    ];
+                    match crate::daemon_logger::reopen_log_file() {
+                        Ok(()) => lines.push("ospf: log file re-opened (SIGHUP)".to_string()),
+                        Err(e) => lines.push(format!("ospf: log file reopen failed: {e}")),
+                    }
+                    lines
                 }),
                 router: Arc::clone(&daemon.router),
                 running: Arc::new(AtomicBool::new(true)),

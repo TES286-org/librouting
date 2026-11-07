@@ -557,7 +557,23 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let shutdown = crate::build_shutdown(cfg, &router);
     let runtime = Arc::new(crate::Runtime {
         reload: Arc::new(|| {
-            vec!["ldp: configuration reload is not supported yet; shutdown still works".to_string()]
+            // LDP reload is not wired yet — the engine's session
+            // table, LIB, transit bookkeeping and kernel MPLS mirror
+            // all need a real diff/apply pass to re-sync to a fresh
+            // config; for now the operator restarts. The log file is
+            // still re-opened so the operator's `logrotate`
+            // postrotate SIGHUP works on the LDP daemon — the
+            // `reopen_log_file` helper re-opens the path the live
+            // `[logging] file` carries without touching the rest of
+            // the configuration.
+            let mut lines = vec![
+                "ldp: configuration reload is not supported yet; shutdown still works".to_string(),
+            ];
+            match crate::daemon_logger::reopen_log_file() {
+                Ok(()) => lines.push("ldp: log file re-opened (SIGHUP)".to_string()),
+                Err(e) => lines.push(format!("ldp: log file reopen failed: {e}")),
+            }
+            lines
         }),
         router: Arc::clone(&router),
         running: Arc::clone(&running),

@@ -884,10 +884,23 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             let shutdown = crate::build_shutdown(cfg, &daemon.router);
             Arc::new(crate::Runtime {
                 reload: Arc::new(|| {
-                    vec![
+                    // OSPFv3 reload is not wired yet (same shape as
+                    // the v2 standalone daemon: interface set changes
+                    // need LSA re-origination + session moves). The log
+                    // file is still re-opened so the operator's
+                    // `logrotate` postrotate SIGHUP works on the OSPFv3
+                    // daemon — `reopen_log_file` re-opens the path the
+                    // live `[logging] file` carries without touching
+                    // the rest of the configuration.
+                    let mut lines = vec![
                         "ospf3: configuration reload is not supported yet; shutdown still works"
                             .to_string(),
-                    ]
+                    ];
+                    match crate::daemon_logger::reopen_log_file() {
+                        Ok(()) => lines.push("ospf3: log file re-opened (SIGHUP)".to_string()),
+                        Err(e) => lines.push(format!("ospf3: log file reopen failed: {e}")),
+                    }
+                    lines
                 }),
                 router: Arc::clone(&daemon.router),
                 running: Arc::new(std::sync::atomic::AtomicBool::new(true)),

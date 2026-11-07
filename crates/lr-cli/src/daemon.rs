@@ -4350,7 +4350,22 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let running = Arc::new(AtomicBool::new(true));
     let router = Arc::new(RwLock::new(DefaultRouter::new()));
     let runtime = Arc::new(Runtime {
-        reload: Arc::new(|| vec!["bmp: configuration reload is not supported".to_string()]),
+        reload: Arc::new(|| {
+            // BMP collector reload is not supported (the collector is a
+            // passive listener that accepts BMP sessions from routers;
+            // re-binding the listener would drop live sessions). The
+            // log file is still re-opened so the operator's `logrotate`
+            // postrotate SIGHUP works on the BMP daemon — the
+            // `reopen_log_file` helper re-opens the path the live
+            // `[logging] file` carries without touching the rest of
+            // the configuration.
+            let mut lines = vec!["bmp: configuration reload is not supported".to_string()];
+            match daemon_logger::reopen_log_file() {
+                Ok(()) => lines.push("bmp: log file re-opened (SIGHUP)".to_string()),
+                Err(e) => lines.push(format!("bmp: log file reopen failed: {e}")),
+            }
+            lines
+        }),
         router: Arc::clone(&router),
         running: Arc::clone(&running),
         status_lines: Arc::new(Vec::new),
@@ -7281,6 +7296,64 @@ fn reload_config(
     // window on every SIGHUP / API reload.
     if let Some(notice) = daemon_config::deprecation_notice(fresh.config_dialect.as_deref()) {
         lines.push(format!("reload: config deprecation: {notice}"));
+    }
+
+    // SIGHUP-driven log rotation (issue #92 defects.txt
+    // daemon_logger.rs:L272 future-work item): re-finalise the fresh
+    // `[logging]` block and re-open the file destination so the
+    // standard `logrotate` postrotate contract holds — the daemon
+    // drops the old fd and re-opens the path so the next record lands
+    // in the new file.
+    //
+    // Two cases:
+    // 1. The fresh config *has* a `[logging] file` set (or a
+    //    `--log-file` flag was carried into the config block). Re-call
+    //    `init_logger` with the full fresh `LogConfig` so the path can
+    //    change too (an operator who edits the file path on SIGHUP
+    //    sees the new path take effect).
+    // 2. The fresh config has *no* `[logging] file` (the operator
+    //    passed `--log-file` on the command line at startup, and the
+    //    config file does not re-set it). The fresh `LogConfig.file`
+    //    is `None`, which `init_logger` would treat as "stop logging
+    //    to a file" — closing the destination the operator just
+    //    rotated. Instead, fall back to `reopen_log_file`, which
+    //    re-opens the path the *live* `LOG_CONFIG` carries (the
+    //    startup `--log-file` path) without touching the rest of
+    //    the configuration. This is the operator's expected
+    //    behaviour: `logrotate`'s postrotate SIGHUP re-opens the
+    //    file the daemon was started with.
+    //
+    // A failure to open the new file does NOT abort the reload: the
+    // rest of the configuration is already valid (passed
+    // `fresh.finalize()`), and the operator's investigation path is
+    // the `reload: log destination ...` line in the old log stream /
+    // stderr. The pre-existing file destination (if any) stays open,
+    // so the daemon keeps logging to the old fd.
+    match fresh.logging.finalise() {
+        Ok(log_cfg) if log_cfg.file.is_some() => {
+            if let Err(e) = daemon_logger::init_logger(log_cfg) {
+                lines.push(format!(
+                    "reload: log destination rejected ({e}) — keeping current file"
+                ));
+            } else {
+                lines.push("reload: log destination re-opened (SIGHUP)".to_string());
+            }
+        }
+        Ok(_) => {
+            // Fresh config has no `file` set; the operator's startup
+            // `--log-file` is what we should re-open.
+            match daemon_logger::reopen_log_file() {
+                Ok(()) => lines.push("reload: log destination re-opened (SIGHUP)".to_string()),
+                Err(e) => lines.push(format!(
+                    "reload: log destination reopen failed ({e}) — keeping current file"
+                )),
+            }
+        }
+        Err(e) => {
+            lines.push(format!(
+                "reload: log destination rejected ({e}) — keeping current file"
+            ));
+        }
     }
 
     let old = current_networks.lock().unwrap().clone();
