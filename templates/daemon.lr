@@ -436,6 +436,18 @@ route-map "to-customer" {
 #                                  # (absolute SRLB label, 16..=1048575)
 #     }
 # }
+#
+# ospf_auth {
+#     # RFC 2328 §D authentication for the OSPFv2 daemon. Defaults to
+#     # null (AuType 0). The daemon signs every outgoing packet and
+#     # verifies every received packet; a mismatch drops the packet
+#     # before the LSDB sees it.
+#     type "simple";               # null (default) | simple
+#     password "secret12";         # required for simple; RFC 2328 §D.2
+#                                  # truncates to 8 bytes. md5 (crypto
+#                                  # auth) is rejected with a clear
+#                                  # "not wired" message — the next slice.
+# }
 
 # ---------------------------------------------------------------------
 # LDP daemon mode (protocol ldp; BGP/OSPF blocks above are ignored)

@@ -173,6 +173,8 @@ behaves as an alias for `teardown`.
 | `--ospf-hello-interval S` | `[ospf] hello_interval` | 10 | |
 | `--ospf-dead-interval S` | `[ospf] dead_interval` | 40 | |
 | `--ospf-rxmt-interval S` | `[ospf] rxmt_interval` (alias `retransmit_interval`) | 5 | RFC 2328 Appendix B `RxmtInterval`; BIRD `rxmtint`, FRR `retransmit-interval` |
+| `--ospf-auth-type T` | `[ospf.auth] type` | `null` | `null` / `simple`; `md5` rejected with a clear message (follow-up) |
+| `--ospf-auth-password P` | `[ospf.auth] password` | — | Required for `simple`; RFC 2328 §D.2 truncates to 8 bytes |
 
 `--ospf-area` sets the default area for interfaces that do not name one.
 The configuration-file counterpart is the `[[ospf.area]]` block (landed
@@ -182,6 +184,36 @@ backbone area (0) is always implicit and always `normal`, so a config
 using only area 0 needs no `[[ospf.area]]` block — but interfaces that
 attach to a non-backbone area must reference an `id` declared by an
 `[[ospf.area]]` block.
+
+### OSPFv2 authentication (`[ospf.auth]`)
+
+RFC 2328 §D authentication is wired into the OSPFv2 daemon for the two
+stateless strategies. A `[ospf.auth]` block (or `--ospf-auth-type` /
+`--ospf-auth-password` on the CLI) selects the strategy the daemon
+applies to every outgoing packet and verifies on every received
+packet — a mismatched credential drops the packet before the LSDB
+sees it (RFC 2328 §D.1).
+
+| Strategy | `type` value | AuType | Notes |
+| --- | --- | --- | --- |
+| NullAuth (default) | `null` | 0 | No authentication; the auth_data field is zero on outgoing packets and ignored on received packets. |
+| SimplePassword | `simple` | 1 | 8-byte password (zero-padded when shorter, truncated when longer). RFC 2328 §D.2 warns the password crosses the network in cleartext; use on trusted segments only. |
+| CryptoAuth (follow-up) | `md5` | 2 | HMAC-SHA-1 / HMAC-SHA-256 (RFC 5709). The wire codec and `lr_ospf::auth::CryptoAuth` helper already exist; the per-packet trailer append and anti-replay state needed for daemon wiring is the next slice. The parser rejects `type = "md5"` at config-load time with a clear "not wired into the daemon yet" message. |
+
+A startup log line surfaces the resolved strategy (`ospf auth: null`
+or `ospf auth: simple-password (AuType 1, 8-byte credential)`); an
+all-zero password (the wire-valid but weak `password = ""` case) logs
+a warning.
+
+#### Example
+
+```toml
+[ospf.auth]
+type = "simple"
+password = "secret12"
+```
+
+The CLI equivalent is `--ospf-auth-type simple --ospf-auth-password secret12`.
 
 ### OSPF graceful restart
 

@@ -94,6 +94,76 @@ recompiling.
 
 ### Added
 
+**`lr-ospf` / `lr-cli` OSPFv2 SimplePassword authentication wiring
+(`SimplePassword::new`, `[ospf.auth]` TOML keys, `--ospf-auth-type` /
+`--ospf-auth-password` CLI flags)** (issue #92 — `defects.txt`
+`crates/lr-cli/src/daemon_ospf.rs:L42-L47` DOC-MISMATCH "Authentication
+is not wired into the v2 daemon yet"). The `lr_ospf::auth` module
+already implemented the wire codec for the three RFC 2328 §D
+strategies (NullAuth, SimplePassword, CryptoAuth) and RFC 5709
+HMAC-SHA, but the daemon's `daemon_ospf.rs` documentation explicitly
+noted "Authentication is not wired into the v2 daemon yet" — a
+configuration that set the au_type and auth_data fields had no effect
+on outgoing packets, and a peer sending a credential the daemon did
+not verify was silently admitted into the LSDB.
+
+This round wires the two stateless strategies end-to-end:
+
+- `lr_ospf::auth::SimplePassword::new(secret: &[u8])` constructor that
+  pads short secrets to 8 bytes (RFC 2328 §D.2 fixes the auth_data
+  field at 8 bytes) and truncates long ones — the previous shape
+  required callers to build the `[u8; 8]` array by hand.
+- `[ospf.auth]` TOML table with `type = "null" | "simple"` and
+  `password = "..."` (for `simple`). Crypto auth (`type = "md5"`) is
+  rejected at parse time with a clear "not wired into the daemon yet"
+  message — the wire codec and `CryptoAuth` helper already exist in
+  `lr_ospf::auth::crypto`; the per-packet trailer append and anti-replay
+  state needed for daemon wiring is the next slice.
+- `--ospf-auth-type` and `--ospf-auth-password` CLI flags (with the
+  `--ospf-authentication-*` aliases for the long form), rejected at
+  `parse_args` time on the same fail-closed rules as the TOML parser.
+- `daemon_ospf.rs`'s `OspfDaemon` carries an
+  `auth: Option<SimplePassword>` field built from the config. The send
+  path applies auth to every outgoing packet (Hello, DD, LSR, LSU,
+  LSAck, Grace-LSA): `apply_ospf_auth` sets au_type = 1, writes the
+  password into the auth_data field, and zeroes the checksum so the
+  subsequent `finalize_v2_packet` recomputes from the modified header.
+  The receive path verifies auth on every received packet before the
+  LSDB sees it: `verify_ospf_auth` drops a packet whose au_type or
+  auth_data do not match (RFC 2328 §D.1 "If the authentication proves
+  unsuccessful, the packet is dropped"), logging a single warning per
+  drop so the operator can correlate a misconfigured peer with the
+  silent adjacency.
+- Startup log line surfaces the resolved strategy (`ospf auth: null`
+  / `ospf auth: simple-password (AuType 1, 8-byte credential)`); an
+  all-zero password (the wire-valid but weak `password = ""` case)
+  logs a warning.
+- The daemon's documentation header (`daemon_ospf.rs` module doc) no
+  longer claims auth is not wired — it now describes the landed
+  NullAuth + SimplePassword surface and names CryptoAuth as the
+  follow-up.
+
+The default is `null` (NullAuth, AuType 0) — every existing
+configuration is unchanged; the new surface is purely additive.
+`SimplePassword` is `Send + Sync` (a 9-byte Clone), so the auth
+state is cloned out of `self` before the `&mut self.interfaces` send
+loops — the borrow checker split the helper into a free-function
+`apply_ospf_auth` / `verify_ospf_auth` pair the loops can call without
+re-borrowing `self`. 21 new unit tests in
+`crates/lr-cli/src/daemon_ospf_tests.rs` cover the codec default
+(NullAuth au_type / all-zero auth_data), the apply/verify round-trip
+(accept on match, reject on wrong password / wrong au_type /
+truncated header), the build-from-config mapping (default → NullAuth,
+explicit null → NullAuth, simple → SimplePassword, empty password →
+all-zero credential), the config-parse coverage (simple, md5
+rejection, unknown type rejection, unknown key rejection), and the
+finalize-time validation (simple without password fails closed, long
+password warns). 8 new unit tests in `crates/lr-ospf/src/auth/mod.rs`
+cover the new `SimplePassword::new` constructor (pad, truncate, empty,
+eight-byte round-trip) and the `Auth` trait surface (sign writes the
+password, verify accepts signed / rejects mismatched, verify rejects
+short header, au_type is SimplePassword).
+
 **`lr-router` / `lr-cli` per-session OSPF `RxmtInterval` (`SessionConfig::with_ospf_rxmt_interval`,
 `[ospf] rxmt_interval`, `[[ospf.interface]] rxmt_interval`,
 `--ospf-rxmt-interval`, FRR `ip ospf retransmit-interval` + BIRD `retransmit` translation)**

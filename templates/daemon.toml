@@ -451,6 +451,17 @@ permit = false
                               # Link Opaque LSA once the adjacency is
                               # Full, withdrawn (MaxAge) when it drops.
 
+# [ospf.auth]
+# RFC 2328 §D authentication for the OSPFv2 daemon. Defaults to `null`
+# (AuType 0, no authentication) — the daemon signs every outgoing
+# packet and verifies every received packet against the configured
+# strategy; a mismatch drops the packet before the LSDB sees it.
+# type = "simple"             # null (default) | simple
+# password = "secret12"       # required for `simple`; RFC 2328 §D.2
+                              # truncates to 8 bytes. `md5` (crypto auth)
+                              # is rejected with a clear "not wired into
+                              # the daemon yet" message — the next slice.
+
 # ---------------------------------------------------------------------------
 # LDP daemon mode (run with --protocol ldp; BGP/OSPF tables above are ignored)
 # ---------------------------------------------------------------------------
