@@ -63,6 +63,22 @@ pub struct SimplePassword {
     pub password: [u8; 8],
 }
 
+impl SimplePassword {
+    /// Build a SimplePassword from a variable-length secret. RFC 2328
+    /// §D.2 fixes the auth_data field at 8 bytes, so the secret is
+    /// zero-padded when shorter and truncated when longer — the same
+    /// convention FRR's `area XY authentication message-digest` and
+    /// BIRD's `password` directive apply. Empty input produces an
+    /// all-zero password (a weak but wire-valid configuration; the
+    /// embedder is expected to validate policy on top).
+    pub fn new(secret: &[u8]) -> Self {
+        let mut password = [0u8; 8];
+        let len = secret.len().min(8);
+        password[..len].copy_from_slice(&secret[..len]);
+        Self { password }
+    }
+}
+
 impl Auth for SimplePassword {
     fn verify(&self, header: &[u8], _body: &[u8]) -> bool {
         // The 8-byte auth_data field is at offsets 16..24 of the header.
@@ -79,5 +95,63 @@ impl Auth for SimplePassword {
             return;
         }
         header[16..24].copy_from_slice(&self.password);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_pads_short_secret_with_zeros() {
+        let auth = SimplePassword::new(b"hello");
+        assert_eq!(&auth.password, b"hello\0\0\0");
+    }
+
+    #[test]
+    fn new_truncates_long_secret_to_eight_bytes() {
+        let auth = SimplePassword::new(b"abcdefghijklmnop");
+        assert_eq!(&auth.password, b"abcdefgh");
+    }
+
+    #[test]
+    fn new_empty_secret_is_all_zeros() {
+        let auth = SimplePassword::new(b"");
+        assert_eq!(&auth.password, &[0u8; 8]);
+    }
+
+    #[test]
+    fn new_eight_byte_secret_round_trips_unchanged() {
+        let auth = SimplePassword::new(b"12345678");
+        assert_eq!(&auth.password, b"12345678");
+    }
+
+    #[test]
+    fn sign_writes_password_into_header_auth_data_field() {
+        let auth = SimplePassword::new(b"secret12");
+        let mut header = vec![0u8; 24];
+        auth.sign(&mut header, &[]);
+        assert_eq!(&header[16..24], b"secret12");
+    }
+
+    #[test]
+    fn verify_accepts_signed_header_and_rejects_mismatch() {
+        let auth = SimplePassword::new(b"secret12");
+        let mut header = vec![0u8; 24];
+        auth.sign(&mut header, &[]);
+        assert!(auth.verify(&header, &[]));
+        header[16] ^= 0xff;
+        assert!(!auth.verify(&header, &[]));
+    }
+
+    #[test]
+    fn verify_rejects_short_header() {
+        let auth = SimplePassword::new(b"secret12");
+        assert!(!auth.verify(&[0u8; 16], &[]));
+    }
+
+    #[test]
+    fn au_type_is_simple_password() {
+        assert_eq!(SimplePassword::new(b"x").au_type(), AuType::SimplePassword);
     }
 }
