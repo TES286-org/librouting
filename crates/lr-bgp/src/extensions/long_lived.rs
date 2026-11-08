@@ -22,37 +22,29 @@
 //! The restarting speaker advertises its Restart Time (RFC 4724) and LLST
 //! in OPEN; helpers retain the speaker's routes for the sum of both
 //! timers, marking routes with LLGR_STALE once the GR window elapses.
-
-#![allow(dead_code)]
+//!
+//! The address-family list the LLGR capability advertises mirrors the
+//! RFC 4724 GR family list (§3.1 reuses the same shape); the
+//! [`advertised_families`] helper is therefore shared with
+//! [`crate::extensions::graceful_restart`] and re-exported from here
+//! for callers that build the LLGR capability from the LLGR module
+//! surface.
 
 use crate::capabilities::Capability;
 use crate::peer::PeerConfig;
 
-use lr_core::nlri::NlriFamily;
+// Re-export the shared family-list helper from the GR module so
+// callers that construct the LLGR capability through the
+// `crate::extensions::long_lived` surface (the FSM, tests) keep
+// working without rewriting their imports. The helper lives in
+// `graceful_restart` because RFC 9494 §3.1 defines the LLGR family
+// list as the same shape as the GR one (RFC 4724 §3), so GR is the
+// natural home for the shared computation.
+pub use crate::extensions::graceful_restart::advertised_families;
 
 /// F bit (RFC 9494 §3.1): set when the speaker preserved its forwarding
 /// state across the restart being signalled.
 pub const FLAG_FORWARDING: u8 = 0x80;
-
-/// Families a restart-related capability (RFC 4724 §3 GR, RFC 9494 §3.1
-/// LLGR) should list for a peer: the negotiated MP-BGP families, or
-/// implicit `<IPv4, Unicast>` when the session uses RFC 4271 encoding
-/// only (RFC 9494 §3.1).
-///
-/// FRR `no bgp default ipv4-unicast` (W2.1): when the knob is off and
-/// the peer did not explicitly add IPv4 unicast to `mp_families`, the
-/// capability does NOT list it — the family is not active, so there
-/// is no retention promise to make.
-pub fn advertised_families(cfg: &PeerConfig) -> Vec<NlriFamily> {
-    if !cfg.default_ipv4_unicast && !cfg.mp_families.contains(&NlriFamily::IPV4_UNICAST) {
-        return cfg.mp_families.clone();
-    }
-    if cfg.mp_families.is_empty() {
-        vec![NlriFamily::IPV4_UNICAST]
-    } else {
-        cfg.mp_families.clone()
-    }
-}
 
 /// Build the LLGR capability for a configured peer. Returns `None` when
 /// LLGR is not usable: RFC 9494 §4.1 requires the Graceful Restart
@@ -75,6 +67,7 @@ mod tests {
     use crate::capabilities::CapabilityCode;
     use crate::peer::PeerConfig;
     use lr_core::addr::{Asn, RouterId};
+    use lr_core::nlri::NlriFamily;
 
     fn cfg() -> PeerConfig {
         PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))

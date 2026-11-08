@@ -406,30 +406,35 @@ impl BgpPeer {
                 .any(|cap| cap.code == crate::capabilities::CapabilityCode::RouteRefresh)
     }
 
-    /// Whether both speakers negotiated RFC 7313 enhanced route refresh.
     /// Peer-advertised RFC 4724 restart time, when graceful restart was
     /// negotiated. The caller retains stale routes no longer than this limit.
+    ///
+    /// Returns `None` when either side did not advertise the RFC 4724
+    /// capability, or when the peer's value is malformed — the retention
+    /// deadline in `lr-router` then defaults to zero (no retention).
+    /// Delegates the local-knob + peer-capability check to
+    /// [`crate::extensions::graceful_restart::negotiated`] and the
+    /// peer-time decode to
+    /// [`crate::extensions::graceful_restart::peer_restart_time`].
     pub fn negotiated_graceful_restart_time(&self) -> Option<u16> {
-        if !self.cfg.graceful_restart {
+        if !crate::extensions::graceful_restart::negotiated(&self.cfg, &self.peer_capabilities) {
             return None;
         }
-        self.peer_capabilities
-            .iter()
-            .find_map(crate::capabilities::Capability::as_graceful_restart)
-            .map(|(_, time)| time)
+        crate::extensions::graceful_restart::peer_restart_time(&self.peer_capabilities)
     }
 
     /// Whether both speakers exchanged the RFC 9494 Long-Lived Graceful
     /// Restart capability *and* the RFC 4724 GR capability. Per §4.5 an
     /// LLGR capability received without GR is ignored.
+    ///
+    /// Delegates the GR-half of the negotiation to
+    /// [`crate::extensions::graceful_restart::peer_offered`] for
+    /// parity with the asn4 / enhanced_rr / long_lived helpers.
     pub fn llgr_negotiated(&self) -> bool {
         if !self.cfg.long_lived || !self.cfg.graceful_restart {
             return false;
         }
-        let peer_gr = self
-            .peer_capabilities
-            .iter()
-            .any(|cap| cap.code == crate::capabilities::CapabilityCode::GracefulRestart);
+        let peer_gr = crate::extensions::graceful_restart::peer_offered(&self.peer_capabilities);
         let peer_llgr = self
             .peer_capabilities
             .iter()
@@ -470,7 +475,7 @@ impl BgpPeer {
             .flatten()
             .filter(|(afi, safi, _, llst)| {
                 *llst > 0
-                    && crate::extensions::long_lived::advertised_families(&self.cfg)
+                    && crate::extensions::graceful_restart::advertised_families(&self.cfg)
                         .iter()
                         .any(|f| f.afi == *afi && f.safi == *safi)
             })
@@ -600,21 +605,15 @@ impl BgpPeer {
         if self.cfg.enhanced_rr {
             caps.push(Capability::enhanced_rr());
         }
-        if self.cfg.graceful_restart {
-            // RFC 4724 §3: list the families whose state we can preserve —
-            // the receiving speaker retains routes exactly for these
-            // (§4.2). The F bit is set: the library keeps Adj-RIB-In across
-            // reconnects within the same process (the reference daemon).
-            let families: Vec<(u16, u8, bool)> =
-                crate::extensions::long_lived::advertised_families(&self.cfg)
-                    .into_iter()
-                    .map(|f| (f.afi, f.safi, true))
-                    .collect();
-            caps.push(Capability::graceful_restart(
-                0,
-                self.cfg.graceful_restart_time,
-                &families,
-            ));
+        // RFC 4724 §3: list the families whose state we can preserve —
+        // the receiving speaker retains routes exactly for these
+        // (§4.2). The F bit is set: the library keeps Adj-RIB-In across
+        // reconnects within the same process (the reference daemon). The
+        // `graceful_restart::open_capability` helper centralises the
+        // construction (mirrors `asn4::open_capability` /
+        // `enhanced_rr::open_capability` / `long_lived::open_capability`).
+        if let Some(gr) = crate::extensions::graceful_restart::open_capability(&self.cfg) {
+            caps.push(gr);
         }
         // RFC 9494 §4.1: LLGR is advertised alongside the GR capability.
         if let Some(llgr) = crate::extensions::long_lived::open_capability(&self.cfg) {
