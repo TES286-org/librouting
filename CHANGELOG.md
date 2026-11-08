@@ -2284,6 +2284,109 @@ now list the LDP `[[ldp.bind]]` re-apply behaviour. No public Rust
 API change, no C ABI change, no protocol-on-the-wire change, no
 version bump.
 
+### `lr-bgp`: RFC 4724 Graceful Restart orchestration helpers (issue #92)
+
+`crates/lr-bgp/src/extensions/graceful_restart.rs:L1-L20 | PLACEHOLDER |
+Module only contains doc tables; all implementation lives in
+lr-router; `#![allow(dead_code)]` — gap with RFC 4724 §4.2
+description` — the `graceful_restart` extension module held only
+a doc table; the actual GR capability construction and the peer's
+restart-time / R-bit reads were inlined in the FSM
+(`crates/lr-bgp/src/fsm.rs`) at every call site. The
+`advertised_families` helper existed in the LLGR module
+(`crates/lr-bgp/src/extensions/long_lived.rs`) even though its
+doc said "Families a restart-related capability (RFC 4724 §3 GR,
+RFC 9494 §3.1 LLGR) should list" — shared between the two
+extensions, but hosted on the wrong side of the layering.
+
+The module now exposes the same `advertised` / `peer_offered` /
+`negotiated` / `open_capability` triple the other extension
+modules already use (`asn4`, `enhanced_rr`, `long_lived`), plus
+two GR-specific readers:
+
+- `advertised(cfg)` — whether the local config opts the session
+  into the RFC 4724 capability (mirror of `enhanced_rr::advertised`
+  / `asn4::advertised`).
+- `advertised_families(cfg)` — the address-family list to put in
+  the capability. Moved from `long_lived` to `graceful_restart` so
+  the GR module owns the shared computation; `long_lived` re-exports
+  it via `pub use crate::extensions::graceful_restart::advertised_families`
+  so existing callers (the FSM, the LLGR tests) keep working
+  without rewriting their imports.
+- `peer_offered(peer_caps)` — whether the peer advertised the
+  capability in its OPEN (mirror of `asn4::peer_offered_as4`).
+- `peer_restart_time(peer_caps)` — the peer's advertised Restart
+  Time (RFC 4724 §3) in seconds; returns `None` when the peer did
+  not advertise the capability or its value is malformed (length < 2).
+  Uses `find_map` so a later malformed duplicate does not
+  invalidate an earlier well-formed value (mirrors `asn4::peer_as4`'s
+  RFC 6793 §4 first-occurrence rule).
+- `peer_restart_state(peer_caps)` — whether the peer's R bit
+  (Restart State, §3) is set, so the local helper-of-record knows
+  the peer has just restarted its control plane and is in the
+  process of restoring its routes (§4.2 step 2).
+- `negotiated(cfg, peer_caps)` — whether both speakers advertised
+  the capability, so the helper-of-record retention policy (§4.2)
+  applies.
+- `open_capability(cfg)` — the capability to put in the OPEN, or
+  `None` when the knob is off. The R bit is left clear (the local
+  speaker is not in the restart state on a fresh OPEN); a restarting
+  speaker that needs to set the R bit can post-process the returned
+  capability. The F bit per family is set: the library keeps
+  Adj-RIB-In across reconnects within the same process.
+
+The FSM's OPEN builder now calls
+`crate::extensions::graceful_restart::open_capability(&self.cfg)`
+instead of inlining the family-list walk + `Capability::graceful_restart`
+construction. `BgpPeer::negotiated_graceful_restart_time` now delegates
+the local-knob + peer-capability check to `negotiated` and the
+peer-time decode to `peer_restart_time`. `BgpPeer::llgr_negotiated`
+now uses `peer_offered` for the GR-half of the negotiation
+(the LLGR-half stays inline — adding a `long_lived::peer_offered`
+helper is the same low-cost follow-up that landed for asn4 /
+enhanced_rr, and is left to a follow-up to keep this slice
+focused on the GR module).
+
+The `#![allow(dead_code)]` is removed from both
+`crates/lr-bgp/src/extensions/graceful_restart.rs` (the module
+now carries real implementations) and
+`crates/lr-bgp/src/extensions/long_lived.rs` (the
+`advertised_families` move + `pub use` re-export keeps the
+`long_lived::advertised_families` call site working, and the
+module's `open_capability` / `FLAG_FORWARDING` items were already
+referenced from the FSM — the `allow` was stale).
+
+23 new unit tests in `crates/lr-bgp/src/extensions/graceful_restart.rs`
+(`advertised_tracks_knob`, `open_capability_*` (5 tests for the
+OPEN builder — off when knob off, on when knob on, implicit IPv4
+family, MP families listed, FRR `no bgp default ipv4-unicast`
+excludes / explicit IPv4 kept), `peer_offered_*` (3 tests — when
+present, absent, malformed), `peer_restart_time_*` (5 tests —
+none when absent, value when present, none when malformed,
+first-occurrence on duplicate, skips unrelated capabilities),
+`peer_restart_state_*` (3 tests — clear on fresh OPEN, set when
+peer signalled restart, false when absent / malformed),
+`negotiated_*` (4 tests — requires local knob, requires peer cap,
+when both sides advertise, when peer cap is malformed). They
+mirror the `asn4` and `enhanced_rr` test layout one-for-one so a
+future contributor scanning the extensions directory can read
+the three modules with the same expectations.
+
+The existing `lr-bgp` test suite (the LLGR negotiation tests at
+`crates/lr-bgp/src/fsm_tests.rs:L882-1009` and the per-extension
+`long_lived::tests::*` at
+`crates/lr-bgp/src/extensions/long_lived.rs:64-110`) continues
+to pass — the refactor preserves the negotiation posture (the
+`peer_offered` check counts a malformed capability as "offered"
+so the retention policy still applies; the time / R-bit reads
+validate the value separately and return `None` / `false` when
+malformed).
+
+No public Rust API shape change beyond the new
+`lr_bgp::extensions::graceful_restart` items; no C ABI change
+(the new functions are pure-Rust helpers, not `extern "C"`); no
+protocol-on-the-wire change; no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
