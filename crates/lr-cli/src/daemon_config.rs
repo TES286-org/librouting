@@ -167,6 +167,46 @@ impl PeerSpec {
     }
 }
 
+/// OSPFv2 authentication configuration (RFC 2328 §D). The daemon
+/// applies the configured strategy to every outgoing OSPFv2 packet
+/// (Hello, DD, LSR, LSU, LSAck) and verifies it on every received
+/// packet — a mismatched or missing credential drops the packet
+/// before the LSDB sees it (fail-closed, RFC 2328 §D.1 "If the
+/// authentication proves unsuccessful, the packet is dropped").
+///
+/// Supported types:
+/// - `"null"` (default) — [`lr_ospf::auth::NullAuth`]. No
+///   authentication; the auth_data field is zero on every packet and
+///   any received value is accepted (RFC 2328 §D.1 AuType 0).
+/// - `"simple"` — [`lr_ospf::auth::SimplePassword`]. The 8-byte
+///   auth_data field carries the configured password (zero-padded
+///   when shorter, truncated when longer). RFC 2328 §D.2 warns the
+///   password crosses the network in cleartext; use on trusted
+///   segments only.
+///
+/// Crypto auth (RFC 2328 §D.3 + RFC 5709 HMAC-SHA) is a follow-up —
+/// the wire codec and `CryptoAuth` helper already exist in
+/// `lr_ospf::auth::crypto`; the daemon wiring (per-packet trailer
+/// append + anti-replay state) is the next slice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OspfAuthSpec {
+    /// `"null"` (default), `"simple"`. Crypto auth (`"md5"`) is a
+    /// follow-up — the parser rejects it with a clear message until
+    /// the daemon wiring lands.
+    pub auth_type: Option<String>,
+    /// Password for `"simple"` auth. Ignored for `"null"`. Required
+    /// for `"simple"` (the daemon fails closed at startup if
+    /// `auth_type = "simple"` and `password` is absent).
+    pub password: Option<String>,
+}
+
+impl OspfAuthSpec {
+    /// Resolve to the effective auth type, defaulting to `"null"`.
+    pub fn effective_type(&self) -> &str {
+        self.auth_type.as_deref().unwrap_or("null")
+    }
+}
+
 /// One `[[ospf.area]]` table: area ID plus stub/NSSA policy
 /// (RFC 2328 §3.6, RFC 3101). The backbone (area 0) is always normal
 /// and needs no declaration.
@@ -1187,6 +1227,11 @@ pub(crate) struct DaemonConfig {
     /// runtime API socket is configured; absent → restarts re-sync
     /// without the §2 origination suppression.
     pub ospf_gr_state_file: Option<String>,
+    /// OSPFv2 authentication (`[ospf.auth]` table, `--ospf-auth-type` /
+    /// `--ospf-auth-password`). Defaults to `null` auth (no
+    /// authentication) — see [`OspfAuthSpec`] for the supported
+    /// strategies and the fail-closed validation rules.
+    pub ospf_auth: OspfAuthSpec,
 
     /// LDP transport address advertised in Hellos and used for the
     /// TCP session transport (`--ldp-transport`). When unset it
@@ -1564,6 +1609,7 @@ impl DaemonConfig {
             ospf_gr_helper: true,
             ospf_helper_grace_cap: lr_ospf::gr::DEFAULT_GRACE_PERIOD_SECS,
             ospf_gr_state_file: None,
+            ospf_auth: OspfAuthSpec::default(),
             ldp_port: 646,
             ldp_transport_v6: None,
             ldp_prefer_ipv6: true,
@@ -2406,6 +2452,32 @@ impl DaemonConfig {
                 }
             }
         }
+        // RFC 2328 §D: validate the OSPFv2 auth block. `simple` auth
+        // requires a `password` (an empty password is wire-valid but
+        // weak — the daemon logs a warning at startup; here we only
+        // fail closed on a missing password key, which is almost
+        // certainly a typo). `null` is the default and needs no
+        // password. Crypto auth (`md5`) is rejected at parse time, so
+        // we only need to handle `null` and `simple` here.
+        if self.ospf_auth.effective_type() == "simple" {
+            if self.ospf_auth.password.is_none() {
+                return Err("[ospf.auth] type = \"simple\" requires a 'password' key \
+                     (RFC 2328 §D.2 — set password = \"\" for an all-zero credential)"
+                    .into());
+            }
+            // RFC 2328 §D.2: the password is exactly 8 bytes on the
+            // wire. A longer secret is silently truncated by
+            // `SimplePassword::new`; surface a warning so the
+            // operator notices.
+            if let Some(p) = self.ospf_auth.password.as_deref() {
+                if p.len() > 8 {
+                    self.warnings.push(format!(
+                        "ospf.auth password '{}' is {} bytes but RFC 2328 §D.2 truncates to 8 — the wire carries the first 8 bytes",
+                        p, p.len()
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2793,6 +2865,13 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 "ospf.srv6_locator" => {
                     cfg.ospf_srv6_locators.push(OspfSrv6LocatorSpec::default());
                     section = "ospf.srv6_locator".to_string();
+                }
+                "ospf.auth" => {
+                    // Single-table block (only one auth strategy per
+                    // OSPFv2 daemon — RFC 2328 §D keys the auth by the
+                    // area, but the daemon runs one area config; per-
+                    // area auth is a follow-up).
+                    section = "ospf.auth".to_string();
                 }
                 "babel.key" => {
                     cfg.babel_keys.push(BabelKeySpec::default());
@@ -4134,6 +4213,35 @@ fn apply_ospf_key(
                 }
             }
         }
+        "ospf.auth" => match key {
+            "type" | "auth_type" => {
+                let t = value.to_ascii_lowercase();
+                match t.as_str() {
+                    "null" | "none" | "off" => cfg.ospf_auth.auth_type = Some("null".into()),
+                    "simple" | "simple-password" | "password" => {
+                        cfg.ospf_auth.auth_type = Some("simple".into());
+                    }
+                    "md5" | "crypto" | "message-digest" => {
+                        return Err(format!(
+                            "ospf.auth type '{t}': crypto auth (RFC 2328 §D.3 / RFC 5709) \
+                             is not wired into the daemon yet; use 'simple' or 'null' \
+                             (follow-up tracked in defects.txt crates/lr-cli/src/daemon_ospf.rs:L42-L47)"
+                        ));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "unknown ospf.auth type '{t}' (expected: null, simple)"
+                        ));
+                    }
+                }
+            }
+            "password" => cfg.ospf_auth.password = Some(value.to_string()),
+            _ => {
+                return Err(format!(
+                    "unknown [ospf.auth] key '{key}' (typo protection; OSPF config fails closed)"
+                ));
+            }
+        },
         "ospf.interface" => {
             let Some(iface) = cfg.ospf_interfaces.last_mut() else {
                 return Err("key outside a [[ospf.interface]] table".into());
@@ -5407,6 +5515,36 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--ospf-gr-state-file" if i + 1 < args.len() => {
                 cfg.ospf_gr_state_file = Some(args[i + 1].clone());
+                i += 2;
+            }
+            // RFC 2328 §D authentication: `--ospf-auth-type` selects
+            // the strategy (null/simple); `--ospf-auth-password`
+            // supplies the secret for `simple`. Crypto auth (md5)
+            // is rejected with a clear error until the daemon wiring
+            // lands.
+            "--ospf-auth-type" | "--ospf-authentication-type" if i + 1 < args.len() => {
+                let t = args[i + 1].to_ascii_lowercase();
+                match t.as_str() {
+                    "null" | "none" | "off" => cfg.ospf_auth.auth_type = Some("null".into()),
+                    "simple" | "simple-password" | "password" => {
+                        cfg.ospf_auth.auth_type = Some("simple".into());
+                    }
+                    "md5" | "crypto" | "message-digest" => {
+                        eprintln!(
+                            "error: ospf.auth type '{t}': crypto auth (RFC 2328 §D.3 / RFC 5709) \
+                             is not wired into the daemon yet; use 'simple' or 'null'"
+                        );
+                        return Err(ExitCode::from(2));
+                    }
+                    _ => {
+                        eprintln!("error: unknown --ospf-auth-type '{t}' (expected: null, simple)");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--ospf-auth-password" | "--ospf-authentication-password" if i + 1 < args.len() => {
+                cfg.ospf_auth.password = Some(args[i + 1].clone());
                 i += 2;
             }
             // RFC 9513 (OSPFv3 SRv6): a repeatable --ospf-srv6-locator

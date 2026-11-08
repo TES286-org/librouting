@@ -41,8 +41,11 @@
 //!
 //! Limitations (see docs/STATUS.md): this module covers OSPFv2 only;
 //! OSPFv3 lives in `daemon_ospf3` and dispatches from
-//! `--protocol ospf` when `ospf_version = "v3"`. Authentication is not
-//! wired into the v2 daemon yet. Broadcast segments (RFC 2328 §9.4)
+//! `--protocol ospf` when `ospf_version = "v3"`. Authentication
+//! (RFC 2328 §D) is wired in for NullAuth (the default) and
+//! SimplePassword (AuType 1) — see `[ospf.auth]` in the daemon
+//! reference; CryptoAuth (AuType 2, RFC 5709 HMAC-SHA) is a
+//! follow-up. Broadcast segments (RFC 2328 §9.4)
 //! run the full DR/BDR election — Hello DR/BDR fields (§A.3.2), the
 //! §10.4 adjacency gate, §12.4.1.2 transit links and §12.4.2
 //! Network-LSAs — behind the per-interface `network_type =
@@ -327,6 +330,20 @@ struct OspfDaemon {
     /// `mirror.apply` on the events the main thread already polled,
     /// restoring the Loc-RIB → kernel FIB path for OSPF routes.
     kernel_mirror: KernelMirror,
+    /// OSPFv2 authentication state (RFC 2328 §D). `None` = NullAuth
+    /// (AuType 0, the RFC default) — every packet carries au_type = 0
+    /// and an all-zero auth_data field; received packets are accepted
+    /// regardless of the auth_data value. `Some(SimplePassword)` =
+    /// AuType 1 — every outgoing packet has au_type = 1 and the
+    /// auth_data field set to the configured password (zero-padded /
+    /// truncated to 8 bytes by [`lr_ospf::auth::SimplePassword::new`]);
+    /// received packets whose au_type or auth_data do not match are
+    /// dropped before the LSDB sees them (RFC 2328 §D.1 "If the
+    /// authentication proves unsuccessful, the packet is dropped").
+    /// Crypto auth (AuType 2, RFC 2328 §D.3 / RFC 5709) is a
+    /// follow-up — it needs per-packet trailer append and anti-replay
+    /// state.
+    auth: Option<lr_ospf::auth::SimplePassword>,
 }
 
 /// One configured prefix SID (RFC 8665 §5): the prefix, its SID index
@@ -512,7 +529,35 @@ pub(super) fn run_ospf_daemon(
         gr_status: Arc::new(std::sync::Mutex::new(Vec::new())),
         router_id: rid,
         kernel_mirror: KernelMirror::new(cfg.install_kernel),
+        auth: build_ospf_auth(cfg),
     };
+    // Surface the resolved auth strategy at startup so the operator
+    // sees whether the daemon is signing packets and which strategy is
+    // in effect. A SimplePassword configuration with no password is
+    // wire-valid (the auth_data field is all zeros) but weak — log a
+    // warning so the operator notices.
+    match daemon.auth.as_ref() {
+        None => {
+            log_info!(
+                Component::Ospf,
+                "ospf auth: null (AuType 0, no authentication)"
+            );
+        }
+        Some(auth) => {
+            if auth.password == [0u8; 8] {
+                log_warn!(
+                    Component::Ospf,
+                    "ospf auth: simple-password with an all-zero password \
+                     (wire-valid but offers no security)"
+                );
+            } else {
+                log_info!(
+                    Component::Ospf,
+                    "ospf auth: simple-password (AuType 1, 8-byte credential)"
+                );
+            }
+        }
+    }
     // RFC 3623 §2: recovery is *resumed*, not assumed — the state
     // file written by the pre-restart process carries the grace
     // deadline. A fresh start (no file, or a deadline already past)
@@ -1104,7 +1149,19 @@ impl OspfDaemon {
     /// neighbor session, creating sessions for unknown routers.
     /// Hellos additionally update the per-interface neighbor table
     /// (§10.5) that drives the DR/BDR election.
+    ///
+    /// RFC 2328 §D.1: every received packet is auth-verified before
+    /// the LSDB sees it — a mismatched au_type or auth_data field
+    /// drops the packet (the daemon logs a single `ospf auth: ...`
+    /// warning per dropped packet so the operator can correlate a
+    /// misconfigured peer with the silent adjacency). NullAuth (the
+    /// default) accepts every packet; SimplePassword requires the
+    /// peer to send au_type = 1 and the matching 8-byte auth_data.
     fn pump_inbound(&mut self, recv_buf: &mut [u8], now_ms: u64) {
+        // Clone the auth out of `self` before the `&mut self.interfaces`
+        // loop — see `pump_hellos` for the rationale. The per-packet
+        // verify_auth call needs the auth, not `self`.
+        let auth = self.auth.clone();
         // Collect: (ifindex, interface area, datagram bytes).
         let mut datagrams: Vec<(u32, u32, Vec<u8>)> = Vec::new();
         for iface in &mut self.interfaces {
@@ -1115,6 +1172,26 @@ impl OspfDaemon {
                         // strip the header so the router's OSPF codec
                         // sees a bare packet.
                         if let Some(ospf) = strip_ipv4_header(&recv_buf[..n]) {
+                            // RFC 2328 §D.1: verify auth before any
+                            // further processing. A mismatched credential
+                            // drops the packet — the daemon logs a
+                            // single warning so the operator can spot a
+                            // misconfigured peer (the alternative —
+                            // silently dropping — leaves the operator
+                            // debugging a "session stuck in Init" with
+                            // no signal that the auth failed).
+                            if !verify_ospf_auth(auth.as_ref(), ospf) {
+                                let peer_rid =
+                                    u32::from_be_bytes([ospf[4], ospf[5], ospf[6], ospf[7]]);
+                                log_warn!(
+                                    Component::Ospf,
+                                    "ospf auth: dropping packet from {:08x} on {} \
+                                     (au_type / auth_data mismatch)",
+                                    peer_rid,
+                                    iface.name
+                                );
+                                continue;
+                            }
                             if ospf_debug_enabled() {
                                 log_debug!(
                                     Component::Ospf,
@@ -1595,6 +1672,13 @@ impl OspfDaemon {
     }
 
     fn pump_hellos(&mut self, now_ms: u64) {
+        // Clone the auth out of `self` before the `&mut self.interfaces`
+        // loop so the per-packet apply_auth call does not re-borrow
+        // `self`. `SimplePassword` is a 9-byte Clone (8-byte password
+        // + None discriminant), so the clone is cheaper than fighting
+        // the borrow checker.
+        let auth = self.auth.clone();
+        let auth_active = auth.is_some();
         for iface in self.interfaces.iter_mut() {
             let interval_ms = u64::from(iface.hello_interval) * 1000;
             if now_ms.saturating_sub(iface.last_hello_ms) < interval_ms {
@@ -1638,6 +1722,17 @@ impl OspfDaemon {
                     continue;
                 }
             };
+            // RFC 2328 §D: apply auth (sets au_type + auth_data +
+            // zeros checksum) before the checksum is finalized — the
+            // au_type field is covered by the §A.1 checksum, so the
+            // order is apply_auth → finalize_v2_packet. `build_hello`
+            // returns a freshly encoded packet (checksum field = 0),
+            // so finalize_v2_packet is needed regardless of whether
+            // auth was applied.
+            if !apply_ospf_auth(auth.as_ref(), &mut bytes) && auth_active {
+                log_warn!(Component::Daemon, "ospf hello auth: truncated header");
+                continue;
+            }
             finalize_v2_packet(&mut bytes);
             Self::dbg_send_trace(&bytes);
             if let Err(e) = iface.transport.send_multicast(&bytes) {
@@ -1707,7 +1802,20 @@ impl OspfDaemon {
                 let _ = router.drain_output(*anchor); // discard
             }
         }
-        for (ifindex, dst, bytes) in outbound {
+        for (ifindex, dst, mut bytes) in outbound {
+            // RFC 2328 §D: apply auth to every drained packet before
+            // it hits the wire. The router finalized the checksum on
+            // every packet it emitted (the comment at the drain site
+            // explains why a second finalize on a finalized packet is
+            // wrong); apply_auth zeroes the checksum when it modifies
+            // the au_type field, so the subsequent finalize_v2_packet
+            // recomputes from the zeroed field — exactly the contract
+            // finalize_v2_packet expects. When auth is NullAuth,
+            // apply_auth returns false without touching the bytes,
+            // and the router's checksum stands.
+            if apply_ospf_auth(self.auth.as_ref(), &mut bytes) {
+                finalize_v2_packet(&mut bytes);
+            }
             if let Some(iface) = self
                 .interfaces
                 .iter()
@@ -2677,6 +2785,9 @@ impl OspfDaemon {
     fn send_grace_lsas(&mut self, flush: bool) {
         let period_hint = lr_ospf::gr::clamp_grace_period(self.gr_grace_period);
         let our_rid = self.router_id.as_u32();
+        // Clone the auth out of `self` before the `&mut self.interfaces`
+        // loop — see `pump_hellos` for the rationale.
+        let auth = self.auth.clone();
         // Sequence derivation: strictly newer than every instance this
         // router ever sent — the wallclock base (which grows across
         // restarts) OR the persisted floor + 1, whichever is larger.
@@ -2718,6 +2829,11 @@ impl OspfDaemon {
             let packet = self_lsu(self.router_id, iface.area, vec![lsa]);
             match OspfCodec::v2().encode_vec(&packet) {
                 Ok(mut bytes) => {
+                    // RFC 2328 §D: apply auth before finalizing the
+                    // checksum — the freshly encoded packet has
+                    // checksum = 0, so finalize_v2_packet is needed
+                    // regardless of whether auth was applied.
+                    apply_ospf_auth(auth.as_ref(), &mut bytes);
                     finalize_v2_packet(&mut bytes);
                     if let Err(e) = iface.transport.send_multicast(&bytes) {
                         log_warn!(
@@ -2840,6 +2956,64 @@ impl OspfDaemon {
         if let Ok(mut s) = self.gr_status.lock() {
             *s = lines;
         }
+    }
+}
+
+/// Apply OSPFv2 auth (RFC 2328 §D) to an encoded packet in place.
+/// Callers inside a `&mut self` borrow (the `for iface in &mut
+/// self.interfaces` loops in `pump_hellos` / `send_grace_lsas`) pass
+/// `self.auth.as_ref()` so they do not re-borrow `self`.
+///
+/// Returns `true` when the caller should re-run [`finalize_v2_packet`]
+/// (auth was applied, checksum was zeroed), `false` when the packet
+/// is unchanged (NullAuth — the existing checksum stands). Returns
+/// `false` on a truncated header.
+fn apply_ospf_auth(auth: Option<&lr_ospf::auth::SimplePassword>, bytes: &mut [u8]) -> bool {
+    let Some(auth) = auth else {
+        return false; // NullAuth: nothing to do, existing checksum stands
+    };
+    if bytes.len() < lr_ospf::packet::OspfHeader::LEN {
+        return false;
+    }
+    // Zero the checksum first — the au_type change invalidates it,
+    // and finalize_v2_packet computes the new value from the
+    // (zero-checksum) bytes.
+    bytes[12..14].copy_from_slice(&0u16.to_be_bytes());
+    // au_type = 1 (SimplePassword) at offset 14..16, big-endian.
+    bytes[14..16].copy_from_slice(&1u16.to_be_bytes());
+    // auth_data field (offset 16..24) carries the password.
+    bytes[16..24].copy_from_slice(&auth.password);
+    true
+}
+
+/// Verify OSPFv2 auth (RFC 2328 §D.1) on a received packet. Free
+/// function counterpart of the send-side [`apply_ospf_auth`] — kept
+/// split out for symmetry with the send path.
+fn verify_ospf_auth(auth: Option<&lr_ospf::auth::SimplePassword>, bytes: &[u8]) -> bool {
+    let Some(auth) = auth else {
+        return true; // NullAuth: accept all
+    };
+    if bytes.len() < lr_ospf::packet::OspfHeader::LEN {
+        return false;
+    }
+    let au_type = u16::from_be_bytes([bytes[14], bytes[15]]);
+    if au_type != lr_ospf::auth::AuType::SimplePassword as u16 {
+        return false;
+    }
+    bytes[16..24] == auth.password
+}
+
+/// Build the OSPFv2 auth state from the daemon config. Returns
+/// `None` for `null` (the default) and `Some(SimplePassword)` for
+/// `simple`. Crypto auth (`md5`) is rejected at config-parse time, so
+/// this function does not need to handle it.
+fn build_ospf_auth(cfg: &DaemonConfig) -> Option<lr_ospf::auth::SimplePassword> {
+    match cfg.ospf_auth.effective_type() {
+        "simple" => {
+            let password = cfg.ospf_auth.password.as_deref().unwrap_or("");
+            Some(lr_ospf::auth::SimplePassword::new(password.as_bytes()))
+        }
+        _ => None, // "null" or any unknown value falls back to NullAuth
     }
 }
 
