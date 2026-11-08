@@ -183,27 +183,55 @@ impl PeerSpec {
 ///   when shorter, truncated when longer). RFC 2328 §D.2 warns the
 ///   password crosses the network in cleartext; use on trusted
 ///   segments only.
-///
-/// Crypto auth (RFC 2328 §D.3 + RFC 5709 HMAC-SHA) is a follow-up —
-/// the wire codec and `CryptoAuth` helper already exist in
-/// `lr_ospf::auth::crypto`; the daemon wiring (per-packet trailer
-/// append + anti-replay state) is the next slice.
+/// - `"crypto"` (alias `"md5"`, `"message-digest"`) —
+///   [`lr_ospf::auth::CryptoAuth`]. Appends an RFC 5709 authentication
+///   trailer to every packet (Key ID + Auth Data Len + Crypto Seq +
+///   HMAC-SHA digest) and verifies it on every received packet with
+///   anti-replay protection (RFC 2328 §D.3 + RFC 5709 HMAC-SHA-256 /
+///   HMAC-SHA-1). The default algorithm is HMAC-SHA-256 (RFC 5709
+///   §2.2); override with `algorithm = "hmac-sha1"` (RFC 5709 §2.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct OspfAuthSpec {
-    /// `"null"` (default), `"simple"`. Crypto auth (`"md5"`) is a
-    /// follow-up — the parser rejects it with a clear message until
-    /// the daemon wiring lands.
+    /// `"null"` (default), `"simple"`, `"crypto"` (alias `"md5"`,
+    /// `"message-digest"`). Unknown values are rejected at parse
+    /// time.
     pub auth_type: Option<String>,
     /// Password for `"simple"` auth. Ignored for `"null"`. Required
     /// for `"simple"` (the daemon fails closed at startup if
-    /// `auth_type = "simple"` and `password` is absent).
+    /// `auth_type = "simple"` and `password` is absent). For
+    /// `"crypto"`, use [`OspfAuthSpec::key`] instead — `password` is
+    /// ignored when `auth_type = "crypto"`.
     pub password: Option<String>,
+    /// Crypto auth key (RFC 2328 §D.3). Required for `"crypto"`; the
+    /// daemon fails closed at startup if `auth_type = "crypto"` and
+    /// `key` is absent. Keys longer than the digest length (20 bytes
+    /// for HMAC-SHA-1, 32 for HMAC-SHA-256) are hashed first per RFC
+    /// 5709 §3.3 (1); shorter keys are zero-padded by the `hmac`
+    /// crate.
+    pub key: Option<String>,
+    /// Crypto auth Key ID (RFC 2328 §D.3.1, 1 byte: 0..=255). Required
+    /// for `"crypto"`; the daemon fails closed at startup if
+    /// `auth_type = "crypto"` and `key_id` is absent.
+    pub key_id: Option<u8>,
+    /// Crypto auth algorithm (RFC 5709 §2): `"hmac-sha256"` (default,
+    /// §2.2) or `"hmac-sha1"` (§2.1). Unknown values are rejected at
+    /// parse time.
+    pub algorithm: Option<String>,
 }
 
 impl OspfAuthSpec {
     /// Resolve to the effective auth type, defaulting to `"null"`.
     pub fn effective_type(&self) -> &str {
         self.auth_type.as_deref().unwrap_or("null")
+    }
+
+    /// Resolve to the effective crypto algorithm (RFC 5709 §2),
+    /// defaulting to `"hmac-sha256"` (the §2.2 recommendation). The
+    /// daemon's [`build_ospf_auth`] helper maps this string onto the
+    /// typed [`lr_ospf::auth::CryptoAlgorithm`] (after the parser has
+    /// rejected unknown values).
+    pub fn effective_algorithm(&self) -> &str {
+        self.algorithm.as_deref().unwrap_or("hmac-sha256")
     }
 }
 
@@ -2457,26 +2485,71 @@ impl DaemonConfig {
         // weak — the daemon logs a warning at startup; here we only
         // fail closed on a missing password key, which is almost
         // certainly a typo). `null` is the default and needs no
-        // password. Crypto auth (`md5`) is rejected at parse time, so
-        // we only need to handle `null` and `simple` here.
-        if self.ospf_auth.effective_type() == "simple" {
-            if self.ospf_auth.password.is_none() {
-                return Err("[ospf.auth] type = \"simple\" requires a 'password' key \
+        // password. Crypto auth (`crypto`/`md5`) requires a `key` and
+        // a `key_id`; the algorithm defaults to `hmac-sha256`
+        // (RFC 5709 §2.2).
+        match self.ospf_auth.effective_type() {
+            "simple" => {
+                if self.ospf_auth.password.is_none() {
+                    return Err("[ospf.auth] type = \"simple\" requires a 'password' key \
                      (RFC 2328 §D.2 — set password = \"\" for an all-zero credential)"
-                    .into());
-            }
-            // RFC 2328 §D.2: the password is exactly 8 bytes on the
-            // wire. A longer secret is silently truncated by
-            // `SimplePassword::new`; surface a warning so the
-            // operator notices.
-            if let Some(p) = self.ospf_auth.password.as_deref() {
-                if p.len() > 8 {
-                    self.warnings.push(format!(
-                        "ospf.auth password '{}' is {} bytes but RFC 2328 §D.2 truncates to 8 — the wire carries the first 8 bytes",
-                        p, p.len()
-                    ));
+                        .into());
+                }
+                // RFC 2328 §D.2: the password is exactly 8 bytes on the
+                // wire. A longer secret is silently truncated by
+                // `SimplePassword::new`; surface a warning so the
+                // operator notices.
+                if let Some(p) = self.ospf_auth.password.as_deref() {
+                    if p.len() > 8 {
+                        self.warnings.push(format!(
+                            "ospf.auth password '{}' is {} bytes but RFC 2328 §D.2 truncates to 8 — the wire carries the first 8 bytes",
+                            p, p.len()
+                        ));
+                    }
                 }
             }
+            "crypto" => {
+                // RFC 2328 §D.3.1: Key ID is the 1-byte identifier the
+                // receiver uses to look up the secret. Missing key_id
+                // is almost certainly a typo; fail closed.
+                if self.ospf_auth.key_id.is_none() {
+                    return Err(
+                        "[ospf.auth] type = \"crypto\" requires a 'key_id' key (RFC 2328 §D.3.1, \
+                         0..=255)"
+                            .into(),
+                    );
+                }
+                // RFC 2328 §D.3: the secret key. The hmac crate
+                // zero-pads short keys; missing key is a typo.
+                if self.ospf_auth.key.as_deref().is_none_or(str::is_empty) {
+                    return Err(
+                        "[ospf.auth] type = \"crypto\" requires a non-empty 'key' key \
+                         (RFC 2328 §D.3 / RFC 5709 §3.3 — the HMAC secret)"
+                            .into(),
+                    );
+                }
+                // The algorithm was already validated at parse time;
+                // surface the resolved value so the operator sees
+                // which digest is on the wire.
+                let algo = self.ospf_auth.effective_algorithm();
+                if algo != "hmac-sha256" {
+                    self.warnings.push(format!(
+                        "ospf.auth algorithm '{algo}': RFC 5709 §2.2 recommends HMAC-SHA-256; \
+                         SHA-1 is supported for legacy interop but should not be used on \
+                         new deployments"
+                    ));
+                }
+                // `password` is ignored under crypto — surface a
+                // warning if the operator set both so the stale line
+                // does not stay silently accepted.
+                if self.ospf_auth.password.is_some() {
+                    self.warnings.push(
+                        "ospf.auth 'password' is ignored when type = \"crypto\" (use 'key' instead)"
+                            .into(),
+                    );
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -4222,20 +4295,39 @@ fn apply_ospf_key(
                         cfg.ospf_auth.auth_type = Some("simple".into());
                     }
                     "md5" | "crypto" | "message-digest" => {
-                        return Err(format!(
-                            "ospf.auth type '{t}': crypto auth (RFC 2328 §D.3 / RFC 5709) \
-                             is not wired into the daemon yet; use 'simple' or 'null' \
-                             (follow-up tracked in defects.txt crates/lr-cli/src/daemon_ospf.rs:L42-L47)"
-                        ));
+                        cfg.ospf_auth.auth_type = Some("crypto".into());
                     }
                     _ => {
                         return Err(format!(
-                            "unknown ospf.auth type '{t}' (expected: null, simple)"
+                            "unknown ospf.auth type '{t}' (expected: null, simple, crypto)"
                         ));
                     }
                 }
             }
             "password" => cfg.ospf_auth.password = Some(value.to_string()),
+            "key" => cfg.ospf_auth.key = Some(value.to_string()),
+            "key_id" => {
+                let id: u8 = value
+                    .parse()
+                    .map_err(|_| format!("ospf.auth key_id '{value}' is not a u8 (0..=255)"))?;
+                cfg.ospf_auth.key_id = Some(id);
+            }
+            "algorithm" => {
+                let a = value.to_ascii_lowercase();
+                match a.as_str() {
+                    "hmac-sha256" | "hmac-sha-256" | "sha256" => {
+                        cfg.ospf_auth.algorithm = Some("hmac-sha256".into());
+                    }
+                    "hmac-sha1" | "hmac-sha-1" | "sha1" => {
+                        cfg.ospf_auth.algorithm = Some("hmac-sha1".into());
+                    }
+                    _ => {
+                        return Err(format!(
+                            "unknown ospf.auth algorithm '{a}' (expected: hmac-sha256, hmac-sha1)"
+                        ));
+                    }
+                }
+            }
             _ => {
                 return Err(format!(
                     "unknown [ospf.auth] key '{key}' (typo protection; OSPF config fails closed)"
@@ -5518,10 +5610,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 i += 2;
             }
             // RFC 2328 §D authentication: `--ospf-auth-type` selects
-            // the strategy (null/simple); `--ospf-auth-password`
-            // supplies the secret for `simple`. Crypto auth (md5)
-            // is rejected with a clear error until the daemon wiring
-            // lands.
+            // the strategy (null/simple/crypto); `--ospf-auth-password`
+            // supplies the secret for `simple`; `--ospf-auth-key`,
+            // `--ospf-auth-key-id` and `--ospf-auth-algorithm` supply
+            // the crypto auth material (RFC 2328 §D.3 / RFC 5709).
             "--ospf-auth-type" | "--ospf-authentication-type" if i + 1 < args.len() => {
                 let t = args[i + 1].to_ascii_lowercase();
                 match t.as_str() {
@@ -5530,14 +5622,12 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                         cfg.ospf_auth.auth_type = Some("simple".into());
                     }
                     "md5" | "crypto" | "message-digest" => {
-                        eprintln!(
-                            "error: ospf.auth type '{t}': crypto auth (RFC 2328 §D.3 / RFC 5709) \
-                             is not wired into the daemon yet; use 'simple' or 'null'"
-                        );
-                        return Err(ExitCode::from(2));
+                        cfg.ospf_auth.auth_type = Some("crypto".into());
                     }
                     _ => {
-                        eprintln!("error: unknown --ospf-auth-type '{t}' (expected: null, simple)");
+                        eprintln!(
+                            "error: unknown --ospf-auth-type '{t}' (expected: null, simple, crypto)"
+                        );
                         return Err(ExitCode::from(2));
                     }
                 }
@@ -5545,6 +5635,41 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--ospf-auth-password" | "--ospf-authentication-password" if i + 1 < args.len() => {
                 cfg.ospf_auth.password = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--ospf-auth-key" | "--ospf-authentication-key" if i + 1 < args.len() => {
+                cfg.ospf_auth.key = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--ospf-auth-key-id" | "--ospf-authentication-key-id" if i + 1 < args.len() => {
+                match args[i + 1].parse::<u8>() {
+                    Ok(id) => cfg.ospf_auth.key_id = Some(id),
+                    Err(_) => {
+                        eprintln!(
+                            "error: --ospf-auth-key-id '{}' is not a u8 (0..=255)",
+                            args[i + 1]
+                        );
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--ospf-auth-algorithm" | "--ospf-authentication-algorithm" if i + 1 < args.len() => {
+                let a = args[i + 1].to_ascii_lowercase();
+                match a.as_str() {
+                    "hmac-sha256" | "hmac-sha-256" | "sha256" => {
+                        cfg.ospf_auth.algorithm = Some("hmac-sha256".into());
+                    }
+                    "hmac-sha1" | "hmac-sha-1" | "sha1" => {
+                        cfg.ospf_auth.algorithm = Some("hmac-sha1".into());
+                    }
+                    _ => {
+                        eprintln!(
+                            "error: unknown --ospf-auth-algorithm '{a}' (expected: hmac-sha256, hmac-sha1)"
+                        );
+                        return Err(ExitCode::from(2));
+                    }
+                }
                 i += 2;
             }
             // RFC 9513 (OSPFv3 SRv6): a repeatable --ospf-srv6-locator
