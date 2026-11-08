@@ -234,6 +234,32 @@ The CLI equivalent is `--ospf-auth-type crypto --ospf-auth-key-id 1
 --ospf-auth-key shared-secret --ospf-auth-algorithm hmac-sha256`
 (`--ospf-auth-algorithm` defaults to `hmac-sha256` if omitted).
 
+#### OSPFv3 note (RFC 7166)
+
+OSPFv3 (RFC 5340) removed the `auth_data` field from the header
+(§A.3.1 replaced it with the Instance ID), so the only cryptographic
+strategy on v3 is the RFC 7166 Authentication Trailer — appended to
+every packet after the body (and after the optional LLS data block)
+and NOT covered by the OSPF checksum. The same `[ospf.auth] type =
+"crypto"` block (with `key`, `key_id`, `algorithm`) drives the v3
+trailer; the `key_id` (0..=255) widens to the v3 16-bit SA ID, and
+the algorithm defaults to HMAC-SHA-256 (RFC 5709 §2.2 — RFC 7166
+§4.5 inherits the same algorithm set).
+
+`[ospf.auth] type = "simple"` is rejected at finalize time under
+`[ospf] version = "v3"` (RFC 5340 §A.3.1 removed the auth_data field
+the SimplePassword strategy writes into); the error message names
+RFC 7166 as the v3 alternative.
+
+The send path (`pump_outbound`, `send_grace_lsas`, `pump_hellos`)
+appends the trailer on every outgoing packet with the interface's
+link-local as the IPv6 source embedded in Apad (RFC 7166 §2.3/§4.5);
+the receive path (`pump_inbound`) verifies the trailer with the
+received packet's source IPv6 (the peer's link-local) before any
+further processing — Hello tracking or router `feed_input` — drops
+a packet whose trailer is missing, malformed, fails the MAC check
+or fails the anti-replay check (RFC 7166 §4.6).
+
 ### OSPF graceful restart
 
 | Flag | Config equivalent | Default | Notes |

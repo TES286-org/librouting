@@ -234,6 +234,88 @@ the finalize-time validation (crypto without `key` fails closed,
 crypto without `key_id` fails closed, SHA-1 warns, stale `password`
 under crypto warns).
 
+**`lr-ospf` / `lr-cli` OSPFv3 RFC 7166 authentication trailer wiring
+(`[ospf.auth] type = "crypto"` under `[ospf] version = "v3"`, the
+`OspfV3AuthState` daemon state, `apply_ospf_v3_auth` /
+`verify_ospf_v3_auth` per-packet helpers)** (issue #92 — the v3
+counterpart of the v2 CryptoAuth round above; the `lr_ospf::auth::v3_auth`
+module already implemented the RFC 7166 wire codec and the FFI
+surface already exposed it through `lr_ffi::ospf_auth::V3Auth`
+constructors/accessors, but the daemon_ospf3 module ignored auth
+entirely: a config that set `[ospf.auth] type = "crypto"` under
+`[ospf] version = "v3"` had no effect on outgoing packets, and a peer
+sending a credential the daemon did not verify was silently admitted
+into the LSDB).
+
+This round wires the v3 trailer end-to-end, mirroring the v2
+CryptoAuth pattern:
+
+- `OspfV3AuthState` enum: `None` = NullAuth (the default), `Crypto(Arc<Mutex<V3Auth>>)`
+  = RFC 7166 trailer. The `Arc<Mutex<_>>` lets the send path advance
+  `crypto_seq` (RFC 7166 §4.6) and the receive path update the
+  anti-replay `last_peer_seq` without re-borrowing `self`.
+- `build_ospf_v3_auth(cfg)` constructs the state from the existing
+  `OspfAuthSpec` config: `type = "crypto"` (alias `"md5"`,
+  `"message-digest"`) maps to `Crypto`, `key_id` widens to the v3
+  16-bit `sa_id` (0..=255 fits in `u16`, the wire field stays 16 bits
+  for a future `u16` SA ID without widening `OspfAuthSpec`), the
+  algorithm defaults to HMAC-SHA-256 with `algorithm = "hmac-sha1"`
+  override.
+- `[ospf.auth] type = "simple"` under `[ospf] version = "v3"` is
+  rejected at `finalize_ospf` time — RFC 5340 §A.3.1 removed the
+  auth_data field from the header, so SimplePassword is not a v3
+  strategy. The error message names RFC 7166 as the v3 alternative.
+- `apply_ospf_v3_auth(&mut auth, &mut bytes, source_v6)` appends the
+  trailer to an outgoing packet, zeroes the OSPFv3 header checksum
+  (RFC 7166 §4.2 omits it from the MAC input when the AT is used),
+  advances the `crypto_seq` and signs with the explicit `source_v6`
+  (the interface's link-local). The OSPF length field stays at the
+  body length (the trailer is NOT counted).
+- `verify_ospf_v3_auth(&mut auth, &bytes, source_v6)` splits the
+  datagram into packet + trailer at the OSPF length boundary and
+  verifies the trailer (MAC, SA ID, anti-replay) with the received
+  packet's source IPv6 (the peer's link-local, embedded in Apad per
+  RFC 7166 §2.3/§4.5).
+- `pump_inbound` drops a packet whose trailer is missing, malformed,
+  fails the MAC check or fails the anti-replay check before any
+  further processing (Hello tracking, router `feed_input`) — the
+  LSDB never sees it.
+- `pump_outbound` / `send_grace_lsas` / `pump_hellos`: every
+  outgoing packet either applies the trailer (Crypto) or finalizes
+  the checksum (NullAuth) — an active config that fails to apply
+  (defensive case) skips the send rather than emit a trailer-less
+  packet the peer would reject.
+- Two additive `V3Auth` methods (`sign_trailer_with_source` /
+  `verify_with_source`) take the IPv6 source explicitly so a daemon
+  can share one `V3Auth` across interfaces (each with its own
+  link-local) and peers (each with its own received source). The
+  existing `sign_trailer` / `verify` methods (using `self.source_v6`)
+  are unchanged for ABI-stable embedders.
+
+The default is `null` (NullAuth) — every existing v3 configuration is
+unchanged; the new surface is purely additive. The shared
+`last_peer_seq` mirrors the v2 CryptoAuth shape: anti-replay across
+multiple peers with a single key is approximate (the strongest seen
+sequence sticks; a peer whose seq regresses is rejected). RFC 7166
+§4.6 specifies the check as "less than or equal to the value last
+received from the same router", so a strict per-peer table is the
+long-term shape; a single-peer deployment (the common p2p lab) is
+exact today — the same limitation the v2 daemon documents.
+
+12 new unit tests in `crates/lr-cli/src/daemon_ospf3_tests.rs` cover
+the state-enum default, the config → state mapping (default null,
+explicit null, crypto with HMAC-SHA-256 default, HMAC-SHA-1
+override), the apply path (appends the 48-byte SHA-256 trailer,
+zeroes the checksum, advances `crypto_seq` monotonically), the
+verify path (round-trip, wrong key rejected, wrong source rejected,
+replay rejected, NullAuth accepts no trailer, Crypto rejects no
+trailer, HMAC-SHA-1 trailer is 36 bytes), and the finalize-time
+rejection of `[ospf.auth] type = "simple"` under v3 with the RFC
+7166 hint (v2 still accepts it). 4 new `V3Auth` tests in
+`crates/lr-ospf/src/auth/v3_auth.rs` cover the explicit-source
+variants' round-trip and the distinct-sources-produce-distinct-
+trailers contract.
+
 **`lr-router` / `lr-cli` per-session OSPF `RxmtInterval` (`SessionConfig::with_ospf_rxmt_interval`,
 `[ospf] rxmt_interval`, `[[ospf.interface]] rxmt_interval`,
 `--ospf-rxmt-interval`, FRR `ip ospf retransmit-interval` + BIRD `retransmit` translation)**
