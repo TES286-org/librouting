@@ -164,6 +164,76 @@ eight-byte round-trip) and the `Auth` trait surface (sign writes the
 password, verify accepts signed / rejects mismatched, verify rejects
 short header, au_type is SimplePassword).
 
+**`lr-ospf` / `lr-cli` OSPFv2 CryptoAuth daemon wiring
+(`[ospf.auth]` `crypto` keys, `--ospf-auth-key` /
+`--ospf-auth-key-id` / `--ospf-auth-algorithm` CLI flags, anti-replay
+state)** (issue #92 — `defects.txt`
+`crates/lr-cli/src/daemon_ospf.rs:L42-L47` DOC-MISMATCH follow-up to
+the SimplePassword round above). The `lr_ospf::auth::crypto` module
+already implemented the RFC 2328 §D.3 / RFC 5709 wire codec and the
+`CryptoAuth` helper (`sign_trailer` / `verify` with HMAC-SHA-1 and
+HMAC-SHA-256 and the §D.3.3 anti-replay check), but the daemon still
+rejected `type = "md5"` at parse time and the per-packet trailer
+append / anti-replay state needed to flow through the daemon's send
+and receive paths was the open follow-up.
+
+This round wires the third strategy end-to-end:
+
+- `[ospf.auth]` accepts `type = "crypto"` (alias `"md5"`,
+  `"message-digest"`) with `key`, `key_id` (0..=255, RFC 2328
+  §D.3.1) and `algorithm = "hmac-sha256" | "hmac-sha1"` (default
+  `hmac-sha256`, RFC 5709 §2.2). Finalize-time validation: crypto
+  requires `key` and `key_id`; a stale `password` key under crypto
+  warns that it is ignored; SHA-1 warns that RFC 5709 §2.2 recommends
+  SHA-256.
+- `--ospf-auth-key`, `--ospf-auth-key-id`, `--ospf-auth-algorithm` CLI
+  flags (with `--ospf-authentication-*` aliases) on the same fail-closed
+  rules as the TOML parser.
+- `OspfAuthState` enum replaces the prior `Option<SimplePassword>`:
+  `None` = NullAuth, `Simple(SimplePassword)` = AuType 1, `Crypto(Arc<Mutex<CryptoAuth>>)`
+  = AuType 2. The `Arc<Mutex<_>>` lets the send path advance the
+  crypto_seq (RFC 2328 §D.3.2 "non-decreasing") and the receive path
+  update the anti-replay `last_peer_seq` (§D.3.3 — strictly greater than
+  the last-seen value) without re-borrowing `self`.
+- `apply_ospf_auth` for Crypto: sets au_type = 2, writes the
+  `(key_id | auth_data_len | crypto_seq | 0x0000)` auth_data field,
+  finalizes the OSPF §A.1 checksum over the modified header + body
+  (excluding the trailer per RFC 5709 §3 — the trailer is NOT counted
+  in the OSPF length), then computes the RFC 5709 §3.3 HMAC over the
+  finalized header + body and appends the trailer (Key ID + Auth Data
+  Len + Crypto Seq + HMAC-SHA digest).
+- `verify_ospf_auth` for Crypto: checks au_type = 2, extracts the
+  trailer (length 6 + Auth Data Len from the header), and calls
+  `CryptoAuth::verify(packet, trailer)` which compares the Key ID,
+  Auth Data Len, MAC and the anti-replay crypto_seq.
+- `v2_packet_checksum` now respects the OSPF length field (so an
+  appended RFC 5709 trailer is excluded) and excludes the checksum
+  field from the sum, making `finalize_v2_packet` idempotent — the
+  send path can call `finalize_v2_packet` after `apply_ospf_auth`
+  without overwriting the already-finalized checksum the MAC was
+  computed over.
+- Startup log line surfaces the resolved strategy (`ospf auth: crypto
+  (AuType 2, RFC 2328 §D.3 + RFC 5709) — key_id=…, algorithm=…,
+  crypto_seq=…`).
+- The `daemon_ospf.rs` module doc no longer names CryptoAuth as a
+  follow-up — the strategy table in `docs/lr-daemon-reference.md`
+  lists all three strategies as wired.
+
+The default is `null` (NullAuth, AuType 0) — every existing
+configuration is unchanged; the new surface is purely additive. 16
+new unit tests in `crates/lr-cli/src/daemon_ospf_tests.rs` cover the
+apply path (writes au_type=2, the auth_data field, appends the
+trailer; advances crypto_seq monotonically across packets; HMAC-SHA-1
+trailer is 26 bytes vs 38 for SHA-256), the verify path (round-trip
+against the same key; rejects tampered digest, wrong Key ID, wrong
+key, wrong au_type, truncated trailer; anti-replay rejects a stale
+crypto_seq), the config-parse coverage (crypto aliases `md5` /
+`message-digest` / `crypto`, algorithm aliases `sha256` /
+`hmac-sha-256` / `hmac-sha1` / `sha1`, unknown algorithm rejected),
+the finalize-time validation (crypto without `key` fails closed,
+crypto without `key_id` fails closed, SHA-1 warns, stale `password`
+under crypto warns).
+
 **`lr-router` / `lr-cli` per-session OSPF `RxmtInterval` (`SessionConfig::with_ospf_rxmt_interval`,
 `[ospf] rxmt_interval`, `[[ospf.interface]] rxmt_interval`,
 `--ospf-rxmt-interval`, FRR `ip ospf retransmit-interval` + BIRD `retransmit` translation)**

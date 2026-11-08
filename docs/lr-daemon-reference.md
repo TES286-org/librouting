@@ -173,8 +173,11 @@ behaves as an alias for `teardown`.
 | `--ospf-hello-interval S` | `[ospf] hello_interval` | 10 | |
 | `--ospf-dead-interval S` | `[ospf] dead_interval` | 40 | |
 | `--ospf-rxmt-interval S` | `[ospf] rxmt_interval` (alias `retransmit_interval`) | 5 | RFC 2328 Appendix B `RxmtInterval`; BIRD `rxmtint`, FRR `retransmit-interval` |
-| `--ospf-auth-type T` | `[ospf.auth] type` | `null` | `null` / `simple`; `md5` rejected with a clear message (follow-up) |
-| `--ospf-auth-password P` | `[ospf.auth] password` | — | Required for `simple`; RFC 2328 §D.2 truncates to 8 bytes |
+| `--ospf-auth-type T` | `[ospf.auth] type` | `null` | `null` / `simple` / `crypto` (alias `md5`, `message-digest`) |
+| `--ospf-auth-password P` | `[ospf.auth] password` | — | Required for `simple`; RFC 2328 §D.2 truncates to 8 bytes. Ignored for `crypto` (use `key` instead). |
+| `--ospf-auth-key K` | `[ospf.auth] key` | — | Required for `crypto`; the HMAC secret (RFC 2328 §D.3 / RFC 5709 §3.3). |
+| `--ospf-auth-key-id N` | `[ospf.auth] key_id` | — | Required for `crypto`; 0..=255 (RFC 2328 §D.3.1). |
+| `--ospf-auth-algorithm A` | `[ospf.auth] algorithm` | `hmac-sha256` | `hmac-sha256` (RFC 5709 §2.2) / `hmac-sha1` (§2.1) |
 
 `--ospf-area` sets the default area for interfaces that do not name one.
 The configuration-file counterpart is the `[[ospf.area]]` block (landed
@@ -187,9 +190,10 @@ attach to a non-backbone area must reference an `id` declared by an
 
 ### OSPFv2 authentication (`[ospf.auth]`)
 
-RFC 2328 §D authentication is wired into the OSPFv2 daemon for the two
-stateless strategies. A `[ospf.auth]` block (or `--ospf-auth-type` /
-`--ospf-auth-password` on the CLI) selects the strategy the daemon
+RFC 2328 §D authentication is wired into the OSPFv2 daemon for all three
+strategies. A `[ospf.auth]` block (or `--ospf-auth-type` /
+`--ospf-auth-password` / `--ospf-auth-key` / `--ospf-auth-key-id` /
+`--ospf-auth-algorithm` on the CLI) selects the strategy the daemon
 applies to every outgoing packet and verifies on every received
 packet — a mismatched credential drops the packet before the LSDB
 sees it (RFC 2328 §D.1).
@@ -198,12 +202,13 @@ sees it (RFC 2328 §D.1).
 | --- | --- | --- | --- |
 | NullAuth (default) | `null` | 0 | No authentication; the auth_data field is zero on outgoing packets and ignored on received packets. |
 | SimplePassword | `simple` | 1 | 8-byte password (zero-padded when shorter, truncated when longer). RFC 2328 §D.2 warns the password crosses the network in cleartext; use on trusted segments only. |
-| CryptoAuth (follow-up) | `md5` | 2 | HMAC-SHA-1 / HMAC-SHA-256 (RFC 5709). The wire codec and `lr_ospf::auth::CryptoAuth` helper already exist; the per-packet trailer append and anti-replay state needed for daemon wiring is the next slice. The parser rejects `type = "md5"` at config-load time with a clear "not wired into the daemon yet" message. |
+| CryptoAuth | `crypto` (alias `md5`, `message-digest`) | 2 | HMAC-SHA-1 / HMAC-SHA-256 (RFC 5709). Appends the RFC 5709 authentication trailer (Key ID + Auth Data Len + Crypto Seq + digest) to every outgoing packet; verifies the trailer and the §D.3.3 anti-replay crypto_seq (strictly greater than the last-seen value) on every received packet. Defaults to HMAC-SHA-256 (RFC 5709 §2.2); `algorithm = "hmac-sha1"` selects SHA-1 (§2.1) for legacy interop. |
 
-A startup log line surfaces the resolved strategy (`ospf auth: null`
-or `ospf auth: simple-password (AuType 1, 8-byte credential)`); an
-all-zero password (the wire-valid but weak `password = ""` case) logs
-a warning.
+A startup log line surfaces the resolved strategy (`ospf auth: null`,
+`ospf auth: simple-password (AuType 1, 8-byte credential)` or
+`ospf auth: crypto (AuType 2, RFC 2328 §D.3 + RFC 5709) — key_id=…,
+algorithm=…, crypto_seq=…`); an all-zero password (the wire-valid but
+weak `password = ""` case for SimplePassword) logs a warning.
 
 #### Example
 
@@ -214,6 +219,20 @@ password = "secret12"
 ```
 
 The CLI equivalent is `--ospf-auth-type simple --ospf-auth-password secret12`.
+
+A crypto-auth example:
+
+```toml
+[ospf.auth]
+type = "crypto"
+key_id = 1
+key = "shared-secret"
+algorithm = "hmac-sha256"
+```
+
+The CLI equivalent is `--ospf-auth-type crypto --ospf-auth-key-id 1
+--ospf-auth-key shared-secret --ospf-auth-algorithm hmac-sha256`
+(`--ospf-auth-algorithm` defaults to `hmac-sha256` if omitted).
 
 ### OSPF graceful restart
 
