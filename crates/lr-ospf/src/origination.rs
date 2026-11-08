@@ -299,13 +299,46 @@ pub fn finalize_v2_stream(bytes: &mut [u8]) -> usize {
 }
 
 /// The OSPFv2 packet checksum of `bytes` (checksum field assumed zero /
-/// ignored, authentication bytes excluded).
+/// ignored, authentication bytes excluded). The body slice is bounded by
+/// the OSPF length field at offset 2..4 so that an appended RFC 5709
+/// authentication trailer (which is NOT counted in the OSPF length per
+/// §3) stays out of the checksum — exactly the same shape the receive
+/// path's `v2_packet_checksum_ok(&bytes[..ospf_len])` verifier uses.
+///
+/// The checksum field itself (offsets 12..14) is excluded from the
+/// sum: a finalized packet whose checksum already holds the correct
+/// value re-computes to the same value, so [`finalize_v2_packet`]
+/// is idempotent. The previous shape included the checksum field in
+/// the fold and would return `0` for an already-finalized packet
+/// (because the standard IP checksum makes the all-words sum equal
+/// to `0xffff`), causing [`finalize_v2_packet`] to overwrite the
+/// correct value with `0` whenever the caller re-finalized. Crypto
+/// auth (RFC 5709) relies on this idempotence: `apply_ospf_auth`
+/// for Crypto computes the checksum once before the MAC, and the
+/// caller's subsequent `finalize_v2_packet` must not corrupt the
+/// already-MAC'd header.
 fn v2_packet_checksum(bytes: &[u8]) -> u16 {
+    if bytes.len() < crate::packet::OspfHeader::LEN {
+        return 0;
+    }
+    let ospf_len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    // Clamp the body end to the OSPF length, then to the buffer's
+    // actual length — a mis-set OSPF length on a malformed packet
+    // cannot read past the buffer.
+    let body_end = ospf_len
+        .min(bytes.len())
+        .max(crate::packet::OspfHeader::LEN);
     let mut sum: u32 = 0;
-    // Header without the 8-byte authentication field (offsets 16..24).
-    fold(&bytes[..16], &mut sum);
-    // Body: from the 24-byte header to the end.
-    fold(&bytes[crate::packet::OspfHeader::LEN..], &mut sum);
+    // Header bytes 0..12 (everything before the checksum field).
+    fold(&bytes[..12], &mut sum);
+    // Header bytes 14..16 (the AuType field) — the 8-byte
+    // authentication field at offsets 16..24 is excluded per RFC 2328
+    // §A.1, and the 2-byte checksum field at offsets 12..14 is
+    // excluded so the helper is idempotent on a finalized packet.
+    fold(&bytes[14..16], &mut sum);
+    // Body: from the 24-byte header to the OSPF length (excludes the
+    // RFC 5709 trailer when one is appended).
+    fold(&bytes[crate::packet::OspfHeader::LEN..body_end], &mut sum);
     finish(sum)
 }
 
