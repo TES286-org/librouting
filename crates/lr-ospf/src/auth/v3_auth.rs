@@ -140,6 +140,14 @@ impl V3Auth {
     /// input (RFC 7166 §4.2 omits the header checksum when the AT is
     /// used). `lls` is the optional Link-Local Signaling data block
     /// (RFC 5613), or an empty slice when none is present.
+    ///
+    /// The Apad that fills the digest slot during the MAC computation
+    /// is built from [`V3Auth::source_v6`] (see [`apad`]). A daemon
+    /// that sends from a per-interface link-local source can either
+    /// build one [`V3Auth`] per interface (the builder pattern's
+    /// [`V3Auth::with_source`] sets the field at construction time) or
+    /// share one daemon-wide instance and pass the source explicitly
+    /// via [`V3Auth::sign_trailer_with_source`].
     pub fn sign_trailer(&self, packet: &[u8], lls: &[u8]) -> Vec<u8> {
         let l = self.algorithm.digest_len();
         let mut trailer_with_apad = Vec::with_capacity(self.trailer_len());
@@ -149,6 +157,44 @@ impl V3Auth {
         trailer_with_apad.extend_from_slice(&self.sa_id.to_be_bytes());
         trailer_with_apad.extend_from_slice(&self.crypto_seq.to_be_bytes());
         trailer_with_apad.extend_from_slice(&apad(self.source_v6, l));
+
+        let digest = self.compute_mac(packet, lls, &trailer_with_apad);
+
+        let mut trailer = trailer_with_apad;
+        trailer.truncate(V3_TRAILER_HEADER);
+        trailer.extend_from_slice(&digest);
+        trailer
+    }
+
+    /// Same as [`V3Auth::sign_trailer`] but with the IPv6 source
+    /// address (the one embedded in Apad, RFC 7166 §4.5) passed
+    /// explicitly — a daemon that shares one [`V3Auth`] across
+    /// multiple interfaces (each with its own link-local source) can
+    /// stamp the per-interface source on every call instead of
+    /// keeping a separate [`V3Auth`] per interface.
+    ///
+    /// Like [`V3Auth::sign_trailer`] this method takes `&self` and
+    /// does not advance the cryptographic sequence number — the
+    /// caller is responsible for calling [`V3Auth::advance_seq`] (a
+    /// `&mut self` operation) between packets so the next trailer
+    /// carries a strictly larger `crypto_seq` (RFC 7166 §4.6 anti-
+    /// replay). The `source_v6` field of `self` is left untouched so
+    /// the next call with a different interface's source sees the
+    /// same instance state (only the per-packet Apad differs).
+    pub fn sign_trailer_with_source(
+        &self,
+        packet: &[u8],
+        lls: &[u8],
+        source_v6: [u8; 16],
+    ) -> Vec<u8> {
+        let l = self.algorithm.digest_len();
+        let mut trailer_with_apad = Vec::with_capacity(self.trailer_len());
+        trailer_with_apad.extend_from_slice(&V3_AUTH_TYPE_HMAC.to_be_bytes());
+        trailer_with_apad.extend_from_slice(&(self.trailer_len() as u16).to_be_bytes());
+        trailer_with_apad.extend_from_slice(&0u16.to_be_bytes()); // Reserved
+        trailer_with_apad.extend_from_slice(&self.sa_id.to_be_bytes());
+        trailer_with_apad.extend_from_slice(&self.crypto_seq.to_be_bytes());
+        trailer_with_apad.extend_from_slice(&apad(source_v6, l));
 
         let digest = self.compute_mac(packet, lls, &trailer_with_apad);
 
@@ -239,6 +285,70 @@ impl V3Auth {
         let mut trailer_with_apad = trailer.to_vec();
         trailer_with_apad.truncate(V3_TRAILER_HEADER);
         trailer_with_apad.extend_from_slice(&apad(self.source_v6, l));
+        let expected_mac = self.compute_mac(packet, lls, &trailer_with_apad);
+        let received_mac = &trailer[V3_TRAILER_HEADER..];
+        if received_mac != expected_mac.as_slice() {
+            return false;
+        }
+        self.last_peer_seq = Some(peer_seq);
+        true
+    }
+
+    /// Same as [`V3Auth::verify`] but with the IPv6 source address
+    /// (the one embedded in Apad, RFC 7166 §4.5) passed explicitly.
+    /// Use this when a daemon shares one [`V3Auth`] across multiple
+    /// peers and the source IPv6 address is the *received packet's*
+    /// source (the peer's link-local) — different peers have
+    /// different sources, so the shared `self.source_v6` field cannot
+    /// hold the right value for every verify call.
+    ///
+    /// Like [`V3Auth::verify`] this method takes `&mut self` because
+    /// it advances the anti-replay `last_peer_seq` field on success
+    /// (RFC 7166 §4.6). The `source_v6` field of `self` is left
+    /// untouched so a subsequent sign call still sees the daemon's
+    /// configured source.
+    pub fn verify_with_source(
+        &mut self,
+        packet: &[u8],
+        lls: &[u8],
+        trailer: &[u8],
+        source_v6: [u8; 16],
+    ) -> bool {
+        if trailer.len() < V3_TRAILER_HEADER {
+            return false;
+        }
+        let auth_type = u16::from_be_bytes([trailer[0], trailer[1]]);
+        if auth_type != V3_AUTH_TYPE_HMAC {
+            return false;
+        }
+        let auth_data_len = u16::from_be_bytes([trailer[2], trailer[3]]) as usize;
+        if auth_data_len != trailer.len() || auth_data_len != self.trailer_len() {
+            return false;
+        }
+        let sa_id = u16::from_be_bytes([trailer[6], trailer[7]]);
+        if sa_id != self.sa_id {
+            return false;
+        }
+        let peer_seq = u64::from_be_bytes([
+            trailer[8],
+            trailer[9],
+            trailer[10],
+            trailer[11],
+            trailer[12],
+            trailer[13],
+            trailer[14],
+            trailer[15],
+        ]);
+        if let Some(last) = self.last_peer_seq {
+            if peer_seq <= last {
+                return false;
+            }
+        }
+
+        let l = self.algorithm.digest_len();
+        let mut trailer_with_apad = trailer.to_vec();
+        trailer_with_apad.truncate(V3_TRAILER_HEADER);
+        trailer_with_apad.extend_from_slice(&apad(source_v6, l));
         let expected_mac = self.compute_mac(packet, lls, &trailer_with_apad);
         let received_mac = &trailer[V3_TRAILER_HEADER..];
         if received_mac != expected_mac.as_slice() {
@@ -474,5 +584,85 @@ mod tests {
         assert_eq!(auth.crypto_seq, 0);
         auth.advance_seq();
         assert_eq!(auth.crypto_seq, 1);
+    }
+
+    #[test]
+    fn sign_and_verify_with_source_roundtrip() {
+        // The `_with_source` variants let a daemon share one V3Auth
+        // across multiple interfaces / peers by passing the source
+        // per call. The MAC must verify when the same source is
+        // passed to sign and verify.
+        let src_a = src();
+        let auth = V3Auth::new(1, b"shared-secret".to_vec()); // source_v6 = [0;16]
+        let packet = make_v3_packet();
+        let trailer = auth.sign_trailer_with_source(&packet, &[], src_a);
+
+        let mut verifier = V3Auth::new(1, b"shared-secret".to_vec());
+        assert!(
+            verifier.verify_with_source(&packet, &[], &trailer, src_a),
+            "matching source verifies with the explicit-source variants"
+        );
+    }
+
+    #[test]
+    fn sign_with_source_then_verify_with_default_source_fails() {
+        // Verifying with the wrong source (the V3Auth's own
+        // source_v6 = [0;16] default) must fail when the trailer was
+        // signed with a different source — Apad is built from the
+        // source so a mismatch breaks the digest.
+        let src_a = src();
+        let auth = V3Auth::new(1, b"key".to_vec());
+        let packet = make_v3_packet();
+        let trailer = auth.sign_trailer_with_source(&packet, &[], src_a);
+
+        let mut verifier = V3Auth::new(1, b"key".to_vec()); // source_v6 = [0;16]
+        assert!(
+            !verifier.verify(&packet, &[], &trailer),
+            "verify with default source must fail when sign used a real source"
+        );
+    }
+
+    #[test]
+    fn sign_with_source_round_trip_with_a_fresh_verifier() {
+        // Verify the explicit-source path matches the field-based
+        // path: signing with `_with_source(src)` and verifying with
+        // the same `src` (set via `with_source` builder) must accept.
+        let src_a = src();
+        let signer = V3Auth::new(1, b"key".to_vec());
+        let packet = make_v3_packet();
+        let trailer = signer.sign_trailer_with_source(&packet, &[], src_a);
+
+        let mut verifier = V3Auth::new(1, b"key".to_vec()).with_source(src_a);
+        assert!(
+            verifier.verify(&packet, &[], &trailer),
+            "explicit-source sign + field-source verify round-trips"
+        );
+    }
+
+    #[test]
+    fn sign_with_source_distinct_sources_produce_distinct_trailers() {
+        // The Apad is part of the MAC input, so signing the same
+        // packet with two different sources must produce different
+        // digests — distinct trailers for distinct sources.
+        let src_a = src();
+        let mut src_b = src();
+        src_b[15] = 9;
+        let auth = V3Auth::new(1, b"key".to_vec());
+        let packet = make_v3_packet();
+        let trailer_a = auth.sign_trailer_with_source(&packet, &[], src_a);
+        let trailer_b = auth.sign_trailer_with_source(&packet, &[], src_b);
+        assert_ne!(
+            &trailer_a[V3_TRAILER_HEADER..],
+            &trailer_b[V3_TRAILER_HEADER..],
+            "distinct sources produce distinct digests"
+        );
+        // Both verify against their own source.
+        let mut verifier = V3Auth::new(1, b"key".to_vec());
+        assert!(verifier.verify_with_source(&packet, &[], &trailer_a, src_a));
+        let mut verifier = V3Auth::new(1, b"key".to_vec());
+        assert!(verifier.verify_with_source(&packet, &[], &trailer_b, src_b));
+        // Cross-source verify fails.
+        let mut verifier = V3Auth::new(1, b"key".to_vec());
+        assert!(!verifier.verify_with_source(&packet, &[], &trailer_a, src_b));
     }
 }
