@@ -258,3 +258,405 @@ fn e_router_links_p2p_keeps_the_plain_form() {
     assert_eq!(plain[0].sid, v6_octets("2001:db8:a:1::100"));
     assert!(lr_ospf::lsa::srv6::walk_lan_end_x_sub_tlvs(&out[0].sub_tlvs).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// RFC 7166 OSPFv3 authentication trailer — daemon wiring
+// ---------------------------------------------------------------------------
+
+/// Build a minimal OSPFv3 packet (16-byte header + 4-byte Hello body
+/// tail to round it up to the v3 header length). The body shape itself
+/// does not matter for the auth tests — the MAC is computed over the
+/// packet bytes verbatim (with the checksum field zeroed), so any
+/// 16+ byte v3-shaped buffer round-trips.
+fn minimal_v3_packet() -> Vec<u8> {
+    let mut h = vec![0u8; lr_ospf::packet::OspfHeader::LEN_V3];
+    h[0] = 3; // version 3
+    h[1] = 1; // type = Hello
+    let len = lr_ospf::packet::OspfHeader::LEN_V3 as u16;
+    h[2..4].copy_from_slice(&len.to_be_bytes());
+    h[4..8].copy_from_slice(&1u32.to_be_bytes()); // router id
+    h[8..12].copy_from_slice(&0u32.to_be_bytes()); // area id
+    h[12..14].copy_from_slice(&0u16.to_be_bytes()); // checksum (zeroed)
+    h[14..16].copy_from_slice(&0u16.to_be_bytes()); // instance id
+    h
+}
+
+/// `OspfV3AuthState::None` is the default — `is_active()` returns
+/// false, and both `apply_ospf_v3_auth` and `verify_ospf_v3_auth` are
+/// no-ops (apply returns false so the caller falls through to the
+/// finalize path; verify returns true so the caller accepts the
+/// packet).
+#[test]
+fn ospf_v3_auth_state_default_is_null() {
+    let mut state = OspfV3AuthState::default();
+    assert!(!state.is_active(), "default is NullAuth — not active");
+    let mut bytes = minimal_v3_packet();
+    let applied = apply_ospf_v3_auth(&mut state, &mut bytes, [0u8; 16]);
+    assert!(!applied, "NullAuth apply is a no-op (returns false)");
+    assert_eq!(
+        bytes.len(),
+        lr_ospf::packet::OspfHeader::LEN_V3,
+        "NullAuth does not append a trailer"
+    );
+    let verified = verify_ospf_v3_auth(&mut state, &bytes, [0u8; 16]);
+    assert!(verified, "NullAuth verify accepts everything");
+}
+
+/// `build_ospf_v3_auth` constructs `None` for the default config (no
+/// `[ospf.auth]` block) and for `type = "null"` (the explicit default)
+/// and constructs `Crypto` for `type = "crypto"` with the configured
+/// SA ID, key and algorithm.
+#[test]
+fn build_ospf_v3_auth_maps_config_to_state() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    // Default: no `[ospf.auth]` block → None.
+    let state = build_ospf_v3_auth(&cfg);
+    assert!(matches!(state, OspfV3AuthState::None));
+
+    // Explicit null.
+    cfg.ospf_auth.auth_type = Some("null".to_string());
+    let state = build_ospf_v3_auth(&cfg);
+    assert!(matches!(state, OspfV3AuthState::None));
+
+    // Crypto with HMAC-SHA-256 (the default).
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("shared-secret".to_string());
+    cfg.ospf_auth.key_id = Some(7);
+    let state = build_ospf_v3_auth(&cfg);
+    match state {
+        OspfV3AuthState::Crypto(arc) => {
+            let ca = arc.lock().unwrap();
+            assert_eq!(ca.sa_id, 7, "SA ID = key_id (widened to u16)");
+            assert_eq!(ca.algorithm, lr_ospf::auth::CryptoAlgorithm::HmacSha256);
+            assert_eq!(ca.key, b"shared-secret", "key from config");
+        }
+        _ => panic!("crypto config produces Crypto state"),
+    }
+
+    // HMAC-SHA-1 override.
+    cfg.ospf_auth.algorithm = Some("hmac-sha1".to_string());
+    let state = build_ospf_v3_auth(&cfg);
+    match state {
+        OspfV3AuthState::Crypto(arc) => {
+            let ca = arc.lock().unwrap();
+            assert_eq!(ca.algorithm, lr_ospf::auth::CryptoAlgorithm::HmacSha1);
+        }
+        _ => panic!("crypto config produces Crypto state"),
+    }
+}
+
+/// `apply_ospf_v3_auth` under Crypto appends the RFC 7166 trailer
+/// (16-octet fixed header + 32-byte SHA-256 digest = 48 octets) and
+/// zeroes the OSPFv3 header checksum (offset 12..14). The OSPF
+/// length at offset 2..4 stays at the body length (the trailer is
+/// NOT counted — RFC 7166 §4.2).
+#[test]
+fn apply_ospf_v3_auth_appends_trailer_and_zeros_checksum() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("shared-secret".to_string());
+    cfg.ospf_auth.key_id = Some(7);
+    let mut state = build_ospf_v3_auth(&cfg);
+
+    let mut bytes = minimal_v3_packet();
+    let body_len = bytes.len();
+    let src = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let applied = apply_ospf_v3_auth(&mut state, &mut bytes, src);
+    assert!(applied, "Crypto apply returns true");
+    // Trailer = 16 (fixed header) + 32 (SHA-256 digest) = 48 bytes.
+    assert_eq!(
+        bytes.len(),
+        body_len + 48,
+        "trailer appended (RFC 7166 §4.1)"
+    );
+    // Checksum field zeroed (offset 12..14).
+    assert_eq!(&bytes[12..14], &[0u8, 0u8], "checksum zeroed (§4.2)");
+    // OSPF length stays at the body length.
+    let ospf_len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    assert_eq!(
+        ospf_len, body_len,
+        "OSPF length excludes the trailer (§4.2)"
+    );
+    // The trailer's Auth Type = 1 (HMAC), Auth Data Len = 48 (entire
+    // trailer), SA ID = 7 (from key_id).
+    let trailer = &bytes[body_len..];
+    assert_eq!(
+        u16::from_be_bytes([trailer[0], trailer[1]]),
+        1,
+        "Auth Type = HMAC"
+    );
+    assert_eq!(
+        u16::from_be_bytes([trailer[2], trailer[3]]),
+        48,
+        "Auth Data Len = 48 (entire trailer)"
+    );
+    assert_eq!(u16::from_be_bytes([trailer[6], trailer[7]]), 7, "SA ID = 7");
+}
+
+/// `apply_ospf_v3_auth` advances the crypto_seq on every call so
+/// successive packets carry strictly larger sequence numbers
+/// (RFC 7166 §4.6 anti-replay).
+#[test]
+fn apply_ospf_v3_auth_advances_seq_monotonically() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("key".to_string());
+    cfg.ospf_auth.key_id = Some(1);
+    let mut state = build_ospf_v3_auth(&cfg);
+    let src = [0u8; 16];
+
+    let mut bytes_a = minimal_v3_packet();
+    apply_ospf_v3_auth(&mut state, &mut bytes_a, src);
+    let seq_a = u64::from_be_bytes([
+        bytes_a[bytes_a.len() - 48 + 8],
+        bytes_a[bytes_a.len() - 48 + 9],
+        bytes_a[bytes_a.len() - 48 + 10],
+        bytes_a[bytes_a.len() - 48 + 11],
+        bytes_a[bytes_a.len() - 48 + 12],
+        bytes_a[bytes_a.len() - 48 + 13],
+        bytes_a[bytes_a.len() - 48 + 14],
+        bytes_a[bytes_a.len() - 48 + 15],
+    ]);
+
+    let mut bytes_b = minimal_v3_packet();
+    apply_ospf_v3_auth(&mut state, &mut bytes_b, src);
+    let seq_b = u64::from_be_bytes([
+        bytes_b[bytes_b.len() - 48 + 8],
+        bytes_b[bytes_b.len() - 48 + 9],
+        bytes_b[bytes_b.len() - 48 + 10],
+        bytes_b[bytes_b.len() - 48 + 11],
+        bytes_b[bytes_b.len() - 48 + 12],
+        bytes_b[bytes_b.len() - 48 + 13],
+        bytes_b[bytes_b.len() - 48 + 14],
+        bytes_b[bytes_b.len() - 48 + 15],
+    ]);
+    assert!(seq_b > seq_a, "crypto_seq advances between calls");
+}
+
+/// A signed packet verifies at the receiver when the same key, SA ID
+/// and source IPv6 address are configured. The round-trip mirrors
+/// what two daemons on a link would see: the sender signs with its
+/// link-local, the receiver verifies with the peer's link-local
+/// (the same address — the packet's source).
+#[test]
+fn apply_ospf_v3_auth_then_verify_roundtrip() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("shared-secret".to_string());
+    cfg.ospf_auth.key_id = Some(1);
+    let mut signer = build_ospf_v3_auth(&cfg);
+    let mut verifier = build_ospf_v3_auth(&cfg);
+
+    let src = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut bytes = minimal_v3_packet();
+    apply_ospf_v3_auth(&mut signer, &mut bytes, src);
+    assert!(
+        verify_ospf_v3_auth(&mut verifier, &bytes, src),
+        "matching key + SA ID + source verifies"
+    );
+}
+
+/// A packet signed with one key fails verification when the verifier
+/// is configured with a different key — the MAC mismatch is the
+/// security boundary (RFC 7166 §4.5).
+#[test]
+fn apply_ospf_v3_auth_wrong_key_rejected() {
+    let mut cfg_sign = DaemonConfig::with_defaults();
+    cfg_sign.protocol = "ospf".to_string();
+    cfg_sign.ospf_version = "v3".to_string();
+    cfg_sign.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg_sign.ospf_auth.key = Some("correct".to_string());
+    cfg_sign.ospf_auth.key_id = Some(1);
+    let mut signer = build_ospf_v3_auth(&cfg_sign);
+
+    let mut cfg_verify = DaemonConfig::with_defaults();
+    cfg_verify.protocol = "ospf".to_string();
+    cfg_verify.ospf_version = "v3".to_string();
+    cfg_verify.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg_verify.ospf_auth.key = Some("wrong".to_string());
+    cfg_verify.ospf_auth.key_id = Some(1);
+    let mut verifier = build_ospf_v3_auth(&cfg_verify);
+
+    let src = [0u8; 16];
+    let mut bytes = minimal_v3_packet();
+    apply_ospf_v3_auth(&mut signer, &mut bytes, src);
+    assert!(
+        !verify_ospf_v3_auth(&mut verifier, &bytes, src),
+        "wrong key must fail the MAC check"
+    );
+}
+
+/// A packet signed with one source fails verification when the
+/// verifier passes a different source — Apad (RFC 7166 §2.3/§4.5)
+/// embeds the source in the MAC input.
+#[test]
+fn apply_ospf_v3_auth_wrong_source_rejected() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("key".to_string());
+    cfg.ospf_auth.key_id = Some(1);
+    let mut signer = build_ospf_v3_auth(&cfg);
+    let mut verifier = build_ospf_v3_auth(&cfg);
+
+    let mut src_a = [0u8; 16];
+    src_a[15] = 1;
+    let mut src_b = [0u8; 16];
+    src_b[15] = 2;
+    let mut bytes = minimal_v3_packet();
+    apply_ospf_v3_auth(&mut signer, &mut bytes, src_a);
+    assert!(
+        verify_ospf_v3_auth(&mut verifier, &bytes, src_a),
+        "matching source verifies"
+    );
+    // Re-create the verifier — verify mutates last_peer_seq, so a
+    // second verify call against the same packet would fail the
+    // anti-replay check (the correct behaviour, but not what this
+    // test asserts).
+    let mut verifier = build_ospf_v3_auth(&cfg);
+    assert!(
+        !verify_ospf_v3_auth(&mut verifier, &bytes, src_b),
+        "different source must fail the MAC check (Apad mismatch)"
+    );
+}
+
+/// A replayed packet (the same bytes verified twice) is rejected on
+/// the second call — the anti-replay check (RFC 7166 §4.6) keeps the
+/// last seen `crypto_seq` and rejects any sequence ≤ it.
+#[test]
+fn apply_ospf_v3_auth_replay_rejected() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("key".to_string());
+    cfg.ospf_auth.key_id = Some(1);
+    let mut signer = build_ospf_v3_auth(&cfg);
+    let mut verifier = build_ospf_v3_auth(&cfg);
+
+    let src = [0u8; 16];
+    let mut bytes = minimal_v3_packet();
+    apply_ospf_v3_auth(&mut signer, &mut bytes, src);
+    assert!(
+        verify_ospf_v3_auth(&mut verifier, &bytes, src),
+        "first packet accepted"
+    );
+    assert!(
+        !verify_ospf_v3_auth(&mut verifier, &bytes, src),
+        "replay must be rejected (anti-replay, RFC 7166 §4.6)"
+    );
+}
+
+/// `verify_ospf_v3_auth` under `None` (NullAuth) accepts a packet
+/// that has no trailer — a sender without auth configured sends a
+/// bare OSPFv3 packet, and the receiver without auth accepts it.
+/// The OSPF length at offset 2..4 matches the datagram length (no
+/// trailer is appended).
+#[test]
+fn verify_ospf_v3_auth_null_accepts_no_trailer() {
+    let mut state = OspfV3AuthState::default();
+    let bytes = minimal_v3_packet();
+    assert!(
+        verify_ospf_v3_auth(&mut state, &bytes, [0u8; 16]),
+        "NullAuth accepts a packet with no trailer"
+    );
+}
+
+/// `verify_ospf_v3_auth` under `Crypto` rejects a packet that has
+/// no trailer (the OSPF length matches the datagram length, so the
+/// split leaves an empty trailer slice — V3Auth::verify rejects
+/// that as a malformed trailer).
+#[test]
+fn verify_ospf_v3_auth_crypto_rejects_no_trailer() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("key".to_string());
+    cfg.ospf_auth.key_id = Some(1);
+    let mut verifier = build_ospf_v3_auth(&cfg);
+
+    let bytes = minimal_v3_packet();
+    assert!(
+        !verify_ospf_v3_auth(&mut verifier, &bytes, [0u8; 16]),
+        "Crypto must reject a packet with no trailer (fail-closed)"
+    );
+}
+
+/// HMAC-SHA-1 produces a 20-byte digest (vs SHA-256's 32), so the
+/// trailer is 16 + 20 = 36 bytes — pin the algorithm dispatch so a
+/// regression that flips the SHA-256/SHA-1 wire length is caught.
+#[test]
+fn apply_ospf_v3_auth_hmac_sha1_trailer_length() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_auth.auth_type = Some("crypto".to_string());
+    cfg.ospf_auth.key = Some("key".to_string());
+    cfg.ospf_auth.key_id = Some(1);
+    cfg.ospf_auth.algorithm = Some("hmac-sha1".to_string());
+    let mut state = build_ospf_v3_auth(&cfg);
+
+    let mut bytes = minimal_v3_packet();
+    let body_len = bytes.len();
+    apply_ospf_v3_auth(&mut state, &mut bytes, [0u8; 16]);
+    assert_eq!(
+        bytes.len(),
+        body_len + 36,
+        "SHA-1 trailer = 16 fixed header + 20 digest"
+    );
+}
+
+/// `[ospf.auth] type = "simple"` is rejected at finalize time when
+/// `[ospf] version = "v3"` — RFC 5340 §A.3.1 removed the auth_data
+/// field from the header, so SimplePassword is not a v3 strategy.
+/// The error message names RFC 7166 as the v3 alternative. The
+/// finalize_ospf path only fires when OSPF is configured (at least
+/// one OSPF interface), so the test carries a stub interface.
+#[test]
+fn finalize_ospf_rejects_simple_under_v3() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v3".to_string();
+    cfg.ospf_interfaces.push(crate::daemon_config::OspfIfSpec {
+        name: Some("lo".to_string()),
+        ..Default::default()
+    });
+    cfg.ospf_auth.auth_type = Some("simple".to_string());
+    cfg.ospf_auth.password = Some("secret".to_string());
+    let err = cfg.finalize().expect_err("simple under v3 fails closed");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not valid for OSPFv3"),
+        "error explains the v3 incompatibility"
+    );
+    assert!(
+        msg.contains("RFC 7166"),
+        "error names RFC 7166 as the v3 alternative"
+    );
+}
+
+/// `[ospf.auth] type = "simple"` under v2 still finalizes cleanly
+/// (the v3-only rejection does not affect the v2 path).
+#[test]
+fn finalize_ospf_accepts_simple_under_v2() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v2".to_string();
+    cfg.ospf_interfaces.push(crate::daemon_config::OspfIfSpec {
+        name: Some("lo".to_string()),
+        ..Default::default()
+    });
+    cfg.ospf_auth.auth_type = Some("simple".to_string());
+    cfg.ospf_auth.password = Some("secret".to_string());
+    cfg.finalize().expect("v2 simple is valid");
+}

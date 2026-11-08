@@ -54,6 +54,29 @@
 //!   ifindexes — stable across the process restart (RFC 5187 §3.2's
 //!   preservation requirement holds structurally while the interface
 //!   stays up).
+//! - **Authentication (RFC 7166)** — the v3 counterpart of the v2
+//!   daemon's RFC 2328 §D strategies. OSPFv3 removed the
+//!   authentication fields from the header (RFC 5340 §A.3.1 replaced
+//!   them with the Instance ID), so the only cryptographic strategy
+//!   on v3 is the RFC 7166 Authentication Trailer, appended to every
+//!   packet after the body (and after the optional LLS data block,
+//!   which the daemon does not currently emit) and NOT covered by
+//!   the OSPF checksum. The daemon's `[ospf.auth] type = "crypto"`
+//!   block (the same `OspfAuthSpec` the v2 daemon uses) maps to the
+//!   trailer; the `key_id` widens to the v3 16-bit SA ID, the
+//!   algorithm defaults to HMAC-SHA-256 (RFC 5709 §2.2 — RFC 7166
+//!   §4.5 inherits the same algorithm set) with `algorithm =
+//!   "hmac-sha1"` override. `type = "simple"` is rejected at
+//!   finalize time under v3 (RFC 5340 §A.3.1 removed the auth_data
+//!   field). The send path (`pump_outbound`, `send_grace_lsas`,
+//!   `pump_hellos`) appends the trailer on every outgoing packet
+//!   with the interface's link-local as the source embedded in Apad
+//!   (RFC 7166 §2.3/§4.5); the receive path (`pump_inbound`) verifies
+//!   the trailer with the received packet's source IPv6 (the peer's
+//!   link-local) before any further processing — Hello tracking or
+//!   router `feed_input` — drops a packet whose trailer is missing,
+//!   malformed, fails the MAC check or fails the anti-replay check
+//!   (RFC 7166 §4.6).
 //!
 //! Scope of slice 1 was point-to-point segments only; broadcast
 //! segments (DR election, Network-LSAs, network-referenced
@@ -449,6 +472,60 @@ struct Neighbor {
     helper: HelperEntry,
 }
 
+/// OSPFv3 authentication runtime state (RFC 7166).
+///
+/// OSPFv3 removed the authentication fields from the header (they were
+/// replaced by the Instance ID, RFC 5340 §A.3.1), so the only
+/// cryptographic strategy on v3 is the RFC 7166 Authentication Trailer —
+/// appended to every packet after the body (and after the optional LLS
+/// data block), and NOT covered by the OSPF checksum.
+///
+/// `None` (the default) is NullAuth — no per-packet work. `Crypto`
+/// carries an `Arc<Mutex<V3Auth>>` so the send path can advance the
+/// `crypto_seq` (via `advance_seq`) and the receive path can update
+/// the anti-replay `last_peer_seq` (via `verify_with_source`).
+///
+/// The shared `last_peer_seq` mirrors the v2 daemon's `CryptoAuth`
+/// shape: anti-replay across multiple peers with a single key is
+/// approximate (the strongest seen sequence number sticks and any
+/// peer whose seq regresses below it is rejected). RFC 7166 §4.6
+/// specifies the check as "less than or equal to the value last
+/// received from the same router", so a strict per-peer table is the
+/// long-term shape; a single-peer deployment (the common p2p lab) is
+/// exact today.
+///
+/// The `source_v6` field on the inner [`V3Auth`] is left at the
+/// `[0;16]` default — the daemon sends from a per-interface
+/// link-local source and receives from a per-packet peer source, so
+/// the field cannot hold the right value for every call. The send
+/// and verify paths pass the source explicitly through
+/// [`V3Auth::sign_trailer_with_source`] / [`V3Auth::verify_with_source`]
+/// (the additive variants that take the source as a parameter).
+#[derive(Debug, Clone, Default)]
+enum OspfV3AuthState {
+    /// No authentication (the default) — every packet is sent without
+    /// a trailer and every received packet is accepted.
+    #[default]
+    None,
+    /// RFC 7166 Authentication Trailer (HMAC-SHA-256 default,
+    /// HMAC-SHA-1 optional). The `Arc<Mutex<_>>` lets the send and
+    /// receive paths advance / read the shared `crypto_seq` and
+    /// `last_peer_seq` without re-borrowing `self`.
+    Crypto(Arc<Mutex<lr_ospf::auth::V3Auth>>),
+}
+
+impl OspfV3AuthState {
+    /// True when the strategy is anything other than NullAuth — the
+    /// send path uses this to choose between "append trailer then
+    /// finalize the checksum" (auth active) and "send the body as
+    /// encoded" (NullAuth). The receive path uses it to gate the
+    /// verify call (a packet without a trailer under NullAuth is
+    /// accepted; the same packet under Crypto is rejected).
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Crypto(_))
+    }
+}
+
 struct Ospf3Daemon {
     router: Arc<RwLock<DefaultRouter>>,
     interfaces: Vec<Ospf3Interface>,
@@ -508,6 +585,15 @@ struct Ospf3Daemon {
     gr_recovery: BTreeMap<u32, RestartTracker>,
     /// Area → last-seen LSDB topology version (the §3.2 (3) exit).
     gr_topology: BTreeMap<u32, u64>,
+    /// RFC 7166 OSPFv3 authentication trailer state — `None` (default)
+    /// for NullAuth, `Crypto(Arc<Mutex<V3Auth>>)` for the HMAC-SHA
+    /// trailer. Built once from the daemon's `[ospf.auth]` config at
+    /// startup ([`build_ospf_v3_auth`]); the send path appends the
+    /// trailer in [`apply_ospf_v3_auth`] and the receive path verifies
+    /// it in [`verify_ospf_v3_auth`]. Shared across interfaces and
+    /// peers; the per-interface / per-packet IPv6 source is passed
+    /// explicitly through the `*_with_source` variants.
+    auth: OspfV3AuthState,
 }
 
 /// The resolved RFC 9513 origination state: what `reoriginate_area`
@@ -712,6 +798,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             .or_else(|| cfg.api_socket.as_ref().map(|s| format!("{s}.gr"))),
         gr_recovery: BTreeMap::new(),
         gr_topology: BTreeMap::new(),
+        auth: build_ospf_v3_auth(cfg),
     };
     if let Some(s) = &daemon.srv6 {
         log_info!(
@@ -1371,7 +1458,12 @@ impl Ospf3Daemon {
     /// sockets deliver the OSPF packet without the IPv6 header, and
     /// receive-side checksum verification is skipped (FRR ospf6d
     /// parity — the RFC 5340 §4.2.2 checks the daemon enforces are
-    /// version, area and source identity).
+    /// version, area and source identity). When RFC 7166
+    /// authentication is configured, the trailer is verified before
+    /// any further processing (Hello tracking or router feed_input);
+    /// a packet whose trailer is missing, malformed, fails the MAC
+    /// check or fails the anti-replay check is dropped at the
+    /// receive boundary (RFC 7166 §4.6).
     fn pump_inbound(&mut self, recv_buf: &mut [u8], now_ms: u64) {
         let mut datagrams: Vec<(u32, u32, Vec<u8>, Ipv6Addr)> = Vec::new();
         for iface in &mut self.interfaces {
@@ -1391,6 +1483,29 @@ impl Ospf3Daemon {
                                 u32::from_be_bytes([ospf[4], ospf[5], ospf[6], ospf[7]]),
                                 src
                             );
+                        }
+                        // RFC 7166 §4.5/§4.6: verify the authentication
+                        // trailer before any further processing (Hello
+                        // tracking, router feed_input). The peer's
+                        // link-local `src` is the IPv6 source embedded
+                        // in Apad (§2.3). A packet whose trailer is
+                        // missing, malformed, fails the MAC check or
+                        // fails the anti-replay check is dropped here —
+                        // the LSDB never sees it. The debug-level drop
+                        // log mirrors the v2 daemon's pattern: a
+                        // misconfigured peer could flood the log, so a
+                        // `warn`-level drop is reserved for the first
+                        // drop on a session (a future increment); the
+                        // `LR_OSPF_DEBUG` trace is the operator's
+                        // per-packet view.
+                        if !verify_ospf_v3_auth(&mut self.auth, ospf, src.octets()) {
+                            if ospf_debug_enabled() {
+                                log_debug!(
+                                    Component::Ospfv3,
+                                    "ospf3 auth drop from {src} (RFC 7166 verify failed)"
+                                );
+                            }
+                            continue;
                         }
                         if ospf.get(1).copied() == Some(OspfPacketType::Hello as u8)
                             && ospf.len() >= 12
@@ -2076,7 +2191,34 @@ impl Ospf3Daemon {
             };
             match OspfCodec::v3().encode_vec(&packet) {
                 Ok(mut bytes) => {
-                    finalize_v3_packet(&mut bytes, &iface.link_local.octets(), &MULTICAST_ALL_SPF);
+                    // RFC 7166 §4.2 (see `pump_outbound` for the full
+                    // rationale): the authenticated path zeroes the
+                    // checksum and appends the trailer; the NullAuth
+                    // path finalizes the checksum with the IPv6
+                    // pseudo-header. The `src` is read out of `iface`
+                    // before the auth call so the borrow of
+                    // `self.interfaces` (the for-loop iterator) does
+                    // not extend into the `&mut self.auth` call — the
+                    // disjoint-borrow rule lets the two coexist. An
+                    // active config that fails to apply (the packet is
+                    // shorter than the 16-byte v3 header — a defensive
+                    // case the codec should never produce) skips the
+                    // send rather than emit a trailer-less packet the
+                    // peer would reject.
+                    let src = iface.link_local.octets();
+                    let auth_active = self.auth.is_active();
+                    let applied = apply_ospf_v3_auth(&mut self.auth, &mut bytes, src);
+                    if !applied {
+                        if auth_active {
+                            log_warn!(
+                                Component::Ospfv3,
+                                "ospf3 grace-LSA {}: auth apply failed (truncated header)",
+                                iface.name
+                            );
+                            continue;
+                        }
+                        finalize_v3_packet(&mut bytes, &src, &MULTICAST_ALL_SPF);
+                    }
                     if let Err(e) = iface.transport.send_multicast(&bytes) {
                         log_warn!(
                             Component::Daemon,
@@ -2258,7 +2400,25 @@ impl Ospf3Daemon {
                     continue;
                 }
             };
-            finalize_v3_packet(&mut bytes, &iface.link_local.octets(), &MULTICAST_ALL_SPF);
+            // RFC 7166 §4.2 (see `pump_outbound` for the rationale):
+            // authenticated sends leave the checksum zero and append
+            // the trailer; NullAuth sends finalize the checksum. A
+            // truncated-header apply failure (defensive) skips the
+            // send rather than emit a trailer-less packet.
+            let src = iface.link_local.octets();
+            let auth_active = self.auth.is_active();
+            let applied = apply_ospf_v3_auth(&mut self.auth, &mut bytes, src);
+            if !applied {
+                if auth_active {
+                    log_warn!(
+                        Component::Ospfv3,
+                        "ospf3 hello {}: auth apply failed (truncated header)",
+                        iface.name
+                    );
+                    continue;
+                }
+                finalize_v3_packet(&mut bytes, &src, &MULTICAST_ALL_SPF);
+            }
             dbg_send_trace(&bytes);
             if let Err(e) = iface.transport.send_multicast(&bytes) {
                 log_warn!(Component::Daemon, "ospf3 hello send {}: {}", iface.name, e);
@@ -2336,7 +2496,39 @@ impl Ospf3Daemon {
             else {
                 continue;
             };
-            finalize_v3_packet(&mut bytes, &iface.link_local.octets(), &dst);
+            // RFC 7166 §4.2: when the Authentication Trailer is in use
+            // the OSPFv3 header checksum is omitted from the MAC
+            // input AND from the wire (the receiver zeroes it before
+            // verifying, so the wire value does not matter, but the
+            // daemon leaves it zero on the authenticated path so an
+            // observer sees a clean zero). When auth is `None`
+            // (NullAuth) the codec's zero checksum is finalized with
+            // the IPv6 pseudo-header as before.
+            //
+            // `apply_ospf_v3_auth` returns false in two cases: auth
+            // is `None` (no work to do — fall through to finalize) or
+            // auth is `Crypto` and the packet is too short to sign
+            // (the daemon must drop the send rather than emit a
+            // trailer-less packet the peer would reject). The
+            // `is_active` gate distinguishes the two.
+            let src = iface.link_local.octets();
+            let auth_active = self.auth.is_active();
+            let applied = apply_ospf_v3_auth(&mut self.auth, &mut bytes, src);
+            if !applied {
+                if auth_active {
+                    // Crypto active but the apply failed (the packet
+                    // was shorter than the 16-byte v3 header). The
+                    // router's output should never produce a packet
+                    // that short, so this is a defensive drop.
+                    log_warn!(
+                        Component::Ospfv3,
+                        "ospf3 send {}: auth apply failed (truncated header)",
+                        iface.name
+                    );
+                    continue;
+                }
+                finalize_v3_packet(&mut bytes, &src, &dst);
+            }
             dbg_send_trace(&bytes);
             if dst == MULTICAST_ALL_SPF {
                 if let Err(e) = iface.transport.send_multicast(&bytes) {
@@ -3089,6 +3281,125 @@ fn demux_header(bytes: &[u8]) -> Option<(u32, u32, u16)> {
 
 fn fmt_rid(rid: u32) -> String {
     RouterId::from_u32(rid).to_string()
+}
+
+// ---------------------------------------------------------------------------
+// RFC 7166 OSPFv3 authentication trailer — daemon wiring
+// ---------------------------------------------------------------------------
+
+/// Build the v3 auth state from the daemon config (RFC 7166). Returns
+/// [`OspfV3AuthState::None`] for `null` (the default), and
+/// [`OspfV3AuthState::Crypto`] for `crypto` (alias `md5`,
+/// `message-digest`). `simple` is rejected at finalize time when
+/// `ospf_version = "v3"` (RFC 5340 §A.3.1 removed the auth_data field
+/// from the header, so SimplePassword is not a v3 strategy — see
+/// `DaemonConfig::finalize_ospf`).
+///
+/// The `key_id` (1 byte, RFC 2328 §D.3.1) is widened to the v3
+/// `sa_id` (2 bytes, RFC 7166 §4.1) — the 0..=255 range fits in a
+/// `u16`, and the wire field stays 16 bits so a future configuration
+/// surface that takes a full `u16` SA ID does not need to widen the
+/// OspfAuthSpec type. The algorithm defaults to HMAC-SHA-256
+/// (RFC 5709 §2.2 — RFC 7166 §4.5 inherits the same algorithm set);
+/// `algorithm = "hmac-sha1"` selects HMAC-SHA-1 for legacy interop.
+fn build_ospf_v3_auth(cfg: &DaemonConfig) -> OspfV3AuthState {
+    if cfg.ospf_auth.effective_type() != "crypto" {
+        return OspfV3AuthState::None;
+    }
+    let sa_id = u16::from(cfg.ospf_auth.key_id.unwrap_or(1));
+    let key = cfg
+        .ospf_auth
+        .key
+        .as_deref()
+        .unwrap_or("")
+        .as_bytes()
+        .to_vec();
+    let mut auth = lr_ospf::auth::V3Auth::new(sa_id, key);
+    if cfg.ospf_auth.effective_algorithm() == "hmac-sha1" {
+        auth = auth.with_sha1();
+    }
+    OspfV3AuthState::Crypto(Arc::new(Mutex::new(auth)))
+}
+
+/// Append the RFC 7166 authentication trailer to an outgoing OSPFv3
+/// packet (the send-side counterpart of [`verify_ospf_v3_auth`]).
+///
+/// `bytes` is the full encoded OSPFv3 packet (header + body) as the
+/// codec produced it; `source_v6` is the IPv6 source the packet will
+/// be sent from (the interface's link-local). On success the trailer
+/// is appended in place and `true` is returned; on failure (the
+/// packet is shorter than the 16-byte v3 header, or the auth state
+/// is `None`) the packet is left untouched and `false` is returned.
+///
+/// The OSPF length field at offset 2..4 stays at the body length
+/// (RFC 7166 §4.2: "the OSPFv3 Packet Length field MUST NOT include
+/// the length of the Authentication Trailer"); the trailer sits
+/// *after* the body in the wire bytes. The header checksum is zeroed
+/// before signing (RFC 7166 §4.2 omits the header checksum from the
+/// MAC input when the AT is used).
+fn apply_ospf_v3_auth(
+    auth: &mut OspfV3AuthState,
+    bytes: &mut Vec<u8>,
+    source_v6: [u8; 16],
+) -> bool {
+    match auth {
+        OspfV3AuthState::None => false,
+        OspfV3AuthState::Crypto(arc) => {
+            if bytes.len() < lr_ospf::packet::OspfHeader::LEN_V3 {
+                return false;
+            }
+            let mut ca = arc.lock().unwrap();
+            // RFC 7166 §4.6: the crypto_seq is non-decreasing —
+            // advance it on every packet so a receiver's anti-replay
+            // window always sees a strictly larger value.
+            ca.advance_seq();
+            // Zero the OSPFv3 header checksum (offset 12..14) before
+            // signing — RFC 7166 §4.2 omits the header checksum from
+            // the MAC input when the AT is used. The codec left it
+            // zero on encode (the daemon's finalize_v3_packet call
+            // patches the real checksum in for unauthenticated sends),
+            // so an authenticated packet skips finalize and the
+            // checksum stays zero on the wire too.
+            bytes[12] = 0;
+            bytes[13] = 0;
+            let trailer = ca.sign_trailer_with_source(bytes, &[], source_v6);
+            bytes.extend_from_slice(&trailer);
+            true
+        }
+    }
+}
+
+/// Verify a received OSPFv3 packet's authentication trailer (RFC 7166
+/// §4.5). Returns `true` when the strategy is `None` (NullAuth — every
+/// packet is accepted, matching RFC 5340's unauthenticated default) or
+/// when the trailer is present, the SA ID matches, the MAC verifies
+/// and the anti-replay sequence number is strictly greater than the
+/// last-seen value (RFC 7166 §4.6). Returns `false` when the strategy
+/// is `Crypto` and the trailer is missing, malformed, the SA ID
+/// differs, the MAC mismatch, or the anti-replay check fails.
+///
+/// `bytes` is the full datagram (OSPFv3 packet + trailer) as the raw
+/// socket delivered it; `source_v6` is the IPv6 source address the
+/// packet arrived from (the peer's link-local, embedded in Apad per
+/// RFC 7166 §2.3/§4.5). The OSPF length at offset 2..4 covers the
+/// body only — the trailer sits *after* that length, so the split is
+/// `bytes[..ospf_len]` (packet) and `bytes[ospf_len..]` (trailer).
+fn verify_ospf_v3_auth(auth: &mut OspfV3AuthState, bytes: &[u8], source_v6: [u8; 16]) -> bool {
+    match auth {
+        OspfV3AuthState::None => true,
+        OspfV3AuthState::Crypto(arc) => {
+            if bytes.len() < lr_ospf::packet::OspfHeader::LEN_V3 {
+                return false;
+            }
+            let ospf_len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+            if ospf_len < lr_ospf::packet::OspfHeader::LEN_V3 || ospf_len > bytes.len() {
+                return false;
+            }
+            let (packet, trailer) = bytes.split_at(ospf_len);
+            let mut ca = arc.lock().unwrap();
+            ca.verify_with_source(packet, &[], trailer, source_v6)
+        }
+    }
 }
 
 #[cfg(test)]

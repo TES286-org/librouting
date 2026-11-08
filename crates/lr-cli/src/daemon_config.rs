@@ -2488,6 +2488,21 @@ impl DaemonConfig {
         // password. Crypto auth (`crypto`/`md5`) requires a `key` and
         // a `key_id`; the algorithm defaults to `hmac-sha256`
         // (RFC 5709 §2.2).
+        //
+        // OSPFv3 (RFC 5340) removed the auth_data field from the
+        // header, so `simple` is not a v3 strategy — RFC 7166 is the
+        // only cryptographic strategy on v3 (it appends a trailer to
+        // every packet). A `[ospf.auth] type = "simple"` block under
+        // `[ospf] version = "v3"` is therefore a config bug — fail
+        // closed instead of silently ignoring the block.
+        if self.ospf_version == "v3" && self.ospf_auth.effective_type() == "simple" {
+            return Err(
+                "[ospf.auth] type = \"simple\" is not valid for OSPFv3 (RFC 5340 §A.3.1 \
+                 removed the auth_data field from the header); use type = \"crypto\" \
+                 (RFC 7166 authentication trailer) for v3 cryptographic authentication"
+                    .into(),
+            );
+        }
         match self.ospf_auth.effective_type() {
             "simple" => {
                 if self.ospf_auth.password.is_none() {
