@@ -77,6 +77,19 @@ pub(crate) struct BfdPeerSpec {
 /// latency contribution negligible.
 const POLL_MS: u64 = 10;
 
+/// Cached `LR_BFD_DEBUG` gate for the per-packet trace (checked on
+/// every datagram the supervisor drains; an uncached `var_os` syscall
+/// per packet showed up in profiling on a 10 ms poll cadence). Mirrors
+/// `daemon_ospf::ospf_debug_enabled`. The trace records themselves go
+/// through `log_debug!` / `log_trace!`, which the per-component
+/// severity filter (`--log-target bfd=debug` / `=trace`) gates a
+/// second time — the env var is the cheap pre-check, the severity
+/// filter is the real gate.
+fn bfd_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LR_BFD_DEBUG").is_some())
+}
+
 /// Start the BFD supervisor thread. Returns the liveness flags aligned
 /// with `specs`. Fails closed: if any socket cannot be bound the
 /// daemon must not run with BFD silently absent.
@@ -167,7 +180,19 @@ pub(crate) fn spawn_supervisor(
                             break;
                         }
                     };
+                    if bfd_debug_enabled() {
+                        log_trace!(Component::Bfd, "rx {} bytes from {} on {}", n, src, mode);
+                    }
                     if n < 12 {
+                        if bfd_debug_enabled() {
+                            log_debug!(
+                                Component::Bfd,
+                                "drop: short BFD datagram ({} bytes) from {} — \
+                                 header is 12 bytes",
+                                n,
+                                src
+                            );
+                        }
                         continue; // not even a BFD header
                     }
                     let your_disc = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
@@ -180,7 +205,18 @@ pub(crate) fn spawn_supervisor(
                             .iter()
                             .position(|p| p.peer_ip == src.ip() && p.mode == *mode)
                     };
-                    let Some(idx) = idx else { continue };
+                    let Some(idx) = idx else {
+                        if bfd_debug_enabled() {
+                            log_debug!(
+                                Component::Bfd,
+                                "drop: no peer for your_disc={:08x} src={} on {}",
+                                your_disc,
+                                src,
+                                mode
+                            );
+                        }
+                        continue;
+                    };
                     let p = &mut peers[idx];
                     let evs = p.session.feed_bytes(now, &buf[..n]);
                     apply_events(p, evs);
