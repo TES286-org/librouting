@@ -13847,6 +13847,28 @@ void lr_ospf_v3_auth_free(lr_ospf_v3_auth_t v);
  */
 uint32_t lr_ospf_hello_network_mask(lr_ospf_packet_t p);
 
+/**
+ * Read the Hello body's Interface ID (RFC 5340 §A.3.2.1) — the
+ * 4-byte wire slot v2 uses for the network mask. v3 has no network
+ * mask; the slot identifies the interface the Hello was sent on, so
+ * the receiver can correlate it with the matching Link-LSA (per
+ * §A.4.9, the Link-LSA's Link State ID equals this Interface ID).
+ *
+ * This is the v3-named alias of [`lr_ospf_hello_network_mask`]; the
+ * two read the same wire slot. Embedders processing an OSPFv3 Hello
+ * should call this accessor instead of `lr_ospf_hello_network_mask`
+ * so the call site documents the v3 intent — reading
+ * `lr_ospf_hello_network_mask` for v3 looks like "the network mask
+ * is 7", which is misleading on its face.
+ *
+ * Returns `0` when the packet body is not a Hello (matching the
+ * `lr_ospf_hello_network_mask` contract).
+ *
+ * # Safety
+ * `p` must be a valid handle.
+ */
+uint32_t lr_ospf_hello_interface_id(lr_ospf_packet_t p);
+
 uint16_t lr_ospf_hello_interval(lr_ospf_packet_t p);
 
 uint32_t lr_ospf_hello_options(lr_ospf_packet_t p);

@@ -9967,6 +9967,10 @@ inline std::uint32_t ospf_hello_network_mask(lr_ospf_packet_t p) {
     return lr_ospf_hello_network_mask(p);
 }
 
+inline std::uint32_t ospf_hello_interface_id(lr_ospf_packet_t p) {
+    return lr_ospf_hello_interface_id(p);
+}
+
 inline std::uint16_t ospf_hello_interval(lr_ospf_packet_t p) {
     return lr_ospf_hello_interval(p);
 }
@@ -13299,6 +13303,10 @@ inline std::uint8_t body_kind(OspfPacketHandle const& h) {
 
 inline std::uint32_t ospf_hello_network_mask(OspfPacketHandle const& h) {
     return lr_ospf_hello_network_mask(h.get());
+}
+
+inline std::uint32_t ospf_hello_interface_id(OspfPacketHandle const& h) {
+    return lr_ospf_hello_interface_id(h.get());
 }
 
 inline std::uint16_t ospf_hello_interval(OspfPacketHandle const& h) {

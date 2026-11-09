@@ -21702,6 +21702,19 @@
       ]
     },
     {
+      "name": "lr_ospf_hello_interface_id",
+      "return_type": "uint32_t",
+      "params": [
+        {
+          "name": "p",
+          "type": "lr_ospf_packet_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_ospf_hello_interval",
       "return_type": "uint16_t",
       "params": [
@@ -33143,6 +33156,162 @@
     },
     {
       "name": "lr_router_uninstall_static_v6",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_router_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_addr",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_router_install_connected_v4",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_router_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_addr",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "next_hop",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "metric",
+          "type": "uint32_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "if_id",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_router_install_connected_v6",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_router_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_addr",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "next_hop",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "metric",
+          "type": "uint32_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "if_id",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_router_uninstall_connected_v4",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_router_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_addr",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_router_uninstall_connected_v6",
       "return_type": "int32_t",
       "params": [
         {
@@ -58717,6 +58886,162 @@
         ]
       },
       {
+        "name": "lr_router_install_connected_v4",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_router_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_addr",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "next_hop",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "metric",
+            "type": "uint32_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "if_id",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_router_install_connected_v6",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_router_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_addr",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "next_hop",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "metric",
+            "type": "uint32_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "if_id",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_router_uninstall_connected_v4",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_router_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_addr",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_router_uninstall_connected_v6",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_router_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_addr",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
         "name": "lr_router_rib_len",
         "return_type": "int64_t",
         "params": [
@@ -66809,6 +67134,19 @@
       },
       {
         "name": "lr_ospf_hello_network_mask",
+        "return_type": "uint32_t",
+        "params": [
+          {
+            "name": "p",
+            "type": "lr_ospf_packet_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ospf_hello_interface_id",
         "return_type": "uint32_t",
         "params": [
           {
