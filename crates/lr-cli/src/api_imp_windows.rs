@@ -230,7 +230,6 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let shutdown = ctx.shutdown;
     let roa_store = ctx.roa_store;
     let started = std::time::Instant::now();
-    let path_owned = pipe_name.clone();
 
     // Pre-create the first pipe instance so a bind failure shows up
     // at startup, not on the first client connect.
@@ -264,7 +263,6 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                 let status_lines = Arc::clone(&status_lines);
                 let shutdown = shutdown.clone();
                 let roa_store = roa_store.clone();
-                let path_owned = path_owned.clone();
                 thread::Builder::new()
                     .name("lr-api-conn".into())
                     .spawn(move || {
@@ -277,7 +275,6 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                             shutdown: shutdown.as_ref(),
                             roa_store: roa_store.as_ref(),
                             started,
-                            socket_path: Some(&path_owned),
                         };
                         serve_connection(stream, &deps);
                     })
@@ -358,8 +355,10 @@ fn accept_loop(
 }
 
 /// Shared state one API connection reads. Bundled so the serve
-/// function keeps a short parameter list (same shape as the Unix
-/// side's `ConnDeps`).
+/// function keeps a short parameter list (mirrors the Unix side's
+/// `ConnDeps`, minus the `socket_path` field — Windows named pipes
+/// are kernel-namespace objects that vanish when the last handle
+/// closes, so there is no socket file to remove on `shutdown`).
 struct ConnDeps<'a> {
     info: &'a DaemonInfo,
     router: &'a Arc<RwLock<DefaultRouter>>,
@@ -376,13 +375,6 @@ struct ConnDeps<'a> {
     /// renderer then reports `roa-total 0` instead of refusing.
     roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
     started: std::time::Instant,
-    /// `shutdown` does not need to remove a socket file on Windows
-    /// (named pipes are kernel-namespace objects that vanish when
-    /// the last handle closes), so this field exists only for
-    /// structural parity with the Unix `ConnDeps` — it is never
-    /// read on Windows.
-    #[allow(dead_code)]
-    socket_path: Option<&'a str>,
 }
 
 /// One connection: read a command line, answer, repeat. Mirrors the
