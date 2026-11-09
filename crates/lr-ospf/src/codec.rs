@@ -208,12 +208,16 @@ fn encode_hello(
     out: &mut WriteBuf<'_>,
 ) -> Result<(), EncodeError> {
     if version == OspfVersion::V2 {
-        out.put_u32_be(h.network_mask)
+        out.put_u32_be(h.network_mask())
             .ok_or(EncodeError::BufferFull)?;
     } else {
         // v3 has a 4-byte Interface ID instead of the network mask
-        // (RFC 5340 §A.3.2).
-        out.put_u32_be(h.network_mask)
+        // (RFC 5340 §A.3.2.1). `interface_id()` reads the same wire
+        // slot as `network_mask()`; the named accessor documents
+        // the v3 intent at the call site (the slot is the Interface
+        // ID, not a mask), where reading `h.network_mask` would look
+        // like "the network mask is 7" on a v3 Hello.
+        out.put_u32_be(h.interface_id())
             .ok_or(EncodeError::BufferFull)?;
     }
     if version == OspfVersion::V2 {
@@ -454,7 +458,13 @@ fn decode_hello(b: &[u8], version: OspfVersion) -> Result<HelloBody, ParseError>
     if b.len() < 20 {
         return Err(ParseError::truncated("ospf.hello.body"));
     }
-    let network_mask = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+    // The first 4 bytes are version-overloaded: v2 reads them as the
+    // network mask (RFC 2328 §A.3.2); v3 reads them as the 4-byte
+    // Interface ID (RFC 5340 §A.3.2.1). The slot has the same wire
+    // shape — `HelloBody` keeps one `network_mask` field named for
+    // the v2 case and stays `pub` for ABI-stable construction; readers
+    // disambiguate via the version-parameterised accessor below.
+    let network_mask_or_interface_id = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
     // The fixed part is 20 bytes in both versions; the middle fields
     // differ (RFC 5340 §A.3.2: priority | 24-bit options | hello(2) |
     // dead(2) — the v3 dead interval is 16 bits wide).
@@ -483,9 +493,14 @@ fn decode_hello(b: &[u8], version: OspfVersion) -> Result<HelloBody, ParseError>
         neighbors.push(u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]));
         i += 4;
     }
-    Ok(HelloBody {
-        // For v3 the network_mask slot carries the Interface ID; keep as-is.
-        network_mask,
+    let hello = HelloBody {
+        // The first 4 bytes are version-overloaded (RFC 2328 §A.3.2
+        // vs RFC 5340 §A.3.2.1). The `network_mask` field stays `pub`
+        // for ABI-stable struct-literal construction; readers use the
+        // version-parameterised accessor (`network_mask()` for v2,
+        // `interface_id()` for v3) on the decoded body, so the dual
+        // semantics live at the call site instead of in the wire slot.
+        network_mask: network_mask_or_interface_id,
         hello_interval,
         options,
         priority,
@@ -493,7 +508,8 @@ fn decode_hello(b: &[u8], version: OspfVersion) -> Result<HelloBody, ParseError>
         dr,
         bdr,
         neighbors,
-    })
+    };
+    Ok(hello)
 }
 
 fn decode_dbdesc(b: &[u8], version: OspfVersion) -> Result<DbDescBody, ParseError> {
@@ -794,16 +810,25 @@ mod tests {
         let codec = OspfCodec::v3();
         let pkt = OspfPacket {
             header: v3_header(1, 0x01020304),
-            body: OspfBody::Hello(HelloBody {
-                network_mask: 0x0000_0007, // Interface ID (v3 has no mask)
-                hello_interval: 10,
-                options: 0x00_00_13, // v3: V6|R|E (RFC 5340 §A.2)
-                priority: 3,
-                dead_interval: 40,
-                dr: 0x0a00_0001,
-                bdr: 0,
-                neighbors: vec![0x0a00_0002],
-            }),
+            body: OspfBody::Hello(
+                HelloBody {
+                    // v3 reuses the v2 network_mask wire slot for the
+                    // 4-byte Interface ID (RFC 5340 §A.3.2.1). The
+                    // `with_interface_id` builder documents the v3
+                    // intent at the construction site; the field
+                    // itself stays `pub network_mask` so v2 callers
+                    // keep the v2-shaped struct-literal form.
+                    network_mask: 0,
+                    hello_interval: 10,
+                    options: 0x00_00_13, // v3: V6|R|E (RFC 5340 §A.2)
+                    priority: 3,
+                    dead_interval: 40,
+                    dr: 0x0a00_0001,
+                    bdr: 0,
+                    neighbors: vec![0x0a00_0002],
+                }
+                .with_interface_id(7),
+            ),
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
         // RFC 5340 §A.3.1: the v3 packet header is 16 bytes, so the body
@@ -825,6 +850,11 @@ mod tests {
         assert_eq!(p2.header.au_type_or_instance, 0, "instance id low byte");
         match p2.body {
             OspfBody::Hello(h) => {
+                // The v3-aware accessor reads the wire slot as the
+                // Interface ID; the legacy `network_mask` field reads
+                // the same bytes (the dual semantics live at the
+                // accessor, not the field).
+                assert_eq!(h.interface_id(), 7);
                 assert_eq!(h.network_mask, 7);
                 assert_eq!(h.options, 0x0000_0013);
                 assert_eq!(h.priority, 3);
@@ -846,16 +876,21 @@ mod tests {
         let codec = OspfCodec::v3();
         let pkt = OspfPacket {
             header: v3_header(1, 0x0a00_0001),
-            body: OspfBody::Hello(HelloBody {
-                network_mask: 5, // Interface ID = ifindex (FRR convention)
-                hello_interval: 10,
-                options: 0x13, // V6|R|E
-                priority: 1,
-                dead_interval: 40,
-                dr: 0,
-                bdr: 0,
-                neighbors: vec![],
-            }),
+            body: OspfBody::Hello(
+                HelloBody {
+                    network_mask: 0,
+                    hello_interval: 10,
+                    options: 0x13, // V6|R|E
+                    priority: 1,
+                    dead_interval: 40,
+                    dr: 0,
+                    bdr: 0,
+                    neighbors: vec![],
+                }
+                // v3 Interface ID — FRR writes the kernel ifindex
+                // (ospf6_make_hello: `stream_putl(oi->interface->ifindex)`).
+                .with_interface_id(5),
+            ),
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
         // FRR: stream_putl(ifindex); putc(priority); 3 option bytes;
