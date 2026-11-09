@@ -107,11 +107,16 @@ macro_rules! log_info {
     };
 }
 /// `log_debug!` is reserved for verbose diagnostic output that an
-/// operator enables on demand (`--log-target bgp=debug`). Several
-/// daemon submodules do not yet route their verbose output through it;
-/// the macro is defined here so the migration can land one submodule
-/// at a time without re-declaring it.
-#[allow(unused_macros)]
+/// operator enables on demand (`--log-target bgp=debug`). The
+/// `daemon_bfd`, `daemon_ospf` and `daemon_ospf3` submodules route
+/// their per-packet verbose output through it (gated by the
+/// `LR_BFD_DEBUG` / `LR_OSPF_DEBUG` env vars to keep the per-packet
+/// overhead off the hot path when trace is not requested); the
+/// remaining submodules use only `log_info!` / `log_warn!` /
+/// `log_error!` for operator-facing diagnostics and have no debug
+/// surface to migrate. The macro is defined here so a future
+/// submodule that does gain a debug surface can adopt it without
+/// re-declaring it.
 macro_rules! log_debug {
     ($comp:expr, $($arg:tt)*) => {
         $crate::daemon_logger::log_record(
@@ -122,8 +127,12 @@ macro_rules! log_debug {
     };
 }
 /// `log_trace!` carries packet-level detail reserved for protocol
-/// debugging. See `log_debug!` for the migration status.
-#[allow(unused_macros)]
+/// debugging (one step below `log_debug!`). `daemon_bfd`'s supervisor
+/// drain emits one record per received datagram through it; the OSPF
+/// daemons route the equivalent per-packet trace through `log_debug!`
+/// instead (the OSPF wire trace is dense enough that a single level
+/// is sufficient). A future submodule that needs a finer split between
+/// "debug" and "packet trace" can adopt this macro.
 macro_rules! log_trace {
     ($comp:expr, $($arg:tt)*) => {
         $crate::daemon_logger::log_record(
