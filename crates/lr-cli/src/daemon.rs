@@ -338,6 +338,12 @@ fn print_usage() {
                                   on a live daemon.\n  \
          --shutdown-drain-rate N  Withdrawals per second the drain emits (50)\n  \
          --shutdown-drain-max-wait S  Drain hard ceiling in seconds (600)\n  \
+         --exchange-plane-policy-role R  RFC 9234 §3.1 role the local speaker\n  \
+                                  claims for every exchange-plane session\n  \
+                                  (default: unset; one of: provider |\n  \
+                                  customer | rs | rs-client | peer | unset).\n  \
+                                  Per-peer override: [[peer]]\n  \
+                                  exchange_plane_policy_role.\n  \
          Multi-peer configuration uses [[peer]] tables in the TOML config\n  \
          (see templates/daemon.toml): per-peer remote/address, peer_as,\n  \
          auth, GTSM, maximum-prefix, Add-Path and family settings,\n  \
@@ -2646,7 +2652,10 @@ fn wire_exchange_plane(
     g: &DaemonConfig,
     p: &PeerSpec,
 ) -> Result<(), String> {
-    use lr_bgp::extensions::exchange_plane::{ExchangePlaneConfig, ROLE_UNSET};
+    use lr_bgp::extensions::exchange_plane::{
+        ExchangePlaneConfig, ROLE_CUSTOMER, ROLE_PEER, ROLE_PROVIDER, ROLE_RS, ROLE_RS_CLIENT,
+        ROLE_UNSET,
+    };
 
     if g.exchange_plane_keys.is_empty() {
         return Err(
@@ -2669,10 +2678,39 @@ fn wire_exchange_plane(
     }
     let mut xp = ExchangePlaneConfig::new(nonce);
     xp.keys = keys;
-    // Policy intent (design §5.2): lr's daemon does not configure RFC
-    // 9234 roles yet, so the claim is ROLE_UNSET; the digests fingerprint
-    // the effective import/export filter sets when a route-map is bound.
-    xp.policy_role = Some(ROLE_UNSET);
+    // Policy intent (design §5.2): the RFC 9234 §3.1 role the local
+    // speaker claims for this session. The per-peer override
+    // (`[[peer]] exchange_plane_policy_role`) wins; the router-wide
+    // `[bgp] exchange_plane_policy_role` (or `--exchange-plane-policy-role`
+    // CLI flag) is the fallback. The string is canonicalised at parse
+    // time and re-validated in `finalize_exchange_plane`, so the match
+    // here is exhaustive on the accepted vocabulary — a stray value
+    // would have already failed closed.
+    let role_byte = match g.effective_exchange_plane_policy_role(p) {
+        "provider" => ROLE_PROVIDER,
+        "customer" => ROLE_CUSTOMER,
+        "rs" => ROLE_RS,
+        "rs-client" => ROLE_RS_CLIENT,
+        "peer" => ROLE_PEER,
+        // The empty-string arm covers a DaemonConfig constructed via
+        // Default::default() that has not yet been finalized; finalize
+        // rewrites it to "unset", but a direct-construction caller
+        // (tests, the .lr emitter) hits this branch first. Treat it
+        // the same as the explicit "unset" the operator writes.
+        "unset" | "" => ROLE_UNSET,
+        // Unreachable in normal operation:
+        // parse_exchange_plane_policy_role / finalize reject any other
+        // value before this function runs. The catch-all keeps the
+        // function total without silently defaulting to a wrong role
+        // if a future code path forgets to validate.
+        other => {
+            return Err(format!(
+                "internal: exchange_plane_policy_role '{other}' passed validation \
+                 but has no RFC 9234 role byte mapping"
+            ));
+        }
+    };
+    xp.policy_role = Some(role_byte);
     xp.policy_import_digest = exchange_plane_policy_digest(g, p, true, &nonce);
     xp.policy_export_digest = exchange_plane_policy_digest(g, p, false, &nonce);
     r.set_session_exchange_plane(h, xp)

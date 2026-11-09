@@ -105,6 +105,15 @@ pub(crate) struct PeerSpec {
     /// override of the router-wide default. `None` inherits the global.
     /// Requires a binary built with the `exchange-plane` feature.
     pub exchange_plane: Option<bool>,
+    /// RFC 9234 §3.1 policy role for this peer's exchange-plane
+    /// session (`exchange_plane_policy_role = "provider"` in
+    /// `[[peer]]` blocks). `None` inherits the router-wide
+    /// `[bgp] exchange_plane_policy_role`. Recognised values: the
+    /// five RFC 9234 roles ("provider", "customer", "rs",
+    /// "rs-client", "peer") and "unset". Other strings fail-closed
+    /// at finalize time so an operator does not silently advertise a
+    /// typo'd role to a peer's import policy.
+    pub exchange_plane_policy_role: Option<String>,
     /// RFC 8326 per-peer override (`graceful_shutdown = false`): exempt
     /// this neighbor's sessions from the §3.1 sender-side LOCAL_PREF
     /// zeroing on GRACEFUL_SHUTDOWN-tagged exports. `None` inherits the
@@ -1061,6 +1070,19 @@ pub(crate) struct DaemonConfig {
     /// decides activation, and every negotiated key id stays valid
     /// while rotating (new key id added before the old one removed).
     pub exchange_plane_keys: Vec<String>,
+    /// RFC 9234 §3.1 policy role the local speaker claims for every
+    /// exchange-plane session (`[bgp] exchange_plane_policy_role` /
+    /// `--exchange-plane-policy-role`). One of the five RFC 9234
+    /// roles ("provider", "customer", "rs", "rs-client", "peer") or
+    /// "unset" (default, leaves the role unspecified — the previous
+    /// hardcoded behaviour). The role rides in the policy-intent
+    /// record (design §5.2) so the peer can drive its own import
+    /// policy from it; the value is the literal RFC 9234 vocabulary,
+    /// not an lr-specific name, so an operator familiar with FRR
+    /// `bgp policy-role` / BIRD `policy role` recognises every value
+    /// without cross-referencing the docs. Per-peer overrides land
+    /// via [`PeerSpec::exchange_plane_policy_role`].
+    pub exchange_plane_policy_role: String,
 
     /// RFC 8326 Graceful Session Shutdown (``[bgp] graceful_shutdown``,
     /// default on). When on, the daemon honours the ``GRACEFUL_SHUTDOWN``
@@ -1611,6 +1633,7 @@ impl DaemonConfig {
             soft_reconfig_inbound: false,
             exchange_plane: false,
             exchange_plane_keys: Vec::new(),
+            exchange_plane_policy_role: "unset".to_string(),
             graceful_shutdown: true,
             shutdown_mode: "immediate".to_string(),
             shutdown_drain_rate_per_sec: 50,
@@ -1745,6 +1768,33 @@ impl DaemonConfig {
         self.finalize_redistribution()?;
         self.finalize_aggregates()?;
         self.finalize_shutdown()?;
+        self.finalize_exchange_plane()?;
+        Ok(())
+    }
+
+    /// Validate the `[bgp] exchange_plane_policy_role` global and any
+    /// per-peer overrides. A `DaemonConfig` constructed via
+    /// `Default::default()` (the SIGHUP reload path, the `.lr` DSL
+    /// emitter, several tests) leaves `exchange_plane_policy_role`
+    /// at the empty string; treat that as the canonical "unset" so
+    /// the field always carries a valid RFC 9234 vocabulary word by
+    /// the time `wire_exchange_plane` stamps it onto the policy-intent
+    /// record. Per-peer overrides are validated at parse time; this
+    /// step is a safety net against direct construction with a
+    /// typo'd value.
+    fn finalize_exchange_plane(&mut self) -> Result<(), String> {
+        if self.exchange_plane_policy_role.is_empty() {
+            self.exchange_plane_policy_role = "unset".to_string();
+        }
+        // Re-validate the canonical form so a caller that constructed
+        // the DaemonConfig directly (not through the parser) gets the
+        // same fail-closed posture as a TOML parse error.
+        parse_exchange_plane_policy_role(&self.exchange_plane_policy_role)?;
+        for peer in &self.peers {
+            if let Some(role) = peer.exchange_plane_policy_role.as_deref() {
+                parse_exchange_plane_policy_role(role)?;
+            }
+        }
         Ok(())
     }
 
@@ -2709,6 +2759,25 @@ impl DaemonConfig {
     pub fn effective_bfd_multihop(&self, peer: &PeerSpec) -> bool {
         peer.bfd_multihop.unwrap_or(self.bfd_multihop)
     }
+
+    /// RFC 9234 §3.1 policy role resolved for one peer (per-peer
+    /// override of the `[bgp]` / `--exchange-plane-policy-role`
+    /// global). Returns the canonical lowercase vocabulary word
+    /// ("provider" / "customer" / "rs" / "rs-client" / "peer" /
+    /// "unset") the daemon stamps into the exchange-plane
+    /// policy-intent record for the peer.
+    ///
+    /// Gated on `test` or the `exchange-plane` feature: the helper
+    /// only has live callers under the feature (the
+    /// `wire_exchange_plane` path), and the `test` arm keeps the
+    /// unit tests in this file compiled without forcing the
+    /// exchange-plane feature on.
+    #[cfg(any(test, feature = "exchange-plane"))]
+    pub fn effective_exchange_plane_policy_role<'a>(&'a self, peer: &'a PeerSpec) -> &'a str {
+        peer.exchange_plane_policy_role
+            .as_deref()
+            .unwrap_or(&self.exchange_plane_policy_role)
+    }
 }
 
 /// Area IDs render as dotted quads when they look like one (BIRD/FRR
@@ -2791,6 +2860,10 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
     if over.exchange_plane.is_none() {
         over.exchange_plane = base.exchange_plane;
     }
+    opt(
+        &mut over.exchange_plane_policy_role,
+        &base.exchange_plane_policy_role,
+    );
 }
 
 fn parse_bool(value: &str) -> bool {
@@ -2866,6 +2939,24 @@ fn parse_gtsm(value: &str) -> Option<u8> {
         Some(1)
     } else {
         value.parse::<u8>().ok()
+    }
+}
+
+/// Validate an RFC 9234 §3.1 policy-role vocabulary entry. Returns the
+/// canonical lowercase spelling on success so a TOML value with stray
+/// casing ("Provider", "RS-Client") round-trips to the same byte string
+/// the C ABI's `ExchangePlaneConfig::policy_role` carries. The five
+/// RFC 9234 roles plus "unset" (the explicit "no claim" form) are the
+/// accepted set; any other string fails closed so an operator does
+/// not silently advertise a typo'd role to a peer's import policy.
+fn parse_exchange_plane_policy_role(value: &str) -> Result<String, String> {
+    let canonical = value.trim().to_ascii_lowercase();
+    match canonical.as_str() {
+        "provider" | "customer" | "rs" | "rs-client" | "peer" | "unset" => Ok(canonical),
+        _ => Err(format!(
+            "bad exchange_plane_policy_role '{value}' (expected one of: \
+             provider | customer | rs | rs-client | peer | unset)"
+        )),
     }
 }
 
@@ -3324,6 +3415,10 @@ pub(crate) fn apply_config_key(
         "bgp.soft_reconfig_inbound" => cfg.soft_reconfig_inbound = parse_bool(value),
         "bgp.exchange_plane" => cfg.exchange_plane = parse_bool(value),
         "bgp.exchange_plane_keys" => cfg.exchange_plane_keys = parse_str_array(value),
+        "bgp.exchange_plane_policy_role" => {
+            cfg.exchange_plane_policy_role = parse_exchange_plane_policy_role(value)
+                .map_err(|e| format!("line {}: {e}", lineno + 1))?;
+        }
         "bgp.roa_validate" | "roa_validate" => cfg.roa_validate = parse_bool(value),
         "bgp.roa_invalid_action" | "roa_invalid_action" => {
             if !matches!(value, "reject" | "warn" | "accept") {
@@ -5114,6 +5209,9 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         }
         "soft_reconfig_inbound" => peer.soft_reconfig_inbound = Some(parse_bool(value)),
         "exchange_plane" => peer.exchange_plane = Some(parse_bool(value)),
+        "exchange_plane_policy_role" => {
+            peer.exchange_plane_policy_role = Some(parse_exchange_plane_policy_role(value)?);
+        }
         "graceful_shutdown" => peer.graceful_shutdown = Some(parse_bool(value)),
         "extended_next_hop" => peer.extended_next_hop = Some(parse_bool(value)),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
@@ -5394,6 +5492,17 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--exchange-plane-key" if i + 1 < args.len() => {
                 cfg.exchange_plane_keys.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--exchange-plane-policy-role" if i + 1 < args.len() => {
+                cfg.exchange_plane_policy_role =
+                    match parse_exchange_plane_policy_role(&args[i + 1]) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("bad --exchange-plane-policy-role '{e}'");
+                            return Err(ExitCode::from(2));
+                        }
+                    };
                 i += 2;
             }
             // BGP-LS speaker (RFC 7752, issue #60 daemon wiring). The

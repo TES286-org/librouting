@@ -2577,3 +2577,243 @@ fn toml_peer_shutdown_defaults_to_none() {
     assert_eq!(cfg.peers.len(), 1);
     assert_eq!(cfg.peers[0].shutdown, None);
 }
+
+// ---------------------------------------------------------------------------
+// RFC 9234 §3.1 exchange-plane policy role — TOML parser + finalize
+// (issue #92 defects.txt `crates/lr-cli/src/daemon.rs` INCOMPLETE-IMPL:
+//  "lr's daemon does not configure RFC 9234 roles yet, so the claim is
+//  ROLE_UNSET"). The role the local speaker claims for an exchange-plane
+//  session rides in the policy-intent record (design §5.2) so a peer can
+//  drive its own import policy from it. The previous hard-coded
+//  `ROLE_UNSET` left the role unspecified even when the operator wanted
+//  to claim one; this round exposes the role through `[bgp]
+//  exchange_plane_policy_role` (router-wide) and `[[peer]]
+//  exchange_plane_policy_role` (per-peer override).
+
+/// A router-wide `[bgp] exchange_plane_policy_role = "provider"` parses
+/// into the canonical lowercase form and survives `finalize` unchanged.
+#[test]
+fn toml_global_exchange_plane_policy_role_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
+         exchange_plane_policy_role = \"provider\"\n",
+        &mut cfg,
+    )
+    .expect("a recognised role parses");
+    cfg.finalize().expect("finalize accepts a valid role");
+    assert_eq!(cfg.exchange_plane_policy_role, "provider");
+}
+
+/// The TOML parser canonicalises casing and surrounding whitespace so a
+/// config written `"RS-Client"` (FRR-style capitalisation) round-trips
+/// to the same lowercase wire byte the C ABI's `policy_role` field
+/// carries. This keeps the daemon's log lines, the BGP-LS attribute and
+/// the operator's TOML in the same vocabulary form regardless of the
+/// source dialect.
+#[test]
+fn toml_global_exchange_plane_policy_role_canonicalises_case() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
+         exchange_plane_policy_role = \"  RS-Client  \"\n",
+        &mut cfg,
+    )
+    .expect("a role with stray casing + whitespace parses");
+    cfg.finalize()
+        .expect("finalize accepts the canonicalised role");
+    assert_eq!(cfg.exchange_plane_policy_role, "rs-client");
+}
+
+/// A typo'd role fails closed at parse time with a diagnostic that
+/// names the accepted vocabulary. The fail-closed posture matters: the
+/// role rides in a record the peer's import policy consults, so a
+/// silently accepted typo would let the operator's *intended* policy
+/// diverge from the *advertised* one without any signal.
+#[test]
+fn toml_global_exchange_plane_policy_role_rejects_typo() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    let err = parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
+         exchange_plane_policy_role = \"providor\"\n",
+        &mut cfg,
+    )
+    .expect_err("a typo'd role must fail");
+    assert!(
+        err.contains("bad exchange_plane_policy_role 'providor'"),
+        "expected a diagnostic naming the bad value; got: {err}"
+    );
+    assert!(
+        err.contains("provider | customer | rs | rs-client | peer | unset"),
+        "expected the diagnostic to enumerate the accepted vocabulary; got: {err}"
+    );
+}
+
+/// A `[[peer]]` block can override the router-wide role with its own
+/// `exchange_plane_policy_role` key. The per-peer override wins; the
+/// global default applies to every other peer.
+#[test]
+fn toml_peer_exchange_plane_policy_role_override_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
+         exchange_plane_policy_role = \"customer\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64513\n\
+         exchange_plane_policy_role = \"peer\"\n",
+        &mut cfg,
+    )
+    .expect("a per-peer override parses");
+    cfg.finalize().expect("finalize accepts the override");
+    assert_eq!(cfg.exchange_plane_policy_role, "customer");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(
+        cfg.peers[0].exchange_plane_policy_role.as_deref(),
+        Some("peer")
+    );
+    // The resolver returns the per-peer override when set.
+    assert_eq!(
+        cfg.effective_exchange_plane_policy_role(&cfg.peers[0]),
+        "peer"
+    );
+}
+
+/// A peer without an explicit `exchange_plane_policy_role` key inherits
+/// the router-wide default — `None` on PeerSpec falls back to the
+/// `[bgp]` value through `effective_exchange_plane_policy_role`.
+#[test]
+fn toml_peer_exchange_plane_policy_role_inherits_global() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
+         exchange_plane_policy_role = \"rs\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64513\n",
+        &mut cfg,
+    )
+    .expect("an inherited role parses");
+    cfg.finalize()
+        .expect("finalize succeeds with one valid peer");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].exchange_plane_policy_role, None);
+    // The resolver returns the global default when the peer is silent.
+    assert_eq!(
+        cfg.effective_exchange_plane_policy_role(&cfg.peers[0]),
+        "rs"
+    );
+}
+
+/// A peer-level typo'd role fails closed at parse time with the same
+/// diagnostic shape as the global one.
+#[test]
+fn toml_peer_exchange_plane_policy_role_rejects_typo() {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "bgp".to_string();
+    let err = parse_toml_subset(
+        "[[peer]]\nremote = \"192.0.2.2\"\npeer_as = 64513\n\
+         exchange_plane_policy_role = \"cust0mer\"\n",
+        &mut cfg,
+    )
+    .expect_err("a typo'd per-peer role must fail");
+    assert!(
+        err.contains("bad exchange_plane_policy_role 'cust0mer'"),
+        "expected a diagnostic naming the bad value; got: {err}"
+    );
+}
+
+/// A DaemonConfig constructed via `Default::default()` (the SIGHUP
+/// reload path, the .lr DSL emitter, several tests) leaves the global
+/// `exchange_plane_policy_role` at the empty string. `finalize` rewrites
+/// the empty form to the canonical "unset" so the wire byte the daemon
+/// stamps onto the policy-intent record always carries a valid RFC 9234
+/// vocabulary word — the empty string is never sent on the wire.
+#[test]
+fn finalize_rewrites_empty_global_role_to_unset() {
+    let mut cfg = DaemonConfig::default();
+    // Sanity check: the field really is empty before finalize.
+    assert_eq!(cfg.exchange_plane_policy_role, "");
+    cfg.finalize().expect("finalize tolerates the empty string");
+    assert_eq!(cfg.exchange_plane_policy_role, "unset");
+}
+
+/// A `DaemonConfig::default()` followed by a direct field write of a
+/// bad role (a programming error — the parser would have caught it)
+/// fails closed in `finalize_exchange_plane` instead of silently
+/// stamping a bad wire byte onto the policy-intent record.
+#[test]
+fn finalize_rejects_directly_written_bad_role() {
+    let mut cfg = DaemonConfig {
+        exchange_plane_policy_role: "not-a-role".to_string(),
+        ..Default::default()
+    };
+    let err = cfg
+        .finalize()
+        .expect_err("finalize must reject the bad role");
+    assert!(
+        err.contains("bad exchange_plane_policy_role 'not-a-role'"),
+        "expected a diagnostic; got: {err}"
+    );
+}
+
+/// A directly-written bad per-peer override also fails closed in
+/// finalize, mirroring the global behaviour. The unit test for the
+/// per-peer override path catches a regression where `finalize` only
+/// validated the global and trusted the per-peer override.
+#[test]
+fn finalize_rejects_directly_written_bad_peer_role() {
+    let mut cfg = DaemonConfig::default();
+    cfg.peers.push(PeerSpec {
+        remote: Some("192.0.2.2:179".to_string()),
+        peer_as: 64513,
+        exchange_plane_policy_role: Some("not-a-role".to_string()),
+        ..Default::default()
+    });
+    let err = cfg
+        .finalize()
+        .expect_err("finalize must reject the bad peer role");
+    assert!(
+        err.contains("bad exchange_plane_policy_role 'not-a-role'"),
+        "expected a diagnostic; got: {err}"
+    );
+}
+
+/// `parse_exchange_plane_policy_role` is the shared validation helper.
+/// Pin its accepted vocabulary and its canonicalisation in one place so
+/// a future role addition lands here as a compile error before it
+/// reaches the daemon.
+#[test]
+fn parse_exchange_plane_policy_role_accepts_canonical_vocabulary() {
+    for (input, expected) in [
+        ("provider", "provider"),
+        ("customer", "customer"),
+        ("rs", "rs"),
+        ("rs-client", "rs-client"),
+        ("peer", "peer"),
+        ("unset", "unset"),
+        // Stray casing + whitespace round-trip to the canonical form.
+        ("Provider", "provider"),
+        ("  RS  ", "rs"),
+        ("RS-Client", "rs-client"),
+    ] {
+        assert_eq!(
+            parse_exchange_plane_policy_role(input).unwrap(),
+            expected,
+            "input {input:?}"
+        );
+    }
+}
+
+/// `parse_exchange_plane_policy_role` rejects anything outside the RFC
+/// 9234 vocabulary so a typo'd role never reaches the wire.
+#[test]
+fn parse_exchange_plane_policy_role_rejects_unknown() {
+    for bad in &["providor", "rsclient", "", "transit", "lir"] {
+        assert!(
+            parse_exchange_plane_policy_role(bad).is_err(),
+            "expected {bad:?} to be rejected"
+        );
+    }
+}
