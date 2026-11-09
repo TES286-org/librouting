@@ -634,7 +634,7 @@ fn finalize_ospf_rejects_simple_under_v3() {
     cfg.ospf_auth.auth_type = Some("simple".to_string());
     cfg.ospf_auth.password = Some("secret".to_string());
     let err = cfg.finalize().expect_err("simple under v3 fails closed");
-    let msg = format!("{err}");
+    let msg = err.to_string();
     assert!(
         msg.contains("not valid for OSPFv3"),
         "error explains the v3 incompatibility"

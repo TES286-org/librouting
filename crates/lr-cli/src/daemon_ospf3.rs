@@ -1303,7 +1303,7 @@ impl Ospf3Interface {
             self.election_dirty = true;
         }
         let entry = self.heard.entry(rid).or_insert(HeardNeighbor {
-            interface_id: body.network_mask, // v3: Interface ID slot
+            interface_id: body.interface_id(),
             priority: body.priority,
             link_local,
             last_ms: now_ms,
@@ -1311,7 +1311,7 @@ impl Ospf3Interface {
             stated_dr: body.dr,
             stated_bdr: body.bdr,
         });
-        entry.interface_id = body.network_mask;
+        entry.interface_id = body.interface_id();
         entry.priority = body.priority;
         entry.link_local = link_local;
         entry.last_ms = now_ms;
