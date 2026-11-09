@@ -115,8 +115,15 @@ hold_time = 90
 # feature-less build is a startup error.
 # exchange_plane = true
 # exchange_plane_keys = ["1:first-secret", "2:second-secret"]
+# RFC 9234 §3.1 role the local speaker claims for every exchange-plane
+# session (rides the policy-intent record so the peer's import policy
+# can drive off it). One of: provider | customer | rs | rs-client |
+# peer | unset (the default — leaves the role unspecified). Per-peer
+# override: [[peer]] exchange_plane_policy_role.
+# exchange_plane_policy_role = "unset"
 # Per-peer override: `[peer.X] exchange_plane = false`.
 # CLI: --exchange-plane / --no-exchange-plane / --exchange-plane-key 1:secret
+#       --exchange-plane-policy-role provider
 
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this

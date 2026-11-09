@@ -331,9 +331,14 @@ flags; those two are configuration keys only.
 | `--exchange-plane` | `[bgp] exchange_plane` | Needs the `exchange-plane` feature |
 | `--no-exchange-plane` | `[bgp] exchange_plane` | |
 | `--exchange-plane-key ID:SECRET` | `[bgp] exchange_plane_keys` | Repeatable |
+| `--exchange-plane-policy-role R` | `[bgp] exchange_plane_policy_role` | RFC 9234 §3.1 role: `provider` \| `customer` \| `rs` \| `rs-client` \| `peer` \| `unset` (default) |
 
 Requesting the exchange plane on a binary built without the feature is a
-startup error, exit 2. See
+startup error, exit 2. The `policy_role` value rides in the policy-intent
+record (design §5.2) so a peer can drive its own import policy from it; a
+per-peer override lives at `[[peer]] exchange_plane_policy_role`. An
+unknown value fails closed at parse / finalize time so a typo'd role
+never reaches the wire. See
 [research/EXCHANGE-PLANE.md](research/EXCHANGE-PLANE.md).
 
 ### Shutdown (issue #53)
@@ -439,6 +444,7 @@ warning, not a value.
 | `soft_reconfig_inbound` | bool | false | |
 | `exchange_plane` | bool | false | Feature-gated |
 | `exchange_plane_keys` | array | — | `"id:secret"` |
+| `exchange_plane_policy_role` | enum | `unset` | RFC 9234 §3.1: `provider` \| `customer` \| `rs` \| `rs-client` \| `peer` \| `unset` |
 | `add_path` | bool | false | |
 | `add_path_max_paths` | int | 6 | |
 | `mp_families` | array | — | Four family names |
@@ -490,6 +496,7 @@ template it is a hard error. A peer with `remote` dials out; one with
 | `allow_local_as` | int/word | global | |
 | `soft_reconfig_inbound` | bool | global | |
 | `exchange_plane` | bool | global | |
+| `exchange_plane_policy_role` | enum | global | RFC 9234 §3.1: `provider` \| `customer` \| `rs` \| `rs-client` \| `peer` \| `unset`. Per-peer override of the `[bgp]` global. |
 | `graceful_shutdown` | bool | global | `false` exempts the peer |
 | `extended_next_hop` | bool | global | |
 | `gtsm` | int | global | |

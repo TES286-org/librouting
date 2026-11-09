@@ -1456,6 +1456,68 @@ builds.
 
 No public Rust API change, no C ABI change, no version bump.
 
+**`lr-cli` RFC 9234 §3.1 exchange-plane policy role configuration
+(`[bgp] exchange_plane_policy_role` + `[[peer]] exchange_plane_policy_role`
++ `--exchange-plane-policy-role`)** (issue #92 — `defects.txt`
+`crates/lr-cli/src/daemon.rs` INCOMPLETE-IMPL "lr's daemon does not
+configure RFC 9234 roles yet, so the claim is ROLE_UNSET"). The W6.3
+exchange-plane prototype already advertised the LRXP capability and
+exchanged record sets, but the RFC 9234 §3.1 *policy role* the local
+speaker claims for a session was hardcoded to `ROLE_UNSET` in
+`wire_exchange_plane` — an operator who wanted to claim `provider`,
+`customer`, `rs`, `rs-client` or `peer` (the five RFC 9234 vocabulary
+entries) had no TOML or CLI surface to do so, and the role the peer's
+import policy consults was always the "no claim" byte.
+
+This round exposes the role end-to-end:
+
+- `DaemonConfig.exchange_plane_policy_role` (router-wide default,
+  default value `"unset"`) and `PeerSpec.exchange_plane_policy_role`
+  (per-peer override, `Option<String>`) carry the canonical lowercase
+  vocabulary word.
+- `parse_exchange_plane_policy_role` validates the input at parse
+  time, canonicalising case and surrounding whitespace, so a TOML
+  value with stray casing (`"RS-Client"`) round-trips to the same
+  byte string the C ABI's `policy_role` field carries. A typo'd
+  value (`"providor"`) fails closed with a diagnostic that names
+  the bad value and enumerates the accepted vocabulary.
+- `finalize_exchange_plane` rewrites the empty string (a
+  `DaemonConfig::default()` shape the SIGHUP reload path and the
+  `.lr` DSL emitter use) to the canonical `"unset"` so the wire byte
+  always carries a valid RFC 9234 vocabulary word; it re-validates
+  the global and any per-peer overrides so a directly-constructed
+  `DaemonConfig` (programming error — the parser would have caught
+  it) still fails closed.
+- `DaemonConfig::effective_exchange_plane_policy_role(peer)` resolves
+  the per-peer override against the global default.
+- `wire_exchange_plane` consults the resolver and stamps the matching
+  RFC 9234 role byte (`ROLE_PROVIDER` / `ROLE_CUSTOMER` / `ROLE_RS` /
+  `ROLE_RS_CLIENT` / `ROLE_PEER` / `ROLE_UNSET`) onto the
+  policy-intent record instead of the hardcoded `ROLE_UNSET`.
+- The CLI banner (`--help`) advertises the new flag with its
+  vocabulary, the per-peer override key, and the per-peer override
+  pointer.
+
+Eight in-process unit tests pin the parser + finalize + resolver
+(`toml_global_exchange_plane_policy_role_parses`,
+`toml_global_exchange_plane_policy_role_canonicalises_case`,
+`toml_global_exchange_plane_policy_role_rejects_typo`,
+`toml_peer_exchange_plane_policy_role_override_parses`,
+`toml_peer_exchange_plane_policy_role_inherits_global`,
+`toml_peer_exchange_plane_policy_role_rejects_typo`,
+`finalize_rewrites_empty_global_role_to_unset`,
+`finalize_rejects_directly_written_bad_role`,
+`finalize_rejects_directly_written_bad_peer_role`,
+`parse_exchange_plane_policy_role_accepts_canonical_vocabulary`,
+`parse_exchange_plane_policy_role_rejects_unknown`). Seven e2e
+tests in `crates/lr-cli/tests/daemon_exchange_plane_role.rs` exercise
+the CLI surface (`--help` advertisement, `config check` acceptance
+of global + per-peer + explicit `unset`, `config check` rejection of
+global + per-peer typos, `--exchange-plane-policy-role` CLI flag
+acceptance and rejection) through the real `lr-daemon` binary.
+
+No public Rust API change, no C ABI change, no version bump.
+
 ### Fixed
 
 **`lr-cli` clippy regression in `daemon_ospf3_tests.rs`** (`test`,
