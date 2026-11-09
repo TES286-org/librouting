@@ -5698,6 +5698,11 @@ func (x *OspfPacket) OspfHelloNetworkMask() (uint32, error) {
 	return uint32(res), nil
 }
 
+func (x *OspfPacket) OspfHelloInterfaceId() (uint32, error) {
+	res := C.lr_ospf_hello_interface_id(x.ptr)
+	return uint32(res), nil
+}
+
 func (x *OspfPacket) OspfHelloInterval() (uint16, error) {
 	res := C.lr_ospf_hello_interval(x.ptr)
 	return uint16(res), nil

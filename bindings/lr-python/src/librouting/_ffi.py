@@ -3883,6 +3883,7 @@ uintptr_t lr_ospf_v3_auth_key(
 uintptr_t lr_ospf_v3_auth_key_len(lr_ospf_v3_auth_t v);
 void lr_ospf_v3_auth_free(lr_ospf_v3_auth_t v);
 uint32_t lr_ospf_hello_network_mask(lr_ospf_packet_t p);
+uint32_t lr_ospf_hello_interface_id(lr_ospf_packet_t p);
 uint16_t lr_ospf_hello_interval(lr_ospf_packet_t p);
 uint32_t lr_ospf_hello_options(lr_ospf_packet_t p);
 uint8_t lr_ospf_hello_priority(lr_ospf_packet_t p);
