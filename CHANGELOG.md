@@ -2749,6 +2749,39 @@ No public Rust API shape change beyond the new private
 `bfd_debug_enabled()` helper in `daemon_bfd.rs`; no C ABI
 change; no protocol-on-the-wire change; no version bump.
 
+### `lr-cli`: drop dead Windows `ConnDeps.socket_path` field (issue #92)
+
+`crates/lr-cli/src/api_imp_windows.rs:L384-L385 | DEAD-CODE |
+socket_path field never read on Windows; annotated
+#[allow(dead_code)]` — the Windows runtime-API server's
+`ConnDeps` struct carried a `socket_path: Option<&'a str>` field
+that was set on every connection (`socket_path: Some(&path_owned)`)
+but never read on Windows. The field existed "for structural parity
+with the Unix side's `ConnDeps`", but the Unix side reads it during
+the `shutdown` command to `std::fs::remove_file(path)` the Unix
+socket file; the Windows side has no equivalent cleanup (Windows
+named pipes are kernel-namespace objects that vanish when the last
+handle closes — there is no socket file to remove). The field was
+therefore dead, and the `#[allow(dead_code)]` annotation was the
+only thing keeping it from tripping the workspace
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+gate.
+
+This round removes the field altogether, plus the `path_owned`
+local that was constructed solely to populate it. The Windows
+`ConnDeps` docstring now explicitly notes the asymmetry: it
+mirrors the Unix side minus the `socket_path` field, and explains
+why (named-pipe semantics obviate socket-file cleanup).
+
+The Windows build (`cargo check -p lr-cli --target
+x86_64-pc-windows-gnu --all-features` and `cargo clippy -p lr-cli
+--target x86_64-pc-windows-gnu --all-targets --all-features --
+-D warnings`) is clean; the Linux lr-cli test suite (717 tests)
+and the lr-ffi test suite (1103 tests) are unchanged.
+
+No public Rust API shape change (the `ConnDeps` is `pub(crate)`);
+no C ABI change; no protocol-on-the-wire change; no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
