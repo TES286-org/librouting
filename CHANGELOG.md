@@ -2690,6 +2690,65 @@ No public Rust API shape change beyond the new
 (the new functions are pure-Rust helpers, not `extern "C"`); no
 protocol-on-the-wire change; no version bump.
 
+### `lr-cli`: BFD daemon `log_debug!`/`log_trace!` migration (issue #92)
+
+`crates/lr-cli/src/daemon.rs:L109-L135 | TODO | log_debug! /
+log_trace! macros annotated #[allow(unused_macros)]; comment:
+"Several daemon submodules do not yet route their verbose output
+through it; the migration can land one submodule at a time"` —
+the `log_debug!` and `log_trace!` macros were defined in
+`daemon.rs` and gated by `#[allow(unused_macros)]` because no
+submodule used them at definition time. The migration has since
+started: `daemon.rs` itself at the `peer {label}: reconnecting`
+debug line, `daemon_ospf.rs` at the `dbg-drop demux` / `dbg-send`
+debug lines, `daemon_ospf3.rs` at the same patterns. The
+`#[allow(unused_macros)]` on `log_debug!` was therefore stale.
+`log_trace!` was still genuinely unused — keeping the
+`#[allow(unused_macros)]` was technically correct but the
+migration-status comment did not explain the asymmetry.
+
+This round closes the gap by migrating `daemon_bfd.rs` to use
+both macros for per-packet trace, then dropping the stale
+annotations and refreshing the migration-status comment.
+
+What landed:
+
+- `daemon_bfd.rs`'s supervisor receive path now emits one
+  `log_trace!` per received datagram (gated by the new
+  `bfd_debug_enabled()` cached env-var check `LR_BFD_DEBUG`,
+  mirroring `daemon_ospf::ospf_debug_enabled`) and one
+  `log_debug!` per drop (short BFD datagram < 12 bytes, or
+  unmatched discriminator / source address). The records flow
+  through `log_record` and are subject to the per-component
+  severity filter (`--log-target bfd=debug` / `=trace`) — the
+  env var is the cheap per-packet pre-check, the severity
+  filter is the real gate. The BFD supervisor polls at the
+  10 ms `POLL_MS` cadence and may drain multiple datagrams per
+  iteration, so the cached env-var check keeps the per-packet
+  overhead off the hot path when trace is not requested.
+- `daemon.rs`'s `log_debug!` and `log_trace!` macro
+  definitions drop the stale `#[allow(unused_macros)]`
+  annotations now that both macros are exercised (`log_debug!`
+  by `daemon.rs`, `daemon_ospf.rs`, `daemon_ospf3.rs` and
+  `daemon_bfd.rs`; `log_trace!` by `daemon_bfd.rs`). The
+  migration-status comment is updated to reflect the actual
+  state: `daemon_bfd`, `daemon_ospf` and `daemon_ospf3` route
+  per-packet verbose output through the macros; the remaining
+  submodules use only `log_info!` / `log_warn!` / `log_error!`
+  for operator-facing diagnostics and have no debug surface
+  to migrate.
+
+The BFD e2e test (`bfd_fast_fail_beats_hold_time` in
+`crates/lr-cli/tests/daemon_bfd.rs`) continues to pass: the
+new log calls are gated by the env var (off by default) and
+by the per-component severity (default `Info`), so the test's
+log scan for `Up -> Down` and `session ended: bfd session
+down` is unaffected.
+
+No public Rust API shape change beyond the new private
+`bfd_debug_enabled()` helper in `daemon_bfd.rs`; no C ABI
+change; no protocol-on-the-wire change; no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
