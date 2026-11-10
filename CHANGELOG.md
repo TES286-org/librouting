@@ -3056,6 +3056,58 @@ No public Rust API change (the docstrings describe the existing
 surface), no C ABI change (no `lr_*` symbol touched), no
 protocol-on-the-wire change, no version bump.
 
+**`lr-ospf` unified OSPFv3 self-origination entry point**
+(`ospf`, issue #92). `defects.txt` flagged
+`crates/lr-ospf/src/origination.rs` as `INCOMPLETE-IMPL`:
+"Only v2 router-LSA + v2 packet checksum finalize; v3 origination
+scattered across `lsa/v3.rs` and `lsa/e_v3.rs`; no unified
+`origination_v3` module entry". The `finalize_v3_packet` /
+`finalize_v3_stream` / `v3_packet_checksum_ok` helpers (RFC 5340
+§3.3 packet checksum) had landed in `origination.rs` under a
+previous round, but the v3 LSA origination surface stayed
+scattered across three sibling modules with no single `lr_ospf::*`
+path an embedder could grep:
+
+- the fixed-format RFC 5340 LSAs lived in `lr_ospf::lsa::v3`
+  (Router-LSA, Router-LSA fragment, Network-LSA, Link-LSA,
+  Intra-Area-Prefix-LSA, Inter-Area-Router-LSA, AS-External-LSA,
+  Type-7 NSSA-LSA);
+- the TLV-bodied RFC 8362 Extended LSAs lived in `lr_ospf::lsa::e_v3`
+  (E-Router-LSA, E-Router-LSA fragment, E-Network-LSA, E-Link-LSA,
+  E-Intra-Area-Prefix-LSA, E-Inter-Area-Prefix-LSA,
+  E-Inter-Area-Router-LSA, E-AS-External-LSA);
+- the v3 type-3 summary-LSA equivalent lived in
+  `lr_ospf::abr::originate_v3_inter_area_prefix_lsa` (the ABR owns
+  the LS-ID-to-prefix mapping, so the helper lives in `abr` rather
+  than `lsa`).
+
+`origination.rs` now re-exports every public v3 origination helper
+through `pub use`, so an embedder building an OSPFv3 speaker has one
+module to grep — `lr_ospf::origination::originate_v3_*` mirrors the
+v2 origination helpers (`originate_router_lsa`,
+`originate_network_lsa`) already in this module. The re-exports
+are name aliases; they do not change behaviour. A call through the
+unified path produces the same LSA as a call through the original
+module path — `v3_origination_re_exports_alias_the_originals` in
+`origination_v3_tests.rs` anchors that contract with one assertion
+per source module (`crate::lsa::v3::originate_v3_router_lsa`,
+`crate::lsa::e_v3::originate_v3_e_router_lsa`,
+`crate::abr::originate_v3_inter_area_prefix_lsa`). The module doc
+now describes both halves (v2 and v3) of the self-origination
+surface and cross-references the three source modules so the next
+reader does not have to grep for them.
+
+Additive only. The re-exports are new public names on an existing
+public function; the original module paths
+(`lr_ospf::lsa::v3::originate_v3_router_lsa`,
+`lr_ospf::lsa::e_v3::originate_v3_e_router_lsa`,
+`lr_ospf::abr::originate_v3_inter_area_prefix_lsa`) still work
+unchanged, so an embedder that already imports through those paths
+does not need to switch. No public Rust API signature changes
+(the re-exported functions keep their original signatures), no
+C ABI change (no `lr_*` symbol touched, no FFI surface change),
+no protocol-on-the-wire change, no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
