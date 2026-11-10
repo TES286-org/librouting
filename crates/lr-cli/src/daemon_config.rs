@@ -2197,6 +2197,20 @@ impl DaemonConfig {
             && self.ospf_srv6_max_end_pop.is_none()
             && self.ospf_srv6_max_h_encaps.is_none()
             && self.ospf_srv6_max_end_d.is_none()
+            // An explicit `[ospf.auth]` block (any of the spec's
+            // fields set to a non-default value) is OSPF config —
+            // count it toward the "is the OSPF section populated"
+            // predicate so an operator who configures only auth
+            // (no interfaces, no areas) still gets the fail-closed
+            // validation below. The previous shape of this gate
+            // skipped the auth validation entirely when no other
+            // OSPF table was present, so a typo like
+            // `[ospf.auth] type = "simple"` without a `password`
+            // silently passed `config check` (the daemon would
+            // still fail at startup, but the operator's first
+            // signal would be a startup failure rather than a
+            // `config check` rejection).
+            && self.ospf_auth == OspfAuthSpec::default()
         {
             return Ok(());
         }
@@ -3132,6 +3146,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "logging"
                 && section != "safety"
                 && section != "shutdown"
+                && section != "ospf.auth"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(

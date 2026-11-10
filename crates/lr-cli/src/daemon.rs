@@ -312,6 +312,25 @@ fn print_usage() {
          --ospf-rxmt-interval S   OSPF retransmit interval (default 5,\n  \
                                   RFC 2328 App. B RxmtInterval;\n  \
                                   alias --ospf-retransmit-interval)\n  \
+         --ospf-auth-type T       OSPFv2 authentication strategy (RFC 2328\n  \
+                                  §D): null (default) | simple | crypto\n  \
+                                  (alias --ospf-authentication-type; crypto\n  \
+                                  aliases md5 / message-digest)\n  \
+         --ospf-auth-password P   SimplePassword secret (RFC 2328 §D.2;\n  \
+                                  truncated to 8 bytes; required when\n  \
+                                  --ospf-auth-type=simple; alias\n  \
+                                  --ospf-authentication-password)\n  \
+         --ospf-auth-key K        CryptoAuth HMAC secret (RFC 2328 §D.3 /\n  \
+                                  RFC 5709 §3.3; required when\n  \
+                                  --ospf-auth-type=crypto; alias\n  \
+                                  --ospf-authentication-key)\n  \
+         --ospf-auth-key-id N     CryptoAuth Key ID 0..=255 (RFC 2328\n  \
+                                  §D.3.1; required when\n  \
+                                  --ospf-auth-type=crypto; alias\n  \
+                                  --ospf-authentication-key-id)\n  \
+         --ospf-auth-algorithm A  CryptoAuth MAC algorithm: hmac-sha256\n  \
+                                  (default, RFC 5709 §2.2) | hmac-sha1 (§2.1)\n  \
+                                  (alias --ospf-authentication-algorithm)\n  \
          --ldp-transport ADDR     LDP transport address advertised in\n  \
                                   Hellos (default: first interface addr)\n  \
          --ldp-port PORT          LDP UDP/TCP port (646)\n  \
