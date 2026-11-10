@@ -2844,6 +2844,59 @@ and the lr-ffi test suite (1103 tests) are unchanged.
 No public Rust API shape change (the `ConnDeps` is `pub(crate)`);
 no C ABI change; no protocol-on-the-wire change; no version bump.
 
+### `docs/PARITY.md`: correct FRR RPKI command surface (issue #92)
+
+`docs/PARITY.md:L240-L241 | DOC-MISMATCH | "Filter access" row FRR
+column says extcommunity rt ...` (the defects.txt wording) — the
+ROA-prefix-origin validation table (PARITY.md §11) listed three
+FRR commands that do not exist in any FRRouting release:
+
+- `bgp rpki on` — there is no such BGP-router-level command. RPKI
+  in FRR is loaded by running `bgpd` with the `-M rpki` module
+  argument (the daemon then connects to the configured `rpki
+  cache` servers), and validated state is consulted automatically
+  during BGP import; there is no per-protocol "on" toggle.
+- `bgp rpki invalid reject` — there is no such command. Per-neighbor
+  strict rejection is `neighbor PEER rpki strict` (the session
+  refuses to establish when the cache is unreachable); per-route
+  invalid handling is a `route-map NAME in` clause that contains a
+  `match rpki invalid` line followed by a deny action.
+- `bgp rpki invalid-only` — there is no such command. The
+  route-map match is `match rpki notfound|invalid|valid`
+  (`frr/doc/user/rpki.rst`), not a `bgp rpki …` directive.
+
+The BIRD column's `rpki reload` was also imprecise: BIRD's
+per-protocol reload command is `reload in <bgp_proto>` (the BIRD
+client command), and `rpki reload` is not a BIRD client command
+on its own. The BIRD configuration surface for an RPKI cache is a
+`protocol rpki { ... }` block, not "an RPKI session" — the table
+now names the block.
+
+What landed (one commit on `main`):
+
+- `docs/PARITY.md` §11 ROA table's FRR column now cites the
+  real FRR 10 surface (verified against `frr/doc/user/rpki.rst`
+  at the project's tracked 10.x reference):
+  - ROA source — `rpki cache tcp HOST PORT` in `rpki` config mode.
+  - Validation trigger — load `-M rpki` module; ROA lookup is
+    automatic on session establishment (no explicit "on" command).
+  - Invalid action — `neighbor PEER rpki strict` (drops invalid
+    routes) plus a `match rpki invalid` route-map deny clause.
+  - Filter access — `match rpki invalid` inside a `route-map NAME`.
+  - The BIRD column's validation trigger now reads
+    `reload in <bgp_proto>` (the actual BIRD client command that
+    revalidates a BGP protocol's routes against the ROA table), and
+    the ROA source now names `protocol rpki` block (BIRD's
+    configuration shape) instead of the unqualified "RPKI session".
+  - The BIRD filter-access cell now lists the three concrete
+    return values of `roa_check(table)` (`ROA_VALID` / `ROA_INVALID` /
+    `ROA_UNKNOWN`) so an operator porting a BIRD filter to lr's
+    `roa.state == "invalid"` sees the exact mapping.
+
+No code change; no Rust API change; no C ABI change; no
+protocol-on-the-wire change; no version bump. The `tests/lint_docs.sh`
+and `tests/lint_interop_doc.sh` doc-lint jobs stay green.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
