@@ -69,10 +69,13 @@
 //!   route-map surface today.
 //! - FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
 //!   `router bgp`/`router ospf`/`router ospfv3`) → `[[redistribute]]`
-//!   rows. Only `bgp`/`ospf`/`ospf3`/`babel` sources map (the
-//!   daemon's injection surface); `connected`/`static`/`kernel`/`rip`/
-//!   `isis` carry unmapped notes (lr models kernel/static routes via
-//!   `networks`, not via a redistribute pipe). `route-map NAME` is
+//!   rows. Sources `bgp`/`ospf`/`ospf3`/`babel`/`static`/`connected`
+//!   map (the daemon's injection surface — `static`/`connected` ride
+//!   `install_static`/`install_connected`, BIRD `redistribute static`
+//!   / `redistribute direct` and FRR `redistribute static` /
+//!   `redistribute connected` parity); `kernel`/`rip`/`isis` carry
+//!   unmapped notes (the daemon has no injection surface for the
+//!   kernel RIB or for protocols it does not run). `route-map NAME` is
 //!   translated onto the pipe's `allow` list when the route-map is a
 //!   pure prefix-list allow (every entry is `permit` with only
 //!   `match ip address prefix-list NAME`, the referenced prefix-list
@@ -310,9 +313,12 @@ pub(super) struct ConfigOut {
     aggregates: Vec<AggregateSpec>,
     /// FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
     /// `router bgp` + `address-family …`) → `[[redistribute]]` rows.
-    /// Only `bgp`, `ospf`, `babel` sources map (the daemon's
-    /// injection surface); `connected`, `static`, `kernel`, `rip`,
-    /// `isis` carry unmapped notes instead. `route-map NAME` is
+    /// Sources `bgp`, `ospf`, `ospf3`, `babel`, `static`, `connected`
+    /// map (the daemon's injection surface — `static`/`connected`
+    /// ride `install_static`/`install_connected`); `kernel`, `rip`,
+    /// `isis` carry unmapped notes instead (the daemon has no
+    /// injection surface for the kernel RIB or for protocols it
+    /// does not run). `route-map NAME` is
     /// resolved against the parsed `route_maps` and `prefix_lists` by
     /// `resolve_redistribute_route_maps` after the file is scanned
     /// (FRR allows forward references) and either lands on the
@@ -2291,11 +2297,13 @@ fn translate_frr(text: &str) -> ConfigOut {
             // FRR's inter-protocol pipe into the active router
             // context. Inside `router bgp` (with or without an
             // `address-family` block) the target is bgp; inside
-            // `router ospf`/`ospfv3` the target is ospf/ospf3. Only
-            // bgp/ospf/ospf3/babel sources map (the daemon's injection
-            // surface); `connected`, `static`, `kernel`, `rip`,
-            // `isis` carry unmapped notes — lr models kernel/static
-            // routes via `networks`, not via a redistribute pipe.
+            // `router ospf`/`ospfv3` the target is ospf/ospf3.
+            // bgp/ospf/ospf3/babel/static/connected sources map (the
+            // daemon's injection surface — `static`/`connected` ride
+            // `install_static`/`install_connected`); `kernel`, `rip`,
+            // `isis` carry unmapped notes (the daemon has no
+            // injection surface for the kernel RIB or for protocols
+            // it does not run).
             "redistribute" if tokens.len() >= 2 => {
                 apply_frr_redistribute(
                     &mut out,
@@ -2833,11 +2841,15 @@ fn peer_for_or_create<'a>(out: &'a mut ConfigOut, addr: &str) -> Option<&'a mut 
 /// `redistribute <proto> [metric M] [route-map NAME]` — FRR's
 /// inter-protocol pipe. The target engine depends on the active
 /// router context: `bgp` inside `router bgp`, `ospf`/`ospf3` inside
-/// `router ospf`/`ospfv3`. Only `bgp`/`ospf`/`ospf3`/`babel` sources
-/// map onto lr's `[[redistribute]]` (the daemon's injection surface);
-/// `connected`/`static`/`kernel`/`rip`/`isis` carry unmapped notes
-/// since lr seeds kernel/static routes via `networks`, not via a
-/// redistribute pipe. `metric M` carries through; `route-map NAME` is
+/// `router ospf`/`ospfv3`. Sources `bgp`/`ospf`/`ospf3`/`babel`/
+/// `static`/`connected` map onto lr's `[[redistribute]]` (the
+/// daemon's injection surface — `static`/`connected` ride
+/// `install_static`/`install_connected`, BIRD `redistribute static` /
+/// `redistribute direct` and FRR `redistribute static` /
+/// `redistribute connected` parity); `kernel`/`rip`/`isis` carry
+/// unmapped notes (the daemon has no injection surface for the
+/// kernel RIB or for protocols it does not run). `metric M` carries
+/// through; `route-map NAME` is
 /// recorded into `out.pending_redistribute_route_maps` for the
 /// post-pass that runs after the whole file is scanned (FRR allows
 /// forward references) — see `resolve_redistribute_route_maps` for the

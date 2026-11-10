@@ -318,23 +318,32 @@ as unmapped with the v3 directive stem so the operator sees the
 version-specific gap. FRR `address-family` state inside `router bgp`
 has landed alongside the v3 path: `aggregate-address A.B.C.D/M
 [summary-only] [as-set] [route-map NAME]` (RFC 4271 §9.2.2.2) maps
-onto `[[aggregate]]` rows (the `summary-only`/`as-set`/`route-map`
-qualifiers carry unmapped notes — lr's `[[aggregate]]` models only
-the prefix today); `redistribute <proto> [metric M] [route-map
-NAME]` (inside `router bgp`/`router ospf`/`router ospfv3`) maps onto
-`[[redistribute]]` rows — `bgp`/`ospf`/`ospf3`/`babel` sources map
-(the daemon's injection surface), `connected`/`static`/`kernel`/
-`rip`/`isis` carry unmapped notes (lr models kernel/static routes
-via `networks`, not via a redistribute pipe), and `route-map NAME`
-is noted (lr's `[[redistribute]]` has no per-pipe filter hook). A
-pipe whose source engine is not `bgp` triggers a top-level
+onto `[[aggregate]]` rows — `summary-only` and `as-set` carry
+through to the row's `summary_only` / `as_set` keys, while
+`route-map NAME` (the per-aggregate attribute hook) still carries an
+unmapped note (lr's `[[aggregate]]` has no per-aggregate route-map
+surface today); `redistribute <proto> [metric M] [route-map NAME]`
+(inside `router bgp`/`router ospf`/`router ospfv3`) maps onto
+`[[redistribute]]` rows — `bgp`/`ospf`/`ospf3`/`babel`/`static`/
+`connected` sources map (the daemon's injection surface; `static`/
+`connected` ride `install_static`/`install_connected`, BIRD
+`redistribute static` / `redistribute direct` and FRR
+`redistribute static` / `redistribute connected` parity), `kernel`/
+`rip`/`isis` carry unmapped notes (the daemon has no injection
+surface for the kernel RIB or for protocols it does not run), and
+`route-map NAME` is translated onto the pipe's `allow` list when the
+route-map is a pure prefix-list allow (otherwise an unmapped note
+describes what was lost — lr's `[[redistribute]]` per-pipe filter
+hook is the `allow` list, populated by `resolve_redistribute_route_maps`).
+A pipe whose source engine is not `bgp` triggers a top-level
 `protocols = ["bgp", "<engine>", …]` emission so the generated
 config is loadable as-is (the daemon's `finalize` rejects a
 `[[redistribute]]` whose source engine it does not run). `no bgp
 ebgp-requires-policy` is consumed silently (the converter always
 emits `ebgp_policy = "accept-all"`, which is the same intent), and
 `network PREFIX route-map NAME` keeps the prefix while noting the
-route-map (lr's `networks` is a plain prefix list). The
+route-map (lr's `networks` is a plain prefix list, no per-route
+attribute hook). The
 route-reflector loop-detection attributes the per-route filter
 context rides on have landed: `lr-policy::filter::ast::RouteFieldKind`
 gains `BgpAtomicAggregate` (RFC 4271 §5.1.6), `BgpOriginatorId` and

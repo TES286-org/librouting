@@ -1873,9 +1873,12 @@ impl DaemonConfig {
     /// * the pipe actually transports: only `bgp`, `ospf`, `ospf3`
     ///   targets are implemented by the router's redistribution
     ///   engine (anything else would silently drop routes);
-    /// * only protocols the daemon can *learn* routes with are valid
-    ///   sources — `static` / `connected` have no daemon injection
-    ///   surface yet, so a pipe from them would be inert;
+    /// * the source is one of `bgp`, `ospf`, `ospf3`, `babel`,
+    ///   `static`, `connected` — the protocols the daemon either
+    ///   peers with (`bgp`/`ospf`/`ospf3`/`babel`) or injects itself
+    ///   (`static` via `install_static`, `connected` via
+    ///   `install_connected`); other names are rejected at parse time
+    ///   by `parse_daemon_protocol`;
     /// * no `(source, target)` pair is declared twice.
     fn finalize_redistribution(&mut self) -> Result<(), String> {
         let mut seen: std::collections::BTreeSet<(String, String)> =
