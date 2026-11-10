@@ -235,10 +235,10 @@ any single default explicitly.
 
 | Feature | lr | BIRD | FRR |
 | --- | --- | --- | --- |
-| ROA source | `[[roa]] prefix, max_length, asn` | `roa table` plus an RPKI session | `rpki` cache |
-| Validation trigger | `[bgp] roa_validate = true` | `rpki reload` | `bgp rpki on` |
-| Invalid action | `roa_invalid_action = "reject"` | `reject` | `bgp rpki invalid reject` |
-| Filter access | `roa.state == "invalid"` | `roa_check()` | `bgp rpki invalid-only` (route-map) |
+| ROA source | `[[roa]] prefix, max_length, asn` | `roa table` plus a `protocol rpki` block | `rpki cache tcp HOST PORT` in `rpki` config mode |
+| Validation trigger | `[bgp] roa_validate = true` | `reload in <bgp_proto>` (BIRD client) | load `-M rpki` module; ROA lookup is automatic on session establishment |
+| Invalid action | `roa_invalid_action = "reject"` | `reject` filter action on a `roa_check()` reject | `neighbor PEER rpki strict` (drops invalid routes) + `match rpki invalid` route-map deny clause |
+| Filter access | `roa.state == "invalid"` | `roa_check(table)` returns `ROA_VALID` / `ROA_INVALID` / `ROA_UNKNOWN` | `match rpki invalid` (inside `route-map NAME`) |
 | Malformed ROA | fail closed | strict | strict |
 
 ## 12. BIRD-like filter DSL
