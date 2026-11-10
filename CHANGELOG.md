@@ -2897,6 +2897,104 @@ No code change; no Rust API change; no C ABI change; no
 protocol-on-the-wire change; no version bump. The `tests/lint_docs.sh`
 and `tests/lint_interop_doc.sh` doc-lint jobs stay green.
 
+### `lr-cli`: OSPFv2 auth CLI surface — `--help` advertises the
+flags + `[ospf.auth]` / `ospf_auth` blocks round-trip (issue #92)
+
+The OSPFv2 authentication wiring landed in commits `47a330e`
+(SimplePassword) and `52086d7` (CryptoAuth): the daemon signs every
+outgoing packet and verifies every received packet against the
+configured strategy (RFC 2328 §D — NullAuth, SimplePassword,
+CryptoAuth). The CLI surface, however, was incomplete in three
+operator-visible ways this round closes:
+
+1. **`--help` did not advertise the `--ospf-auth-type` /
+   `--ospf-auth-password` / `--ospf-auth-key` /
+   `--ospf-auth-key-id` / `--ospf-auth-algorithm` flags** (or
+   their `--ospf-authentication-*` aliases). The parser accepted
+   them, but an operator scanning `--help` had no way to discover
+   them without reading the docs — the previous `print_usage()`
+   output jumped straight from `--ospf-rxmt-interval` to
+   `--ldp-transport`, hiding the entire auth cluster. The new
+   `--help` text documents every flag and its alias, names the
+   RFC 2328 §D / RFC 5709 references, and surfaces the
+   fail-closed rules (which key is required for which strategy).
+
+2. **A single-section `[ospf.auth]` header in a TOML config
+   produced a spurious `unknown section [ospf.auth] (ignored)`
+   warning at parse time**, even though the keys inside the
+   section parsed correctly. The previous shape of
+   `parse_toml_subset`'s section-header allowlist did not include
+   `ospf.auth`, so a clean config check emitted a warning the
+   operator read as "the auth block was silently dropped" — even
+   though the daemon would actually honour the auth strategy at
+   startup. `ospf.auth` is now on the allowlist, so a clean
+   config check reports `warnings: 0`.
+
+3. **`config check` skipped the auth fail-closed validation
+   entirely when no other OSPF table was present**, so a typo
+   like `[ospf.auth] type = "simple"` without a `password`
+   silently passed `config check` (the daemon would still fail
+   at startup, but the operator's first signal was a startup
+   failure rather than a `config check` rejection). The
+   `finalize_ospf` "is the OSPF section populated" predicate
+   now counts an explicit `OspfAuthSpec` (any field set) as
+   OSPF config, so the auth fail-closed validation runs at
+   config-check time too — the missing-`password`,
+   missing-`key`, missing-`key_id`, unknown-`type` and
+   unknown-`algorithm` rejections all surface in
+   `lr-daemon config check` output.
+
+The native `.lr` DSL frontend was missing the auth block
+entirely: `ospf_auth { ... }` was rejected as an unknown
+top-level block. The DSL parser now dispatches `("", "ospf_auth")`
+to the same `ospf.auth` `apply_config_key` arm the TOML frontend
+uses, so a config that came in through either path lands on the
+same typed `OspfAuthSpec` IR. The DSL emitter (`config to-dsl`)
+mirrors the parser: a TOML config carrying `[ospf.auth]`
+converts to an `.lr` program with the equivalent
+`ospf_auth { ... }` block (the round-trip is idempotent — a
+TOML config converted to DSL and re-loaded as DSL produces the
+same `OspfAuthSpec`).
+
+`templates/daemon.lr` and `templates/daemon.toml` were updated:
+the previous templates said "md5 (crypto auth) is rejected with a
+clear 'not wired' message — the next slice" (the SimplePassword
+round's follow-up note); the new templates show both the
+SimplePassword and CryptoAuth shapes, the CLI mirror flags, and
+the RFC 2328 §D / RFC 5709 references (the `shipped_templates_match_across_frontends`
+unit test still passes — both templates parse to the same IR).
+
+13 new end-to-end integration tests in
+`crates/lr-cli/tests/daemon_ospf_auth.rs` exercise the operator-
+visible surface through the real `lr-daemon` binary (no socket
+work, no root required):
+
+- `help_advertises_ospf_auth_flags` — every flag and every alias
+  on the `--help` output.
+- `config_check_toml_ospf_auth_simple_no_warning` and
+  `config_check_toml_ospf_auth_crypto_no_warning` — a clean TOML
+  config check produces zero warnings.
+- `config_check_dsl_ospf_auth_simple_block_parses` and
+  `config_check_dsl_ospf_auth_crypto_block_parses` — the DSL
+  `ospf_auth { ... }` block parses cleanly.
+- `config_check_rejects_simple_without_password`,
+  `config_check_rejects_crypto_without_key`,
+  `config_check_rejects_crypto_without_key_id`,
+  `config_check_rejects_unknown_auth_type`,
+  `config_check_rejects_unknown_auth_algorithm` — the
+  fail-closed rules fire at `config check` time, not at startup.
+- `config_to_dsl_round_trips_ospf_auth_simple`,
+  `config_to_dsl_round_trips_ospf_auth_crypto` and
+  `config_to_dsl_round_trip_idempotent` — the TOML→DSL
+  conversion preserves the auth block, and the round-trip is
+  idempotent.
+
+No public Rust API change, no C ABI change, no protocol-on-the-
+wire change; no version bump. The unit tests in
+`daemon_ospf_tests.rs` (the apply/verify codec round-trip and
+the TOML parse coverage) still pass — this round adds the e2e
+surface on top of them.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
