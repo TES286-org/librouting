@@ -4,11 +4,16 @@
 //! leaves LSA/packet origination to the embedder: it processes what
 //! arrives on a session and floods what changed. A real speaker —
 //! `lr-daemon` or an embedder — must additionally *produce* its own
-//! artifacts:
+//! artifacts. This module is the unified entry point for both OSPFv2
+//! and OSPFv3 self-origination.
+//!
+//! # OSPFv2 (RFC 2328)
 //!
 //! - **Router-LSAs** (RFC 2328 §12.4.1) describing the router's
 //!   interfaces: one stub link per attached network plus one
 //!   point-to-point link per adjacent neighbor.
+//! - **Network-LSAs** (RFC 2328 §12.4.2) describing the transit
+//!   network's attached routers when the local router is the DR.
 //! - **Hello packets** (RFC 2328 §A.3.2) with a correct OSPFv2 packet
 //!   checksum so peers that validate checksums (BIRD, FRR) accept them.
 //!
@@ -16,9 +21,70 @@
 //! its length and RFC 2328 §C.4 checksum; [`finalize_v2_packet`] patches
 //! the one's-complement checksum into an encoded OSPFv2 packet (the
 //! codec leaves it zeroed).
+//!
+//! # OSPFv3 (RFC 5340 + RFC 8362)
+//!
+//! - **Packet checksum finalize** lives in this module:
+//!   [`finalize_v3_packet`] / [`finalize_v3_stream`] patch the IPv6
+//!   pseudo-header one's-complement checksum into encoded OSPFv3
+//!   packets (RFC 5340 §3.3 — the codec leaves it zeroed because it
+//!   cannot reach the IPv6 pseudo-header), and [`v3_packet_checksum_ok`]
+//!   is the receive-side gate the codec uses to drop forged or
+//!   corrupted v3 frames.
+//! - **LSA origination** lives in three sibling modules and is
+//!   re-exported here so an embedder building an OSPFv3 speaker has one
+//!   module to grep — `lr_ospf::origination::originate_v3_*` mirrors the
+//!   v2 origination helpers (`originate_router_lsa`,
+//!   `originate_network_lsa`) already in this module:
+//!   - [`crate::lsa::v3`] — the fixed-format RFC 5340 LSAs:
+//!     [`originate_v3_router_lsa`], [`originate_v3_router_lsa_fragment`],
+//!     [`originate_v3_network_lsa`], [`originate_v3_link_lsa`],
+//!     [`originate_v3_intra_area_prefix_lsa`],
+//!     [`originate_v3_inter_area_router_lsa`],
+//!     [`originate_v3_as_external_lsa`], [`originate_v3_nssa_lsa`].
+//!   - [`crate::lsa::e_v3`] — the TLV-bodied RFC 8362 Extended LSAs:
+//!     [`originate_v3_e_router_lsa`],
+//!     [`originate_v3_e_router_lsa_fragment`],
+//!     [`originate_v3_e_network_lsa`], [`originate_v3_e_link_lsa`],
+//!     [`originate_v3_e_intra_area_prefix_lsa`],
+//!     [`originate_v3_e_inter_area_prefix_lsa`],
+//!     [`originate_v3_e_inter_area_router_lsa`],
+//!     [`originate_v3_e_as_external_lsa`].
+//!   - [`crate::abr::originate_v3_inter_area_prefix_lsa`] — the v3
+//!     type-3 summary-LSA equivalent (the ABR owns the LS-ID-to-prefix
+//!     mapping, so the helper lives in `abr`, not in `lsa`).
+//!
+//!   The re-exports are name aliases; they do not change behaviour. A
+//!   call through the unified path produces the same LSA as a call
+//!   through the original module path — see
+//!   `v3_origination_re_exports_alias_the_originals` in
+//!   `origination_v3_tests.rs`.
 
 use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::lsa::{Lsa, LsaHeader, LsaTypeV2, RouterLink, RouterLinkType};
+
+// Unified v3 LSA origination surface. The v3 LSA origination helpers
+// live in `crate::lsa::v3` (the fixed-format RFC 5340 LSAs),
+// `crate::lsa::e_v3` (the TLV-bodied RFC 8362 Extended LSAs) and
+// `crate::abr` (`originate_v3_inter_area_prefix_lsa` for the type-3
+// summary-LSA equivalent — the ABR owns the LS-ID-to-prefix mapping).
+// They are re-exported here so an embedder building an OSPFv3 speaker
+// has one module to grep — `lr_ospf::origination::originate_v3_*` —
+// mirroring the v2 origination helpers (`originate_router_lsa`,
+// `originate_network_lsa`) already in this module. The re-exports are
+// name aliases; they do not change behaviour.
+pub use crate::abr::originate_v3_inter_area_prefix_lsa;
+pub use crate::lsa::e_v3::{
+    originate_v3_e_as_external_lsa, originate_v3_e_inter_area_prefix_lsa,
+    originate_v3_e_inter_area_router_lsa, originate_v3_e_intra_area_prefix_lsa,
+    originate_v3_e_link_lsa, originate_v3_e_network_lsa, originate_v3_e_router_lsa,
+    originate_v3_e_router_lsa_fragment,
+};
+pub use crate::lsa::v3::{
+    originate_v3_as_external_lsa, originate_v3_inter_area_router_lsa,
+    originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
+    originate_v3_nssa_lsa, originate_v3_router_lsa, originate_v3_router_lsa_fragment,
+};
 
 /// One entry in a Router-LSA under construction: one [`Stub`] per
 /// attached network plus one [`PointToPoint`] per adjacent neighbor.

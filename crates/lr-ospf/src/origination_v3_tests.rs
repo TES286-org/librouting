@@ -91,3 +91,85 @@ fn v3_packet_checksum_ok_short_input() {
     assert!(finalize_v3_packet(&mut pkt, &src, &dst));
     assert!(v3_packet_checksum_ok(&pkt, &src, &dst));
 }
+
+/// `lr_ospf::origination` re-exports every v3 LSA origination helper
+/// (RFC 5340 fixed-format LSAs from [`crate::lsa::v3`], RFC 8362
+/// Extended-LSAs from [`crate::lsa::e_v3`], and the type-3 summary-LSA
+/// equivalent from [`crate::abr`]) so an embedder building an OSPFv3
+/// speaker has one module to grep — `lr_ospf::origination::originate_v3_*`
+/// mirrors the v2 origination helpers (`originate_router_lsa`,
+/// `originate_network_lsa`) already in this module.
+///
+/// The re-exports are name aliases of the originals (a `pub use` is not
+/// a wrapping). A call through the unified path must produce the same
+/// LSA as a call through the original module path with the same
+/// inputs. This test is a regression guard against an accidental
+/// `pub use` of the wrong function (e.g., a future move that breaks
+/// the alias), and it covers one function from each source module so
+/// the `pub use` block in `origination.rs` stays anchored.
+#[test]
+fn v3_origination_re_exports_alias_the_originals() {
+    let router_id = 0x0a00_0001u32;
+    let bits = 0u8;
+    let options = 0u32;
+
+    // (1) `crate::lsa::v3::originate_v3_router_lsa` — the fixed-format
+    // RFC 5340 Router-LSA.
+    let link = crate::lsa::v3::V3RouterLink {
+        link_type: crate::lsa::v3::LINK_TYPE_POINTTOPOINT,
+        metric: 1,
+        interface_id: 3,
+        neighbor_interface_id: 4,
+        neighbor_router_id: 0x0a00_0002,
+    };
+    let links = vec![link];
+    let via_re_export =
+        crate::origination::originate_v3_router_lsa(router_id, bits, options, &links, None);
+    let via_original =
+        crate::lsa::v3::originate_v3_router_lsa(router_id, bits, options, &links, None);
+    assert_eq!(
+        via_re_export, via_original,
+        "originate_v3_router_lsa re-export must alias the original in crate::lsa::v3"
+    );
+
+    // (2) `crate::lsa::e_v3::originate_v3_e_router_lsa` — the TLV-bodied
+    // RFC 8362 E-Router-LSA. The function takes `Vec<ERouterLinkTlv>` by
+    // value, so the second call re-uses the same vector through `clone`.
+    let e_link = crate::lsa::e_v3::ERouterLinkTlv {
+        link_type: crate::lsa::v3::LINK_TYPE_POINTTOPOINT,
+        metric: 1,
+        interface_id: 3,
+        neighbor_interface_id: 4,
+        neighbor_router_id: 0x0a00_0002,
+        sub_tlvs: Vec::new(),
+    };
+    let via_re_export_e = crate::origination::originate_v3_e_router_lsa(
+        router_id,
+        bits,
+        options,
+        vec![e_link.clone()],
+        None,
+    );
+    let via_original_e =
+        crate::lsa::e_v3::originate_v3_e_router_lsa(router_id, bits, options, vec![e_link], None);
+    assert_eq!(
+        via_re_export_e, via_original_e,
+        "originate_v3_e_router_lsa re-export must alias the original in crate::lsa::e_v3"
+    );
+
+    // (3) `crate::abr::originate_v3_inter_area_prefix_lsa` — the v3
+    // type-3 summary-LSA equivalent. The ABR owns the LS-ID-to-prefix
+    // mapping, so the helper lives in `abr` rather than `lsa`.
+    let dest = crate::abr::SummaryDestination::new(
+        lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+        10,
+    );
+    let via_re_export_abr =
+        crate::origination::originate_v3_inter_area_prefix_lsa(router_id, 0, &dest, None);
+    let via_original_abr =
+        crate::abr::originate_v3_inter_area_prefix_lsa(router_id, 0, &dest, None);
+    assert_eq!(
+        via_re_export_abr, via_original_abr,
+        "originate_v3_inter_area_prefix_lsa re-export must alias the original in crate::abr"
+    );
+}
