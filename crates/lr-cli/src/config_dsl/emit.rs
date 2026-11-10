@@ -299,6 +299,22 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.close(0);
     }
 
+    // --- ospf_auth (RFC 2328 §D authentication, single-table block) -----------
+    // Emitted as a top-level `ospf_auth { ... }` block — the same shape
+    // the parser accepts (the parser dispatches on ("", "ospf_auth")).
+    // The TOML form is `[ospf.auth]`; both frontends lower to the same
+    // `OspfAuthSpec` field. Only emit when the auth strategy is non-
+    // default (NullAuth with no key/password set) so a fresh config
+    // round-trips to an empty file.
+    let ospf_auth = ospf_auth_block(cfg, &base);
+    if !ospf_auth.is_empty() {
+        e.open(0, "ospf_auth", None);
+        for (key, value) in &ospf_auth {
+            e.kv(1, key, value);
+        }
+        e.close(0);
+    }
+
     // --- babel ----------------------------------------------------------------
     let babel = babel_block(cfg, &base);
     let babel_sub = babel_sub_blocks(cfg)?;
@@ -926,6 +942,53 @@ fn ospf_sub_blocks(cfg: &DaemonConfig) -> Result<Vec<SubBlock>, String> {
         });
     }
     Ok(v)
+}
+
+/// `ospf_auth { ... }` block (RFC 2328 §D authentication strategy).
+/// Mirrors the `[ospf.auth]` TOML table — only emits the keys that
+/// differ from `base` (the default config), so a fresh config round-
+/// trips to an empty block (and a `config to-dsl` of a config with
+/// `type = "null"` only emits when an override was explicit).
+fn ospf_auth_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    // `type` — the strategy selection. The default is `null`
+    // (NullAuth); emit only when the operator picked a different
+    // strategy. The TOML form accepts the alias `auth_type` for
+    // `type`; the DSL form uses `type` (the canonical TOML key).
+    if cfg.ospf_auth.auth_type != base.ospf_auth.auth_type {
+        if let Some(t) = &cfg.ospf_auth.auth_type {
+            v.push(("type".into(), fmt_string(t)));
+        }
+    }
+    // `password` — SimplePassword secret (RFC 2328 §D.2). Emitted
+    // only when set; the daemon truncates to 8 bytes at apply time,
+    // so the emitted value is the operator's original input.
+    if cfg.ospf_auth.password != base.ospf_auth.password {
+        if let Some(p) = &cfg.ospf_auth.password {
+            v.push(("password".into(), fmt_string(p)));
+        }
+    }
+    // `key` — CryptoAuth HMAC secret (RFC 2328 §D.3 / RFC 5709 §3.3).
+    if cfg.ospf_auth.key != base.ospf_auth.key {
+        if let Some(k) = &cfg.ospf_auth.key {
+            v.push(("key".into(), fmt_string(k)));
+        }
+    }
+    // `key_id` — CryptoAuth Key ID (RFC 2328 §D.3.1, 0..=255).
+    if cfg.ospf_auth.key_id != base.ospf_auth.key_id {
+        if let Some(id) = cfg.ospf_auth.key_id {
+            v.push(("key_id".into(), id.to_string()));
+        }
+    }
+    // `algorithm` — CryptoAuth MAC algorithm (RFC 5709 §2). The
+    // daemon's `effective_algorithm` falls back to `hmac-sha256`
+    // when unset; emit only the explicit override.
+    if cfg.ospf_auth.algorithm != base.ospf_auth.algorithm {
+        if let Some(a) = &cfg.ospf_auth.algorithm {
+            v.push(("algorithm".into(), fmt_string(a)));
+        }
+    }
+    v
 }
 
 fn babel_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Vec<(String, String)> {

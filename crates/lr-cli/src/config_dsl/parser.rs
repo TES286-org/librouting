@@ -81,6 +81,15 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
         ("ospf", "prefix-sid") => Some(array("ospf.prefix_sid", Some("prefix"))),
         ("ospf", "mapping-server") => Some(array("ospf.mapping_server", Some("prefix"))),
         ("ospf", "srv6-locator") => Some(array("ospf.srv6_locator", Some("prefix"))),
+        // OSPFv2 authentication (RFC 2328 §D) — a single-table block
+        // (only one auth strategy per OSPFv2 daemon; per-area auth is
+        // a follow-up). The TOML form is `[ospf.auth]`; the DSL form
+        // is `ospf_auth { ... }` (underscore, matching the CLI's
+        // `--ospf-auth-*` flag spelling). Keys dispatch through the
+        // same `apply_config_key` entry the TOML frontend uses, so
+        // both frontends share the fail-closed key schema and the
+        // `OspfAuthSpec` struct.
+        ("", "ospf_auth") => Some(single("ospf.auth")),
         ("", "babel") => Some(single("babel")),
         ("babel", "key") => Some(array("babel.key", None)),
         ("babel", "interface") => Some(array("babel.interface", Some("name"))),
