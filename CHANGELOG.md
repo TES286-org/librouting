@@ -2995,6 +2995,67 @@ wire change; no version bump. The unit tests in
 the TOML parse coverage) still pass — this round adds the e2e
 surface on top of them.
 
+### `lr-cli`: stale static/connected redistribute docstrings (issue #92)
+
+The implementation rounds `557c61c` (accept `static` and `connected`
+as `[[redistribute]]` sources), `0740f9c` (enumerate kernel
+interfaces and install connected routes), `4dfa744` (FRR
+`aggregate-address` `summary-only` / `as-set` translation onto the
+`[[aggregate]]` row's `summary_only` / `as_set` keys) and `2f7d5b2`
+(FRR `redistribute … route-map NAME` translation onto the pipe's
+`allow` list) landed BIRD/FRR parity for these surfaces and updated
+the top-level docstrings of the affected types (`RedistributeSpec`
+in `daemon_config.rs`, `ConfigOut::aggregates` in `translate.rs`).
+Five inline docstrings inside the same files and two paragraphs in
+the operator-facing docs were not updated and still claimed the
+older, pre-implementation state — a DOC-MISMATCH that contradicted
+the in-file tests
+(`frr_redistribute_connected_maps_to_connected_source`,
+`frr_redistribute_static_maps_to_static_source`,
+`redistribute_finalize_accepts_static_source`,
+`redistribute_finalize_accepts_connected_source`,
+`redistribute_finalize_accepts_direct_alias_for_connected`,
+`frr_aggregate_address_summary_only_carries_through`,
+`frr_redistribute_route_map_translates_to_allow_list`).
+
+The five inline docstrings now match the implementation:
+
+- the module doc and the `ConfigOut::redistributes` field doc in
+  `crates/lr-cli/src/translate.rs` now name
+  `bgp`/`ospf`/`ospf3`/`babel`/`static`/`connected` as the mapped
+  source vocabulary (with `static`/`connected` riding
+  `install_static`/`install_connected`, BIRD `redistribute static`
+  / `redistribute direct` and FRR `redistribute static` /
+  `redistribute connected` parity), and `kernel`/`rip`/`isis` as
+  the unmapped remainder;
+- the inline comment at the `redistribute` dispatch arm and the
+  `apply_frr_redistribute` function doc carry the same correction;
+- the `finalize_redistribution` doc bullet in
+  `crates/lr-cli/src/daemon_config.rs` now lists the accepted
+  source vocabulary and notes that `static` rides `install_static`
+  and `connected` rides `install_connected`.
+
+The two markdown docs now match the implementation:
+
+- `docs/ROADMAP.md`'s FRR `address-family` paragraph no longer
+  claims `summary-only`/`as-set` carry unmapped notes (only
+  `route-map NAME` does), no longer claims `connected`/`static`
+  carry unmapped notes (only `kernel`/`rip`/`isis` do), and no
+  longer claims the per-pipe filter hook is missing (the converter
+  populates the pipe's `allow` list from a pure prefix-list allow;
+  richer shapes carry an unmapped note);
+- `docs/COMPAT.md`'s `aggregate-address` and `redistribute` rows
+  carry the same corrections in table form.
+
+The released `[1.4.0]` section's "FRR address-family state" entry
+that originally described the pre-implementation state is left
+unchanged — released CHANGELOG sections are immutable historical
+records, and the correction lands under `[Unreleased]` instead.
+
+No public Rust API change (the docstrings describe the existing
+surface), no C ABI change (no `lr_*` symbol touched), no
+protocol-on-the-wire change, no version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
