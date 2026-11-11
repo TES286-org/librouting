@@ -3108,6 +3108,68 @@ does not need to switch. No public Rust API signature changes
 C ABI change (no `lr_*` symbol touched, no FFI surface change),
 no protocol-on-the-wire change, no version bump.
 
+### BGP-LS Instance-ID configuration (RFC 9552 §3.2) — issue #92
+
+The BGP-LS NLRI `identifier` field is the RFC 9552 §3.2 *BGP-LS
+Instance Identifier* — an 8-octet opaque value that names the *IGP
+routing domain* the NLRI belongs to (per-IGP-instance, not per-area
+or per-NLRI). Every NLRI from one IGP instance shares the same
+value; NLRIs from different IGP domains carry distinct values so a
+BGP-LS consumer can segregate a multi-domain topology without
+consulting the Node Descriptor sub-TLVs. RFC 9552 §3.2 recommends
+`0` for the single-instance case, which the project default keeps.
+
+The previous implementation hardcoded `0` for every emitted NLRI
+(the OSPF LSDB projection's 17 emit sites across Node, Link, IPv4
+Prefix, IPv6 Prefix and SRv6 SID NLRI variants, plus the EPE
+projection's per-session emit site) and left a comment naming "a
+per-area monotonic counter to disambiguate re-advertisements" as a
+future value. The comment misread the field's purpose — RFC 9552
+§3.2 fixes the semantics as per-IGP-instance, and re-advertisement
+disambiguation is the BGP-LS Attribute's job (metric / attribute
+changes), not the NLRI Identifier's.
+
+The fix threads the daemon's configured Instance-ID through the
+projection:
+
+- `OspfAreaBgplsContext` (the per-area projection context) gains
+  an `instance_id: u64` field; every emitted NLRI's `identifier`
+  reads `ctx.instance_id` instead of the hardcoded 0.
+- `EpePeerSession` gains an `instance_id: u64` field with a
+  `with_instance_id` builder; the EPE Link NLRI's `identifier`
+  reads `s.instance_id`.
+- The four public `DefaultRouter` projection entry points
+  (`ospf_area_bgpls_nlris`, `bgpls_republish`,
+  `bgpls_republish_end_x`, `bgpls_republish_epe`) gain an
+  `instance_id: u64` parameter; the internal
+  `epe_peer_sessions_snapshot` helper gains it too.
+- The daemon's `BgplsDriver` carries the field, reads it from
+  `BgpLsSpec::bgp_ls_instance_id`, and threads it through the
+  three projection calls in its `tick`.
+- The daemon's `[bgp_ls]` config block gains an `instance_id = N`
+  TOML key (typo-protected, fail-closed on a non-numeric value)
+  and a `--bgp-ls-instance-id N` CLI flag (same fail-closed
+  posture as `--bgp-ls-id` / `--bgp-ls-as`).
+- The startup banner's `bgp-ls:` line surfaces the Instance-ID
+  only when the operator pinned a non-zero value — the default `0`
+  (RFC 9552 §3.2's single-instance recommendation) stays out of
+  the banner so a default `--bgp-ls` invocation produces
+  byte-identical output to the previous form (regression gate for
+  the existing e2e tests in `daemon_bgpls.rs`).
+
+Breaking Rust API change: the four `DefaultRouter` projection
+methods gain an `instance_id: u64` parameter (added between
+`bgp_ls_id` and the `prev` slice). The `OspfAreaBgplsContext`
+struct gains a field — not marked `#[non_exhaustive]`, so the
+struct-literal construction sites in the test fixtures and the
+daemon's two temporary build sites are updated in the same round.
+The C ABI surface is unchanged (no `lr_*` symbol touched, no FFI
+surface change). The default-0 wire output is byte-identical to
+the previous hardcoded-0 behaviour, so an embedder that does not
+pass `instance_id` through (or passes 0) sees no protocol-on-the-
+wire change. The change lands on `main` ahead of the next release
+tag, matching the workspace's existing semver-debt pattern.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

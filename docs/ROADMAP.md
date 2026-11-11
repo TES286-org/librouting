@@ -20,7 +20,10 @@ republish driver), the BIRD interop lab, and the BGP-LS
 Attribute TLV codec (RFC 7752 §3.3 + RFC 9514 §7-§8) have all
 landed. The STATUS rows for the codec, projection, egress,
 republish driver and daemon config are all `yes`; the
-`bgpls_bird.sh` lab is the "done" gate from this section.
+`bgpls_bird.sh` lab is the "done" gate from this section. The
+RFC 9552 §3.2 BGP-LS Instance-ID is exposed as
+`--bgp-ls-instance-id` / `[bgp_ls] instance_id` (defaults to 0,
+the RFC's single-instance recommendation).
 
 `lr-bgp::path::bgp_ls` parses and serialises the Node, Link, IPv4
 Prefix and IPv6 Prefix NLRI shapes from RFC 7752 §3.3, the Local

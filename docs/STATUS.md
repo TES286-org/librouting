@@ -70,6 +70,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Egress Peer Engineering peer-session → BGP-LS Link NLRI projection (RFC 9086 §3) | yes | `lr-router::instance::epe::project_epe_peer_sessions` |
 | Egress Peer Engineering projection incremental republish driver | yes | `lr-router::instance::DefaultRouter::bgpls_republish_epe` |
 | Daemon `--bgp-ls` flag and `[bgp_ls]` config block | yes | `lr-cli::daemon_config::BgpLsSpec`, `lr-cli::daemon::BgplsDriver` |
+| Daemon `--bgp-ls-instance-id` flag and `[bgp_ls] instance_id` key (RFC 9552 §3.2) | yes | `lr-cli::daemon_config::BgpLsSpec::bgp_ls_instance_id`, `lr-cli::daemon::BgplsDriver::instance_id` |
 | Egress Peer Engineering SR-MPLS BGP Peering SID TLVs (RFC 9086 §5) | yes | `lr-bgp::path::bgp_ls_attr::BgpLsAttrTlv::{PeerNodeSid, PeerAdjSid, PeerSetSid}` |
 | Egress Peer Engineering Node Descriptor sub-TLVs (RFC 9086 §3) | yes | `lr-bgp::path::bgp_ls::NodeDescriptorSubTlv::{BgpRouterId, BgpConfederationMember}` |
 
