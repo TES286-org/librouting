@@ -203,20 +203,30 @@ fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
 /// `Address already in use (os error 98)` while the other test's
 /// daemon was still coming up.
 ///
-/// The derivation folds the test process id into the ephemeral range
-/// 20_000..=39_999 (well clear of the privileged range, the daemon's
-/// other test ports 17981..=17987, and the BFD/Babel UDP ports). Two
-/// tests in the same `cargo test` invocation get distinct ports
-/// because each call increments the per-process counter; two
-/// concurrent `cargo test` processes get distinct ports because their
-/// PIDs differ.
+/// `cargo nextest` runs each test in its **own process** (process
+/// isolation is nextest's default). A per-process static counter
+/// alone is therefore not enough — every test process would start
+/// at the same base port and two parallel tests would collide. The
+/// derivation folds the PID into the port so two processes get
+/// different base offsets, then increments a per-process counter
+/// for tests that need multiple ports (e.g. one for the listen
+/// address and one for a reload).
+///
+/// The range is 20_000..=39_999 (well clear of the privileged
+/// range, the daemon's other test ports 17981..=17987, and the
+/// BFD/Babel UDP ports 3784/4784/6696). The range never crosses
+/// into the IANA ephemeral range Linux assigns to outgoing
+/// connections (32768+).
 fn unique_listen_port() -> u16 {
-    static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20_000);
-    // Wrap within 20_000..=39_999 so the value stays in u16 range
-    // and never crosses into the IANA ephemeral range Linux assigns
-    // to outgoing connections (32768+).
+    static NEXT_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let p = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    20_000 + (p % 20_000)
+    // Fold the PID into the port derivation: two nextest test
+    // processes have different PIDs, so their base offsets differ.
+    // The per-process counter handles multiple ports within one
+    // test process.
+    let pid = std::process::id();
+    let offset = (pid.wrapping_add(p)) % 20_000;
+    20_000 + (offset as u16)
 }
 
 #[test]
