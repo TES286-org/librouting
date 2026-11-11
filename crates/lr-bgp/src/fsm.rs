@@ -855,6 +855,19 @@ impl BgpPeer {
             prefix: &route.key.prefix,
             received: received.as_ref(),
             peer_as: self.cfg.peer_as.as_u32(),
+            // RFC 4271 §9.1.2.2 step (g): the IGP metric from the local
+            // decision point to the route's NEXT_HOP, read back from
+            // the private `LrIgpMetric` tag the embedder attached when
+            // it had access to the IGP RIB. `None` falls through to 0
+            // in `build_record_set` (the documented "off" value for the
+            // hint's `igp_cost`).
+            igp_metric: attrs.igp_metric(),
+            // Damping FoM: the FSM has no access to the daemon's
+            // `DampingTable`, so `None` falls through to 0 (the
+            // documented "off" value). Wiring the FoM through a
+            // private attribute tag (mirroring `LrIgpMetric`) is
+            // tracked as a follow-up — see `EgressInput::damp_fom`.
+            damp_fom: None,
         };
         let Some(out) = xp::build_record_set(local, session, &input, sequence) else {
             return;

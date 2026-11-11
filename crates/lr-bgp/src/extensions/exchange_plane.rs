@@ -795,6 +795,37 @@ pub struct EgressInput<'a> {
     /// The peer AS this session talks to (the record set is addressed
     /// to this receiver; its OPEN nonce is echoed).
     pub peer_as: u32,
+    /// The IGP metric from the local speaker's decision point to this
+    /// path's NEXT_HOP (design §5.1: the quantity the RFC 4271
+    /// §9.1.2.2 tie-break rules assume "all the BGP speakers within an
+    /// autonomous system can ascertain" and that inter-AS receivers
+    /// otherwise cannot see). `None` when the embedder has no IGP RIB
+    /// (or has not wired the per-route injection yet); the
+    /// [`HintRecord`] then carries `igp_cost = 0`, the documented
+    /// "off" value.
+    ///
+    /// The FSM populates this from [`crate::path::PathAttributes::igp_metric`]
+    /// — the private `LrIgpMetric` tag the embedder sets when it has
+    /// access to the IGP RIB. The exchange-plane path keeps the same
+    /// "absent → 0" mapping as the best-path comparator so the two
+    /// surfaces agree on what "no IGP metric" means.
+    pub igp_metric: Option<u32>,
+    /// The local speaker's current route-flap figure of merit for the
+    /// prefix (design §5.1: 0 when damping is off — RFC 2439 shape,
+    /// advisory only). `None` when damping is disabled or the daemon
+    /// has not wired the per-route FoM injection; the [`HintRecord`]
+    /// then carries `damp_fom = 0`, the documented "off" value.
+    ///
+    /// The FSM does not yet have access to the daemon's
+    /// [`lr_damping::DampingTable`] (the table lives in the daemon,
+    /// not in the per-session FSM), so it currently passes `None` and
+    /// the record carries 0. Wiring the FoM through a private
+    /// attribute tag (mirroring `LrIgpMetric`) so the daemon's
+    /// [`lr_policy::hooks::DampingImportHook`] can stamp the FoM at
+    /// import time and the FSM can read it at egress is tracked as a
+    /// follow-up — the field is here so the follow-up touches only
+    /// the FSM call site, not the [`EgressInput`] shape again.
+    pub damp_fom: Option<u16>,
 }
 
 /// What the egress attach hook produced.
@@ -832,12 +863,18 @@ pub fn build_record_set(
     if local.hints && session.peer_flags & FLAG_HINTS_CAPABLE != 0 {
         // Prototype rank semantics: the decision process is untouched
         // and every route handed to egress is by definition the sender's
-        // rank-1 path for this peer (design §5.1). Damping and IGP
-        // integration are future work — 0 is the documented "off" value.
+        // rank-1 path for this peer (design §5.1). The IGP cost is the
+        // local speaker's IGP metric to the route's NEXT_HOP, read from
+        // the private `LrIgpMetric` tag the embedder attached from its
+        // IGP RIB (RFC 4271 §9.1.2.2 step (g)); `None` means "no IGP
+        // RIB wired" and 0 is the documented "off" value. The damping
+        // FoM is still future work — the FSM has no access to the
+        // daemon's `DampingTable`, so it passes `None` and the record
+        // carries 0 (the documented "off" value).
         records.push(Record::Hint(HintRecord {
             rank: 1,
-            damp_fom: 0,
-            igp_cost: 0,
+            damp_fom: input.damp_fom.unwrap_or(0),
+            igp_cost: input.igp_metric.unwrap_or(0),
         }));
         if let (Some(role), Some(import), Some(export)) = (
             local.policy_role,
