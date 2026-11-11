@@ -134,10 +134,14 @@ use lr_ospf::lsdb::Lsdb;
 use lr_ospf::srv6db::Srv6Database;
 
 /// Per-area context the projection needs from the daemon. The four
-/// fields are exactly the Local Node Descriptor sub-TLVs every Node
-/// NLRI emits (RFC 7752 §3.2.1.4). `as_number` and `bgp_ls_id` come
-/// from the daemon's BGP-LS speaker configuration; `area_id` and
-/// `protocol` come from the OSPF area being projected.
+/// Local-Node-Descriptor sub-TLVs every Node NLRI emits (RFC 7752
+/// §3.2.1.4) plus the BGP-LS Instance-ID (RFC 9552 §3.2) every
+/// emitted NLRI carries in its `identifier` field. `as_number` and
+/// `bgp_ls_id` come from the daemon's BGP-LS speaker configuration;
+/// `area_id` and `protocol` come from the OSPF area being projected;
+/// `instance_id` comes from the daemon's `[bgp_ls] instance_id` knob
+/// and disambiguates NLRIs from different IGP routing domains a
+/// multi-domain speaker may project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OspfAreaBgplsContext {
     /// RFC 7752 §3.2.1.4 — Autonomous System sub-TLV (512). The 4-byte
@@ -156,6 +160,27 @@ pub struct OspfAreaBgplsContext {
     /// [`ProtocolId::Ospfv2`] / [`ProtocolId::Ospfv3`] tag on every
     /// emitted NLRI and the LSA-type match arms in the projection.
     pub protocol: Protocol,
+    /// RFC 9552 §3.2 — BGP-LS Instance Identifier carried in every
+    /// emitted NLRI's `identifier` field. The field names the IGP
+    /// routing domain the NLRI belongs to (not the individual NLRI
+    /// nor the area): every NLRI produced by one IGP instance shares
+    /// the same value, and NLRIs from different IGP domains carry
+    /// different values so a BGP-LS consumer can segregate a
+    /// multi-domain topology without consulting the Node
+    /// Descriptor sub-TLVs. RFC 9552 §3.2 recommends `0` for the
+    /// single-instance case — which is the project default and the
+    /// value every test fixture in this crate uses — but operators
+    /// that project multiple IGP domains from one BGP-LS speaker
+    /// must assign the same non-zero Instance-ID to every producer
+    /// in a given domain and distinct Instance-IDs across domains.
+    /// The previous comment named a "per-area monotonic counter to
+    /// disambiguate re-advertisements" as a future value for this
+    /// field; that read of the field's purpose was incorrect — RFC
+    /// 9552 §3.2 fixes the semantics as per-IGP-instance, not
+    /// per-area or per-NLRI, and re-advertisement disambiguation is
+    /// the BGP-LS Attribute's job (metric / attribute changes),
+    /// not the NLRI Identifier's.
+    pub instance_id: u64,
 }
 
 impl OspfAreaBgplsContext {
@@ -339,7 +364,7 @@ fn project_v2_router_lsa(
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Node(NodeNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node: local_node.clone(),
         }),
     });
@@ -362,7 +387,7 @@ fn project_v2_router_lsa(
                         route_distinguisher: None,
                         variant: BgpLsNlriVariant::Link(LinkNlri {
                             protocol_id: ctx.bgpls_protocol_id(),
-                            identifier: 0,
+                            identifier: ctx.instance_id,
                             local_node: local_node.clone(),
                             remote_node,
                             link: link_desc,
@@ -389,7 +414,7 @@ fn project_v2_router_lsa(
                     route_distinguisher: None,
                     variant: BgpLsNlriVariant::Link(LinkNlri {
                         protocol_id: ctx.bgpls_protocol_id(),
-                        identifier: 0,
+                        identifier: ctx.instance_id,
                         local_node: local_node.clone(),
                         remote_node,
                         link: link_desc,
@@ -414,7 +439,7 @@ fn project_v2_router_lsa(
                     route_distinguisher: None,
                     variant: BgpLsNlriVariant::Ipv4Prefix(PrefixNlri {
                         protocol_id: ctx.bgpls_protocol_id(),
-                        identifier: 0,
+                        identifier: ctx.instance_id,
                         local_node: local_node.clone(),
                         prefix: prefix_desc,
                     }),
@@ -435,7 +460,7 @@ fn project_v2_network_lsa(lsa: &Lsa, ctx: &OspfAreaBgplsContext, out: &mut Vec<B
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Node(NodeNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
         }),
     });
@@ -467,7 +492,7 @@ fn project_v2_summary_lsa(lsa: &Lsa, ctx: &OspfAreaBgplsContext, out: &mut Vec<B
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv4Prefix(PrefixNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
             prefix: prefix_desc,
         }),
@@ -506,7 +531,7 @@ fn project_v2_as_external_lsa(lsa: &Lsa, ctx: &OspfAreaBgplsContext, out: &mut V
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv4Prefix(PrefixNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
             prefix: prefix_desc,
         }),
@@ -616,7 +641,7 @@ fn project_v3_router_lsa<const EXTENDED: bool>(
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Node(NodeNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node: local_node.clone(),
         }),
     });
@@ -670,7 +695,7 @@ fn project_v3_router_lsa<const EXTENDED: bool>(
                         route_distinguisher: None,
                         variant: BgpLsNlriVariant::Link(LinkNlri {
                             protocol_id: ctx.bgpls_protocol_id(),
-                            identifier: 0,
+                            identifier: ctx.instance_id,
                             local_node: local_node.clone(),
                             remote_node,
                             link: link_desc,
@@ -691,7 +716,7 @@ fn project_v3_router_lsa<const EXTENDED: bool>(
                     route_distinguisher: None,
                     variant: BgpLsNlriVariant::Link(LinkNlri {
                         protocol_id: ctx.bgpls_protocol_id(),
-                        identifier: 0,
+                        identifier: ctx.instance_id,
                         local_node: local_node.clone(),
                         remote_node,
                         link: link_desc,
@@ -711,7 +736,7 @@ fn project_v3_network_lsa(lsa: &Lsa, ctx: &OspfAreaBgplsContext, out: &mut Vec<B
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Node(NodeNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
         }),
     });
@@ -788,7 +813,7 @@ fn project_v3_inter_area_prefix_lsa(
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv6Prefix(PrefixNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
             prefix: prefix_desc,
         }),
@@ -818,7 +843,7 @@ fn project_v3_e_inter_area_prefix_lsa(
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv6Prefix(PrefixNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
             prefix: prefix_desc,
         }),
@@ -854,7 +879,7 @@ fn project_v3_as_external_lsa(lsa: &Lsa, ctx: &OspfAreaBgplsContext, out: &mut V
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv6Prefix(PrefixNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
             prefix: prefix_desc,
         }),
@@ -890,7 +915,7 @@ fn project_v3_e_as_external_lsa(lsa: &Lsa, ctx: &OspfAreaBgplsContext, out: &mut
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv6Prefix(PrefixNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node,
             prefix: prefix_desc,
         }),
@@ -919,7 +944,7 @@ fn push_v3_ipv6_prefix_nlri(
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv6Prefix(PrefixNlri {
             protocol_id: ctx.bgpls_protocol_id(),
-            identifier: 0,
+            identifier: ctx.instance_id,
             local_node: local_node.clone(),
             prefix: prefix_desc,
         }),
@@ -1002,7 +1027,7 @@ fn project_v3_srv6_sid_nlris(lsdb: &Lsdb, ctx: &OspfAreaBgplsContext, out: &mut 
                 route_distinguisher: None,
                 variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
                     protocol_id: ctx.bgpls_protocol_id(),
-                    identifier: 0,
+                    identifier: ctx.instance_id,
                     local_node: local_node.clone(),
                     srv6_sid,
                 }),
@@ -1087,7 +1112,7 @@ pub fn project_v3_srv6_end_x_nlris(
                 route_distinguisher: None,
                 variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
                     protocol_id: ctx.bgpls_protocol_id(),
-                    identifier: 0,
+                    identifier: ctx.instance_id,
                     local_node: local_node.clone(),
                     srv6_sid: Srv6SidDescriptor::new(vec![
                         Srv6SidDescriptorSubTlv::Srv6SidInformation(x.sid),

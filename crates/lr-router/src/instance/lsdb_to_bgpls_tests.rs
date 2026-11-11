@@ -41,12 +41,14 @@ use lr_ospf::origination::{
     originate_network_lsa, originate_router_lsa, RouterLsaFlags, RouterLsaLink,
 };
 
-/// Default context for tests: AS 64512, BGP-LS ID 0x100, area 0.
+/// Default context for tests: AS 64512, BGP-LS ID 0x100, area 0,
+/// Instance-ID 0 (the RFC 9552 §3.2 single-instance default).
 const CTX_V2: OspfAreaBgplsContext = OspfAreaBgplsContext {
     as_number: 64512,
     bgp_ls_id: 0x100,
     area_id: 0,
     protocol: Protocol::Ospfv2,
+    instance_id: 0,
 };
 
 const CTX_V3: OspfAreaBgplsContext = OspfAreaBgplsContext {
@@ -54,6 +56,7 @@ const CTX_V3: OspfAreaBgplsContext = OspfAreaBgplsContext {
     bgp_ls_id: 0x100,
     area_id: 0,
     protocol: Protocol::Ospfv3,
+    instance_id: 0,
 };
 
 fn install(db: &mut Lsdb, lsa: Lsa) {
@@ -1883,6 +1886,7 @@ fn non_ospf_protocol_context_yields_no_nlris() {
         bgp_ls_id: 0x100,
         area_id: 0,
         protocol: Protocol::Bgp,
+        instance_id: 0,
     };
     let mut db = Lsdb::new();
     install(
@@ -1925,4 +1929,188 @@ fn unknown_lsa_type_is_silently_skipped() {
     install(&mut db, lsa);
     let out = project_area_lsdb_to_bgpls(&db, &CTX_V2);
     assert!(out.is_empty());
+}
+
+/// RFC 9552 §3.2: every emitted NLRI's `identifier` field carries the
+/// BGP-LS Instance-ID from the projection context — the same value for
+/// every NLRI produced by one IGP instance, distinct across IGP
+/// domains. The previous implementation hardcoded `0` for every NLRI;
+/// this test pins the propagation through every NLRI variant the v2
+/// projection emits (Node, Link, IPv4 Prefix) so a non-zero
+/// `instance_id` the daemon configures surfaces on the wire.
+#[test]
+fn instance_id_propagates_to_every_v2_nlri_variant() {
+    let ctx = OspfAreaBgplsContext {
+        as_number: 64512,
+        bgp_ls_id: 0x100,
+        area_id: 0,
+        protocol: Protocol::Ospfv2,
+        instance_id: 0x1122334455667788,
+    };
+    let mut db = Lsdb::new();
+    // A Router-LSA with one transit-network link + one stub network
+    // link exercises the Node, Link (transit), and IPv4 Prefix (stub)
+    // NLRI variants.
+    install(
+        &mut db,
+        originate_router_lsa(
+            0x01020304,
+            RouterLsaFlags::default(),
+            &[
+                RouterLsaLink::Transit {
+                    dr_addr: 0xc0a80101, // DR's interface IP — must match Network-LSA's link_state_id
+                    local_addr: 0xc0a80102,
+                    metric: 10,
+                },
+                RouterLsaLink::Stub {
+                    network: 0xcb007100, // 203.0.113.0
+                    mask: 0xffff_ff00,   // /24
+                    metric: 10,
+                },
+            ],
+            None,
+        )
+        .unwrap(),
+    );
+    // A Network-LSA from the DR so the transit link's remote pseudonode
+    // is known — the projection looks the DR up by `link_id` (the DR's
+    // interface IP, which is the Network-LSA's `link_state_id`).
+    install(
+        &mut db,
+        originate_network_lsa(0x05060708, 0xc0a80101, 0xffff_ff00, &[0x01020304], None).unwrap(),
+    );
+    let out = project_area_lsdb_to_bgpls(&db, &ctx);
+    assert!(!out.is_empty(), "projection must emit NLRIs");
+    // Every emitted NLRI carries the configured instance_id — none is
+    // left at the previous hardcoded 0.
+    for n in &out {
+        let id = match &n.variant {
+            BgpLsNlriVariant::Node(v) => v.identifier,
+            BgpLsNlriVariant::Link(v) => v.identifier,
+            BgpLsNlriVariant::Ipv4Prefix(v) => v.identifier,
+            BgpLsNlriVariant::Ipv6Prefix(v) => v.identifier,
+            BgpLsNlriVariant::Srv6Sid(v) => v.identifier,
+            _ => continue,
+        };
+        assert_eq!(
+            id, ctx.instance_id,
+            "every NLRI variant must carry the projection context's instance_id; got {id:#x}"
+        );
+    }
+    // Spot-check the variant mix: at least one Node, one Link, one
+    // IPv4 Prefix NLRI is emitted by the LSAs above — the per-variant
+    // assertion above would silently pass if the projection emitted no
+    // NLRIs of a variant, so this gate keeps the test honest about the
+    // coverage shape.
+    let mut has_node = false;
+    let mut has_link = false;
+    let mut has_prefix = false;
+    for n in &out {
+        match &n.variant {
+            BgpLsNlriVariant::Node(_) => has_node = true,
+            BgpLsNlriVariant::Link(_) => has_link = true,
+            BgpLsNlriVariant::Ipv4Prefix(_) => has_prefix = true,
+            _ => {}
+        }
+    }
+    assert!(has_node, "Router-LSA must produce a Node NLRI");
+    assert!(
+        has_link,
+        "Router-LSA transit link + Network-LSA must produce a Link NLRI"
+    );
+    assert!(
+        has_prefix,
+        "Router-LSA stub link must produce an IPv4 Prefix NLRI"
+    );
+    // The NLRIs still round-trip through the codec byte-for-byte with
+    // the non-zero instance_id — the codec must accept the value
+    // verbatim (RFC 9552 §3.2 says it is opaque to the receiver).
+    assert_all_round_trip(&out);
+}
+
+/// v3 mirror of [`instance_id_propagates_to_every_v2_nlri_variant`]:
+/// the v3 projection emits Node, Link (per p2p link) and IPv6 Prefix
+/// NLRIs from a Router-LSA; the configured `instance_id` must surface
+/// on every variant the v2 test covers.
+#[test]
+fn instance_id_propagates_to_every_v3_nlri_variant() {
+    let ctx = OspfAreaBgplsContext {
+        as_number: 64512,
+        bgp_ls_id: 0x100,
+        area_id: 0,
+        protocol: Protocol::Ospfv3,
+        instance_id: 0x1122334455667788,
+    };
+    let mut db = Lsdb::new();
+    install(
+        &mut db,
+        originate_v3_router_lsa(
+            0x01020304,
+            0,
+            0,
+            &[V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 1,
+                neighbor_interface_id: 2,
+                neighbor_router_id: 0x05060708,
+            }],
+            None,
+        )
+        .unwrap(),
+    );
+    let out = project_area_lsdb_to_bgpls(&db, &ctx);
+    assert!(!out.is_empty(), "projection must emit NLRIs");
+    for n in &out {
+        let id = match &n.variant {
+            BgpLsNlriVariant::Node(v) => v.identifier,
+            BgpLsNlriVariant::Link(v) => v.identifier,
+            BgpLsNlriVariant::Ipv4Prefix(v) => v.identifier,
+            BgpLsNlriVariant::Ipv6Prefix(v) => v.identifier,
+            BgpLsNlriVariant::Srv6Sid(v) => v.identifier,
+            _ => continue,
+        };
+        assert_eq!(
+            id, ctx.instance_id,
+            "v3 NLRI variant must carry the projection context's instance_id; got {id:#x}"
+        );
+    }
+    assert_all_round_trip(&out);
+}
+
+/// The default `instance_id = 0` (the RFC 9552 §3.2 single-instance
+/// recommendation) is byte-identical to the previous hardcoded-0
+/// behaviour — a regression gate so a future refactor that drops the
+/// `ctx.instance_id` plumbing for the default-context path does not
+/// silently change the wire form.
+#[test]
+fn default_instance_id_zero_matches_previous_hardcoded_zero() {
+    let mut db = Lsdb::new();
+    install(
+        &mut db,
+        originate_router_lsa(
+            0x01020304,
+            RouterLsaFlags::default(),
+            &[RouterLsaLink::PointToPoint {
+                neighbor: 0x05060708,
+                local_addr: 0xc0a80101,
+                metric: 10,
+            }],
+            None,
+        )
+        .unwrap(),
+    );
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V2);
+    assert!(!out.is_empty());
+    for n in &out {
+        let id = match &n.variant {
+            BgpLsNlriVariant::Node(v) => v.identifier,
+            BgpLsNlriVariant::Link(v) => v.identifier,
+            BgpLsNlriVariant::Ipv4Prefix(v) => v.identifier,
+            BgpLsNlriVariant::Ipv6Prefix(v) => v.identifier,
+            BgpLsNlriVariant::Srv6Sid(v) => v.identifier,
+            _ => continue,
+        };
+        assert_eq!(id, 0, "default CTX_V2 keeps instance_id = 0");
+    }
 }

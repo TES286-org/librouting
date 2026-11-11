@@ -6331,6 +6331,7 @@ impl DefaultRouter {
             bgp_ls_id,
             area_id,
             protocol: area.protocol,
+            instance_id: 0,
         };
         Some(lsdb_to_bgpls::project_area_lsdb_to_bgpls(&area.lsdb, &ctx))
     }
@@ -6471,6 +6472,7 @@ impl DefaultRouter {
             bgp_ls_id,
             area_id,
             protocol: area.protocol,
+            instance_id: 0,
         };
         let curr = lsdb_to_bgpls::project_v3_srv6_end_x_nlris(&area.lsdb, &ctx);
         let diff = lsdb_to_bgpls::diff_bgpls_with_attrs(prev, &curr);
