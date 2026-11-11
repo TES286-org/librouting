@@ -2438,6 +2438,191 @@ fn aggregate_duplicate_prefix_fails() {
     assert!(err.contains("declared twice"), "unexpected error: {err}");
 }
 
+// ---- issue #92 (defects.txt L75): [[bgp.network_route_map]] TOML key
+// ---- FRR `network PREFIX route-map NAME` qualifier --------------------
+
+#[test]
+fn network_route_map_table_parses_and_finalizes() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[route-map]]\nname = \"net1\"\nentry = 10\npermit = true\n\
+         set_local_pref = 200\n\n\
+         [[bgp.network_route_map]]\nprefix = \"198.51.100.0/24\"\n\
+         route_map = \"net1\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.network_route_maps.len(), 1);
+    assert_eq!(
+        cfg.network_route_maps[0].prefix.as_deref(),
+        Some("198.51.100.0/24")
+    );
+    assert_eq!(cfg.network_route_maps[0].route_map.as_deref(), Some("net1"));
+}
+
+#[test]
+fn network_route_map_missing_prefix_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+         [[route-map]]\nname = \"net1\"\nentry = 10\npermit = true\n\n\
+         [[bgp.network_route_map]]\nroute_map = \"net1\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().expect_err("missing prefix");
+    assert!(
+        err.contains("[[bgp.network_route_map]] without 'prefix'"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn network_route_map_missing_route_map_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[bgp.network_route_map]]\nprefix = \"198.51.100.0/24\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().expect_err("missing route_map");
+    assert!(
+        err.contains("[[bgp.network_route_map]] 198.51.100.0/24 without 'route_map'"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn network_route_map_unknown_route_map_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[bgp.network_route_map]]\nprefix = \"198.51.100.0/24\"\n\
+         route_map = \"does-not-exist\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().expect_err("unknown route-map");
+    assert!(
+        err.contains("names unknown route-map 'does-not-exist'"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn network_route_map_prefix_not_in_networks_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[route-map]]\nname = \"net1\"\nentry = 10\npermit = true\n\n\
+         [[bgp.network_route_map]]\nprefix = \"203.0.113.0/24\"\n\
+         route_map = \"net1\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().expect_err("prefix not in networks");
+    assert!(
+        err.contains("203.0.113.0/24 is not in `networks`"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn network_route_map_unknown_key_fails_closed() {
+    let mut cfg = DaemonConfig::with_defaults();
+    let err = parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[route-map]]\nname = \"net1\"\nentry = 10\npermit = true\n\n\
+         [[bgp.network_route_map]]\nprefix = \"198.51.100.0/24\"\n\
+         route_map = \"net1\"\nfoo = true\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("unknown [[bgp.network_route_map]] key 'foo'"),
+        "error should name the bad key: {err}"
+    );
+}
+
+#[test]
+fn network_route_map_duplicate_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[route-map]]\nname = \"net1\"\nentry = 10\npermit = true\n\n\
+         [[bgp.network_route_map]]\nprefix = \"198.51.100.0/24\"\n\
+         route_map = \"net1\"\n\n\
+         [[bgp.network_route_map]]\nprefix = \"198.51.100.0/24\"\n\
+         route_map = \"net1\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().expect_err("duplicate network_route_map");
+    assert!(err.contains("declared twice"), "unexpected error: {err}");
+}
+
+#[test]
+fn network_route_map_empty_route_map_name_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    let err = parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[bgp.network_route_map]]\nprefix = \"198.51.100.0/24\"\n\
+         route_map = \"\"\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("[[bgp.network_route_map]] route_map is empty"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn network_route_map_bad_prefix_fails() {
+    let mut cfg = DaemonConfig::with_defaults();
+    let err = parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\n\
+         [[route-map]]\nname = \"net1\"\nentry = 10\npermit = true\n\n\
+         [[bgp.network_route_map]]\nprefix = \"not-a-prefix\"\n\
+         route_map = \"net1\"\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("bad [[bgp.network_route_map]] prefix 'not-a-prefix'"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn network_route_map_without_route_maps_block_starts_daemon() {
+    // A daemon that has `networks` but no `[[bgp.network_route_map]]`
+    // and no `[[route-map]]` at all still finalizes — the feature is
+    // opt-in (the test mirrors `aggregate_table_parses_and_finalizes`
+    // above, which exercises the same "feature absent" path for the
+    // aggregate surface).
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\", \"2001:db8::/32\"]\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert!(cfg.network_route_maps.is_empty());
+}
+
 #[test]
 fn deprecation_notice_keys_on_the_resolved_dialect() {
     // Only the TOML subset is inside its deprecation window.

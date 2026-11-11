@@ -721,6 +721,38 @@ pub(crate) struct AggregateSpec {
     pub as_set: bool,
 }
 
+/// One `[[bgp.network_route_map]]` table: an FRR `network PREFIX
+/// route-map NAME` qualifier (RFC 4271 §9.1.2.1 — "Originate routes
+/// from the local routing table into BGP") whose per-network
+/// route-map is applied at origination, not at export. The route-map
+/// can set LOCAL_PREF / MED / AS_PATH-prepend / communities / next-hop
+/// on the locally originated route, and the modified attributes
+/// enter the Loc-RIB (and from there every Adj-RIB-Out) once — the
+/// per-session export policy is unchanged. FRR evaluates the
+/// route-map each time the network is (re-)originated; lr evaluates
+/// it once at startup and on SIGHUP reload (re-origination walks the
+/// same path).
+///
+/// The `prefix` MUST also appear in `networks` (the daemon fails
+/// closed at finalize when the entry's prefix is not in the plain
+/// `networks` list — the route-map is a per-network *qualifier*, not
+/// a way to originate a network the operator did not list). The
+/// `route_map` MUST name a `[[route-map]]` table the daemon already
+/// parsed (finalize surfaces a typo as a startup error, not a silent
+/// drop at first UPDATE).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct NetworkRouteMapSpec {
+    /// Locally originated prefix (CIDR, required). MUST also appear
+    /// in [`DaemonConfig::networks`] — the finalize step fails
+    /// closed when the entry's prefix is not in the plain list.
+    pub prefix: Option<String>,
+    /// `[[route-map]]` name applied at origination (required). MUST
+    /// name a route-map the daemon already parsed; finalize fails
+    /// closed when the name is unknown so a typo surfaces at startup
+    /// instead of silently dropping the route-map at first UPDATE.
+    pub route_map: Option<String>,
+}
+
 /// One `[[ldp.interface]]` table (or `--ldp-interface` flag): an
 /// interface running basic (link) discovery, RFC 5036 §3.5.2.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1188,6 +1220,16 @@ pub(crate) struct DaemonConfig {
     /// `[[aggregate]]` tables (ROADMAP-v3 D4.2) — BGP route aggregates
     /// registered on the shared router at startup (RFC 4271 §9.2.2.2).
     pub aggregates: Vec<AggregateSpec>,
+
+    /// `[[bgp.network_route_map]]` tables (issue #92) — per-network
+    /// route-map qualifiers for `networks` (FRR `network PREFIX
+    /// route-map NAME`). Each entry names one prefix in
+    /// [`Self::networks`] and one `[[route-map]]`; the daemon applies
+    /// the route-map at origination (sets LOCAL_PREF / MED / AS_PATH
+    /// prepend / communities / next-hop on the locally originated
+    /// route before it enters the Loc-RIB). The per-session export
+    /// policy is unchanged.
+    pub network_route_maps: Vec<NetworkRouteMapSpec>,
 
     /// `[bgp.rpki]` table — the RPKI-RTR cache client (RFC 8210).
     /// Off by default (`cache = None`); set `cache = "host:port"` to
@@ -1781,6 +1823,7 @@ impl DaemonConfig {
         self.finalize_static_routes()?;
         self.finalize_redistribution()?;
         self.finalize_aggregates()?;
+        self.finalize_network_route_maps()?;
         self.finalize_shutdown()?;
         self.finalize_exchange_plane()?;
         Ok(())
@@ -2025,6 +2068,62 @@ impl DaemonConfig {
                 .map_err(|_| format!("[[aggregate]] bad prefix '{text}'"))?;
             if !seen.insert(prefix) {
                 return Err(format!("[[aggregate]] {text} declared twice (duplicate)"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the `[[bgp.network_route_map]]` table (issue #92 — FRR
+    /// `network PREFIX route-map NAME` qualifier). Each entry's
+    /// `prefix` MUST also appear in `networks` (the route-map is a
+    /// per-network *qualifier*, not a way to originate a network the
+    /// operator did not list), each `route_map` MUST name a
+    /// `[[route-map]]` the daemon already parsed (a typo surfaces at
+    /// startup instead of silently dropping the route-map at first
+    /// UPDATE), and the same `(prefix, route_map)` pair MUST NOT
+    /// appear twice (last-write-wins would silently hide a duplicate
+    /// the operator did not intend).
+    fn finalize_network_route_maps(&mut self) -> Result<(), String> {
+        let mut seen: std::collections::BTreeSet<(lr_core::addr::Prefix, String)> =
+            std::collections::BTreeSet::new();
+        let network_set: std::collections::BTreeSet<String> =
+            self.networks.iter().cloned().collect();
+        let route_map_set: std::collections::BTreeSet<String> =
+            self.route_maps.iter().map(|m| m.name.clone()).collect();
+        for spec in &self.network_route_maps {
+            let prefix_text = spec
+                .prefix
+                .as_deref()
+                .ok_or_else(|| "[[bgp.network_route_map]] without 'prefix'".to_string())?;
+            let prefix: lr_core::addr::Prefix = prefix_text
+                .parse()
+                .map_err(|_| format!("[[bgp.network_route_map]] bad prefix '{prefix_text}'"))?;
+            let route_map_name = spec
+                .route_map
+                .as_deref()
+                .ok_or_else(|| {
+                    format!("[[bgp.network_route_map]] {prefix_text} without 'route_map'")
+                })?
+                .to_string();
+            if !network_set.contains(prefix_text) {
+                return Err(format!(
+                    "[[bgp.network_route_map]] {prefix_text} is not in `networks` \
+                     (the route-map is a per-network qualifier; add the prefix to \
+                     `networks` to originate it)"
+                ));
+            }
+            if !route_map_set.contains(&route_map_name) {
+                return Err(format!(
+                    "[[bgp.network_route_map]] {prefix_text} names unknown \
+                     route-map '{route_map_name}' (no [[route-map]] with name = \
+                     \"{route_map_name}\" was parsed)"
+                ));
+            }
+            if !seen.insert((prefix, route_map_name.clone())) {
+                return Err(format!(
+                    "[[bgp.network_route_map]] {prefix_text} route-map \
+                     '{route_map_name}' declared twice (duplicate)"
+                ));
             }
         }
         Ok(())
@@ -3115,6 +3214,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.aggregates.push(AggregateSpec::default());
                     section = "aggregate".to_string();
                 }
+                "bgp.network_route_map" => {
+                    cfg.network_route_maps.push(NetworkRouteMapSpec::default());
+                    section = "bgp.network_route_map".to_string();
+                }
                 "ldp.interface" => {
                     cfg.ldp_interfaces.push(LdpIfSpec::default());
                     section = "ldp.interface".to_string();
@@ -3282,6 +3385,15 @@ pub(crate) fn apply_config_key(
         return Ok(());
     }
     if apply_aggregate_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // `[[bgp.network_route_map]]` (issue #92 — FRR `network PREFIX
+    // route-map NAME` qualifier): fail-closed for the same reason as
+    // the aggregate handler above — a typo'd `route_map` name would
+    // silently drop the route-map at origination.
+    if apply_network_route_map_key(cfg, section, key, value)
         .map_err(|e| format!("line {}: {}", lineno + 1, e))?
     {
         return Ok(());
@@ -4171,6 +4283,47 @@ fn apply_aggregate_key(
         _ => {
             return Err(format!(
                 "unknown [[aggregate]] key '{key}' (typo protection; aggregation fails closed)"
+            ));
+        }
+    }
+    Ok(true)
+}
+
+/// Parse one `[[bgp.network_route_map]]` table key (issue #92 — FRR
+/// `network PREFIX route-map NAME` qualifier). Unknown keys are hard
+/// errors — a typo'd `route_map` name silently drops the route-map
+/// at origination, the same fail-closed posture as the aggregate
+/// handler above.
+fn apply_network_route_map_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "bgp.network_route_map" {
+        return Ok(false);
+    }
+    let Some(spec) = cfg.network_route_maps.last_mut() else {
+        return Err("key outside an [[bgp.network_route_map]] table".into());
+    };
+    match key {
+        "prefix" => {
+            let v = value.trim().trim_matches('"');
+            let p: lr_core::addr::Prefix = v.parse().map_err(|_| {
+                format!("bad [[bgp.network_route_map]] prefix '{v}' (expected CIDR)")
+            })?;
+            spec.prefix = Some(p.to_string());
+        }
+        "route_map" => {
+            let v = value.trim().trim_matches('"');
+            if v.is_empty() {
+                return Err("[[bgp.network_route_map]] route_map is empty".to_string());
+            }
+            spec.route_map = Some(v.to_string());
+        }
+        _ => {
+            return Err(format!(
+                "unknown [[bgp.network_route_map]] key '{key}' (typo protection; the route-map qualifier fails closed)"
             ));
         }
     }
