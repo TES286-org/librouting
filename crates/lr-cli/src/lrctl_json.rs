@@ -26,20 +26,26 @@
 /// grepping for `"router-id"` after `"local-as"` finds them in the
 /// same shape across the line-oriented and JSON forms.
 ///
-/// `Float` is currently unused by the `lrctl` parsers (every
-/// counter is an integer), but kept on the enum so a future
-/// parser (e.g. for a float field the daemon emits) does not have
-/// to extend the type — the surface stays stable.
+/// Every counter the daemon emits today is an integer, but the
+/// daemon's status lines may grow a fractional field in the future
+/// (e.g. `cpu-percent 12.3` or `load-average 1.5`). The `Float`
+/// variant lets `push_typed` surface such a value as a JSON number
+/// instead of falling back to a `Str` — and the writer guards the
+/// non-finite cases (`NaN`, `±Infinity`) the JSON grammar forbids
+/// (ECMA-404 §9) by emitting `null`, matching ECMAScript's
+/// `JSON.stringify(Infinity)` / `JSON.stringify(NaN)`.
 #[derive(Debug, Clone)]
 pub enum JValue {
     Null,
     Bool(bool),
     Int(i64),
     UInt(u64),
-    /// Kept for forward compatibility — no `lrctl` parser emits a
-    /// float today, but the daemon's status may grow a fractional
-    /// field in the future (e.g. `cpu-percent 12.3`).
-    #[allow(dead_code)]
+    /// A fractional number. Constructed by `push_typed` when the
+    /// value parses as `f64` but not as an integer (i.e. it carries
+    /// a decimal point or an exponent). Non-finite values (`NaN`,
+    /// `±Infinity`) are never constructed by `push_typed` (the parser
+    /// falls back to `Str`), but the writer still guards the wire —
+    /// see the `write_compact` arm for `Float`.
     Float(f64),
     Str(String),
     Array(JArray),
@@ -75,6 +81,15 @@ impl JObject {
         self.entries.push((key.into(), JValue::UInt(value)));
         self
     }
+    /// Convenience: push a floating-point value. Used for fractional
+    /// status fields (`cpu-percent`, `load-average`, …) once the
+    /// daemon emits one. Non-finite values (`NaN`, `±Infinity`) are
+    /// accepted here for symmetry with `push_uint` / `push_bool`, but
+    /// the writer guards them at the wire (it emits `null`).
+    pub fn push_float<K: Into<String>>(&mut self, key: K, value: f64) -> &mut Self {
+        self.entries.push((key.into(), JValue::Float(value)));
+        self
+    }
     pub fn push_bool<K: Into<String>>(&mut self, key: K, value: bool) -> &mut Self {
         self.entries.push((key.into(), JValue::Bool(value)));
         self
@@ -101,12 +116,12 @@ impl JArray {
         self.items.push(value.into());
         self
     }
-    /// Number of items. Currently unused by the `lrctl` parsers
-    /// (the array is iterated by the serializer, not by client
-    /// code), but kept public so a future caller (e.g. a test
-    /// asserting "exactly one session") does not have to extend
-    /// the type.
-    #[allow(dead_code)]
+    /// Number of items in the array. Used by tests that assert an
+    /// exact array length (e.g. "exactly one session after `pump`")
+    /// and by `parse_show_status_body` to detect the empty-array case
+    /// before constructing the wrapping `JValue::Array`. Mirrors
+    /// `Vec::len` / `slice::len` so callers can use it the same way
+    /// they would a `Vec`.
     pub fn len(&self) -> usize {
         self.items.len()
     }
@@ -142,8 +157,22 @@ impl JValue {
                 let _ = write!(out, "{n}");
             }
             JValue::Float(f) => {
+                // JSON (ECMA-404 §9) admits only finite numbers —
+                // `NaN` / `±Infinity` are not legal in a JSON document.
+                // ECMAScript's `JSON.stringify` maps them to `null`;
+                // mirror that here so a `JValue::Float(f64::NAN)` (which
+                // `push_typed` never constructs but a direct call to
+                // `push_float` might) does not silently produce invalid
+                // JSON. The finite-path rendering uses `Display` for
+                // `f64`, which round-trips the value the parser
+                // accepted (Rust's `Display` for `f64` is lossless for
+                // finite values that fit in the JSON grammar).
                 use std::fmt::Write as _;
-                let _ = write!(out, "{f}");
+                if f.is_finite() {
+                    let _ = write!(out, "{f}");
+                } else {
+                    out.push_str("null");
+                }
             }
             JValue::Str(s) => {
                 out.push('"');
@@ -324,5 +353,91 @@ mod tests {
         assert_eq!(JValue::Null.to_json(), "null");
         assert_eq!(JValue::Bool(true).to_json(), "true");
         assert_eq!(JValue::Bool(false).to_json(), "false");
+    }
+
+    // ---- `JValue::Float` — the previously-dead-code path the
+    // `push_typed` change below now reaches. The write arms must
+    // produce JSON-grammar-conformant output for finite values and
+    // degrade to `null` for `NaN` / `±Infinity` (ECMA-404 §9 forbids
+    // non-finite numbers; ECMAScript's `JSON.stringify` does the same
+    // `null`-mapping).
+
+    #[test]
+    fn float_finite_renders_as_json_number() {
+        // Plain fractional value — the canonical "cpu-percent=12.3"
+        // case the docstring points at.
+        assert_eq!(JValue::Float(12.3).to_json(), "12.3");
+        // Whole-number floats render without a trailing `.0` (Rust's
+        // `Display` for `f64` shortens `1.0` to `1`); JSON treats
+        // integers and floats as the same number grammar so this is
+        // legal, and a JSON consumer parsing the value back as a
+        // float gets `1.0` either way.
+        assert_eq!(JValue::Float(1.0).to_json(), "1");
+        // Negative finite floats round-trip through `Display`.
+        assert_eq!(JValue::Float(-0.5).to_json(), "-0.5");
+        // Pretty form delegates to `write_compact` for scalars, so
+        // the same shape holds.
+        assert_eq!(JValue::Float(12.3).to_pretty(), "12.3");
+    }
+
+    #[test]
+    fn float_non_finite_renders_as_null() {
+        // `NaN` and `±Infinity` are not legal JSON numbers; the
+        // writer maps them to `null` so a `JValue::Float(f64::NAN)`
+        // (which `push_typed` never constructs but a direct
+        // `push_float` call might) does not produce invalid JSON.
+        assert_eq!(JValue::Float(f64::NAN).to_json(), "null");
+        assert_eq!(JValue::Float(f64::INFINITY).to_json(), "null");
+        assert_eq!(JValue::Float(f64::NEG_INFINITY).to_json(), "null");
+        // The pretty form goes through `write_compact` for scalars,
+        // so the same null-mapping applies.
+        assert_eq!(JValue::Float(f64::NAN).to_pretty(), "null");
+        assert_eq!(JValue::Float(f64::INFINITY).to_pretty(), "null");
+    }
+
+    #[test]
+    fn push_float_round_trips_through_object() {
+        // The convenience helper on `JObject` constructs a `Float`
+        // entry the same way `push_uint` / `push_bool` do for their
+        // shapes — the resulting JSON carries the value as a number,
+        // not a quoted string.
+        let mut o = JObject::new();
+        o.push_float("cpu-percent", 12.3)
+            .push_float("load-average", 1.5);
+        let v = JValue::Object(o);
+        assert_eq!(v.to_json(), r#"{"cpu-percent":12.3,"load-average":1.5}"#);
+    }
+
+    #[test]
+    fn push_float_non_finite_emits_null_through_object() {
+        // The object helper does not pre-reject non-finite values —
+        // the writer does, so a caller that builds a Float from a
+        // pre-validated source can still hand a non-finite value
+        // without crashing the serializer. This mirrors what
+        // ECMAScript's `JSON.stringify({x: Infinity})` does
+        // (`{"x":null}`).
+        let mut o = JObject::new();
+        o.push_float("x", f64::INFINITY);
+        assert_eq!(JValue::Object(o).to_json(), r#"{"x":null}"#);
+    }
+
+    // ---- `JArray::len` — the previously-dead-code accessor. The
+    // `push_typed` change below now uses it to short-circuit the
+    // empty-array case, and the unit test here pins the contract.
+
+    #[test]
+    fn array_len_counts_pushed_items() {
+        let mut a = JArray::new();
+        assert_eq!(a.len(), 0);
+        assert!(a.is_empty());
+        a.push(JValue::UInt(1));
+        assert_eq!(a.len(), 1);
+        assert!(!a.is_empty());
+        a.push(JValue::UInt(2)).push(JValue::UInt(3));
+        assert_eq!(a.len(), 3);
+        // A nested empty array still counts as one item — `len`
+        // counts top-level entries, not transitively.
+        a.push(JValue::Array(JArray::new()));
+        assert_eq!(a.len(), 4);
     }
 }

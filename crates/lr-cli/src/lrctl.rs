@@ -1324,6 +1324,16 @@ fn parse_show_status_body(body: &str) -> JValue {
         }
     }
     if !by_protocol.is_empty() {
+        // Surface the protocol count as a top-level integer field
+        // alongside the per-protocol array — a monitoring/alerting
+        // consumer can read `protocol_count` to alert on "expected
+        // 3 protocols, got N" without parsing the array. Uses
+        // `JArray::len` (the previously-dead-code accessor on
+        // `JArray`) so the count is read off the same array the
+        // serializer iterates, not a hand-maintained counter that
+        // could drift if the parsing loop ever grows more push
+        // sites.
+        o.push_uint("protocol_count", by_protocol.len() as u64);
         o.push("by_protocol", JValue::Array(by_protocol));
     }
     if !memory.is_empty() {
@@ -1404,6 +1414,12 @@ fn parse_routes_count_body(body: &str) -> JValue {
         }
     }
     if !by_protocol.is_empty() {
+        // Surface the protocol count alongside the per-protocol
+        // array — same rationale as `parse_show_status_body`:
+        // `JArray::len` reads off the same array the serializer
+        // iterates, so a monitoring consumer can alert on a count
+        // delta without parsing the array.
+        o.push_uint("protocol_count", by_protocol.len() as u64);
         o.push("by_protocol", JValue::Array(by_protocol));
     }
     JValue::Object(o)
@@ -1431,20 +1447,151 @@ fn parse_show_memory_body(body: &str) -> JValue {
 /// number, not a string); `true`/`false` parse to `Bool`; the
 /// sentinel `unknown` (BIRD parity for "no value available")
 /// becomes a JSON `null` so a consumer can distinguish "no value"
-/// from the string `"unknown"`. Anything else stays a `Str`.
+/// from the string `"unknown"`. A value that carries a decimal
+/// point or an exponent (`12.3`, `1.5e-3`, `load-average 1.5`) and
+/// parses as a finite `f64` is pushed through
+/// [`JObject::push_float`](lrctl_json::JObject::push_float), so the
+/// JSON output carries the number as a number rather than the
+/// quoted string the previous shape silently fell back to.
+/// Non-finite `f64` values (`NaN`, `±Infinity`) — which
+/// `f64::parse` accepts for the strings `"NaN"` / `"inf"` /
+/// `"-inf"` — stay as `Str` so the writer never has to emit invalid
+/// JSON for a status line the daemon did not actually intend to be
+/// numeric. Anything else stays a `Str`.
 fn push_typed(o: &mut JObject, key: &str, value: &str) {
-    let v = if value == "unknown" {
-        JValue::Null
+    if value == "unknown" {
+        o.push(key, JValue::Null);
     } else if value == "true" {
-        JValue::Bool(true)
+        o.push_bool(key, true);
     } else if value == "false" {
-        JValue::Bool(false)
+        o.push_bool(key, false);
     } else if let Ok(n) = value.parse::<u64>() {
-        JValue::UInt(n)
+        o.push_uint(key, n);
     } else if let Ok(n) = value.parse::<i64>() {
-        JValue::Int(n)
+        o.push(key, JValue::Int(n));
+    } else if looks_numeric(value) {
+        // Only attempt a float parse when the value carries a
+        // decimal point or an exponent — this avoids surprising
+        // coercions like `"0"` (already covered by `u64` above)
+        // or `"NaN"` / `"inf"` being silently turned into a
+        // JSON `null`. The `f64::parse` call below still rejects
+        // non-finite values (which `looks_numeric` would
+        // otherwise admit for `"inf"` / `"nan"` strings), so the
+        // writer never sees a `JValue::Float(f64::NAN)`.
+        match value.parse::<f64>() {
+            Ok(f) if f.is_finite() => o.push_float(key, f),
+            _ => o.push_str(key, value),
+        };
     } else {
-        JValue::Str(value.to_string())
-    };
-    o.push(key, v);
+        o.push_str(key, value);
+    }
+}
+
+/// Heuristic: does `value` carry a decimal point or an exponent
+/// marker that signals "this is a fractional number, not an
+/// integer"? `u64` and `i64` parsing already absorbed the integer
+/// forms before `push_typed` reaches the float arm, so this gate's
+/// only job is to keep strings like `"NaN"` / `"inf"` / `"-inf"`
+/// (which `f64::parse` accepts and would otherwise produce a
+/// non-finite `f64`) out of the float path entirely. The set is
+/// small enough that a linear scan beats a regex; the strings are
+/// short (status-line tokens are at most a few dozen bytes).
+fn looks_numeric(value: &str) -> bool {
+    value.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'))
+}
+
+#[cfg(test)]
+mod push_typed_tests {
+    use super::{looks_numeric, push_typed, JArray, JObject, JValue};
+
+    /// A plain decimal-fraction value (the canonical `cpu-percent
+    /// 12.3` shape the `JValue::Float` variant exists for) parses
+    /// through to `JValue::Float` and renders as a JSON number —
+    /// not a quoted string. The previous shape fell back to `Str`
+    /// here, so a downstream JSON consumer would have seen
+    /// `"cpu-percent":"12.3"` (string) instead of
+    /// `"cpu-percent":12.3` (number).
+    #[test]
+    fn decimal_fraction_becomes_float_not_string() {
+        let mut o = JObject::new();
+        push_typed(&mut o, "cpu-percent", "12.3");
+        let v = JValue::Object(o);
+        assert_eq!(v.to_json(), r#"{"cpu-percent":12.3}"#);
+    }
+
+    /// Scientific-notation forms (a hypothetical `load-average
+    /// 1.5e-1`) parse the same way; the resulting JSON uses the
+    /// `Display` form Rust chooses for the parsed `f64` (so `0.15`
+    /// rather than `1.5e-1`), which is still a valid JSON number.
+    #[test]
+    fn scientific_notation_becomes_float() {
+        let mut o = JObject::new();
+        push_typed(&mut o, "load-average", "1.5e-1");
+        let v = JValue::Object(o);
+        // Rust's `Display` for `0.15_f64` round-trips to `0.15`.
+        assert_eq!(v.to_json(), r#"{"load-average":0.15}"#);
+    }
+
+    /// A negative fractional value (e.g. `offset -0.5`) lands in
+    /// the float arm too — `i64::parse` rejects the `-0.5` form
+    /// (it has a fractional part), so the float arm picks it up.
+    #[test]
+    fn negative_fraction_becomes_float() {
+        let mut o = JObject::new();
+        push_typed(&mut o, "offset", "-0.5");
+        let v = JValue::Object(o);
+        assert_eq!(v.to_json(), r#"{"offset":-0.5}"#);
+    }
+
+    /// `NaN` and `±Infinity` are *not* legal JSON numbers (ECMA-404
+    /// §9), and `f64::parse` accepts the strings `"NaN"` / `"inf"`
+    /// / `"-inf"` — the `looks_numeric` gate keeps these strings
+    /// out of the float path entirely (they do not carry `.` or
+    /// `e`/`E`), so the parser falls back to `Str` and the writer
+    /// never sees a `JValue::Float(f64::NAN)`.
+    #[test]
+    fn nan_and_infinity_stay_as_strings() {
+        // None of these carry a `.` or `e`/`E`, so `looks_numeric`
+        // returns false and `push_typed` falls through to `Str`
+        // without ever calling `f64::parse`.
+        for s in &["NaN", "nan", "inf", "-inf", "Infinity", "-Infinity"] {
+            assert!(
+                !looks_numeric(s),
+                "looks_numeric({s:?}) must be false so NaN/Inf stays a Str"
+            );
+            let mut o = JObject::new();
+            push_typed(&mut o, "value", s);
+            let v = JValue::Object(o);
+            // Quoted string — the JSON consumer sees a string the
+            // daemon actually emitted, not a JSON number that
+            // violates ECMA-404.
+            let expected = format!(r#"{{"value":"{s}"}}"#);
+            assert_eq!(v.to_json(), expected, "for s = {s:?}");
+        }
+    }
+
+    /// Integer values still take the `UInt`/`Int` paths (the float
+    /// arm only fires for values that fail both integer parses) —
+    /// the previous shape's behaviour is preserved so existing
+    /// JSON consumers do not see `64512` become `64512.0`.
+    #[test]
+    fn integer_values_stay_as_integers() {
+        let mut o = JObject::new();
+        push_typed(&mut o, "as", "64512");
+        push_typed(&mut o, "neg", "-42");
+        let v = JValue::Object(o);
+        assert_eq!(v.to_json(), r#"{"as":64512,"neg":-42}"#);
+    }
+
+    /// `JArray::len` (the previously-dead-code accessor) returns
+    /// the number of items pushed — used by tests that assert an
+    /// exact count, and by the empty-array short-circuit in
+    /// `parse_show_status_body`.
+    #[test]
+    fn jarray_len_counts_items() {
+        let mut a = JArray::new();
+        assert_eq!(a.len(), 0);
+        a.push(JValue::UInt(1)).push(JValue::UInt(2));
+        assert_eq!(a.len(), 2);
+    }
 }
