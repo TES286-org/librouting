@@ -143,20 +143,20 @@ mod imp {
 
     use super::{bind_address, os_error, BfdMode, BfdTransportError};
 
-    const AF_INET: i32 = 2;
-    const AF_INET6: i32 = 10;
-    const IPPROTO_IP: i32 = 0;
-    const IPPROTO_IPV6: i32 = 41;
-    const IP_TTL: i32 = 2;
-    const IP_RECVTTL: i32 = 12;
-    const IPV6_UNICAST_HOPS: i32 = 16;
-    const IPV6_HOPLIMIT: i32 = 52;
-    const IPV6_RECVHOPLIMIT: i32 = 51;
-    const MSG_DONTWAIT: i32 = 0x40;
-    const EAGAIN: i32 = 11;
+    pub(super) const AF_INET: i32 = 2;
+    pub(super) const AF_INET6: i32 = 10;
+    pub(super) const IPPROTO_IP: i32 = 0;
+    pub(super) const IPPROTO_IPV6: i32 = 41;
+    pub(super) const IP_TTL: i32 = 2;
+    pub(super) const IP_RECVTTL: i32 = 12;
+    pub(super) const IPV6_UNICAST_HOPS: i32 = 16;
+    pub(super) const IPV6_HOPLIMIT: i32 = 52;
+    pub(super) const IPV6_RECVHOPLIMIT: i32 = 51;
+    pub(super) const MSG_DONTWAIT: i32 = 0x40;
+    pub(super) const EAGAIN: i32 = 11;
 
     #[repr(C)]
-    struct Iovec {
+    pub(super) struct Iovec {
         iov_base: *mut u8,
         iov_len: usize,
     }
@@ -173,10 +173,10 @@ mod imp {
     }
 
     #[repr(C)]
-    struct Cmsghdr {
-        cmsg_len: usize,
-        cmsg_level: i32,
-        cmsg_type: i32,
+    pub(super) struct Cmsghdr {
+        pub(super) cmsg_len: usize,
+        pub(super) cmsg_level: i32,
+        pub(super) cmsg_type: i32,
     }
 
     extern "C" {
@@ -306,7 +306,22 @@ mod imp {
 
     /// Walk the ancillary-data chain for the received TTL (IP_TTL) or
     /// hop limit (IPV6_HOPLIMIT) message.
-    fn parse_ttl_cmsg(control: &[u8]) -> Option<u8> {
+    ///
+    /// The cmsg data for `IP_TTL` / `IPV6_HOPLIMIT` is a 4-byte `int`
+    /// in native byte order (the kernel writes it as a C `int` through
+    /// `setsockopt` / cmsg). Reading only `data[0]` — as this function
+    /// did historically — happens to return the correct TTL value on
+    /// **little-endian** targets (x86_64, aarch64, RISC-V) because the
+    /// LSB of a small `int` value lives at byte offset 0. On
+    /// **big-endian** targets (s390x) the MSB lives at offset 0, so
+    /// `data[0]` reads 0 for every TTL in 0..=255 — the single-hop
+    /// GTSM check (`ttl >= 255`) then discards every received BFD
+    /// packet and the session never reaches Up.
+    ///
+    /// The fix reads the full 4-byte `int` via `i32::from_ne_bytes`
+    /// (native byte order, matching the kernel's write) and then
+    /// narrows to `u8`. This is correct on both endiannesses.
+    pub(super) fn parse_ttl_cmsg(control: &[u8]) -> Option<u8> {
         const CMSGHDR_LEN: usize = core::mem::size_of::<Cmsghdr>();
         let mut off = 0usize;
         while off + CMSGHDR_LEN <= control.len() {
@@ -317,11 +332,17 @@ mod imp {
                 break;
             }
             let data = &control[off + CMSGHDR_LEN..off + len];
-            if level == IPPROTO_IP && ctype == IP_TTL && !data.is_empty() {
-                return Some(data[0]);
+            // The IP_TTL / IPV6_HOPLIMIT cmsg payload is a 4-byte int
+            // in native byte order. Read it as i32 then narrow to u8;
+            // a truncated or zero-length payload (should not happen
+            // when the kernel arms IP_RECVTTL / IPV6_RECVHOPLIMIT)
+            // falls through to `None` so the caller's TTL-agnostic
+            // fallback applies.
+            if level == IPPROTO_IP && ctype == IP_TTL && data.len() >= 4 {
+                return Some(i32::from_ne_bytes(data[..4].try_into().ok()?) as u8);
             }
-            if level == IPPROTO_IPV6 && ctype == IPV6_HOPLIMIT && !data.is_empty() {
-                return Some(data[0]);
+            if level == IPPROTO_IPV6 && ctype == IPV6_HOPLIMIT && data.len() >= 4 {
+                return Some(i32::from_ne_bytes(data[..4].try_into().ok()?) as u8);
             }
             // cmsg entries are aligned to the word size.
             off = (off + len + 7) & !7;
@@ -621,5 +642,64 @@ mod tests {
         assert_eq!(BfdMode::Multihop.port(), 4784);
         assert_eq!(BfdMode::SingleHop.to_string(), "single-hop");
         assert_eq!(BfdMode::Multihop.to_string(), "multihop");
+    }
+
+    /// `parse_ttl_cmsg` must read the TTL from the cmsg payload as a
+    /// full 4-byte native-order `int`, not just `data[0]`. The
+    /// historical `data[0]` read happened to work on little-endian
+    /// targets (the LSB of a small int is at offset 0) but returned 0
+    /// on big-endian s390x (the MSB is at offset 0), causing every
+    /// single-hop BFD packet to be discarded by the GTSM `ttl >= 255`
+    /// check.
+    ///
+    /// This test builds a synthetic cmsg buffer in native byte order
+    /// and verifies the function extracts the correct TTL. On
+    /// big-endian hosts (s390x) the regression guard is direct:
+    /// `data[0]` of 255 (`0x000000FF` BE) is `0x00`, so the old code
+    /// would return 0 and the assertion `ttl == 255` fails. On
+    /// little-endian hosts the test still passes (the old code's
+    /// `data[0]` reads `0xFF` = 255) but documents the contract.
+    #[cfg(all(feature = "std", target_os = "linux"))]
+    #[test]
+    fn parse_ttl_cmsg_reads_full_int_not_first_byte() {
+        use super::imp::{
+            parse_ttl_cmsg, Cmsghdr, IPPROTO_IP, IPPROTO_IPV6, IPV6_HOPLIMIT, IP_TTL,
+        };
+
+        // Build a cmsg buffer: cmsghdr (16 B on 64-bit) + 4-byte TTL
+        // payload. The kernel writes the TTL as a C `int` (4 bytes)
+        // in native byte order. cmsg_len = sizeof(cmsghdr) + 4 = 20
+        // on 64-bit targets.
+        let ttl_value: i32 = 255;
+        let cmsg_len: usize = core::mem::size_of::<Cmsghdr>() + 4;
+
+        // IPv4 IP_TTL cmsg in native byte order.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(cmsg_len as u64).to_ne_bytes()); // cmsg_len
+        buf.extend_from_slice(&IPPROTO_IP.to_ne_bytes()); // cmsg_level
+        buf.extend_from_slice(&IP_TTL.to_ne_bytes()); // cmsg_type
+        buf.extend_from_slice(&ttl_value.to_ne_bytes()); // TTL payload
+
+        let ttl = parse_ttl_cmsg(&buf).expect("native-order IP_TTL cmsg");
+        assert_eq!(
+            ttl, 255,
+            "native-order cmsg should yield TTL=255, got {ttl} \
+             (on big-endian s390x, data[0] of 0x000000FF is 0x00 — \
+             the old data[0] read returned 0 and discarded every \
+             single-hop BFD packet)"
+        );
+
+        // IPv6 IPV6_HOPLIMIT cmsg in native byte order.
+        let mut buf6 = Vec::new();
+        buf6.extend_from_slice(&(cmsg_len as u64).to_ne_bytes());
+        buf6.extend_from_slice(&IPPROTO_IPV6.to_ne_bytes());
+        buf6.extend_from_slice(&IPV6_HOPLIMIT.to_ne_bytes());
+        buf6.extend_from_slice(&(64i32).to_ne_bytes());
+
+        let hop = parse_ttl_cmsg(&buf6).expect("native-order IPV6_HOPLIMIT cmsg");
+        assert_eq!(
+            hop, 64,
+            "native-order IPv6 cmsg should yield hop limit=64, got {hop}"
+        );
     }
 }
