@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use super::lexer::{lex, Tok, TokKind, Unit};
 use crate::daemon_config::{
     apply_config_key, escape_toml_string, AggregateSpec, BabelInterfaceSpec, BabelKeySpec,
-    DaemonConfig, FilterSpec, LdpBindSpec, LdpIfSpec, LdpTargetedSpec, OspfAreaSpec, OspfIfSpec,
-    OspfMappingServerSpec, OspfPrefixSidSpec, OspfSrv6LocatorSpec, PeerSpec, RedistributeSpec,
-    RoaSpec, StaticRouteSpec,
+    DaemonConfig, FilterSpec, LdpBindSpec, LdpIfSpec, LdpTargetedSpec, NetworkRouteMapSpec,
+    OspfAreaSpec, OspfIfSpec, OspfMappingServerSpec, OspfPrefixSidSpec, OspfSrv6LocatorSpec,
+    PeerSpec, RedistributeSpec, RoaSpec, StaticRouteSpec,
 };
 use crate::daemon_policy::{AsPathListSpec, CommunityListSpec, PrefixListSpec, RouteMapSpec};
 
@@ -121,6 +121,13 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
         ("", "roa") => Some(array("roa", None)),
         ("", "redistribute") => Some(array("redistribute", None)),
         ("", "aggregate") => Some(array("aggregate", None)),
+        // `[[bgp.network_route_map]]` (issue #92 — defects.txt L75):
+        // FRR `network PREFIX route-map NAME` qualifier applied at
+        // origination. The DSL emits these as a top-level
+        // `bgp.network_route_map { prefix = "..."; route_map = "..." }`
+        // block (mirrors the TOML shape — flat, no enclosing `bgp { … }`
+        // block).
+        ("", "bgp.network_route_map") => Some(array("bgp.network_route_map", None)),
         _ => None,
     }
 }
@@ -787,6 +794,7 @@ impl<'a> Parser<'a> {
             "filter" => cfg.filters.push(FilterSpec::default()),
             "redistribute" => cfg.redistributes.push(RedistributeSpec::default()),
             "aggregate" => cfg.aggregates.push(AggregateSpec::default()),
+            "bgp.network_route_map" => cfg.network_route_maps.push(NetworkRouteMapSpec::default()),
             _ => {
                 return Err(self.err(format!(
                     "internal: unhandled array section '{section}' for block '{block}'"

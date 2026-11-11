@@ -266,6 +266,20 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         }
         e.close(0);
     }
+    // `[[bgp.network_route_map]]` (issue #92 — defects.txt L75): FRR
+    // `network PREFIX route-map NAME` qualifier. Emitted as a flat
+    // top-level `bgp.network_route_map { prefix = …; route_map = … }`
+    // block — mirrors the TOML shape (no enclosing `bgp { … }`).
+    for nr in &cfg.network_route_maps {
+        e.open(0, "bgp.network_route_map", None);
+        if let Some(v) = &nr.prefix {
+            e.kv(1, "prefix", &fmt_string(v));
+        }
+        if let Some(v) = &nr.route_map {
+            e.kv(1, "route_map", &fmt_string(v));
+        }
+        e.close(0);
+    }
 
     // --- static routes ------------------------------------------------------
     if !cfg.static_routes.is_empty() {
