@@ -468,3 +468,215 @@ remote = "127.0.0.1:{port_c}"
     );
     std::fs::remove_file(&cfg_a).ok();
 }
+
+// ---- issue #92 (defects.txt L75): [[bgp.network_route_map]] e2e ----
+// FRR `network PREFIX route-map NAME` qualifier applied at origination.
+
+/// A `[[bgp.network_route_map]]` that permits with `set_local_pref`
+/// produces a route that flows through to the peer. The daemon logs
+/// the (route-map ...) qualifier on the origination line; the peer
+/// installs the route. (Local-pref is not visible in the daemon's
+/// log stream — the test pins the originating-with-route-map log
+/// line and the peer's `route installed` line.)
+#[test]
+fn network_route_map_permit_originate_and_peer_installs() {
+    let port_a = free_port();
+    let port_b = free_port();
+    let cfg_a = std::env::temp_dir().join(format!("lr-nrm-p-{}.toml", std::process::id()));
+    std::fs::write(
+        &cfg_a,
+        format!(
+            r#"
+[bgp]
+local_as = 64512
+router_id = "10.0.0.1"
+listen_addr = "127.0.0.1:{port_a}"
+local_address = "192.0.2.1"
+networks = ["203.0.113.0/24"]
+ebgp_policy = "accept-all"
+
+[[route-map]]
+name = "mark"
+entry = 10
+set_local_pref = 250
+permit = true
+
+[[bgp.network_route_map]]
+prefix = "203.0.113.0/24"
+route_map = "mark"
+
+[[peer]]
+remote = "127.0.0.1:{port_b}"
+peer_as = 64513
+"#,
+        ),
+    )
+    .unwrap();
+
+    let a = Daemon::spawn(&["--config", cfg_a.to_str().unwrap()], "nrm-p-a");
+    let b = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.2",
+            "--listen",
+            &format!("127.0.0.1:{port_b}"),
+            "--local-address",
+            "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
+        ],
+        "nrm-p-b",
+    );
+
+    wait_log_all(&a.log, &["originating 203.0.113.0/24 (route-map mark)"]);
+    wait_log_all(&b.log, &["route installed 203.0.113.0/24"]);
+    std::fs::remove_file(&cfg_a).ok();
+    let _ = a;
+}
+
+/// A `[[bgp.network_route_map]]` that denies suppresses origination
+/// entirely (RFC 4271 §9.1.2.1). The daemon logs the suppression;
+/// the peer never installs the route. The peer's log converges to
+/// "quiet" without ever containing `route installed 203.0.113.0/24`.
+#[test]
+fn network_route_map_deny_suppresses_origination() {
+    let port_a = free_port();
+    let port_b = free_port();
+    let cfg_a = std::env::temp_dir().join(format!("lr-nrm-d-{}.toml", std::process::id()));
+    std::fs::write(
+        &cfg_a,
+        format!(
+            r#"
+[bgp]
+local_as = 64512
+router_id = "10.0.0.1"
+listen_addr = "127.0.0.1:{port_a}"
+local_address = "192.0.2.1"
+networks = ["203.0.113.0/24"]
+ebgp_policy = "accept-all"
+
+[[route-map]]
+name = "block"
+entry = 10
+permit = false
+
+[[bgp.network_route_map]]
+prefix = "203.0.113.0/24"
+route_map = "block"
+
+[[peer]]
+remote = "127.0.0.1:{port_b}"
+peer_as = 64513
+"#,
+        ),
+    )
+    .unwrap();
+
+    let a = Daemon::spawn(&["--config", cfg_a.to_str().unwrap()], "nrm-d-a");
+    let b = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.2",
+            "--listen",
+            &format!("127.0.0.1:{port_b}"),
+            "--local-address",
+            "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
+        ],
+        "nrm-d-b",
+    );
+
+    wait_log_all(
+        &a.log,
+        &["network 203.0.113.0/24 suppressed by route-map block (deny verdict)"],
+    );
+    let b_quiet = wait_quiet(&b.log);
+    assert!(
+        !b_quiet.contains("route installed 203.0.113.0/24"),
+        "deny verdict must suppress origination so the peer never installs the route; log: {b_quiet}"
+    );
+    std::fs::remove_file(&cfg_a).ok();
+    let _ = a;
+}
+
+/// A `[[bgp.network_route_map]]` that names an unknown route-map
+/// fails closed at startup (the finalize step rejects the config).
+/// The daemon's stderr carries the diagnostic the operator needs.
+#[test]
+fn network_route_map_unknown_route_map_name_fails_startup() {
+    let cfg = std::env::temp_dir().join(format!("lr-nrm-x-{}.toml", std::process::id()));
+    std::fs::write(
+        &cfg,
+        r#"
+[bgp]
+local_as = 64512
+router_id = "10.0.0.1"
+networks = ["203.0.113.0/24"]
+
+[[bgp.network_route_map]]
+prefix = "203.0.113.0/24"
+route_map = "ghost"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(BIN)
+        .args(["--config", cfg.to_str().unwrap()])
+        .output()
+        .expect("run lr-daemon");
+    assert!(!out.status.success(), "startup must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("names unknown route-map 'ghost'"),
+        "stderr: {stderr}"
+    );
+    std::fs::remove_file(&cfg).ok();
+}
+
+/// A `[[bgp.network_route_map]]` whose prefix is not in `networks`
+/// fails closed at startup. The route-map is a per-network qualifier,
+/// not a way to originate a network the operator did not list.
+#[test]
+fn network_route_map_prefix_not_in_networks_fails_startup() {
+    let cfg = std::env::temp_dir().join(format!("lr-nrm-n-{}.toml", std::process::id()));
+    std::fs::write(
+        &cfg,
+        r#"
+[bgp]
+local_as = 64512
+router_id = "10.0.0.1"
+networks = ["203.0.113.0/24"]
+
+[[route-map]]
+name = "mark"
+entry = 10
+permit = true
+
+[[bgp.network_route_map]]
+prefix = "198.51.100.0/24"
+route_map = "mark"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(BIN)
+        .args(["--config", cfg.to_str().unwrap()])
+        .output()
+        .expect("run lr-daemon");
+    assert!(!out.status.success(), "startup must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("198.51.100.0/24 is not in `networks`"),
+        "stderr: {stderr}"
+    );
+    std::fs::remove_file(&cfg).ok();
+}
