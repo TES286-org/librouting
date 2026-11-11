@@ -409,8 +409,21 @@ fn sighup_reloads_networks_from_config_file() {
 /// to the original path the rotation tool just left in place.
 #[test]
 fn sighup_reopens_log_file_for_rotation() {
+    // Short dir name: macOS's $TMPDIR is typically
+    // /var/folders/<xx>/<rest>/T/ (~50 chars), and the daemon's
+    // Unix-socket runtime API bind fails with `path must be shorter
+    // than SUN_LEN` (104 bytes) when the api-socket path exceeds
+    // that limit. The historical dir name
+    // `lr-daemon-test-hup-logrotate-{PID}-{NANOS}` was ~53 chars on
+    // its own; combined with $TMPDIR + `daemon.api` it crossed 104
+    // on the macOS CI runner and the daemon died at startup with
+    // `ERROR [api] runtime API: bind ...: path must be shorter than
+    // SUN_LEN` — which surfaced as the test's `got: ` (empty)
+    // symptom because the daemon exited before SIGHUP could be
+    // delivered. The short prefix `lr-hup-` + PID + nanos keeps the
+    // full socket path under ~80 chars on macOS.
     let dir = std::env::temp_dir().join(format!(
-        "lr-daemon-test-hup-logrotate-{}-{}",
+        "lr-hup-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
