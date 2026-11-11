@@ -783,6 +783,15 @@ pub(crate) struct LdpBindSpec {
 /// across speakers. `as_number` defaults to the daemon's `local_as`
 /// and `bgp_ls_id` defaults to 0 (the simplest legal value).
 ///
+/// `bgp_ls_instance_id` (RFC 9552 §3.2) is the BGP-LS Instance-ID
+/// carried in every emitted NLRI's `identifier` field — names the
+/// IGP routing domain the NLRI belongs to (per-IGP-instance, not
+/// per-area or per-NLRI). Defaults to 0 (the RFC 9552 §3.2
+/// single-instance recommendation); operators that project multiple
+/// IGP domains from one BGP-LS speaker must assign the same non-zero
+/// Instance-ID to every producer in a given domain and distinct
+/// Instance-IDs across domains.
+///
 /// `areas` selects which OSPF area IDs to project. An empty list
 /// (the default) means "every area the router holds" — a router that
 /// learns areas dynamically (e.g. via OSPF adjacency) does not need
@@ -799,6 +808,11 @@ pub(crate) struct BgpLsSpec {
     /// BGP-LS Identifier (RFC 7752 §3.2.1.4 sub-TLV 513). Defaults
     /// to `0`.
     pub bgp_ls_id: u32,
+    /// RFC 9552 §3.2 BGP-LS Instance-ID — opaque 8-octet value
+    /// carried in every emitted NLRI's `identifier` field, naming
+    /// the IGP routing domain the projection belongs to. Defaults
+    /// to `0` (the RFC 9552 §3.2 single-instance recommendation).
+    pub bgp_ls_instance_id: u64,
     /// OSPF area IDs to project. Empty = all areas the router holds.
     pub areas: Vec<u32>,
 }
@@ -5153,6 +5167,11 @@ fn apply_bgp_ls_key(
                 .parse()
                 .map_err(|_| format!("bad bgp_ls_id '{value}' (0..=u32::MAX)"))?;
         }
+        "instance_id" => {
+            cfg.bgp_ls.bgp_ls_instance_id = value
+                .parse()
+                .map_err(|_| format!("bad instance_id '{value}' (0..=u64::MAX)"))?;
+        }
         "areas" => {
             // Array of area IDs (decimal or dotted quad). Each entry
             // is validated through `parse_area_id` so a typo surfaces
@@ -5551,6 +5570,19 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                     Ok(v) => cfg.bgp_ls.bgp_ls_id = v,
                     Err(_) => {
                         eprintln!("bad --bgp-ls-id '{}' (expected integer)", args[i + 1]);
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--bgp-ls-instance-id" if i + 1 < args.len() => {
+                match args[i + 1].parse::<u64>() {
+                    Ok(v) => cfg.bgp_ls.bgp_ls_instance_id = v,
+                    Err(_) => {
+                        eprintln!(
+                            "bad --bgp-ls-instance-id '{}' (expected 0..=u64::MAX)",
+                            args[i + 1]
+                        );
                         return Err(ExitCode::from(2));
                     }
                 }

@@ -1767,10 +1767,22 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            println!(
-                "  bgp-ls:       on (AS={} BGP-LS-ID={} areas={})",
-                as_n, cfg.bgp_ls.bgp_ls_id, areas
-            );
+            // The Instance-ID surfaces in the banner only when the
+            // operator pinned a non-zero value (RFC 9552 §3.2's
+            // single-instance default of 0 is the no-news case and
+            // stays out of the banner so the default `--bgp-ls`
+            // output stays byte-identical to the previous form).
+            if cfg.bgp_ls.bgp_ls_instance_id != 0 {
+                println!(
+                    "  bgp-ls:       on (AS={} BGP-LS-ID={} Instance-ID={} areas={})",
+                    as_n, cfg.bgp_ls.bgp_ls_id, cfg.bgp_ls.bgp_ls_instance_id, areas
+                );
+            } else {
+                println!(
+                    "  bgp-ls:       on (AS={} BGP-LS-ID={} areas={})",
+                    as_n, cfg.bgp_ls.bgp_ls_id, areas
+                );
+            }
         } else {
             println!("  bgp-ls:       off");
         }
@@ -3738,6 +3750,11 @@ fn pump_session(
 pub(crate) struct BgplsDriver {
     as_number: u32,
     bgp_ls_id: u32,
+    /// RFC 9552 §3.2 BGP-LS Instance-ID — carried in every emitted
+    /// NLRI's `identifier` field, sourced from the operator's
+    /// `[bgp_ls] instance_id` configuration. Defaults to 0 (the
+    /// RFC 9552 §3.2 single-instance recommendation).
+    instance_id: u64,
     areas: Vec<u32>,
     cache: HashMap<u32, BgplsAreaCache>,
     /// Last projected EPE `(BgpLsNlri, BgpLsAttr)` pair set, so
@@ -3780,6 +3797,7 @@ impl BgplsDriver {
         Self {
             as_number: cfg.effective_as_number(local_as),
             bgp_ls_id: cfg.bgp_ls_id,
+            instance_id: cfg.bgp_ls_instance_id,
             areas: cfg.areas.clone(),
             cache: HashMap::new(),
             epe_pairs: Vec::new(),
@@ -3829,7 +3847,7 @@ impl BgplsDriver {
                 area_id,
                 self.as_number,
                 self.bgp_ls_id,
-                0,
+                self.instance_id,
                 &mut entry.nlris,
             );
             // The End.X projection is a no-op for OSPFv2 areas (the
@@ -3841,7 +3859,7 @@ impl BgplsDriver {
                 area_id,
                 self.as_number,
                 self.bgp_ls_id,
-                0,
+                self.instance_id,
                 &mut entry.end_x_pairs,
             );
             entry.version = version;
@@ -3875,8 +3893,12 @@ impl BgplsDriver {
         if session_hash == self.epe_session_hash {
             return;
         }
-        let epe_diff =
-            router.bgpls_republish_epe(self.as_number, self.bgp_ls_id, 0, &mut self.epe_pairs);
+        let epe_diff = router.bgpls_republish_epe(
+            self.as_number,
+            self.bgp_ls_id,
+            self.instance_id,
+            &mut self.epe_pairs,
+        );
         self.epe_session_hash = session_hash;
         if !epe_diff.added.is_empty()
             || !epe_diff.removed.is_empty()
