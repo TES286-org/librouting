@@ -5,6 +5,7 @@
 bindings/lr-python/src/librouting/_generated_*.py
 bindings/lr-python/build
 bindings/lr-python/dist
+bindings/lr-python/src/librouting.egg-info
 bindings/lr-go/liblr_ffi.*
 Cargo.lock.bak
 *.swp

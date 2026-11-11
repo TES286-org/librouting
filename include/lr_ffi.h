@@ -4422,18 +4422,133 @@ typedef struct OpaqueRtrClient {
 typedef struct OpaqueRtrClient *lr_rtr_client_t;
 
 /**
+ * One BGPsec Router Key entry (RFC 8210 §5.10) — the cache's
+ * attestation for one `(ski, asn)` pair.
+ *
+ * The wire identity is `(ski, asn)` (RFC 8210 §5.10 scopes a key by
+ * that pair); the `subject_public_key_info` is the full DER
+ * `subjectPublicKeyInfo` blob the cache vouches for. The SPKI is
+ * variable-length; the FFI heap-allocates one buffer per delta and
+ * carries the pointer + length inline. The pointer is owned by the
+ * step that produced the delta — the embedder must NOT free it; the
+ * step's [`lr_rtr_client_step_free`] call reclaims every SPKI buffer
+ * in one pass.
+ */
+typedef struct lr_router_key_entry_t {
+  /**
+   * RFC 8210 §5.10: the 20-byte SHA-1 hash of the SPKI. The cache
+   * identifies the key by this hash; the client treats it as the
+   * primary identity inside one ASN.
+   */
+  uint8_t ski[20];
+  /**
+   * The AS number the router key is valid for. §5.10 scopes a key
+   * by `(ski, asn)`; two keys with the same SKI for different ASNs
+   * are distinct records.
+   */
+  uint32_t asn;
+  /**
+   * Heap-allocated, NUL-free `subjectPublicKeyInfo` blob the cache
+   * attests (DER tag + length + value). Owned by the step that
+   * produced the delta; valid until [`lr_rtr_client_step_free`]
+   * runs. NULL when `subject_public_key_info_len == 0` (an empty
+   * SPKI is wire-valid as a withdrawal target).
+   */
+  uint8_t *subject_public_key_info;
+  /**
+   * Length of `subject_public_key_info` in bytes. Zero when the
+   * entry carries no SPKI (a withdrawal or a malformed PDU the
+   * client still surfaced for symmetry with the Rust API).
+   */
+  uintptr_t subject_public_key_info_len;
+} lr_router_key_entry_t;
+
+/**
+ * One Router Key delta at a completed sync (RFC 8210 §5.10):
+ * `announce != 0` adds the entry to the authoritative set,
+ * `announce == 0` removes it. Mirrors [`lr_roa_delta_t`] for the
+ * §5.10 Router Key PDU.
+ */
+typedef struct lr_router_key_delta_t {
+  /**
+   * `0` = withdraw, anything else = announce.
+   */
+  uint8_t announce;
+  /**
+   * The record the delta applies to.
+   */
+  struct lr_router_key_entry_t entry;
+} lr_router_key_delta_t;
+
+/**
+ * One ASPA record (RFC 8210 §5.11, SIDROPS ASPA profile) — the
+ * cache's attestation for one customer ASN's provider set.
+ *
+ * The wire identity is `customer_asn` (§5.11: "A withdrawal deletes
+ * the entire ASPA object for the customer ASN"); the `providers`
+ * array carries the provider ASNs the cache attests, in ascending
+ * order (the Rust side canonicalises to a `BTreeSet<u32>` so two
+ * announcements with the same providers in different wire order
+ * compare equal). The providers array is heap-allocated and owned
+ * by the step that produced the delta — the embedder must NOT free
+ * it; the step's [`lr_rtr_client_step_free`] call reclaims every
+ * providers buffer in one pass.
+ */
+typedef struct lr_aspa_entry_t {
+  /**
+   * The customer AS the providers are attested for. The wire
+   * identity of an ASPA record.
+   */
+  uint32_t customer_asn;
+  /**
+   * Heap-allocated, ascending-order provider ASN array. Owned by
+   * the step that produced the delta; valid until
+   * [`lr_rtr_client_step_free`] runs. NULL when
+   * `provider_count == 0` (an empty provider set is wire-valid as
+   * "the customer is not a provider of any AS" per §5.11).
+   */
+  uint32_t *providers;
+  /**
+   * Number of providers in the `providers` array.
+   */
+  uintptr_t provider_count;
+} lr_aspa_entry_t;
+
+/**
+ * One ASPA delta at a completed sync (RFC 8210 §5.11):
+ * `announce != 0` adds the entry to the authoritative set,
+ * `announce == 0` removes it. Mirrors [`lr_roa_delta_t`] for the
+ * §5.11 ASPA PDU.
+ */
+typedef struct lr_aspa_delta_t {
+  /**
+   * `0` = withdraw, anything else = announce.
+   */
+  uint8_t announce;
+  /**
+   * The record the delta applies to.
+   */
+  struct lr_aspa_entry_t entry;
+} lr_aspa_delta_t;
+
+/**
  * One `ClientStep` projection — what the embedder should do after
  * one protocol step. The `send_bytes` field carries the wire bytes
  * to transmit (NULL `lr_bytes_t` when empty); `roa_deltas` carries
- * the atomic ROA deltas at End of Data; `logs` carries the
- * diagnostic log lines the state machine produced; the boolean
+ * the atomic ROA deltas at End of Data; `router_key_deltas` carries
+ * the RFC 8210 §5.10 BGPsec Router Key attestation; `aspa_deltas`
+ * carries the §5.11 ASPA provider-set attestation; `logs` carries
+ * the diagnostic log lines the state machine produced; the boolean
  * flags surface `synced` / `drop` / `expired`.
  *
  * # Ownership
  *
- * `send_bytes`, `roa_deltas` and `logs` are caller-owned. Free
- * them all with a single [`lr_rtr_client_step_free`] call. The
- * accessor [`lr_rtr_client_step_roa_delta_at`] and
+ * `send_bytes`, `roa_deltas`, `router_key_deltas`, `aspa_deltas` and
+ * `logs` are caller-owned. Free them all with a single
+ * [`lr_rtr_client_step_free`] call. The accessors
+ * [`lr_rtr_client_step_roa_delta_at`],
+ * [`lr_rtr_client_step_router_key_delta_at`],
+ * [`lr_rtr_client_step_aspa_delta_at`] and
  * [`lr_rtr_client_step_log_at`] borrow the arrays in place — they
  * do not allocate, and the arrays they read from stay owned by the
  * step until [`lr_rtr_client_step_free`] runs.
@@ -4479,6 +4594,30 @@ typedef struct lr_rtr_client_step_t {
    * [`lr_rtr_client_step_free`].
    */
   char **logs;
+  /**
+   * Number of BGPsec Router Key deltas in this step (RFC 8210
+   * §5.10 — zero unless `synced`, always zero for v0 caches).
+   */
+  uintptr_t router_key_delta_count;
+  /**
+   * Number of ASPA deltas in this step (RFC 8210 §5.11 — zero
+   * unless `synced`, always zero for v0/v1 caches).
+   */
+  uintptr_t aspa_delta_count;
+  /**
+   * Owned flat array of `router_key_delta_count`
+   * [`lr_router_key_delta_t`] values. NULL when
+   * `router_key_delta_count == 0`. Each entry's SPKI buffer and
+   * the array itself are freed by [`lr_rtr_client_step_free`].
+   */
+  struct lr_router_key_delta_t *router_key_deltas;
+  /**
+   * Owned flat array of `aspa_delta_count` [`lr_aspa_delta_t`]
+   * values. NULL when `aspa_delta_count == 0`. Each entry's
+   * providers array and the array itself are freed by
+   * [`lr_rtr_client_step_free`].
+   */
+  struct lr_aspa_delta_t *aspa_deltas;
 } lr_rtr_client_step_t;
 
 /**
@@ -19704,6 +19843,50 @@ int32_t lr_rtr_client_step_roa_delta_at(const struct lr_rtr_client_step_t *step,
                                         struct lr_roa_delta_t *out);
 
 /**
+ * Reclaim one BGPsec Router Key delta by index (RFC 8210 §5.10).
+ * Copies the value into `*out`. The SPKI bytes stay owned by the
+ * step — `out->entry.subject_public_key_info` points into the
+ * step's heap allocation and stays valid until
+ * [`lr_rtr_client_step_free`] runs; the caller must NOT free the
+ * pointer.
+ *
+ * Returns `0` on success, `LR_ERR_NULL` (-1) on a NULL `step` or
+ * `out`, `LR_ERR_INVALID_HANDLE` (-2) on an out-of-bounds index.
+ *
+ * # Safety
+ * `step` must point to a `lr_rtr_client_step_t` returned by
+ * [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+ * yet freed. `out` must point to a writable
+ * `lr_router_key_delta_t`. The `subject_public_key_info` pointer
+ * inside `*out` borrows from the step and is invalidated by
+ * [`lr_rtr_client_step_free`].
+ */
+int32_t lr_rtr_client_step_router_key_delta_at(const struct lr_rtr_client_step_t *step,
+                                               uintptr_t index,
+                                               struct lr_router_key_delta_t *out);
+
+/**
+ * Reclaim one ASPA delta by index (RFC 8210 §5.11). Copies the
+ * value into `*out`. The provider ASN array stays owned by the
+ * step — `out->entry.providers` points into the step's heap
+ * allocation and stays valid until [`lr_rtr_client_step_free`]
+ * runs; the caller must NOT free the pointer.
+ *
+ * Returns `0` on success, `LR_ERR_NULL` (-1) on a NULL `step` or
+ * `out`, `LR_ERR_INVALID_HANDLE` (-2) on an out-of-bounds index.
+ *
+ * # Safety
+ * `step` must point to a `lr_rtr_client_step_t` returned by
+ * [`lr_rtr_client_poll`] or [`lr_rtr_client_on_pdu_raw`] and not
+ * yet freed. `out` must point to a writable `lr_aspa_delta_t`. The
+ * `providers` pointer inside `*out` borrows from the step and is
+ * invalidated by [`lr_rtr_client_step_free`].
+ */
+int32_t lr_rtr_client_step_aspa_delta_at(const struct lr_rtr_client_step_t *step,
+                                         uintptr_t index,
+                                         struct lr_aspa_delta_t *out);
+
+/**
  * Read one log line by index into `out_buf` (NUL-terminated).
  * Returns the length needed (excluding the NUL) — call with
  * `cap=0` to size. `0` is also returned on a NULL `step` or
@@ -19723,11 +19906,14 @@ uintptr_t lr_rtr_client_step_log_at(const struct lr_rtr_client_step_t *step,
 
 /**
  * Free every owned field of a `lr_rtr_client_step_t`: the
- * `send_bytes`, the `roa_deltas` array and the `logs` array
- * (including every C string inside it). Safe to call with NULL.
- * After this returns, the step's pointer fields are NULL and the
- * counts are zero — the embedder may let the step go out of scope
- * without further cleanup.
+ * `send_bytes`, the `roa_deltas` array, the `router_key_deltas`
+ * array (including every SPKI buffer inside each entry), the
+ * `aspa_deltas` array (including every providers buffer inside
+ * each entry), and the `logs` array (including every C string
+ * inside it). Safe to call with NULL. After this returns, the
+ * step's pointer fields are NULL and the counts are zero — the
+ * embedder may let the step go out of scope without further
+ * cleanup.
  *
  * # Safety
  * `step` must point to a `lr_rtr_client_step_t` returned by
