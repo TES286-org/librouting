@@ -487,6 +487,8 @@ jobs:
           - aarch64-unknown-linux-gnu
           - x86_64-pc-windows-gnu
           - riscv64gc-unknown-linux-gnu
+          - powerpc64le-unknown-linux-gnu
+          - s390x-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -506,7 +508,11 @@ jobs:
             libgcc-11-dev-arm64-cross \
             gcc-mingw-w64-x86-64 \
             gcc-riscv64-linux-gnu \
-            libc6-dev-riscv64-cross
+            libc6-dev-riscv64-cross \
+            gcc-powerpc64le-linux-gnu \
+            libc6-dev-ppc64el-cross \
+            gcc-s390x-linux-gnu \
+            libc6-dev-s390x-cross
       - name: cargo build (${{ matrix.target }})
         timeout-minutes: 20
         run: cargo build --workspace --target ${{ matrix.target }} --all-features
@@ -514,6 +520,8 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+          CARGO_TARGET_POWERPC64LE_UNKNOWN_LINUX_GNU_LINKER: powerpc64le-linux-gnu-gcc
+          CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
 
   # Intel macOS coverage now that the macos-13 (Intel) native job is
   # retired (see cross-platform job). The macos-14 (Apple Silicon)
@@ -633,6 +641,150 @@ jobs:
         # MPLS label-stack path end-to-end. Same script the windows-
         # interop and macos-interop jobs run.
         timeout-minutes: 5
+        run: ./tests/interop/labeled_unicast.sh
+
+  # Native build + test on IBM Power (ppc64le) and IBM Z (s390x)
+  # hardware. IBM provides free ephemeral GitHub Actions runners for
+  # these architectures through the IBM Power-Z GitHub App (issue #95,
+  # https://github.com/marketplace/power-z-gha-runner,
+  # https://github.com/IBM/actionspz). Three runner labels are
+  # available as of issue #95:
+  #   - ubuntu-26.04-ppc64le      — IBM POWER9 (little-endian, ppc64le)
+  #   - ubuntu-26.04-ppc64le-p10  — IBM POWER10 (little-endian, ppc64le)
+  #   - ubuntu-26.04-s390x        — IBM Z (big-endian, s390x)
+  #
+  # Install the IBM Power-Z GitHub App on the org/repo, or the job
+  # silently skips (GitHub marks it "no runner found" after the
+  # timeout, never blocks merge) — same shape as the `riscv-native`
+  # job above.
+  #
+  # Toolchain choice: both `powerpc64le-unknown-linux-gnu` and
+  # `s390x-unknown-linux-gnu` are Rust Tier 2 with host tools on
+  # stable (https://forge.rust-lang.org/release/platform-support.html),
+  # so the workspace's pinned stable toolchain (rust-toolchain.toml)
+  # installs a working `rustc` + `cargo` natively on each runner. No
+  # nightly-only codegen or stdlib feature is needed for the project's
+  # hot paths: the BGP/OSPF/Babel wire codecs use `to_be_bytes` /
+  # `from_be_bytes` (which the LLVM backend lowers to native loads +
+  # byte-swap instructions on every target), and the filter DSL
+  # bytecode VM is straight-line Rust that auto-vectorizes on ppc64le
+  # VSX and s390x vx without target-specific intrinsics. `RUSTFLAGS`
+  # is therefore left at its default; downstream users who want to
+  # specialise a release build for a specific CPU generation can set
+  # `RUSTFLAGS="-C target-cpu=native"` (POWER9 / POWER10 / z14 / z15)
+  # in their own build, but the CI jobs stay portable across runner
+  # generations — a CI build on a POWER9 runner must not produce
+  # artifacts that a POWER10-only feature gate rejects.
+  #
+  # The workspace is target-OS-aware, not target-arch-aware: the
+  # socket constants, struct layouts and syscall numbers are
+  # identical across every Linux architecture librouting targets
+  # (x86_64, aarch64, riscv64, ppc64le, s390x). The kernel-gated
+  # #[ignore]d tests (route_kernel, srv6_kernel, windows_route_table)
+  # self-skip when they lack CAP_NET_ADMIN or the right kernel
+  # feature, so this job runs the same `cargo nextest` + doctest
+  # pair as the Linux x86_64 `unit-tests` job without any per-arch
+  # gating. s390x is the only big-endian target in the matrix, so
+  # the byte-order discipline the wire codecs already follow (every
+  # multi-byte wire field uses `to_be_bytes` / `from_be_bytes`, never
+  # native endianness) is mechanically verified on every push —
+  # a regression that accidentally slipped in a `to_ne_bytes` on a
+  # wire path would fail its assertion on s390x where native is big-
+  # endian but the wire format is also big-endian, so the symptom
+  # differs from the little-endian targets.
+  #
+  # clippy is run here (and not just on the lint job) for the same
+  # reason `riscv-native` runs it per-arch: arch-conditional code
+  # (the `c_char` signed/unsigned cast pattern in `lr-ffi::core` and
+  # `lr-ffi::srv6`) only compiles on its own architecture, so a
+  # per-arch clippy pass catches any future arch-conditional code
+  # the x86_64-only lint job would miss. fmt is NOT re-run —
+  # rustfmt is deterministic and platform-independent.
+  #
+  # Interop labs: same two lr-vs-lr loopback labs as the
+  # `riscv-native`, `windows-interop` and `macos-interop` jobs —
+  # `two_daemon.sh` + `labeled_unicast.sh`. The full BIRD/FRR
+  # interop suite stays on the x86_64 `interop` job (the BIRD / FRR
+  # packages are not preinstalled on the IBM runner images and the
+  # IBM hardware is slow enough that the package install + every
+  # lab would dominate the job). The two smoke labs verify the
+  # daemon binary actually exchanges BGP routes end-to-end on the
+  # target architecture, not just that it compiles.
+  ibm-pz-native:
+    name: Native IBM Power-Z (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-26.04-ppc64le
+          - ubuntu-26.04-ppc64le-p10
+          - ubuntu-26.04-s390x
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ibm-pz-native-${{ matrix.runner }}"
+      - name: Install cargo-nextest
+        # cargo-nextest does not ship prebuilt binaries for ppc64le
+        # or s390x (https://github.com/nextest-rs/nextest/releases),
+        # so taiki-e/install-action falls back to a `cargo install`
+        # from source on these architectures. The from-source build
+        # pulls nextest's transitive deps once and reuses them on
+        # warm cache; cold-cache install is ~3-5 min on the IBM
+        # hardware. Same nextest rationale as the unit-tests job:
+        # nextest isolates each test in its own process so a hung
+        # test is killed within the slow-timeout window instead of
+        # stalling the whole invocation.
+        timeout-minutes: 15
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo clippy
+        # Per-arch clippy — see job-level comment. Same -D warnings
+        # gate as the lint job.
+        timeout-minutes: 45
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: cargo build (workspace)
+        # Builds the lr-daemon binary the interop steps below reuse
+        # (target/debug/lr-daemon, resolved by tests/interop/_lr_daemon.sh).
+        timeout-minutes: 45
+        run: cargo build --workspace --all-features
+      - name: cargo nextest (workspace, unit + integration)
+        # Mirrors the unit-tests job. nextest +
+        # .config/nextest.toml's slow-timeout (5 min of no stdout)
+        # bounds any single hung test to <=5 min instead of
+        # stalling the whole suite. IBM Power and Z hardware is
+        # slower than x86_64 for compute-heavy compilation and
+        # tests, so the 45 min ceiling gives ~3-6x slack over the
+        # x86_64 baseline.
+        timeout-minutes: 45
+        run: cargo nextest run --workspace --all-features
+      - name: cargo test --doc (workspace)
+        # nextest's doctest support is still unstable; the stable
+        # path is cargo test --doc.
+        timeout-minutes: 20
+        run: cargo test --doc --workspace --all-features
+      - name: Two-daemon TCP interop (lr <-> lr)
+        # Architecture smoke test #1: two lr-daemons on loopback TCP,
+        # BGP OPEN/KEEPALIVE/UPDATE exchange, route install + withdrawal
+        # on session loss. Pure userspace, no privileges, no external
+        # daemons. Same script the windows-interop, macos-interop
+        # and riscv-native jobs run — keeps the non-x86_64 coverage
+        # shape consistent.
+        timeout-minutes: 10
+        run: ./tests/interop/two_daemon.sh
+      - name: RFC 8277 labelled-unicast interop (lr <-> lr)
+        # Architecture smoke test #2: MP-BGP labelled-unicast (AFI=1,
+        # SAFI=4) route exchange between two lr-daemons. Exercises
+        # the MPLS label-stack path end-to-end. Same script the
+        # windows-interop, macos-interop and riscv-native jobs run.
+        timeout-minutes: 10
         run: ./tests/interop/labeled_unicast.sh
 
   # Native build + test on the non-Linux primary platforms. The
