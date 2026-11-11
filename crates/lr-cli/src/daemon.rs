@@ -363,6 +363,12 @@ fn print_usage() {
                                   customer | rs | rs-client | peer | unset).\n  \
                                   Per-peer override: [[peer]]\n  \
                                   exchange_plane_policy_role.\n  \
+         The TOML config also accepts: [[route-map]] + [[bgp.network_route_map]]\n  \
+                                  for FRR `network PREFIX route-map NAME`\n  \
+                                  (RFC 4271 §9.1.2.1 — apply a route-map at\n  \
+                                  origination: set actions rewrite the route\n  \
+                                  before it enters the Loc-RIB; deny verdict\n  \
+                                  suppresses origination).\n  \
          Multi-peer configuration uses [[peer]] tables in the TOML config\n  \
          (see templates/daemon.toml): per-peer remote/address, peer_as,\n  \
          auth, GTSM, maximum-prefix, Add-Path and family settings,\n  \
@@ -1403,7 +1409,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         .peers
         .iter()
         .any(|p| p.import_filter.is_some() || p.export_filter.is_some());
-    if has_policy_bindings || !cfg.route_maps.is_empty() {
+    // Build the PolicySet whenever the operator wired any policy
+    // (per-peer import/export bindings, free-standing `[[route-map]]`
+    // tables, or `[[bgp.network_route_map]]` qualifiers — the last
+    // needs the route-map lookup at origination, so it forces the
+    // PolicySet to exist even with no per-peer bindings).
+    let policy_hooks: Option<lr_policy::PolicyHooks> = if has_policy_bindings
+        || !cfg.route_maps.is_empty()
+        || !cfg.network_route_maps.is_empty()
+    {
         let mut policy_set = match daemon_policy::build_policy_set(cfg) {
             Ok(set) => set,
             Err(e) => return daemon_policy::policy_error(e),
@@ -1419,7 +1433,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         {
             let mut r = router.write().unwrap();
             r.hooks_mut().import.push(Box::new(hooks.clone()));
-            r.hooks_mut().export.push(Box::new(hooks));
+            r.hooks_mut().export.push(Box::new(hooks.clone()));
         }
         log_info!(
             Component::Policy,
@@ -1428,7 +1442,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             bound_imports,
             bound_exports
         );
-    }
+        Some(hooks)
+    } else {
+        None
+    };
 
     // ---- ROA / RFC 6811 prefix-origin validation ----
     // Build the table even when `roa_validate` is off so the filter
@@ -1799,8 +1816,63 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 Ok(p) => {
                     let (p, family) = originate_family_for(p);
                     let nh = originate_next_hop(cfg, family);
-                    r.originate_family(p, family, nh);
-                    log_info!(Component::Bgp, "originating {}", p);
+                    // Issue #92 (defects.txt L75): FRR `network PREFIX
+                    // route-map NAME` qualifier. Look up the per-network
+                    // route-map in `[[bgp.network_route_map]]` and apply
+                    // it at origination (RFC 4271 §9.1.2.1 — set
+                    // actions rewrite the route before it enters the
+                    // Loc-RIB; deny verdict suppresses origination).
+                    // When no route-map is configured for this prefix,
+                    // `originate_family` keeps the historical
+                    // behaviour (route installed with default
+                    // attributes). The finalize step already
+                    // guaranteed that a referenced route-map name
+                    // exists, so a missing lookup here is a daemon bug.
+                    let route_map_name = cfg
+                        .network_route_maps
+                        .iter()
+                        .find(|nr| nr.prefix.as_deref() == Some(net))
+                        .and_then(|nr| nr.route_map.as_deref());
+                    if let (Some(name), Some(hooks)) = (route_map_name, &policy_hooks) {
+                        if let Some(rm) = hooks.route_map(name) {
+                            match r.originate_family_with_route_map(
+                                p,
+                                family,
+                                nh,
+                                rm,
+                                hooks as &dyn lr_policy::action::MatchResolver,
+                            ) {
+                                Some(_) => log_info!(
+                                    Component::Bgp,
+                                    "originating {} (route-map {})",
+                                    p,
+                                    name
+                                ),
+                                None => log_info!(
+                                    Component::Bgp,
+                                    "network {} suppressed by route-map {} (deny verdict)",
+                                    p,
+                                    name
+                                ),
+                            }
+                        } else {
+                            // finalize_network_route_maps rejects unknown
+                            // route-map names at startup; this branch is
+                            // a daemon bug — fall back to plain
+                            // origination so the route still lands.
+                            r.originate_family(p, family, nh);
+                            log_error!(
+                                Component::Bgp,
+                                "network {}: route-map '{}' not found in PolicySet \
+                                 (originate unchanged; finalize should have caught this)",
+                                p,
+                                name
+                            );
+                        }
+                    } else {
+                        r.originate_family(p, family, nh);
+                        log_info!(Component::Bgp, "originating {}", p);
+                    }
                 }
                 Err(_) => log_error!(Component::Bgp, "invalid network '{}'", net),
             }
@@ -7535,6 +7607,38 @@ fn reload_config(
 
     let old = current_networks.lock().unwrap().clone();
     let new = fresh.networks.clone();
+    // SIGHUP reload of per-network route-maps (issue #92): the fresh
+    // config's `[[bgp.network_route_map]]` table is consulted for each
+    // newly-originated network the same way as at startup. A reload
+    // that changes only the route-map (e.g. adjusts `set_local_pref`
+    // on the referenced `[[route-map]]` entry without touching the
+    // `networks` list) does not yet trigger re-origination of the
+    // affected network — the route-map is applied once per origination
+    // event, and the existing route stays in the Loc-RIB until the
+    // prefix is removed and re-added (or the daemon is restarted).
+    // Tracked as a follow-up; the per-network route-map hook here is
+    // the right surface for that follow-up to land on.
+    let reload_hooks = if fresh.network_route_maps.is_empty() {
+        None
+    } else {
+        match daemon_policy::build_policy_set(&fresh) {
+            Ok(set) => {
+                // The reload path does not need to re-bind peer
+                // policies (the live router already has them; the
+                // import/export bindings survive SIGHUP unchanged).
+                // The PolicySet here is only consulted for the
+                // route-map lookups.
+                Some(set.hooks())
+            }
+            Err(e) => {
+                lines.push(format!(
+                    "reload: per-network route-map set build failed ({e}); \
+                     reloading networks without route-maps"
+                ));
+                None
+            }
+        }
+    };
     {
         let mut r = router.write().unwrap();
         for net in new.iter().filter(|n| !old.contains(n)) {
@@ -7542,8 +7646,40 @@ fn reload_config(
                 Ok(p) => {
                     let (p, family) = originate_family_for(p);
                     let nh = originate_next_hop(&fresh, family);
-                    r.originate_family(p, family, nh);
-                    lines.push(format!("reload: originating {}", p));
+                    let route_map_name = fresh
+                        .network_route_maps
+                        .iter()
+                        .find(|nr| nr.prefix.as_deref() == Some(net))
+                        .and_then(|nr| nr.route_map.as_deref());
+                    if let (Some(name), Some(hooks)) = (route_map_name, &reload_hooks) {
+                        if let Some(rm) = hooks.route_map(name) {
+                            match r.originate_family_with_route_map(
+                                p,
+                                family,
+                                nh,
+                                rm,
+                                hooks as &dyn lr_policy::action::MatchResolver,
+                            ) {
+                                Some(_) => lines.push(format!(
+                                    "reload: originating {} (route-map {})",
+                                    p, name
+                                )),
+                                None => lines.push(format!(
+                                    "reload: network {} suppressed by route-map {} (deny verdict)",
+                                    p, name
+                                )),
+                            }
+                        } else {
+                            r.originate_family(p, family, nh);
+                            lines.push(format!(
+                                "reload: originating {} (route-map {} not found — originate unchanged)",
+                                p, name
+                            ));
+                        }
+                    } else {
+                        r.originate_family(p, family, nh);
+                        lines.push(format!("reload: originating {}", p));
+                    }
                 }
                 Err(_) => lines.push(format!("reload: invalid network '{}' skipped", net)),
             }
