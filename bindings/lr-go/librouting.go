@@ -636,7 +636,6 @@ func (r *Router) UninstallStaticV6(prefix [16]byte, prefixLen uint8) (withdrawn 
 	return rc == 0, nil
 }
 
-
 // InstallConnectedV4 installs an interface-connected IPv4 route into
 // the Loc-RIB (BIRD "protocol direct", FRR "redistribute connected").
 // The route's protocol is Connected and its admin distance is 0, so
@@ -2182,6 +2181,47 @@ type RoaEntry struct {
 type RoaDelta struct {
 	Announce bool
 	Entry    RoaEntry
+}
+
+// RouterKeyEntry is one BGPsec Router Key entry (RFC 8210 §5.10):
+// the cache's attestation for one (ski, asn) pair. The SPKI is the
+// full DER subjectPublicKeyInfo blob the cache vouches for; the Go
+// binding copies the SPKI into a []byte so the value is owned and
+// garbage-collected independently of the step's lifetime.
+type RouterKeyEntry struct {
+	// 20-byte SHA-1 hash of the SPKI.
+	SKI [20]byte
+	// The AS number the router key is valid for.
+	ASN uint32
+	// Full DER subjectPublicKeyInfo blob (tag + length + value).
+	SubjectPublicKeyInfo []byte
+}
+
+// RouterKeyDelta is one BGPsec Router Key delta of a completed RTR
+// sync (RFC 8210 §5.10). Announce=true adds the entry to the
+// authoritative set; Announce=false removes it.
+type RouterKeyDelta struct {
+	Announce bool
+	Entry    RouterKeyEntry
+}
+
+// AspaEntry is one ASPA record (RFC 8210 §5.11, SIDROPS ASPA profile):
+// the cache's attestation for one customer ASN's provider set. The
+// providers are in ascending order (the Rust side canonicalises to a
+// BTreeSet<u32> so wire order does not affect equality).
+type AspaEntry struct {
+	// The customer AS the providers are attested for.
+	CustomerASN uint32
+	// The provider ASNs the cache attests, in ascending order.
+	Providers []uint32
+}
+
+// AspaDelta is one ASPA delta of a completed RTR sync (RFC 8210
+// §5.11). Announce=true adds the entry to the authoritative set;
+// Announce=false removes it.
+type AspaDelta struct {
+	Announce bool
+	Entry    AspaEntry
 }
 
 // RoaStore is a live, thread-safe ROA database with two provenance
@@ -4045,6 +4085,97 @@ func (s *RtrClientStep) Logs() ([]string, error) {
 	return out, nil
 }
 
+// RouterKeyDeltaCount returns the number of BGPsec Router Key
+// deltas in this step (RFC 8210 §5.10 — zero unless Synced is true,
+// always zero for v0 caches).
+func (s *RtrClientStep) RouterKeyDeltaCount() int {
+	return int(s.step.router_key_delta_count)
+}
+
+// RouterKeyDeltaAt returns the i-th BGPsec Router Key delta (RFC
+// 8210 §5.10) and (RouterKeyDelta{}, true, nil) on success, or
+// (RouterKeyDelta{}, false, nil) on an out-of-bounds index. The
+// SPKI bytes are copied into the returned RouterKeyEntry's
+// SubjectPublicKeyInfo slice, so the value is owned and
+// garbage-collected independently of the step's lifetime.
+func (s *RtrClientStep) RouterKeyDeltaAt(i int) (RouterKeyDelta, bool, error) {
+	if i < 0 || i >= int(s.step.router_key_delta_count) {
+		return RouterKeyDelta{}, false, nil
+	}
+	var d C.struct_lr_router_key_delta_t
+	if rc := C.lr_rtr_client_step_router_key_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
+		return RouterKeyDelta{}, false, fmt.Errorf(
+			"lr_rtr_client_step_router_key_delta_at: %s (rc=%d)", LastError(), int(rc))
+	}
+	return routerKeyDeltaFromC(&d), true, nil
+}
+
+// RouterKeyDeltas returns every BGPsec Router Key delta in the step
+// as a slice. Returns nil when the step carries no Router Key deltas.
+func (s *RtrClientStep) RouterKeyDeltas() ([]RouterKeyDelta, error) {
+	n := int(s.step.router_key_delta_count)
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]RouterKeyDelta, 0, n)
+	for i := 0; i < n; i++ {
+		d, ok, err := s.RouterKeyDeltaAt(i)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// AspaDeltaCount returns the number of ASPA deltas in this step
+// (RFC 8210 §5.11 — zero unless Synced is true, always zero for
+// v0/v1 caches).
+func (s *RtrClientStep) AspaDeltaCount() int {
+	return int(s.step.aspa_delta_count)
+}
+
+// AspaDeltaAt returns the i-th ASPA delta (RFC 8210 §5.11) and
+// (AspaDelta{}, true, nil) on success, or (AspaDelta{}, false, nil)
+// on an out-of-bounds index. The provider ASNs are copied into the
+// returned AspaEntry's Providers slice, so the value is owned and
+// garbage-collected independently of the step's lifetime.
+func (s *RtrClientStep) AspaDeltaAt(i int) (AspaDelta, bool, error) {
+	if i < 0 || i >= int(s.step.aspa_delta_count) {
+		return AspaDelta{}, false, nil
+	}
+	var d C.struct_lr_aspa_delta_t
+	if rc := C.lr_rtr_client_step_aspa_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
+		return AspaDelta{}, false, fmt.Errorf(
+			"lr_rtr_client_step_aspa_delta_at: %s (rc=%d)", LastError(), int(rc))
+	}
+	return aspaDeltaFromC(&d), true, nil
+}
+
+// AspaDeltas returns every ASPA delta in the step as a slice.
+// Returns nil when the step carries no ASPA deltas.
+func (s *RtrClientStep) AspaDeltas() ([]AspaDelta, error) {
+	n := int(s.step.aspa_delta_count)
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]AspaDelta, 0, n)
+	for i := 0; i < n; i++ {
+		d, ok, err := s.AspaDeltaAt(i)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 // roaEntryFromC copies a C lr_roa_entry_t into a Go RoaEntry. The
 // address bytes are returned as 4 (IPv4) or 16 (IPv6) bytes.
 func roaEntryFromC(e *C.struct_lr_roa_entry_t) RoaEntry {
@@ -4065,5 +4196,81 @@ func roaEntryFromC(e *C.struct_lr_roa_entry_t) RoaEntry {
 		PrefixLen: uint8(e.prefix_len),
 		MaxLength: uint8(e.max_length),
 		ASN:       uint32(e.asn),
+	}
+}
+
+// routerKeyEntryFromC copies a C lr_router_key_entry_t into a Go
+// RouterKeyEntry. The SPKI bytes are copied into a fresh []byte so
+// the returned value is owned and garbage-collected independently
+// of the step's lifetime.
+func routerKeyEntryFromC(e *C.struct_lr_router_key_entry_t) RouterKeyEntry {
+	var ski [20]byte
+	for i := 0; i < 20; i++ {
+		ski[i] = byte(e.ski[i])
+	}
+	var spki []byte
+	if e.subject_public_key_info != nil && e.subject_public_key_info_len > 0 {
+		spki = make([]byte, int(e.subject_public_key_info_len))
+		// The C pointer borrows from the step's heap allocation;
+		// the Go-owned []byte is a copy, so the step can be freed
+		// without invalidating the returned entry. Element-by-element
+		// copy avoids relying on a C stdlib declaration cgo may or
+		// may not pick up across platforms.
+		base := uintptr(unsafe.Pointer(e.subject_public_key_info))
+		for i := 0; i < int(e.subject_public_key_info_len); i++ {
+			b := (*C.uint8_t)(unsafe.Pointer(base + uintptr(i)))
+			spki[i] = byte(*b)
+		}
+	}
+	return RouterKeyEntry{
+		SKI:                  ski,
+		ASN:                  uint32(e.asn),
+		SubjectPublicKeyInfo: spki,
+	}
+}
+
+// routerKeyDeltaFromC copies a C lr_router_key_delta_t into a Go
+// RouterKeyDelta.
+func routerKeyDeltaFromC(d *C.struct_lr_router_key_delta_t) RouterKeyDelta {
+	return RouterKeyDelta{
+		Announce: d.announce != 0,
+		Entry:    routerKeyEntryFromC(&d.entry),
+	}
+}
+
+// aspaEntryFromC copies a C lr_aspa_entry_t into a Go AspaEntry.
+// The provider ASNs are copied into a fresh []uint32 so the
+// returned value is owned and garbage-collected independently of
+// the step's lifetime.
+func aspaEntryFromC(e *C.struct_lr_aspa_entry_t) AspaEntry {
+	var providers []uint32
+	if e.providers != nil && e.provider_count > 0 {
+		providers = make([]uint32, int(e.provider_count))
+		// Read the C array element-by-element; the C array is
+		// uint32_t (4-byte aligned per element) and the Go slice
+		// is uint32 (also 4-byte aligned on platforms where this
+		// crate compiles).
+		for i := 0; i < int(e.provider_count); i++ {
+			// *(*C.uint32_t)(unsafe.Pointer(e.providers)) reads
+			// the i-th element through pointer arithmetic; the
+			// pointer is non-nil and the index is bounds-checked
+			// against provider_count above.
+			p := (*C.uint32_t)(unsafe.Pointer(
+				uintptr(unsafe.Pointer(e.providers)) +
+					uintptr(i)*unsafe.Sizeof(C.uint32_t(0))))
+			providers[i] = uint32(*p)
+		}
+	}
+	return AspaEntry{
+		CustomerASN: uint32(e.customer_asn),
+		Providers:   providers,
+	}
+}
+
+// aspaDeltaFromC copies a C lr_aspa_delta_t into a Go AspaDelta.
+func aspaDeltaFromC(d *C.struct_lr_aspa_delta_t) AspaDelta {
+	return AspaDelta{
+		Announce: d.announce != 0,
+		Entry:    aspaEntryFromC(&d.entry),
 	}
 }

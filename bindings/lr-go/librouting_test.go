@@ -646,6 +646,7 @@ func TestStaticRouteLifecycle(t *testing.T) {
 		t.Fatalf("repeat UninstallStaticV4: got (%v, %v), want (false, nil)", w, err)
 	}
 }
+
 // TestConnectedRouteLifecycle mirrors TestStaticRouteLifecycle for
 // the connected-route surface (BIRD `protocol direct`, FRR
 // `redistribute connected`). It installs three connected routes,
@@ -711,7 +712,6 @@ func TestConnectedRouteLifecycle(t *testing.T) {
 		t.Fatalf("repeat UninstallConnectedV4: got (%v, %v), want (false, nil)", w, err)
 	}
 }
-
 
 func TestBGPMessageEncoders(t *testing.T) {
 	// OPEN with the ASN4 capability.
@@ -2612,5 +2612,84 @@ func TestRtrClientStepRoaDeltasAfterFullSync(t *testing.T) {
 	}
 	if step.RoaDeltaCount() != 0 {
 		t.Fatalf("Poll before EoD RoaDeltaCount = %d, want 0", step.RoaDeltaCount())
+	}
+	// Router Key / ASPA counts are also zero on a fresh poll (the
+	// attestation surfaces only carry deltas at End-of-Data).
+	if step.RouterKeyDeltaCount() != 0 {
+		t.Fatalf("Poll before EoD RouterKeyDeltaCount = %d, want 0", step.RouterKeyDeltaCount())
+	}
+	if step.AspaDeltaCount() != 0 {
+		t.Fatalf("Poll before EoD AspaDeltaCount = %d, want 0", step.AspaDeltaCount())
+	}
+	// Out-of-bounds accessors return (zero, false, nil).
+	if _, ok, err := step.RouterKeyDeltaAt(0); err != nil || ok {
+		t.Fatalf("RouterKeyDeltaAt(0) on empty step = (%v, %v, %v), want (zero, false, nil)",
+			RouterKeyDelta{}, ok, err)
+	}
+	if _, ok, err := step.AspaDeltaAt(0); err != nil || ok {
+		t.Fatalf("AspaDeltaAt(0) on empty step = (%v, %v, %v), want (zero, false, nil)",
+			AspaDelta{}, ok, err)
+	}
+	// Bulk accessors on an empty step return nil without an error.
+	if rk, err := step.RouterKeyDeltas(); err != nil || rk != nil {
+		t.Fatalf("RouterKeyDeltas() on empty step = (%v, %v), want (nil, nil)", rk, err)
+	}
+	if aspa, err := step.AspaDeltas(); err != nil || aspa != nil {
+		t.Fatalf("AspaDeltas() on empty step = (%v, %v), want (nil, nil)", aspa, err)
+	}
+}
+
+// TestRtrClientStepRouterKeyAndAspaDataclassShape pins the
+// dataclass shape of the new RouterKeyEntry / RouterKeyDelta /
+// AspaEntry / AspaDelta types so a refactor that drops a field
+// breaks the test. The test does not need a wire PDU — the values
+// are constructed directly and the field accessors are exercised
+// in the round-trip helpers (the full-wire test lives in the Rust
+// FFI suite `ffi_rtr_client_step_router_key_and_aspa_deltas_after_v2_sync`).
+func TestRtrClientStepRouterKeyAndAspaDataclassShape(t *testing.T) {
+	ski := [20]byte{
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23,
+		0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+	}
+	rk := RouterKeyEntry{
+		SKI:                  ski,
+		ASN:                  64512,
+		SubjectPublicKeyInfo: []byte{0x30, 0x59, 0x04, 0x6f, 0xad, 0x12, 0x34},
+	}
+	if rk.SKI != ski {
+		t.Fatalf("RouterKeyEntry.SKI round-trip = %v, want %v", rk.SKI, ski)
+	}
+	if rk.ASN != 64512 {
+		t.Fatalf("RouterKeyEntry.ASN = %d, want 64512", rk.ASN)
+	}
+	if len(rk.SubjectPublicKeyInfo) != 7 {
+		t.Fatalf("RouterKeyEntry.SubjectPublicKeyInfo len = %d, want 7", len(rk.SubjectPublicKeyInfo))
+	}
+
+	rkd := RouterKeyDelta{Announce: true, Entry: rk}
+	if !rkd.Announce {
+		t.Fatal("RouterKeyDelta.Announce = false, want true")
+	}
+	if rkd.Entry.ASN != 64512 {
+		t.Fatalf("RouterKeyDelta.Entry.ASN = %d, want 64512", rkd.Entry.ASN)
+	}
+
+	aspa := AspaEntry{
+		CustomerASN: 65000,
+		Providers:   []uint32{65001, 65002, 65003},
+	}
+	if aspa.CustomerASN != 65000 {
+		t.Fatalf("AspaEntry.CustomerASN = %d, want 65000", aspa.CustomerASN)
+	}
+	if len(aspa.Providers) != 3 {
+		t.Fatalf("AspaEntry.Providers len = %d, want 3", len(aspa.Providers))
+	}
+
+	aspad := AspaDelta{Announce: false, Entry: aspa}
+	if aspad.Announce {
+		t.Fatal("AspaDelta.Announce = true, want false")
+	}
+	if aspad.Entry.CustomerASN != 65000 {
+		t.Fatalf("AspaDelta.Entry.CustomerASN = %d, want 65000", aspad.Entry.CustomerASN)
 	}
 }
