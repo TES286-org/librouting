@@ -94,8 +94,12 @@
 //!   converter always emits `ebgp_policy = "accept-all"`, which is
 //!   the same intent.
 //! - FRR `network PREFIX route-map NAME` → the prefix joins
-//!   `networks`; the route-map carries an unmapped note (lr's
-//!   `networks` is a plain prefix list, no per-route attribute hook).
+//!   `networks` AND one `[[bgp.network_route_map]]` row is emitted
+//!   so the daemon applies the route-map at origination (RFC 4271
+//!   §9.1.2.1 — `set` actions rewrite the route before it enters
+//!   the Loc-RIB; `deny` verdict suppresses origination). The
+//!   route-map name is resolved by the daemon's finalize step
+//!   (fail-closed on typos); see issue #92 (defects.txt L75).
 //!
 //! Policy semantics: BIRD and FRR natively accept every route a peer
 //! sends unless a filter says otherwise, which is lr's
@@ -130,7 +134,8 @@
 use std::process::ExitCode;
 
 use crate::daemon_config::{
-    AggregateSpec, BabelInterfaceSpec, OspfAreaSpec, OspfIfSpec, RedistributeSpec,
+    AggregateSpec, BabelInterfaceSpec, NetworkRouteMapSpec, OspfAreaSpec, OspfIfSpec,
+    RedistributeSpec,
 };
 use crate::translate_bird_filter::{self, BirdFilterSource, FilterRow, RoaRow};
 
@@ -282,6 +287,14 @@ pub(super) struct ConfigOut {
     /// Locally originated prefixes (FRR `network`, BIRD static
     /// `route` inside a static protocol).
     networks: Vec<String>,
+    /// FRR `network PREFIX route-map NAME` qualifiers (issue #92 —
+    /// defects.txt L75). Each entry names one prefix in `networks`
+    /// and one `route_map` already pushed to `route_maps`. The
+    /// render pass emits one `[[bgp.network_route_map]]` table per
+    /// entry; the daemon applies the route-map at origination (RFC
+    /// 4271 §9.1.2.1 — `set` actions rewrite the route before it
+    /// enters the Loc-RIB; `deny` verdict suppresses origination).
+    network_route_maps: Vec<NetworkRouteMapSpec>,
     peers: Vec<PeerOut>,
     prefix_lists: Vec<PrefixListRow>,
     as_path_lists: Vec<AsPathListRow>,
@@ -2232,16 +2245,24 @@ fn translate_frr(text: &str) -> ConfigOut {
                 // `network PREFIX` (router or address-family context)
                 // — locally originated, same as lr's `networks`. The
                 // optional `route-map NAME` qualifier (FRR's per-route
-                // attribute hook on origination) has no lr equivalent
-                // today — `[[networks]]` is a plain prefix list — so
-                // it is noted instead of silently dropped.
+                // attribute hook on origination, RFC 4271 §9.1.2.1)
+                // maps onto `[[bgp.network_route_map]]` (issue #92 —
+                // defects.txt L75); the daemon applies the route-map
+                // at origination (set actions rewrite the route
+                // before it enters the Loc-RIB; deny verdict
+                // suppresses origination). When no route-map is named,
+                // the plain prefix joins `networks` (the historical
+                // shape).
                 out.networks.push(tokens[1].to_string());
                 if let Some(idx) = tokens.iter().position(|t| *t == "route-map") {
                     if let Some(name) = tokens.get(idx + 1) {
-                        out.unmapped_global.push(format!(
-                            "network {} route-map {} — lr's `networks` has no per-route attribute hook; route-map dropped",
-                            tokens[1], name
-                        ));
+                        out.network_route_maps.push(NetworkRouteMapSpec {
+                            prefix: Some(tokens[1].to_string()),
+                            route_map: Some(name.to_string()),
+                        });
+                    } else {
+                        out.unmapped_global
+                            .push(format!("network {} route-map — missing name", tokens[1]));
                     }
                 }
             }
@@ -3486,6 +3507,22 @@ fn render(out: ConfigOut) -> String {
         }
         if agg.as_set {
             s.push_str("as_set = true\n");
+        }
+        s.push('\n');
+    }
+    // FRR `network PREFIX route-map NAME` (RFC 4271 §9.1.2.1) — the
+    // per-network route-map qualifier the daemon applies at
+    // origination. Each entry references one prefix in `networks`
+    // and one `[[route-map]]` row; the daemon's finalize step
+    // fails closed when the prefix is not in `networks` or the
+    // route-map name is unknown (issue #92 — defects.txt L75).
+    for nr in &out.network_route_maps {
+        s.push_str("[[bgp.network_route_map]]\n");
+        if let Some(p) = &nr.prefix {
+            s.push_str(&format!("prefix = {}\n", toml_str(p)));
+        }
+        if let Some(name) = &nr.route_map {
+            s.push_str(&format!("route_map = {}\n", toml_str(name)));
         }
         s.push('\n');
     }

@@ -2158,20 +2158,119 @@ fn frr_no_bgp_ebgp_requires_policy_is_silently_consumed() {
 }
 
 #[test]
-fn frr_network_with_route_map_keeps_prefix_noting_route_map() {
+fn frr_network_with_route_map_emits_bgp_network_route_map_table() {
+    // Issue #92 (defects.txt L75): FRR `network PREFIX route-map NAME`
+    // now maps onto a `[[bgp.network_route_map]]` row + the prefix
+    // joining `networks` — the daemon applies the route-map at
+    // origination (RFC 4271 §9.1.2.1). The previous shape noted the
+    // route-map as unmapped; the unmapped note is gone. The route-map
+    // is defined in the source so the roundtrip's finalize passes.
     let toml = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               network 203.0.113.0/24 route-map RM-NET\n\
+              route-map RM-NET permit 10\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
+    assert_eq!(cfg.network_route_maps.len(), 1);
+    assert_eq!(
+        cfg.network_route_maps[0].prefix.as_deref(),
+        Some("203.0.113.0/24")
+    );
+    assert_eq!(
+        cfg.network_route_maps[0].route_map.as_deref(),
+        Some("RM-NET")
+    );
+    assert!(
+        !toml.contains("# UNMAPPED: network 203.0.113.0/24 route-map RM-NET"),
+        "the route-map is no longer unmapped, got:\n{toml}"
+    );
+    assert!(
+        toml.contains("[[bgp.network_route_map]]"),
+        "rendered TOML must emit the [[bgp.network_route_map]] table, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_network_with_route_map_missing_name_notes_unmapped() {
+    // `network PREFIX route-map` without a name — the converter notes
+    // the missing name instead of emitting a `[[bgp.network_route_map]]`
+    // row whose `route_map` is empty (the daemon's finalize would
+    // reject the empty name anyway, but surfacing it at translate time
+    // keeps the diagnostic close to the offending line).
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              network 203.0.113.0/24 route-map\n\
              exit-address-family\n\
              !\n",
     ));
     let cfg = roundtrip(&toml);
     assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
     assert!(
-        toml.contains("network 203.0.113.0/24 route-map RM-NET"),
-        "expected unmapped note for the route-map, got:\n{toml}"
+        cfg.network_route_maps.is_empty(),
+        "no row emitted for a route-map with no name"
     );
+    assert!(
+        toml.contains("network 203.0.113.0/24 route-map — missing name"),
+        "expected unmapped note for the missing name, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_network_without_route_map_still_emits_just_networks() {
+    // A plain `network PREFIX` (no `route-map` qualifier) still
+    // joins `networks` and emits no `[[bgp.network_route_map]]` row —
+    // the historical behaviour is unchanged.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              network 203.0.113.0/24\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
+    assert!(
+        cfg.network_route_maps.is_empty(),
+        "plain `network PREFIX` must not emit a [[bgp.network_route_map]] row"
+    );
+    assert!(
+        !toml.contains("[[bgp.network_route_map]]"),
+        "rendered TOML must not emit the [[bgp.network_route_map]] table for a plain network, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_network_route_map_with_route_map_definition_round_trips() {
+    // `network PREFIX route-map NAME` + the route-map definition
+    // itself round-trip into a config that the daemon's finalize
+    // accepts (the route-map name resolves, the prefix is in
+    // `networks`).
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              network 203.0.113.0/24 route-map RM-NET\n\
+              route-map RM-NET permit 10\n\
+               set local-preference 200\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let mut cfg = roundtrip(&toml);
+    assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
+    assert_eq!(cfg.network_route_maps.len(), 1);
+    assert_eq!(
+        cfg.network_route_maps[0].route_map.as_deref(),
+        Some("RM-NET")
+    );
+    // The route-map definition lands on `cfg.route_maps` (the daemon
+    // parser accepts `[[route-map]]` rows). The finalize step
+    // succeeds — pin that.
+    cfg.finalize()
+        .expect("finalize accepts the round-tripped config");
 }
 
 // ---- RFC 4271 §5.1.6 + RFC 4456 §8: BIRD attribute renames ----
