@@ -3170,6 +3170,88 @@ pass `instance_id` through (or passes 0) sees no protocol-on-the-
 wire change. The change lands on `main` ahead of the next release
 tag, matching the workspace's existing semver-debt pattern.
 
+### `lr-cli`: wire `JValue::Float` / `JArray::len` through real code paths (issue #92)
+
+`crates/lr-cli/src/lrctl_json.rs:L42 | DEAD-CODE | JValue::Float
+annotated #[allow(dead_code)]; comment: "kept for forward
+compatibility - no lrctl parser emits a float today"` and
+`crates/lr-cli/src/lrctl_json.rs:L109 | DEAD-CODE | JArray::len
+annotated #[allow(dead_code)]` — the `lrctl` JSON builder declared
+both a `JValue::Float` variant and a `JArray::len` accessor that
+no production code ever reached, kept under `#[allow(dead_code)]`
+with explanatory comments. The defects were genuine: the previous
+`push_typed` (the `lrctl` parser that maps a `key=value` token to
+a typed `JValue`) tried `u64` then `i64` then fell back to `Str`,
+so a fractional value like `cpu-percent=12.3` reached the wire as
+a quoted JSON string (`"cpu-percent":"12.3"`) instead of a JSON
+number (`"cpu-percent":12.3`), and `JArray::len` had no production
+caller — `is_empty()` covered every check the parsers needed.
+
+The fix wires both through real code paths:
+
+- `push_typed` (in `crates/lr-cli/src/lrctl.rs`) tries `u64`,
+  then `i64`, then — when the value carries a `.` or `e`/`E` (a
+  new `looks_numeric` helper) and parses as a *finite* `f64` —
+  pushes it via the new `JObject::push_float` helper, producing a
+  `JValue::Float` on the wire. The `looks_numeric` gate keeps
+  `NaN` / `inf` / `-inf` (which `f64::parse` accepts) out of the
+  float arm entirely, so the writer never sees a
+  `JValue::Float(f64::NAN)`; the `is_finite()` guard inside the
+  float arm is a second line of defence for direct `push_float`
+  callers.
+- The `JValue::Float` writer (in
+  `crates/lr-cli/src/lrctl_json.rs::write_compact`) now guards
+  non-finite values: a `JValue::Float(f64::NAN)` / `±Infinity`
+  (which `push_typed` never constructs but `push_float` might) emits
+  `null` instead of `NaN` / `inf` — the JSON grammar (ECMA-404 §9)
+  forbids non-finite numbers, and ECMAScript's `JSON.stringify`
+  does the same `null` mapping. The previous `write!(out, "{f}")`
+  would silently produce invalid JSON for any non-finite input.
+- `JArray::len` is now used in `parse_show_status_body` and
+  `parse_routes_count_body` to surface a new `protocol_count`
+  top-level integer field alongside the per-protocol array — a
+  monitoring/alerting consumer can read `protocol_count` to alert
+  on a count delta (e.g. "expected 3 protocols, got N") without
+  parsing the array. The count is read off the same array the
+  serializer iterates, not a hand-maintained counter that could
+  drift if the parsing loop ever grows more push sites.
+- The `#[allow(dead_code)]` annotations on `JValue::Float` and
+  `JArray::len` are removed; the explanatory comments now describe
+  the real callers (and the JSON-grammar contract the writer
+  enforces) instead of "kept for forward compatibility".
+
+Tests: `crates/lr-cli/src/lrctl_json.rs::tests` gains four new
+unit tests (`float_finite_renders_as_json_number`,
+`float_non_finite_renders_as_null`, `push_float_round_trips_through_object`,
+`push_float_non_finite_emits_null_through_object`) covering the
+finite-path rendering, the non-finite `null` mapping, and the
+`push_float` helper. `crates/lr-cli/src/lrctl_json.rs::tests` also
+gains `array_len_counts_pushed_items` for the previously-dead
+`JArray::len` accessor. `crates/lr-cli/src/lrctl.rs` gains a new
+`push_typed_tests` module with six tests:
+`decimal_fraction_becomes_float_not_string`,
+`scientific_notation_becomes_float`,
+`negative_fraction_becomes_float`,
+`nan_and_infinity_stay_as_strings`,
+`integer_values_stay_as_integers` (regression guard for the
+existing integer-parsing behaviour, so a future change to the
+float arm does not silently widen the integer paths), and
+`jarray_len_counts_items`.
+
+The `cargo test -p lr-cli` suite (762 tests across all bins +
+integration tests) passes; `cargo clippy -p lr-cli --bins --tests
+-- -D warnings` is clean; `cargo fmt -p lr-cli --check` is clean.
+
+No public Rust API shape change (`JValue` / `JObject` / `JArray`
+are `pub` inside the `lr-cli` binary crate, not a library; the
+`push_float` helper is a new public method on a `pub` type, which
+is a non-breaking additive change for the crate's internal API);
+no C ABI change (the `lrctl_json` module is not in the FFI surface);
+no protocol-on-the-wire change (the daemon's status-line output is
+unchanged; only the `lrctl --json` proxy's *interpretation* of that
+output is more faithful for fractional values, plus the new
+`protocol_count` field which is additive). No version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
