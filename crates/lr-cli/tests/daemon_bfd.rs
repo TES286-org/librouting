@@ -71,7 +71,13 @@ impl Drop for Daemon {
             kill(self.pid(), 15);
         }
         let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.log);
+        // Preserve the capture log when the test is unwinding so the
+        // daemon's stderr/stdout tail is available for triage on a
+        // remote CI runner. On a clean exit the file is removed as
+        // before — keeping temp-dir hygiene tight for the green run.
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_file(&self.log);
+        }
     }
 }
 
@@ -83,26 +89,25 @@ const SIGSTOP: i32 = 19;
 
 /// Read a log file until it contains every needle (bounded wait).
 ///
-/// The ceiling is 60 s (was 30 s): the BFD bring-up sequence (Down →
-/// Init → Up) on the self-hosted s390x runner (IBM Z hardware,
-/// ~3-6× slower than x86_64 for cold-cache compile + BFD UDP packet
-/// exchange) can take ~25-35 s on the listener side before the first
-/// `-> Up` transition surfaces, because both `lr-daemon` processes
-/// spawn in parallel and the BFD FSM only starts exchanging packets
-/// once both daemons have finished their startup sequence (load
-/// config, install connected routes, bind TCP listener, bind BFD
-/// UDP socket). 30 s occasionally tripped the s390x runner before
-/// the FSM completed its initial cycle.
+/// The ceiling is 90 s (was 30 s, then 60 s): the BFD bring-up
+/// sequence (Down, then Init, then Up) on the self-hosted s390x
+/// runner (IBM Z hardware, ~3-6x slower than x86_64 for cold-cache
+/// compile + BFD UDP packet exchange) can take longer than the
+/// x86_64 baseline. The previous 30 s ceiling tripped immediately;
+/// 60 s was still not enough on some runs. 90 s gives ~3x slack
+/// over the worst observed 60 s timeout while staying well within
+/// the nextest slow-timeout (5 min) and the job's
+/// `timeout-minutes: 90` ceiling.
 ///
 /// The same ceiling is reused for the fast-fail detection wait
-/// (`Up -> Down` + `session ended`) — the BFD detection itself is
-/// ~0.3 s (3 × 100 ms), so the wait returns on the first poll that
+/// (`Up to Down` + `session ended`) - the BFD detection itself is
+/// ~0.3 s (3 x 100 ms), so the wait returns on the first poll that
 /// observes the Down transition (typically within 1 s of the
-/// SIGSTOP). The 60 s ceiling is just the bound; the actual
+/// SIGSTOP). The 90 s ceiling is just the bound; the actual
 /// detection-time assertion (`elapsed < Duration::from_secs(5)`)
 /// is unchanged.
 fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut text = String::new();
     while Instant::now() < deadline {
         text = std::fs::read_to_string(path).unwrap_or_default();
@@ -112,6 +117,35 @@ fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("log never contained all of {needles:?}; last: {text}");
+}
+
+/// Same as `wait_log_all` but on failure also dumps the sibling
+/// daemon's log tail so a BFD bring-up failure on a remote CI
+/// runner (s390x) is triageable from the panic message alone -
+/// without needing to reproduce locally. The BFD protocol is
+/// bidirectional: a failure on A's side is often visible in B's
+/// log (e.g. B never received A's BFD packet, or B's BFD listener
+/// never started).
+fn wait_log_all_with_sibling(
+    path: &std::path::Path,
+    needles: &[&str],
+    sibling: &std::path::Path,
+    sibling_label: &str,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        text = std::fs::read_to_string(path).unwrap_or_default();
+        if needles.iter().all(|n| text.contains(n)) {
+            return text;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let sibling_tail = std::fs::read_to_string(sibling).unwrap_or_default();
+    panic!(
+        "log never contained all of {needles:?}; last: {text}\n\
+         --- {sibling_label} daemon log tail ---\n{sibling_tail}"
+    );
 }
 
 /// BFD fast-fail: a frozen peer (TCP alive, BFD silent) must tear the
@@ -183,8 +217,13 @@ fn bfd_fast_fail_beats_hold_time() {
 
     // BFD sessions come up on both sides... (any transition to Up —
     // the FSM may go Down -> Up directly per RFC 5880 §6.8.6).
-    wait_log_all(&a.log, &["[bfd]", "-> Up"]);
-    wait_log_all(&b.log, &["[bfd]", "-> Up"]);
+    // Use the sibling-dumping variant for A's bring-up wait so a
+    // failure on the s390x runner (where BFD packets may not cross
+    // the loopback the same way as x86_64) is triageable from the
+    // panic message alone — B's log tail reveals whether B's BFD
+    // listener ever started and whether B received A's BFD packet.
+    wait_log_all_with_sibling(&a.log, &["[bfd]", "-> Up"], &b.log, "B");
+    wait_log_all_with_sibling(&b.log, &["[bfd]", "-> Up"], &a.log, "A");
     // ...and BGP establishes with the route propagated to B.
     wait_log_all(&a.log, &["session #1 → Established"]);
     wait_log_all(
