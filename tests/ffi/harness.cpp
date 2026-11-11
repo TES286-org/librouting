@@ -1743,6 +1743,28 @@ int main() {
         // snapshot on a fresh client is empty.
         auto snap = c.snapshot();
         check(snap.empty(), "RtrClient snapshot empty on fresh client");
+
+        // The fresh-poll step exposes zero counts for the new
+        // attestation surfaces (RFC 8210 §5.10 Router Key and
+        // §5.11 ASPA) — the full-wire test lives in the Rust FFI
+        // suite (`ffi_rtr_client_step_router_key_and_aspa_deltas_after_v2_sync`),
+        // the C++ harness pins the empty-step shape so a regression
+        // that drops a method breaks at the wrapper layer too.
+        {
+            auto step = c.poll(0);
+            check(step.router_key_delta_count() == 0,
+                  "RtrClientStep fresh poll router_key_delta_count == 0");
+            check(step.aspa_delta_count() == 0,
+                  "RtrClientStep fresh poll aspa_delta_count == 0");
+            check(!step.router_key_delta_at(0).has_value(),
+                  "RtrClientStep out-of-bounds Router Key delta returns nullopt");
+            check(!step.aspa_delta_at(0).has_value(),
+                  "RtrClientStep out-of-bounds ASPA delta returns nullopt");
+            check(step.router_key_deltas().empty(),
+                  "RtrClientStep router_key_deltas() empty on fresh poll");
+            check(step.aspa_deltas().empty(),
+                  "RtrClientStep aspa_deltas() empty on fresh poll");
+        }
     }
 
     // ---- RIB RAII wrappers (lr_rib mirror): LocRib / AdjRibIn /

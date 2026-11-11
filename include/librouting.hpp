@@ -4851,11 +4851,11 @@ inline std::vector<std::uint8_t> seg6_netlink_last_response_bytes(Seg6Netlink& n
 // RTR client (RFC 8210 §6-§8 RPKI-Router protocol state machine).
 //
 // Mirrors the public Rust API of `lr_bgp::rtr::client::{RtrClient,
-// ClientStep, RoaDelta}` — transport-agnostic state machine: the
-// embedder owns the TCP connection, the clock and the live ROA
-// table; the C++ `RtrClient` owns the protocol (one session, one
-// authoritative ROA snapshot). RAII frees the underlying
-// `lr_rtr_client_t` on destruction.
+// ClientStep, RoaDelta, RouterKeyDelta, AspaDelta}` —
+// transport-agnostic state machine: the embedder owns the TCP
+// connection, the clock and the live ROA table; the C++ `RtrClient`
+// owns the protocol (one session, one authoritative ROA snapshot).
+// RAII frees the underlying `lr_rtr_client_t` on destruction.
 // ---------------------------------------------------------------------------
 
 /// One ROA record delta of a completed RTR sync (RFC 8210 §5.6 /
@@ -4865,10 +4865,45 @@ struct RoaDelta {
     lr_roa_entry_t entry;
 };
 
+/// One BGPsec Router Key entry (RFC 8210 §5.10). The wire identity is
+/// `(ski, asn)`; the SPKI blob is the full DER `subjectPublicKeyInfo`
+/// the cache vouches for. The C++ projection copies the SPKI into a
+/// `std::vector<std::uint8_t>` so the value is owned and freed on
+/// destruction — no manual lifetime bookkeeping is needed.
+struct RouterKeyEntry {
+    std::array<std::uint8_t, 20> ski;
+    std::uint32_t asn;
+    std::vector<std::uint8_t> subject_public_key_info;
+};
+
+/// One Router Key delta of a completed RTR sync (RFC 8210 §5.10).
+/// Mirrors `lr_bgp::rtr::client::RouterKeyDelta`.
+struct RouterKeyDelta {
+    bool announce;
+    RouterKeyEntry entry;
+};
+
+/// One ASPA record (RFC 8210 §5.11, SIDROPS ASPA profile). The wire
+/// identity is `customer_asn`; the providers are the cache-attested
+/// provider ASNs in ascending order (the Rust side canonicalises to a
+/// `BTreeSet<u32>` so wire order does not affect equality).
+struct AspaEntry {
+    std::uint32_t customer_asn;
+    std::vector<std::uint32_t> providers;
+};
+
+/// One ASPA delta of a completed RTR sync (RFC 8210 §5.11). Mirrors
+/// `lr_bgp::rtr::client::AspaDelta`.
+struct AspaDelta {
+    bool announce;
+    AspaEntry entry;
+};
+
 /// `ClientStep` projection — what the embedder should do after one
 /// protocol step. Owns the wire bytes (`send`), the ROA deltas
-/// (`roa_deltas`) and the diagnostic log lines (`logs`). All three
-/// are freed by the destructor.
+/// (`roa_deltas`), the Router Key deltas (`router_key_deltas`), the
+/// ASPA deltas (`aspa_deltas`) and the diagnostic log lines
+/// (`logs`). All five are freed by the destructor.
 class RtrClientStep {
 public:
     RtrClientStep() = default;
@@ -4930,6 +4965,81 @@ public:
             lr_roa_delta_t d{};
             if (lr_rtr_client_step_roa_delta_at(&step_, i, &d) != 0) break;
             out.push_back(RoaDelta{d.announce != 0, d.entry});
+        }
+        return out;
+    }
+
+    /// Number of BGPsec Router Key deltas in this step (RFC 8210
+    /// §5.10 — zero unless `synced`, always zero for v0 caches).
+    std::size_t router_key_delta_count() const noexcept {
+        return step_.router_key_delta_count;
+    }
+    /// Read one Router Key delta by index. Out-of-bounds indices
+    /// return std::nullopt. The SPKI bytes are copied into the
+    /// returned `RouterKeyEntry::subject_public_key_info` vector, so
+    /// the value is owned and freed on destruction — the caller does
+    /// not need to track the step's lifetime past the call.
+    std::optional<RouterKeyDelta> router_key_delta_at(std::size_t i) const {
+        if (i >= step_.router_key_delta_count) return std::nullopt;
+        lr_router_key_delta_t d{};
+        int rc = lr_rtr_client_step_router_key_delta_at(&step_, i, &d);
+        if (rc != 0) return std::nullopt;
+        RouterKeyEntry entry{};
+        std::copy(std::begin(d.entry.ski), std::end(d.entry.ski), entry.ski.begin());
+        entry.asn = d.entry.asn;
+        if (d.entry.subject_public_key_info && d.entry.subject_public_key_info_len > 0) {
+            entry.subject_public_key_info.assign(
+                d.entry.subject_public_key_info,
+                d.entry.subject_public_key_info + d.entry.subject_public_key_info_len);
+        }
+        return RouterKeyDelta{d.announce != 0, std::move(entry)};
+    }
+    /// All Router Key deltas as a single vector (convenience for
+    /// embedders that drain the whole batch in one pass).
+    std::vector<RouterKeyDelta> router_key_deltas() const {
+        std::vector<RouterKeyDelta> out;
+        out.reserve(step_.router_key_delta_count);
+        for (std::size_t i = 0; i < step_.router_key_delta_count; ++i) {
+            auto d = router_key_delta_at(i);
+            if (!d) break;
+            out.push_back(std::move(*d));
+        }
+        return out;
+    }
+
+    /// Number of ASPA deltas in this step (RFC 8210 §5.11 — zero
+    /// unless `synced`, always zero for v0/v1 caches).
+    std::size_t aspa_delta_count() const noexcept {
+        return step_.aspa_delta_count;
+    }
+    /// Read one ASPA delta by index. Out-of-bounds indices return
+    /// std::nullopt. The provider ASNs are copied into the returned
+    /// `AspaEntry::providers` vector, so the value is owned and
+    /// freed on destruction — the caller does not need to track the
+    /// step's lifetime past the call.
+    std::optional<AspaDelta> aspa_delta_at(std::size_t i) const {
+        if (i >= step_.aspa_delta_count) return std::nullopt;
+        lr_aspa_delta_t d{};
+        int rc = lr_rtr_client_step_aspa_delta_at(&step_, i, &d);
+        if (rc != 0) return std::nullopt;
+        AspaEntry entry{};
+        entry.customer_asn = d.entry.customer_asn;
+        if (d.entry.providers && d.entry.provider_count > 0) {
+            entry.providers.assign(
+                d.entry.providers,
+                d.entry.providers + d.entry.provider_count);
+        }
+        return AspaDelta{d.announce != 0, std::move(entry)};
+    }
+    /// All ASPA deltas as a single vector (convenience for
+    /// embedders that drain the whole batch in one pass).
+    std::vector<AspaDelta> aspa_deltas() const {
+        std::vector<AspaDelta> out;
+        out.reserve(step_.aspa_delta_count);
+        for (std::size_t i = 0; i < step_.aspa_delta_count; ++i) {
+            auto d = aspa_delta_at(i);
+            if (!d) break;
+            out.push_back(std::move(*d));
         }
         return out;
     }
