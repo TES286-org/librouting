@@ -382,9 +382,24 @@ pub(crate) fn reopen_log_file() -> Result<(), String> {
         .append(true)
         .open(&path)
         .map_err(|e| format!("cannot reopen log file {}: {e}", path.display()))?;
-    *LOG_FILE
+    // Flush the prior handle before swapping it out: a std::fs::File
+    // opened with O_APPEND writes through to the kernel page cache on
+    // every `write(2)`, but `writeln!`'s `write_fmt` may have left the
+    // libc FILE* equivalent (none here — Rust's `File` is unbuffered,
+    // but a `BufWriter` upstream or a future refactor could reintroduce
+    // one) with unflushed bytes. Calling `flush()` on the new handle is
+    // a no-op (it just opened), but flushing the OLD handle before
+    // `drop` closes it ensures any in-flight line reaches the rotated
+    // file before the new handle takes over. The swap is then atomic
+    // from the poller's perspective: the next `log_record` writes to
+    // the new fd, and the new fd's first write goes to the new path.
+    let mut guard = LOG_FILE
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(old) = guard.as_mut() {
+        let _ = old.flush();
+    }
+    *guard = Some(f);
     Ok(())
 }
 
