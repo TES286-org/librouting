@@ -3825,8 +3825,13 @@ impl BgplsDriver {
                 nlris: Vec::new(),
                 end_x_pairs: Vec::new(),
             });
-            let diff =
-                router.bgpls_republish(area_id, self.as_number, self.bgp_ls_id, &mut entry.nlris);
+            let diff = router.bgpls_republish(
+                area_id,
+                self.as_number,
+                self.bgp_ls_id,
+                0,
+                &mut entry.nlris,
+            );
             // The End.X projection is a no-op for OSPFv2 areas (the
             // Srv6Database is empty); running it unconditionally keeps
             // the daemon loop simple and lets the End.X projection
@@ -3836,6 +3841,7 @@ impl BgplsDriver {
                 area_id,
                 self.as_number,
                 self.bgp_ls_id,
+                0,
                 &mut entry.end_x_pairs,
             );
             entry.version = version;
@@ -3870,7 +3876,7 @@ impl BgplsDriver {
             return;
         }
         let epe_diff =
-            router.bgpls_republish_epe(self.as_number, self.bgp_ls_id, &mut self.epe_pairs);
+            router.bgpls_republish_epe(self.as_number, self.bgp_ls_id, 0, &mut self.epe_pairs);
         self.epe_session_hash = session_hash;
         if !epe_diff.added.is_empty()
             || !epe_diff.removed.is_empty()

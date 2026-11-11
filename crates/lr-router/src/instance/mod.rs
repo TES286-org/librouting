@@ -6305,7 +6305,10 @@ impl DefaultRouter {
     /// `as_number` and `bgp_ls_id` come from the daemon's BGP-LS
     /// speaker configuration; `area_id` is the OSPF area being
     /// projected and `protocol` selects the v2 / v3 LSA-type match
-    /// arms. The projection emits one Node NLRI per Router-LSA /
+    /// arms; `instance_id` is the RFC 9552 §3.2 BGP-LS Instance-ID
+    /// the daemon pins for the IGP routing domain the projection
+    /// belongs to (0 for the single-instance default). The projection
+    /// emits one Node NLRI per Router-LSA /
     /// Network-LSA, one Link NLRI per transit / P2P link in a
     /// Router-LSA, one IPv4 / IPv6 Topology Prefix NLRI per
     /// Summary-LSA / AS-External-LSA / stub link / Intra-Area-Prefix
@@ -6324,6 +6327,7 @@ impl DefaultRouter {
         area_id: u32,
         as_number: u32,
         bgp_ls_id: u32,
+        instance_id: u64,
     ) -> Option<Vec<lr_bgp::path::bgp_ls::BgpLsNlri>> {
         let area = self.ospf_areas.get(&area_id)?;
         let ctx = lsdb_to_bgpls::OspfAreaBgplsContext {
@@ -6331,7 +6335,7 @@ impl DefaultRouter {
             bgp_ls_id,
             area_id,
             protocol: area.protocol,
-            instance_id: 0,
+            instance_id,
         };
         Some(lsdb_to_bgpls::project_area_lsdb_to_bgpls(&area.lsdb, &ctx))
     }
@@ -6363,12 +6367,13 @@ impl DefaultRouter {
         area_id: u32,
         as_number: u32,
         bgp_ls_id: u32,
+        instance_id: u64,
         prev: &mut Vec<lr_bgp::path::bgp_ls::BgpLsNlri>,
     ) -> lsdb_to_bgpls::BgplsDiff {
         // Compute the current projection. Unknown area → no-op with
         // an empty diff (the daemon may be polling every area it
         // holds; a missing area is normal during shutdown).
-        let curr = match self.ospf_area_bgpls_nlris(area_id, as_number, bgp_ls_id) {
+        let curr = match self.ospf_area_bgpls_nlris(area_id, as_number, bgp_ls_id, instance_id) {
             Some(n) => n,
             None => return lsdb_to_bgpls::BgplsDiff::default(),
         };
@@ -6454,6 +6459,7 @@ impl DefaultRouter {
         area_id: u32,
         as_number: u32,
         bgp_ls_id: u32,
+        instance_id: u64,
         prev: &mut Vec<(
             lr_bgp::path::bgp_ls::BgpLsNlri,
             lr_bgp::path::bgp_ls_attr::BgpLsAttr,
@@ -6472,7 +6478,7 @@ impl DefaultRouter {
             bgp_ls_id,
             area_id,
             protocol: area.protocol,
-            instance_id: 0,
+            instance_id,
         };
         let curr = lsdb_to_bgpls::project_v3_srv6_end_x_nlris(&area.lsdb, &ctx);
         let diff = lsdb_to_bgpls::diff_bgpls_with_attrs(prev, &curr);
@@ -6582,6 +6588,7 @@ impl DefaultRouter {
         &mut self,
         as_number: u32,
         bgp_ls_id: u32,
+        instance_id: u64,
         prev: &mut Vec<(
             lr_bgp::path::bgp_ls::BgpLsNlri,
             lr_bgp::path::bgp_ls_attr::BgpLsAttr,
@@ -6591,7 +6598,7 @@ impl DefaultRouter {
         // the router again — a Vec<EpePeerSession> is a stable input
         // even if `advertise_bgpls_with_attr` mutates session state
         // mid-walk.
-        let sessions = self.epe_peer_sessions_snapshot(as_number, bgp_ls_id);
+        let sessions = self.epe_peer_sessions_snapshot(as_number, bgp_ls_id, instance_id);
         let curr = epe::project_epe_peer_sessions(&sessions);
         let diff = lsdb_to_bgpls::diff_bgpls_with_attrs(prev, &curr);
         // Update the caller's baseline before sending so a transient
@@ -6663,6 +6670,7 @@ impl DefaultRouter {
         &self,
         as_number: u32,
         bgp_ls_id: u32,
+        instance_id: u64,
     ) -> Vec<epe::EpePeerSession> {
         use lr_bgp::path::bgp_ls_attr::{BgpPeeringSid, BgpPeeringSidFlags, BgpPeeringSidValue};
         let mut out = Vec::new();
@@ -6730,7 +6738,7 @@ impl DefaultRouter {
                 peer_node_sid,
                 peer_adj_sid: None,
                 peer_set_sid: None,
-                instance_id: 0,
+                instance_id,
             });
             // `as_number` (the daemon's BGP-LS speaker AS) overrides
             // the per-session local_as when the daemon's [bgp_ls]

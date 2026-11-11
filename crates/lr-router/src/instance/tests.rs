@@ -5419,7 +5419,7 @@ fn bgpls_republish_pushes_node_nlri_to_bgp_ls_session() {
     // Republish. The driver computes the projection and pushes
     // MP_REACH_NLRI to every BGP-LS session.
     let mut prev: Vec<lr_bgp::path::bgp_ls::BgpLsNlri> = Vec::new();
-    let diff = r.bgpls_republish(0, 64512, 0x01020304, &mut prev);
+    let diff = r.bgpls_republish(0, 64512, 0x01020304, 0, &mut prev);
     assert!(
         !diff.added.is_empty(),
         "first republish must add the projected NLRIs"
@@ -5430,7 +5430,7 @@ fn bgpls_republish_pushes_node_nlri_to_bgp_ls_session() {
     assert!(!out.is_empty(), "republish must push UPDATE to the session");
     // Second republish with no LSDB change: empty diff, no UPDATE.
     let mut prev2 = prev.clone();
-    let diff2 = r.bgpls_republish(0, 64512, 0x01020304, &mut prev2);
+    let diff2 = r.bgpls_republish(0, 64512, 0x01020304, 0, &mut prev2);
     assert!(diff2.added.is_empty() && diff2.removed.is_empty());
     let out2 = r.drain_output(bgp_h);
     assert!(out2.is_empty(), "no LSDB change → no UPDATE");
@@ -5443,7 +5443,7 @@ fn bgpls_republish_pushes_node_nlri_to_bgp_ls_session() {
 fn bgpls_republish_unknown_area_is_noop() {
     let mut r = DefaultRouter::new();
     let mut prev: Vec<lr_bgp::path::bgp_ls::BgpLsNlri> = Vec::new();
-    let diff = r.bgpls_republish(999, 64512, 1, &mut prev);
+    let diff = r.bgpls_republish(999, 64512, 1, 0, &mut prev);
     assert!(diff.added.is_empty());
     assert!(diff.removed.is_empty());
     assert!(diff.unchanged.is_empty());
@@ -5584,7 +5584,7 @@ fn bgpls_republish_end_x_pushes_end_x_nlri_with_attribute_to_bgp_ls_session() {
         lr_bgp::path::bgp_ls::BgpLsNlri,
         lr_bgp::path::bgp_ls_attr::BgpLsAttr,
     )> = Vec::new();
-    let diff = r.bgpls_republish_end_x(0, 64512, 0x01020304, &mut prev);
+    let diff = r.bgpls_republish_end_x(0, 64512, 0x01020304, 0, &mut prev);
     assert_eq!(diff.added.len(), 1, "one End.X SID → one added pair");
     assert!(diff.removed.is_empty());
     assert!(diff.updated.is_empty());
@@ -5596,7 +5596,7 @@ fn bgpls_republish_end_x_pushes_end_x_nlri_with_attribute_to_bgp_ls_session() {
     );
     // Second republish with no LSDB change: empty diff, no UPDATE.
     let mut prev2 = prev.clone();
-    let diff2 = r.bgpls_republish_end_x(0, 64512, 0x01020304, &mut prev2);
+    let diff2 = r.bgpls_republish_end_x(0, 64512, 0x01020304, 0, &mut prev2);
     assert!(
         diff2.added.is_empty() && diff2.removed.is_empty() && diff2.updated.is_empty(),
         "no LSDB change → empty diff"
@@ -5622,7 +5622,7 @@ fn bgpls_republish_end_x_v2_area_is_noop() {
         lr_bgp::path::bgp_ls::BgpLsNlri,
         lr_bgp::path::bgp_ls_attr::BgpLsAttr,
     )> = Vec::new();
-    let diff = r.bgpls_republish_end_x(0, 64512, 1, &mut prev);
+    let diff = r.bgpls_republish_end_x(0, 64512, 1, 0, &mut prev);
     assert!(diff.added.is_empty());
     assert!(diff.removed.is_empty());
     assert!(diff.updated.is_empty());
@@ -5636,7 +5636,7 @@ fn bgpls_republish_end_x_unknown_area_is_noop() {
         lr_bgp::path::bgp_ls::BgpLsNlri,
         lr_bgp::path::bgp_ls_attr::BgpLsAttr,
     )> = Vec::new();
-    let diff = r.bgpls_republish_end_x(999, 64512, 1, &mut prev);
+    let diff = r.bgpls_republish_end_x(999, 64512, 1, 0, &mut prev);
     assert!(diff.added.is_empty());
     assert!(diff.removed.is_empty());
     assert!(diff.updated.is_empty());
@@ -5726,7 +5726,7 @@ fn bgpls_republish_epe_pushes_link_nlri_with_peer_node_sid_to_bgp_ls_session() {
         lr_bgp::path::bgp_ls::BgpLsNlri,
         lr_bgp::path::bgp_ls_attr::BgpLsAttr,
     )> = Vec::new();
-    let diff = r.bgpls_republish_epe(64512, 1, &mut prev);
+    let diff = r.bgpls_republish_epe(64512, 1, 0, &mut prev);
     assert_eq!(
         diff.added.len(),
         2,
@@ -5749,7 +5749,7 @@ fn bgpls_republish_epe_pushes_link_nlri_with_peer_node_sid_to_bgp_ls_session() {
     );
     // Second republish with no session change: empty diff, no UPDATE.
     let mut prev2 = prev.clone();
-    let diff2 = r.bgpls_republish_epe(64512, 1, &mut prev2);
+    let diff2 = r.bgpls_republish_epe(64512, 1, 0, &mut prev2);
     assert!(
         diff2.added.is_empty() && diff2.removed.is_empty() && diff2.updated.is_empty(),
         "no session change → empty diff"
@@ -5799,7 +5799,7 @@ fn bgpls_republish_epe_no_bgp_ls_session_is_noop_send() {
         lr_bgp::path::bgp_ls::BgpLsNlri,
         lr_bgp::path::bgp_ls_attr::BgpLsAttr,
     )> = Vec::new();
-    let diff = r.bgpls_republish_epe(64512, 1, &mut prev);
+    let diff = r.bgpls_republish_epe(64512, 1, 0, &mut prev);
     assert_eq!(
         diff.added.len(),
         1,
@@ -5834,7 +5834,7 @@ fn bgpls_republish_epe_no_established_sessions_is_empty_diff() {
         lr_bgp::path::bgp_ls::BgpLsNlri,
         lr_bgp::path::bgp_ls_attr::BgpLsAttr,
     )> = Vec::new();
-    let diff = r.bgpls_republish_epe(64512, 1, &mut prev);
+    let diff = r.bgpls_republish_epe(64512, 1, 0, &mut prev);
     assert!(diff.added.is_empty());
     assert!(diff.removed.is_empty());
     assert!(diff.updated.is_empty());
