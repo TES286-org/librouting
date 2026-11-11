@@ -639,6 +639,37 @@ impl RpkiLoop {
         if !step.roa_deltas.is_empty() {
             self.store.apply_rtr_deltas(&step.roa_deltas);
         }
+        // RFC 8210 §5.10 / §5.11: the cache's BGPsec Router Key and
+        // ASPA attestations surface as typed deltas alongside the
+        // ROA deltas. The daemon does not run BGPsec or ASPA
+        // validation (a separate slice); the counts are logged so
+        // the operator sees the attestation the cache vouches for
+        // even before the FFI carries the typed deltas through to
+        // C/Go/Python embedders (FFI follow-up, see
+        // `crates/lr-ffi/src/rtr_client.rs` module docs).
+        if !step.router_key_deltas.is_empty() {
+            let (announce, withdraw) = (
+                step.router_key_deltas.iter().filter(|d| d.announce).count(),
+                step.router_key_deltas
+                    .iter()
+                    .filter(|d| !d.announce)
+                    .count(),
+            );
+            log_info!(
+                Component::Rpki,
+                " router key deltas: +{announce} -{withdraw} (BGPsec attestation; not validated)"
+            );
+        }
+        if !step.aspa_deltas.is_empty() {
+            let (announce, withdraw) = (
+                step.aspa_deltas.iter().filter(|d| d.announce).count(),
+                step.aspa_deltas.iter().filter(|d| !d.announce).count(),
+            );
+            log_info!(
+                Component::Rpki,
+                " aspa deltas: +{announce} -{withdraw} (RFC 8210 §5.11 attestation; not validated)"
+            );
+        }
         if step.synced {
             self.last_sync = Some(Instant::now());
             log_info!(

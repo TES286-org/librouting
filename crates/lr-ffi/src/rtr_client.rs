@@ -21,6 +21,21 @@
 //! and leaving the deltas/logs arrays to be reclaimed at process
 //! exit, but the helper is the canonical path).
 //!
+//! # RFC 8210 §5.10 / §5.11 surfaces in Rust only (FFI follow-up)
+//!
+//! The Rust `ClientStep` also carries `router_key_deltas` (BGPsec
+//! Router Key attestation, RFC 8210 §5.10) and `aspa_deltas` (ASPA
+//! provider-set attestation, §5.11) — the cache's attestation is
+//! surfaced to the embedder at End of Data alongside the ROA deltas.
+//! The C `lr_rtr_client_step_t` does not yet carry those two arrays:
+//! adding new fields to the struct is a layout change for C
+//! consumers, so the surface grows in a separate minor-version
+//! follow-up that adds `lr_router_key_delta_t` / `lr_aspa_delta_t`
+//! types and `lr_rtr_client_step_router_key_delta_at` /
+//! `lr_rtr_client_step_aspa_delta_at` accessors. Until then C
+//! embedders see the ROA deltas and the §5.10/§5.11 attestation is
+//! reachable only through the Rust API.
+//!
 //! Every entry point runs inside the crate's `catch_unwind` barrier
 //! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
 //! thread-local last-error string.
