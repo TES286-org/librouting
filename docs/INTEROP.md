@@ -13,7 +13,7 @@ longer exists. The CI `lint` job runs it.
 
 ## Where the labs run
 
-Six CI jobs run lab scripts:
+Seven CI jobs run lab scripts:
 
 | Job | Runner | Labs |
 | --- | --- | --- |
@@ -23,15 +23,29 @@ Six CI jobs run lab scripts:
 | `macos-interop` | macOS | `two_daemon.sh`, `labeled_unicast.sh`, `bgp_kernel_install.sh` |
 | `windows-bird-interop` | Windows | `bird_wsl.sh` |
 | `riscv-native` | Ubuntu 24.04 on RISC-V (`ubuntu-24.04-riscv`, RISE Project) | `two_daemon.sh`, `labeled_unicast.sh` |
+| `ibm-pz-native` | Ubuntu 26.04 on IBM Power (`ubuntu-26.04-ppc64le`, `ubuntu-26.04-ppc64le-p10`) and IBM Z (`ubuntu-26.04-s390x`, IBM Power-Z GitHub App, issue #95) | `two_daemon.sh`, `labeled_unicast.sh` |
 
-The `riscv-native` job runs the same two lr-vs-lr loopback labs as
-the Windows and macOS interop jobs — a deliberately small subset,
-because RISC-V hardware is roughly 3-5x slower than x86_64 and the
-full BIRD/FRR suite would add minutes of package setup plus the
-labs' own runtime. The two labs are enough to verify the daemon
-binary actually exchanges BGP routes end-to-end on `riscv64gc`, not
-just that it compiles. The heavier labs (BIRD, FRR, kernel-route
-install, network namespaces) stay on the `interop` job.
+The `riscv-native` and `ibm-pz-native` jobs run the same two lr-vs-lr
+loopback labs as the Windows and macOS interop jobs — a deliberately
+small subset, because the non-x86_64 hardware is roughly 3-5x slower
+than x86_64 and the full BIRD/FRR suite would add minutes of package
+setup plus the labs' own runtime. The two labs are enough to verify the
+daemon binary actually exchanges BGP routes end-to-end on the target
+architecture, not just that it compiles. The heavier labs (BIRD, FRR,
+kernel-route install, network namespaces) stay on the `interop` job.
+
+The `ibm-pz-native` job is the only matrix entry that exercises a
+big-endian target (`s390x`); the same wire-format discipline the
+codecs already follow (`to_be_bytes` / `from_be_bytes` everywhere,
+never native endianness) is mechanically verified on every push on
+that architecture. The `ppc64le` and `ppc64le-p10` entries cover the
+two IBM Power generations currently offered by the IBM Power-Z
+runner service; both are little-endian, so the gap they close is
+per-arch clippy and the `c_char` signed/unsigned cast pattern in
+`lr-ffi::core` and `lr-ffi::srv6`. If the IBM Power-Z GitHub App is
+not installed on the repository, GitHub marks the job
+"no runner found" after the timeout — it never blocks merge, same
+shape as `riscv-native`.
 
 The nightly `vm-kernel-gated` job boots
 [`tests/vm/run_vm.sh`](../tests/vm/run_vm.sh) — a minimal initramfs QEMU

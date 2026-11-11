@@ -94,6 +94,96 @@ recompiling.
 
 ### Added
 
+**IBM Power (ppc64le) and IBM Z (s390x) CI matrix** (`ci`,
+[issue #95](https://github.com/TES286-org/librouting/issues/95)).
+The CI workflow in `.github/workflows/ci.yml` now covers the IBM
+Power (`ppc64le`) and IBM Z (`s390x`) architectures in two ways,
+mirroring the RISC-V (issue #65) split. The existing `cross` matrix
+job gains `powerpc64le-unknown-linux-gnu` and
+`s390x-unknown-linux-gnu` alongside `aarch64-unknown-linux-gnu`,
+`x86_64-pc-windows-gnu` and `riscv64gc-unknown-linux-gnu`: the apt
+install step pulls in `gcc-powerpc64le-linux-gnu` +
+`libc6-dev-ppc64el-cross` and `gcc-s390x-linux-gnu` +
+`libc6-dev-s390x-cross`, the per-target linker env block gains
+`CARGO_TARGET_POWERPC64LE_UNKNOWN_LINUX_GNU_LINKER=powerpc64le-linux-gnu-gcc`
+and
+`CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER=s390x-linux-gnu-gcc`,
+and `cargo build --workspace --target <target> --all-features` runs
+on every push. This is the safety net: even on a fork where the IBM
+Power-Z GitHub App is not installed, the cross-build still produces
+a linkable artifact on a plain `ubuntu-latest` runner.
+
+A new `ibm-pz-native` matrix job runs on the three IBM Power-Z
+runner labels — `ubuntu-26.04-ppc64le` (IBM POWER9),
+`ubuntu-26.04-ppc64le-p10` (IBM POWER10), `ubuntu-26.04-s390x`
+(IBM Z), provided by the IBM Power-Z GitHub App
+(<https://github.com/marketplace/power-z-gha-runner>,
+<https://github.com/IBM/actionspz>). Each matrix entry mirrors the
+existing `riscv-native` job: `cargo clippy --workspace --all-features
+--all-targets -- -D warnings`, `cargo build --workspace --all-features`,
+`cargo nextest run --workspace --all-features`, `cargo test --doc
+--workspace --all-features`, plus the two lr-vs-lr loopback interop
+smoke labs (`two_daemon.sh` + `labeled_unicast.sh`) the Windows,
+macOS and RISC-V native jobs already run, keeping the non-x86_64
+coverage shape consistent. clippy runs per-arch for the same reason
+the `cross-platform` matrix runs it per-OS: arch-conditional code
+(the `c_char` signed/unsigned cast pattern in `lr-ffi::core` and
+`lr-ffi::srv6`) only compiles on its own architecture, so a
+per-arch lint pass catches future regressions the x86_64-only
+`lint` job would miss. fmt is NOT re-run; rustfmt is deterministic
+and platform-independent, and the `lint` job already gates it on
+every push.
+
+Toolchain choice: both `powerpc64le-unknown-linux-gnu` and
+`s390x-unknown-linux-gnu` are Rust Tier 2 with host tools on stable
+(<https://forge.rust-lang.org/release/platform-support.html>), so
+the workspace's pinned stable toolchain (`rust-toolchain.toml`)
+installs a working `rustc` + `cargo` natively on each runner. No
+nightly-only codegen or stdlib feature is needed for the project's
+hot paths: the BGP/OSPF/Babel wire codecs use `to_be_bytes` /
+`from_be_bytes` (which the LLVM backend lowers to native loads +
+byte-swap instructions on every target), and the filter DSL
+bytecode VM is straight-line Rust that auto-vectorizes on ppc64le
+VSX and s390x vx without target-specific intrinsics. `RUSTFLAGS`
+is therefore left at its default; downstream users who want to
+specialise a release build for a specific CPU generation can set
+`RUSTFLAGS="-C target-cpu=native"` (POWER9 / POWER10 / z14 / z15)
+in their own build, but the CI jobs stay portable across runner
+generations.
+
+The workspace is target-OS-aware, not target-arch-aware: the
+socket constants, struct layouts and syscall numbers are identical
+across every Linux architecture librouting targets (x86_64,
+aarch64, riscv64, ppc64le, s390x). The kernel-gated `#[ignore]d`
+tests (`route_kernel`, `srv6_kernel`) self-skip when they lack
+`CAP_NET_ADMIN`, so the same `nextest` command runs unchanged on
+each IBM runner. s390x is the only big-endian target in the matrix,
+so the byte-order discipline the wire codecs already follow (every
+multi-byte wire field uses `to_be_bytes` / `from_be_bytes`, never
+native endianness) is mechanically verified on every push — a
+regression that accidentally slipped in a `to_ne_bytes` on a wire
+path would fail its assertion on s390x where native is big-endian
+but the wire format is also big-endian, so the symptom differs
+from the little-endian targets. This was verified locally with
+`cargo check --workspace --target powerpc64le-unknown-linux-gnu
+--all-features` and `cargo check --workspace --target
+s390x-unknown-linux-gnu --all-features` — both clean.
+
+If the IBM Power-Z GitHub App is not installed on the repository,
+GitHub marks the `ibm-pz-native` job "no runner found" after the
+timeout — it never blocks merge. The `cross` matrix entries cover
+the gap until the App is installed. `cargo-nextest` does not ship
+prebuilt binaries for ppc64le or s390x
+(<https://github.com/nextest-rs/nextest/releases>), so
+`taiki-e/install-action@v2` falls back to a `cargo install` from
+source on these architectures; the cold-cache install is ~3-5 min
+on the IBM hardware and reuses the cached cargo registry on
+subsequent runs.
+
+`docs/INTEROP.md` (Where the labs run) gains an `ibm-pz-native`
+row and the surrounding paragraph is updated to explain the
+deliberately small subset (mirrors the RISC-V note).
+
 **`lr-ospf` / `lr-cli` OSPFv2 SimplePassword authentication wiring
 (`SimplePassword::new`, `[ospf.auth]` TOML keys, `--ospf-auth-type` /
 `--ospf-auth-password` CLI flags)** (issue #92 — `defects.txt`
