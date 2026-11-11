@@ -3854,6 +3854,87 @@ symbol removed or modified. `scripts/abi_coverage.py HEAD`
 reports 1795 / 1795 / 1795 / 1795 coverage across C / C++ /
 Python / Go (was 1791 before this round).
 
+### `lr-bgp` (exchange-plane): HintRecord IGP cost wired through `EgressInput` (issue #92)
+
+defects.txt flagged `build_record_set` for hard-coding the
+`HintRecord`'s `igp_cost` and `damp_fom` fields to 0 ("Damping and
+IGP integration are future work — 0 is the documented 'off' value").
+The advisory `igp_cost` (design §5.1: "the sender's IGP cost from
+its decision point to this path's next hop") is the input the
+RFC 4271 §9.1.2.2 step (g) tie-break assumes "all the BGP speakers
+within an autonomous system can ascertain" but inter-AS receivers
+otherwise cannot see — exactly the use case the exchange-plane
+hint exists for. Hard-coding it to 0 meant every LRXP-carrying
+UPDATE advertised `igp_cost = 0`, so a receiver's policy that
+preferred lower-IGP-cost paths saw every LRXP path tie at 0 and
+fell through to the remaining tiebreakers — the hint was a no-op
+for the IGP dimension.
+
+This round wires the IGP metric end-to-end through the egress path:
+
+- **`lr-bgp::extensions::exchange_plane::EgressInput`** gains two
+  new public fields: `igp_metric: Option<u32>` (the IGP metric to
+  the route's NEXT_HOP, RFC 4271 §9.1.2.2 step (g)) and
+  `damp_fom: Option<u16>` (the local speaker's route-flap figure
+  of merit, RFC 2439 shape, advisory only). Both fall through to 0
+  in `build_record_set` when `None` (the documented "off" value),
+  so existing callers that do not populate the new fields see
+  byte-identical wire output.
+- **`build_record_set`** now reads `input.igp_metric.unwrap_or(0)`
+  for `HintRecord.igp_cost` and `input.damp_fom.unwrap_or(0)` for
+  `HintRecord.damp_fom`. The previous hard-coded zeros are gone;
+  the rank stays 1 (the decision process is untouched — every
+  route handed to egress is by definition the sender's rank-1 path
+  for this peer, design §5.1).
+- **`lr-bgp::fsm::BgpPeer::attach_exchange_plane`** populates
+  `igp_metric: attrs.igp_metric()` — the private `LrIgpMetric` tag
+  the embedder attached when it had access to the IGP RIB (the
+  same tag the best-path comparator reads for step 7). The
+  exchange-plane path keeps the same "absent → 0" mapping as the
+  best-path comparator so the two surfaces agree on what "no IGP
+  metric" means. `damp_fom: None` is documented as a follow-up:
+  the FSM has no access to the daemon's
+  `lr_damping::DampingTable` (the table lives in the daemon, not
+  in the per-session FSM), so the FoM field exists on `EgressInput`
+  for a follow-up that wires the daemon's
+  `lr_policy::hooks::DampingImportHook` through a private
+  attribute tag (mirroring `LrIgpMetric`); the field is here so the
+  follow-up touches only the FSM call site, not the `EgressInput`
+  shape again.
+
+5 new unit tests in
+`crates/lr-bgp/src/extensions/exchange_plane_tests.rs` pin the
+wiring:
+
+- `build_record_set_hint_igp_cost_zero_when_metric_absent` —
+  `None` IGP metric flows through to `igp_cost = 0` (the
+  documented "off" value), preserving the byte-identical output
+  for callers that do not populate the new field.
+- `build_record_set_hint_igp_cost_carries_input_metric` —
+  `Some(N)` flows through unchanged: the receiver sees the
+  sender's actual IGP cost to the route's NEXT_HOP.
+- `build_record_set_hint_damp_fom_carries_input_fom` —
+  `Some(N)` FoM flows through unchanged. The follow-up that
+  wires the daemon's `DampingTable` to populate this field
+  depends on this contract; pinning it here keeps a regression
+  that re-zeroes the FoM from silently changing the wire hint.
+- `build_record_set_hint_carries_both_metric_and_fom` — both
+  fields together; the hint carries the sender's actual IGP
+  cost and damping FoM, the receiver's policy can prefer the
+  lower-IGP-cost path and avoid a path the sender is actively
+  damping.
+- `hint_igp_cost_round_trips_through_wire` — encode → decode
+  symmetry for the newly-wired field; a regression that changes
+  the byte layout (e.g. truncating `igp_cost` to u16) would be
+  caught here, not just in the abstract `record_roundtrip`
+  test.
+
+No public Rust API surface change beyond the two new fields on
+the feature-gated `EgressInput` struct (off by default; the
+exchange-plane feature is the W6.3 prototype, not the frozen
+post-1.0 surface). No C ABI change — `EgressInput` is internal to
+the FSM, never exposed across the FFI. No version bump.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
