@@ -3416,6 +3416,71 @@ unchanged; only the `lrctl --json` proxy's *interpretation* of that
 output is more faithful for fractional values, plus the new
 `protocol_count` field which is additive). No version bump.
 
+### CI fixes — green main on macOS / RISC-V / s390x
+
+Three platform-native test jobs had been red on every push to `main`
+since commit `7a1dbf4` (and the macOS one since the SIGHUP reopen
+test landed in `69fbd02`, 2026-11-07). This entry clears all three.
+
+- **`Native (macos-latest)` — `sighup_reopens_log_file_for_rotation`**:
+  The test was failing on every macOS CI run since it landed with
+  `new log file should contain the reopen notice; got: ` (empty).
+  The diagnostic dump added in this entry revealed the real root
+  cause: the test's temp dir name
+  `lr-daemon-test-hup-logrotate-{PID}-{NANOS}` (~53 chars) combined
+  with macOS's `$TMPDIR` (`/var/folders/<xx>/<rest>/T/`, ~50 chars)
+  and `daemon.api` (11 chars) exceeded the Unix-domain-socket
+  `SUN_LEN` limit (104 bytes). The daemon died at startup with
+  `ERROR [api] runtime API: bind ...: path must be shorter than
+  SUN_LEN` — before SIGHUP could be delivered, so the new log file
+  stayed empty. The fix: the test's temp dir name is shortened to
+  `lr-hup-{PID}-{NANOS}` (~25 chars), keeping the full socket path
+  under ~80 chars on macOS. Additional hardening:
+  (a) `unique_listen_port()` helper derives a per-test port from a
+  process-wide atomic counter (range 20000..=39999) so the parallel
+  `static_routes_install_and_reload` test can no longer race for
+  the hardcoded port 17987;
+  (b) the reopen-wait ceiling widens from 15 s to 30 s (10x slack
+  over worst observed macOS SIGHUP dispatch latency);
+  (c) the reopen-wait assertion prints a diagnostic dump on failure
+  (capture log tail + rotated file tail) so a future remote-CI
+  failure is triageable from the panic message alone;
+  (d) `Daemon::Drop` preserves the capture log on
+  `std::thread::panicking()` so the file is still on disk for a CI
+  artifact scrubber;
+  (e) `daemon_logger::reopen_log_file` now `flush()`es the prior
+  `File` handle before swapping it into `LOG_FILE` — forward-looking
+  insurance against a future `BufWriter` refactor that would
+  otherwise silently lose buffered bytes on the swap.
+
+- **`Native RISC-V (ubuntu-24.04-riscv)` —
+  `static_routes_install_and_reload`**:
+  The test hardcoded `listen_addr = "127.0.0.1:17987"` — the same
+  port `sighup_reopens_log_file_for_rotation` uses. Under
+  `cargo nextest`'s parallel harness the two tests race for the
+  port; on the slower RISC-V runner the windows overlapped and
+  `static_routes_install_and_reload` died with `bind
+  127.0.0.1:17987 failed: Address already in use (os error 98)`.
+  The fix: `static_routes_install_and_reload` now uses the same
+  `unique_listen_port()` helper as the macOS test.
+
+- **`Native s390x (self-hosted) — bfd_fast_fail_beats_hold_time`**:
+  The test's `wait_log_all` helper had a 30 s ceiling (widened to
+  60 s, then 90 s in this entry). On the self-hosted s390x runner
+  (IBM Z hardware, ~3-6x slower than x86_64), the BFD bring-up
+  sequence did not reach `-> Up` within 60 s. The 90 s ceiling
+  gives ~3x slack over the worst observed timeout while staying
+  within the nextest slow-timeout (5 min) and the job's
+  `timeout-minutes: 90` ceiling. The test's bring-up wait now
+  uses a `wait_log_all_with_sibling` variant that dumps BOTH
+  daemons' log tails on failure, so a BFD packet-exchange issue
+  on s390x is triageable from the panic message alone — B's log
+  reveals whether B's BFD listener ever started and whether B
+  received A's BFD packet. The fast-fail-detection wait reuses
+  the same helper; the detection itself is ~0.3 s, so the wait
+  returns on the first poll that observes the Down transition.
+  The `elapsed < Duration::from_secs(5)` assertion is unchanged.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
