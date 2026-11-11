@@ -113,9 +113,23 @@ The CI matrix in `.github/workflows/ci.yml` must cover:
   release-blocking only when the RISE GitHub App is installed on the
   repository — otherwise GitHub marks it "no runner found" and the
   cut proceeds.
+- **IBM Power (ppc64le)** and **IBM Z (s390x)** (Linux) — covered two
+  ways: the `cross` matrix job cross-builds
+  `powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu` on
+  every push (always available, no third-party runner required), and
+  the `ibm-pz-native` matrix job runs `cargo nextest`, doctests and
+  per-arch clippy on real IBM Power (`ubuntu-26.04-ppc64le`,
+  `ubuntu-26.04-ppc64le-p10`) and IBM Z (`ubuntu-26.04-s390x`)
+  hardware via the IBM Power-Z GitHub App (issue #95). The
+  cross-build is release-blocking; the native job is release-blocking
+  only when the IBM Power-Z App is installed on the repository —
+  otherwise GitHub marks it "no runner found" and the cut proceeds.
+  s390x is the only big-endian target in the matrix; the wire-codec
+  byte-order discipline is mechanically verified on every push.
 
-All four must be green on `main` at the cut commit (the RISC-V native
-job is exempt when the RISE App is not installed).
+All five must be green on `main` at the cut commit (the RISC-V native
+job is exempt when the RISE App is not installed; the IBM Power-Z
+native job is exempt when the IBM Power-Z App is not installed).
 
 ### 2.5. ABI version pinned
 
@@ -175,7 +189,7 @@ One PR performs the cut:
 | 2.1 RFC coverage | The capability tables in [`STATUS.md`](STATUS.md) |
 | 2.2 Cross-vendor interop | The `interop` and `interop-auth` jobs in `.github/workflows/ci.yml` |
 | 2.3 Wire-level parity | `tests/interop/parity.sh`, run by the `interop` job |
-| 2.4 Cross-platform build and test | The `lint`, `unit-tests`, `cross`, `cross-macos-intel`, `cross-platform`, `msrv` and `coverage` jobs |
+| 2.4 Cross-platform build and test | The `lint`, `unit-tests`, `cross`, `cross-macos-intel`, `cross-platform`, `riscv-native`, `ibm-pz-native`, `msrv` and `coverage` jobs |
 | 2.5 ABI version pinned | The `abi-freeze` job |
 | 2.6 Documentation set | `tests/lint_docs.sh` and `tests/lint_interop_doc.sh`, run by the `lint` job |
 | 2.7 The cut PR | The `publish-release` job in `.github/workflows/release.yml` |
