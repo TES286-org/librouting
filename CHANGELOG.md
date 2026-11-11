@@ -3724,17 +3724,135 @@ pin the new contract:
 Breaking Rust API change: `ClientStep` gains two `Vec<T>`
 fields (additive under the existing `#[derive(Default)]`, so
 `ClientStep { ..Default::default() }` callers continue to
-compile). The C ABI surface is unchanged: the C
-`lr_rtr_client_step_t` struct in `crates/lr-ffi/src/rtr_client.rs`
-continues to carry the existing fields, and the new
-`router_key_deltas` / `aspa_deltas` arrays are reachable only
-through the Rust API. A separate minor-version follow-up will
-add `lr_router_key_delta_t` / `lr_aspa_delta_t` C types and
-`lr_rtr_client_step_router_key_delta_at` /
-`lr_rtr_client_step_aspa_delta_at` accessors so C/Go/Python
-embedders see the same attestation; the FFI module docs name
-this as the follow-up so an embedder reading the C header sees
-the path. No version bump in this round.
+compile). The C ABI surface for the §5.10 / §5.11 attestation
+landed in a follow-up round (see the `lr-ffi`: RFC 8210 §5.10
+Router Key + §5.11 ASPA C ABI section below); the previous
+release carried the Rust-only surface. No version bump in this
+round.
+
+### `lr-ffi`: RFC 8210 §5.10 Router Key + §5.11 ASPA C ABI (issue #92)
+
+The follow-up the previous `lr-bgp` / `lr-cli` round named: the
+C `lr_rtr_client_step_t` now carries the §5.10 Router Key and
+§5.11 ASPA attestation alongside the ROA deltas, so C / C++ / Go
+/ Python embedders see the same typed deltas the Rust API
+surfaces. The two new types are additive growth on the existing
+struct (the new fields land at the tail, the existing fields'
+offsets are unchanged); the freeze gate
+(`scripts/abi_freeze_check.py`) treats new fields and new
+symbols as silent, so no `ABI_VERSION` bump is required.
+
+What landed:
+
+- Two new C types in `crates/lr-ffi/src/rtr_client.rs`:
+  `lr_router_key_entry_t` (the 20-byte `ski`, the `asn`, and a
+  heap-allocated `subject_public_key_info` pointer + length
+  pair) and `lr_aspa_entry_t` (the `customer_asn` and a
+  heap-allocated `providers` ASN array + count pair). The
+  variable-length payloads are heap-allocated by the FFI and
+  owned by the step — the pointers stay valid until
+  `lr_rtr_client_step_free` runs; the embedder must not free
+  them per-entry.
+- Two new C delta structs wrapping the entry structs with an
+  `announce: u8` flag: `lr_router_key_delta_t` and
+  `lr_aspa_delta_t`, mirroring the existing `lr_roa_delta_t`
+  shape.
+- `lr_rtr_client_step_t` gains four new tail fields:
+  `router_key_delta_count` / `router_key_deltas` and
+  `aspa_delta_count` / `aspa_deltas`. The `Default::default()`
+  impl initializes all four to zero / NULL, so existing C
+  consumers that stack-allocate the struct and zero-init
+  continue to compile; consumers that stack-allocate without
+  zero-init (the C++ / Go / Python wrappers go through the
+  FFI's `step_to_c`, which zero-initialises before populating)
+  are unaffected. `ABI_VERSION` stays at 2.
+- Two new accessors: `lr_rtr_client_step_router_key_delta_at`
+  and `lr_rtr_client_step_aspa_delta_at`, mirroring the
+  existing `lr_rtr_client_step_roa_delta_at` shape. Each
+  copies the fixed-size entry fields plus the variable-length
+  payload pointer/length pair into `*out`. The payload
+  pointers borrow from the step and are invalidated by
+  `lr_rtr_client_step_free`; the embedder must not free them
+  per-entry.
+- `step_to_c` now projects the Rust `Vec<RouterKeyDelta>` /
+  `Vec<AspaDelta>` into the C arrays (each entry's SPKI /
+  providers buffer is heap-allocated as a separate `Box<[u8]>`
+  / `Box<[u32]>` and the C struct owns the raw pointer).
+- `lr_rtr_client_step_free` now reclaims every entry's SPKI /
+  providers buffer before dropping the delta array itself,
+  mirroring the existing `logs` reclaim pattern (each `CString`
+  is dropped before the array).
+
+The C++ wrapper (`include/librouting.hpp`) gains four new
+RAII value types — `RouterKeyEntry`, `RouterKeyDelta`,
+`AspaEntry`, `AspaDelta` — that copy the variable-length
+payloads into `std::vector<std::uint8_t>` /
+`std::vector<std::uint32_t>` so the returned value is owned
+and freed on destruction. `RtrClientStep` gains
+`router_key_delta_count` / `router_key_delta_at` /
+`router_key_deltas` and `aspa_delta_count` / `aspa_delta_at` /
+`aspa_deltas` mirroring the existing `roa_delta_*` shape.
+
+The Go binding (`bindings/lr-go/librouting.go`) gains the
+same four types (`RouterKeyEntry`, `RouterKeyDelta`,
+`AspaEntry`, `AspaDelta`) and the same six methods on
+`RtrClientStep`. The variable-length payloads are copied into
+Go-owned `[]byte` / `[]uint32` so the returned values are
+garbage-collected independently of the step's lifetime.
+
+The Python binding (`bindings/lr-python/src/librouting/rtr.py`)
+gains four frozen dataclasses (`RouterKeyEntry`,
+`RouterKeyDelta`, `AspaEntry`, `AspaDelta`) and the same six
+properties / methods on `RtrClientStep`. The variable-length
+payloads are copied into Python-owned `bytes` / `tuple[int, ...]`
+so the returned values are garbage-collected independently of
+the step's lifetime. The package re-exports the new types as
+`RtrRouterKeyDelta` / `RtrRouterKeyEntry` / `RtrAspaDelta` /
+`RtrAspaEntry` to match the existing `RtrRoaDelta` /
+`RtrRoaEntry` naming convention.
+
+2 new Rust unit tests in `crates/lr-ffi/src/rtr_client.rs`
+pin the new contract end-to-end:
+
+- `ffi_rtr_client_step_router_key_and_aspa_deltas_after_v2_sync`
+  — feeds a Cache Response + Router Key + ASPA + End-of-Data
+  sequence through `lr_rtr_client_on_pdu_raw`, then walks the
+  step's new arrays via the new accessors: SPKI bytes
+  round-trip verbatim through the FFI pointer, providers are
+  projected in ascending order (the Rust `BTreeSet<u32>`
+  canonicalisation), out-of-bounds and NULL inputs return
+  `LR_ERR_INVALID_HANDLE` / `LR_ERR_NULL`, and `step_free`
+  clears all four new fields.
+- `ffi_rtr_client_step_router_key_and_aspa_with_empty_payloads`
+  — RFC 8210 §5.11 permits an empty provider set ("the
+  customer is not a provider of any AS"); the FFI must
+  surface NULL pointers + zero counts for the empty payloads
+  without crashing on a NULL dereference. The test feeds a
+  Router Key with an empty SPKI and an ASPA with an empty
+  provider set, then verifies the accessors return NULL
+  pointers + zero lengths.
+
+The C++ harness (`tests/ffi/harness.cpp`) extends the
+existing `RtrClientStep` test with five new assertions that
+pin the empty-step shape of the new surface so a regression
+that drops a method breaks at the wrapper layer.
+
+The Go test (`bindings/lr-go/librouting_test.go`) extends
+`TestRtrClientStepRoaDeltasAfterFullSync` with five new
+assertions for the empty-step shape and adds
+`TestRtrClientStepRouterKeyAndAspaDataclassShape` to pin the
+new types' field shape. The Python test
+(`bindings/lr-python/tests/test_rtr.py`) adds
+`test_rtr_client_step_router_key_and_aspa_counts_on_fresh_poll`
+and `test_rtr_client_router_key_and_aspa_dataclass_shape`
+mirroring the Go coverage.
+
+`scripts/abi_freeze_check.py v1.0.0 HEAD` reports the new
+symbols as additive (586 new `#define`s, 284 new typedefs, 85
+new struct / enum / union / class, 1849 new functions); no
+symbol removed or modified. `scripts/abi_coverage.py HEAD`
+reports 1795 / 1795 / 1795 / 1795 coverage across C / C++ /
+Python / Go (was 1791 before this round).
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
