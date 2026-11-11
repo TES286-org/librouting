@@ -23,9 +23,9 @@ Seven CI jobs run lab scripts:
 | `macos-interop` | macOS | `two_daemon.sh`, `labeled_unicast.sh`, `bgp_kernel_install.sh` |
 | `windows-bird-interop` | Windows | `bird_wsl.sh` |
 | `riscv-native` | Ubuntu 24.04 on RISC-V (`ubuntu-24.04-riscv`, RISE Project) | `two_daemon.sh`, `labeled_unicast.sh` |
-| `ibm-pz-native` | Ubuntu 26.04 on IBM Power (`ubuntu-26.04-ppc64le`, `ubuntu-26.04-ppc64le-p10`) and IBM Z (`ubuntu-26.04-s390x`, IBM Power-Z GitHub App, issue #95) | `two_daemon.sh`, `labeled_unicast.sh` |
+| `s390x-native` | Self-hosted s390x (`[self-hosted, Linux, s390x]`, issue #95) | `two_daemon.sh`, `labeled_unicast.sh` |
 
-The `riscv-native` and `ibm-pz-native` jobs run the same two lr-vs-lr
+The `riscv-native` and `s390x-native` jobs run the same two lr-vs-lr
 loopback labs as the Windows and macOS interop jobs — a deliberately
 small subset, because the non-x86_64 hardware is roughly 3-5x slower
 than x86_64 and the full BIRD/FRR suite would add minutes of package
@@ -34,18 +34,24 @@ daemon binary actually exchanges BGP routes end-to-end on the target
 architecture, not just that it compiles. The heavier labs (BIRD, FRR,
 kernel-route install, network namespaces) stay on the `interop` job.
 
-The `ibm-pz-native` job is the only matrix entry that exercises a
+The `s390x-native` job is the only matrix entry that exercises a
 big-endian target (`s390x`); the same wire-format discipline the
 codecs already follow (`to_be_bytes` / `from_be_bytes` everywhere,
 never native endianness) is mechanically verified on every push on
-that architecture. The `ppc64le` and `ppc64le-p10` entries cover the
-two IBM Power generations currently offered by the IBM Power-Z
-runner service; both are little-endian, so the gap they close is
-per-arch clippy and the `c_char` signed/unsigned cast pattern in
-`lr-ffi::core` and `lr-ffi::srv6`. If the IBM Power-Z GitHub App is
-not installed on the repository, GitHub marks the job
+that architecture. It runs on a self-hosted s390x runner registered
+with the labels `[self-hosted, Linux, s390x]`; the IBM-provided
+`ubuntu-26.04-s390x` runner from the IBM Power-Z GitHub App is
+pending review and not yet available (issue #95). If no self-hosted
+s390x runner is registered on the repository, GitHub marks the job
 "no runner found" after the timeout — it never blocks merge, same
 shape as `riscv-native`.
+
+IBM Power (`ppc64le`) native jobs are not yet in the matrix: there
+is no self-hosted ppc64le runner registered, and the IBM-provided
+`ubuntu-26.04-ppc64le` / `ubuntu-26.04-ppc64le-p10` labels are pending
+the same review. ppc64le coverage is currently limited to the
+`cross` matrix (cross-build only, no test). The open work is tracked
+on issue #95.
 
 The nightly `vm-kernel-gated` job boots
 [`tests/vm/run_vm.sh`](../tests/vm/run_vm.sh) — a minimal initramfs QEMU

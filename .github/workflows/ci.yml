@@ -643,38 +643,41 @@ jobs:
         timeout-minutes: 5
         run: ./tests/interop/labeled_unicast.sh
 
-  # Native build + test on IBM Power (ppc64le) and IBM Z (s390x)
-  # hardware. IBM provides free ephemeral GitHub Actions runners for
-  # these architectures through the IBM Power-Z GitHub App (issue #95,
-  # https://github.com/marketplace/power-z-gha-runner,
-  # https://github.com/IBM/actionspz). Three runner labels are
-  # available as of issue #95:
-  #   - ubuntu-26.04-ppc64le      — IBM POWER9 (little-endian, ppc64le)
-  #   - ubuntu-26.04-ppc64le-p10  — IBM POWER10 (little-endian, ppc64le)
-  #   - ubuntu-26.04-s390x        — IBM Z (big-endian, s390x)
+  # Native build + test on IBM Z (s390x) hardware. As of issue #95
+  # the IBM-provided `ubuntu-26.04-s390x` runner from the IBM
+  # Power-Z GitHub App
+  # (https://github.com/marketplace/power-z-gha-runner,
+  # https://github.com/IBM/actionspz) is pending review and not
+  # available yet, so this job runs on a self-hosted s390x runner
+  # registered with the labels `[self-hosted, Linux, s390x]`. The
+  # job is gated to that runner; without a self-hosted s390x runner
+  # registered on the repository GitHub marks the job
+  # "no runner found" after the timeout — it never blocks merge.
   #
-  # Install the IBM Power-Z GitHub App on the org/repo, or the job
-  # silently skips (GitHub marks it "no runner found" after the
-  # timeout, never blocks merge) — same shape as the `riscv-native`
-  # job above.
+  # IBM Power (ppc64le) native jobs are deliberately NOT in this
+  # matrix yet: there is no self-hosted ppc64le runner registered,
+  # and the IBM-provided `ubuntu-26.04-ppc64le` /
+  # `ubuntu-26.04-ppc64le-p10` labels are pending the same review.
+  # ppc64le coverage is therefore limited to the `cross` matrix
+  # (cross-build only, no test) until a ppc64le runner lands. The
+  # open work is tracked on issue #95.
   #
-  # Toolchain choice: both `powerpc64le-unknown-linux-gnu` and
-  # `s390x-unknown-linux-gnu` are Rust Tier 2 with host tools on
-  # stable (https://forge.rust-lang.org/release/platform-support.html),
-  # so the workspace's pinned stable toolchain (rust-toolchain.toml)
-  # installs a working `rustc` + `cargo` natively on each runner. No
-  # nightly-only codegen or stdlib feature is needed for the project's
-  # hot paths: the BGP/OSPF/Babel wire codecs use `to_be_bytes` /
-  # `from_be_bytes` (which the LLVM backend lowers to native loads +
-  # byte-swap instructions on every target), and the filter DSL
-  # bytecode VM is straight-line Rust that auto-vectorizes on ppc64le
-  # VSX and s390x vx without target-specific intrinsics. `RUSTFLAGS`
-  # is therefore left at its default; downstream users who want to
-  # specialise a release build for a specific CPU generation can set
-  # `RUSTFLAGS="-C target-cpu=native"` (POWER9 / POWER10 / z14 / z15)
-  # in their own build, but the CI jobs stay portable across runner
-  # generations — a CI build on a POWER9 runner must not produce
-  # artifacts that a POWER10-only feature gate rejects.
+  # Toolchain choice: `s390x-unknown-linux-gnu` is Rust Tier 2 with
+  # host tools on stable
+  # (https://forge.rust-lang.org/release/platform-support.html), so
+  # the workspace's pinned stable toolchain (rust-toolchain.toml)
+  # installs a working `rustc` + `cargo` natively on the runner. No
+  # nightly-only codegen or stdlib feature is needed for the
+  # project's hot paths: the BGP/OSPF/Babel wire codecs use
+  # `to_be_bytes` / `from_be_bytes` (which the LLVM backend lowers
+  # to native loads + byte-swap instructions on every target), and
+  # the filter DSL bytecode VM is straight-line Rust that
+  # auto-vectorizes on s390x vx without target-specific intrinsics.
+  # `RUSTFLAGS` is therefore left at its default; downstream users
+  # who want to specialise a release build for a specific CPU
+  # generation can set `RUSTFLAGS="-C target-cpu=native"` (z14 /
+  # z15 / z16) in their own build, but the CI jobs stay portable
+  # across runner generations.
   #
   # The workspace is target-OS-aware, not target-arch-aware: the
   # socket constants, struct layouts and syscall numbers are
@@ -686,18 +689,19 @@ jobs:
   # pair as the Linux x86_64 `unit-tests` job without any per-arch
   # gating. s390x is the only big-endian target in the matrix, so
   # the byte-order discipline the wire codecs already follow (every
-  # multi-byte wire field uses `to_be_bytes` / `from_be_bytes`, never
-  # native endianness) is mechanically verified on every push —
-  # a regression that accidentally slipped in a `to_ne_bytes` on a
-  # wire path would fail its assertion on s390x where native is big-
-  # endian but the wire format is also big-endian, so the symptom
-  # differs from the little-endian targets.
+  # multi-byte wire field uses `to_be_bytes` / `from_be_bytes`,
+  # never native endianness) is mechanically verified on every
+  # push — a regression that accidentally slipped in a
+  # `to_ne_bytes` on a wire path would fail its assertion on s390x
+  # where native is big-endian but the wire format is also
+  # big-endian, so the symptom differs from the little-endian
+  # targets.
   #
   # clippy is run here (and not just on the lint job) for the same
   # reason `riscv-native` runs it per-arch: arch-conditional code
-  # (the `c_char` signed/unsigned cast pattern in `lr-ffi::core` and
-  # `lr-ffi::srv6`) only compiles on its own architecture, so a
-  # per-arch clippy pass catches any future arch-conditional code
+  # (the `c_char` signed/unsigned cast pattern in `lr-ffi::core`
+  # and `lr-ffi::srv6`) only compiles on its own architecture, so
+  # a per-arch clippy pass catches any future arch-conditional code
   # the x86_64-only lint job would miss. fmt is NOT re-run —
   # rustfmt is deterministic and platform-independent.
   #
@@ -705,22 +709,16 @@ jobs:
   # `riscv-native`, `windows-interop` and `macos-interop` jobs —
   # `two_daemon.sh` + `labeled_unicast.sh`. The full BIRD/FRR
   # interop suite stays on the x86_64 `interop` job (the BIRD / FRR
-  # packages are not preinstalled on the IBM runner images and the
-  # IBM hardware is slow enough that the package install + every
-  # lab would dominate the job). The two smoke labs verify the
-  # daemon binary actually exchanges BGP routes end-to-end on the
-  # target architecture, not just that it compiles.
-  ibm-pz-native:
-    name: Native IBM Power-Z (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
+  # packages are not necessarily preinstalled on the self-hosted
+  # runner and the s390x hardware is slow enough that the package
+  # install + every lab would dominate the job). The two smoke
+  # labs verify the daemon binary actually exchanges BGP routes
+  # end-to-end on the target architecture, not just that it
+  # compiles.
+  s390x-native:
+    name: Native s390x (self-hosted)
+    runs-on: [self-hosted, Linux, s390x]
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        runner:
-          - ubuntu-26.04-ppc64le
-          - ubuntu-26.04-ppc64le-p10
-          - ubuntu-26.04-s390x
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -729,14 +727,14 @@ jobs:
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ibm-pz-native-${{ matrix.runner }}"
+          shared-key: "s390x-native"
       - name: Install cargo-nextest
-        # cargo-nextest does not ship prebuilt binaries for ppc64le
-        # or s390x (https://github.com/nextest-rs/nextest/releases),
-        # so taiki-e/install-action falls back to a `cargo install`
-        # from source on these architectures. The from-source build
+        # cargo-nextest does not ship prebuilt binaries for s390x
+        # (https://github.com/nextest-rs/nextest/releases), so
+        # taiki-e/install-action falls back to a `cargo install`
+        # from source on this architecture. The from-source build
         # pulls nextest's transitive deps once and reuses them on
-        # warm cache; cold-cache install is ~3-5 min on the IBM
+        # warm cache; cold-cache install is ~3-5 min on the s390x
         # hardware. Same nextest rationale as the unit-tests job:
         # nextest isolates each test in its own process so a hung
         # test is killed within the slow-timeout window instead of
@@ -759,10 +757,9 @@ jobs:
         # Mirrors the unit-tests job. nextest +
         # .config/nextest.toml's slow-timeout (5 min of no stdout)
         # bounds any single hung test to <=5 min instead of
-        # stalling the whole suite. IBM Power and Z hardware is
-        # slower than x86_64 for compute-heavy compilation and
-        # tests, so the 45 min ceiling gives ~3-6x slack over the
-        # x86_64 baseline.
+        # stalling the whole suite. s390x hardware is slower than
+        # x86_64 for compute-heavy compilation and tests, so the
+        # 45 min ceiling gives ~3-6x slack over the x86_64 baseline.
         timeout-minutes: 45
         run: cargo nextest run --workspace --all-features
       - name: cargo test --doc (workspace)

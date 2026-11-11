@@ -305,25 +305,32 @@ improvements.** The CI matrix covers the IBM Power and IBM Z
 architectures in two ways as of [issue #95](https://github.com/TES286-org/librouting/issues/95):
 the `cross` matrix job cross-builds
 `powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu` on
-every push, and a native `ibm-pz-native` matrix job runs
-`cargo nextest`, doctests and per-arch clippy on real IBM Power
-(POWER9 via `ubuntu-26.04-ppc64le`, POWER10 via
-`ubuntu-26.04-ppc64le-p10`) and IBM Z (`ubuntu-26.04-s390x`)
-hardware via the IBM Power-Z GitHub App
-(<https://github.com/marketplace/power-z-gha-runner>). The
-workspace is target-OS-aware rather than target-arch-aware, so
-the Linux rtnetlink backend, the GTSM/TCP-AO socket constants and
-every protocol codec compile and run on ppc64le and s390x
+every push, and a native `s390x-native` job runs `cargo nextest`,
+doctests and per-arch clippy on a self-hosted s390x runner
+registered with the labels `[self-hosted, Linux, s390x]`. The
+IBM-provided `ubuntu-26.04-ppc64le`, `ubuntu-26.04-ppc64le-p10`
+and `ubuntu-26.04-s390x` runners from the IBM Power-Z GitHub App
+(<https://github.com/marketplace/power-z-gha-runner>) are pending
+review and not yet available; once they clear review, the
+s390x-native job can switch to (or matrix-add) the
+IBM-provided `ubuntu-26.04-s390x` label and ppc64le native jobs
+can land (issue #95 stays open to track that follow-up).
+
+The workspace is target-OS-aware rather than target-arch-aware,
+so the Linux rtnetlink backend, the GTSM/TCP-AO socket constants
+and every protocol codec compile and run on ppc64le and s390x
 unchanged. s390x is the only big-endian target in the matrix, so
 the wire-codec byte-order discipline (`to_be_bytes` /
 `from_be_bytes` everywhere, never native endianness) is
 mechanically verified on every push. What remains is to act on
-what the CI surfaces: if a kernel-gated test regresses on ppc64le
-or s390x (a `setsockopt` constant that varies by arch, a struct
-layout quirk, a byte-order slip on a wire path), file the
-finding against this entry and fix the per-arch path. Done when
-the `ibm-pz-native` job has been green on `main` for a release
-window without an arch-specific patch landing.
+what the CI surfaces: if a kernel-gated test regresses on
+ppc64le or s390x (a `setsockopt` constant that varies by arch,
+a struct layout quirk, a byte-order slip on a wire path), file
+the finding against this entry and fix the per-arch path. Done
+when the `s390x-native` job has been green on `main` for a
+release window without an arch-specific patch landing, and the
+ppc64le native job lands once the IBM-provided runner clears
+review or a self-hosted ppc64le runner is registered.
 
 **Per-protocol route attributes and an external conversion corpus.**
 `lr-daemon translate bird|frr` and the native compat loader handle the BGP

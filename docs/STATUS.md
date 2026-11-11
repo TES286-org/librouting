@@ -250,11 +250,14 @@ entire RFC scope. The major ones:
 - **IBM Power (ppc64le) and IBM Z (s390x) CI gate** — pending.
   The cross-build job is green on `main` for both
   `powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu`; the
-  gate closes when the `ibm-pz-native` matrix job (POWER9, POWER10
-  and s390x entries) has been green for a release window without an
-  arch-specific patch landing. See [`ROADMAP.md`](ROADMAP.md)
-  §Scaling, `IBM Power (ppc64le) and IBM Z (s390x) targeted
-  compatibility improvements`.
+  s390x gate closes when the `s390x-native` job (running on a
+  self-hosted s390x runner, `[self-hosted, Linux, s390x]`) has been
+  green for a release window without an arch-specific patch landing.
+  The ppc64le native gate is blocked on the IBM-provided
+  `ubuntu-26.04-ppc64le` / `ubuntu-26.04-ppc64le-p10` runner labels
+  clearing review or a self-hosted ppc64le runner being registered
+  (issue #95). See [`ROADMAP.md`](ROADMAP.md) §Scaling, `IBM Power
+  (ppc64le) and IBM Z (s390x) targeted compatibility improvements`.
 
 The deliberately out-of-scope protocols (BGPsec, NBMA, p2mp OSPF,
 OSPFv3 virtual links) are listed in [`RELEASE-PLAN.md`](RELEASE-PLAN.md)

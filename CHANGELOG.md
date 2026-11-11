@@ -92,6 +92,79 @@ delegate to `lr_policy::bgp` and `lr_policy::ospf`, so every
 existing embedder inherits the correct behaviour without
 recompiling.
 
+### Changed (CI)
+
+**s390x native CI switches to a self-hosted runner; ppc64le native
+gated on runner availability** (`ci`,
+[issue #95](https://github.com/TES286-org/librouting/issues/95)).
+The `ibm-pz-native` matrix job (introduced in the previous round
+above, running on the three IBM-provided `ubuntu-26.04-ppc64le`,
+`ubuntu-26.04-ppc64le-p10` and `ubuntu-26.04-s390x` labels from
+the IBM Power-Z GitHub App) is replaced by a single
+`s390x-native` job that runs on a self-hosted s390x runner
+registered with the labels `[self-hosted, Linux, s390x]`. The
+IBM-provided labels are pending review and not yet available, so
+the s390x gate rides on the self-hosted runner in the meantime.
+
+The ppc64le native entries are removed from the matrix until a
+runner lands: there is no self-hosted ppc64le runner registered
+yet, and the IBM-provided `ubuntu-26.04-ppc64le` /
+`ubuntu-26.04-ppc64le-p10` labels are pending the same review.
+ppc64le coverage therefore stays limited to the `cross` matrix
+(cross-build only, no test) until the IBM-provided runner clears
+review or a self-hosted ppc64le runner is registered. The open
+work is tracked on [issue #95](https://github.com/TES286-org/librouting/issues/95)
+— reopened for this follow-up.
+
+Job shape is otherwise unchanged: `cargo clippy --workspace
+--all-features --all-targets -- -D warnings`, `cargo build
+--workspace --all-features`, `cargo nextest run --workspace
+--all-features`, `cargo test --doc --workspace --all-features`,
+plus the two lr-vs-lr loopback interop smoke labs
+(`two_daemon.sh` + `labeled_unicast.sh`) the `windows-interop`,
+`macos-interop` and `riscv-native` jobs run. clippy runs per-arch
+for the same reason the `cross-platform` matrix runs it per-OS:
+arch-conditional code (the `c_char` signed/unsigned cast pattern
+in `lr-ffi::core` and `lr-ffi::srv6`) only compiles on its own
+architecture, so a per-arch lint pass catches future regressions
+the x86_64-only `lint` job would miss. fmt is NOT re-run;
+rustfmt is deterministic and platform-independent, and the `lint`
+job already gates it on every push.
+
+`s390x-unknown-linux-gnu` is Rust Tier 2 with host tools on stable
+(<https://forge.rust-lang.org/release/platform-support.html>), so
+the workspace's pinned stable toolchain (`rust-toolchain.toml`)
+installs a working `rustc` + `cargo` natively on the runner. No
+nightly-only codegen or stdlib feature is needed for the project's
+hot paths; `RUSTFLAGS` is left at its default. s390x is the only
+big-endian target in the matrix, so the wire-codec byte-order
+discipline (`to_be_bytes` / `from_be_bytes` everywhere, never
+native endianness) is mechanically verified on every push on
+that architecture.
+
+`cargo-nextest` does not ship prebuilt binaries for s390x
+(<https://github.com/nextest-rs/nextest/releases>), so
+`taiki-e/install-action@v2` falls back to a `cargo install` from
+source on this architecture; the cold-cache install is ~3-5 min
+on the s390x hardware and reuses the cached cargo registry on
+subsequent runs.
+
+If no self-hosted s390x runner is registered on the repository,
+GitHub marks the `s390x-native` job "no runner found" after the
+timeout — it never blocks merge. The `cross` matrix entry covers
+the gap until a runner is registered. Once the IBM-provided
+`ubuntu-26.04-s390x` runner clears review, the `s390x-native` job
+can switch to (or matrix-add) that label and ppc64le native jobs
+can land.
+
+`docs/INTEROP.md` (Where the labs run) replaces the `ibm-pz-native`
+row with an `s390x-native` row and adds a paragraph explaining the
+ppc64le gap. `docs/ROADMAP.md` and `docs/STATUS.md` update the
+"IBM Power (ppc64le) and IBM Z (s390x)" entry to reflect the
+self-hosted s390x runner and the ppc64le native follow-up.
+`docs/RELEASE-PLAN.md` §2.4 mirrors the change and §2.8's
+verification table renames `ibm-pz-native` to `s390x-native`.
+
 ### Added
 
 **IBM Power (ppc64le) and IBM Z (s390x) CI matrix** (`ci`,
@@ -3260,8 +3333,9 @@ pass `instance_id` through (or passes 0) sees no protocol-on-the-
 wire change. The change lands on `main` ahead of the next release
 tag, matching the workspace's existing semver-debt pattern.
 
-### `lr-cli`: wire `JValue::Float` / `JArray::len` through real code paths (issue #92)
+### `lr-cli`: wire `JValue::Float` / `JArray::len` through real code paths
 
+[Issue #92](https://github.com/TES286-org/librouting/issues/92) —
 `crates/lr-cli/src/lrctl_json.rs:L42 | DEAD-CODE | JValue::Float
 annotated #[allow(dead_code)]; comment: "kept for forward
 compatibility - no lrctl parser emits a float today"` and
