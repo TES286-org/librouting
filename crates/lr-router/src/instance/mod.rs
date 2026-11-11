@@ -1568,6 +1568,28 @@ impl DefaultRouter {
         family: NlriFamily,
         next_hop: Option<IpAddr>,
     ) -> RouteKey {
+        let route = self.build_originated_route(prefix, family, next_hop);
+        self.install_originated(route)
+    }
+
+    /// Build the [`Route`] object that [`Self::originate_family`] /
+    /// [`Self::originate_family_with_route_map`] install into the
+    /// Loc-RIB. The route carries the canonical locally-originated
+    /// attribute set (`ORIGIN = IGP`, empty `AS_PATH`, `NEXT_HOP` on
+    /// IPv4 unicast) and is ready for a route-map to mutate.
+    ///
+    /// Factored out of `originate_family` so the route-map variant
+    /// can build the route, run the route-map's `evaluate` against
+    /// it (which may rewrite `LOCAL_PREF` / `MED` / `AS_PATH` /
+    /// communities / `NEXT_HOP` / `metric` / `tag`), and then install
+    /// the mutated route — without duplicating the attribute
+    /// construction between the two paths.
+    fn build_originated_route(
+        &self,
+        prefix: Prefix,
+        family: NlriFamily,
+        next_hop: Option<IpAddr>,
+    ) -> Route {
         let key = RouteKey::new(prefix, family);
         let mut attrs = PathAttributes::new();
         attrs.insert(PathAttribute::new(
@@ -1597,8 +1619,8 @@ impl DefaultRouter {
                 ));
             }
         }
-        let route = Route {
-            key: key.clone(),
+        Route {
+            key,
             origin: RouteOrigin { proto: 2, peer: 0 }, // 2 = locally originated
             protocol: Protocol::Bgp,
             preference: lr_core::rib::Preference::new(Protocol::Bgp.default_admin_distance(), 0),
@@ -1607,13 +1629,74 @@ impl DefaultRouter {
             age_ms: 0,
             path_id: 0,
             tag: None,
-        };
+        }
+    }
+
+    /// Install a locally originated [`Route`] into the Loc-RIB,
+    /// record it on the originated set, emit a `RouteInstalled`
+    /// event, and run the export pipeline so the Adj-RIB-Out picks
+    /// it up. Shared between [`Self::originate_family`] and
+    /// [`Self::originate_family_with_route_map`].
+    fn install_originated(&mut self, route: Route) -> RouteKey {
+        let key = route.key.clone();
         self.loc_rib.install_set(&key, vec![route.clone()]);
         self.originated.insert(key.clone(), route.clone());
         self.pending_events
             .push(RouterEvent::RouteInstalled(route.clone()));
         self.export_selection(&key, &[route]);
         key
+    }
+
+    /// Originate a route for an explicit address family, applying a
+    /// route-map (RFC 4271 §9.1.2.1 — FRR `network PREFIX route-map
+    /// NAME`) at origination. The route-map's `set` actions
+    /// (`SetLocalPref` / `SetMed` / `PrependAs` / `AddCommunity` /
+    /// `SetNextHop` / `SetMetric` / `SetTag`) are applied to the
+    /// locally originated route **before** it enters the Loc-RIB, so
+    /// the modified attributes flow through every Adj-RIB-Out (the
+    /// per-session export policy is unchanged). The route-map's
+    /// `permit` / `deny` verdict gates origination: a `deny`
+    /// verdict suppresses the route entirely (returns `None`), a
+    /// `permit` verdict with no sets installs the route unchanged
+    /// (equivalent to [`Self::originate_family`]), and a fall-
+    /// through (no entry matched) installs the route unchanged.
+    ///
+    /// This is the FRR `network PREFIX route-map NAME` semantic: the
+    /// route-map is evaluated **once** at origination, not per-peer
+    /// at export. Embedders wanting per-peer policy on a locally
+    /// originated route still use the `[[peer]] import = "…"` /
+    /// `export = "…"` surface; the per-network route-map is the
+    /// hook for origin-wide attribute rewriting.
+    ///
+    /// Returns `Some(RouteKey)` when the route was originated
+    /// (route-map permitted or fell through), `None` when the
+    /// route-map denied the route (RFC 4271 §9.1.2.1: a route whose
+    /// network statement's route-map denies is not originated).
+    pub fn originate_family_with_route_map(
+        &mut self,
+        prefix: Prefix,
+        family: NlriFamily,
+        next_hop: Option<IpAddr>,
+        route_map: &lr_policy::RouteMap,
+        resolver: &dyn lr_policy::action::MatchResolver,
+    ) -> Option<RouteKey> {
+        let mut route = self.build_originated_route(prefix, family, next_hop);
+        match route_map.evaluate(&mut route, resolver) {
+            Some(false) => {
+                // Route-map denied: do not originate (RFC 4271
+                // §9.1.2.1).
+                None
+            }
+            Some(true) | None => {
+                // Route-map permitted (sets applied) or fell through
+                // (no entry matched): install the route. The fall-
+                // through case mirrors FRR's behaviour — a route-map
+                // that does not explicitly permit is still installed
+                // when the `network` statement names it; only an
+                // explicit `deny` suppresses it.
+                Some(self.install_originated(route))
+            }
+        }
     }
 
     /// Originate a route with an explicit attribute set (the BMP

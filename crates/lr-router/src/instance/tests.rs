@@ -1313,6 +1313,277 @@ fn originate_fills_rib() {
     assert_eq!(r.rib_len(), 0);
 }
 
+// ---- issue #92 (defects.txt L75): DefaultRouter::originate_family_with_route_map
+// ---- FRR `network PREFIX route-map NAME` qualifier at origination ----
+
+/// A trivial `MatchResolver` that approves every match condition. The
+/// route-map's `set` actions are what we test against (no entry-level
+/// `matches` filter), so the resolver is never consulted in these
+/// tests — but the `evaluate` API needs one to satisfy the trait.
+struct AllMatchResolver;
+impl lr_policy::action::MatchResolver for AllMatchResolver {
+    fn prefix_in(&self, _id: u32, _p: &lr_core::addr::Prefix) -> bool {
+        true
+    }
+    fn as_path_in(&self, _id: u32, _r: &Route) -> bool {
+        true
+    }
+    fn community_in(&self, _id: u32, _r: &Route) -> bool {
+        true
+    }
+    fn next_hop_in(&self, _id: u32, _r: &Route) -> bool {
+        true
+    }
+}
+
+#[test]
+fn originate_family_with_route_map_permit_installs_route() {
+    let mut r = DefaultRouter::new();
+    let mut rm = lr_policy::RouteMap::new();
+    rm.push(lr_policy::RouteMapEntry {
+        matches: Vec::new(),
+        sets: Vec::new(),
+        verdict: Some(true),
+    });
+    let key = r
+        .originate_family_with_route_map(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+            None,
+            &rm,
+            &AllMatchResolver,
+        )
+        .expect("permit installs the route");
+    assert_eq!(r.rib_len(), 1);
+    r.unoriginate(&key);
+    assert_eq!(r.rib_len(), 0);
+}
+
+#[test]
+fn originate_family_with_route_map_deny_suppresses_route() {
+    let mut r = DefaultRouter::new();
+    let mut rm = lr_policy::RouteMap::new();
+    rm.push(lr_policy::RouteMapEntry {
+        matches: Vec::new(),
+        sets: Vec::new(),
+        verdict: Some(false), // deny: do not originate
+    });
+    let key = r.originate_family_with_route_map(
+        Prefix::new_v4([203, 0, 113, 0], 24),
+        NlriFamily::IPV4_UNICAST,
+        None,
+        &rm,
+        &AllMatchResolver,
+    );
+    assert!(key.is_none(), "deny verdict suppresses origination");
+    assert_eq!(
+        r.rib_len(),
+        0,
+        "no route installed when the route-map denies"
+    );
+}
+
+#[test]
+fn originate_family_with_route_map_fallthrough_installs_route() {
+    // No entries: the route-map returns `None` (fall-through), and
+    // the route is installed unchanged — mirroring FRR's behaviour
+    // for a `network PREFIX route-map NAME` where the route-map's
+    // entries all skipped (no match) and none explicitly permitted
+    // or denied.
+    let mut r = DefaultRouter::new();
+    let rm = lr_policy::RouteMap::new();
+    let key = r
+        .originate_family_with_route_map(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+            None,
+            &rm,
+            &AllMatchResolver,
+        )
+        .expect("fall-through installs the route");
+    assert_eq!(r.rib_len(), 1);
+    r.unoriginate(&key);
+    assert_eq!(r.rib_len(), 0);
+}
+
+#[test]
+fn originate_family_with_route_map_set_local_pref_applied_before_install() {
+    // RFC 4271 §9.1.2.1: the route-map's `set` actions rewrite the
+    // route before it enters the Loc-RIB, so every Adj-RIB-Out sees
+    // the rewritten attribute. Pin the contract by originating with
+    // `SetLocalPref(200)` and checking the installed route carries
+    // `local_pref == Some(200)`.
+    use lr_policy::action::SetAction;
+    let mut r = DefaultRouter::new();
+    let mut rm = lr_policy::RouteMap::new();
+    rm.push(lr_policy::RouteMapEntry {
+        matches: Vec::new(),
+        sets: vec![SetAction::SetLocalPref(200)],
+        verdict: Some(true),
+    });
+    let key = r
+        .originate_family_with_route_map(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            &rm,
+            &AllMatchResolver,
+        )
+        .expect("permit installs the route");
+    let snap = r.rib_snapshot();
+    assert_eq!(snap.len(), 1);
+    let path: lr_bgp::path::PathAttributes = snap[0].attributes.clone().into();
+    assert_eq!(
+        path.local_pref(),
+        Some(lr_bgp::path::LocalPref(200)),
+        "set_local_pref must be applied before the route enters the Loc-RIB"
+    );
+    r.unoriginate(&key);
+}
+
+#[test]
+fn originate_family_with_route_map_set_med_applied_before_install() {
+    use lr_policy::action::SetAction;
+    let mut r = DefaultRouter::new();
+    let mut rm = lr_policy::RouteMap::new();
+    rm.push(lr_policy::RouteMapEntry {
+        matches: Vec::new(),
+        sets: vec![SetAction::SetMed(150)],
+        verdict: Some(true),
+    });
+    let key = r
+        .originate_family_with_route_map(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            &rm,
+            &AllMatchResolver,
+        )
+        .expect("permit installs the route");
+    let snap = r.rib_snapshot();
+    assert_eq!(snap.len(), 1);
+    let path: lr_bgp::path::PathAttributes = snap[0].attributes.clone().into();
+    assert_eq!(
+        path.med(),
+        Some(lr_bgp::path::Med(150)),
+        "set_med must be applied before the route enters the Loc-RIB"
+    );
+    r.unoriginate(&key);
+}
+
+#[test]
+fn originate_family_with_route_map_set_tag_applied_before_install() {
+    // SetTag does not touch a BGP path attribute; it populates the
+    // route's `tag` field directly (the OSPF external route tag —
+    // RFC 2328 §A.4.5 — that the OSPF external-LSA origination path
+    // later reads). The set is observable on the Loc-RIB snapshot
+    // via `route.tag`.
+    use lr_policy::action::SetAction;
+    let mut r = DefaultRouter::new();
+    let mut rm = lr_policy::RouteMap::new();
+    rm.push(lr_policy::RouteMapEntry {
+        matches: Vec::new(),
+        sets: vec![SetAction::SetTag(0xdead_beef)],
+        verdict: Some(true),
+    });
+    let key = r
+        .originate_family_with_route_map(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+            None,
+            &rm,
+            &AllMatchResolver,
+        )
+        .expect("permit installs the route");
+    let snap = r.rib_snapshot();
+    assert_eq!(snap.len(), 1);
+    assert_eq!(
+        snap[0].tag,
+        Some(0xdead_beef),
+        "set_tag must be applied before the route enters the Loc-RIB"
+    );
+    r.unoriginate(&key);
+}
+
+#[test]
+fn originate_family_with_route_map_prepend_as_applied_before_install() {
+    use lr_policy::action::SetAction;
+    let mut r = DefaultRouter::new();
+    let mut rm = lr_policy::RouteMap::new();
+    rm.push(lr_policy::RouteMapEntry {
+        matches: Vec::new(),
+        sets: vec![
+            SetAction::PrependAs(lr_core::addr::Asn(64512)),
+            SetAction::PrependAs(lr_core::addr::Asn(64513)),
+        ],
+        verdict: Some(true),
+    });
+    let key = r
+        .originate_family_with_route_map(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+            Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            &rm,
+            &AllMatchResolver,
+        )
+        .expect("permit installs the route");
+    let snap = r.rib_snapshot();
+    assert_eq!(snap.len(), 1);
+    let path: lr_bgp::path::PathAttributes = snap[0].attributes.clone().into();
+    let as_path = path
+        .as_path()
+        .expect("the locally-originated route carries an (initially empty) AS_PATH");
+    // AS_PATH prepend prepends to the head of the sequence, so the
+    // two `PrependAs` calls produce `[64513, 64512]` (the second
+    // prepend goes before the first) — the same shape FRR's
+    // `set as-path prepend` produces for two prepends in one
+    // route-map entry.
+    assert_eq!(
+        as_path.as_sequence(),
+        vec![lr_core::addr::Asn(64513), lr_core::addr::Asn(64512)],
+        "prepend_as must be applied before the route enters the Loc-RIB"
+    );
+    r.unoriginate(&key);
+}
+
+#[test]
+fn originate_family_with_route_map_next_hop_v6_unaffected_by_route_map() {
+    // The route-map's `set` actions do not touch the family; an IPv6
+    // route originated with a route-map still carries the right
+    // `ORIGIN` / `AS_PATH` and no `NEXT_HOP` (NEXT_HOP is injected by
+    // the egress path through MP_REACH_NLRI for non-IPv4-unicast
+    // families — see the comment in `build_originated_route`).
+    let mut r = DefaultRouter::new();
+    let mut rm = lr_policy::RouteMap::new();
+    rm.push(lr_policy::RouteMapEntry {
+        matches: Vec::new(),
+        sets: Vec::new(),
+        verdict: Some(true),
+    });
+    let key = r
+        .originate_family_with_route_map(
+            Prefix::new_v6(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                32,
+            ),
+            NlriFamily::IPV6_UNICAST,
+            Some(lr_core::addr::IpAddr::V6([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ])),
+            &rm,
+            &AllMatchResolver,
+        )
+        .expect("permit installs the route");
+    let snap = r.rib_snapshot();
+    assert_eq!(snap.len(), 1);
+    let path: lr_bgp::path::PathAttributes = snap[0].attributes.clone().into();
+    assert!(
+        path.next_hop().is_none(),
+        "v6 NEXT_HOP is not in the well-known attribute"
+    );
+    r.unoriginate(&key);
+}
+
 #[test]
 fn mrai_batches_prefix_reannouncements() {
     let mut a = DefaultRouter::new();
