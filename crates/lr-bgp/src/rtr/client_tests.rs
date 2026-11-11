@@ -407,7 +407,15 @@ fn refresh_and_expire_timers() {
 }
 
 #[test]
-fn router_key_and_aspa_are_accepted_but_unused() {
+fn router_key_and_aspa_are_surfaced_as_deltas() {
+    // RFC 8210 §5.10 (Router Key, v1+) and §5.11 (ASPA, v2+) PDUs
+    // accumulate into per-sync batches and surface as typed deltas at
+    // End of Data, mirroring the ROA path. The previous shape of this
+    // test (`router_key_and_aspa_are_accepted_but_unused`) confirmed
+    // only that the PDUs did not drop the session; the contract now
+    // pins that the deltas carry the cache's attestation through to
+    // the embedder (the client itself still does not run BGPsec or
+    // ASPA validation — that's a separate slice).
     let mut c = RtrClient::new();
     c.on_connect();
     feed(&mut c, &cache_response(1), NOW);
@@ -422,6 +430,8 @@ fn router_key_and_aspa_are_accepted_but_unused() {
         NOW,
     );
     assert!(!step.drop);
+    // Mid-batch: deltas are not populated until End of Data.
+    assert!(step.router_key_deltas.is_empty());
     let step = feed(
         &mut c,
         &RtrPdu::Aspa {
@@ -432,9 +442,311 @@ fn router_key_and_aspa_are_accepted_but_unused() {
         NOW,
     );
     assert!(!step.drop);
+    assert!(step.aspa_deltas.is_empty());
     let step = feed(&mut c, &eod(1, 1), NOW);
     assert!(step.synced);
     assert!(step.roa_deltas.is_empty());
+    // One Router Key delta (announce) and one ASPA delta (announce).
+    assert_eq!(step.router_key_deltas.len(), 1);
+    let rk = &step.router_key_deltas[0];
+    assert!(rk.announce);
+    assert_eq!(rk.entry.ski, [0u8; 20]);
+    assert_eq!(rk.entry.asn, 64512);
+    assert_eq!(rk.entry.subject_public_key_info, vec![0x30]);
+    assert_eq!(step.aspa_deltas.len(), 1);
+    let aspa = &step.aspa_deltas[0];
+    assert!(aspa.announce);
+    assert_eq!(aspa.entry.customer_asn, 64496);
+    assert_eq!(
+        aspa.entry.providers.iter().copied().collect::<Vec<_>>(),
+        vec![64500]
+    );
+    // Snapshots also reflect the authoritative sets after EoD.
+    assert_eq!(c.router_key_snapshot().len(), 1);
+    assert_eq!(c.aspa_snapshot().len(), 1);
+}
+
+#[test]
+fn router_key_withdrawal_at_next_sync_surfaces_as_remove_delta() {
+    // A Serial-Query sync that explicitly withdraws a previously
+    // announced Router Key surfaces a `RouterKeyDelta { announce:
+    // false, .. }`. The client never silently drops the cache's
+    // withdrawal even though it does not run BGPsec validation itself.
+    let mut c = RtrClient::new();
+    c.on_connect();
+    feed(&mut c, &cache_response(1), NOW);
+    feed(
+        &mut c,
+        &RtrPdu::RouterKey {
+            announce: true,
+            ski: [0u8; 20],
+            asn: 64512,
+            subject_public_key_info: vec![0x30],
+        },
+        NOW,
+    );
+    let step = feed(&mut c, &eod(1, 1), NOW);
+    assert!(step.synced);
+    assert_eq!(step.router_key_deltas.len(), 1);
+    // Second sync: the refresh poll sends a Serial Query; the cache
+    // responds with a Cache Response (the batch is cloned from the
+    // authoritative set, so the key starts in the batch) followed by
+    // an explicit withdrawal of the key.
+    c.poll(NOW + 61_000);
+    feed(&mut c, &cache_response(1), NOW + 61_000);
+    feed(
+        &mut c,
+        &RtrPdu::RouterKey {
+            announce: false,
+            ski: [0u8; 20],
+            asn: 64512,
+            subject_public_key_info: vec![0x30],
+        },
+        NOW + 61_000,
+    );
+    let step = feed(&mut c, &eod(1, 2), NOW + 61_000);
+    assert!(step.synced);
+    assert_eq!(step.router_key_deltas.len(), 1);
+    assert!(!step.router_key_deltas[0].announce);
+    assert!(c.router_key_snapshot().is_empty());
+}
+
+#[test]
+fn aspa_withdrawal_deletes_whole_customer_record() {
+    // RFC 8210 §5.11: "A withdrawal deletes the entire ASPA object
+    // for the customer ASN." A withdrawal PDU carries an empty
+    // providers vec; the diff removes the customer's entry from the
+    // authoritative set.
+    let mut c = RtrClient::new();
+    c.on_connect();
+    feed(&mut c, &cache_response(1), NOW);
+    feed(
+        &mut c,
+        &RtrPdu::Aspa {
+            announce: true,
+            customer_asn: 64496,
+            providers: vec![64500, 64501],
+        },
+        NOW,
+    );
+    let step = feed(&mut c, &eod(1, 1), NOW);
+    assert!(step.synced);
+    assert_eq!(step.aspa_deltas.len(), 1);
+    assert!(step.aspa_deltas[0].announce);
+    // Second sync: refresh poll + Cache Response (clones records into
+    // batch) + explicit withdrawal of the customer.
+    c.poll(NOW + 61_000);
+    feed(&mut c, &cache_response(1), NOW + 61_000);
+    feed(
+        &mut c,
+        &RtrPdu::Aspa {
+            announce: false,
+            customer_asn: 64496,
+            providers: vec![],
+        },
+        NOW + 61_000,
+    );
+    let step = feed(&mut c, &eod(1, 2), NOW + 61_000);
+    assert!(step.synced);
+    assert_eq!(step.aspa_deltas.len(), 1);
+    assert!(!step.aspa_deltas[0].announce);
+    assert_eq!(step.aspa_deltas[0].entry.customer_asn, 64496);
+    assert!(c.aspa_snapshot().is_empty());
+}
+
+#[test]
+fn aspa_provider_set_is_canonicalised_for_equality() {
+    // RFC 8210 §5.11 does not pin a wire order for providers; the
+    // client compares as a set so two announcements of the same
+    // providers in different order produce no diff at the next sync.
+    let mut c = RtrClient::new();
+    c.on_connect();
+    feed(&mut c, &cache_response(1), NOW);
+    feed(
+        &mut c,
+        &RtrPdu::Aspa {
+            announce: true,
+            customer_asn: 64496,
+            providers: vec![64500, 64501],
+        },
+        NOW,
+    );
+    let step = feed(&mut c, &eod(1, 1), NOW);
+    assert!(step.synced);
+    assert_eq!(step.aspa_deltas.len(), 1);
+    // Second sync: re-announce the same providers in reverse order.
+    c.poll(NOW + 61_000);
+    feed(&mut c, &cache_response(1), NOW + 61_000);
+    feed(
+        &mut c,
+        &RtrPdu::Aspa {
+            announce: true,
+            customer_asn: 64496,
+            providers: vec![64501, 64500],
+        },
+        NOW + 61_000,
+    );
+    let step = feed(&mut c, &eod(1, 2), NOW + 61_000);
+    assert!(step.synced);
+    assert!(
+        step.aspa_deltas.is_empty(),
+        "same set in different wire order must not surface a delta"
+    );
+    assert_eq!(c.aspa_snapshot().len(), 1);
+}
+
+#[test]
+fn router_key_pdu_outside_a_sync_is_logged_and_ignored() {
+    // A Router Key PDU before a Cache Response is logged and ignored
+    // — the same phase gate the ROA path applies. The session stays
+    // alive; the authoritative set stays empty.
+    let mut c = RtrClient::new();
+    c.on_connect();
+    let step = feed(
+        &mut c,
+        &RtrPdu::RouterKey {
+            announce: true,
+            ski: [0u8; 20],
+            asn: 64512,
+            subject_public_key_info: vec![0x30],
+        },
+        NOW,
+    );
+    assert!(!step.drop);
+    assert!(step.router_key_deltas.is_empty());
+    assert!(c.router_key_snapshot().is_empty());
+    // The log line surfaces the rejected PDU for the operator.
+    assert!(step
+        .logs
+        .iter()
+        .any(|l| l.contains("router key PDU outside a sync")));
+}
+
+#[test]
+fn aspa_pdu_outside_a_sync_is_logged_and_ignored() {
+    // An ASPA PDU before a Cache Response is logged and ignored —
+    // the same phase gate the ROA path applies. The session stays
+    // alive; the authoritative set stays empty.
+    let mut c = RtrClient::new();
+    c.on_connect();
+    let step = feed(
+        &mut c,
+        &RtrPdu::Aspa {
+            announce: true,
+            customer_asn: 64496,
+            providers: vec![64500],
+        },
+        NOW,
+    );
+    assert!(!step.drop);
+    assert!(step.aspa_deltas.is_empty());
+    assert!(c.aspa_snapshot().is_empty());
+    assert!(step
+        .logs
+        .iter()
+        .any(|l| l.contains("aspa PDU outside a sync")));
+}
+
+#[test]
+fn router_key_replacement_surfaces_as_withdraw_plus_announce() {
+    // RFC 8210 §5.10: a re-announcement of the same (ski, asn) with
+    // a different SPKI replaces the key. The diff sees the SPKI as
+    // part of the entry's data (the identity is `(ski, asn)` only),
+    // so a replacement surfaces as a withdraw of the old key plus
+    // an announce of the new one (matching the wire semantics — a
+    // cache that re-attests a key with a new SPKI is by definition
+    // withdrawing the old attestation).
+    let mut c = RtrClient::new();
+    c.on_connect();
+    feed(&mut c, &cache_response(1), NOW);
+    feed(
+        &mut c,
+        &RtrPdu::RouterKey {
+            announce: true,
+            ski: [0u8; 20],
+            asn: 64512,
+            subject_public_key_info: vec![0x30],
+        },
+        NOW,
+    );
+    let step = feed(&mut c, &eod(1, 1), NOW);
+    assert!(step.synced);
+    assert_eq!(step.router_key_deltas.len(), 1);
+    // Second sync: refresh poll + Cache Response (clones records into
+    // batch, so the key with SPKI 0x30 starts in the batch) +
+    // re-announcement of the same (ski, asn) with SPKI 0x31. The
+    // remove-then-insert replaces the batch entry; the diff sees the
+    // SPKI change.
+    c.poll(NOW + 61_000);
+    feed(&mut c, &cache_response(1), NOW + 61_000);
+    feed(
+        &mut c,
+        &RtrPdu::RouterKey {
+            announce: true,
+            ski: [0u8; 20],
+            asn: 64512,
+            subject_public_key_info: vec![0x31],
+        },
+        NOW + 61_000,
+    );
+    let step = feed(&mut c, &eod(1, 2), NOW + 61_000);
+    assert!(step.synced);
+    // One withdraw (the old SPKI) and one announce (the new SPKI).
+    assert_eq!(step.router_key_deltas.len(), 2);
+    assert_eq!(
+        step.router_key_deltas.iter().filter(|d| d.announce).count(),
+        1
+    );
+    assert_eq!(
+        step.router_key_deltas
+            .iter()
+            .filter(|d| !d.announce)
+            .count(),
+        1
+    );
+    assert_eq!(c.router_key_snapshot().len(), 1);
+}
+
+#[test]
+fn aspa_provider_set_change_surfaces_as_withdraw_plus_announce() {
+    // RFC 8210 §5.11: a re-announcement with a different provider set
+    // for the same customer ASN replaces the prior attestation. The
+    // diff sees the providers as the entry's data (the identity is
+    // `customer_asn` only), so a provider-set change surfaces as a
+    // withdraw of the old set plus an announce of the new one.
+    let mut c = RtrClient::new();
+    c.on_connect();
+    feed(&mut c, &cache_response(1), NOW);
+    feed(
+        &mut c,
+        &RtrPdu::Aspa {
+            announce: true,
+            customer_asn: 64496,
+            providers: vec![64500, 64501],
+        },
+        NOW,
+    );
+    let step = feed(&mut c, &eod(1, 1), NOW);
+    assert!(step.synced);
+    assert_eq!(step.aspa_deltas.len(), 1);
+    // Second sync: re-announce with one provider dropped.
+    c.poll(NOW + 61_000);
+    feed(&mut c, &cache_response(1), NOW + 61_000);
+    feed(
+        &mut c,
+        &RtrPdu::Aspa {
+            announce: true,
+            customer_asn: 64496,
+            providers: vec![64500],
+        },
+        NOW + 61_000,
+    );
+    let step = feed(&mut c, &eod(1, 2), NOW + 61_000);
+    assert!(step.synced);
+    assert_eq!(step.aspa_deltas.len(), 2);
+    assert_eq!(step.aspa_deltas.iter().filter(|d| d.announce).count(), 1);
+    assert_eq!(step.aspa_deltas.iter().filter(|d| !d.announce).count(), 1);
+    assert_eq!(c.aspa_snapshot().len(), 1);
 }
 
 #[test]

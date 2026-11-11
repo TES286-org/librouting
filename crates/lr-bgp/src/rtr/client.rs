@@ -37,7 +37,7 @@
 //! `rpki_check_pdu` applies). Serial Notify PDUs are ignored during
 //! the startup period regardless of their version (§7).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use lr_core::addr::Asn;
 
@@ -73,6 +73,109 @@ pub struct RoaDelta {
     pub entry: RoaEntry,
 }
 
+/// One BGPsec Router Key (RFC 8210 §5.10) the cache vouches for.
+///
+/// The wire identity of a Router Key is `(ski, asn)` — §5.10 names
+/// the SKI as "the 20-byte Subject Key Identifier" and scopes the key
+/// by AS. Equality and hashing cover only those two fields, so two
+/// PDUs for the same `(ski, asn)` — an announcement and a re-announcement
+/// with a different SPKI, or an announcement and a withdrawal — collapse
+/// onto one entry in the client's [`HashSet`]. The [`Vec`] SPKI the
+/// cache attests is carried as data: a re-announcement with a different
+/// SPKI replaces the prior attestation in the batch, and the diff at
+/// End of Data surfaces the SPKI change as a withdraw + announce pair
+/// (see [`diff_router_keys`]).
+#[derive(Debug, Clone)]
+pub struct RouterKeyEntry {
+    /// RFC 8210 §5.10: the 20-byte SHA-1 hash of the SPKI. The cache
+    /// identifies the key by this hash; the client treats it as the
+    /// primary identity inside one ASN.
+    pub ski: [u8; 20],
+    /// The AS number the router key is valid for. RFC 8210 §5.10
+    /// scopes a key by `(ski, asn)`; two keys with the same SKI for
+    /// different ASNs are distinct records.
+    pub asn: u32,
+    /// The full DER `subjectPublicKeyInfo` (tag + length + value). The
+    /// client does not parse the SPKI — it stores the blob verbatim
+    /// and surfaces it on the delta so an embedder that does
+    /// BGPsec validation (RFC 8210 §5.10 references the RPKI
+    /// certification path) can use the exact bytes the cache attested.
+    pub subject_public_key_info: Vec<u8>,
+}
+
+impl PartialEq for RouterKeyEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.ski == other.ski && self.asn == other.asn
+    }
+}
+
+impl Eq for RouterKeyEntry {}
+
+impl std::hash::Hash for RouterKeyEntry {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ski.hash(state);
+        self.asn.hash(state);
+    }
+}
+
+/// One ASPA record (RFC 8210 §5.11, SIDROPS ASPA profile) the cache
+/// vouches for.
+///
+/// The wire identity of an ASPA record is the customer ASN — §5.11:
+/// "A withdrawal deletes the entire ASPA object for the customer
+/// ASN." Equality and hashing cover only `customer_asn`, so two PDUs
+/// for the same customer collapse onto one entry in the client's
+/// [`HashSet`]. The provider set is carried as data: a re-announcement
+/// with a different provider set replaces the prior attestation in
+/// the batch, and the diff at End of Data surfaces the change as a
+/// withdraw + announce pair (see [`diff_aspa_records`]). The provider
+/// set is canonicalised into a [`BTreeSet`] so two announcements that
+/// list the same providers in different wire order compare equal
+/// (RFC 8210 §5.11 does not pin a wire order; the set is what matters
+/// semantically).
+#[derive(Debug, Clone)]
+pub struct AspaEntry {
+    /// The customer AS the providers are attested for. The wire
+    /// identity of an ASPA record.
+    pub customer_asn: u32,
+    /// The set of provider ASNs the cache attests for
+    /// `customer_asn`. Stored as a [`BTreeSet`] so two PDUs that list
+    /// the same providers in different order compare equal.
+    pub providers: BTreeSet<u32>,
+}
+
+impl PartialEq for AspaEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.customer_asn == other.customer_asn
+    }
+}
+
+impl Eq for AspaEntry {}
+
+impl std::hash::Hash for AspaEntry {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.customer_asn.hash(state);
+    }
+}
+
+/// One Router Key delta at a completed sync: `announce = true` adds
+/// the entry to the authoritative set, `announce = false` removes it.
+/// Mirrors [`RoaDelta`] for the §5.10 Router Key PDU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterKeyDelta {
+    pub announce: bool,
+    pub entry: RouterKeyEntry,
+}
+
+/// One ASPA delta at a completed sync: `announce = true` adds the
+/// entry to the authoritative set, `announce = false` removes it.
+/// Mirrors [`RoaDelta`] for the §5.11 ASPA PDU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AspaDelta {
+    pub announce: bool,
+    pub entry: AspaEntry,
+}
+
 /// What the embedder should do after one protocol step.
 #[derive(Debug, Default, Clone)]
 pub struct ClientStep {
@@ -80,6 +183,21 @@ pub struct ClientStep {
     pub send: Vec<u8>,
     /// ROA record deltas of a completed sync (empty unless `synced`).
     pub roa_deltas: Vec<RoaDelta>,
+    /// BGPsec Router Key deltas of a completed sync (empty unless
+    /// `synced`). Populated from the §5.10 Router Key PDUs the cache
+    /// sent inside the just-closed batch; the client does not run
+    /// BGPsec validation itself — the deltas surface the cache's
+    /// attestation so an embedder that does (or a future validation
+    /// hook) sees the atomic update. Empty for v0 caches (Router Key
+    /// is a v1+ PDU; a v0 session never carries one).
+    pub router_key_deltas: Vec<RouterKeyDelta>,
+    /// ASPA deltas of a completed sync (empty unless `synced`).
+    /// Populated from the §5.11 ASPA PDUs the cache sent inside the
+    /// just-closed batch; the client does not run ASPA validation
+    /// itself — the deltas surface the cache's attestation so an
+    /// embedder that does (or a future validation hook) sees the
+    /// atomic update. Empty for v0/v1 caches (ASPA is a v2+ PDU).
+    pub aspa_deltas: Vec<AspaDelta>,
     /// True when a sync completed (End of Data processed): the
     /// deltas (or [`RtrClient::snapshot`]) are now authoritative.
     pub synced: bool,
@@ -107,6 +225,26 @@ pub struct RtrClient {
     records: HashSet<RoaEntry>,
     /// The batch accumulating since the current Cache Response.
     batch: HashSet<RoaEntry>,
+    /// Authoritative BGPsec Router Key set of the last completed
+    /// sync (RFC 8210 §5.10). The client does not run BGPsec
+    /// validation; the set is the cache's attestation, surfaced
+    /// through [`ClientStep::router_key_deltas`] at End of Data.
+    router_keys: HashSet<RouterKeyEntry>,
+    /// The Router Key batch accumulating since the current Cache
+    /// Response. Cleared at Cache Response (AwaitingReset) and
+    /// cloned from the authoritative set (AwaitingSerial), matching
+    /// the ROA batch's lifecycle.
+    router_key_batch: HashSet<RouterKeyEntry>,
+    /// Authoritative ASPA record set of the last completed sync
+    /// (RFC 8210 §5.11, SIDROPS ASPA profile). The client does not
+    /// run ASPA validation; the set is the cache's attestation,
+    /// surfaced through [`ClientStep::aspa_deltas`] at End of Data.
+    aspa_records: HashSet<AspaEntry>,
+    /// The ASPA batch accumulating since the current Cache Response.
+    /// Cleared at Cache Response (AwaitingReset) and cloned from
+    /// the authoritative set (AwaitingSerial), matching the ROA
+    /// batch's lifecycle.
+    aspa_batch: HashSet<AspaEntry>,
     /// Cache-provided timing (§6): v1+ End-of-Data values override;
     /// v0 End-of-Data leaves the configured values standing.
     refresh_interval: u32,
@@ -133,6 +271,10 @@ impl RtrClient {
             phase: Phase::AwaitingReset,
             records: HashSet::new(),
             batch: HashSet::new(),
+            router_keys: HashSet::new(),
+            router_key_batch: HashSet::new(),
+            aspa_records: HashSet::new(),
+            aspa_batch: HashSet::new(),
             refresh_interval: DEFAULT_REFRESH_INTERVAL,
             retry_interval: DEFAULT_RETRY_INTERVAL,
             expire_interval: DEFAULT_EXPIRE_INTERVAL,
@@ -161,6 +303,27 @@ impl RtrClient {
     pub fn snapshot(&self) -> Vec<RoaEntry> {
         let mut out: Vec<RoaEntry> = self.records.iter().copied().collect();
         out.sort_by_key(|e| (e.prefix, e.max_length, e.asn));
+        out
+    }
+
+    /// The authoritative BGPsec Router Key set after the last completed
+    /// sync (RFC 8210 §5.10), sorted for deterministic snapshots. The
+    /// client does not run BGPsec validation — the snapshot is the
+    /// cache's attestation, surfaced for an embedder that does.
+    pub fn router_key_snapshot(&self) -> Vec<RouterKeyEntry> {
+        let mut out: Vec<RouterKeyEntry> = self.router_keys.iter().cloned().collect();
+        out.sort_by_key(|e| (e.asn, e.ski));
+        out
+    }
+
+    /// The authoritative ASPA record set after the last completed sync
+    /// (RFC 8210 §5.11, SIDROPS ASPA profile), sorted for deterministic
+    /// snapshots. The client does not run ASPA validation — the
+    /// snapshot is the cache's attestation, surfaced for an embedder
+    /// that does.
+    pub fn aspa_snapshot(&self) -> Vec<AspaEntry> {
+        let mut out: Vec<AspaEntry> = self.aspa_records.iter().cloned().collect();
+        out.sort_by_key(|e| e.customer_asn);
         out
     }
 
@@ -299,6 +462,8 @@ impl RtrClient {
                         // The full database follows: a fresh batch.
                         self.session_id = Some(*session_id);
                         self.batch.clear();
+                        self.router_key_batch.clear();
+                        self.aspa_batch.clear();
                         self.phase = Phase::ReceivingPayload;
                     }
                     Phase::AwaitingSerial => {
@@ -312,12 +477,16 @@ impl RtrClient {
                             self.session_id = Some(*session_id);
                             self.phase = Phase::AwaitingReset;
                             self.batch.clear();
+                            self.router_key_batch.clear();
+                            self.aspa_batch.clear();
                             encode(&RtrPdu::ResetQuery, self.version, &mut step.send);
                             return step;
                         }
                         // Incremental: the batch starts from the
                         // current records and the deltas apply on top.
                         self.batch = self.records.clone();
+                        self.router_key_batch = self.router_keys.clone();
+                        self.aspa_batch = self.aspa_records.clone();
                         self.phase = Phase::ReceivingPayload;
                     }
                     Phase::ReceivingPayload | Phase::Synced => {
@@ -424,6 +593,23 @@ impl RtrClient {
                 // emit the atomic diff.
                 let old = core::mem::replace(&mut self.records, core::mem::take(&mut self.batch));
                 step.roa_deltas = diff_records(&old, &self.records);
+                // §5.10 / §5.11: the same swap-and-diff applies to the
+                // BGPsec Router Key and ASPA batches the cache sent
+                // inside this sync. The client does not run BGPsec or
+                // ASPA validation itself — the deltas surface the
+                // cache's attestation so an embedder (or a future
+                // validation hook) sees the atomic update alongside
+                // the ROA deltas.
+                let old_keys = core::mem::replace(
+                    &mut self.router_keys,
+                    core::mem::take(&mut self.router_key_batch),
+                );
+                step.router_key_deltas = diff_router_keys(&old_keys, &self.router_keys);
+                let old_aspa = core::mem::replace(
+                    &mut self.aspa_records,
+                    core::mem::take(&mut self.aspa_batch),
+                );
+                step.aspa_deltas = diff_aspa_records(&old_aspa, &self.aspa_records);
                 self.serial = Some(*serial);
                 self.phase = Phase::Synced;
                 self.last_sync_ms = Some(now_ms);
@@ -435,10 +621,16 @@ impl RtrClient {
                 self.expire_interval = expire_interval.unwrap_or(self.expire_interval).max(1);
                 step.synced = true;
                 step.logs.push(format!(
-                    "rtr: synced (session {session_id:#06x}, serial {serial}, {} roas: +{} -{})",
+                    "rtr: synced (session {session_id:#06x}, serial {serial}, {} roas: +{} -{}, {} router keys: +{} -{}, {} aspa: +{} -{})",
                     self.records.len(),
                     step.roa_deltas.iter().filter(|d| d.announce).count(),
                     step.roa_deltas.iter().filter(|d| !d.announce).count(),
+                    self.router_keys.len(),
+                    step.router_key_deltas.iter().filter(|d| d.announce).count(),
+                    step.router_key_deltas.iter().filter(|d| !d.announce).count(),
+                    self.aspa_records.len(),
+                    step.aspa_deltas.iter().filter(|d| d.announce).count(),
+                    step.aspa_deltas.iter().filter(|d| !d.announce).count(),
                 ));
             }
             RtrPdu::CacheReset => {
@@ -447,6 +639,8 @@ impl RtrClient {
                 step.logs.push("rtr: cache reset, re-querying".into());
                 self.phase = Phase::AwaitingReset;
                 self.batch.clear();
+                self.router_key_batch.clear();
+                self.aspa_batch.clear();
                 encode(&RtrPdu::ResetQuery, self.version, &mut step.send);
             }
             RtrPdu::ErrorReport {
@@ -465,14 +659,101 @@ impl RtrClient {
                 // governs reconnecting).
                 step.drop = true;
             }
-            RtrPdu::RouterKey { .. } | RtrPdu::Aspa { .. } => {
-                // Accepted on the wire (the codec validates them) but
-                // not used for origin validation yet — BIRD's parity
-                // is to skip Router Key PDUs it cannot use.
-                step.logs.push(format!(
-                    "rtr: {} PDU accepted but unused",
-                    pdu.pdu_type().name()
-                ));
+            RtrPdu::RouterKey {
+                announce,
+                ski,
+                asn,
+                subject_public_key_info,
+            } => {
+                // §5.10: BGPsec Router Key PDU (v1+). The client does
+                // not run BGPsec validation; the entry is accumulated
+                // into the per-sync batch so End of Data surfaces it
+                // as a typed delta. Outside a sync the PDU is logged
+                // and ignored — the same phase gate the ROA path
+                // applies to a stray prefix PDU. Previously this arm
+                // silently swallowed every Router Key PDU, so an
+                // embedder that wanted to consume the cache's
+                // attestation (BGPsec path validation, or operator
+                // visibility) saw nothing; the deltas now carry the
+                // data through.
+                //
+                // The entry identity is `(ski, asn)` (see
+                // [`RouterKeyEntry`]'s `PartialEq`/`Hash`); the SPKI
+                // is the attested data. A re-announcement with a
+                // different SPKI replaces the prior attestation —
+                // `HashSet::insert` would no-op on a duplicate
+                // identity, so remove first to make the replacement
+                // stick.
+                if self.phase != Phase::ReceivingPayload {
+                    step.logs.push(format!(
+                        "rtr: router key PDU outside a sync in state {}, ignored",
+                        self.phase_name()
+                    ));
+                    return step;
+                }
+                let entry = RouterKeyEntry {
+                    ski: *ski,
+                    asn: *asn,
+                    subject_public_key_info: subject_public_key_info.clone(),
+                };
+                if *announce {
+                    self.router_key_batch.remove(&entry);
+                    self.router_key_batch.insert(entry);
+                } else if !self.router_key_batch.remove(&entry) {
+                    step.logs
+                        .push(format!("rtr: withdrawal of unknown router key (asn {asn})"));
+                }
+            }
+            RtrPdu::Aspa {
+                announce,
+                customer_asn,
+                providers,
+            } => {
+                // §5.11 (SIDROPS ASPA profile, v2+): the provider set
+                // of one customer AS. The client does not run ASPA
+                // validation; the entry is accumulated into the
+                // per-sync batch so End of Data surfaces it as a typed
+                // delta. Outside a sync the PDU is logged and ignored
+                // — the same phase gate the ROA path applies. A
+                // withdrawal (`announce = false`) deletes the whole
+                // customer record (RFC 8210 §5.11), so any entry
+                // whose `customer_asn` matches is removed regardless
+                // of the providers vec the withdrawal carries.
+                //
+                // The entry identity is `customer_asn` (see
+                // [`AspaEntry`]'s `PartialEq`/`Hash`); the providers
+                // set is the attested data. A re-announcement with a
+                // different provider set replaces the prior
+                // attestation — `HashSet::insert` would no-op on a
+                // duplicate identity, so remove first to make the
+                // replacement stick.
+                if self.phase != Phase::ReceivingPayload {
+                    step.logs.push(format!(
+                        "rtr: aspa PDU outside a sync in state {}, ignored",
+                        self.phase_name()
+                    ));
+                    return step;
+                }
+                let entry = AspaEntry {
+                    customer_asn: *customer_asn,
+                    providers: providers.iter().copied().collect(),
+                };
+                if *announce {
+                    self.aspa_batch.remove(&entry);
+                    self.aspa_batch.insert(entry);
+                } else {
+                    // §5.11: a withdrawal deletes the entire customer
+                    // record. `HashSet::remove` with the custom
+                    // identity-only `Hash`/`Eq` matches any entry
+                    // for `customer_asn`, so a withdrawal with an
+                    // empty providers vec still removes the
+                    // previously-announced entry.
+                    if !self.aspa_batch.remove(&entry) {
+                        step.logs.push(format!(
+                            "rtr: aspa withdrawal of unknown customer {customer_asn}"
+                        ));
+                    }
+                }
             }
             RtrPdu::SerialQuery { .. } | RtrPdu::ResetQuery => {
                 // Router-to-cache PDUs from the cache side are noise.
@@ -542,6 +823,101 @@ fn diff_records(old: &HashSet<RoaEntry>, new: &HashSet<RoaEntry>) -> Vec<RoaDelt
             out.push(RoaDelta {
                 announce: false,
                 entry: *entry,
+            });
+        }
+    }
+    out
+}
+
+/// The atomic diff between the old and new authoritative BGPsec Router
+/// key sets (RFC 8210 §5.10). The entry identity is `(ski, asn)` —
+/// [`RouterKeyEntry`]'s `PartialEq` and `Hash` cover only those two
+/// fields. Two entries that share `(ski, asn)` but disagree on the
+/// SPKI therefore hash to the same bucket; the diff walks both sets
+/// and, for each entry in `new` whose `(ski, asn)` is also in `old`,
+/// compares the SPKI verbatim. A SPKI change surfaces as a withdraw of
+/// the old entry plus an announce of the new one (matching §5.10: a
+/// re-announcement with a different SPKI is by definition a
+/// re-attestation, not a no-op).
+fn diff_router_keys(
+    old: &HashSet<RouterKeyEntry>,
+    new: &HashSet<RouterKeyEntry>,
+) -> Vec<RouterKeyDelta> {
+    let mut out = Vec::new();
+    for new_entry in new {
+        if let Some(old_entry) = old.get(new_entry) {
+            // Same (ski, asn). Compare the SPKI; a change is a
+            // re-attestation (withdraw the old, announce the new).
+            if new_entry.subject_public_key_info != old_entry.subject_public_key_info {
+                out.push(RouterKeyDelta {
+                    announce: false,
+                    entry: old_entry.clone(),
+                });
+                out.push(RouterKeyDelta {
+                    announce: true,
+                    entry: new_entry.clone(),
+                });
+            }
+            // Else: identical (ski, asn, spki) — no delta.
+        } else {
+            // New (ski, asn) — announce.
+            out.push(RouterKeyDelta {
+                announce: true,
+                entry: new_entry.clone(),
+            });
+        }
+    }
+    for old_entry in old {
+        if !new.contains(old_entry) {
+            // Removed (ski, asn) — withdraw.
+            out.push(RouterKeyDelta {
+                announce: false,
+                entry: old_entry.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// The atomic diff between the old and new authoritative ASPA record
+/// sets (RFC 8210 §5.11, SIDROPS ASPA profile). The entry identity is
+/// `customer_asn` — [`AspaEntry`]'s `PartialEq` and `Hash` cover only
+/// that field. The diff walks both sets and, for each entry in `new`
+/// whose `customer_asn` is also in `old`, compares the provider set
+/// verbatim. A provider-set change surfaces as a withdraw of the old
+/// entry plus an announce of the new one (matching §5.11's "replace
+/// the entire ASPA object" semantics).
+fn diff_aspa_records(old: &HashSet<AspaEntry>, new: &HashSet<AspaEntry>) -> Vec<AspaDelta> {
+    let mut out = Vec::new();
+    for new_entry in new {
+        if let Some(old_entry) = old.get(new_entry) {
+            // Same customer_asn. Compare the provider sets; a change
+            // is a re-attestation (withdraw the old, announce the new).
+            if new_entry.providers != old_entry.providers {
+                out.push(AspaDelta {
+                    announce: false,
+                    entry: old_entry.clone(),
+                });
+                out.push(AspaDelta {
+                    announce: true,
+                    entry: new_entry.clone(),
+                });
+            }
+            // Else: identical (customer_asn, providers) — no delta.
+        } else {
+            // New customer — announce.
+            out.push(AspaDelta {
+                announce: true,
+                entry: new_entry.clone(),
+            });
+        }
+    }
+    for old_entry in old {
+        if !new.contains(old_entry) {
+            // Removed customer — withdraw.
+            out.push(AspaDelta {
+                announce: false,
+                entry: old_entry.clone(),
             });
         }
     }
