@@ -235,6 +235,34 @@ pub struct PolicyHooks {
     inner: Arc<PolicySet>,
 }
 
+impl PolicyHooks {
+    /// Look up a named route-map on the underlying [`PolicySet`].
+    /// Returns `None` when the name is unknown. Used by callers that
+    /// share one `PolicyHooks` for both import/export dispatch
+    /// (the `ImportHook` / `ExportHook` impls) and per-network
+    /// origination route-maps (FRR `network PREFIX route-map NAME` —
+    /// the route-map is applied at origination, not at export, so the
+    /// hook chain is the wrong dispatch site for it).
+    pub fn route_map(&self, name: &str) -> Option<&RouteMap> {
+        self.inner.route_map(name)
+    }
+}
+
+impl MatchResolver for PolicyHooks {
+    fn prefix_in(&self, list_id: u32, p: &Prefix) -> bool {
+        self.inner.prefix_in(list_id, p)
+    }
+    fn as_path_in(&self, list_id: u32, route: &Route) -> bool {
+        self.inner.as_path_in(list_id, route)
+    }
+    fn community_in(&self, list_id: u32, route: &Route) -> bool {
+        self.inner.community_in(list_id, route)
+    }
+    fn next_hop_in(&self, list_id: u32, route: &Route) -> bool {
+        self.inner.next_hop_in(list_id, route)
+    }
+}
+
 impl ImportHook for PolicyHooks {
     fn name(&self) -> &str {
         "policy-set"
@@ -434,5 +462,86 @@ mod tests {
         let mut untagged = route_for(&[203, 0, 113, 0]);
         untagged.origin.peer = 5;
         assert!(matches!(hooks.on_import(&mut untagged), HookVerdict::Drop));
+    }
+
+    // ---- issue #92 (defects.txt L75): PolicyHooks::route_map() + MatchResolver impl ----
+
+    /// `PolicyHooks::route_map(name)` looks up a named route-map on
+    /// the underlying `PolicySet`. Used by the daemon's per-network
+    /// origination path (FRR `network PREFIX route-map NAME`) — the
+    /// hook chain is the wrong dispatch site for per-network route-
+    /// maps, so the daemon shares the `PolicyHooks` with the import/
+    /// export chain and looks the route-map up directly.
+    #[test]
+    fn policy_hooks_route_map_looks_up_named_route_map() {
+        let mut set = PolicySet::new();
+        set.push_route_map_entry(
+            "net1",
+            RouteMapEntry {
+                matches: vec![],
+                sets: vec![],
+                verdict: Some(true),
+            },
+        );
+        let hooks = set.hooks();
+        assert!(
+            hooks.route_map("net1").is_some(),
+            "route_map(\"net1\") must return Some after the entry was pushed"
+        );
+        assert!(
+            hooks.route_map("does-not-exist").is_none(),
+            "route_map on an unknown name must return None"
+        );
+    }
+
+    /// `PolicyHooks` implements `MatchResolver` by delegating to the
+    /// underlying `PolicySet` — so the daemon's per-network
+    /// origination path can pass `&hooks as &dyn MatchResolver` to
+    /// `RouteMap::evaluate` without re-wrapping the resolver. Pin
+    /// the delegation by binding a community-list + a route-map that
+    /// matches on it, then evaluating the route-map through the
+    /// hooks' `MatchResolver` impl.
+    #[test]
+    fn policy_hooks_match_resolver_delegates_to_inner_set() {
+        use crate::action::MatchResolver;
+        let mut set = PolicySet::new();
+        let mut cl = CommunityList::new();
+        cl.push(CommunityListEntry {
+            communities: vec![lr_bgp::path::communities::Community::new(64512, 42).as_u32()],
+            permit: true,
+        });
+        set.add_community_list("known", cl);
+        set.push_route_map_entry(
+            "c-in",
+            RouteMapEntry {
+                matches: vec![set.match_condition(ListKind::Community, "known").unwrap()],
+                sets: vec![],
+                verdict: Some(true),
+            },
+        );
+        let hooks = set.hooks();
+        let rm = hooks
+            .route_map("c-in")
+            .expect("route_map(\"c-in\") must return Some");
+        // Route with the tagged community: matches the list,
+        // the route-map permits.
+        let mut tagged = route_for(&[203, 0, 113, 0]);
+        crate::bgp::add_community(
+            &mut tagged,
+            lr_bgp::path::communities::Community::new(64512, 42),
+        );
+        assert_eq!(
+            rm.evaluate(&mut tagged, &hooks as &dyn MatchResolver),
+            Some(true),
+            "tagged route permits via the hooks' MatchResolver delegation"
+        );
+        // Untagged route: list does not match, the route-map's only
+        // entry skips; the route-map falls through to `None`.
+        let mut untagged = route_for(&[203, 0, 113, 0]);
+        assert_eq!(
+            rm.evaluate(&mut untagged, &hooks as &dyn MatchResolver),
+            None,
+            "untagged route falls through (no entry matched)"
+        );
     }
 }
