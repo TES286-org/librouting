@@ -94,7 +94,7 @@ jobs:
         with:
           fetch-depth: 0 # full history so the baseline tag is present
       - name: Set up Python (for scripts/abi_freeze_check.py)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
       - name: C ABI surface must be additive-only since the baseline
