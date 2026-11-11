@@ -188,43 +188,87 @@ fn seg6local_request_matches_iproute2_wire() {
     // the same choice mpls_route makes). Everything else — the
     // 76-byte length, the rtmsg, every attribute's type, length
     // and payload — must match exactly.
+    //
+    // The expected buffer is built with `to_ne_bytes` for every
+    // multi-byte netlink/NLA field (not hardcoded raw bytes) so the
+    // test passes on both little-endian (x86_64, aarch64, RISC-V)
+    // and big-endian (s390x) targets. The Linux kernel netlink ABI
+    // uses native byte order; a hardcoded LE buffer would fail on
+    // s390x where the kernel expects BE.
     let sid = Sid::from_str("2001:db8:dead:beef::abcd").unwrap();
     let route = Seg6LocalRoute::new(sid, Behavior::End).with_if_index(1);
     let req = test_netlink()
         .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
         .unwrap();
-    let expected: Vec<u8> = [
-        // nlmsghdr: len 76, RTM_NEWROUTE, REQUEST|ACK|REPLACE|CREATE,
-        // seq 7 (test_netlink's first), pid 123.
-        &[
-            0x4c, 0x00, 0x00, 0x00, 0x18, 0x00, 0x05, 0x05, 0x07, 0x00, 0x00, 0x00, 0x7b, 0x00,
-            0x00, 0x00,
-        ][..],
-        // rtmsg: AF_INET6, dst_len 128, table LOCAL(0xff), proto
-        // RTPROT_BGP(0xba), scope UNIVERSE, type UNICAST.
-        &[
-            0x0a, 0x80, 0x00, 0x00, 0xff, 0xba, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-        ][..],
-        // RTA_DST (1) = 2001:db8:dead:beef::abcd.
-        &[0x14, 0x00, 0x01, 0x00][..],
-        &[
-            0x20, 0x01, 0x0d, 0xb8, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0xab, 0xcd,
-        ][..],
-        // RTA_OIF (4) = 1.
-        &[0x08, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00][..],
-        // RTA_ENCAP_TYPE (21) = 7 (LWTUNNEL_ENCAP_SEG6_LOCAL), u16
-        // payload, NLA_U16 policy form — identical to iproute2's
-        // `06 00 15 00 07 00 00 00`.
-        &[0x06, 0x00, 0x15, 0x00, 0x07, 0x00, 0x00, 0x00][..],
-        // RTA_ENCAP (22|NLA_F_NESTED) = { SEG6_LOCAL_ACTION (1) =
-        // END (1) } — identical to iproute2's
-        // `0c 00 16 80 08 00 01 00 01 00 00 00`.
-        &[
-            0x0c, 0x00, 0x16, 0x80, 0x08, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
-        ][..],
-    ]
-    .concat();
+
+    // Build the expected buffer field by field in native byte order.
+    let mut expected: Vec<u8> = Vec::with_capacity(76);
+
+    // --- nlmsghdr (16 bytes) ---
+    // nlmsg_len = 76, nlmsg_type = RTM_NEWROUTE (24),
+    // nlmsg_flags = REQUEST|ACK|REPLACE|CREATE (0x0505),
+    // nlmsg_seq = 7 (test_netlink's first seq), nlmsg_pid = 123.
+    expected.extend_from_slice(&76u32.to_ne_bytes()); // nlmsg_len
+    expected.extend_from_slice(&24u16.to_ne_bytes()); // nlmsg_type (RTM_NEWROUTE)
+    expected.extend_from_slice(&0x0505u16.to_ne_bytes()); // nlmsg_flags
+    expected.extend_from_slice(&7u32.to_ne_bytes()); // nlmsg_seq
+    expected.extend_from_slice(&123u32.to_ne_bytes()); // nlmsg_pid
+
+    // --- rtmsg (12 bytes) ---
+    // rtm_family = AF_INET6 (10), rtm_dst_len = 128,
+    // rtm_src_len = 0, rtm_tos = 0,
+    // rtm_table = LOCAL (0xff), rtm_protocol = RTPROT_BGP (0xba),
+    // rtm_scope = RT_SCOPE_UNIVERSE (0), rtm_type = RTN_UNICAST (1),
+    // rtm_flags = 0.
+    expected.push(10); // AF_INET6
+    expected.push(128); // dst_len
+    expected.push(0); // src_len
+    expected.push(0); // tos
+    expected.push(0xff); // table = LOCAL
+    expected.push(0xba); // protocol = RTPROT_BGP
+    expected.push(0); // scope = UNIVERSE
+    expected.push(1); // type = UNICAST
+    expected.extend_from_slice(&0u32.to_ne_bytes()); // flags
+
+    // --- RTA_DST (type 1) = 2001:db8:dead:beef::abcd ---
+    // nla_len = 4 (header) + 16 (IPv6) = 20, nla_type = RTA_DST (1).
+    expected.extend_from_slice(&20u16.to_ne_bytes()); // nla_len
+    expected.extend_from_slice(&1u16.to_ne_bytes()); // nla_type = RTA_DST
+    expected.extend_from_slice(&[
+        0x20, 0x01, 0x0d, 0xb8, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xab,
+        0xcd,
+    ]);
+
+    // --- RTA_OIF (type 4) = 1 ---
+    // nla_len = 4 + 4 = 8, nla_type = RTA_OIF (4), payload = 1 (u32).
+    expected.extend_from_slice(&8u16.to_ne_bytes()); // nla_len
+    expected.extend_from_slice(&4u16.to_ne_bytes()); // nla_type = RTA_OIF
+    expected.extend_from_slice(&1u32.to_ne_bytes()); // if_index = 1
+
+    // --- RTA_ENCAP_TYPE (type 21) = 7 (LWTUNNEL_ENCAP_SEG6_LOCAL) ---
+    // nla_len = 4 + 2 = 6, nla_type = 21, payload = u16(7) + 2 pad.
+    expected.extend_from_slice(&6u16.to_ne_bytes()); // nla_len
+    expected.extend_from_slice(&21u16.to_ne_bytes()); // nla_type = RTA_ENCAP_TYPE
+    expected.extend_from_slice(&7u16.to_ne_bytes()); // encap type = SEG6_LOCAL
+    expected.extend_from_slice(&[0u8, 0u8]); // NLA padding to 4-byte boundary
+
+    // --- RTA_ENCAP (type 22|NLA_F_NESTED = 0x8016) ---
+    // nla_len = 4 + 8 = 12, nla_type = 0x8016,
+    // nested { SEG6_LOCAL_ACTION (1) = END (1) }:
+    //   nla_len = 4 + 4 = 8, nla_type = 1, payload = u32(1).
+    expected.extend_from_slice(&12u16.to_ne_bytes()); // nla_len
+    expected.extend_from_slice(&0x8016u16.to_ne_bytes()); // nla_type = RTA_ENCAP | NLA_F_NESTED
+    expected.extend_from_slice(&8u16.to_ne_bytes()); // inner nla_len
+    expected.extend_from_slice(&1u16.to_ne_bytes()); // inner nla_type = SEG6_LOCAL_ACTION
+    expected.extend_from_slice(&1u32.to_ne_bytes()); // action = END
+
+    assert_eq!(
+        req.len(),
+        expected.len(),
+        "seg6local wire length drifted: got {} expected {}",
+        req.len(),
+        expected.len()
+    );
     assert_eq!(
         req, expected,
         "seg6local wire bytes drifted from the \
