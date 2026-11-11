@@ -417,3 +417,60 @@ fn index_form_peer_node_sid_round_trips() {
     let decoded = lr_bgp::path::bgp_ls_attr::BgpLsAttr::decode(&encoded).expect("decode attribute");
     assert_eq!(&decoded, attr);
 }
+
+/// RFC 9552 §3.2: the EPE Link NLRI's `identifier` field carries the
+/// BGP-LS Instance-ID from the projection context. The default
+/// constructor (`EpePeerSession::new`) leaves the field at 0 (the
+/// RFC 9552 §3.2 single-instance recommendation); the
+/// `with_instance_id` builder threads a non-zero value through so a
+/// multi-domain speaker can segregate EPE NLRIs from different IGP
+/// routing domains on the consumer side.
+#[test]
+fn instance_id_propagates_to_epe_link_nlri() {
+    let sid = BgpPeeringSid {
+        flags: BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::L),
+        weight: 0,
+        reserved: 0,
+        sid: BgpPeeringSidValue::Label([0x00, 0x00, 0x21]),
+    };
+    let s = EpePeerSession::new(64512, 0x0a000001, 1, 64513, 0x0a000002, sid)
+        .with_instance_id(0x1122334455667788);
+    let out = project_epe_peer_sessions(std::slice::from_ref(&s));
+    assert_eq!(out.len(), 1);
+    let (nlri, _) = &out[0];
+    let BgpLsNlriVariant::Link(link) = &nlri.variant else {
+        panic!("expected Link NLRI");
+    };
+    assert_eq!(
+        link.identifier, 0x1122334455667788,
+        "EPE Link NLRI identifier must carry the configured Instance-ID"
+    );
+    // The NLRI still round-trips through the codec — the codec must
+    // accept the non-zero identifier verbatim (RFC 9552 §3.2 says
+    // the field is opaque to the receiver).
+    assert_nlri_round_trips(nlri);
+}
+
+/// The default `instance_id = 0` (no `with_instance_id` builder call)
+/// matches the previous hardcoded-0 behaviour — a regression gate
+/// so a future refactor that drops the `s.instance_id` plumbing
+/// for the default path does not silently change the wire form.
+#[test]
+fn default_instance_id_zero_matches_previous_hardcoded_zero() {
+    let sid = BgpPeeringSid {
+        flags: BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::L),
+        weight: 0,
+        reserved: 0,
+        sid: BgpPeeringSidValue::Label([0x00, 0x00, 0x21]),
+    };
+    let s = EpePeerSession::new(64512, 0x0a000001, 1, 64513, 0x0a000002, sid);
+    let out = project_epe_peer_sessions(std::slice::from_ref(&s));
+    let (nlri, _) = &out[0];
+    let BgpLsNlriVariant::Link(link) = &nlri.variant else {
+        panic!("expected Link NLRI");
+    };
+    assert_eq!(
+        link.identifier, 0,
+        "default EpePeerSession keeps instance_id = 0"
+    );
+}

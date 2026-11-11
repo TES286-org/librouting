@@ -139,6 +139,15 @@ pub struct EpePeerSession {
     /// RFC 9086 §5.3 PeerSet SID — optional. `None` omits the
     /// TLV. A future per-peer config surface can populate this.
     pub peer_set_sid: Option<BgpPeeringSid>,
+    /// RFC 9552 §3.2 BGP-LS Instance-ID carried in every emitted
+    /// EPE Link NLRI's `identifier` field. Same semantics as
+    /// [`super::lsdb_to_bgpls::OspfAreaBgplsContext::instance_id`]:
+    /// per-IGP-routing-domain (not per-session), so every EPE
+    /// NLRI the daemon projects carries the same value, and NLRIs
+    /// from a different IGP domain a multi-domain speaker may
+    /// project carry a different value. Defaults to 0 (the
+    /// RFC 9552 §3.2 single-instance recommendation).
+    pub instance_id: u64,
 }
 
 impl EpePeerSession {
@@ -172,7 +181,18 @@ impl EpePeerSession {
             peer_node_sid,
             peer_adj_sid: None,
             peer_set_sid: None,
+            instance_id: 0,
         }
+    }
+
+    /// Set the BGP-LS Instance-ID (RFC 9552 §3.2). The default
+    /// constructor [`EpePeerSession::new`] leaves the field at 0
+    /// (the RFC 9552 §3.2 single-instance recommendation); the
+    /// daemon-side snapshot path uses this builder to thread the
+    /// operator's `[bgp_ls] instance_id` configuration through.
+    pub fn with_instance_id(mut self, instance_id: u64) -> Self {
+        self.instance_id = instance_id;
+        self
     }
 }
 
@@ -190,12 +210,12 @@ impl EpePeerSession {
 ///
 /// Each NLRI is a BGP-LS Link NLRI (RFC 7752 §3.3 NLRI Type 2)
 /// with `ProtocolId::Bgp` (RFC 9086 §3, the BGP-LS Protocol-ID
-/// for EPE) and `identifier = 0` — RFC 7752 §3.3 leaves the
-/// 8-byte Identifier opaque; the daemon-wide monotonic counter
-/// a strict reading might want is a follow-up (the End.X
-/// projection in [`super::lsdb_to_bgpls::project_v3_srv6_end_x_nlris`]
-/// uses the same value). The Local/Remote Node Descriptor carries
-/// the `As` + `BgpLsId` + `BgpRouterId` sub-TLVs always, plus
+/// for EPE) and `identifier = s.instance_id` (RFC 9552 §3.2 —
+/// the BGP-LS Instance-ID for the IGP routing domain the EPE
+/// projection belongs to; same semantics as
+/// [`super::lsdb_to_bgpls::OspfAreaBgplsContext::instance_id`]).
+/// The Local/Remote Node Descriptor carries the `As` +
+/// `BgpLsId` + `BgpRouterId` sub-TLVs always, plus
 /// `BgpConfederationMember` when the caller supplied it. The
 /// Link Descriptor always carries `MultiTopologyId(0)`; the
 /// Interface/Neighbor Address sub-TLVs are added when the
@@ -248,7 +268,7 @@ pub fn project_epe_peer_sessions(sessions: &[EpePeerSession]) -> Vec<(BgpLsNlri,
             route_distinguisher: None,
             variant: BgpLsNlriVariant::Link(LinkNlri {
                 protocol_id: ProtocolId::Bgp,
-                identifier: 0,
+                identifier: s.instance_id,
                 local_node,
                 remote_node,
                 link,

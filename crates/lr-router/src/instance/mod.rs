@@ -6730,6 +6730,7 @@ impl DefaultRouter {
                 peer_node_sid,
                 peer_adj_sid: None,
                 peer_set_sid: None,
+                instance_id: 0,
             });
             // `as_number` (the daemon's BGP-LS speaker AS) overrides
             // the per-session local_as when the daemon's [bgp_ls]
