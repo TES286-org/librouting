@@ -82,8 +82,27 @@ extern "C" {
 const SIGSTOP: i32 = 19;
 
 /// Read a log file until it contains every needle (bounded wait).
+///
+/// The ceiling is 60 s (was 30 s): the BFD bring-up sequence (Down →
+/// Init → Up) on the self-hosted s390x runner (IBM Z hardware,
+/// ~3-6× slower than x86_64 for cold-cache compile + BFD UDP packet
+/// exchange) can take ~25-35 s on the listener side before the first
+/// `-> Up` transition surfaces, because both `lr-daemon` processes
+/// spawn in parallel and the BFD FSM only starts exchanging packets
+/// once both daemons have finished their startup sequence (load
+/// config, install connected routes, bind TCP listener, bind BFD
+/// UDP socket). 30 s occasionally tripped the s390x runner before
+/// the FSM completed its initial cycle.
+///
+/// The same ceiling is reused for the fast-fail detection wait
+/// (`Up -> Down` + `session ended`) — the BFD detection itself is
+/// ~0.3 s (3 × 100 ms), so the wait returns on the first poll that
+/// observes the Down transition (typically within 1 s of the
+/// SIGSTOP). The 60 s ceiling is just the bound; the actual
+/// detection-time assertion (`elapsed < Duration::from_secs(5)`)
+/// is unchanged.
 fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut text = String::new();
     while Instant::now() < deadline {
         text = std::fs::read_to_string(path).unwrap_or_default();

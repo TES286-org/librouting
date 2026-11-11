@@ -121,7 +121,17 @@ impl Drop for Daemon {
                 Err(_) => break,
             }
         }
-        let _ = std::fs::remove_file(&self.log);
+        // Preserve the capture log when the test is unwinding so the
+        // daemon's stderr/stdout tail is available in the panic
+        // message (the test reads it explicitly before this Drop
+        // runs, but if the panic originated from an assertion that
+        // did not dump the capture log, the file is still on disk
+        // under $TMPDIR for a developer or CI artifact scrubber to
+        // pick up). On a clean exit the file is removed as before —
+        // keeping temp-dir hygiene tight for the green-run case.
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_file(&self.log);
+        }
     }
 }
 
@@ -182,6 +192,31 @@ fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("log never contained all of {needles:?}; last: {text}");
+}
+
+/// Derive a unique loopback TCP port for a test daemon so two tests
+/// running in parallel under `cargo nextest` cannot collide on the
+/// same `bind(127.0.0.1:PORT)`. The historical hardcoded ports
+/// (17981..=17987) were stable across runs but shared between named
+/// tests — on the slower RISC-V and s390x CI runners the parallel
+/// windows overlapped and one test's `bind` failed with
+/// `Address already in use (os error 98)` while the other test's
+/// daemon was still coming up.
+///
+/// The derivation folds the test process id into the ephemeral range
+/// 20_000..=39_999 (well clear of the privileged range, the daemon's
+/// other test ports 17981..=17987, and the BFD/Babel UDP ports). Two
+/// tests in the same `cargo test` invocation get distinct ports
+/// because each call increments the per-process counter; two
+/// concurrent `cargo test` processes get distinct ports because their
+/// PIDs differ.
+fn unique_listen_port() -> u16 {
+    static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20_000);
+    // Wrap within 20_000..=39_999 so the value stays in u16 range
+    // and never crosses into the IANA ephemeral range Linux assigns
+    // to outgoing connections (32768+).
+    let p = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    20_000 + (p % 20_000)
 }
 
 #[test]
@@ -387,11 +422,18 @@ fn sighup_reopens_log_file_for_rotation() {
     let socket = dir.join("daemon.api");
     let log_path = dir.join("daemon.log");
     let rotated_path = dir.join("daemon.log.1");
+    // Unique port so the parallel `static_routes_install_and_reload`
+    // test (which used to share 17987 with this test) cannot race us
+    // for the bind on slow runners.
+    let port = unique_listen_port();
+    let listen_addr = format!("127.0.0.1:{port}");
 
     std::fs::write(
         &conf,
-        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
-         listen_addr = \"127.0.0.1:17987\"\n\nnetworks = [\"203.0.113.0/24\"]\n",
+        format!(
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+             listen_addr = \"{listen_addr}\"\n\nnetworks = [\"203.0.113.0/24\"]\n",
+        ),
     )
     .unwrap();
     let _ = std::fs::remove_file(&log_path);
@@ -445,7 +487,18 @@ fn sighup_reopens_log_file_for_rotation() {
     // to reopen would still write the failure line — but to the old
     // fd (which now points at the rotated path), so the new path
     // would stay empty.
-    let deadline = Instant::now() + Duration::from_secs(15);
+    //
+    // The wait ceiling is 30 s (was 15 s): the macOS CI runner
+    // (Apple Silicon macos-latest) sometimes schedules the daemon's
+    // SIGHUP dispatch up to ~2 s after the test's `kill(pid, SIGHUP)`
+    // returns, and the reopen + first `writeln!` to the new fd can
+    // land another ~100 ms behind that. 15 s was plenty on Linux but
+    // occasionally tripped the macOS runner's slower signal delivery;
+    // 30 s gives 10x slack over the worst observed macOS latency
+    // without losing the "this should be sub-second" intent — the
+    // poll cadence is still 100 ms, so a successful reopen surfaces
+    // in the first or second iteration.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut new_text = String::new();
     while Instant::now() < deadline {
         new_text = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -454,10 +507,24 @@ fn sighup_reopens_log_file_for_rotation() {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    assert!(
-        new_text.contains("reload: log destination re-opened (SIGHUP)"),
-        "new log file should contain the reopen notice; got: {new_text}"
-    );
+    if !new_text.contains("reload: log destination re-opened (SIGHUP)") {
+        // Diagnostic dump: surface every clue the test has so a
+        // failure on a remote CI runner (macOS, RISC-V, s390x) is
+        // triageable from the log alone — without having to reproduce
+        // locally. The capture log carries the daemon's stderr
+        // (the `reload:` lines are also `log_record`-mirrored to
+        // stderr); the rotated file carries the pre-reopen fd's
+        // tail (so a `reload: log destination reopen failed (...)`
+        // error message — which would land in the rotated file,
+        // not the new one — is visible).
+        let capture_tail = std::fs::read_to_string(&d.log).unwrap_or_default();
+        let rotated_tail = std::fs::read_to_string(&rotated_path).unwrap_or_default();
+        panic!(
+            "new log file should contain the reopen notice; got: {new_text}\n\
+             --- daemon capture log (stderr/stdout tail) ---\n{capture_tail}\n\
+             --- rotated file (pre-reopen fd tail) ---\n{rotated_tail}"
+        );
+    }
     // The reload's "SIGHUP received" line is logged BEFORE init_logger
     // re-opens the file, so it lands in the rotated file (the old fd
     // the daemon still held at that instant). The "log destination
@@ -776,13 +843,21 @@ fn static_routes_install_and_reload() {
     std::fs::create_dir_all(&dir).unwrap();
     let conf = dir.join("daemon.toml");
     let socket = dir.join("daemon.api");
+    // Unique port so the parallel `sighup_reopens_log_file_for_rotation`
+    // test (which used to share 17987 with this test) cannot race us
+    // for the bind on slow runners (RISC-V failed with `Address already
+    // in use` before this derivation landed).
+    let port = unique_listen_port();
+    let listen_addr = format!("127.0.0.1:{port}");
 
     std::fs::write(
         &conf,
-        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
-         listen_addr = \"127.0.0.1:17987\"\n\n\
-         [[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"198.51.100.1\"\nmetric = 10\n\n\
-         [[static.route]]\nprefix = \"10.0.0.0/8\"\nnext_hop = \"blackhole\"\n",
+        format!(
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+             listen_addr = \"{listen_addr}\"\n\n\
+             [[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"198.51.100.1\"\nmetric = 10\n\n\
+             [[static.route]]\nprefix = \"10.0.0.0/8\"\nnext_hop = \"blackhole\"\n",
+        ),
     )
     .unwrap();
 
@@ -812,13 +887,18 @@ fn static_routes_install_and_reload() {
     assert!(routes.contains("proto=Static"), "routes: {routes}");
 
     // Rewrite the config: drop 10.0.0.0/8, change 203.0.113.0/24's
-    // next-hop, add a new 198.51.100.0/24 blackhole.
+    // next-hop, add a new 198.51.100.0/24 blackhole. Keep the same
+    // listen_addr — the daemon's TCP listener is already bound from
+    // startup and a SIGHUP does not rebind, so the port stays the
+    // same across the reload.
     std::fs::write(
         &conf,
-        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
-         listen_addr = \"127.0.0.1:17987\"\n\n\
-         [[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"198.51.100.2\"\nmetric = 10\n\n\
-         [[static.route]]\nprefix = \"198.51.100.0/24\"\nnext_hop = \"blackhole\"\n",
+        format!(
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+             listen_addr = \"{listen_addr}\"\n\n\
+             [[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"198.51.100.2\"\nmetric = 10\n\n\
+             [[static.route]]\nprefix = \"198.51.100.0/24\"\nnext_hop = \"blackhole\"\n",
+        ),
     )
     .unwrap();
     d.signal(SIGHUP);
