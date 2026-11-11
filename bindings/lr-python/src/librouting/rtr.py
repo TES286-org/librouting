@@ -67,6 +67,52 @@ class RoaDelta:
     entry: RoaEntry
 
 
+@dataclass(frozen=True)
+class RouterKeyEntry:
+    """One BGPsec Router Key entry (RFC 8210 §5.10) — the cache's
+    attestation for one `(ski, asn)` pair. The `subject_public_key_info`
+    is the full DER `subjectPublicKeyInfo` blob the cache vouches for;
+    the Python binding copies the bytes into a `bytes` object so the
+    value is owned and garbage-collected independently of the step's
+    lifetime."""
+
+    ski: bytes  # 20 bytes — SHA-1 hash of the SPKI
+    asn: int
+    subject_public_key_info: bytes  # full DER blob (tag + length + value)
+
+
+@dataclass(frozen=True)
+class RouterKeyDelta:
+    """One BGPsec Router Key delta of a completed RTR sync (RFC 8210
+    §5.10). `announce=True` is an announcement; `announce=False` is a
+    withdrawal."""
+
+    announce: bool
+    entry: RouterKeyEntry
+
+
+@dataclass(frozen=True)
+class AspaEntry:
+    """One ASPA record (RFC 8210 §5.11, SIDROPS ASPA profile) — the
+    cache's attestation for one customer ASN's provider set. The
+    `providers` tuple is in ascending order (the Rust side
+    canonicalises to a `BTreeSet<u32>` so wire order does not affect
+    equality)."""
+
+    customer_asn: int
+    providers: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class AspaDelta:
+    """One ASPA delta of a completed RTR sync (RFC 8210 §5.11).
+    `announce=True` is an announcement; `announce=False` is a
+    withdrawal."""
+
+    announce: bool
+    entry: AspaEntry
+
+
 def _entry_to_py(e) -> RoaEntry:
     is_ipv6 = bool(e.is_ipv6)
     if is_ipv6:
@@ -81,11 +127,48 @@ def _entry_to_py(e) -> RoaEntry:
     )
 
 
+def _router_key_entry_to_py(e) -> RouterKeyEntry:
+    """Copy a C `lr_router_key_entry_t` into a Python `RouterKeyEntry`.
+    The SPKI bytes are copied into a `bytes` object so the returned
+    value is owned and garbage-collected independently of the step's
+    lifetime — the caller can let the step go out of scope without
+    invalidating the entry."""
+    ski = bytes(e.ski[i] for i in range(20))
+    spki_len = int(e.subject_public_key_info_len)
+    if e.subject_public_key_info != ffi.NULL and spki_len > 0:
+        spki = bytes(ffi.buffer(e.subject_public_key_info, spki_len))
+    else:
+        spki = b""
+    return RouterKeyEntry(
+        ski=ski,
+        asn=int(e.asn),
+        subject_public_key_info=spki,
+    )
+
+
+def _aspa_entry_to_py(e) -> AspaEntry:
+    """Copy a C `lr_aspa_entry_t` into a Python `AspaEntry`. The
+    provider ASNs are copied into a `tuple[int, ...]` so the returned
+    value is owned and garbage-collected independently of the step's
+    lifetime."""
+    count = int(e.provider_count)
+    if e.providers != ffi.NULL and count > 0:
+        providers = tuple(int(e.providers[i]) for i in range(count))
+    else:
+        providers = ()
+    return AspaEntry(
+        customer_asn=int(e.customer_asn),
+        providers=providers,
+    )
+
+
 class RtrClientStep:
     """Projection of one RTR protocol step — what the embedder should
     do after one state machine transition. Owns the wire bytes
-    (`send_bytes`), the ROA deltas and the diagnostic log lines.
-    All three are freed by `close` (or the garbage collector)."""
+    (`send_bytes`), the ROA deltas (`roa_deltas`), the BGPsec Router
+    Key deltas (`router_key_deltas`, RFC 8210 §5.10), the ASPA deltas
+    (`aspa_deltas`, §5.11) and the diagnostic log lines (`logs`).
+    All five are freed by `close` (or the garbage collector)."""
 
     __slots__ = ("_step", "_freed")
 
@@ -169,6 +252,80 @@ class RtrClientStep:
         out: list[RoaDelta] = []
         for i in range(n):
             d = self.roa_delta_at(i)
+            if d is None:
+                break
+            out.append(d)
+        return out
+
+    @property
+    def router_key_delta_count(self) -> int:
+        """Number of BGPsec Router Key deltas in this step (RFC 8210
+        §5.10 — zero unless `synced`, always zero for v0 caches)."""
+        return int(self._step.router_key_delta_count)
+
+    def router_key_delta_at(self, i: int) -> RouterKeyDelta | None:
+        """Read the i-th BGPsec Router Key delta (RFC 8210 §5.10).
+        Returns `None` on an out-of-bounds index or when the
+        underlying array is empty. The SPKI bytes are copied into a
+        Python `bytes` object so the returned value is owned and
+        garbage-collected independently of the step's lifetime."""
+        if i < 0 or i >= self.router_key_delta_count:
+            return None
+        out = ffi.new("lr_router_key_delta_t*")
+        rc = get_lib().lr_rtr_client_step_router_key_delta_at(self._step, i, out)
+        if rc != 0:
+            return None
+        return RouterKeyDelta(
+            announce=bool(out.announce),
+            entry=_router_key_entry_to_py(out.entry),
+        )
+
+    @property
+    def router_key_deltas(self) -> list[RouterKeyDelta]:
+        """All BGPsec Router Key deltas in the step as a list."""
+        n = self.router_key_delta_count
+        if n == 0:
+            return []
+        out: list[RouterKeyDelta] = []
+        for i in range(n):
+            d = self.router_key_delta_at(i)
+            if d is None:
+                break
+            out.append(d)
+        return out
+
+    @property
+    def aspa_delta_count(self) -> int:
+        """Number of ASPA deltas in this step (RFC 8210 §5.11 — zero
+        unless `synced`, always zero for v0/v1 caches)."""
+        return int(self._step.aspa_delta_count)
+
+    def aspa_delta_at(self, i: int) -> AspaDelta | None:
+        """Read the i-th ASPA delta (RFC 8210 §5.11). Returns `None`
+        on an out-of-bounds index or when the underlying array is
+        empty. The provider ASNs are copied into a Python `tuple` so
+        the returned value is owned and garbage-collected
+        independently of the step's lifetime."""
+        if i < 0 or i >= self.aspa_delta_count:
+            return None
+        out = ffi.new("lr_aspa_delta_t*")
+        rc = get_lib().lr_rtr_client_step_aspa_delta_at(self._step, i, out)
+        if rc != 0:
+            return None
+        return AspaDelta(
+            announce=bool(out.announce),
+            entry=_aspa_entry_to_py(out.entry),
+        )
+
+    @property
+    def aspa_deltas(self) -> list[AspaDelta]:
+        """All ASPA deltas in the step as a list."""
+        n = self.aspa_delta_count
+        if n == 0:
+            return []
+        out: list[AspaDelta] = []
+        for i in range(n):
+            d = self.aspa_delta_at(i)
             if d is None:
                 break
             out.append(d)

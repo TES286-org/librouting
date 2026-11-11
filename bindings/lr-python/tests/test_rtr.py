@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import librouting
 from librouting import (
+    RtrAspaDelta,
+    RtrAspaEntry,
     RtrClient,
     RtrClientStep,
+    RtrRouterKeyDelta,
+    RtrRouterKeyEntry,
     RtrRoaDelta,
     RtrRoaEntry,
 )
@@ -145,3 +149,50 @@ def test_rtr_client_handles_garbage_in_on_pdu_raw():
         # construct a zero-length C pointer slice).
         with pytest.raises(LrError):
             c.on_pdu_raw(b"", 1_000)
+
+
+def test_rtr_client_step_router_key_and_aspa_counts_on_fresh_poll():
+    """The fresh-poll step exposes zero counts for the new
+    attestation surfaces (`router_key_deltas`, `aspa_deltas`) so a
+    consumer that walks every delta array on every step sees an
+    empty list rather than a missing attribute."""
+    with RtrClient() as c:
+        with c.poll(0) as step:
+            assert step.router_key_delta_count == 0
+            assert step.aspa_delta_count == 0
+            assert step.router_key_delta_at(0) is None
+            assert step.aspa_delta_at(0) is None
+            assert step.router_key_deltas == []
+            assert step.aspa_deltas == []
+
+
+def test_rtr_client_router_key_and_aspa_dataclass_shape():
+    """The new `RtrRouterKeyDelta` / `RtrRouterKeyEntry` /
+    `RtrAspaDelta` / `RtrAspaEntry` dataclasses are immutable and
+    carry the fields the C ABI surfaces — pin the shape so a
+    refactor that drops a field breaks the test."""
+    ski = bytes(
+        [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+            0x01, 0x23, 0x45, 0x67,
+        ]
+    )
+    spki = bytes([0x30, 0x59, 0x04, 0x6F, 0xAD, 0x12, 0x34])
+    rk_entry = RtrRouterKeyEntry(ski=ski, asn=64512, subject_public_key_info=spki)
+    assert rk_entry.ski == ski
+    assert rk_entry.asn == 64512
+    assert rk_entry.subject_public_key_info == spki
+
+    rk_delta = RtrRouterKeyDelta(announce=True, entry=rk_entry)
+    assert rk_delta.announce is True
+    assert rk_delta.entry.asn == 64512
+
+    aspa_entry = RtrAspaEntry(customer_asn=65000, providers=(65001, 65002, 65003))
+    assert aspa_entry.customer_asn == 65000
+    assert aspa_entry.providers == (65001, 65002, 65003)
+
+    aspa_delta = RtrAspaDelta(announce=False, entry=aspa_entry)
+    assert aspa_delta.announce is False
+    assert aspa_delta.entry.customer_asn == 65000
+    assert aspa_delta.entry.providers == (65001, 65002, 65003)

@@ -1189,9 +1189,39 @@ int32_t lr_seg6_route_err_code(void);
 const char *lr_seg6_route_err_name(int32_t code);
 
 /* RTR client (RFC 8210 §6-§8) — transport-agnostic state machine.
- * Mirrors `lr_bgp::rtr::client::{RtrClient, ClientStep, RoaDelta}`. */
+ * Mirrors `lr_bgp::rtr::client::{RtrClient, ClientStep, RoaDelta,
+ * RouterKeyDelta, AspaDelta}`. */
 typedef struct OpaqueRtrClient OpaqueRtrClient;
 typedef struct OpaqueRtrClient *lr_rtr_client_t;
+
+/* RFC 8210 §5.10 Router Key entry (BGPsec attestation). The
+ * `subject_public_key_info` pointer borrows from the step's heap
+ * allocation and is invalidated by `lr_rtr_client_step_free`. */
+typedef struct lr_router_key_entry_t {
+    uint8_t ski[20];
+    uint32_t asn;
+    uint8_t *subject_public_key_info;
+    uintptr_t subject_public_key_info_len;
+} lr_router_key_entry_t;
+
+typedef struct lr_router_key_delta_t {
+    uint8_t announce;
+    lr_router_key_entry_t entry;
+} lr_router_key_delta_t;
+
+/* RFC 8210 §5.11 ASPA entry (SIDROPS ASPA profile). The `providers`
+ * pointer borrows from the step's heap allocation and is
+ * invalidated by `lr_rtr_client_step_free`. */
+typedef struct lr_aspa_entry_t {
+    uint32_t customer_asn;
+    uint32_t *providers;
+    uintptr_t provider_count;
+} lr_aspa_entry_t;
+
+typedef struct lr_aspa_delta_t {
+    uint8_t announce;
+    lr_aspa_entry_t entry;
+} lr_aspa_delta_t;
 
 typedef struct lr_rtr_client_step_t {
     lr_bytes_t send_bytes;
@@ -1202,6 +1232,10 @@ typedef struct lr_rtr_client_step_t {
     uintptr_t log_count;
     lr_roa_delta_t *roa_deltas;
     char **logs;
+    uintptr_t router_key_delta_count;
+    uintptr_t aspa_delta_count;
+    lr_router_key_delta_t *router_key_deltas;
+    lr_aspa_delta_t *aspa_deltas;
 } lr_rtr_client_step_t;
 
 lr_rtr_client_t lr_rtr_client_new(void);
@@ -1235,6 +1269,12 @@ uintptr_t lr_rtr_client_snapshot(lr_rtr_client_t c,
 int32_t lr_rtr_client_step_roa_delta_at(const lr_rtr_client_step_t *step,
                                         uintptr_t index,
                                         lr_roa_delta_t *out);
+int32_t lr_rtr_client_step_router_key_delta_at(const lr_rtr_client_step_t *step,
+                                                uintptr_t index,
+                                                lr_router_key_delta_t *out);
+int32_t lr_rtr_client_step_aspa_delta_at(const lr_rtr_client_step_t *step,
+                                          uintptr_t index,
+                                          lr_aspa_delta_t *out);
 uintptr_t lr_rtr_client_step_log_at(const lr_rtr_client_step_t *step,
                                     uintptr_t index,
                                     uint8_t *out_buf,

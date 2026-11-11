@@ -182,7 +182,16 @@ from .seg6route import (
     err_name,
     err_code,
 )
-from .rtr import RtrClient, RtrClientStep, RoaDelta as RtrRoaDelta, RoaEntry as RtrRoaEntry
+from .rtr import (
+    AspaDelta as RtrAspaDelta,
+    AspaEntry as RtrAspaEntry,
+    RouterKeyDelta as RtrRouterKeyDelta,
+    RouterKeyEntry as RtrRouterKeyEntry,
+    RtrClient,
+    RtrClientStep,
+    RoaDelta as RtrRoaDelta,
+    RoaEntry as RtrRoaEntry,
+)
 from .babel import (
     AE_IPV4,
     AE_IPV6,
@@ -524,6 +533,10 @@ __all__ = [
     "RtrClientStep",
     "RtrRoaDelta",
     "RtrRoaEntry",
+    "RtrRouterKeyDelta",
+    "RtrRouterKeyEntry",
+    "RtrAspaDelta",
+    "RtrAspaEntry",
     # RIB storage (RFC 4271 §9: Loc-RIB / Adj-RIB-In / Adj-RIB-Out /
     # cross-protocol mux / RouteSelector). Mirrors lr_rib.
     "LocRib",
