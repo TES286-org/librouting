@@ -3631,6 +3631,111 @@ test landed in `69fbd02`, 2026-11-07). This entry clears all three.
   returns on the first poll that observes the Down transition.
   The `elapsed < Duration::from_secs(5)` assertion is unchanged.
 
+### `lr-bgp` / `lr-cli`: RFC 8210 §5.10 Router Key + §5.11 ASPA deltas (issue #92)
+
+The RTR client (`lr-bgp::rtr::client::RtrClient`) accepted
+BGPsec Router Key (RFC 8210 §5.10) and ASPA (RFC 8210 §5.11,
+SIDROPS ASPA profile) PDUs on the wire but silently dropped
+them — the previous `on_pdu` arm logged `"rtr: <type> PDU
+accepted but unused"` and produced no typed output, matching
+BIRD's documented parity ("skip Router Key PDUs it cannot
+use"). The defect (`defects.txt` L468-L475) was that an
+embedder who wanted to consume the cache's attestation —
+BGPsec path validation, ASPA validation, or operational
+visibility — saw nothing; the data the cache vouches for
+never reached the embedder through `ClientStep`.
+
+This round surfaces the two attestation classes as typed
+deltas alongside the existing ROA deltas, mirroring the ROA
+pattern that landed in 1.0:
+
+- `RouterKeyEntry { ski: [u8; 20], asn: u32,
+  subject_public_key_info: Vec<u8> }` and `AspaEntry {
+  customer_asn: u32, providers: BTreeSet<u32> }` are the
+  normalised equality shapes the client needs to diff two
+  syncs. `PartialEq` / `Hash` cover only the wire identity
+  (`(ski, asn)` for Router Key, `customer_asn` for ASPA) so
+  two PDUs for the same identity collapse onto one entry in
+  the client's `HashSet` (matching §5.10's `(ski, asn)`
+  scoping and §5.11's "one ASPA object per customer ASN"
+  rule). The SPKI / provider set is carried as data; a
+  re-announcement with different data replaces the prior
+  attestation in the batch and the diff at End of Data
+  surfaces the change as a withdraw + announce pair.
+- `RouterKeyDelta` / `AspaDelta` (mirroring `RoaDelta`)
+  carry one entry plus an `announce: bool` flag.
+- `ClientStep` gains two new fields — `router_key_deltas:
+  Vec<RouterKeyDelta>` and `aspa_deltas: Vec<AspaDelta>` —
+  populated at End of Data alongside `roa_deltas`. The four
+  fields are `Vec<T>` so the existing `#[derive(Default)]` on
+  `ClientStep` is unchanged; no breaking change for
+  embedders that construct `ClientStep { ..Default::default() }`.
+- `RtrClient` gains `router_key_snapshot()` /
+  `aspa_snapshot()` accessors mirroring `snapshot()` for
+  ROA, returning the authoritative set sorted for
+  deterministic snapshots.
+- The `on_pdu` arm for `RtrPdu::RouterKey` and
+  `RtrPdu::Aspa` now accumulates into per-sync batches (with
+  the same phase gate the ROA path applies: a PDU outside a
+  sync is logged and ignored). At End of Data the batch is
+  swapped into the authoritative set and the diff against
+  the prior set is emitted as deltas. An explicit withdrawal
+  (Announce=false) removes the entry; an implicit withdrawal
+  by omission in a Reset Query response also produces a
+  withdraw delta (the batch starts empty for Reset Query
+  syncs, so any entry not re-announced is removed).
+- The daemon's RPKI thread (`crates/lr-cli/src/daemon_rpki.rs`)
+  logs the new delta counts alongside the existing ROA delta
+  log so the operator sees the attestation the cache vouches
+  for even before the FFI carries the typed deltas through to
+  C/Go/Python embedders.
+
+The client does not run BGPsec or ASPA validation — that is
+a separate slice (BGPsec path validation needs the RPKI
+certification path; ASPA validation needs RFC 8481's
+upstream/downstream classification). The deltas surface the
+cache's attestation so an embedder that does run validation,
+or a future validation hook inside librouting, sees the
+atomic update alongside the ROA deltas.
+
+7 new Rust unit tests in `crates/lr-bgp/src/rtr/client_tests.rs`
+pin the new contract:
+
+- `router_key_and_aspa_are_surfaced_as_deltas` (renamed from
+  `router_key_and_aspa_are_accepted_but_unused`) — mid-batch
+  deltas are empty; at EoD the deltas carry the entries.
+- `router_key_withdrawal_at_next_sync_surfaces_as_remove_delta`
+  — a Serial-Query sync with an explicit withdrawal emits a
+  `RouterKeyDelta { announce: false, .. }`.
+- `aspa_withdrawal_deletes_whole_customer_record` — RFC 8210
+  §5.11's "withdrawal deletes the entire ASPA object" rule.
+- `aspa_provider_set_is_canonicalised_for_equality` — same
+  providers in different wire order produce no delta.
+- `router_key_pdu_outside_a_sync_is_logged_and_ignored` /
+  `aspa_pdu_outside_a_sync_is_logged_and_ignored` — the phase
+  gate matches the ROA path.
+- `router_key_replacement_surfaces_as_withdraw_plus_announce`
+  — a re-announcement with a different SPKI surfaces as both
+  a withdraw of the old attestation and an announce of the new.
+- `aspa_provider_set_change_surfaces_as_withdraw_plus_announce`
+  — a re-announcement with a different provider set surfaces as
+  both a withdraw and an announce.
+
+Breaking Rust API change: `ClientStep` gains two `Vec<T>`
+fields (additive under the existing `#[derive(Default)]`, so
+`ClientStep { ..Default::default() }` callers continue to
+compile). The C ABI surface is unchanged: the C
+`lr_rtr_client_step_t` struct in `crates/lr-ffi/src/rtr_client.rs`
+continues to carry the existing fields, and the new
+`router_key_deltas` / `aspa_deltas` arrays are reachable only
+through the Rust API. A separate minor-version follow-up will
+add `lr_router_key_delta_t` / `lr_aspa_delta_t` C types and
+`lr_rtr_client_step_router_key_delta_at` /
+`lr_rtr_client_step_aspa_delta_at` accessors so C/Go/Python
+embedders see the same attestation; the FFI module docs name
+this as the follow-up so an embedder reading the C header sees
+the path. No version bump in this round.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
