@@ -1683,6 +1683,156 @@ No public Rust API change, no C ABI change, no version bump.
 
 ### Fixed
 
+**`lr-cli` / `lr-router` / `lr-policy`: FRR `network PREFIX route-map
+NAME` qualifier applied at origination** (`policy`, issue #92 —
+defects.txt L75). The FRR `network PREFIX route-map NAME` form (RFC
+4271 §9.1.2.1 — "Originate routes from the local routing table into
+BGP") is the per-network attribute hook on origination: a route-map
+whose `set` actions rewrite the locally originated route before it
+enters the Loc-RIB (and from there every Adj-RIB-Out) and whose
+`deny` verdict suppresses origination. The previous `lr translate
+frr` converter parsed the qualifier, pushed the prefix onto
+`networks`, and noted the route-map as unmapped — claiming "lr's
+`networks` is a plain prefix list, no per-route attribute hook." The
+claim was already stale: `lr_policy::RouteMap::evaluate` (with the
+`MatchResolver` trait) is the right hook surface, and
+`lr_router::DefaultRouter::originate_family` constructs the route
+object the route-map can mutate. The gap was on the converter and
+daemon-origination sides only.
+
+This round closes the gap end-to-end:
+
+- **`lr-router`**: `DefaultRouter::originate_family_with_route_map`
+  is a new public method that builds the locally-originated route
+  (factored out of `originate_family` into `build_originated_route`
+  so the two paths do not duplicate attribute construction), runs
+  the route-map's `evaluate` against it, and installs the
+  (possibly mutated) route via the new shared `install_originated`
+  helper. The `deny` verdict returns `None` (no origination); the
+  `permit` and fall-through cases return `Some(RouteKey)`. The
+  route-map's `set` actions (`SetLocalPref` / `SetMed` / `PrependAs`
+  / `AddCommunity` / `SetNextHop` / `SetMetric` / `SetTag`) are
+  applied before the route enters the Loc-RIB, so every Adj-RIB-Out
+  sees the rewritten attribute. The per-session export policy is
+  unchanged — the per-network route-map is the origin-wide
+  attribute hook, not a per-peer filter.
+- **`lr-policy`**: `PolicyHooks` gains a `route_map(name)` accessor
+  and a `MatchResolver` impl that delegates to the underlying
+  `PolicySet`. The daemon shares one `PolicyHooks` between the
+  import/export hook chain (the existing usage) and the per-network
+  origination path (the new usage), so a single
+  `lr_policy::PolicySet` build covers both dispatch sites. The
+  `MatchResolver` impl mirrors the delegation `PolicySet` already
+  provides; the `route_map` accessor returns the named `RouteMap` or
+  `None` (the daemon's finalize step already rejects unknown
+  route-map names at startup, so a missing lookup at runtime is a
+  daemon bug — the origination path falls back to plain
+  `originate_family` and logs the inconsistency).
+- **`lr-cli` (daemon-config)**: a new `[[bgp.network_route_map]]`
+  TOML table (with `prefix` and `route_map` keys) carries the
+  per-network route-map qualifier. The finalize step fails closed
+  when the entry's prefix is not in `networks` (the route-map is a
+  per-network qualifier, not a way to originate a network the
+  operator did not list), when the `route_map` name is unknown (a
+  typo surfaces at startup instead of silently dropping the
+  route-map at first UPDATE), and when the same `(prefix,
+  route_map)` pair appears twice. The parser also fails closed on
+  unknown keys (`typo protection; the route-map qualifier fails
+  closed`) — the same posture as the `[[aggregate]]` handler.
+- **`lr-cli` (daemon)**: the BGP daemon's origination path now
+  looks up the per-network route-map (if any) for each `networks`
+  entry, resolves the named `RouteMap` against the daemon's
+  `PolicyHooks`, and calls `originate_family_with_route_map` when a
+  route-map is configured (logging `originating <prefix> (route-map
+  <name>)` on permit, `network <prefix> suppressed by route-map
+  <name> (deny verdict)` on deny). The SIGHUP reload path consults
+  the freshly-reloaded `[[bgp.network_route_map]]` table the same
+  way for newly-originated networks; the live routes stay unchanged
+  on reload (the per-network route-map is applied once per
+  origination event, not per reload — a follow-up can re-originate
+  the affected network when its route-map changes).
+- **`lr-cli` (translate)**: the FRR converter now maps `network
+  PREFIX route-map NAME` onto a `[[bgp.network_route_map]]` row
+  (instead of an unmapped note), keeping the prefix on `networks`
+  the same way the previous shape did. The BIRD converter is
+  unchanged — BIRD's `network` (inside `protocol bgp`) does not
+  carry a per-route route-map qualifier the way FRR's does (BIRD
+  puts the route-map on the protocol's `import` / `export` filter
+  instead, which the converter already maps onto the per-peer
+  `import` / `export` TOML keys).
+- **`lr-cli` (config_dsl)**: the `.lr` DSL parser and emitter
+  recognise the `bgp.network_route_map { prefix = "..." ;
+  route_map = "..." }` block, so `lr config to-dsl` round-trips a
+  config that carries `[[bgp.network_route_map]]` without loss.
+  The block is a top-level array table (mirrors the TOML shape —
+  flat, no enclosing `bgp { … }`).
+
+Test surface: ten new unit tests in
+`crates/lr-cli/src/daemon_config_tests.rs` cover the TOML parser +
+finalize (`network_route_map_table_parses_and_finalizes`,
+`network_route_map_missing_prefix_fails`,
+`network_route_map_missing_route_map_fails`,
+`network_route_map_unknown_route_map_fails`,
+`network_route_map_prefix_not_in_networks_fails`,
+`network_route_map_unknown_key_fails_closed`,
+`network_route_map_duplicate_fails`,
+`network_route_map_empty_route_map_name_fails`,
+`network_route_map_bad_prefix_fails`,
+`network_route_map_without_route_maps_block_starts_daemon`). Four
+new e2e tests in `crates/lr-cli/tests/daemon_policy.rs` exercise
+the daemon's runtime path through the real `lr-daemon` binary
+(`network_route_map_permit_originate_and_peer_installs` — the
+daemon logs `originating <prefix> (route-map <name>)` and the peer
+installs the route; `network_route_map_deny_suppresses_origination`
+— the daemon logs `network <prefix> suppressed by route-map <name>
+(deny verdict)` and the peer never installs the route;
+`network_route_map_unknown_route_map_name_fails_startup` and
+`network_route_map_prefix_not_in_networks_fails_startup` — the
+daemon's stderr carries the finalize-step diagnostic). Four new
+unit tests in `crates/lr-cli/src/translate_tests.rs` cover the FRR
+converter
+(`frr_network_with_route_map_emits_bgp_network_route_map_table`,
+`frr_network_with_route_map_missing_name_notes_unmapped`,
+`frr_network_without_route_map_still_emits_just_networks`,
+`frr_network_route_map_with_route_map_definition_round_trips`).
+Two new unit tests in `crates/lr-cli/src/config_dsl/emit_tests.rs`
+cover the DSL round-trip
+(`round_trips_bgp_network_route_map_table`,
+`round_trips_multiple_bgp_network_route_map_tables`). Eight new
+unit tests in `crates/lr-router/src/instance/tests.rs` cover
+`DefaultRouter::originate_family_with_route_map`'s contract
+(permit, deny, fall-through, set_local_pref, set_med, set_tag,
+prepend_as, v6 NEXT_HOP unaffected). Two new unit tests in
+`crates/lr-policy/src/set.rs` cover `PolicyHooks::route_map` and
+the `MatchResolver` delegation
+(`policy_hooks_route_map_looks_up_named_route_map`,
+`policy_hooks_match_resolver_delegates_to_inner_set`).
+
+Public Rust API change (additive): one new public method on
+`lr_router::DefaultRouter`
+(`originate_family_with_route_map`), two new public items on
+`lr_policy::PolicyHooks` (the `route_map` accessor and the
+`MatchResolver` impl), one new public struct in
+`lr_cli::daemon_config` (`NetworkRouteMapSpec`). The two
+private helpers `build_originated_route` and `install_originated`
+on `DefaultRouter` are non-public refactors of the existing
+`originate_family` body; their signatures are stable across the
+`lr-router` crate's own consumers. No C ABI change (no `lr_*`
+symbol touched — `BgpAction` and `Event` are not exposed through
+the C ABI; the new `DefaultRouter::originate_family_with_route_map`
+is a Rust-API-only addition that takes `&lr_policy::RouteMap` and
+`&dyn lr_policy::action::MatchResolver`, neither of which has a C
+ABI counterpart), no protocol-on-the-wire change (the route-map's
+`set` actions produce attributes the egress path already knew how
+to encode), no version bump.
+
+The defects.txt entry this closes is
+`crates/lr-cli/src/translate.rs:L71-L72 | INCOMPLETE-IMPL | "lr's
+\`networks\` is a plain prefix list, no per-route attribute hook" -
+FRR \`network PREFIX route-map NAME\` not mapped`. The matching
+re-stated entries at `crates/lr-cli/src/translate.rs:L268` and
+`crates/lr-cli/src/translate.rs:L275` are also closed.
+
 **`lr-cli` clippy regression in `daemon_ospf3_tests.rs`** (`test`,
 issue #92 follow-up). The `OSPFv3 RFC 7166 authentication trailer
 wiring end-to-end` round (commit `3b0bcb5`) added a test that

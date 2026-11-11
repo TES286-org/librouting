@@ -855,6 +855,30 @@ pair may appear once.
 | `summary_only` | bool | `false` | RFC 4271 §9.2.2.2 c — suppress every more-specific route that falls inside the aggregate from the Adj-RIB-Out toward every BGP peer; only the aggregate is advertised. The Loc-RIB is unchanged. Mirrors FRR `aggregate-address … summary-only`. |
 | `as_set` | bool | `false` | RFC 4271 §9.2.2.2 d — build an `AS_SET` segment in the aggregate's AS_PATH enumerating every AS that contributed a more-specific route; `ATOMIC_AGGREGATE` is omitted in this mode. The aggregate is re-originated when the contributing-AS set changes. Mirrors FRR `aggregate-address … as-set`. |
 
+### `[[bgp.network_route_map]]`
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `prefix` | string | — | Required CIDR; MUST also appear in `[bgp] networks`. The route-map is a per-network *qualifier*, not a way to originate a network the operator did not list. |
+| `route_map` | string | — | Required; MUST name a `[[route-map]]` table the daemon already parsed. A typo fails closed at finalize time so it surfaces at startup instead of silently dropping the route-map at first UPDATE. |
+
+`[[bgp.network_route_map]]` carries FRR's `network PREFIX route-map
+NAME` qualifier (RFC 4271 §9.1.2.1 — "Originate routes from the local
+routing table into BGP"). The daemon applies the named route-map
+**at origination**: the route-map's `set` actions rewrite the
+locally originated route before it enters the Loc-RIB (and from
+there every Adj-RIB-Out) — `set_local_pref` / `set_med` / `prepend` /
+`add_community` / `set_next_hop` / `set_metric` / `set_tag` all take
+effect — and the route-map's `deny` verdict suppresses origination
+entirely. The per-session export policy is unchanged: the per-network
+route-map is the origin-wide attribute hook, not a per-peer filter
+(use `[[peer]] import = "…"` / `export = "…"` for per-peer policy).
+
+A `(prefix, route_map)` pair may appear once per config; a duplicate
+fails closed at finalize time. The `.lr` DSL emits these as a flat
+top-level `bgp.network_route_map { prefix = …; route_map = … }`
+block (mirrors the TOML shape — no enclosing `bgp { … }`).
+
 ### `[shutdown]`
 
 | Key | Type | Default | Notes |
