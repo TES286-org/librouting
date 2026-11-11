@@ -279,3 +279,167 @@ fn bgp_ls_area_dotted_quad_parses() {
     // 0.0.0.1 parses to u32 = 1, so the banner prints "areas=1".
     wait_log_all(&a.log, &["bgp-ls:       on (AS=64512 BGP-LS-ID=0 areas=1)"]);
 }
+
+/// `--bgp-ls-instance-id 42` surfaces in the startup banner's
+/// `bgp-ls:` line as `Instance-ID=42`. The default (no
+/// `--bgp-ls-instance-id` flag) keeps the previous banner form
+/// (without the `Instance-ID=` segment) — regression-gated by
+/// `bgp_ls_flag_negotiates_family_alongside_ipv4_unicast` above.
+/// A non-zero Instance-ID is the RFC 9552 §3.2 way to segregate
+/// NLRIs from different IGP routing domains on the consumer side.
+#[test]
+fn bgp_ls_instance_id_cli_flag_shows_in_banner() {
+    let port_b = free_port();
+    let a = Daemon::spawn(
+        &[
+            "--local-as",
+            "64512",
+            "--peer-as",
+            "64513",
+            "--router-id",
+            "10.0.0.1",
+            "--peer",
+            &format!("127.0.0.1:{port_b}"),
+            "--local-address",
+            "192.0.2.1",
+            "--network",
+            "203.0.113.0/24",
+            "--ebgp-policy",
+            "accept-all",
+            "--bgp-ls",
+            "--bgp-ls-instance-id",
+            "42",
+        ],
+        "iid-a",
+    );
+    let _b = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.2",
+            "--listen",
+            &format!("127.0.0.1:{port_b}"),
+            "--local-address",
+            "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
+            "--bgp-ls",
+        ],
+        "iid-b",
+    );
+    wait_log_all(
+        &a.log,
+        &["bgp-ls:       on (AS=64512 BGP-LS-ID=0 Instance-ID=42 areas=(all))"],
+    );
+}
+
+/// `--bgp-ls-instance-id bad` (non-numeric) is rejected with exit
+/// code 2 — the same fail-closed posture `--bgp-ls-id` and
+/// `--bgp-ls-as` already use for a non-integer argument. The
+/// process exits before any BGP work, so no log file is needed.
+#[test]
+fn bgp_ls_instance_id_cli_flag_rejects_non_numeric() {
+    let bin = std::env::current_exe().unwrap();
+    // The test binary is `lr-daemon` — its parent directory is
+    // `target/debug/deps` (or `target/release/deps`); the daemon
+    // binary is two levels up under `target/{debug,release}`.
+    let mut dir = bin.clone();
+    dir.pop();
+    dir.pop();
+    dir.push("lr-daemon");
+    let out = std::process::Command::new(&dir)
+        .args([
+            "--local-as",
+            "64512",
+            "--peer-as",
+            "64513",
+            "--router-id",
+            "10.0.0.1",
+            "--bgp-ls",
+            "--bgp-ls-instance-id",
+            "not-a-number",
+        ])
+        .output()
+        .expect("spawn lr-daemon");
+    assert!(
+        !out.status.success(),
+        "lr-daemon must exit non-zero on a non-numeric --bgp-ls-instance-id"
+    );
+    let code = out.status.code().unwrap_or(-1);
+    assert_eq!(
+        code, 2,
+        "config-parse failure exits with code 2 (matches --bgp-ls-id's posture); got {code}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bad --bgp-ls-instance-id"),
+        "stderr must name the rejected flag; got: {stderr}"
+    );
+}
+
+/// `[bgp_ls] instance_id = 7` (TOML) is parsed by `config check`
+/// and shows up in the banner's `bgp-ls:` line as `Instance-ID=7`.
+/// Covers the TOML surface the CLI flag's test above does not —
+/// the operator's other configuration channel.
+#[test]
+fn bgp_ls_instance_id_toml_key_shows_in_banner() {
+    let port_b = free_port();
+    let cfg_path = std::env::temp_dir().join(format!(
+        "lr-daemon-bgpls-iid-toml-{}-{}.toml",
+        std::process::id(),
+        port_b
+    ));
+    std::fs::write(
+        &cfg_path,
+        "\
+[bgp]
+local_as = 64512
+peer_as = 64513
+router_id = \"10.0.0.1\"
+peer_addr = '127.0.0.1:0'
+local_address = '192.0.2.1'
+ebgp_policy = \"accept-all\"
+networks = [\"203.0.113.0/24\"]
+
+[bgp_ls]
+enabled = true
+instance_id = 7
+",
+    )
+    .expect("write temp TOML");
+    let a = Daemon::spawn(
+        &[
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--peer",
+            &format!("127.0.0.1:{port_b}"),
+        ],
+        "iid-toml-a",
+    );
+    let _b = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.2",
+            "--listen",
+            &format!("127.0.0.1:{port_b}"),
+            "--local-address",
+            "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
+            "--bgp-ls",
+        ],
+        "iid-toml-b",
+    );
+    wait_log_all(
+        &a.log,
+        &["bgp-ls:       on (AS=64512 BGP-LS-ID=0 Instance-ID=7 areas=(all))"],
+    );
+    let _ = std::fs::remove_file(&cfg_path);
+}
