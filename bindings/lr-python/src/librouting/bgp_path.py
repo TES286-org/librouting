@@ -95,10 +95,16 @@ ORIGIN_IGP = 0
 ORIGIN_EGP = 1
 ORIGIN_INCOMPLETE = 2
 
-# NEXT_HOP kind values (lr_bgp_next_hop_t::kind).
+# NEXT_HOP / MP_REACH_NLRI next-hop kind values (lr_bgp_next_hop_t::kind).
+# The two extra constants below (`NEXT_HOP_V6_LINK_LOCAL`,
+# `NEXT_HOP_V6_GLOBAL_LINK_LOCAL`) are reachable only through
+# `MP_REACH_NLRI` (:meth:`BgpMessage.update_mp_reach_next_hop`); the
+# legacy `NEXT_HOP` attribute is always V4 / V6 / V4_OVER_V6.
 NEXT_HOP_V4 = 0
 NEXT_HOP_V6 = 1
 NEXT_HOP_V4_OVER_V6 = 2
+NEXT_HOP_V6_LINK_LOCAL = 3
+NEXT_HOP_V6_GLOBAL_LINK_LOCAL = 4
 
 # IANA BGP path attribute type codes (RFC 4271 §5.1 + extensions).
 # Mirrors `lr_bgp::path::AttrType` so a Python embedder can drive
@@ -278,7 +284,7 @@ class BgpNextHop:
             return None
         if self.kind == NEXT_HOP_V4:
             return ipaddress.IPv4Address(self.addr[:4])
-        if self.kind == NEXT_HOP_V6:
+        if self.kind in (NEXT_HOP_V6, NEXT_HOP_V6_LINK_LOCAL, NEXT_HOP_V6_GLOBAL_LINK_LOCAL):
             return ipaddress.IPv6Address(self.addr)
         if self.kind == NEXT_HOP_V4_OVER_V6:
             return ipaddress.IPv4Address(self.addr[:4])

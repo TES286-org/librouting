@@ -428,3 +428,128 @@ class BgpMessage:
     def update_attrs(self) -> list[tuple[int, int, bytes]]:
         """Walk every path attribute."""
         return [self.update_attr_at(i) for i in range(self.update_attr_count())]
+
+    # -- MP-BGP typed readers (RFC 4760 + RFC 7911) --
+    #
+    # `update_attr_at` exposes the raw attribute bytes for
+    # MP_REACH_NLRI / MP_UNREACH_NLRI (path attribute type 14 / 15);
+    # the readers below decode the attribute once via the message
+    # handle's `PathAttributes` and surface each NLRI entry as a
+    # `(path_id, prefix)` tuple, the same shape the legacy IPv4 NLRI /
+    # withdrawn readers use. A Python embedder walking an MP-BGP
+    # UPDATE no longer needs to call the codec a second time to crack
+    # open the NLRI list.
+
+    def update_mp_reach_present(self) -> bool:
+        """True when the UPDATE carries an MP_REACH_NLRI attribute (RFC
+        4760 §3). False on a non-UPDATE message or when the attribute
+        is absent — distinguishes "absent" from "present with zero
+        NLRI entries" the same way the C ABI's `present` reader does."""
+        return get_lib().lr_bgp_message_update_mp_reach_present(self._require()) != 0
+
+    def update_mp_reach_family(self) -> tuple[int, int]:
+        """Read the MP_REACH_NLRI address family as ``(afi, safi)``."""
+        afi = ffi.new("uint16_t *")
+        safi = ffi.new("uint8_t *")
+        rc = get_lib().lr_bgp_message_update_mp_reach_family(
+            self._require(), afi, safi
+        )
+        if rc != 0:
+            raise LrError(
+                f"update_mp_reach_family failed (rc={rc}): {last_error()}"
+            )
+        return int(afi[0]), int(safi[0])
+
+    def update_mp_reach_next_hop(self) -> "BgpNextHop":
+        """Read the MP_REACH_NLRI next-hop. ``kind`` may be V4 / V6 /
+        V4_OVER_V6 / V6_LINK_LOCAL / V6_GLOBAL_LINK_LOCAL. For
+        V6_GLOBAL_LINK_LOCAL only the global half is exposed; the
+        link-local half is dropped (matches the existing
+        :meth:`BgpPathAttrs.mp_reach` behaviour — embedders that need
+        both halves read the raw attribute bytes via
+        :meth:`update_attr_at` for the MP_REACH_NLRI index)."""
+        from .bgp_path import BgpNextHop, _next_hop_from_c
+
+        out = ffi.new("lr_bgp_next_hop_t*")
+        rc = get_lib().lr_bgp_message_update_mp_reach_next_hop(
+            self._require(), out
+        )
+        if rc != 0:
+            raise LrError(
+                f"update_mp_reach_next_hop failed (rc={rc}): {last_error()}"
+            )
+        return _next_hop_from_c(out)
+
+    def update_mp_reach_nlri_count(self) -> int:
+        """Number of NLRI entries carried inside the MP_REACH_NLRI
+        attribute. Returns 0 on a non-UPDATE message, an UPDATE
+        without MP_REACH_NLRI, or an MP_REACH_NLRI with zero NLRI
+        entries — use :meth:`update_mp_reach_present` to distinguish
+        the absent case from a zero-NLRI attribute."""
+        return int(get_lib().lr_bgp_message_update_mp_reach_nlri_count(self._require()))
+
+    def update_mp_reach_nlri_at(self, idx: int) -> tuple[int, bytes, int]:
+        """Read the MP_REACH_NLRI entry at ``idx`` as
+        ``(path_id, addr_bytes, prefix_len)``. ``path_id`` is the
+        RFC 7911 Add-Path identifier (0 when Add-Path was not
+        negotiated for the family); ``addr_bytes`` is 4 bytes for
+        IPv4 families or 16 bytes for IPv6 families."""
+        path_id = ffi.new("uint32_t *")
+        p = ffi.new("struct lr_prefix_t *")
+        rc = get_lib().lr_bgp_message_update_mp_reach_nlri_at(
+            self._require(), idx, path_id, p
+        )
+        if rc != 0:
+            raise LrError(
+                f"update_mp_reach_nlri_at({idx}) failed (rc={rc}): {last_error()}"
+            )
+        if p.is_ipv6:
+            return int(path_id[0]), bytes(p.addr[0:16]), p.prefix_len
+        return int(path_id[0]), bytes(p.addr[0:4]), p.prefix_len
+
+    def update_mp_unreach_present(self) -> bool:
+        """True when the UPDATE carries an MP_UNREACH_NLRI attribute
+        (RFC 4760 §4). MP_UNREACH_NLRI with zero NLRI entries is the
+        End-of-RIB marker for an MP family — `present` is the only
+        way to distinguish "EoR marker" from "no MP_UNREACH at all"."""
+        return get_lib().lr_bgp_message_update_mp_unreach_present(self._require()) != 0
+
+    def update_mp_unreach_family(self) -> tuple[int, int]:
+        """Read the MP_UNREACH_NLRI address family as ``(afi, safi)``."""
+        afi = ffi.new("uint16_t *")
+        safi = ffi.new("uint8_t *")
+        rc = get_lib().lr_bgp_message_update_mp_unreach_family(
+            self._require(), afi, safi
+        )
+        if rc != 0:
+            raise LrError(
+                f"update_mp_unreach_family failed (rc={rc}): {last_error()}"
+            )
+        return int(afi[0]), int(safi[0])
+
+    def update_mp_unreach_nlri_count(self) -> int:
+        """Number of NLRI entries carried inside the MP_UNREACH_NLRI
+        attribute. Returns 0 on a non-UPDATE message, an UPDATE
+        without MP_UNREACH_NLRI, or an MP_UNREACH_NLRI with zero NLRI
+        entries (End-of-RIB marker) — use
+        :meth:`update_mp_unreach_present` to distinguish the absent
+        case from an EoR marker."""
+        return int(get_lib().lr_bgp_message_update_mp_unreach_nlri_count(self._require()))
+
+    def update_mp_unreach_nlri_at(self, idx: int) -> tuple[int, bytes, int]:
+        """Read the MP_UNREACH_NLRI entry at ``idx`` as
+        ``(path_id, addr_bytes, prefix_len)``. Same contract as
+        :meth:`update_mp_reach_nlri_at` but for the withdrawal
+        section."""
+        path_id = ffi.new("uint32_t *")
+        p = ffi.new("struct lr_prefix_t *")
+        rc = get_lib().lr_bgp_message_update_mp_unreach_nlri_at(
+            self._require(), idx, path_id, p
+        )
+        if rc != 0:
+            raise LrError(
+                f"update_mp_unreach_nlri_at({idx}) failed (rc={rc}): {last_error()}"
+            )
+        if p.is_ipv6:
+            return int(path_id[0]), bytes(p.addr[0:16]), p.prefix_len
+        return int(path_id[0]), bytes(p.addr[0:4]), p.prefix_len

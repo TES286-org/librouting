@@ -1401,6 +1401,105 @@ def test_bgp_message_decode_keepalive():
         assert m.kind() == librouting.BGP_MSG_KEEPALIVE
 
 
+def test_bgp_message_mp_reach_readers():
+    """MP_REACH_NLRI readers on BgpMessage (RFC 4760 §3).
+
+    The C ABI has no `lr_bgp_encode_update_mp_reach_v6` helper, so the
+    byte sequence is hard-coded from the Rust encoder (see codec.rs
+    inline test `mp_reach_round_trip_ipv6` for the producer side). The
+    UPDATE carries IPv6 unicast + 2001:db8::1 next-hop + two NLRI
+    entries (2001:db8::/64 and 2001:db8:0:1::/65).
+    """
+    mp_reach = bytes([
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x42, 0x02, 0x00, 0x00, 0x00, 0x2b, 0x80,
+        0x0e, 0x28, 0x00, 0x02, 0x01, 0x10, 0x20, 0x01,
+        0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x40,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+        0x41, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00,
+        0x01, 0x00,
+    ])
+    with librouting.BgpMessage.decode(mp_reach) as m:
+        assert m.kind() == librouting.BGP_MSG_UPDATE
+        assert m.update_mp_reach_present() is True
+        assert m.update_mp_unreach_present() is False
+
+        afi, safi = m.update_mp_reach_family()
+        assert afi == 2  # IPv6
+        assert safi == 1  # unicast
+
+        nh = m.update_mp_reach_next_hop()
+        assert nh.kind == librouting.NEXT_HOP_V6
+        assert nh.present is True
+        assert nh.addr == bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                 0, 0, 0, 0, 0, 0, 0, 1])
+
+        assert m.update_mp_reach_nlri_count() == 2
+
+        path_id0, addr0, plen0 = m.update_mp_reach_nlri_at(0)
+        assert path_id0 == 0
+        assert addr0 == bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0])
+        assert plen0 == 64
+
+        path_id1, addr1, plen1 = m.update_mp_reach_nlri_at(1)
+        assert path_id1 == 0
+        assert addr1 == bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1,
+                                0, 0, 0, 0, 0, 0, 0, 0])
+        assert plen1 == 65
+
+        # Out-of-range raises LrError.
+        try:
+            m.update_mp_reach_nlri_at(2)
+        except librouting.LrError:
+            pass
+        else:
+            raise AssertionError("update_mp_reach_nlri_at(2) must raise")
+
+
+def test_bgp_message_mp_unreach_readers():
+    """MP_UNREACH_NLRI readers on BgpMessage (RFC 4760 §4).
+
+    Hard-coded byte sequence from the Rust encoder (see codec.rs inline
+    test `mp_unreach_round_trip_ipv6`); two IPv6 NLRI entries to
+    withdraw (2001:db8::/64 + 2001:db8:0:1::/64).
+    """
+    mp_unreach = bytes([
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x2f, 0x02, 0x00, 0x00, 0x00, 0x18, 0x80,
+        0x0f, 0x15, 0x00, 0x02, 0x01, 0x40, 0x20, 0x01,
+        0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x40, 0x20,
+        0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01,
+    ])
+    with librouting.BgpMessage.decode(mp_unreach) as m:
+        assert m.kind() == librouting.BGP_MSG_UPDATE
+        assert m.update_mp_unreach_present() is True
+        assert m.update_mp_reach_present() is False
+
+        afi, safi = m.update_mp_unreach_family()
+        assert afi == 2
+        assert safi == 1
+
+        assert m.update_mp_unreach_nlri_count() == 2
+        path_id0, addr0, plen0 = m.update_mp_unreach_nlri_at(0)
+        assert path_id0 == 0
+        assert plen0 == 64
+
+
+def test_bgp_message_mp_readers_absent_on_plain_update():
+    """MP_REACH/MP_UNREACH readers return False / 0 on a plain IPv4
+    withdraw UPDATE."""
+    wire = librouting.encode_update_withdraw_v4(["203.0.113.0/24"])
+    with librouting.BgpMessage.decode(wire) as m:
+        assert m.update_mp_reach_present() is False
+        assert m.update_mp_unreach_present() is False
+        assert m.update_mp_reach_nlri_count() == 0
+        assert m.update_mp_unreach_nlri_count() == 0
+
+
 def test_bgp_message_decode_rejects_truncated():
     """4 bytes cannot fit a 19-byte BGP header — decode must raise."""
     try:

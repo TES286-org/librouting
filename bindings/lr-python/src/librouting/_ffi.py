@@ -585,6 +585,28 @@ int32_t lr_bgp_message_update_attr_at(lr_bgp_message_t m,
                                       uint8_t *out_flags,
                                       lr_bytes_t *out_value);
 
+uint8_t lr_bgp_message_update_mp_reach_present(lr_bgp_message_t m);
+int32_t lr_bgp_message_update_mp_reach_family(lr_bgp_message_t m,
+                                               uint16_t *out_afi,
+                                               uint8_t *out_safi);
+int32_t lr_bgp_message_update_mp_reach_next_hop(lr_bgp_message_t m,
+                                                struct lr_bgp_next_hop_t *out);
+uintptr_t lr_bgp_message_update_mp_reach_nlri_count(lr_bgp_message_t m);
+int32_t lr_bgp_message_update_mp_reach_nlri_at(lr_bgp_message_t m,
+                                                uintptr_t idx,
+                                                uint32_t *out_path_id,
+                                                struct lr_prefix_t *out_prefix);
+
+uint8_t lr_bgp_message_update_mp_unreach_present(lr_bgp_message_t m);
+int32_t lr_bgp_message_update_mp_unreach_family(lr_bgp_message_t m,
+                                                uint16_t *out_afi,
+                                                uint8_t *out_safi);
+uintptr_t lr_bgp_message_update_mp_unreach_nlri_count(lr_bgp_message_t m);
+int32_t lr_bgp_message_update_mp_unreach_nlri_at(lr_bgp_message_t m,
+                                                 uintptr_t idx,
+                                                 uint32_t *out_path_id,
+                                                 struct lr_prefix_t *out_prefix);
+
 typedef struct OpaqueRoaStore OpaqueRoaStore;
 typedef struct OpaqueRoaStore *lr_roa_store_t;
 

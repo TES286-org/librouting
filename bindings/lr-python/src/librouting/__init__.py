@@ -311,6 +311,8 @@ from .bgp_path import (
     NEXT_HOP_V4,
     NEXT_HOP_V6,
     NEXT_HOP_V4_OVER_V6,
+    NEXT_HOP_V6_LINK_LOCAL,
+    NEXT_HOP_V6_GLOBAL_LINK_LOCAL,
     PathAttr,
 )
 from .core_types import (
@@ -585,6 +587,8 @@ __all__ = [
     "NEXT_HOP_V4",
     "NEXT_HOP_V6",
     "NEXT_HOP_V4_OVER_V6",
+    "NEXT_HOP_V6_LINK_LOCAL",
+    "NEXT_HOP_V6_GLOBAL_LINK_LOCAL",
     "BGP_ATTR_ORIGIN",
     "BGP_ATTR_AS_PATH",
     "BGP_ATTR_NEXT_HOP",
