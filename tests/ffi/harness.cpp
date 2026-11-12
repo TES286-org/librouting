@@ -561,6 +561,115 @@ int main() {
         // RAII cleanup runs when each BgpMessage leaves scope.
     }
 
+    // ===== MP-BGP typed readers (RFC 4760) — issue #92 =====
+    //
+    // The C ABI has no `lr_bgp_encode_update_mp_reach_v6` helper, so the
+    // MP_REACH/MP_UNREACH UPDATEs are exercised from a hard-coded byte
+    // sequence captured from the Rust encoder (see codec.rs inline
+    // tests for the producer side). The byte sequence is an MP_REACH
+    // for IPv6 unicast with 2001:db8::1 next-hop + two NLRI entries
+    // (2001:db8::/64 and 2001:db8:0:1::/65).
+    {
+        static const std::uint8_t mp_reach_update[] = {
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0x00, 0x42, 0x02, 0x00, 0x00, 0x00, 0x2b, 0x80,
+            0x0e, 0x28, 0x00, 0x02, 0x01, 0x10, 0x20, 0x01,
+            0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x40,
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+            0x41, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00,
+            0x01, 0x00,
+        };
+        auto um = decode_bgp_message(std::vector<std::uint8_t>(
+            mp_reach_update, mp_reach_update + sizeof(mp_reach_update)));
+        check(message_kind(um) == BgpMessageKind::Update, "MP_REACH UPDATE kind");
+        check(update_mp_reach_present(um), "MP_REACH_NLRI present");
+        check(!update_mp_unreach_present(um), "MP_UNREACH_NLRI absent in MP_REACH-only UPDATE");
+
+        auto fam = update_mp_reach_family(um);
+        check(fam.afi == 2, "MP_REACH AFI = IPv6");
+        check(fam.safi == 1, "MP_REACH SAFI = unicast");
+
+        auto nh = update_mp_reach_next_hop(um);
+        check(nh.kind == BgpNextHopKind::V6, "MP_REACH next-hop kind = V6");
+        check(nh.present, "MP_REACH next-hop present");
+        std::array<std::uint8_t, 16> want_nh = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 1,
+        };
+        check(nh.addr == want_nh, "MP_REACH next-hop = 2001:db8::1");
+
+        check(update_mp_reach_nlri_count(um) == 2, "MP_REACH has 2 NLRI entries");
+        auto e0 = update_mp_reach_nlri_at(um, 0);
+        check(e0.path_id == 0, "MP_REACH NLRI[0] path_id = 0");
+        check(e0.prefix.is_ipv6 == 1, "MP_REACH NLRI[0] is IPv6");
+        check(e0.prefix.prefix_len == 64, "MP_REACH NLRI[0] prefix_len = 64");
+        std::array<std::uint8_t, 16> want_p0 = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        };
+        check(std::memcmp(e0.prefix.addr, want_p0.data(), 16) == 0,
+              "MP_REACH NLRI[0] prefix = 2001:db8::/64");
+
+        auto e1 = update_mp_reach_nlri_at(um, 1);
+        check(e1.prefix.prefix_len == 65, "MP_REACH NLRI[1] prefix_len = 65");
+        std::array<std::uint8_t, 16> want_p1 = {
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        };
+        check(std::memcmp(e1.prefix.addr, want_p1.data(), 16) == 0,
+              "MP_REACH NLRI[1] prefix = 2001:db8:0:1::/65");
+
+        bool threw = false;
+        try {
+            (void)update_mp_reach_nlri_at(um, 2);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "MP_REACH NLRI[2] out of range throws");
+    }
+    {
+        // MP_UNREACH_NLRI UPDATE (RFC 4760 §4): two IPv6 NLRI entries
+        // to withdraw (2001:db8::/64 + 2001:db8:0:1::/64).
+        static const std::uint8_t mp_unreach_update[] = {
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0x00, 0x2f, 0x02, 0x00, 0x00, 0x00, 0x18, 0x80,
+            0x0f, 0x15, 0x00, 0x02, 0x01, 0x40, 0x20, 0x01,
+            0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x40, 0x20,
+            0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01,
+        };
+        auto um = decode_bgp_message(std::vector<std::uint8_t>(
+            mp_unreach_update, mp_unreach_update + sizeof(mp_unreach_update)));
+        check(message_kind(um) == BgpMessageKind::Update, "MP_UNREACH UPDATE kind");
+        check(update_mp_unreach_present(um), "MP_UNREACH_NLRI present");
+        check(!update_mp_reach_present(um), "MP_REACH_NLRI absent in MP_UNREACH-only UPDATE");
+
+        auto fam = update_mp_unreach_family(um);
+        check(fam.afi == 2, "MP_UNREACH AFI = IPv6");
+        check(fam.safi == 1, "MP_UNREACH SAFI = unicast");
+
+        check(update_mp_unreach_nlri_count(um) == 2, "MP_UNREACH has 2 NLRI entries");
+        auto e0 = update_mp_unreach_nlri_at(um, 0);
+        check(e0.path_id == 0, "MP_UNREACH NLRI[0] path_id = 0");
+        check(e0.prefix.prefix_len == 64, "MP_UNREACH NLRI[0] prefix_len = 64");
+
+        auto e1 = update_mp_unreach_nlri_at(um, 1);
+        check(e1.prefix.prefix_len == 64, "MP_UNREACH NLRI[1] prefix_len = 64");
+    }
+    {
+        // MP_REACH/MP_UNREACH absent on a plain IPv4 withdraw UPDATE.
+        std::vector<lr_prefix_t> prefixes = {
+            make_prefix({203, 0, 113, 0}, 24),
+        };
+        auto um = decode_bgp_message(to_vec(encode_update_withdraw_v4(prefixes)));
+        check(!update_mp_reach_present(um), "MP_REACH absent on plain IPv4 UPDATE");
+        check(!update_mp_unreach_present(um), "MP_UNREACH absent on plain IPv4 UPDATE");
+        check(update_mp_reach_nlri_count(um) == 0, "MP_REACH nlri_count = 0 absent");
+        check(update_mp_unreach_nlri_count(um) == 0, "MP_UNREACH nlri_count = 0 absent");
+    }
+
     // ===== Structured inspection surface (issue #92) =====
     {
         auto r = make_router();

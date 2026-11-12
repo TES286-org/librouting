@@ -1283,6 +1283,76 @@ inline lr_prefix_t update_nlri_at(const BgpMessage& m, std::size_t idx) {
     return p;
 }
 
+// ===== MP-BGP typed readers (RFC 4760 + RFC 7911) — declarations =====
+//
+// `update_attr_at` exposes the raw attribute bytes for MP_REACH_NLRI /
+// MP_UNREACH_NLRI (path attribute type 14 / 15); the readers below
+// decode the attribute once via the message handle's `PathAttributes`
+// and surface each NLRI entry as a `(path_id, lr_prefix_t)` tuple, the
+// same shape the legacy IPv4 NLRI / withdrawn readers use. The
+// `next_hop` reader returns a `BgpNextHop` (defined further down with
+// the path-attrs surface); the definitions are placed after the
+// `BgpNextHop` struct definition to avoid a forward-declaration cycle.
+
+/// MP-BGP address family: (AFI, SAFI). Mirrors `lr_core::nlri::NlriFamily`.
+struct BgpMpFamily {
+    std::uint16_t afi{0};
+    std::uint8_t  safi{0};
+};
+
+/// One MP_REACH_NLRI / MP_UNREACH_NLRI NLRI entry. `path_id` is the
+/// RFC 7911 Add-Path identifier (0 when Add-Path was not negotiated
+/// for the family); `prefix` is the family's prefix projected into
+/// the 16-byte zero-padded `lr_prefix_t` shape.
+struct BgpMpNlriEntry {
+    std::uint32_t path_id{0};
+    lr_prefix_t   prefix{};
+};
+
+inline bool update_mp_reach_present(const BgpMessage& m) {
+    return lr_bgp_message_update_mp_reach_present(m.get()) != 0;
+}
+
+inline BgpMpFamily update_mp_reach_family(const BgpMessage& m) {
+    BgpMpFamily out;
+    check_rc(lr_bgp_message_update_mp_reach_family(m.get(), &out.afi, &out.safi),
+             "lr_bgp_message_update_mp_reach_family");
+    return out;
+}
+
+inline std::size_t update_mp_reach_nlri_count(const BgpMessage& m) {
+    return lr_bgp_message_update_mp_reach_nlri_count(m.get());
+}
+
+inline BgpMpNlriEntry update_mp_reach_nlri_at(const BgpMessage& m, std::size_t idx) {
+    BgpMpNlriEntry out;
+    check_rc(lr_bgp_message_update_mp_reach_nlri_at(m.get(), idx, &out.path_id, &out.prefix),
+             "lr_bgp_message_update_mp_reach_nlri_at");
+    return out;
+}
+
+inline bool update_mp_unreach_present(const BgpMessage& m) {
+    return lr_bgp_message_update_mp_unreach_present(m.get()) != 0;
+}
+
+inline BgpMpFamily update_mp_unreach_family(const BgpMessage& m) {
+    BgpMpFamily out;
+    check_rc(lr_bgp_message_update_mp_unreach_family(m.get(), &out.afi, &out.safi),
+             "lr_bgp_message_update_mp_unreach_family");
+    return out;
+}
+
+inline std::size_t update_mp_unreach_nlri_count(const BgpMessage& m) {
+    return lr_bgp_message_update_mp_unreach_nlri_count(m.get());
+}
+
+inline BgpMpNlriEntry update_mp_unreach_nlri_at(const BgpMessage& m, std::size_t idx) {
+    BgpMpNlriEntry out;
+    check_rc(lr_bgp_message_update_mp_unreach_nlri_at(m.get(), idx, &out.path_id, &out.prefix),
+             "lr_bgp_message_update_mp_unreach_nlri_at");
+    return out;
+}
+
 // ===== D5.3 — policy objects: route handle, prefix-list, route-map,
 // resolver =====
 
@@ -6949,11 +7019,18 @@ enum class BgpAttrType : std::uint8_t {
     LrMplsLabelStack  = 255,
 };
 
-/// NEXT_HOP kind values (lr_bgp_next_hop_t::kind).
+/// NEXT_HOP / MP_REACH_NLRI next-hop kind values (lr_bgp_next_hop_t::kind).
+/// The kind value mirrors the C ABI's `kind` field for both the legacy
+/// `NEXT_HOP` attribute and the `MP_REACH_NLRI` next-hop. The two extra
+/// variants below (`V6LinkLocal`, `V6GlobalLinkLocal`) are reachable
+/// only through `MP_REACH_NLRI` (`update_mp_reach_next_hop`); the
+/// legacy `NEXT_HOP` is always V4 / V6 / V4-over-V6.
 enum class BgpNextHopKind : std::uint8_t {
-    V4          = 0,
-    V6          = 1,
-    V4OverV6    = 2,  // RFC 5549 IPv4-over-IPv6.
+    V4              = 0,
+    V6              = 1,  // RFC 2545 V6Global (16-byte next-hop).
+    V4OverV6        = 2,  // RFC 5549 IPv4-over-IPv6.
+    V6LinkLocal     = 3,  // RFC 2545 §2 link-local only (16 bytes).
+    V6GlobalLinkLocal = 4,  // RFC 2545 §2 global + link-local (32 bytes).
 };
 
 /// ORIGIN attribute values (RFC 4271 §5.1.1).
@@ -7115,6 +7192,25 @@ inline BgpNextHop bgp_path_attrs_next_hop(const BgpPathAttrsHandle& a) {
     if (!lr_bgp_path_attrs_next_hop(a.get(), &c)) {
         return BgpNextHop{};
     }
+    BgpNextHop out;
+    out.kind = static_cast<BgpNextHopKind>(c.kind);
+    out.present = c.present != 0;
+    std::memcpy(out.addr.data(), c.addr, 16);
+    return out;
+}
+
+/// MP_REACH_NLRI next-hop on a `BgpMessage` (RFC 4760 §3 + RFC 5549 +
+/// RFC 2545 link-local form). Declared alongside the message-level
+/// readers in the early UPDATE section but defined here because it
+/// returns `BgpNextHop`. `kind = BgpNextHopKind::V6GlobalLinkLocal`
+/// exposes only the global half in `addr`; the link-local half is
+/// dropped (matches the `bgp_path_attrs_mp_reach` behaviour — embedders
+/// that need both halves read the raw attribute bytes via
+/// `update_attr_at` for the MP_REACH_NLRI index).
+inline BgpNextHop update_mp_reach_next_hop(const BgpMessage& m) {
+    lr_bgp_next_hop_t c{};
+    check_rc(lr_bgp_message_update_mp_reach_next_hop(m.get(), &c),
+             "lr_bgp_message_update_mp_reach_next_hop");
     BgpNextHop out;
     out.kind = static_cast<BgpNextHopKind>(c.kind);
     out.present = c.present != 0;
