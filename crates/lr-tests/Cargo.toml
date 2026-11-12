@@ -23,7 +23,7 @@ lr-bgp = { workspace = true }
 lr-ospf = { workspace = true }
 lr-babel = { workspace = true }
 lr-rib = { workspace = true }
-lr-policy = { workspace = true }
+lr-policy = { workspace = true, features = ["peer-health"] }
 lr-router = { workspace = true }
 lr-osroute = { workspace = true }
 lr-bmp = { workspace = true }
@@ -34,4 +34,5 @@ lr-mpls = { workspace = true }
 # without going through the daemon's feature-gated paths.
 lr-mrt = { workspace = true }
 lr-damping = { workspace = true }
+lr-peer-health = { workspace = true }
 lr-srv6 = { workspace = true }
