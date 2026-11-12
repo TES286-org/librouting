@@ -644,6 +644,39 @@ pub(crate) struct DampingSpec {
     pub config: lr_damping::DampingConfig,
 }
 
+/// `[bgp.peer_health]` table — per-peer flap suppression (issue #99).
+///
+/// Off by default (`rollout = "off"`). When the rollout mode is
+/// anything other than `off`, the daemon installs a
+/// [`lr_policy::hooks::PeerHealthImportHook`] on the import chain
+/// and spawns a background ticker thread that periodically calls
+/// [`lr_peer_health::PeerHealthTable::tick`] so tiers transition
+/// and stale prefixes are swept.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PeerHealthSpec {
+    /// Rollout mode string. Parsed into
+    /// [`lr_peer_health::RolloutMode`] at daemon start.
+    pub rollout: String,
+    /// The peer-health configuration. Defaults match
+    /// [`lr_peer_health::PeerHealthConfig::default()`].
+    pub config: lr_peer_health::PeerHealthConfig,
+}
+
+impl PeerHealthSpec {
+    /// True when the rollout mode is anything other than `off`.
+    pub fn is_enabled(&self) -> bool {
+        self.rollout != "off" && !self.rollout.is_empty()
+    }
+
+    /// Parse the rollout string into a [`RolloutMode`]. Returns
+    /// `Off` for unrecognized values (with a warning logged at
+    /// daemon start).
+    pub fn rollout_mode(&self) -> lr_peer_health::RolloutMode {
+        lr_peer_health::RolloutMode::from_name(&self.rollout)
+            .unwrap_or(lr_peer_health::RolloutMode::Off)
+    }
+}
+
 /// One `[[redistribute]]` table (ROADMAP-v3 D4.1): a cross-protocol
 /// redistribution pipe between two protocols the daemon runs.
 ///
@@ -1212,6 +1245,13 @@ pub(crate) struct DaemonConfig {
     /// the reuse threshold.
     pub damping: DampingSpec,
 
+    /// `[bgp.peer_health]` table — per-peer flap suppression (issue #99).
+    /// Off by default. When `rollout != "off"`, the daemon installs a
+    /// [`lr_policy::hooks::PeerHealthImportHook`] on the import chain
+    /// and spawns a ticker thread that periodically calls
+    /// [`lr_peer_health::PeerHealthTable::tick`].
+    pub peer_health: PeerHealthSpec,
+
     /// `[[redistribute]]` tables (ROADMAP-v3 D4.1) — cross-protocol
     /// redistribution pipes installed on the shared router at startup
     /// (`lr_router::RedistributionPipe`).
@@ -1699,6 +1739,7 @@ impl DaemonConfig {
             roa_invalid_action: "reject".to_string(),
             filters: Vec::new(),
             damping: DampingSpec::default(),
+            peer_health: PeerHealthSpec::default(),
             redistributes: Vec::new(),
             aggregates: Vec::new(),
             rpki: RpkiSpec::default(),
@@ -3376,6 +3417,11 @@ pub(crate) fn apply_config_key(
     {
         return Ok(());
     }
+    if apply_peer_health_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
     // Redistribution and aggregation tables (ROADMAP-v3 D4.1/D4.2):
     // fail-closed — a typo'd protocol name or prefix silently
     // changes which routes cross the pipe or get aggregated.
@@ -4156,6 +4202,90 @@ fn apply_damping_key(
         _ => {
             return Err(format!(
                 "unknown [damping] key '{key}' (typo protection; damping config fails closed)"
+            ));
+        }
+    }
+    Ok(true)
+}
+
+/// Apply one `[bgp.peer_health]` key (issue #99). Mirrors
+/// `apply_damping_key` — the section name is `bgp.peer_health`,
+/// and unknown keys fail closed with a typo-protected error.
+fn apply_peer_health_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "bgp.peer_health" {
+        return Ok(false);
+    }
+    let ph = &mut cfg.peer_health;
+    match key {
+        "rollout" => {
+            // Validate the name but store the string — the actual
+            // RolloutMode enum is resolved at daemon start so the
+            // config round-trips through TOML save/load.
+            let r = lr_peer_health::RolloutMode::from_name(value).ok_or_else(|| {
+                format!(
+                    "unknown rollout mode '{value}' for [bgp.peer_health] (expected: off, observe, shadow, shadow-best-path, limited, full)"
+                )
+            })?;
+            ph.rollout = r.name().to_string();
+        }
+        "short_window_s" => {
+            ph.config.short_window.window_s = value.parse().map_err(|_| {
+                format!("invalid u64 for bgp.peer_health.short_window_s: '{value}'")
+            })?;
+        }
+        "mid_window_s" => {
+            ph.config.mid_window.window_s = value
+                .parse()
+                .map_err(|_| format!("invalid u64 for bgp.peer_health.mid_window_s: '{value}'"))?;
+        }
+        "long_window_s" => {
+            ph.config.long_window.window_s = value
+                .parse()
+                .map_err(|_| format!("invalid u64 for bgp.peer_health.long_window_s: '{value}'"))?;
+        }
+        "baseline_window_s" => {
+            ph.config.baseline_window_s = value.parse().map_err(|_| {
+                format!("invalid u64 for bgp.peer_health.baseline_window_s: '{value}'")
+            })?;
+        }
+        "min_transition_interval_s" => {
+            ph.config.min_transition_interval_s = value.parse().map_err(|_| {
+                format!("invalid u64 for bgp.peer_health.min_transition_interval_s: '{value}'")
+            })?;
+        }
+        "min_recovery_interval_s" => {
+            ph.config.min_recovery_interval_s = value.parse().map_err(|_| {
+                format!("invalid u64 for bgp.peer_health.min_recovery_interval_s: '{value}'")
+            })?;
+        }
+        "max_stale_age_s" => {
+            ph.config.max_stale_age_s = value.parse().map_err(|_| {
+                format!("invalid u64 for bgp.peer_health.max_stale_age_s: '{value}'")
+            })?;
+        }
+        "tick_interval_s" => {
+            ph.config.tick_interval_s = value.parse().map_err(|_| {
+                format!("invalid u64 for bgp.peer_health.tick_interval_s: '{value}'")
+            })?;
+        }
+        "soft_degraded" => {
+            ph.config.global_budgets.soft_degraded = value
+                .parse()
+                .map_err(|_| format!("invalid u32 for bgp.peer_health.soft_degraded: '{value}'"))?;
+        }
+        "hard_degraded" => {
+            ph.config.global_budgets.hard_degraded = value
+                .parse()
+                .map_err(|_| format!("invalid u32 for bgp.peer_health.hard_degraded: '{value}'"))?;
+        }
+        _ => {
+            return Err(format!(
+                "unknown [bgp.peer_health] key '{key}' (typo protection; peer-health config fails closed)"
             ));
         }
     }

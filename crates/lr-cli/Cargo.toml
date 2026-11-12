@@ -41,7 +41,7 @@ socket2.workspace = true
 lr-bgp = { workspace = true }
 lr-ospf = { workspace = true }
 lr-rib = { workspace = true }
-lr-policy = { workspace = true, features = ["bgp", "damping"] }
+lr-policy = { workspace = true, features = ["bgp", "damping", "peer-health"] }
 lr-router = { workspace = true }
 lr-bfd = { workspace = true }
 lr-bmp = { workspace = true }
@@ -50,6 +50,7 @@ lr-mrt = { workspace = true }
 lr-osroute = { workspace = true }
 lr-mpls = { workspace = true }
 lr-damping = { workspace = true }
+lr-peer-health = { workspace = true }
 siphasher.workspace = true
 
 # Windows named-pipe transport for the runtime API

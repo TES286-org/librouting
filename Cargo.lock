@@ -573,6 +573,7 @@ dependencies = [
  "lr-mrt",
  "lr-ospf",
  "lr-osroute",
+ "lr-peer-health",
  "lr-policy",
  "lr-rib",
  "lr-router",

@@ -1699,6 +1699,52 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         );
     }
 
+    // ---- Peer-level flap suppression (issue #99). ----
+    // Opt-in via [bgp.peer_health] rollout = "observe" | "shadow" |
+    // "shadow-best-path" | "limited" | "full". Installs a
+    // PeerHealthImportHook on the import chain and spawns a ticker
+    // thread that calls PeerHealthTable::tick every tick_interval_s.
+    if cfg.peer_health.is_enabled() {
+        let mode = cfg.peer_health.rollout_mode();
+        let mut ph_cfg = cfg.peer_health.config.clone();
+        ph_cfg.rollout = mode;
+        let table = Arc::new(Mutex::new(lr_peer_health::PeerHealthTable::new(ph_cfg)));
+        let hook = lr_policy::hooks::PeerHealthImportHook::new(Arc::clone(&table));
+        {
+            let mut r = router.write().unwrap();
+            r.hooks_mut().import.push(Box::new(hook));
+        }
+        let tick_interval = cfg.peer_health.config.tick_interval_s;
+        let tick_table = Arc::clone(&table);
+        std::thread::Builder::new()
+            .name("lr-peer-health-tick".into())
+            .spawn(move || {
+                // TIME BASE: the import hook derives `now_ms` from
+                // `route.age_ms` — the router's monotonic
+                // milliseconds-since-daemon-start. The ticker must
+                // share that base (mirroring the damping decay
+                // thread's pattern).
+                let base = WallClock::now();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(tick_interval.max(1)));
+                    if let Ok(mut t) = tick_table.lock() {
+                        let now_ms = base.elapsed().as_millis() as u64;
+                        t.tick(now_ms);
+                    }
+                }
+            })
+            .expect("spawn peer-health tick thread");
+        log_info!(
+            Component::Policy,
+            "issue-99:     peer-health flap suppression enabled (rollout={})",
+            mode.name(),
+        );
+        // The hook (installed on the router's import chain) holds a
+        // clone of the table Arc; the ticker thread holds another.
+        // The local `table` binding can be dropped safely — the Arc
+        // stays alive until both the hook and the thread are gone.
+    }
+
     // ---- Banner. ----
     // The multi-protocol supervisor already printed the process banner
     // (protocol set, router-id, install, platform); the engine banner
