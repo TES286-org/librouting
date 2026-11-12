@@ -12,6 +12,7 @@ members = [
     "crates/lr-bmp",
     "crates/lr-mrt",
     "crates/lr-damping",
+    "crates/lr-peer-health",
     "crates/lr-osroute",
     "crates/lr-mpls",
     "crates/lr-srv6",
@@ -45,6 +46,7 @@ lr-bfd = { path = "crates/lr-bfd", version = "1.8.0" }
 lr-bmp = { path = "crates/lr-bmp", version = "1.8.0" }
 lr-mrt = { path = "crates/lr-mrt", version = "1.8.0" }
 lr-damping = { path = "crates/lr-damping", version = "1.8.0" }
+lr-peer-health = { path = "crates/lr-peer-health", version = "1.8.0" }
 lr-osroute = { path = "crates/lr-osroute", version = "1.8.0" }
 lr-mpls = { path = "crates/lr-mpls", version = "1.8.0" }
 lr-srv6 = { path = "crates/lr-srv6", version = "1.8.0" }

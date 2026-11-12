@@ -1,0 +1,25 @@
+[package]
+name = "lr-peer-health"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Per-peer BGP flap suppression for librouting (issue #99)"
+keywords = ["bgp", "flap", "suppression", "peer", "damping"]
+categories = ["network-programming", "algorithms"]
+
+[lib]
+bench = false
+
+[features]
+default = ["std"]
+std = ["lr-core/std"]
+
+[dependencies]
+lr-core = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -670,6 +670,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lr-peer-health"
+version = "1.8.0"
+dependencies = [
+ "lr-core",
+ "proptest",
+]
+
+[[package]]
 name = "lr-policy"
 version = "1.8.0"
 dependencies = [
