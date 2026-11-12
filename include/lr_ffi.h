@@ -4126,6 +4126,88 @@ typedef struct lr_osroute_interface_v6_addr_t {
 } lr_osroute_interface_v6_addr_t;
 
 /**
+ * Opaque standalone `PeerHealthTable` handle.
+ */
+typedef struct OpaquePeerHealthTable {
+  uint8_t _private[0];
+} OpaquePeerHealthTable;
+
+typedef struct OpaquePeerHealthTable *lr_peer_health_table_t;
+
+/**
+ * C-side configuration struct. Mirrors the key fields of
+ * [`PeerHealthConfig`]; fields not exposed here pick up the
+ * Rust-side default.
+ */
+typedef struct lr_peer_health_config_t {
+  /**
+   * Rollout mode: 0=Off, 1=Observe, 2=Shadow, 3=ShadowBestPath,
+   * 4=Limited, 5=Full.
+   */
+  uint8_t rollout;
+  /**
+   * Short window length in seconds.
+   */
+  uint64_t short_window_s;
+  /**
+   * Mid window length in seconds.
+   */
+  uint64_t mid_window_s;
+  /**
+   * Long window length in seconds.
+   */
+  uint64_t long_window_s;
+  /**
+   * Baseline window length in seconds.
+   */
+  uint64_t baseline_window_s;
+  /**
+   * Minimum transition interval in seconds.
+   */
+  uint64_t min_transition_interval_s;
+  /**
+   * Recovery cooldown in seconds.
+   */
+  uint64_t min_recovery_interval_s;
+  /**
+   * Maximum stale age in seconds.
+   */
+  uint64_t max_stale_age_s;
+  /**
+   * Tick interval in seconds.
+   */
+  uint64_t tick_interval_s;
+  /**
+   * Global soft degraded budget.
+   */
+  uint32_t soft_degraded;
+  /**
+   * Global hard degraded budget.
+   */
+  uint32_t hard_degraded;
+} lr_peer_health_config_t;
+
+/**
+ * One projected session snapshot.
+ */
+typedef struct lr_peer_health_session_t {
+  uint64_t peer_id;
+  uint16_t afi;
+  uint8_t safi;
+  double baseline_rate;
+  /**
+   * Current effective tier (0..=3).
+   */
+  uint8_t tier;
+  uint64_t updates;
+  uint64_t withdraws;
+  uint64_t escalations;
+  uint64_t recoveries;
+  uint8_t peak_tier;
+  uint64_t stale_count;
+} lr_peer_health_session_t;
+
+/**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
  */
@@ -16369,6 +16451,74 @@ uint8_t lr_osroute_mpls_enabled(void);
 uint8_t lr_osroute_seg6_enabled(void);
 
 uint8_t lr_osroute_ttl_check_enforced(void);
+
+/**
+ * Construct a new standalone PeerHealthTable. The caller owns the
+ * handle and must free it with [`lr_peer_health_table_free`].
+ *
+ * Returns NULL on failure (panic or null config pointer).
+ */
+lr_peer_health_table_t lr_peer_health_table_new(const struct lr_peer_health_config_t *cfg);
+
+/**
+ * Free a table created with [`lr_peer_health_table_new`]. Safe to
+ * call with NULL (no-op).
+ */
+void lr_peer_health_table_free(lr_peer_health_table_t t);
+
+/**
+ * Account an UPDATE event. Returns the session's effective tier
+ * (0..=3) after the state machine ran.
+ */
+uint8_t lr_peer_health_table_account_update(lr_peer_health_table_t t,
+                                            uint64_t peer_id,
+                                            uint16_t afi,
+                                            uint8_t safi,
+                                            uint64_t now_ms);
+
+/**
+ * Account a withdraw event. Returns the effective tier.
+ */
+uint8_t lr_peer_health_table_account_withdraw(lr_peer_health_table_t t,
+                                              uint64_t peer_id,
+                                              uint16_t afi,
+                                              uint8_t safi,
+                                              uint64_t now_ms);
+
+/**
+ * Query the current effective tier for `(peer_id, family)`.
+ */
+uint8_t lr_peer_health_table_tier(lr_peer_health_table_t t,
+                                  uint64_t peer_id,
+                                  uint16_t afi,
+                                  uint8_t safi);
+
+/**
+ * Run a periodic tick: transition tiers, sweep stale prefixes.
+ * Returns the number of tier changes that fired.
+ */
+uintptr_t lr_peer_health_table_tick(lr_peer_health_table_t t, uint64_t now_ms);
+
+/**
+ * Number of sessions the table has observed.
+ */
+uintptr_t lr_peer_health_table_session_count(lr_peer_health_table_t t);
+
+/**
+ * Number of currently-degraded sessions (tier > L0).
+ */
+uint32_t lr_peer_health_table_degraded_count(lr_peer_health_table_t t);
+
+/**
+ * Fill `out` with the session snapshot for `(peer_id, afi, safi)`.
+ * Returns 0 on success, negative on error (session not found =
+ * `LR_ERR_OTHER`).
+ */
+int32_t lr_peer_health_table_session_snapshot(lr_peer_health_table_t t,
+                                              uint64_t peer_id,
+                                              uint16_t afi,
+                                              uint8_t safi,
+                                              struct lr_peer_health_session_t *out);
 
 /**
  * Install one redistribution pipe on the router.

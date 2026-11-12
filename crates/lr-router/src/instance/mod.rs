@@ -2900,7 +2900,24 @@ impl DefaultRouter {
         let ranked: Vec<Route> = if candidates.is_empty() {
             Vec::new()
         } else if candidates.iter().all(|r| r.protocol == Protocol::Bgp) {
-            BestPath::rank(&candidates, &self.best_path_cfg)
+            // Issue #99: when any candidate carries a peer-health
+            // tier attribute (stamped by PeerHealthImportHook),
+            // use the tiered ranking that restricts the candidate
+            // set to the highest non-empty health tier before the
+            // standard decision process. Routes without the
+            // attribute are treated as L0 by tiered_candidates,
+            // so the tiered path is a strict superset of rank when
+            // no attribute is present — but we avoid the extra
+            // allocation in the common (no peer-health) case.
+            let has_tier = candidates
+                .iter()
+                .any(|r| r.attributes.get(lr_core::attr::AttrTag(244)).is_some());
+            let ranked_refs: Vec<&Route> = if has_tier {
+                BestPath::rank_tiered(&candidates, &self.best_path_cfg)
+            } else {
+                BestPath::rank(&candidates, &self.best_path_cfg)
+            };
+            ranked_refs
                 .into_iter()
                 .take(self.add_path_max_paths)
                 .cloned()

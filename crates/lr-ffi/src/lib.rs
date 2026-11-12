@@ -99,6 +99,7 @@ pub mod ospf_spf;
 pub mod ospf_sr_srv6_db;
 pub mod osroute;
 pub mod osroute_helpers;
+pub mod peer_health;
 pub mod policy;
 pub mod policy_batch;
 pub mod policy_objects;

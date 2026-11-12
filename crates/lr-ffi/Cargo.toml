@@ -36,8 +36,9 @@ lr-bmp = { workspace = true }
 lr-mrt = { workspace = true, features = ["bgp"] }
 lr-rib = { workspace = true }
 lr-ldp = { workspace = true }
-lr-policy = { workspace = true, features = ["damping"] }
+lr-policy = { workspace = true, features = ["damping", "peer-health"] }
 lr-damping = { workspace = true }
+lr-peer-health = { workspace = true }
 lr-router = { workspace = true }
 lr-mpls = { workspace = true }
 lr-srv6 = { workspace = true }

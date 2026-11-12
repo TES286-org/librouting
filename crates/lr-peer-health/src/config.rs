@@ -47,6 +47,18 @@ impl RolloutMode {
     pub fn applies_stale(self) -> bool {
         matches!(self, Self::Limited | Self::Full)
     }
+
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Off),
+            1 => Some(Self::Observe),
+            2 => Some(Self::Shadow),
+            3 => Some(Self::ShadowBestPath),
+            4 => Some(Self::Limited),
+            5 => Some(Self::Full),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
