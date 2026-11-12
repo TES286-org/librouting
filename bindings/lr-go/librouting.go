@@ -1974,6 +1974,170 @@ func (m *BgpMessage) UpdateNlriAt(idx int) (PrefixSpec, error) {
 	return prefixFromC(p), nil
 }
 
+// ---- MP-BGP typed readers (RFC 4760 + RFC 7911) ----
+//
+// UpdateAttrAt exposes the raw attribute bytes for MP_REACH_NLRI /
+// MP_UNREACH_NLRI (path attribute type 14 / 15); the readers below
+// decode the attribute once via the message handle's PathAttributes
+// and surface each NLRI entry as a (path_id, PrefixSpec) tuple, the
+// same shape the legacy IPv4 NLRI / withdrawn readers use. A Go
+// embedder walking an MP-BGP UPDATE no longer needs to call the codec
+// a second time to crack open the NLRI list.
+
+// BgpMpFamily is one MP-BGP address family: (AFI, SAFI). Mirrors
+// lr_core::nlri::NlriFamily.
+type BgpMpFamily struct {
+	Afi  uint16
+	Safi uint8
+}
+
+// BgpMpNlriEntry is one MP_REACH_NLRI / MP_UNREACH_NLRI NLRI entry.
+// PathID is the RFC 7911 Add-Path identifier (0 when Add-Path was not
+// negotiated for the family); Prefix is the family's prefix projected
+// into the PrefixSpec shape the legacy IPv4 NLRI / withdrawn readers
+// use.
+type BgpMpNlriEntry struct {
+	PathID uint32
+	Prefix PrefixSpec
+}
+
+// UpdateMpReachPresent returns true when the UPDATE carries an
+// MP_REACH_NLRI attribute (RFC 4760 §3). False on a non-UPDATE
+// message or when the attribute is absent — distinguishes "absent"
+// from "present with zero NLRI entries" the same way the C ABI's
+// present reader does.
+func (m *BgpMessage) UpdateMpReachPresent() (bool, error) {
+	h, err := m.require()
+	if err != nil {
+		return false, err
+	}
+	return C.lr_bgp_message_update_mp_reach_present(h) != 0, nil
+}
+
+// UpdateMpReachFamily returns the MP_REACH_NLRI address family.
+// Returns an error on a non-UPDATE message or an UPDATE without
+// MP_REACH_NLRI — use UpdateMpReachPresent to distinguish.
+func (m *BgpMessage) UpdateMpReachFamily() (BgpMpFamily, error) {
+	h, err := m.require()
+	if err != nil {
+		return BgpMpFamily{}, err
+	}
+	var afi C.uint16_t
+	var safi C.uint8_t
+	rc := C.lr_bgp_message_update_mp_reach_family(h, &afi, &safi)
+	if rc != 0 {
+		return BgpMpFamily{}, fmt.Errorf("lr_bgp_message_update_mp_reach_family: %s (rc=%d)", LastError(), int(rc))
+	}
+	return BgpMpFamily{Afi: uint16(afi), Safi: uint8(safi)}, nil
+}
+
+// UpdateMpReachNextHop returns the MP_REACH_NLRI next-hop (RFC 4760 §3
+// + RFC 5549 + RFC 2545 link-local form). Kind =
+// NextHopV6GlobalLinkLocal exposes only the global half in Addr; the
+// link-local half is dropped (matches the existing
+// BgpPathAttrs.MpReach behaviour — embedders that need both halves
+// read the raw attribute bytes via UpdateAttrAt for the MP_REACH_NLRI
+// index).
+func (m *BgpMessage) UpdateMpReachNextHop() (BgpNextHop, error) {
+	h, err := m.require()
+	if err != nil {
+		return BgpNextHop{}, err
+	}
+	var c C.struct_lr_bgp_next_hop_t
+	rc := C.lr_bgp_message_update_mp_reach_next_hop(h, &c)
+	if rc != 0 {
+		return BgpNextHop{}, fmt.Errorf("lr_bgp_message_update_mp_reach_next_hop: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nextHopFromC(&c), nil
+}
+
+// UpdateMpReachNlriCount returns the number of NLRI entries carried
+// inside the MP_REACH_NLRI attribute (RFC 4760 §3). Returns 0 on a
+// non-UPDATE message, an UPDATE without MP_REACH_NLRI, or an
+// MP_REACH_NLRI with zero NLRI entries — use UpdateMpReachPresent to
+// distinguish the absent case from a zero-NLRI attribute.
+func (m *BgpMessage) UpdateMpReachNlriCount() (int, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	return int(C.lr_bgp_message_update_mp_reach_nlri_count(h)), nil
+}
+
+// UpdateMpReachNlriAt returns the MP_REACH_NLRI entry at idx (RFC 4760
+// §3 + RFC 7911 Add-Path) as a (path_id, prefix) tuple.
+func (m *BgpMessage) UpdateMpReachNlriAt(idx int) (BgpMpNlriEntry, error) {
+	h, err := m.require()
+	if err != nil {
+		return BgpMpNlriEntry{}, err
+	}
+	var pathID C.uint32_t
+	var p C.struct_lr_prefix_t
+	rc := C.lr_bgp_message_update_mp_reach_nlri_at(h, C.size_t(idx), &pathID, &p)
+	if rc != 0 {
+		return BgpMpNlriEntry{}, fmt.Errorf("lr_bgp_message_update_mp_reach_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+	}
+	return BgpMpNlriEntry{PathID: uint32(pathID), Prefix: prefixFromC(p)}, nil
+}
+
+// UpdateMpUnreachPresent returns true when the UPDATE carries an
+// MP_UNREACH_NLRI attribute (RFC 4760 §4). MP_UNREACH_NLRI with zero
+// NLRI entries is the End-of-RIB marker for an MP family — Present is
+// the only way to distinguish "EoR marker" from "no MP_UNREACH at
+// all".
+func (m *BgpMessage) UpdateMpUnreachPresent() (bool, error) {
+	h, err := m.require()
+	if err != nil {
+		return false, err
+	}
+	return C.lr_bgp_message_update_mp_unreach_present(h) != 0, nil
+}
+
+// UpdateMpUnreachFamily returns the MP_UNREACH_NLRI address family.
+func (m *BgpMessage) UpdateMpUnreachFamily() (BgpMpFamily, error) {
+	h, err := m.require()
+	if err != nil {
+		return BgpMpFamily{}, err
+	}
+	var afi C.uint16_t
+	var safi C.uint8_t
+	rc := C.lr_bgp_message_update_mp_unreach_family(h, &afi, &safi)
+	if rc != 0 {
+		return BgpMpFamily{}, fmt.Errorf("lr_bgp_message_update_mp_unreach_family: %s (rc=%d)", LastError(), int(rc))
+	}
+	return BgpMpFamily{Afi: uint16(afi), Safi: uint8(safi)}, nil
+}
+
+// UpdateMpUnreachNlriCount returns the number of NLRI entries carried
+// inside the MP_UNREACH_NLRI attribute (RFC 4760 §4). Returns 0 on a
+// non-UPDATE message, an UPDATE without MP_UNREACH_NLRI, or an
+// MP_UNREACH_NLRI with zero NLRI entries (End-of-RIB marker) — use
+// UpdateMpUnreachPresent to distinguish the absent case from an EoR
+// marker.
+func (m *BgpMessage) UpdateMpUnreachNlriCount() (int, error) {
+	h, err := m.require()
+	if err != nil {
+		return 0, err
+	}
+	return int(C.lr_bgp_message_update_mp_unreach_nlri_count(h)), nil
+}
+
+// UpdateMpUnreachNlriAt returns the MP_UNREACH_NLRI entry at idx (RFC
+// 4760 §4 + RFC 7911 Add-Path) as a (path_id, prefix) tuple.
+func (m *BgpMessage) UpdateMpUnreachNlriAt(idx int) (BgpMpNlriEntry, error) {
+	h, err := m.require()
+	if err != nil {
+		return BgpMpNlriEntry{}, err
+	}
+	var pathID C.uint32_t
+	var p C.struct_lr_prefix_t
+	rc := C.lr_bgp_message_update_mp_unreach_nlri_at(h, C.size_t(idx), &pathID, &p)
+	if rc != 0 {
+		return BgpMpNlriEntry{}, fmt.Errorf("lr_bgp_message_update_mp_unreach_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+	}
+	return BgpMpNlriEntry{PathID: uint32(pathID), Prefix: prefixFromC(p)}, nil
+}
+
 // PathAttr is one path attribute: type code, flags byte and raw value bytes.
 type PathAttr struct {
 	AttrType uint8
@@ -2020,15 +2184,19 @@ func (m *BgpMessage) UpdateAttrs() ([]PathAttr, error) {
 
 // prefixFromC projects a `C.struct_lr_prefix_t` into the Go-side
 // `PrefixSpec`. IPv4 carries the address in the first 4 bytes of `addr`
-// (the remaining 12 are zero); IPv6 uses all 16 bytes.
+// (the remaining 12 are zero); IPv6 uses all 16 bytes. `IsIPv6` is set
+// from the C struct's `is_ipv6` discriminator so the value type's
+// field stays consistent with `Addr`'s length.
 func prefixFromC(p C.struct_lr_prefix_t) PrefixSpec {
 	spec := PrefixSpec{PrefixLen: uint8(p.prefix_len)}
 	if p.is_ipv6 != 0 {
+		spec.IsIPv6 = true
 		spec.Addr = make([]byte, 16)
 		for i := 0; i < 16; i++ {
 			spec.Addr[i] = byte(p.addr[i])
 		}
 	} else {
+		spec.IsIPv6 = false
 		spec.Addr = make([]byte, 4)
 		for i := 0; i < 4; i++ {
 			spec.Addr[i] = byte(p.addr[i])

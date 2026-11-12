@@ -55,11 +55,17 @@ const (
 	OriginIncomplete = 2
 )
 
-// NEXT_HOP kind values (lr_bgp_next_hop_t::kind).
+// NEXT_HOP / MP_REACH_NLRI next-hop kind values (lr_bgp_next_hop_t::kind).
+// The two extra constants below (`NextHopV6LinkLocal`,
+// `NextHopV6GlobalLinkLocal`) are reachable only through `MP_REACH_NLRI`
+// (`BgpMessage.UpdateMpReachNextHop`); the legacy `NEXT_HOP` attribute
+// is always V4 / V6 / V4-over-V6.
 const (
-	NextHopV4       = 0
-	NextHopV6       = 1
-	NextHopV4OverV6 = 2 // RFC 5549 IPv4-over-IPv6.
+	NextHopV4                = 0
+	NextHopV6                = 1 // RFC 2545 V6Global (16-byte next-hop).
+	NextHopV4OverV6          = 2 // RFC 5549 IPv4-over-IPv6.
+	NextHopV6LinkLocal       = 3 // RFC 2545 §2 link-local only (16 bytes).
+	NextHopV6GlobalLinkLocal = 4 // RFC 2545 §2 global + link-local (32 bytes).
 )
 
 // IANA BGP path attribute type codes (RFC 4271 §5.1 + extensions).

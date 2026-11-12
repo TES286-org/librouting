@@ -766,6 +766,176 @@ func TestBGPMessageEncoders(t *testing.T) {
 	}
 }
 
+// TestBgpMessageMpReachReaders pins the typed MP_REACH_NLRI / MP_UNREACH_NLRI
+// readers on BgpMessage (RFC 4760 §3 / §4). The C ABI has no
+// `lr_bgp_encode_update_mp_reach_v6` helper, so the byte sequences
+// are hard-coded from the Rust encoder (see codec.rs inline tests
+// `mp_reach_round_trip_ipv6` / `mp_unreach_round_trip_ipv6` for the
+// producer side). The MP_REACH UPDATE carries IPv6 unicast +
+// 2001:db8::1 next-hop + two NLRI entries (2001:db8::/64 and
+// 2001:db8:0:1::/65).
+func TestBgpMessageMpReachReaders(t *testing.T) {
+	mpReach := []byte{
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0x00, 0x42, 0x02, 0x00, 0x00, 0x00, 0x2b, 0x80,
+		0x0e, 0x28, 0x00, 0x02, 0x01, 0x10, 0x20, 0x01,
+		0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x40,
+		0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+		0x41, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00,
+		0x01, 0x00,
+	}
+	m, err := DecodeBgpMessage(mpReach)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+
+	kind, _ := m.Kind()
+	if kind != BGPMsgUpdate {
+		t.Fatalf("Kind = %d, want UPDATE", kind)
+	}
+	present, _ := m.UpdateMpReachPresent()
+	if !present {
+		t.Fatal("UpdateMpReachPresent = false, want true")
+	}
+	unreachPresent, _ := m.UpdateMpUnreachPresent()
+	if unreachPresent {
+		t.Fatal("UpdateMpUnreachPresent = true, want false")
+	}
+	fam, err := m.UpdateMpReachFamily()
+	if err != nil {
+		t.Fatalf("UpdateMpReachFamily: %v", err)
+	}
+	if fam.Afi != 2 || fam.Safi != 1 {
+		t.Fatalf("UpdateMpReachFamily = (%d, %d), want (2, 1)", fam.Afi, fam.Safi)
+	}
+	nh, err := m.UpdateMpReachNextHop()
+	if err != nil {
+		t.Fatalf("UpdateMpReachNextHop: %v", err)
+	}
+	if nh.Kind != NextHopV6 || !nh.Present {
+		t.Fatalf("UpdateMpReachNextHop = (kind=%d, present=%v), want (1, true)", nh.Kind, nh.Present)
+	}
+	wantNH := [16]byte{
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 1,
+	}
+	if nh.Addr != wantNH {
+		t.Fatalf("UpdateMpReachNextHop addr = %x, want %x", nh.Addr, wantNH)
+	}
+	count, _ := m.UpdateMpReachNlriCount()
+	if count != 2 {
+		t.Fatalf("UpdateMpReachNlriCount = %d, want 2", count)
+	}
+	e0, err := m.UpdateMpReachNlriAt(0)
+	if err != nil {
+		t.Fatalf("UpdateMpReachNlriAt(0): %v", err)
+	}
+	if e0.PathID != 0 {
+		t.Fatalf("UpdateMpReachNlriAt(0).PathID = %d, want 0", e0.PathID)
+	}
+	if !e0.Prefix.IsIPv6 || e0.Prefix.PrefixLen != 64 {
+		t.Fatalf("UpdateMpReachNlriAt(0).Prefix = (isV6=%v plen=%d), want (true, 64)",
+			e0.Prefix.IsIPv6, e0.Prefix.PrefixLen)
+	}
+	wantP0 := []byte{
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	if !bytes.Equal(e0.Prefix.Addr, wantP0) {
+		t.Fatalf("UpdateMpReachNlriAt(0).Addr = %x, want %x", e0.Prefix.Addr, wantP0)
+	}
+	e1, err := m.UpdateMpReachNlriAt(1)
+	if err != nil {
+		t.Fatalf("UpdateMpReachNlriAt(1): %v", err)
+	}
+	if e1.Prefix.PrefixLen != 65 {
+		t.Fatalf("UpdateMpReachNlriAt(1).PrefixLen = %d, want 65", e1.Prefix.PrefixLen)
+	}
+	// Out-of-range returns an error.
+	if _, err := m.UpdateMpReachNlriAt(2); err == nil {
+		t.Fatal("UpdateMpReachNlriAt(2) = nil, want error")
+	}
+}
+
+// TestBgpMessageMpUnreachReaders pins the typed MP_UNREACH_NLRI reader.
+func TestBgpMessageMpUnreachReaders(t *testing.T) {
+	mpUnreach := []byte{
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0x00, 0x2f, 0x02, 0x00, 0x00, 0x00, 0x18, 0x80,
+		0x0f, 0x15, 0x00, 0x02, 0x01, 0x40, 0x20, 0x01,
+		0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x40, 0x20,
+		0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01,
+	}
+	m, err := DecodeBgpMessage(mpUnreach)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+
+	present, _ := m.UpdateMpUnreachPresent()
+	if !present {
+		t.Fatal("UpdateMpUnreachPresent = false, want true")
+	}
+	reachPresent, _ := m.UpdateMpReachPresent()
+	if reachPresent {
+		t.Fatal("UpdateMpReachPresent = true, want false")
+	}
+	fam, err := m.UpdateMpUnreachFamily()
+	if err != nil {
+		t.Fatalf("UpdateMpUnreachFamily: %v", err)
+	}
+	if fam.Afi != 2 || fam.Safi != 1 {
+		t.Fatalf("UpdateMpUnreachFamily = (%d, %d), want (2, 1)", fam.Afi, fam.Safi)
+	}
+	count, _ := m.UpdateMpUnreachNlriCount()
+	if count != 2 {
+		t.Fatalf("UpdateMpUnreachNlriCount = %d, want 2", count)
+	}
+	e0, err := m.UpdateMpUnreachNlriAt(0)
+	if err != nil {
+		t.Fatalf("UpdateMpUnreachNlriAt(0): %v", err)
+	}
+	if e0.PathID != 0 || e0.Prefix.PrefixLen != 64 {
+		t.Fatalf("UpdateMpUnreachNlriAt(0) = (pid=%d plen=%d), want (0, 64)",
+			e0.PathID, e0.Prefix.PrefixLen)
+	}
+}
+
+// TestBgpMessageMpReadersAbsentOnPlainUpdate pins that MP_REACH/MP_UNREACH
+// readers return false / 0 on a plain IPv4 withdraw UPDATE.
+func TestBgpMessageMpReadersAbsentOnPlainUpdate(t *testing.T) {
+	pfx := []PrefixSpec{{Addr: []byte{203, 0, 113, 0}, PrefixLen: 24}}
+	w, err := EncodeUpdateWithdrawV4(pfx)
+	if err != nil {
+		t.Fatalf("EncodeUpdateWithdrawV4: %v", err)
+	}
+	m, err := DecodeBgpMessage(w)
+	if err != nil {
+		t.Fatalf("DecodeBgpMessage: %v", err)
+	}
+	defer m.Close()
+	present, _ := m.UpdateMpReachPresent()
+	if present {
+		t.Fatal("UpdateMpReachPresent = true on plain IPv4 UPDATE")
+	}
+	present, _ = m.UpdateMpUnreachPresent()
+	if present {
+		t.Fatal("UpdateMpUnreachPresent = true on plain IPv4 UPDATE")
+	}
+	count, _ := m.UpdateMpReachNlriCount()
+	if count != 0 {
+		t.Fatalf("UpdateMpReachNlriCount = %d, want 0", count)
+	}
+	count, _ = m.UpdateMpUnreachNlriCount()
+	if count != 0 {
+		t.Fatalf("UpdateMpUnreachNlriCount = %d, want 0", count)
+	}
+}
+
 func TestPollEvents(t *testing.T) {
 	r, err := NewRouter()
 	if err != nil {
