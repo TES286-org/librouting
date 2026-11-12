@@ -133,6 +133,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | BMP codec, split feed, peer headers (RFC 7854) | yes | `lr-bmp` |
 | MRT TABLE_DUMP_V2 read and write, BGP4MP (RFC 6396) | yes | `lr-mrt` |
 | Route flap damping figure of merit (RFC 2439) | yes | `lr-damping` |
+| Per-peer flap suppression (issue #99) | yes | `lr-peer-health`, `lr-policy::hooks::PeerHealthImportHook`, `lr-bgp::best_path::BestPath::rank_tiered` |
 
 ## RIB and router — `lr-rib`, `lr-router`
 

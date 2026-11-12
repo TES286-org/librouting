@@ -731,6 +731,38 @@ factor are dimensionless figure-of-merit values, not seconds; only
 | `decay_factor_active` | float | 0.97 | Per interval, active route |
 | `decay_factor_withdrawn` | float | 0.5 | Per interval, withdrawn |
 
+### `[bgp.peer_health]`
+
+Per-peer BGP flap suppression (issue #99). A softer alternative to
+`[damping]`: instead of suppressing unstable prefixes, it temporarily
+lowers a peer's path preference at session + AFI/SAFI granularity.
+The session stays up, the prefixes stay reachable, and the blast
+radius is one peer. Off by default.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `rollout` | string | `off` | `off`, `observe`, `shadow`, `shadow-best-path`, `limited`, `full` |
+| `short_window_s` | int | 5 | Short detection window |
+| `mid_window_s` | int | 30 | Mid detection window |
+| `long_window_s` | int | 120 | Long detection window |
+| `baseline_window_s` | int | 480 | Baseline rate window (≥ `long_window_s`) |
+| `min_transition_interval_s` | int | 10 | Min seconds between tier transitions |
+| `min_recovery_interval_s` | int | 60 | Recovery cooldown (separate from above) |
+| `max_stale_age_s` | int | 300 | Max age before a stale prefix is swept |
+| `tick_interval_s` | int | 5 | Peer-health ticker period |
+| `soft_degraded` | int | 10 | Freeze recovery at this many degraded sessions |
+| `hard_degraded` | int | 20 | Force every session to ≥ L1 at this many |
+
+Rollout modes gate how far the mechanism reaches:
+
+- `off` — no accounting.
+- `observe` — accounting only; counters and baselines recorded.
+- `shadow` — full state machine runs; tiers computed but not stamped.
+- `shadow-best-path` — tiers stamped so `BestPath::rank_tiered` runs,
+  but stale markings suppressed.
+- `limited` — tiers stamped (capped at L1) and stale markings applied.
+- `full` — every tier L0..=L3 and stale markings apply.
+
 ### `[bgp.rpki]`
 
 | Key | Type | Default | Notes |
@@ -907,7 +939,7 @@ tolerance is narrow:
 | `[ospf]`, `[[ospf.*]]` | Hard error |
 | `[babel]`, `[[babel.*]]` | Hard error |
 | `[ldp]`, `[[ldp.*]]` | Hard error |
-| `[damping]`, `[bgp.rpki]`, `[shutdown]` | Hard error |
+| `[damping]`, `[bgp.peer_health]`, `[bgp.rpki]`, `[shutdown]` | Hard error |
 | `[[roa]]`, `[[filter]]`, `[[prefix-list]]`, `[[as-path-list]]`, `[[community-list]]`, `[[route-map]]`, `[[static.route]]`, `[[redistribute]]`, `[[aggregate]]` | Hard error |
 | An unknown `[[table]]` or `[section]` name | `config warning: line N: unknown table/section … (ignored)` |
 

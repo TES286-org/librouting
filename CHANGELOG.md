@@ -13,7 +13,7 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel per-route filter DSL
+## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, peer-health
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`
@@ -4027,6 +4027,48 @@ No public Rust API surface change (the new functions live in
 the FFI crate only; no new `lr-*` crate type or trait method).
 No version bump — the new C ABI symbols are additive growth,
 the freeze gate treats new symbols as silent.
+
+**Peer-level BGP flap suppression (issue #99).** A new
+`lr-peer-health` crate implements per-`(peer, AFI/SAFI)` flap
+suppression — a softer alternative to RFC 2439 prefix damping.
+Instead of suppressing unstable prefixes (which leaves them
+unreachable), the mechanism temporarily lowers a peer's path
+preference at session granularity. The session stays up, the
+prefixes stay reachable, and the blast radius is one peer.
+
+Detection uses an EWMA-equivalent baseline (computed from a
+configurable baseline window, default 480s) plus three sliding
+windows (short/mid/long, default 5s/30s/120s) with
+baseline-relative budgets. Escalation requires at least two
+tripped windows including a mid- or long-window confirmation;
+hysteresis separates enter and exit thresholds; an emergency
+path bypasses the minimum transition interval for catastrophic
+bursts. Tiers L0..=L3 represent normal through severe
+degradation; recovery is gradual with per-tier dwell and
+exponential backoff. Stale prefixes (learned from a degraded
+peer) stay reachable but are excluded from ECMP until a fresh
+UPDATE re-admits them or a rate-limited sweep clears them.
+
+Six rollout modes gate how far the mechanism reaches: `off`,
+`observe` (accounting only), `shadow` (state machine without
+stamping), `shadow-best-path` (stamping without stale),
+`limited` (L1 cap + stale), `full` (all tiers + stale). The
+daemon wires the mechanism via `[bgp.peer_health]` config and
+spawns a ticker thread; the router's `reselect` uses
+`BestPath::rank_tiered` when any candidate carries the tier
+attribute.
+
+New public Rust API surface: `lr_peer_health::{PeerHealthTable,
+PeerHealthConfig, PeerHealthTier, RolloutMode, ...}`, the
+`lr_policy::PeerHealthImportHook`, two BGP-private path
+attributes (`LrPeerHealthTier` = 244, `LrPeerHealthStale` =
+243), four `BestPath` methods (`tiered_candidates`,
+`rank_tiered`, `select_tiered`, `multipath_tiered`), six
+`PathAttributes` accessors, and a new `peer-health` feature on
+`lr-policy`. New C ABI: `lr_peer_health_table_t` handle,
+`lr_peer_health_config_t` / `lr_peer_health_session_t`
+structs, and 8 entry points. 30+ unit tests cover the state
+machine, hook, and tiered selection.
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 

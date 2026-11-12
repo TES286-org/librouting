@@ -52,6 +52,7 @@ optional edges the diagram omits.
 | `lr-mpls` | `lr-core` |
 | `lr-srv6` | `lr-core` |
 | `lr-damping` | `lr-core` |
+| `lr-peer-health` | `lr-core` |
 | `lr-bfd` | `lr-core` |
 | `lr-ldp` | `lr-core` |
 | `lr-rib` | `lr-core` |
@@ -60,10 +61,10 @@ optional edges the diagram omits.
 | `lr-ospf` | `lr-core` |
 | `lr-mrt` | `lr-core`, `lr-bgp` (`bgp`) |
 | `lr-bmp` | `lr-core`, `lr-bgp` |
-| `lr-policy` | `lr-core`, `lr-bgp` (`bgp`), `lr-damping` (`damping`) |
+| `lr-policy` | `lr-core`, `lr-bgp` (`bgp`), `lr-damping` (`damping`), `lr-peer-health` (`peer-health`) |
 | `lr-router` | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-rib`, `lr-policy`, `lr-bmp`, `lr-mpls` |
 | `lr-osroute` | `lr-core`, `lr-mpls`, `lr-srv6` |
-| `lr-ffi` | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-rib`, `lr-policy`, `lr-damping`, `lr-router`, `lr-mpls`, `lr-srv6` |
+| `lr-ffi` | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-rib`, `lr-policy`, `lr-damping`, `lr-peer-health`, `lr-router`, `lr-mpls`, `lr-srv6` |
 | `lr-cli` | all of the above except `lr-srv6`, plus `lr-bfd`, `lr-ldp`, `lr-mrt` |
 | `lr-tests` | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-rib`, `lr-policy`, `lr-router`, `lr-osroute`, `lr-bmp`, `lr-mpls` |
 
