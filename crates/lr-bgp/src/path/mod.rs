@@ -320,12 +320,25 @@ pub enum AttrType {
     /// discriminator byte; the address family is implied by the
     /// length).
     LrPeerSourceAddress = 245,
+    /// librouting-private peer-health tier (issue #99). Carries the
+    /// per-`(peer, AFI/SAFI)` flap-suppression tier the peer-health
+    /// import hook computed — `0..=3` (L0 = normal, L3 = severe).
+    /// `BestPath::rank_tiered` restricts the candidate set to the
+    /// highest non-empty tier before the standard decision process.
+    /// *Never* transmitted on the wire; the codec strips it at encode.
+    /// Value layout: 1 byte, tier 0..=3. Absent = L0.
+    LrPeerHealthTier = 244,
+    /// librouting-private peer-health stale flag (issue #99). A route
+    /// learned from a degraded peer is marked stale: it stays
+    /// reachable but is excluded from ECMP until re-admitted.
+    /// *Never* transmitted on the wire. Value: 1 byte, 0/1.
+    LrPeerHealthStale = 243,
     /// Unknown attribute code. The explicit discriminant keeps the
     /// data-carrying variant out of the unit-like variants' implicit
-    /// numbering (the eight private tags above sit at
-    /// 245/246/249/250/252/253/254/255 — code point 251 is the W6.3
-    /// exchange-plane wire attribute, not a private `AttrType`
-    /// variant).
+    /// numbering (the private tags above sit at
+    /// 243/244/245/246/249/250/252/253/254/255 — code point 251 is
+    /// the W6.3 exchange-plane wire attribute, not a private
+    /// `AttrType` variant).
     Other(u8) = 0,
 }
 
@@ -361,6 +374,8 @@ impl AttrType {
             249 => Self::LrBabelSeqno,
             246 => Self::LrIgpMetric,
             245 => Self::LrPeerSourceAddress,
+            244 => Self::LrPeerHealthTier,
+            243 => Self::LrPeerHealthStale,
             255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
@@ -397,6 +412,8 @@ impl AttrType {
             Self::LrBabelSeqno => 249,
             Self::LrIgpMetric => 246,
             Self::LrPeerSourceAddress => 245,
+            Self::LrPeerHealthTier => 244,
+            Self::LrPeerHealthStale => 243,
             Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
         }
@@ -1054,6 +1071,52 @@ impl PathAttributes {
     /// returns `None` for both.
     pub fn has_peer_source_address(&self) -> bool {
         self.get(AttrType::LrPeerSourceAddress).is_some()
+    }
+
+    /// Attach the peer-health tier (issue #99) under the private
+    /// [`AttrType::LrPeerHealthTier`] tag. `tier` is clamped to
+    /// `0..=3`; values above 3 clamp to 3 (most-degraded).
+    pub fn set_peer_health_tier(&mut self, tier: u8) {
+        let v = tier.min(3);
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrPeerHealthTier,
+            vec![v],
+        ));
+    }
+
+    /// Read back the peer-health tier. `None` = absent (treated as
+    /// L0 by selection). `Some(0..=3)` = the stamped tier.
+    pub fn peer_health_tier(&self) -> Option<u8> {
+        let a = self.get(AttrType::LrPeerHealthTier)?;
+        if a.value.is_empty() {
+            return Some(0);
+        }
+        Some(a.value[0].min(3))
+    }
+
+    pub fn has_peer_health_tier(&self) -> bool {
+        self.get(AttrType::LrPeerHealthTier).is_some()
+    }
+
+    /// Attach the peer-health stale flag (issue #99).
+    pub fn set_peer_health_stale(&mut self, stale: bool) {
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrPeerHealthStale,
+            vec![if stale { 1 } else { 0 }],
+        ));
+    }
+
+    /// Read back the stale flag. `false` = absent or fresh.
+    pub fn peer_health_stale(&self) -> bool {
+        self.get(AttrType::LrPeerHealthStale)
+            .map(|a| !a.value.is_empty() && a.value[0] != 0)
+            .unwrap_or(false)
+    }
+
+    pub fn has_peer_health_stale(&self) -> bool {
+        self.get(AttrType::LrPeerHealthStale).is_some()
     }
 
     /// Decode MP_REACH_NLRI with RFC 7911 Add-Path awareness: `add_path`

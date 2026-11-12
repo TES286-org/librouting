@@ -161,6 +161,81 @@ impl BestPath {
         Some(out)
     }
 
+    /// Pre-best-path candidate tiering (issue #99). Restrict the
+    /// candidate set to the highest non-empty health tier (lowest
+    /// `LrPeerHealthTier` value present). Fall back to **all**
+    /// candidates if every path is degraded. Routes without a tier
+    /// attribute are treated as L0.
+    pub fn tiered_candidates(routes: &[Route]) -> Vec<&Route> {
+        let min_tier = routes
+            .iter()
+            .map(|r| {
+                let attrs: PathAttributes = r.attributes.clone().into();
+                attrs.peer_health_tier().unwrap_or(0)
+            })
+            .min()
+            .unwrap_or(0);
+        if min_tier == 0 {
+            routes
+                .iter()
+                .filter(|r| {
+                    let attrs: PathAttributes = r.attributes.clone().into();
+                    attrs.peer_health_tier().unwrap_or(0) == 0
+                })
+                .collect()
+        } else {
+            routes.iter().collect()
+        }
+    }
+
+    /// Rank every route best-first, after pre-best-path candidate
+    /// tiering (issue #99).
+    pub fn rank_tiered<'a>(routes: &'a [Route], cfg: &BestPathConfig) -> Vec<&'a Route> {
+        let candidates = Self::tiered_candidates(routes);
+        let mut ranked: Vec<&Route> = candidates.into_iter().collect();
+        ranked.sort_by(|a, b| Self::compare(a, b, cfg));
+        ranked
+    }
+
+    /// Select the best route, after pre-best-path candidate tiering.
+    pub fn select_tiered<'a>(routes: &'a [Route], cfg: &BestPathConfig) -> Option<&'a Route> {
+        let candidates = Self::tiered_candidates(routes);
+        candidates
+            .into_iter()
+            .min_by(|a, b| Self::compare(a, b, cfg))
+    }
+
+    /// Multipath with tiering and stale exclusion (issue #99 §Recovery:
+    /// 'Stale paths are excluded from ECMP until re-admitted').
+    pub fn multipath_tiered<'a>(
+        routes: &'a [Route],
+        cfg: &BestPathConfig,
+    ) -> Option<Vec<&'a Route>> {
+        let best = Self::select_tiered(routes, cfg)?;
+        if cfg.multipath <= 1 {
+            return Some(vec![best]);
+        }
+        let mut out: Vec<&Route> = Vec::new();
+        for r in routes {
+            let attrs: PathAttributes = r.attributes.clone().into();
+            if attrs.peer_health_stale() {
+                continue;
+            }
+            if Self::compare_multipath(r, best, cfg) == Ordering::Equal
+                && (cfg.multipath_relax || Self::same_neighbor(r, best))
+            {
+                out.push(r);
+                if out.len() as u32 >= cfg.multipath {
+                    break;
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push(best);
+        }
+        Some(out)
+    }
+
     /// Like [`Self::compare`] but stops before the final peer-id tiebreaker:
     /// two paths from the same peer are the same path, so the router-ID step
     /// can never separate multipath-eligible candidates.
@@ -1102,6 +1177,126 @@ mod tests {
         let routes = [matched, unmatched];
         let mp = BestPath::multipath(&routes, &cfg).unwrap();
         assert_eq!(mp.len(), 1, "the unmatched path stays out of the set");
+        assert_eq!(mp[0].origin.peer, 1);
+    }
+
+    // ===== issue #99 — peer-health tiering =====
+
+    fn route_with_tier(tier: Option<u8>, peer: u64) -> Route {
+        let mut attrs = Attributes::new();
+        attrs.insert(Attribute {
+            tag: lr_core::attr::AttrTag(2),
+            flags: 0,
+            value: vec![2, 1, 0, 0, 100],
+        });
+        if let Some(t) = tier {
+            attrs.insert(Attribute {
+                tag: lr_core::attr::AttrTag(244),
+                flags: 0,
+                value: vec![t],
+            });
+        }
+        Route {
+            key: RouteKey::new(Prefix::new_v4([10, 0, 0, 0], 8), NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: None,
+            attributes: attrs,
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    fn route_with_tier_and_stale(tier: u8, stale: bool, peer: u64) -> Route {
+        let mut attrs = Attributes::new();
+        attrs.insert(Attribute {
+            tag: lr_core::attr::AttrTag(2),
+            flags: 0,
+            value: vec![2, 1, 0, 0, 100],
+        });
+        attrs.insert(Attribute {
+            tag: lr_core::attr::AttrTag(244),
+            flags: 0,
+            value: vec![tier],
+        });
+        attrs.insert(Attribute {
+            tag: lr_core::attr::AttrTag(243),
+            flags: 0,
+            value: vec![if stale { 1 } else { 0 }],
+        });
+        Route {
+            key: RouteKey::new(Prefix::new_v4([10, 0, 0, 0], 8), NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: None,
+            attributes: attrs,
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn tiered_candidates_prefers_l0() {
+        let l0 = route_with_tier(None, 1);
+        let l1 = route_with_tier(Some(1), 2);
+        let routes = [l0, l1];
+        let cfg = BestPathConfig::default();
+        let best = BestPath::select_tiered(&routes, &cfg).unwrap();
+        assert_eq!(best.origin.peer, 1, "L0 candidate wins over L1");
+    }
+
+    #[test]
+    fn tiered_candidates_falls_back_when_all_degraded() {
+        let a = route_with_tier(Some(2), 1);
+        let b = route_with_tier(Some(2), 2);
+        let routes = [a, b];
+        let cfg = BestPathConfig::default();
+        let best = BestPath::select_tiered(&routes, &cfg).unwrap();
+        assert_eq!(best.origin.peer, 1, "fall-back picks the lower peer-id");
+    }
+
+    #[test]
+    fn rank_tiered_excludes_degraded_when_l0_present() {
+        let l0 = route_with_tier(None, 1);
+        let l1 = route_with_tier(Some(1), 2);
+        let routes = [l0, l1];
+        let cfg = BestPathConfig::default();
+        let ranked = BestPath::rank_tiered(&routes, &cfg);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].origin.peer, 1);
+    }
+
+    #[test]
+    fn multipath_tiered_excludes_stale_paths() {
+        let fresh1 = route_with_tier_and_stale(0, false, 1);
+        let stale = route_with_tier_and_stale(0, true, 2);
+        let fresh2 = route_with_tier_and_stale(0, false, 3);
+        let routes = [fresh1, stale, fresh2];
+        let cfg = BestPathConfig {
+            multipath: 8,
+            multipath_relax: true,
+            ..Default::default()
+        };
+        let mp = BestPath::multipath_tiered(&routes, &cfg).unwrap();
+        assert_eq!(mp.len(), 2, "stale path excluded from ECMP");
+        assert!(mp.iter().all(|r| r.origin.peer != 2));
+    }
+
+    #[test]
+    fn multipath_tiered_keeps_stale_best_when_sole_candidate() {
+        let stale = route_with_tier_and_stale(0, true, 1);
+        let routes = [stale];
+        let cfg = BestPathConfig {
+            multipath: 8,
+            multipath_relax: true,
+            ..Default::default()
+        };
+        let mp = BestPath::multipath_tiered(&routes, &cfg).unwrap();
+        assert_eq!(mp.len(), 1);
         assert_eq!(mp[0].origin.peer, 1);
     }
 }
