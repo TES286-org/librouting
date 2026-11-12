@@ -21,6 +21,7 @@ bench = false
 lr-core = { workspace = true }
 lr-bgp = { workspace = true, optional = true }
 lr-damping = { workspace = true, optional = true }
+lr-peer-health = { workspace = true, optional = true }
 tracing.workspace = true
 
 [features]
@@ -34,6 +35,9 @@ bgp = ["std", "dep:lr-bgp"]
 # crate and exposes `DampingImportHook`. Requires std because
 # `lr-damping` is a std crate.
 damping = ["std", "dep:lr-damping"]
+# Peer-level flap suppression import hook (issue #99). Pulls in
+# `lr-peer-health` and exposes `PeerHealthImportHook`.
+peer-health = ["bgp", "std", "dep:lr-peer-health"]
 # W6.3 LRXP exchange-plane filter DSL surface (issue #81). Exposes
 # the scope-1 records a route carries (`bgp.lrxp.hint.*`,
 # `bgp.lrxp.policy.*`, `bgp.lrxp.origin.*`, `bgp.lrxp.verified`,

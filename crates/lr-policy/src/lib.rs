@@ -32,6 +32,10 @@ pub mod route_map;
 pub mod safety;
 pub mod set;
 
+#[cfg(feature = "damping")]
+pub use hooks::DampingImportHook;
+#[cfg(feature = "peer-health")]
+pub use hooks::PeerHealthImportHook;
 pub use hooks::{
     DrainModeImportHook, ExportHook, HookChain, HookVerdict, ImportHook, SelectionHook,
 };

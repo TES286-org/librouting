@@ -49,7 +49,7 @@ use lr_bgp::path::{Community, PathAttributes};
 
 #[cfg(feature = "damping")]
 use lr_damping::DampingTable;
-#[cfg(feature = "damping")]
+#[cfg(any(feature = "damping", feature = "peer-health"))]
 use std::sync::{Arc, Mutex};
 
 /// Verdict returned by a hook. The route is either dropped, kept as-is, or
@@ -465,6 +465,89 @@ impl ImportHook for DampingImportHook {
         // suppressed — future imports will be dropped until FoM
         // decays back below the reuse threshold.
         let _ = table.on_withdraw(&key.prefix, now_s);
+    }
+}
+
+/// Peer-level flap suppression import hook (issue #99).
+///
+/// Wraps a shared [`lr_peer_health::PeerHealthTable`] and installs
+/// it on the import chain. On every accepted UPDATE the hook
+/// accounts the event, stamps the tier attribute when the rollout
+/// mode stamps tiers, and marks the route stale when the session
+/// is degraded and the rollout mode applies stale markings. A
+/// fresh UPDATE re-admits the prefix (clears stale in the table).
+/// The hook never tears down sessions, never withdraws routes,
+/// and never modifies standard BGP path attributes. Fails OPEN on
+/// a poisoned mutex (keeping the route) to avoid black-holing
+/// prefixes.
+#[cfg(feature = "peer-health")]
+#[derive(Debug, Clone)]
+pub struct PeerHealthImportHook {
+    table: Arc<Mutex<lr_peer_health::PeerHealthTable>>,
+}
+
+#[cfg(feature = "peer-health")]
+impl PeerHealthImportHook {
+    pub fn new(table: Arc<Mutex<lr_peer_health::PeerHealthTable>>) -> Self {
+        Self { table }
+    }
+
+    pub fn shared_table(&self) -> Arc<Mutex<lr_peer_health::PeerHealthTable>> {
+        Arc::clone(&self.table)
+    }
+}
+
+#[cfg(feature = "peer-health")]
+impl ImportHook for PeerHealthImportHook {
+    fn name(&self) -> &str {
+        "peer-health-flap-suppression"
+    }
+
+    fn on_import(&self, route: &mut Route) -> HookVerdict {
+        if route.protocol != lr_core::rib::Protocol::Bgp {
+            return HookVerdict::Keep;
+        }
+        let peer_id = route.origin.peer;
+        let family = route.key.family;
+        let now_ms = route.age_ms;
+
+        let mut table = match self.table.lock() {
+            Ok(g) => g,
+            Err(_) => return HookVerdict::Keep,
+        };
+
+        let tier = table.account_update(peer_id, family, now_ms);
+        let applies_stale = table.config().rollout.applies_stale();
+        let stamps_tier = table.config().rollout.stamps_tier();
+        let is_degraded = tier != lr_peer_health::PeerHealthTier::L0;
+
+        if applies_stale {
+            table.readmit(peer_id, family, &route.key.prefix);
+        }
+
+        if stamps_tier {
+            let mut attrs: PathAttributes = core::mem::take(&mut route.attributes).into();
+            attrs.set_peer_health_tier(tier.as_u8());
+            if applies_stale && is_degraded {
+                attrs.set_peer_health_stale(true);
+            }
+            route.attributes = attrs.into();
+        }
+
+        if applies_stale && is_degraded {
+            table.mark_stale(peer_id, family, &route.key.prefix, now_ms);
+        }
+
+        HookVerdict::Keep
+    }
+
+    fn on_withdraw(&self, key: &RouteKey, now_s: u64) {
+        let mut table = match self.table.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let now_ms = now_s.saturating_mul(1000);
+        let _ = table.account_withdraw(0, key.family, now_ms);
     }
 }
 

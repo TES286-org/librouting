@@ -685,6 +685,7 @@ dependencies = [
  "lr-bgp",
  "lr-core",
  "lr-damping",
+ "lr-peer-health",
  "lr-rib",
  "proptest",
  "tracing",
