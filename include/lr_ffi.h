@@ -9796,6 +9796,150 @@ int32_t lr_bgp_message_update_attr_at(lr_bgp_message_t m,
                                       struct lr_bytes_t *out_value);
 
 /**
+ * Returns 1 when the UPDATE carries an MP_REACH_NLRI attribute (RFC
+ * 4760 §3), 0 otherwise (including when the handle is null or the
+ * message is not an UPDATE). Use this before
+ * [`lr_bgp_message_update_mp_reach_family`] /
+ * [`lr_bgp_message_update_mp_reach_next_hop`] /
+ * [`lr_bgp_message_update_mp_reach_nlri_count`]: those readers
+ * return `LR_ERR_INVALID_HANDLE` when the attribute is absent.
+ *
+ * # Safety
+ * `m` must be a valid `lr_bgp_message_t` (or NULL — NULL returns 0).
+ */
+uint8_t lr_bgp_message_update_mp_reach_present(lr_bgp_message_t m);
+
+/**
+ * Write the MP_REACH_NLRI family (RFC 4760 §3) to `*out_afi` and
+ * `*out_safi`. Either out-pointer may be NULL, in which case it is
+ * skipped (only the non-NULL half is written) — this matches the
+ * `lr_bgp_path_attrs_mp_reach` shape.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle, and
+ * `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE or the
+ * UPDATE has no MP_REACH_NLRI attribute.
+ *
+ * # Safety
+ * `m` must be a valid `lr_bgp_message_t`. `out_afi` (when non-NULL)
+ * must point to a writable `uint16_t`; `out_safi` (when non-NULL) to
+ * a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_update_mp_reach_family(lr_bgp_message_t m,
+                                              uint16_t *out_afi,
+                                              uint8_t *out_safi);
+
+/**
+ * Write the MP_REACH_NLRI next-hop (RFC 4760 §3) to `*out`. The
+ * `kind` field mirrors `lr_bgp_next_hop_t`: 0 = IPv4 (the first 4
+ * bytes of `addr` carry the address), 1 = IPv6 global, 2 = IPv4-over-
+ * IPv6 (RFC 5549, 16 bytes), 3 = IPv6 link-local, 4 = IPv6 global +
+ * link-local (only the global half is exposed in `addr`; the
+ * link-local half is dropped, matching the `lr_bgp_path_attrs_mp_reach`
+ * behaviour — embedders that need both halves read the raw attribute
+ * bytes via [`lr_bgp_message_update_attr_at`] for the MP_REACH_NLRI
+ * index). `present` is always 1 on success.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+ * `out`, `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE
+ * or has no MP_REACH_NLRI attribute.
+ *
+ * # Safety
+ * `m` must be a valid `lr_bgp_message_t`. `out` must point to a
+ * writable `lr_bgp_next_hop_t`.
+ */
+int32_t lr_bgp_message_update_mp_reach_next_hop(lr_bgp_message_t m, struct lr_bgp_next_hop_t *out);
+
+/**
+ * Number of NLRI entries carried inside the MP_REACH_NLRI attribute
+ * (RFC 4760 §3). Returns 0 on a null handle, a non-UPDATE message, or
+ * an UPDATE without MP_REACH_NLRI. An MP_REACH_NLRI that decodes
+ * successfully but carries no NLRI entries (End-of-RIB marker for an
+ * MP family) returns 0 — distinguish the "absent" case with
+ * [`lr_bgp_message_update_mp_reach_present`].
+ */
+uintptr_t lr_bgp_message_update_mp_reach_nlri_count(lr_bgp_message_t m);
+
+/**
+ * Write the MP_REACH_NLRI entry at `idx` (RFC 4760 §3) to
+ * `*out_path_id` and `*out_prefix`. The path identifier is the RFC
+ * 7911 Add-Path identifier (0 when Add-Path was not negotiated for the
+ * family). The prefix is the family's `Prefix` projected into the
+ * 16-byte zero-padded `lr_prefix_t` shape (the same projection the
+ * legacy IPv4 NLRI / withdrawn readers use).
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+ * outputs, `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE
+ * or has no MP_REACH_NLRI attribute, `LR_ERR_OTHER` when `idx` is out
+ * of range.
+ *
+ * # Safety
+ * `m` must be a valid `lr_bgp_message_t`. `out_path_id` must point to
+ * a writable `uint32_t`; `out_prefix` to a writable `lr_prefix_t`.
+ */
+int32_t lr_bgp_message_update_mp_reach_nlri_at(lr_bgp_message_t m,
+                                               uintptr_t idx,
+                                               uint32_t *out_path_id,
+                                               struct lr_prefix_t *out_prefix);
+
+/**
+ * Returns 1 when the UPDATE carries an MP_UNREACH_NLRI attribute
+ * (RFC 4760 §4), 0 otherwise (including when the handle is null or the
+ * message is not an UPDATE). MP_UNREACH_NLRI with zero NLRI entries is
+ * the End-of-RIB marker for an MP family — the `present` reader is the
+ * only way to distinguish "EoR marker" from "no MP_UNREACH at all".
+ *
+ * # Safety
+ * `m` must be a valid `lr_bgp_message_t` (or NULL — NULL returns 0).
+ */
+uint8_t lr_bgp_message_update_mp_unreach_present(lr_bgp_message_t m);
+
+/**
+ * Write the MP_UNREACH_NLRI family (RFC 4760 §4) to `*out_afi` and
+ * `*out_safi`. Either out-pointer may be NULL, in which case it is
+ * skipped. Returns 0 on success, `LR_ERR_NULL` on a null handle, and
+ * `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE or has
+ * no MP_UNREACH_NLRI attribute.
+ *
+ * # Safety
+ * `m` must be a valid `lr_bgp_message_t`. `out_afi` (when non-NULL)
+ * must point to a writable `uint16_t`; `out_safi` (when non-NULL) to
+ * a writable `uint8_t`.
+ */
+int32_t lr_bgp_message_update_mp_unreach_family(lr_bgp_message_t m,
+                                                uint16_t *out_afi,
+                                                uint8_t *out_safi);
+
+/**
+ * Number of NLRI entries carried inside the MP_UNREACH_NLRI attribute
+ * (RFC 4760 §4). Returns 0 on a null handle, a non-UPDATE message, an
+ * UPDATE without MP_UNREACH_NLRI, or an MP_UNREACH_NLRI that decodes
+ * successfully but carries no NLRI entries (End-of-RIB marker for an
+ * MP family) — distinguish the "absent" case with
+ * [`lr_bgp_message_update_mp_unreach_present`].
+ */
+uintptr_t lr_bgp_message_update_mp_unreach_nlri_count(lr_bgp_message_t m);
+
+/**
+ * Write the MP_UNREACH_NLRI entry at `idx` (RFC 4760 §4) to
+ * `*out_path_id` and `*out_prefix`. Same contract as
+ * [`lr_bgp_message_update_mp_reach_nlri_at`] but for the withdrawal
+ * section.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+ * outputs, `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE
+ * or has no MP_UNREACH_NLRI attribute, `LR_ERR_OTHER` when `idx` is
+ * out of range.
+ *
+ * # Safety
+ * `m` must be a valid `lr_bgp_message_t`. `out_path_id` must point to
+ * a writable `uint32_t`; `out_prefix` to a writable `lr_prefix_t`.
+ */
+int32_t lr_bgp_message_update_mp_unreach_nlri_at(lr_bgp_message_t m,
+                                                 uintptr_t idx,
+                                                 uint32_t *out_path_id,
+                                                 struct lr_prefix_t *out_prefix);
+
+/**
  * Encode a list of IPv4 prefixes as RFC 4271 §4.3 NLRI bytes
  * (variable-length prefix-length + minimal address bytes). Each
  * prefix must be IPv4 (the `is_ipv6` flag of every `lr_prefix_t`

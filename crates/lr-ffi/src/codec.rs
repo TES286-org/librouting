@@ -1019,8 +1019,11 @@ pub unsafe extern "C" fn lr_bgp_message_route_refresh_subtype(
 //
 // The UPDATE surface here covers the IPv4 withdrawn-routes + NLRI
 // sections and the path-attribute list. MP-BGP NLRI (RFC 4760) carried
-// inside MpReach/MpUnreach is reachable through the attribute reader at
-// index 14/15 — a follow-up slice will add typed readers for those.
+// inside MpReach/MpUnreach is reachable through the typed readers
+// below (`lr_bgp_message_update_mp_reach_*` /
+// `lr_bgp_message_update_mp_unreach_*`) — they decode the attribute
+// bytes once and expose each NLRI entry as a `(path_id, lr_prefix_t)`
+// tuple, mirroring the legacy IPv4 NLRI / withdrawn readers.
 
 /// Number of withdrawn routes in the UPDATE. Returns the count
 /// directly (0 on a null handle or non-UPDATE message — the last-error
@@ -1199,6 +1202,382 @@ pub unsafe extern "C" fn lr_bgp_message_update_attr_at(
                 *out_type = attr.attr_type.to_u8();
                 *out_flags = attr.flags.0;
                 *out_value = lr_bytes_t::from_vec(attr.value.clone());
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+// ---------- MP-BGP typed readers (RFC 4760) ----------
+//
+// `lr_bgp_message_update_attr_at` exposes the raw attribute bytes for
+// every path attribute, but a C embedder cannot crack open the
+// `MpReach` / `MpUnreach` Rust structs. The readers below decode the
+// attribute once via `PathAttributes::mp_reach` / `mp_unreach` and
+// surface each NLRI entry as a `(path_id, lr_prefix_t)` tuple — the
+// same shape the legacy IPv4 NLRI / withdrawn readers use — so an
+// embedder can walk an MP-BGP UPDATE's NLRI list without going through
+// the codec a second time. Family (`AFI`, `SAFI`) and (for MP_REACH)
+// the next-hop are exposed via dedicated readers that mirror the
+// `lr_bgp_path_attrs_mp_*` shape on the path-attributes handle.
+
+/// Returns 1 when the UPDATE carries an MP_REACH_NLRI attribute (RFC
+/// 4760 §3), 0 otherwise (including when the handle is null or the
+/// message is not an UPDATE). Use this before
+/// [`lr_bgp_message_update_mp_reach_family`] /
+/// [`lr_bgp_message_update_mp_reach_next_hop`] /
+/// [`lr_bgp_message_update_mp_reach_nlri_count`]: those readers
+/// return `LR_ERR_INVALID_HANDLE` when the attribute is absent.
+///
+/// # Safety
+/// `m` must be a valid `lr_bgp_message_t` (or NULL — NULL returns 0).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_mp_reach_present(
+    m: crate::handle::lr_bgp_message_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Update(u) = msg else {
+                return 0;
+            };
+            u.attributes.mp_reach().is_some() as u8
+        },
+        0,
+    )
+}
+
+/// Write the MP_REACH_NLRI family (RFC 4760 §3) to `*out_afi` and
+/// `*out_safi`. Either out-pointer may be NULL, in which case it is
+/// skipped (only the non-NULL half is written) — this matches the
+/// `lr_bgp_path_attrs_mp_reach` shape.
+///
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle, and
+/// `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE or the
+/// UPDATE has no MP_REACH_NLRI attribute.
+///
+/// # Safety
+/// `m` must be a valid `lr_bgp_message_t`. `out_afi` (when non-NULL)
+/// must point to a writable `uint16_t`; `out_safi` (when non-NULL) to
+/// a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_mp_reach_family(
+    m: crate::handle::lr_bgp_message_t,
+    out_afi: *mut u16,
+    out_safi: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(reach) = u.attributes.mp_reach() else {
+                set_last_error("UPDATE has no MP_REACH_NLRI attribute".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            if !out_afi.is_null() {
+                unsafe { *out_afi = reach.family.afi };
+            }
+            if !out_safi.is_null() {
+                unsafe { *out_safi = reach.family.safi };
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Write the MP_REACH_NLRI next-hop (RFC 4760 §3) to `*out`. The
+/// `kind` field mirrors `lr_bgp_next_hop_t`: 0 = IPv4 (the first 4
+/// bytes of `addr` carry the address), 1 = IPv6 global, 2 = IPv4-over-
+/// IPv6 (RFC 5549, 16 bytes), 3 = IPv6 link-local, 4 = IPv6 global +
+/// link-local (only the global half is exposed in `addr`; the
+/// link-local half is dropped, matching the `lr_bgp_path_attrs_mp_reach`
+/// behaviour — embedders that need both halves read the raw attribute
+/// bytes via [`lr_bgp_message_update_attr_at`] for the MP_REACH_NLRI
+/// index). `present` is always 1 on success.
+///
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+/// `out`, `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE
+/// or has no MP_REACH_NLRI attribute.
+///
+/// # Safety
+/// `m` must be a valid `lr_bgp_message_t`. `out` must point to a
+/// writable `lr_bgp_next_hop_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_mp_reach_next_hop(
+    m: crate::handle::lr_bgp_message_t,
+    out: *mut crate::bgp_path::lr_bgp_next_hop_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(reach) = u.attributes.mp_reach() else {
+                set_last_error("UPDATE has no MP_REACH_NLRI attribute".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let (addr, kind) = match &reach.next_hop {
+                lr_bgp::path::MpNextHop::V4(b) => {
+                    let mut a16 = [0u8; 16];
+                    a16[..4].copy_from_slice(b);
+                    (a16, 0u8)
+                }
+                lr_bgp::path::MpNextHop::V6Global(b) => (*b, 1u8),
+                lr_bgp::path::MpNextHop::V4OverV6(b) => (*b, 2u8),
+                lr_bgp::path::MpNextHop::V6LinkLocal(b) => (*b, 3u8),
+                lr_bgp::path::MpNextHop::V6GlobalLinkLocal(g, _l) => {
+                    let mut a16 = [0u8; 16];
+                    a16.copy_from_slice(g);
+                    (a16, 4u8)
+                }
+            };
+            unsafe {
+                *out = crate::bgp_path::lr_bgp_next_hop_t {
+                    addr,
+                    kind,
+                    present: 1,
+                };
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of NLRI entries carried inside the MP_REACH_NLRI attribute
+/// (RFC 4760 §3). Returns 0 on a null handle, a non-UPDATE message, or
+/// an UPDATE without MP_REACH_NLRI. An MP_REACH_NLRI that decodes
+/// successfully but carries no NLRI entries (End-of-RIB marker for an
+/// MP family) returns 0 — distinguish the "absent" case with
+/// [`lr_bgp_message_update_mp_reach_present`].
+#[no_mangle]
+pub extern "C" fn lr_bgp_message_update_mp_reach_nlri_count(
+    m: crate::handle::lr_bgp_message_t,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return 0;
+            };
+            u.attributes.mp_reach().map(|r| r.nlri.len()).unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Write the MP_REACH_NLRI entry at `idx` (RFC 4760 §3) to
+/// `*out_path_id` and `*out_prefix`. The path identifier is the RFC
+/// 7911 Add-Path identifier (0 when Add-Path was not negotiated for the
+/// family). The prefix is the family's `Prefix` projected into the
+/// 16-byte zero-padded `lr_prefix_t` shape (the same projection the
+/// legacy IPv4 NLRI / withdrawn readers use).
+///
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+/// outputs, `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE
+/// or has no MP_REACH_NLRI attribute, `LR_ERR_OTHER` when `idx` is out
+/// of range.
+///
+/// # Safety
+/// `m` must be a valid `lr_bgp_message_t`. `out_path_id` must point to
+/// a writable `uint32_t`; `out_prefix` to a writable `lr_prefix_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_mp_reach_nlri_at(
+    m: crate::handle::lr_bgp_message_t,
+    idx: usize,
+    out_path_id: *mut u32,
+    out_prefix: *mut crate::policy::lr_prefix_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out_path_id.is_null() || out_prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(reach) = u.attributes.mp_reach() else {
+                set_last_error("UPDATE has no MP_REACH_NLRI attribute".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(nlri) = reach.nlri.get(idx) else {
+                set_last_error(format!(
+                    "MP_REACH_NLRI index {idx} out of range ({})",
+                    reach.nlri.len()
+                ));
+                return LR_ERR_OTHER;
+            };
+            unsafe {
+                *out_path_id = nlri.path_id;
+                *out_prefix = prefix_to_lr_prefix(&nlri.prefix);
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Returns 1 when the UPDATE carries an MP_UNREACH_NLRI attribute
+/// (RFC 4760 §4), 0 otherwise (including when the handle is null or the
+/// message is not an UPDATE). MP_UNREACH_NLRI with zero NLRI entries is
+/// the End-of-RIB marker for an MP family — the `present` reader is the
+/// only way to distinguish "EoR marker" from "no MP_UNREACH at all".
+///
+/// # Safety
+/// `m` must be a valid `lr_bgp_message_t` (or NULL — NULL returns 0).
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_mp_unreach_present(
+    m: crate::handle::lr_bgp_message_t,
+) -> u8 {
+    guarded(
+        || unsafe {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Update(u) = msg else {
+                return 0;
+            };
+            u.attributes.mp_unreach().is_some() as u8
+        },
+        0,
+    )
+}
+
+/// Write the MP_UNREACH_NLRI family (RFC 4760 §4) to `*out_afi` and
+/// `*out_safi`. Either out-pointer may be NULL, in which case it is
+/// skipped. Returns 0 on success, `LR_ERR_NULL` on a null handle, and
+/// `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE or has
+/// no MP_UNREACH_NLRI attribute.
+///
+/// # Safety
+/// `m` must be a valid `lr_bgp_message_t`. `out_afi` (when non-NULL)
+/// must point to a writable `uint16_t`; `out_safi` (when non-NULL) to
+/// a writable `uint8_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_mp_unreach_family(
+    m: crate::handle::lr_bgp_message_t,
+    out_afi: *mut u16,
+    out_safi: *mut u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(unreach) = u.attributes.mp_unreach() else {
+                set_last_error("UPDATE has no MP_UNREACH_NLRI attribute".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            if !out_afi.is_null() {
+                unsafe { *out_afi = unreach.family.afi };
+            }
+            if !out_safi.is_null() {
+                unsafe { *out_safi = unreach.family.safi };
+            }
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Number of NLRI entries carried inside the MP_UNREACH_NLRI attribute
+/// (RFC 4760 §4). Returns 0 on a null handle, a non-UPDATE message, an
+/// UPDATE without MP_UNREACH_NLRI, or an MP_UNREACH_NLRI that decodes
+/// successfully but carries no NLRI entries (End-of-RIB marker for an
+/// MP family) — distinguish the "absent" case with
+/// [`lr_bgp_message_update_mp_unreach_present`].
+#[no_mangle]
+pub extern "C" fn lr_bgp_message_update_mp_unreach_nlri_count(
+    m: crate::handle::lr_bgp_message_t,
+) -> usize {
+    guarded(
+        || unsafe {
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return 0;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return 0;
+            };
+            u.attributes.mp_unreach().map(|r| r.nlri.len()).unwrap_or(0)
+        },
+        0,
+    )
+}
+
+/// Write the MP_UNREACH_NLRI entry at `idx` (RFC 4760 §4) to
+/// `*out_path_id` and `*out_prefix`. Same contract as
+/// [`lr_bgp_message_update_mp_reach_nlri_at`] but for the withdrawal
+/// section.
+///
+/// Returns 0 on success, `LR_ERR_NULL` on a null handle or null
+/// outputs, `LR_ERR_INVALID_HANDLE` when the message is not an UPDATE
+/// or has no MP_UNREACH_NLRI attribute, `LR_ERR_OTHER` when `idx` is
+/// out of range.
+///
+/// # Safety
+/// `m` must be a valid `lr_bgp_message_t`. `out_path_id` must point to
+/// a writable `uint32_t`; `out_prefix` to a writable `lr_prefix_t`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_message_update_mp_unreach_nlri_at(
+    m: crate::handle::lr_bgp_message_t,
+    idx: usize,
+    out_path_id: *mut u32,
+    out_prefix: *mut crate::policy::lr_prefix_t,
+) -> i32 {
+    guarded(
+        || unsafe {
+            if out_path_id.is_null() || out_prefix.is_null() {
+                return LR_ERR_NULL;
+            }
+            let Some(msg) = (unsafe { crate::handle::borrow_bgp_message(m) }) else {
+                return LR_ERR_NULL;
+            };
+            let BgpMessage::Update(u) = msg else {
+                set_last_error("message is not UPDATE".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(unreach) = u.attributes.mp_unreach() else {
+                set_last_error("UPDATE has no MP_UNREACH_NLRI attribute".into());
+                return LR_ERR_INVALID_HANDLE;
+            };
+            let Some(nlri) = unreach.nlri.get(idx) else {
+                set_last_error(format!(
+                    "MP_UNREACH_NLRI index {idx} out of range ({})",
+                    unreach.nlri.len()
+                ));
+                return LR_ERR_OTHER;
+            };
+            unsafe {
+                *out_path_id = nlri.path_id;
+                *out_prefix = prefix_to_lr_prefix(&nlri.prefix);
             }
             0
         },
@@ -2411,6 +2790,625 @@ mod tests {
             },
             LR_ERR_NULL
         );
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    /// Build a BGP UPDATE message carrying an MP_REACH_NLRI attribute
+    /// (RFC 4760 §3) for the given family + next-hop + NLRI list.
+    /// `family` selects AFI/SAFI (typically IPv6 unicast), `next_hop`
+    /// is the MpNextHop to encode, `nlri` is the NLRI list to advertise.
+    /// The resulting UPDATE has no IPv4 NLRI / withdrawn routes — the
+    /// MP_REACH_NLRI attribute is the only payload.
+    fn build_update_with_mp_reach(
+        family: lr_core::nlri::NlriFamily,
+        next_hop: lr_bgp::path::MpNextHop,
+        nlri: Vec<lr_bgp::message::update::Nlri>,
+    ) -> Vec<u8> {
+        let mp = lr_bgp::path::MpReach::new(family, next_hop, nlri);
+        let attr = lr_bgp::path::PathAttribute::new(
+            lr_bgp::path::PathAttrFlags::new().set_optional(true),
+            lr_bgp::path::AttrType::MpReachNlri,
+            mp.encode(),
+        );
+        let update = lr_bgp::message::update::Update::new().with_attribute(attr);
+        let msg = lr_bgp::BgpMessage::Update(update);
+        let codec = BgpC::new();
+        codec.encode_vec(&msg).expect("encode UPDATE")
+    }
+
+    /// Build a BGP UPDATE carrying an MP_UNREACH_NLRI attribute
+    /// (RFC 4760 §4) for the given family + NLRI list. Pass an empty
+    /// NLRI list to produce an End-of-RIB marker for the family.
+    fn build_update_with_mp_unreach(
+        family: lr_core::nlri::NlriFamily,
+        nlri: Vec<lr_bgp::message::update::Nlri>,
+    ) -> Vec<u8> {
+        let mp = lr_bgp::path::MpUnreach::new(family, nlri);
+        let attr = lr_bgp::path::PathAttribute::new(
+            lr_bgp::path::PathAttrFlags::new().set_optional(true),
+            lr_bgp::path::AttrType::MpUnreachNlri,
+            mp.encode(),
+        );
+        let update = lr_bgp::message::update::Update::new().with_attribute(attr);
+        let msg = lr_bgp::BgpMessage::Update(update);
+        let codec = BgpC::new();
+        codec.encode_vec(&msg).expect("encode UPDATE")
+    }
+
+    #[test]
+    fn mp_reach_round_trip_ipv6() {
+        // IPv6 unicast MP_REACH with a global v6 next-hop + 2 NLRI entries.
+        let bytes = build_update_with_mp_reach(
+            lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            lr_bgp::path::MpNextHop::V6Global([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]),
+            vec![
+                lr_bgp::message::update::Nlri::plain(lr_core::addr::Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    64,
+                )),
+                lr_bgp::message::update::Nlri::plain(lr_core::addr::Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                    65,
+                )),
+            ],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_present(m) },
+            1,
+            "MP_REACH_NLRI present"
+        );
+        // No MP_UNREACH in this UPDATE.
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_present(m) },
+            0,
+            "MP_UNREACH_NLRI absent"
+        );
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_family(m, &raw mut afi, &raw mut safi) },
+            0
+        );
+        assert_eq!(afi, 2, "AFI = IPv6");
+        assert_eq!(safi, 1, "SAFI = unicast");
+
+        let mut nh = crate::bgp_path::lr_bgp_next_hop_t {
+            addr: [0u8; 16],
+            kind: 0,
+            present: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_next_hop(m, &raw mut nh) },
+            0
+        );
+        assert_eq!(nh.kind, 1, "V6Global kind");
+        assert_eq!(nh.present, 1);
+        assert_eq!(
+            nh.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+
+        assert_eq!(lr_bgp_message_update_mp_reach_nlri_count(m), 2);
+
+        let mut path_id = 0u32;
+        let mut prefix = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 0,
+            prefix_len: 0,
+        };
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            0
+        );
+        assert_eq!(path_id, 0, "no Add-Path id");
+        assert_eq!(prefix.is_ipv6, 1);
+        assert_eq!(prefix.prefix_len, 64);
+        assert_eq!(
+            prefix.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 1, &raw mut path_id, &raw mut prefix)
+            },
+            0
+        );
+        assert_eq!(prefix.prefix_len, 65);
+        assert_eq!(
+            prefix.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+
+        // Out-of-range returns LR_ERR_OTHER.
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 2, &raw mut path_id, &raw mut prefix)
+            },
+            LR_ERR_OTHER
+        );
+
+        // The MP_UNREACH_NLRI readers must reject this UPDATE (the
+        // attribute is absent — LR_ERR_INVALID_HANDLE).
+        assert_eq!(lr_bgp_message_update_mp_unreach_nlri_count(m), 0);
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_unreach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            LR_ERR_INVALID_HANDLE
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_unreach_round_trip_ipv6() {
+        // IPv6 unicast MP_UNREACH with 2 NLRI entries to withdraw.
+        let bytes = build_update_with_mp_unreach(
+            lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            vec![
+                lr_bgp::message::update::Nlri::plain(lr_core::addr::Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    64,
+                )),
+                lr_bgp::message::update::Nlri::plain(lr_core::addr::Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                    64,
+                )),
+            ],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_present(m) },
+            1,
+            "MP_UNREACH_NLRI present"
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_present(m) },
+            0,
+            "MP_REACH_NLRI absent"
+        );
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_family(m, &raw mut afi, &raw mut safi) },
+            0
+        );
+        assert_eq!(afi, 2, "AFI = IPv6");
+        assert_eq!(safi, 1, "SAFI = unicast");
+
+        assert_eq!(lr_bgp_message_update_mp_unreach_nlri_count(m), 2);
+
+        let mut path_id = 0u32;
+        let mut prefix = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 0,
+            prefix_len: 0,
+        };
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_unreach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            0
+        );
+        assert_eq!(path_id, 0);
+        assert_eq!(prefix.is_ipv6, 1);
+        assert_eq!(prefix.prefix_len, 64);
+        assert_eq!(
+            prefix.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_unreach_nlri_at(m, 1, &raw mut path_id, &raw mut prefix)
+            },
+            0
+        );
+        assert_eq!(prefix.prefix_len, 64);
+        assert_eq!(
+            prefix.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+
+        // Out-of-range returns LR_ERR_OTHER.
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_unreach_nlri_at(m, 2, &raw mut path_id, &raw mut prefix)
+            },
+            LR_ERR_OTHER
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_reach_absent_returns_invalid_handle() {
+        // A plain IPv4 UPDATE has no MP_REACH_NLRI attribute.
+        let bytes = build_update_announce(&[([203, 0, 113, 0], 24)], [192, 0, 2, 1], &[64512], 0);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_present(m) },
+            0,
+            "MP_REACH_NLRI absent"
+        );
+        assert_eq!(
+            lr_bgp_message_update_mp_reach_nlri_count(m),
+            0,
+            "no NLRI count without the attribute"
+        );
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_family(m, &raw mut afi, &raw mut safi) },
+            LR_ERR_INVALID_HANDLE
+        );
+        assert!(last_error().contains("no MP_REACH_NLRI"));
+
+        let mut nh = crate::bgp_path::lr_bgp_next_hop_t {
+            addr: [0u8; 16],
+            kind: 0,
+            present: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_next_hop(m, &raw mut nh) },
+            LR_ERR_INVALID_HANDLE
+        );
+
+        let mut path_id = 0u32;
+        let mut prefix = lr_prefix_t::default();
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            LR_ERR_INVALID_HANDLE
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_unreach_absent_returns_invalid_handle() {
+        // A plain IPv4 withdraw UPDATE has no MP_UNREACH_NLRI attribute.
+        let bytes = build_update_withdraw(&[([203, 0, 113, 0], 24)]);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_present(m) },
+            0,
+            "MP_UNREACH_NLRI absent"
+        );
+        assert_eq!(
+            lr_bgp_message_update_mp_unreach_nlri_count(m),
+            0,
+            "no NLRI count without the attribute"
+        );
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_family(m, &raw mut afi, &raw mut safi) },
+            LR_ERR_INVALID_HANDLE
+        );
+        assert!(last_error().contains("no MP_UNREACH_NLRI"));
+
+        let mut path_id = 0u32;
+        let mut prefix = lr_prefix_t::default();
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_unreach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            LR_ERR_INVALID_HANDLE
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_reach_v4_over_v6_next_hop_kind_2() {
+        // RFC 5549: MP_REACH_NLRI for IPv4 unicast with a 16-byte IPv6
+        // next-hop. kind = 2 (V4OverV6).
+        let bytes = build_update_with_mp_reach(
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            lr_bgp::path::MpNextHop::V4OverV6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]),
+            vec![lr_bgp::message::update::Nlri::plain(
+                lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+            )],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        let mut nh = crate::bgp_path::lr_bgp_next_hop_t {
+            addr: [0u8; 16],
+            kind: 0,
+            present: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_next_hop(m, &raw mut nh) },
+            0
+        );
+        assert_eq!(nh.kind, 2, "V4OverV6 kind");
+        assert_eq!(nh.present, 1);
+        assert_eq!(
+            nh.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+
+        // The IPv4 NLRI entry is decoded as a regular IPv4 prefix.
+        assert_eq!(lr_bgp_message_update_mp_reach_nlri_count(m), 1);
+        let mut path_id = 0u32;
+        let mut prefix = lr_prefix_t::default();
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            0
+        );
+        assert_eq!(prefix.is_ipv6, 0, "IPv4 prefix");
+        assert_eq!(prefix.prefix_len, 24);
+        assert_eq!(&prefix.addr[..4], &[203, 0, 113, 0]);
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_reach_v6_link_local_collapses_to_v6_global_on_wire() {
+        // The MP_REACH_NLRI wire form has no discriminator between a
+        // 16-byte V6Global and a 16-byte V6LinkLocal next-hop — the
+        // codec encodes `MpNextHop::V6LinkLocal` as 16 bytes and
+        // decodes 16 bytes as `MpNextHop::V6Global` (RFC 4760 §3
+        // "no semantic difference between link-local and global on
+        // the wire; the link-local-ness is recovered from the IPv6
+        // layer at receive time"). So the round-trip through the
+        // codec surfaces kind=1 (V6Global), not kind=3 (V6LinkLocal)
+        // — the test pins the codec's lossy round-trip so a future
+        // codec change cannot silently flip the kind on the FFI
+        // surface. The `V6LinkLocal` variant is reachable only when
+        // the daemon constructs an `MpReach` directly from kernel
+        // state (where the link-local-ness is known out-of-band).
+        let bytes = build_update_with_mp_reach(
+            lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            lr_bgp::path::MpNextHop::V6LinkLocal([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]),
+            vec![],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        let mut nh = crate::bgp_path::lr_bgp_next_hop_t {
+            addr: [0u8; 16],
+            kind: 0,
+            present: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_next_hop(m, &raw mut nh) },
+            0
+        );
+        // Wire-level collapse: V6LinkLocal encodes as 16 bytes and
+        // decodes back as V6Global (kind=1).
+        assert_eq!(nh.kind, 1, "wire round-trip collapses to V6Global");
+        assert_eq!(nh.present, 1);
+        assert_eq!(
+            nh.addr,
+            [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_reach_v6_global_link_local_drops_link_local_kind_4() {
+        // V6GlobalLinkLocal next-hop — only the global half is surfaced
+        // in `addr`; the link-local half is dropped (matches the
+        // existing `lr_bgp_path_attrs_mp_reach` behaviour).
+        let bytes = build_update_with_mp_reach(
+            lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            lr_bgp::path::MpNextHop::V6GlobalLinkLocal(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            ),
+            vec![],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        let mut nh = crate::bgp_path::lr_bgp_next_hop_t {
+            addr: [0u8; 16],
+            kind: 0,
+            present: 0,
+        };
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_next_hop(m, &raw mut nh) },
+            0
+        );
+        assert_eq!(nh.kind, 4, "V6GlobalLinkLocal kind");
+        assert_eq!(nh.present, 1);
+        // The global half is exposed in `addr`.
+        assert_eq!(
+            nh.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_reach_eor_marker_present_with_zero_nlri() {
+        // An MP_REACH_NLRI with zero NLRI entries — a degenerate case
+        // (an empty MP_REACH is not the EoR marker; MP_UNREACH is),
+        // but the readers must surface it as present=1 + count=0
+        // rather than absent.
+        let bytes = build_update_with_mp_reach(
+            lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            lr_bgp::path::MpNextHop::V6Global([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]),
+            vec![],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_present(m) },
+            1,
+            "MP_REACH_NLRI present even with zero NLRI"
+        );
+        assert_eq!(lr_bgp_message_update_mp_reach_nlri_count(m), 0);
+
+        let mut path_id = 0u32;
+        let mut prefix = lr_prefix_t::default();
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            LR_ERR_OTHER,
+            "zero-NLRI -> first index out of range"
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_unreach_eor_marker_present_with_zero_nlri() {
+        // An MP_UNREACH_NLRI with zero NLRI entries is the End-of-RIB
+        // marker for an MP family (RFC 4760 §4). The `present` reader
+        // distinguishes "EoR marker" from "no MP_UNREACH at all".
+        let bytes = build_update_with_mp_unreach(lr_core::nlri::NlriFamily::IPV6_UNICAST, vec![]);
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_present(m) },
+            1,
+            "EoR marker is present"
+        );
+        assert_eq!(lr_bgp_message_update_mp_unreach_nlri_count(m), 0);
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_family(m, &raw mut afi, &raw mut safi) },
+            0
+        );
+        assert_eq!(afi, 2);
+        assert_eq!(safi, 1);
+
+        let mut path_id = 0u32;
+        let mut prefix = lr_prefix_t::default();
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_unreach_nlri_at(m, 0, &raw mut path_id, &raw mut prefix)
+            },
+            LR_ERR_OTHER,
+            "EoR marker -> first index out of range"
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_reach_nlri_at_rejects_null_outputs() {
+        let bytes = build_update_with_mp_reach(
+            lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            lr_bgp::path::MpNextHop::V6Global([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]),
+            vec![lr_bgp::message::update::Nlri::plain(
+                lr_core::addr::Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    64,
+                ),
+            )],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        let mut path_id = 0u32;
+        // NULL out_prefix.
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 0, &raw mut path_id, std::ptr::null_mut())
+            },
+            LR_ERR_NULL
+        );
+        // NULL out_path_id.
+        let mut prefix = lr_prefix_t::default();
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(m, 0, std::ptr::null_mut(), &raw mut prefix)
+            },
+            LR_ERR_NULL
+        );
+        // NULL handle.
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_mp_reach_nlri_at(
+                    std::ptr::null_mut(),
+                    0,
+                    &raw mut path_id,
+                    &raw mut prefix,
+                )
+            },
+            LR_ERR_NULL
+        );
+        // NULL next-hop out.
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_next_hop(m, std::ptr::null_mut()) },
+            LR_ERR_NULL
+        );
+
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    #[test]
+    fn mp_readers_reject_non_update() {
+        // A KEEPALIVE message must reject every MP_REACH/MP_UNREACH reader.
+        let bytes = build_keepalive();
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_present(m) },
+            0,
+            "non-UPDATE -> present=0"
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_present(m) },
+            0,
+            "non-UPDATE -> present=0"
+        );
+        assert_eq!(lr_bgp_message_update_mp_reach_nlri_count(m), 0);
+        assert_eq!(lr_bgp_message_update_mp_unreach_nlri_count(m), 0);
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_family(m, &raw mut afi, &raw mut safi) },
+            LR_ERR_INVALID_HANDLE
+        );
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_family(m, &raw mut afi, &raw mut safi) },
+            LR_ERR_INVALID_HANDLE
+        );
+
         unsafe { lr_bgp_message_free(m) };
     }
 
