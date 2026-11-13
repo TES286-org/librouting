@@ -342,15 +342,15 @@ fn bgp_ls_instance_id_cli_flag_shows_in_banner() {
 /// process exits before any BGP work, so no log file is needed.
 #[test]
 fn bgp_ls_instance_id_cli_flag_rejects_non_numeric() {
-    let bin = std::env::current_exe().unwrap();
-    // The test binary is `lr-daemon` — its parent directory is
-    // `target/debug/deps` (or `target/release/deps`); the daemon
-    // binary is two levels up under `target/{debug,release}`.
-    let mut dir = bin.clone();
-    dir.pop();
-    dir.pop();
-    dir.push("lr-daemon");
-    let out = std::process::Command::new(&dir)
+    // Use the Cargo-provided path to the built `lr-daemon` binary
+    // (same pattern every other integration test in this crate uses).
+    // The earlier `current_exe() + pop() + pop()` construction assumed
+    // the test binary lives in `target/{debug,release}/deps/`, but
+    // Cargo actually places it under
+    // `target/{debug,release}/build/<crate>/<hash>/out/`, so the
+    // two-level pop landed in the wrong directory and the spawn
+    // failed with NotFound.
+    let out = std::process::Command::new(BIN)
         .args([
             "--local-as",
             "64512",
