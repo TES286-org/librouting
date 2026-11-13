@@ -128,6 +128,7 @@ lowers to:
 | `route-map NAME { }`            | `name`             | `[[route-map]]`           |
 | `filter NAME { }`               | `name`             | `[[filter]]`              |
 | `roa { }`                       | —                  | `[[roa]]`                 |
+| `bgp.roa_source { }`            | —                  | `[[bgp.roa_source]]`      |
 | `redistribute { }`              | —                  | `[[redistribute]]`        |
 | `aggregate { }`                 | —                  | `[[aggregate]]`           |
 

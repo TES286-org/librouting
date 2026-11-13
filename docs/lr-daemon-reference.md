@@ -838,23 +838,44 @@ A `(prefix, asn)` pair may appear once. `asn = 0` marks a blackhole ROA.
 
 Advanced ROA loading (issue #100): one loader thread per source,
 merging file / URL entries with the inline `[[roa]]` tables under the
-live `RoaStore`.
+live `RoaStore`. The feature is internal to `lr-daemon` — there is no
+C ABI entry point (`lr_roa_store_replace_static_from_text` and the
+matching `LR_ROA_FORMAT_*` constants were removed; embedders feed
+ROAs by writing a config block or by hitting the file / URL a
+`[[bgp.roa_source]]` block points at).
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `path`, `file` | string | — | Local file path (mutually exclusive with `url`) |
 | `url` | string | — | HTTP(S) URL (mutually exclusive with `path`) |
-| `format` | enum | inferred | `native`, `bird`, `json`, `csv` |
+| `format` | enum | inferred | `native`, `bird`, `jq`, `awk` |
+| `program` | string | — | Required for `jq` / `awk`; the transform program text |
+| `program_file` | string | — | Alternative to `program`: path to a file holding the program |
 | `interval` | int | 3600 | URL fetch interval (s); minimum 60; ignored for files |
 | `user_agent` | string | `lr-daemon/<version>` | URL fetch UA |
+
+Exactly one of `program` / `program_file` must be set when `format`
+is `jq` or `awk`; both are ignored (and must be absent) for `native`
+and `bird`.
 
 Formats:
 
 * `native` — TOML `[[roa]]` subset (the same shape as the inline tables).
 * `bird` — BIRD 2 `roa table` body (`roa PREFIX max N as N;` per line).
-* `json` — Routinator JSON VRP output (`{"roas":[{asn,prefix,maxLength}]}`).
-* `csv` — Routinator CSV (`ASN,Prefix,MaxLength,TrustAnchor`) or
-  whitespace-separated (`ASN Prefix MaxLength`), with or without header.
+* `jq` — the daemon pipes the fetched bytes into `jq -r '<program>'`
+  (or `jq -r -f <program_file>`). The program must emit one
+  `ASN PREFIX MAXLEN` row per line on stdout; the daemon parses each
+  row into a ROA entry. `jq` must be on the daemon's `PATH` (the
+  container image ships it).
+* `awk` — the daemon pipes the fetched bytes into `awk '<program>'`
+  (or `awk -f <program_file>`). The program's stdout must be one
+  `ASN PREFIX MAXLEN` row per line. `awk` must be on the daemon's
+  `PATH` (Debian's `gawk` is the baseline).
+
+The `json` and `csv` fixed-format parsers that shipped in earlier
+builds were removed in favour of the `jq` / `awk` transform formats:
+the operator now owns the conversion step instead of the daemon
+shipping a hand-rolled JSON scanner.
 
 File sources are watched via mtime polling (1 s cadence). URL sources
 are fetched periodically; a fetch failure keeps the previous snapshot

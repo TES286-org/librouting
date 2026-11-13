@@ -121,10 +121,16 @@ FROM debian:bookworm-slim AS runtime
 # future feature does (e.g. an HTTPS RPKI cache), the cert bundle
 # is already present. `libgcc-s1` is the runtime lib the cdylib
 # links against (Debian ships it separately from the dev package).
+# `jq` is needed by the daemon's `bgp.roa_source` `format = "jq"`
+# transform: the loader pipes the fetched bytes through
+# `jq -r '<program>'` (issue #100). `awk` is provided by `mawk`
+# in the base image (it is a required Debian package), so it is
+# not listed explicitly.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         libgcc-s1 \
+        jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. The daemon's `--user` / `--group` flags handle

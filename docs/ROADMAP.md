@@ -863,25 +863,28 @@ default minimum settle time); URL sources are fetched periodically
 Both paths preserve the previous snapshot on a parse / fetch
 failure — a truncated fetch must never weaken origin validation.
 
-Four on-the-wire formats are supported: native TOML `[[roa]]`
-subset, BIRD 2 `roa table` body, Routinator JSON VRP output, and
-Routinator CSV / awk-produced whitespace-separated rows. The
-format parsers live in `crates/lr-bgp/src/roa_loader.rs` (no
-I/O dependency); the daemon integration lives in
-`crates/lr-cli/src/daemon_roa_loader.rs` (uses `ureq` for HTTP
-fetching). SIGHUP reload re-points each live loader thread with
-its fresh spec; removing a block tears its thread down; adding a
-new block requires a daemon restart (same posture as a re-added
-`[bgp.rpki] cache`).
+Two pure parsers and two transform formats are supported: the
+`native` TOML `[[roa]]` subset and the `bird` BIRD 2 `roa table`
+body are read directly; the `jq` and `awk` transform formats pipe
+the fetched bytes through an operator-supplied program (`program`
+inline string or `program_file` path) and parse the resulting
+`ASN PREFIX MAXLEN` rows. The pure parsers live in
+`crates/lr-bgp/src/roa_loader.rs` (no I/O dependency); the daemon
+integration lives in `crates/lr-cli/src/daemon_roa_loader.rs` (uses
+`ureq` for HTTP fetching, spawns `jq` / `awk` via subprocess for
+the transform formats). SIGHUP reload re-points each live loader
+thread with its fresh spec; removing a block tears its thread down;
+adding a new block requires a daemon restart (same posture as a
+re-added `[bgp.rpki] cache`).
 
 The runtime API `status` command renders one line per loader thread
 (`roa-source: <source> type=<file|url> format=<fmt> entries=<n>
 state=<ok|error> last-load=<age>s`), mirroring the `rpki:` status
-line shape. The C ABI gains
-`lr_roa_store_replace_static_from_text` for embedders that want
-to feed any of the four formats directly; the Go and Python
-bindings wrap it as `RoaStore.ReplaceStaticFromText` /
-`RoaStore.replace_static_from_text`.
+line shape. The feature is internal to `lr-daemon`: there is no C
+ABI entry point and no Go / Python / C++ binding surface for
+feeding bytes directly — embedders put a `[[bgp.roa_source]]`
+block (or a `bgp.roa_source { }` DSL block) in the config, or
+point a source at a file they rewrite out-of-band.
 
 ## Deployment
 

@@ -377,6 +377,29 @@ route-map "to-customer" {
 # }
 
 # ---------------------------------------------------------------------
+# Advanced ROA loading — bgp.roa_source { } (issue #100)
+# ---------------------------------------------------------------------
+# The DSL form of [[bgp.roa_source]]. Each block lowers to one
+# `[[bgp.roa_source]]` array entry and spawns one loader thread at
+# startup. A `path "..."` source is a file on disk (mtime-watched);
+# a `url "..."` source is HTTP(S)-fetched on `interval`. The
+# `format "..."` key selects the parser — `native`, `bird`, `jq`
+# (with a `program "..."` / `program_file "..."` argument) or `awk`
+# (likewise). See templates/daemon.toml for the full prose.
+#
+# bgp.roa_source {
+#     path "/etc/lr/roas.bird";
+#     format "bird";
+# }
+#
+# bgp.roa_source {
+#     url "https://rpki.example.com/vrps.json";
+#     format "jq";
+#     interval 3600;
+#     program '.roas[] | "\(.asn) \(.prefix) \(.maxLength)"';
+# }
+
+# ---------------------------------------------------------------------
 # OSPF daemon mode (protocol ospf; BGP blocks above are ignored)
 # ---------------------------------------------------------------------
 # CLI equivalent (single area, defaults):

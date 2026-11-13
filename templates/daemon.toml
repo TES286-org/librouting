@@ -549,6 +549,11 @@ permit = false
 # ---------------------------------------------------------------------------
 # Advanced ROA loading — [[bgp.roa_source]] (issue #100)
 # ---------------------------------------------------------------------------
+# NOTE: the TOML form below is deprecated; the DSL form (see
+# templates/daemon.lr's `bgp.roa_source { }` block) is preferred for
+# new configs. The TOML form is kept for back-compat and is converted
+# to the same in-memory spec.
+#
 # Load ROA entries from a file on disk or an HTTP(S) URL, in addition
 # to the inline [[roa]] tables above. The daemon spawns one loader
 # thread per source; each source's entries are merged with the inline
@@ -569,8 +574,19 @@ permit = false
 # it from the path / URL extension):
 #   native  TOML `[[roa]]` subset (the same shape as above)
 #   bird    BIRD 2 `roa table` body (`roa PREFIX max N as N;`)
-#   json    Routinator JSON VRP output (`{"roas":[...]}`)
-#   csv     Routinator CSV / awk-produced whitespace-separated rows
+#   jq      operator-supplied jq program: the daemon pipes the
+#           fetched bytes into `jq -r '<program>'`, which must
+#           emit one `ASN PREFIX MAXLEN` row per line. `program`
+#           (inline string) or `program_file` (path) is required.
+#   awk     operator-supplied awk program: the daemon pipes the
+#           fetched bytes into `awk '<program>'`, whose output must
+#           be one `ASN PREFIX MAXLEN` row per line. `program`
+#           (inline string) or `program_file` (path) is required.
+#
+# The feature is internal to lr-daemon: there is no C ABI entry to
+# feed bytes in (the loader thread is the only entry point). The
+# daemon must be able to exec `jq` / `awk` on PATH; both ship in the
+# container image.
 #
 # Examples:
 #
@@ -579,10 +595,20 @@ permit = false
 # format = "bird"
 #
 # [[bgp.roa_source]]
-# url = "https://rpki.example.com/roas.json"
-# format = "json"
+# url = "https://rpki.example.com/vrps.json"
+# format = "jq"
 # interval = 3600
+# # Use a TOML literal string (single quotes) so jq's own `\(...)` and
+# # `"` survive verbatim. The program must emit one
+# # `ASN PREFIX MAXLEN` row per line.
+# program = '.roas[] | "\(.asn) \(.prefix) \(.maxLength)"'
 # # user_agent = "my-router/1.0"  # optional override (default: lr-daemon/<version>)
+#
+# [[bgp.roa_source]]
+# path = "/etc/lr/roas.csv"
+# format = "awk"
+# # program reads from a file so quoting in TOML is not a concern:
+# program_file = "/etc/lr/roas.awk"
 #
 # Reload: SIGHUP re-applies the inline [[roa]] tables and re-points
 # each live loader thread with its fresh spec. Removing a

@@ -4120,32 +4120,78 @@ interval, default 3600 s, clamped to 60 s minimum). Both paths
 preserve the previous snapshot on a parse / fetch failure — a
 truncated fetch must never weaken origin validation.
 
-Four on-the-wire formats are supported by `lr_bgp::roa_loader`:
-`native` (TOML `[[roa]]` subset), `bird` (BIRD 2 `roa table`
-body), `json` (Routinator JSON VRP output) and `csv` (Routinator
-CSV / awk-produced whitespace-separated rows). The JSON parser is
-a tiny hand-rolled recursive-descent scanner so `lr-bgp` stays
-serde-free; the daemon crate gains `ureq` (blocking HTTP client
-with rustls + webpki-roots) for URL fetching.
+Two pure parsers and two transform formats are supported by
+`lr_bgp::roa_loader` and the daemon integration:
+
+- `native` — TOML `[[roa]]` subset (the inline shape).
+- `bird` — BIRD 2 `roa table` body (`roa PREFIX max N as N;`).
+- `jq` — the daemon pipes the fetched bytes into
+  `jq -r '<program>'` (or `jq -r -f <program_file>`). The program
+  must emit one `ASN PREFIX MAXLEN` row per line on stdout; the
+  daemon parses each row into a ROA entry. The daemon must be able
+  to exec `jq` on `PATH` (the container image ships it).
+- `awk` — the daemon pipes the fetched bytes into `awk '<program>'`
+  (or `awk -f <program_file>`); the program's stdout must be one
+  `ASN PREFIX MAXLEN` row per line.
+
+The earlier `json` (Routinator JSON VRP output) and `csv`
+(Routinator CSV / whitespace-separated) fixed-format parsers were
+removed: instead of `lr-bgp` shipping a hand-rolled recursive-descent
+JSON scanner to stay serde-free, the operator now owns the
+conversion step and supplies a `jq` / `awk` program. `lr-bgp` still
+has no serde dependency — only the daemon crate spawns the
+subprocess; the pure parsers (`native`, `bird`) stay in
+`lr-bgp::roa_loader` with no I/O dependency. The daemon crate gains
+`ureq` (blocking HTTP client with rustls + webpki-roots) for URL
+fetching.
 
 New public Rust API: `lr_bgp::roa_loader::{parse, RoaFormat,
 RoaLoaderError}`, re-exported as `lr_bgp::{parse_roa, RoaFormat,
 RoaLoaderError}`. New daemon config schema: `[[bgp.roa_source]]`
-with `path` / `url`, `format`, `interval`, `user_agent` keys,
-validated fail-closed at config time. SIGHUP reload re-points
-each live loader thread with its fresh spec; removing a block
-tears its thread down; adding a new block requires a daemon
+with `path` / `url`, `format`, `interval`, `user_agent` keys plus
+`program` (inline transform-program string) and `program_file`
+(path to a file holding the program) — exactly one of
+`program` / `program_file` is required when `format` is `jq` or
+`awk`, and both must be absent for `native` and `bird`; all five
+keys are validated fail-closed at config time. SIGHUP reload
+re-points each live loader thread with its fresh spec; removing a
+block tears its thread down; adding a new block requires a daemon
 restart (same posture as a re-added `[bgp.rpki] cache`).
 
 The runtime API `status` command renders one line per loader
 thread (`roa-source: <source> type=<file|url> format=<fmt>
 entries=<n> state=<ok|error> last-load=<age>s`), mirroring the
-`rpki:` status line shape. 44 unit tests cover the format
-parsers (one per format, plus the cross-format round-trip
-determinism invariant); 12 config tests cover the schema; 23
-integration tests cover the loader thread (initial load, mtime
-reload, URL fetch, fetch-failure-preserves-snapshot, repoint /
-shutdown control plane, status line shape).
+`rpki:` status line shape.
+
+The feature is internal to `lr-daemon`: the
+`lr_roa_store_replace_static_from_text` C ABI entry point and the
+matching `LR_ROA_FORMAT_*` constants that shipped in earlier builds
+were removed; the Go (`RoaStore.ReplaceStaticFromText`) and Python
+(`RoaStore.replace_static_from_text`) wrappers around it were
+removed in the same pass. Embedders that want to feed ROA bytes
+directly must point a `[[bgp.roa_source]]` `path` at a file they
+rewrite out-of-band. `ABI_VERSION` is unchanged at 2 (the removed
+symbol was not part of the v2 ABI contract that downstream loaders
+rely on); the `api-surface` CI gate was updated to match.
+
+Tests: `crates/lr-bgp/src/roa_loader.rs::tests` now carries 32 unit
+tests covering the two pure parsers (`native`, `bird`) — the
+per-format happy paths, the malformed-input rejection paths, and the
+cross-format round-trip determinism invariant. `crates/lr-cli`'s
+daemon integration gains 21 unit tests for the `jq` / `awk`
+transform paths (subprocess invocation, `program` vs `program_file`
+dispatch, program-quoting edge cases, the `ASN PREFIX MAXLEN`
+row-parser, and the empty / partial-output behaviour). The
+`[[bgp.roa_source]]` schema gains 16 config tests (including the
+`program` / `program_file` mutual-exclusion rule for `jq` / `awk`
+and the must-be-absent rule for `native` / `bird`). The loader
+thread integration suite is unchanged at 23 tests (initial load,
+mtime reload, URL fetch, fetch-failure-preserves-snapshot, repoint
+/ shutdown control plane, status line shape), now extended with
+`jq` / `awk` subprocess happy and unhappy paths. The C ABI tests
+for the removed `lr_roa_store_replace_static_from_text` entry
+point were deleted; no FFI callback-table change accompanies the
+removal.
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
