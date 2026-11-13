@@ -13,7 +13,7 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, peer-health
+## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, peer-health, advanced ROA loading
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`
@@ -4108,6 +4108,44 @@ and C++ binding generators. 45+ unit tests cover the state
 machine, hook, shadow selection, dynamic tiering, stale exclusion,
 and SIGHUP mode flip; 6 E2E tests cover off/observe/shadow-best-path/full
 modes and the dynamic-lookup-vs-stamp-based gap.
+
+### Advanced ROA loading (issue #100)
+
+The daemon gains `[[bgp.roa_source]]` tables: one loader thread per
+source, fetching ROA entries from a file on disk or an HTTP(S) URL
+and merging them with the inline `[[roa]]` tables under the live
+`RoaStore`. File sources are watched via mtime polling (1 s
+cadence); URL sources are fetched periodically (configurable
+interval, default 3600 s, clamped to 60 s minimum). Both paths
+preserve the previous snapshot on a parse / fetch failure — a
+truncated fetch must never weaken origin validation.
+
+Four on-the-wire formats are supported by `lr_bgp::roa_loader`:
+`native` (TOML `[[roa]]` subset), `bird` (BIRD 2 `roa table`
+body), `json` (Routinator JSON VRP output) and `csv` (Routinator
+CSV / awk-produced whitespace-separated rows). The JSON parser is
+a tiny hand-rolled recursive-descent scanner so `lr-bgp` stays
+serde-free; the daemon crate gains `ureq` (blocking HTTP client
+with rustls + webpki-roots) for URL fetching.
+
+New public Rust API: `lr_bgp::roa_loader::{parse, RoaFormat,
+RoaLoaderError}`, re-exported as `lr_bgp::{parse_roa, RoaFormat,
+RoaLoaderError}`. New daemon config schema: `[[bgp.roa_source]]`
+with `path` / `url`, `format`, `interval`, `user_agent` keys,
+validated fail-closed at config time. SIGHUP reload re-points
+each live loader thread with its fresh spec; removing a block
+tears its thread down; adding a new block requires a daemon
+restart (same posture as a re-added `[bgp.rpki] cache`).
+
+The runtime API `status` command renders one line per loader
+thread (`roa-source: <source> type=<file|url> format=<fmt>
+entries=<n> state=<ok|error> last-load=<age>s`), mirroring the
+`rpki:` status line shape. 44 unit tests cover the format
+parsers (one per format, plus the cross-format round-trip
+determinism invariant); 12 config tests cover the schema; 23
+integration tests cover the loader thread (initial load, mtime
+reload, URL fetch, fetch-failure-preserves-snapshot, repoint /
+shutdown control plane, status line shape).
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 

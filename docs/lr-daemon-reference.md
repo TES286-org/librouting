@@ -834,6 +834,34 @@ them from every End-of-Data PDU.
 
 A `(prefix, asn)` pair may appear once. `asn = 0` marks a blackhole ROA.
 
+### `[[bgp.roa_source]]`
+
+Advanced ROA loading (issue #100): one loader thread per source,
+merging file / URL entries with the inline `[[roa]]` tables under the
+live `RoaStore`.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `path`, `file` | string | — | Local file path (mutually exclusive with `url`) |
+| `url` | string | — | HTTP(S) URL (mutually exclusive with `path`) |
+| `format` | enum | inferred | `native`, `bird`, `json`, `csv` |
+| `interval` | int | 3600 | URL fetch interval (s); minimum 60; ignored for files |
+| `user_agent` | string | `lr-daemon/<version>` | URL fetch UA |
+
+Formats:
+
+* `native` — TOML `[[roa]]` subset (the same shape as the inline tables).
+* `bird` — BIRD 2 `roa table` body (`roa PREFIX max N as N;` per line).
+* `json` — Routinator JSON VRP output (`{"roas":[{asn,prefix,maxLength}]}`).
+* `csv` — Routinator CSV (`ASN,Prefix,MaxLength,TrustAnchor`) or
+  whitespace-separated (`ASN Prefix MaxLength`), with or without header.
+
+File sources are watched via mtime polling (1 s cadence). URL sources
+are fetched periodically; a fetch failure keeps the previous snapshot
+(a truncated fetch must never weaken origin validation). SIGHUP
+re-points each live loader with its fresh spec; removing a block tears
+its thread down; adding a new block requires a daemon restart.
+
 ### `[[filter]]`
 
 | Key | Type | Notes |

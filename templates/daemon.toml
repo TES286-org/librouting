@@ -547,6 +547,50 @@ permit = false
 # asn = 64512
 
 # ---------------------------------------------------------------------------
+# Advanced ROA loading — [[bgp.roa_source]] (issue #100)
+# ---------------------------------------------------------------------------
+# Load ROA entries from a file on disk or an HTTP(S) URL, in addition
+# to the inline [[roa]] tables above. The daemon spawns one loader
+# thread per source; each source's entries are merged with the inline
+# tables under the live RoaStore (the union is deduplicated and
+# sorted, so the same entry in two layers counts once).
+#
+# File sources are watched via mtime polling (1 s cadence, matching
+# BIRD 2's default minimum settle time). An mtime change triggers a
+# re-read; a parse failure keeps the previous snapshot (a truncated
+# file must never weaken origin validation).
+#
+# URL sources are fetched periodically (default 3600 s; clamped to a
+# 60 s minimum so a typoed interval does not hammer the origin). The
+# body is parsed with the source's configured format. A fetch failure
+# keeps the previous snapshot too.
+#
+# Supported formats (set 'format' explicitly or let the loader infer
+# it from the path / URL extension):
+#   native  TOML `[[roa]]` subset (the same shape as above)
+#   bird    BIRD 2 `roa table` body (`roa PREFIX max N as N;`)
+#   json    Routinator JSON VRP output (`{"roas":[...]}`)
+#   csv     Routinator CSV / awk-produced whitespace-separated rows
+#
+# Examples:
+#
+# [[bgp.roa_source]]
+# path = "/etc/lr/roas.bird"
+# format = "bird"
+#
+# [[bgp.roa_source]]
+# url = "https://rpki.example.com/roas.json"
+# format = "json"
+# interval = 3600
+# # user_agent = "my-router/1.0"  # optional override (default: lr-daemon/<version>)
+#
+# Reload: SIGHUP re-applies the inline [[roa]] tables and re-points
+# each live loader thread with its fresh spec. Removing a
+# [[bgp.roa_source]] block tears its thread down (transport closed,
+# entries withdrawn). Adding a new block requires a daemon restart
+# (same posture as a re-added [bgp.rpki] cache).
+
+# ---------------------------------------------------------------------------
 # BIRD-like filter DSL ([[filter]] tables)
 # ---------------------------------------------------------------------------
 # A real expression language for import/export policy — targeting a
