@@ -1185,6 +1185,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
         // The reload reports the enable.
         assert!(
@@ -1233,6 +1234,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
         assert!(
             lines.iter().any(|l| l.contains("damping disabled")),
@@ -1282,6 +1284,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
         assert!(
             lines
@@ -1329,6 +1332,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
         assert!(
             !lines.iter().any(|l| l.to_lowercase().contains("damping")),
@@ -1363,6 +1367,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
         assert!(damping_state.lock().unwrap().is_some());
 
@@ -1375,6 +1380,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
         assert!(damping_state.lock().unwrap().is_none());
 
@@ -1458,6 +1464,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
 
         // The hook is still installed but pass-throughs: a route
@@ -1483,6 +1490,7 @@ mod damping_reload_toggle_tests {
             None,
             None,
             Some(&damping_state),
+            None,
         );
         // The fresh FoM table is empty — the prefix is no longer
         // suppressed — so the route flows through. This is the

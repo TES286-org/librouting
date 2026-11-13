@@ -29,7 +29,45 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
+use lr_core::addr::Prefix;
+use lr_core::nlri::NlriFamily;
 use lr_peer_health::PeerHealthTable;
+use lr_router::PeerHealthLookup;
+
+/// Adapter that satisfies the router's [`PeerHealthLookup`] trait by
+/// delegating to a shared [`PeerHealthTable`]. Installed on the
+/// `DefaultRouter` via `set_peer_health_lookup` when `[bgp.peer_health]`
+/// rollout is not `off`, so `reselect` can query the **current**
+/// per-`(peer, AFI/SAFI)` tier dynamically (issue #99 §Hooks 3) and
+/// exclude stale paths from ECMP / add-path (issue #99 §Recovery).
+///
+/// The table is shared with the import hook, the ticker thread, and
+/// the `lrctl show peer-health` renderer — all reads are `&self`
+/// through the `Mutex`. A poisoned mutex fails **open**: `tier()`
+/// returns `0` (L0, not degraded) and `is_stale()` returns `false`,
+/// so a peer-health panic does not black-hole prefixes.
+#[derive(Debug, Clone)]
+pub struct PeerHealthTableLookup {
+    pub table: Arc<Mutex<PeerHealthTable>>,
+}
+
+impl PeerHealthLookup for PeerHealthTableLookup {
+    fn tier(&self, peer: u64, family: NlriFamily) -> u8 {
+        match self.table.lock() {
+            Ok(t) => t.tier(peer, family).as_u8(),
+            // Poisoned: fail-open (L0) so routing is unaffected.
+            Err(_) => 0,
+        }
+    }
+
+    fn is_stale(&self, peer: u64, family: NlriFamily, prefix: &Prefix) -> bool {
+        match self.table.lock() {
+            Ok(t) => t.is_stale(peer, family, prefix),
+            // Poisoned: fail-open (not stale) so ECMP is unaffected.
+            Err(_) => false,
+        }
+    }
+}
 
 /// Render the `show peer-health` body. `table` is `None` when the
 /// daemon was started without `[bgp.peer_health]` (rollout = `off`);

@@ -164,8 +164,8 @@ use lr_osroute::gtsm::Gtsm;
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_osroute::OsRouteTable;
 use lr_router::{
-    DefaultRouter, MetricPolicy, RedistributionPipe, RouterEvent, RouterInstance, SessionConfig,
-    SessionHandle,
+    DefaultRouter, MetricPolicy, PeerHealthLookup, RedistributionPipe, RouterEvent, RouterInstance,
+    SessionConfig, SessionHandle,
 };
 // Ungated: HashMap serves both the kernel-routing-table helpers
 // (Linux-only code) and the D12.4 session-label map, which every
@@ -1713,6 +1713,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // phase 3). The divergence counter is surfaced by
     // `lrctl show peer-health`.
     //
+    // A `PeerHealthTableLookup` adapter is installed on the router
+    // via `set_peer_health_lookup` so `reselect` can query the
+    // **current** per-(peer, AFI/SAFI) tier dynamically (not a
+    // stamp frozen at import time) and exclude stale paths from
+    // ECMP / add-path (issue #99 §Hooks 3 + §Recovery).
+    //
     // The table Arc is captured into `peer_health_table` so the
     // Runtime (and thus the runtime API's `show peer-health`) can
     // read it.
@@ -1726,6 +1732,18 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         {
             let mut r = router.write().unwrap();
             r.hooks_mut().import.push(Box::new(import_hook));
+            // Install the dynamic peer-health lookup so `reselect`
+            // queries the live table for each candidate's current
+            // tier and stale state (issue #99 §Hooks 3 + §Recovery).
+            // Shadow modes return L0 from `tier()` so routing is
+            // unaffected; the lookup is still installed so
+            // `lrctl show peer-health` and the shadow selection hook
+            // can observe the internal state.
+            let lookup: Arc<dyn PeerHealthLookup> =
+                Arc::new(peer_health_view::PeerHealthTableLookup {
+                    table: Arc::clone(&table),
+                });
+            r.set_peer_health_lookup(Some(lookup));
             // In shadow-best-path mode, also install the shadow
             // selection hook that records would-be-best-path
             // divergences. The hook always returns None so the
@@ -2107,6 +2125,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let roa_store = Arc::clone(&roa_store);
                     let rpki = rpki.clone();
                     let damping_state = Arc::clone(&damping_state);
+                    let peer_health_table_reload = peer_health_table.clone();
                     move || {
                         reload_config(
                             config_path.as_deref(),
@@ -2116,6 +2135,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                             Some(&roa_store),
                             rpki.as_ref(),
                             Some(&damping_state),
+                            peer_health_table_reload.as_ref(),
                         )
                     }
                 }),
@@ -5209,6 +5229,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         None,
                         None,
                         None,
+                        None,
                     )
                 }
             }),
@@ -7560,6 +7581,7 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
 /// so the operator knows a restart is required. A parse or I/O error
 /// keeps the current configuration running (reload must never crash or
 /// half-apply).
+#[allow(clippy::too_many_arguments)]
 fn reload_config(
     path: Option<&str>,
     dialect: Option<&str>,
@@ -7577,6 +7599,15 @@ fn reload_config(
     // damping on a multi-protocol daemon is a per-engine reload
     // tracked as future work).
     damping_state: Option<&Arc<Mutex<Option<DampingController>>>>,
+    // `Some` when the daemon installed a `PeerHealthTable` at startup
+    // (i.e. `[bgp.peer_health]` rollout != `off`). The reload re-syncs
+    // the live rollout mode to the freshly-reloaded `[bgp.peer_health]`
+    // block via `PeerHealthTable::set_rollout_mode` — session state
+    // (baselines, counters, tiers) is preserved across the transition
+    // (issue #99 §Rollout: SIGHUP live reload). `None` for the Babel
+    // daemon and the multi-protocol supervisor (peer-health is a
+    // BGP-only construct owned by the BGP engine).
+    peer_health_table: Option<&Arc<Mutex<lr_peer_health::PeerHealthTable>>>,
 ) -> Vec<String> {
     let Some(path) = path else {
         return vec!["reload: no config file in use; nothing to reload".into()];
@@ -8034,6 +8065,40 @@ fn reload_config(
             }
         }
     }
+
+    // Peer-health rollout-mode reload (issue #99 §Rollout): when the
+    // daemon installed a `PeerHealthTable` at startup, a SIGHUP that
+    // changes `[bgp.peer_health] rollout` flips the live mode via
+    // `set_rollout_mode` — session state (baselines, counters, tiers,
+    // stale sets) is preserved across the transition. Window lengths,
+    // budgets, and other tuning parameters are NOT changed here
+    // (issue #99: "online parameters should remain stable during
+    // comparison windows"); a restart is required to re-tune.
+    //
+    // If the table was NOT installed at startup (rollout was `off`
+    // when the daemon started) and the fresh config enables it, the
+    // reload reports that a restart is required — installing the
+    // import hook, selection hook, and lookup on the live router
+    // mid-run is not supported (the hook chain is append-only and
+    // the lookup is set once at startup).
+    if let Some(table) = peer_health_table {
+        let fresh_mode = fresh.peer_health.rollout_mode();
+        let mut t = table.lock().unwrap();
+        let old_mode = t.config().rollout;
+        if fresh_mode != old_mode {
+            t.set_rollout_mode(fresh_mode);
+            lines.push(format!(
+                "reload: peer-health rollout {} -> {} (session state preserved)",
+                old_mode.name(),
+                fresh_mode.name(),
+            ));
+        }
+    } else if fresh.peer_health.is_enabled() {
+        lines.push(
+            "reload: peer-health enabled in config but not running (restart required to install the hook)".into(),
+        );
+    }
+
     if lines.is_empty() {
         lines.push("reload: no network changes".into());
     }
