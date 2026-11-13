@@ -219,6 +219,30 @@ impl PeerHealthTable {
         &self.cfg
     }
 
+    /// Update the rollout mode in-place (issue #99 §Rollout — SIGHUP
+    /// live reload). Session state (baselines, counters, tiers, stale
+    /// sets) is preserved across the transition so a mode change does
+    /// not lose the EWMA history the state machine has accumulated.
+    ///
+    /// The daemon's reload path calls this when the freshly-reloaded
+    /// `[bgp.peer_health]` block carries a different `rollout` value.
+    /// Flipping to `Off` makes `tier()` return `L0` for every session
+    /// (routing is unaffected); flipping to `Full` re-enables stamping
+    /// and stale marking on the next escalation.
+    ///
+    /// Window lengths, budgets, and other tuning parameters are NOT
+    /// changed here — issue #99 §Rollout: "online parameters should
+    /// remain stable during comparison windows." A restart is required
+    /// to re-tune the windows.
+    pub fn set_rollout_mode(&mut self, rollout: RolloutMode) {
+        self.cfg.rollout = rollout;
+        // Recompute aggregates so `degraded_session_count` and
+        // `peak_tier` reflect the new mode's effective tiers (e.g.
+        // flipping to Off zeros them; flipping to Limited re-caps
+        // at L1).
+        self.recompute_aggregates();
+    }
+
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
@@ -584,10 +608,23 @@ impl PeerHealthTable {
     }
 
     fn recompute_aggregates(&mut self) {
+        // The public tier (what `tier()` returns and what the
+        // speaker's `reselect` sees) is L0 for every shadow mode
+        // (off / observe / shadow / shadow-best-path). The aggregate
+        // counters must match that view so `lrctl show peer-health`
+        // and `degraded_session_count()` report 0 degraded sessions
+        // when the mechanism is not publicly active — otherwise a
+        // flip to Off would leave stale counts that confuse operators
+        // and the global-budget logic.
+        let publicly_active = matches!(self.cfg.rollout, RolloutMode::Limited | RolloutMode::Full);
         let mut count = 0u32;
         let mut peak = PeerHealthTier::L0;
         for s in self.sessions.values() {
-            let t = self.cfg.effective_tier(s.tier);
+            let t = if publicly_active {
+                self.cfg.effective_tier(s.tier)
+            } else {
+                PeerHealthTier::L0
+            };
             if t > PeerHealthTier::L0 {
                 count = count.saturating_add(1);
             }
@@ -879,5 +916,42 @@ mod tests {
             tier > PeerHealthTier::L0,
             "emergency escalation should bypass min_transition_interval, got {tier:?}"
         );
+    }
+
+    #[test]
+    fn set_rollout_mode_preserves_state_and_flips_tier() {
+        // Issue #99 §Rollout: SIGHUP live reload flips the rollout
+        // mode in-place without losing session state.
+        let mut t = PeerHealthTable::new(cfg_test());
+        train_then_burst(&mut t, 1, NlriFamily::IPV4_UNICAST, 10_000, 200, 10);
+        let tier_full = t.tier(1, NlriFamily::IPV4_UNICAST);
+        assert!(tier_full > PeerHealthTier::L0, "should be degraded in Full");
+        let snap = t.session_snapshot(1, NlriFamily::IPV4_UNICAST).unwrap();
+        let updates_before = snap.counters.updates;
+
+        // Flip to Off: tier() returns L0, but state is preserved.
+        t.set_rollout_mode(RolloutMode::Off);
+        assert_eq!(t.tier(1, NlriFamily::IPV4_UNICAST), PeerHealthTier::L0);
+        assert_eq!(t.degraded_session_count(), 0);
+        // Session state survived.
+        let snap = t.session_snapshot(1, NlriFamily::IPV4_UNICAST).unwrap();
+        assert_eq!(snap.counters.updates, updates_before);
+
+        // Flip back to Full: tier() returns the escalated tier again.
+        t.set_rollout_mode(RolloutMode::Full);
+        assert!(t.tier(1, NlriFamily::IPV4_UNICAST) > PeerHealthTier::L0);
+    }
+
+    #[test]
+    fn set_rollout_mode_limited_caps_at_l1() {
+        let mut t = PeerHealthTable::new(cfg_test());
+        train_then_burst(&mut t, 1, NlriFamily::IPV4_UNICAST, 10_000, 200, 10);
+        // In Full mode the tier may be L2 or L3.
+        let tier_full = t.tier(1, NlriFamily::IPV4_UNICAST);
+        assert!(tier_full > PeerHealthTier::L1);
+
+        // Flip to Limited: tier capped at L1.
+        t.set_rollout_mode(RolloutMode::Limited);
+        assert_eq!(t.tier(1, NlriFamily::IPV4_UNICAST), PeerHealthTier::L1);
     }
 }
