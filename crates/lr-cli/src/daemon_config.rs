@@ -2266,6 +2266,30 @@ impl DaemonConfig {
                     "{label}: 'interval' is ignored for file sources (file is watched via mtime)"
                 ));
             }
+            // Transform formats (`jq`, `awk`) require a `program`
+            // or `program_file`. Pure formats (`native`, `bird`)
+            // must not set either — a `program` on a `bird` source
+            // is a config typo that would silently be ignored
+            // otherwise.
+            let format = src.resolve_format().map_err(|e| format!("{label}: {e}"))?;
+            if format.requires_program() {
+                if src.program.is_some() && src.program_file.is_some() {
+                    return Err(format!(
+                        "{label}: 'program' and 'program_file' are mutually exclusive (set one or the other)"
+                    ));
+                }
+                if src.program.is_none() && src.program_file.is_none() {
+                    return Err(format!(
+                        "{label}: format '{}' requires 'program' or 'program_file' (the transform that emits BIRD-format lines)",
+                        format.as_str()
+                    ));
+                }
+            } else if src.program.is_some() || src.program_file.is_some() {
+                return Err(format!(
+                    "{label}: 'program' / 'program_file' set but format is '{}' (only 'jq' and 'awk' use a transform program)",
+                    format.as_str()
+                ));
+            }
         }
         Ok(())
     }
@@ -3312,6 +3336,8 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                             format: None,
                             interval: None,
                             user_agent: None,
+                            program: None,
+                            program_file: None,
                         });
                     section = "bgp.roa_source".to_string();
                 }
@@ -4135,7 +4161,7 @@ fn apply_roa_source_key(
                 Some(f) => src.format = Some(f),
                 None => {
                     return Err(format!(
-                        "unknown roa_source format '{v}' (expected: native, bird, json, csv)"
+                        "unknown roa_source format '{v}' (expected: native, bird, jq, awk)"
                     ));
                 }
             }
@@ -4148,6 +4174,22 @@ fn apply_roa_source_key(
         }
         "user_agent" => {
             src.user_agent = Some(value.trim().trim_matches('"').to_string());
+        }
+        "program" => {
+            let v = value.trim().trim_matches('"').to_string();
+            if v.is_empty() {
+                return Err(format!("bad roa_source program '{v}' (empty)"));
+            }
+            // program and program_file are mutually exclusive —
+            // a section that sets both is rejected at finalize time.
+            src.program = Some(v);
+        }
+        "program_file" => {
+            let v = value.trim().trim_matches('"').to_string();
+            if v.is_empty() {
+                return Err(format!("bad roa_source program_file '{v}' (empty)"));
+            }
+            src.program_file = Some(v);
         }
         _ => {
             return Err(format!(
