@@ -244,3 +244,76 @@ fn missing_file_exits_one() {
     assert_eq!(code, 1);
     assert!(stderr.contains("cannot read config"), "{stderr}");
 }
+
+#[test]
+fn converts_bgp_roa_source_blocks_to_dsl() {
+    // The `[[bgp.roa_source]]` advanced ROA loader (issue #100) has
+    // a DSL twin `bgp.roa_source { ... }` that the converter must
+    // emit. The round-trip must preserve every key (path / url /
+    // format / interval / user_agent / program / program_file) so
+    // an operator migrating from TOML to DSL does not lose a source.
+    let path = fixture(
+        "roa-source",
+        "[bgp]\n\
+         local_as = 64512\n\
+         router_id = \"10.0.0.1\"\n\n\
+         [[bgp.roa_source]]\n\
+         path = \"/etc/lr/roas.bird\"\n\
+         format = \"bird\"\n\n\
+         [[bgp.roa_source]]\n\
+         url = \"https://rpki.example.com/roas.json\"\n\
+         format = \"jq\"\n\
+         program = '.roas[] | \"roa \\(.prefix) max \\(.maxLength) as \\(.asn);\"'\n\
+         interval = 3600\n",
+        "toml",
+    );
+    let (code, stdout, stderr) = to_dsl(&["config", "to-dsl", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    // Two `bgp.roa_source { ... }` blocks must appear.
+    assert_eq!(
+        stdout.matches("bgp.roa_source {").count(),
+        2,
+        "expected two bgp.roa_source blocks: {stdout}"
+    );
+    // The file source's keys survive. The DSL emitter renders
+    // `format` as a bare ident (`bird`, `jq`) when the value is
+    // bare-safe; `path` carries a leading `/` so it stays quoted.
+    assert!(
+        stdout.contains("path \"/etc/lr/roas.bird\""),
+        "path key missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("format bird"),
+        "format=bird missing: {stdout}"
+    );
+    // The URL source's keys survive verbatim. The URL is bare-safe
+    // (starts with `h`, contains only `:/.`-class chars) so it
+    // renders without quotes; the jq program carries spaces and
+    // quotes so it is always quoted.
+    assert!(
+        stdout.contains("url https://rpki.example.com/roas.json"),
+        "url key missing: {stdout}"
+    );
+    assert!(stdout.contains("format jq"), "format=jq missing: {stdout}");
+    assert!(
+        stdout.contains("interval 3600"),
+        "interval missing: {stdout}"
+    );
+    // The jq program body survives verbatim — the converter does
+    // not unescape the TOML literal string's `\(.prefix)`. The DSL
+    // emitter quotes the program (it carries spaces and quotes),
+    // with `\\` for the backslash and `\"` for the inner quotes.
+    // The raw stdout text contains `roa \\(.prefix)` (the `\\` is
+    // the DSL-emitted escape of the jq `\`).
+    assert!(
+        stdout.contains("roa \\\\(.prefix)"),
+        "jq program body not preserved verbatim: {stdout}"
+    );
+    // The converted file is a first-class config: the checker
+    // accepts it as the native dialect with no warnings.
+    let lr = fixture("roa-source-converted", &stdout, "lr");
+    let (code, stdout, stderr) = check(&["config", "check", lr.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("dialect lr"), "{stdout}");
+    assert!(stdout.contains("warnings: 0"), "{stdout}");
+}
