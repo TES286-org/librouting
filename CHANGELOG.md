@@ -4059,9 +4059,21 @@ between standard and tiered orderings — routing still
 unaffected), `limited` (L1 cap + stale), `full` (all tiers +
 stale). The daemon wires the mechanism via `[bgp.peer_health]`
 config, spawns a ticker thread, and installs the shadow
-selection hook when `rollout = "shadow-best-path"`; the
-router's `reselect` uses `BestPath::rank_tiered` when any
-candidate carries the tier attribute.
+selection hook when `rollout = "shadow-best-path"`. The router's
+`reselect` uses a **dynamic** `PeerHealthLookup` trait (set by the
+daemon when peer-health is enabled) to query the current
+per-`(peer, AFI/SAFI)` tier for each BGP candidate and restrict the
+candidate set to the lowest non-empty health tier before the standard
+decision process (issue #99 §Hooks 3). This is a dynamic lookup — the
+tier reflects the state machine's current view, not a stamp frozen at
+import time, so a route imported while the peer was healthy is
+correctly deprefed when the peer later escalates. Stale paths are
+excluded from the ECMP / add-path tail via `is_stale()` on the same
+lookup (issue #99 §Recovery). When no lookup is installed (peer-health
+off), the router falls back to the stamp-based
+`BestPath::rank_tiered`. A SIGHUP that changes `[bgp.peer_health]
+rollout` flips the live mode via `PeerHealthTable::set_rollout_mode`
+— session state is preserved across the transition.
 
 `lrctl show peer-health` surfaces per-session state: rollout
 mode, degraded count, peak tier, and one line per
@@ -4071,8 +4083,11 @@ count, and escalations/recoveries.
 New public Rust API surface: `lr_peer_health::{PeerHealthTable,
 PeerHealthConfig, PeerHealthTier, RolloutMode,
 PeerHealthTable::internal_tier, PeerHealthTable::observe_prefix,
-PeerHealthTable::forget_prefix, ...}`, the
+PeerHealthTable::forget_prefix, PeerHealthTable::set_rollout_mode,
+...}`, the
 `lr_policy::{PeerHealthImportHook, PeerHealthShadowSelectionHook}`,
+`lr_router::PeerHealthLookup` (trait the router queries in `reselect`
+for dynamic tiering and stale exclusion),
 two BGP-private path attributes (`LrPeerHealthTier` = 244,
 `LrPeerHealthStale` = 243), four `BestPath` methods
 (`tiered_candidates`, `rank_tiered`, `select_tiered`,
@@ -4084,9 +4099,10 @@ accounts withdraws at the right `(peer, family)`; the damping
 hook ignores it). New C ABI: `lr_peer_health_table_t` handle,
 `lr_peer_health_config_t` / `lr_peer_health_session_t`
 structs, and 8 entry points, surfaced through the Go, Python,
-and C++ binding generators. 40+ unit tests cover the state
-machine, hook, shadow selection, and tiered selection; 4 E2E
-tests cover off/observe/shadow-best-path/full modes.
+and C++ binding generators. 45+ unit tests cover the state
+machine, hook, shadow selection, dynamic tiering, stale exclusion,
+and SIGHUP mode flip; 6 E2E tests cover off/observe/shadow-best-path/full
+modes and the dynamic-lookup-vs-stamp-based gap.
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 

@@ -765,20 +765,48 @@ Rollout modes gate how far the mechanism reaches:
   standard and tiered orderings. The hook always returns `None` so the
   default comparator runs unchanged — routing is unaffected. The
   divergence counter is surfaced by `lrctl show peer-health`.
-- `limited` — tiers stamped (capped at L1) and stale markings applied
-  on escalation. `BestPath::rank_tiered` runs and changes selection.
+- `limited` — tiers effective (capped at L1) and stale markings applied
+  on escalation. The router's `reselect` uses the dynamic
+  `PeerHealthLookup` to restrict candidates to the lowest non-empty
+  health tier and exclude stale paths from ECMP / add-path.
 - `full` — every tier L0..=L3 and stale markings apply.
 
+**Dynamic tiering.** The router holds an `Option<Arc<dyn
+PeerHealthLookup>>` (set by the daemon when `rollout` is not `off`).
+During `reselect`, when the lookup is present, the router queries the
+**current** per-`(peer, AFI/SAFI)` tier for each BGP candidate and
+restricts the candidate set to the lowest non-empty health tier before
+the standard decision process (issue #99 §Hooks 3). This is a
+**dynamic** lookup — the tier reflects the state machine's current
+view, not a stamp frozen at import time, so a route imported while the
+peer was healthy is correctly deprefed when the peer later escalates.
+When no lookup is installed (peer-health off), the router falls back
+to the stamp-based `BestPath::rank_tiered` for routes that carry the
+private tier attribute.
+
 Stale semantics: when a peer escalates into a degraded tier, every
-prefix the peer has advertised is marked stale so ECMP excludes it
-(`BestPath::multipath_tiered` skips stale paths). A fresh UPDATE for a
-prefix re-admits it (clears the stale marker) — the hook does **not**
-re-mark stale on a fresh advertisement. Stale markers expire after
-`max_stale_age_s` via a rate-limited sweep in the ticker thread.
+prefix the peer has advertised is marked stale so ECMP excludes it.
+The router's `reselect` queries `PeerHealthLookup::is_stale()` and
+drops stale paths from the ECMP / add-path tail — the best path is
+always kept (even if stale) so the prefix stays reachable in the
+all-degraded fallback. A fresh UPDATE for a prefix re-admits it
+(clears the stale marker) — the hook does **not** re-mark stale on a
+fresh advertisement. Stale markers expire after `max_stale_age_s` via
+a rate-limited sweep in the ticker thread.
 
 The EWMA baseline (`ewma_alpha`, default 0.05) is updated only while
 the peer is at L0; it is frozen on escalation so a flap cannot inflate
 its own baseline.
+
+**SIGHUP reload.** A SIGHUP that changes `[bgp.peer_health] rollout`
+flips the live mode via `PeerHealthTable::set_rollout_mode` — session
+state (baselines, counters, tiers, stale sets) is preserved across the
+transition. Window lengths, budgets, and other tuning parameters are
+NOT changed on reload (issue #99: "online parameters should remain
+stable during comparison windows"); a restart is required to re-tune.
+If peer-health was off at startup and the fresh config enables it, the
+reload reports that a restart is required (the import hook and lookup
+are installed once at startup).
 
 `lrctl show peer-health` surfaces per-session state: rollout mode,
 degraded count, peak tier, and one line per `(peer, AFI/SAFI)` with
