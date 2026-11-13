@@ -860,7 +860,11 @@ and `bird`.
 
 Formats:
 
-* `native` — TOML `[[roa]]` subset (the same shape as the inline tables).
+* `native` — TOML `[[roa]]` subset (the same shape as the inline
+  tables). `prefix` is required (RFC 6482 §3.1); a `[[roa]]` block
+  that omits `prefix` is rejected at parse time rather than
+  defaulting to `0.0.0.0/0` (which would silently authorise the
+  entire IPv4 unicast space for the configured ASN).
 * `bird` — BIRD 2 `roa table` body (`roa PREFIX max N as N;` per line).
 * `jq` — the daemon pipes the fetched bytes into
   `jq -r -- '<program>'` (where `<program>` is the value of
@@ -890,6 +894,19 @@ are fetched periodically; a fetch failure keeps the previous snapshot
 (a truncated fetch must never weaken origin validation). SIGHUP
 re-points each live loader with its fresh spec; removing a block tears
 its thread down; adding a new block requires a daemon restart.
+
+The URL fetcher caps the response body at 256 MiB (the global RPKI
+VRP set crossed 1 million entries in late 2024; a Routinator JSON
+dump is ~100 MB and a BIRD-format dump ~50 MB — 256 MiB covers both
+shapes with headroom). The fetch timeout is 30 s.
+
+The `jq` / `awk` transform subprocess runs in its own process group
+with a 60 s wall-clock deadline. A hung program is killed (along
+with any helper processes it spawned via `awk`'s `system()` or
+`getline "cmd"`) and the previous ROA snapshot is preserved — the
+same contract a fetch failure upholds. The transform's stdin /
+stdout / stderr are drained concurrently so a large transform output
+cannot deadlock on a full pipe buffer.
 
 ### `[[filter]]`
 

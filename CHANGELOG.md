@@ -4198,6 +4198,84 @@ for the removed `lr_roa_store_replace_static_from_text` entry
 point were deleted; no FFI callback-table change accompanies the
 removal.
 
+### Advanced ROA loading — review fixes (issue #100)
+
+A second pass over the advanced ROA loader surfaced three
+correctness and robustness gaps in the initial implementation.
+Fixed in this entry; no API surface change.
+
+1. **`parse_native` no longer defaults a missing `prefix` to
+   `0.0.0.0/0`.** A `[[roa]]` block that set `asn` but omitted
+   `prefix` would previously finalise as a `RoaEntry` for
+   `0.0.0.0/0` with the configured ASN — silently authorising the
+   entire IPv4 unicast space for that ASN. This is exactly the
+   fail-open bug the loader's snapshot discipline exists to
+   prevent. The parser now tracks `prefix` as `Option<Prefix>` and
+   rejects a `[[roa]]` block missing the `prefix` key at finalise
+   time (RFC 6482 §3.1). Two new unit tests pin the regression:
+   `native_rejects_missing_prefix` (asn-only block) and
+   `native_rejects_missing_prefix_with_max_length` (asn +
+   max_length without prefix).
+
+2. **`MAX_BODY_BYTES` raised from 16 MiB to 256 MiB.** The global
+   RPKI VRP set crossed 1 million entries in late 2024
+   (RPKIViews.org); a Routinator JSON dump is on the order of
+   100 MB and a BIRD-format dump ~50 MB. The previous 16 MiB limit
+   would reject a real-world production fetch — a silent
+   misconfiguration that would leave the daemon running against
+   an empty ROA table. 256 MiB covers both shapes with ~2.5x
+   headroom for the next few years of VRP growth. New regression
+   test: `loader_thread_url_fetch_accepts_body_above_old_16_mib_limit`
+   serves a 17 MiB BIRD-format body and verifies the loader
+   accepts it.
+
+3. **Transform subprocess gains a 60 s timeout, concurrent stdio
+   drain and process-group kill.** The prior `run_transform` shape
+   called `wait_with_output()` with no timeout, blocked the
+   loader thread indefinitely on a hung `jq` / `awk` program, and
+   could deadlock on a large stdout (the writer thread fills the
+   stdin pipe while the parent is blocked reading stdout — a
+   classic stdio deadlock). The new shape:
+
+   * Spawns the child in its own process group
+     (`CommandExt::process_group(0)` on Unix) so a timeout can
+     kill the entire tree — `awk 'system("...")'` would otherwise
+     leave orphaned grandchildren holding the stdout pipe open.
+   * Drains stdin / stdout / stderr on three separate threads so
+     neither pipe fills up.
+   * Polls `try_wait()` with a 50 ms cadence against a 60 s
+     deadline; on timeout it `kill(-pgid, SIGKILL)`s the entire
+     process group, reaps the leader, and returns a clear `Io`
+     error. The previous ROA snapshot is preserved (same contract
+     as a fetch failure).
+
+   The `run_transform_with_timeout` helper takes a custom timeout
+   for tests; production code always goes through `run_transform`,
+   which uses the 60 s default. Four new tests pin the contract:
+   `run_transform_missing_binary_surfaces_clear_error`,
+   `run_transform_nonzero_exit_surfaces_stderr`,
+   `run_transform_kills_hung_subprocess_after_timeout` (uses a
+   2 s test-only timeout), and
+   `run_transform_drains_large_stdout_without_deadlock` (1 MiB
+   input → 4 MiB output, verifies the prior deadlock shape is
+   gone).
+
+4. **DSL round-trip for `bgp.roa_source` blocks is now tested
+   end-to-end.** The TOML → DSL converter (`lr-daemon config
+   to-dsl`) emits a `bgp.roa_source { ... }` block per
+   `[[bgp.roa_source]]` table, but the conversion was not
+   previously covered by a test. The new
+   `converts_bgp_roa_source_blocks_to_dsl` end-to-end test
+   converts a TOML config with two sources (one file `bird`
+   source, one URL `jq` source with a single-quoted literal-string
+   program), asserts every key survives verbatim in the DSL
+   output, and runs the converted file through `config check` to
+   confirm zero warnings.
+
+Total test count for the `daemon_roa_loader` module: 29 → 33 unit
+tests; the `roa_loader` parser module: 29 → 31 unit tests; the
+`config_to_dsl` end-to-end suite gains one test.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

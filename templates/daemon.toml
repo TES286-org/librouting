@@ -536,6 +536,11 @@ permit = false
 #
 # [[roa]]
 # prefix = "203.0.113.0/24"     # authorized prefix (required, CIDR)
+#                               # a [[roa]] block that omits `prefix` is
+#                               # rejected at parse time (RFC 6482 §3.1)
+#                               # rather than defaulting to 0.0.0.0/0,
+#                               # which would silently authorise the
+#                               # entire IPv4 unicast space for the ASN.
 # asn = 64512                   # authorized origin AS (required, u32)
 # max_length = 24               # default: prefix length (exact match)
 #                               # must be >= prefix length and <= 32 (v4)
@@ -568,7 +573,15 @@ permit = false
 # URL sources are fetched periodically (default 3600 s; clamped to a
 # 60 s minimum so a typoed interval does not hammer the origin). The
 # body is parsed with the source's configured format. A fetch failure
-# keeps the previous snapshot too.
+# keeps the previous snapshot too. The fetch timeout is 30 s and the
+# response body is capped at 256 MiB (the global RPKI VRP set crossed
+# 1 million entries in late 2024; a Routinator JSON dump is ~100 MB
+# and a BIRD-format dump ~50 MB — 256 MiB covers both with headroom).
+#
+# The `jq` / `awk` transform subprocess runs in its own process group
+# with a 60 s wall-clock deadline; a hung program is killed (along
+# with any helper processes it spawned via awk's `system()` /
+# `getline "cmd"`) and the previous snapshot is preserved.
 #
 # Supported formats (set 'format' explicitly or let the loader infer
 # it from the path / URL extension):
