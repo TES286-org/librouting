@@ -148,7 +148,6 @@ impl Daemon {
         ));
         let log_file = std::fs::OpenOptions::new()
             .create(true)
-            .write(true)
             .append(true)
             .open(&log)
             .expect("create log file");
