@@ -231,9 +231,19 @@ pub fn parse(text: &str, format: RoaFormat) -> Result<Vec<RoaEntry>, RoaLoaderEr
 /// hand-rolled state machine: the full `toml` crate is overkill for a
 /// shape this narrow, and the daemon already runs the same subset
 /// parser for `daemon.toml` proper.
+///
+/// `prefix` is required (RFC 6482 §3.1 — a ROA without a prefix is
+/// meaningless). A `[[roa]]` block that sets `asn` but omits `prefix`
+/// is rejected at finalize time: the parser cannot default to
+/// `0.0.0.0/0` because that would silently authorise the entire IPv4
+/// unicast space for the configured ASN (a fail-open bug exactly the
+/// kind the loader's snapshot discipline exists to prevent).
 pub fn parse_native(text: &str) -> Result<Vec<RoaEntry>, RoaLoaderError> {
     let mut entries = Vec::new();
-    let mut current: Option<(Prefix, Option<u8>, Option<u32>)> = None;
+    // `prefix` is `Option<Prefix>` so a `[[roa]]` block that omits the
+    // `prefix = "..."` key is rejected at finalize time rather than
+    // silently defaulting to `0.0.0.0/0`.
+    let mut current: Option<(Option<Prefix>, Option<u8>, Option<u32>)> = None;
     for (i, raw) in text.lines().enumerate() {
         let line_no = i + 1;
         let line = strip_comment(raw).trim();
@@ -246,7 +256,7 @@ pub fn parse_native(text: &str) -> Result<Vec<RoaEntry>, RoaLoaderError> {
                 if let Some((p, ml, asn)) = current.take() {
                     entries.push(finalize_entry(p, ml, asn, line_no)?);
                 }
-                current = Some((Prefix::new_v4([0; 4], 0), None, None));
+                current = Some((None, None, None));
                 continue;
             }
             // Unknown array-of-table — flush the current entry (if
@@ -280,10 +290,12 @@ pub fn parse_native(text: &str) -> Result<Vec<RoaEntry>, RoaLoaderError> {
         };
         match key {
             "prefix" => {
-                *prefix = Prefix::from_str(value).map_err(|_| RoaLoaderError::BadPrefix {
-                    line_no,
-                    prefix: value.to_string(),
-                })?;
+                *prefix = Some(
+                    Prefix::from_str(value).map_err(|_| RoaLoaderError::BadPrefix {
+                        line_no,
+                        prefix: value.to_string(),
+                    })?,
+                );
             }
             "max_length" | "max_len" => {
                 *max_length = Some(value.parse().map_err(|_| RoaLoaderError::BadAsn {
@@ -353,14 +365,23 @@ fn strip_comment(raw: &str) -> &str {
 }
 
 /// Build a `RoaEntry` from the parsed `(prefix, max_length, asn)`
-/// triple. `max_length = None` means "exact prefix" (the common
-/// case); `asn = None` is a build error (RFC 6482 §3.2 requires it).
+/// triple. `prefix = None` (the `[[roa]]` block omitted the `prefix`
+/// key) is a build error — RFC 6482 §3.1 requires the `prefix` field
+/// and the parser must not default to `0.0.0.0/0` (which would
+/// silently authorise the entire IPv4 unicast space for the configured
+/// ASN). `max_length = None` means "exact prefix" (the common case);
+/// `asn = None` is a build error (RFC 6482 §3.2 requires it).
 fn finalize_entry(
-    prefix: Prefix,
+    prefix: Option<Prefix>,
     max_length: Option<u8>,
     asn: Option<u32>,
     line_no: usize,
 ) -> Result<RoaEntry, RoaLoaderError> {
+    let prefix = prefix.ok_or_else(|| RoaLoaderError::Missing {
+        line_no,
+        message: "[[roa]] without 'prefix' (RFC 6482 §3.1 — would default to 0.0.0.0/0)"
+            .to_string(),
+    })?;
     let asn = asn.ok_or_else(|| RoaLoaderError::Missing {
         line_no,
         message: "[[roa]] without 'asn' (RFC 6482 §3.2)".to_string(),
@@ -467,7 +488,7 @@ pub fn parse_bird(text: &str) -> Result<Vec<RoaEntry>, RoaLoaderError> {
                 _ => { /* unknown token — ignore (forward compat) */ }
             }
         }
-        entries.push(finalize_entry(prefix, max_length, asn, line_no)?);
+        entries.push(finalize_entry(Some(prefix), max_length, asn, line_no)?);
     }
     Ok(entries)
 }

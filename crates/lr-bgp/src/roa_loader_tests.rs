@@ -207,6 +207,38 @@ prefix = "203.0.113.0/24"
 }
 
 #[test]
+fn native_rejects_missing_prefix() {
+    // Regression: a `[[roa]]` block that sets `asn` but omits
+    // `prefix` must NOT default to `0.0.0.0/0` — doing so would
+    // silently authorise the entire IPv4 unicast space for the
+    // configured ASN. RFC 6482 §3.1 requires the prefix.
+    let text = r#"
+[[roa]]
+asn = 64512
+"#;
+    let err = parse_native(text).unwrap_err();
+    assert!(err.to_string().contains("'prefix'"), "err: {err}");
+    // Specifically NOT a 0.0.0.0/0 entry.
+    let entries = parse_native("[[roa]]\nasn = 64512\n");
+    assert!(entries.is_err(), "must be an error, not 0.0.0.0/0");
+}
+
+#[test]
+fn native_rejects_missing_prefix_with_max_length() {
+    // The same fail-closed property when `max_length` is set:
+    // without an explicit prefix the parser must not produce a
+    // `0.0.0.0/0 max N as ASN` entry (which would authorise every
+    // IPv4 prefix of length ≤ N).
+    let text = r#"
+[[roa]]
+max_length = 24
+asn = 64512
+"#;
+    let err = parse_native(text).unwrap_err();
+    assert!(err.to_string().contains("'prefix'"), "err: {err}");
+}
+
+#[test]
 fn native_rejects_bad_prefix() {
     let text = r#"
 [[roa]]
