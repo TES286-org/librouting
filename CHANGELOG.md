@@ -13,7 +13,7 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, peer-health, advanced ROA loading
+## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`

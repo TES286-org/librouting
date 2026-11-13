@@ -58,7 +58,8 @@ files of the `lr-cli` binary crate, which is not a library.
 | Egress rewrite rules, iBGP split horizon, next-hop-self | yes | `lr-bgp::advertise` |
 | Per-peer configuration: hold time, families, max-prefix, GTSM | yes | `lr-bgp::peer` |
 | RPKI-RTR PDU codec and client (RFC 8210) | yes | `lr-bgp::rtr::pdu`, `lr-bgp::rtr::client` |
-| ROA table and origin validation (RFC 6811) | yes | `lr-bgp::roa`, `lr-bgp::roa_store` |
+| ROA table and origin validation (RFC 6811) | yes | `lr-bgp::roa`, `lr-bgp::roa_store`, `lr-bgp::roa_loader` |
+| Advanced ROA loading: URL fetch + file watch, four formats (issue #100) | yes | `lr-cli::daemon_roa_loader`, `lr-ffi::roa_store::lr_roa_store_replace_static_from_text` |
 | BGP-LS Node/Link/Prefix/SRv6 SID NLRI codec (RFC 7752, RFC 9514) | yes | `lr-bgp::path::bgp_ls` |
 | BGP-LS Attribute TLV codec (RFC 7752 §3.3 + RFC 9514 §7-§8) | yes | `lr-bgp::path::bgp_ls_attr` |
 | BGP-LS NLRI egress (`BgpPeer::advertise_bgpls` / `withdraw_bgpls`) | yes | `lr-bgp::advertise` |

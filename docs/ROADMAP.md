@@ -853,6 +853,36 @@ endpoint already reads), reporting per-layer counts plus one line per
 entry. Per-entry provenance is exact (`static` / `rtr` / `both`) via
 `RoaStore::provenance_of`, which queries each layer's `HashSet`.
 
+**Advanced ROA loading.** Done (issue #100). The daemon gains
+`[[bgp.roa_source]]` tables: one loader thread per source, fetching
+ROA entries from a file on disk or an HTTP(S) URL and merging them
+with the inline `[[roa]]` tables under the live `RoaStore`. File
+sources are watched via mtime polling (1 s cadence, matching BIRD 2's
+default minimum settle time); URL sources are fetched periodically
+(configurable interval, default 3600 s, clamped to 60 s minimum).
+Both paths preserve the previous snapshot on a parse / fetch
+failure — a truncated fetch must never weaken origin validation.
+
+Four on-the-wire formats are supported: native TOML `[[roa]]`
+subset, BIRD 2 `roa table` body, Routinator JSON VRP output, and
+Routinator CSV / awk-produced whitespace-separated rows. The
+format parsers live in `crates/lr-bgp/src/roa_loader.rs` (no
+I/O dependency); the daemon integration lives in
+`crates/lr-cli/src/daemon_roa_loader.rs` (uses `ureq` for HTTP
+fetching). SIGHUP reload re-points each live loader thread with
+its fresh spec; removing a block tears its thread down; adding a
+new block requires a daemon restart (same posture as a re-added
+`[bgp.rpki] cache`).
+
+The runtime API `status` command renders one line per loader thread
+(`roa-source: <source> type=<file|url> format=<fmt> entries=<n>
+state=<ok|error> last-load=<age>s`), mirroring the `rpki:` status
+line shape. The C ABI gains
+`lr_roa_store_replace_static_from_text` for embedders that want
+to feed any of the four formats directly; the Go and Python
+bindings wrap it as `RoaStore.ReplaceStaticFromText` /
+`RoaStore.replace_static_from_text`.
+
 ## Deployment
 
 **A Helm chart.** Deliberately kept out of this repository. A chart versions
