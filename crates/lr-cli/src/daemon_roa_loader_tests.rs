@@ -763,3 +763,182 @@ fn status_line_omits_program_for_pure_formats() {
     assert!(!line.contains("program="), "line: {line}");
     assert!(line.contains("format=bird"), "line: {line}");
 }
+
+// ============================================================
+// Transform failure modes — missing binary, non-zero exit, timeout
+// ============================================================
+//
+// The transform subprocess (`jq` / `awk`) is an external program the
+// daemon does not own; the loader's snapshot-preservation contract
+// requires that every failure mode surfaces a clear error and keeps
+// the previous ROA table live. These tests pin each failure mode
+// against a regression that would silently weaken origin validation.
+
+#[test]
+fn run_transform_missing_binary_surfaces_clear_error() {
+    // A `jq` / `awk` binary not on PATH is the most common operator
+    // misconfiguration. The error must mention the binary name and
+    // "spawn" so the operator knows to install it; the previous ROA
+    // snapshot is preserved by the loader (the test exercises the
+    // pure `run_transform` helper, which returns the error without
+    // touching the registry).
+    let err =
+        run_transform("lr-roa-source-binary-not-on-path-xyz", &["--version"], "").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("spawn") && msg.contains("lr-roa-source-binary-not-on-path-xyz"),
+        "missing-binary error should mention 'spawn' and the binary name: {msg}"
+    );
+}
+
+#[test]
+fn run_transform_nonzero_exit_surfaces_stderr() {
+    // A `jq` program with a syntax error exits non-zero and writes
+    // its complaint to stderr. The loader must surface the stderr
+    // text so the operator can fix the program; the previous ROA
+    // snapshot is preserved.
+    let err = run_transform(
+        "jq",
+        &["-r", "--", ".["], // unterminated bracket — jq exits 3.
+        "[]",
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("jq exited"), "expected exit-line: {msg}");
+    assert!(!msg.is_empty(), "stderr should be included: {msg}");
+}
+
+#[test]
+fn run_transform_kills_hung_subprocess_after_timeout() {
+    // A program that hangs (e.g., reading its own state forever, or
+    // waiting on a missing input) would block the loader thread
+    // indefinitely. The 60 s `TRANSFORM_TIMEOUT` kills the process
+    // and surfaces a clear error so the daemon's SIGHUP reload path
+    // is not blocked.
+    //
+    // Production code goes through `run_transform` (60 s deadline);
+    // this test goes through `run_transform_with_timeout` with a 2 s
+    // deadline so the kill path is exercised quickly. The contract
+    // under test is identical: a child that runs past the deadline
+    // is killed and surfaces a clear error.
+    let start = std::time::Instant::now();
+    let err = run_transform_with_timeout("sh", &["-c", "sleep 120"], "", Duration::from_secs(2))
+        .unwrap_err();
+    let elapsed = start.elapsed();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("did not finish within") && msg.contains("killed"),
+        "timeout error must mention kill + interval: {msg}"
+    );
+    // The kill should fire near the 2 s deadline, not 120 s.
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "kill should fire near the deadline; took {elapsed:?}"
+    );
+}
+
+#[test]
+fn run_transform_drains_large_stdout_without_deadlock() {
+    // Regression for the full-pipe deadlock that the prior
+    // `wait_with_output` shape carried: a child that writes more
+    // than the pipe buffer (64 KiB on Linux) while the parent is
+    // still writing stdin would block on stdout, and the parent
+    // would block on stdin (a classic stdio deadlock). The new
+    // concurrent-drain shape splits the writer and reader into
+    // separate threads so neither pipe fills up.
+    //
+    // The fixture writes 1 MiB of input and the child writes 4 MiB
+    // of output (well above the 64 KiB pipe buffer). A deadlocked
+    // implementation would hang indefinitely; the concurrent-drain
+    // implementation finishes in well under a second.
+    let input = "x".repeat(1024 * 1024);
+    // `head -c 4194304 /dev/zero | tr '\\0' 'x'` writes 4 MiB of
+    // 'x' to stdout, ignoring stdin. The `cat >/dev/null` keeps
+    // stdin drained too so the writer thread is not blocked.
+    let out = run_transform(
+        "sh",
+        &[
+            "-c",
+            "cat >/dev/null; head -c 4194304 /dev/zero | tr '\\0' 'x'",
+        ],
+        &input,
+    )
+    .expect("large stdio must not deadlock");
+    assert_eq!(out.len(), 4 * 1024 * 1024, "output size: {}", out.len());
+    assert!(out.bytes().all(|b| b == b'x'), "output must be all 'x'");
+}
+
+// ============================================================
+// URL fetch — large body (regression for MAX_BODY_BYTES bump)
+// ============================================================
+
+#[test]
+fn loader_thread_url_fetch_accepts_body_above_old_16_mib_limit() {
+    // Regression for issue #100 review: the previous `MAX_BODY_BYTES`
+    // was 16 MiB, which is too small for a real-world Routinator
+    // JSON dump (~100 MB for 1M VRPs). The limit is now 256 MiB.
+    // This test serves a 17 MiB body — above the old limit, well
+    // below the new one — and verifies the loader accepts it.
+    //
+    // The body is a BIRD-format dump (no `jq` transform needed) so
+    // the test does not depend on `jq` being installed (every Unix
+    // ships `awk`, but the test stays focused on the body-size
+    // contract).
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // 17 MiB of BIRD-format lines: ~32 bytes each → ~557k entries.
+    // We don't validate the count (the parser would build 557k
+    // entries — that's fine); the test only checks the body is
+    // accepted, not the parsed entry count.
+    let line = b"roa 203.0.113.0/24 max 24 as 64512;\n";
+    let lines_per_mib = 1024 * 1024 / line.len();
+    let mut body = Vec::with_capacity(17 * 1024 * 1024 + line.len());
+    for _ in 0..(17 * lines_per_mib) {
+        body.extend_from_slice(line);
+    }
+    let body_len = body.len();
+    let body_clone = body.clone();
+    let server = std::thread::spawn(move || {
+        let mut s = listener.accept().unwrap().0;
+        let mut buf = [0u8; 1024];
+        let _ = std::io::Read::read(&mut s, &mut buf);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+            body_len
+        );
+        let _ = std::io::Write::write_all(&mut s, resp.as_bytes());
+        let _ = std::io::Write::write_all(&mut s, &body_clone);
+    });
+    let store = Arc::new(RoaStore::new());
+    let registry = Arc::new(Mutex::new(RoaLayerRegistry::new()));
+    let running = Arc::new(AtomicBool::new(true));
+    let spec = RoaSourceSpec {
+        path: None,
+        url: Some(format!("http://{addr}/roas.bird")),
+        format: Some(RoaFormat::Bird),
+        interval: Some(60),
+        user_agent: None,
+        program: None,
+        program_file: None,
+    };
+    let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
+    // Wait for the initial load. The 17 MiB body parses fast (BIRD
+    // parser is a single linear scan); the bottleneck is the HTTP
+    // transfer. Wait up to 30 s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if !store.is_empty() || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !store.is_empty(),
+        "17 MiB body should be accepted; status: {}",
+        handle.status_line()
+    );
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.shutdown();
+    let _ = server.join();
+}

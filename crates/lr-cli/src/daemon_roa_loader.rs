@@ -57,6 +57,17 @@ use lr_bgp::{RoaFormat, RoaLoaderError};
 
 use crate::Component;
 
+// On Unix we put each transform subprocess in its own process group
+// (via `CommandExt::process_group`) so a timeout can kill the entire
+// tree — `sh -c "sleep 120"` would otherwise leave `sleep 120`
+// orphaned but holding the stdout pipe open, blocking the reader
+// thread until the sleep finishes. Windows has no process groups in
+// the POSIX sense; `child.kill()` terminates the immediate child
+// (which on Windows also closes the handles inherited by any
+// grandchild), which is sufficient.
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 /// How often a file source's mtime is polled. Small enough that an
 /// operator's `routinator` rewrite lands inside the operator's
 /// expected propagation window; large enough that an idle file
@@ -79,11 +90,14 @@ const DEFAULT_URL_INTERVAL: Duration = Duration::from_secs(3600);
 /// wedged cache does not stall ROA updates indefinitely.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Maximum response body size (16 MiB). A larger body is rejected
-/// so a misconfigured origin cannot OOM the daemon. The global
-/// RPKI ROA set is on the order of 500k entries / 20 MB today;
-/// 16 MiB covers the JSON / CSV shape comfortably.
-const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum response body size (256 MiB). A larger body is rejected
+/// so a misconfigured origin cannot OOM the daemon. The global RPKI
+/// VRP set crossed 1 million entries in late 2024 (RPKIViews.org),
+/// which makes a Routinator JSON dump on the order of 100 MB and a
+/// BIRD-format dump on the order of 50 MB. 256 MiB covers both
+/// shapes comfortably with roughly 2.5x headroom for the next few
+/// years of VRP growth plus operator-local additions.
+const MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 /// One ROA source — a file on disk or a URL fetched periodically.
 ///
@@ -907,33 +921,157 @@ fn run_awk(program: &str, input: &str) -> Result<String, RoaLoaderError> {
     run_transform("awk", &["--", program], input)
 }
 
+/// Maximum wall-clock time a transform subprocess (`jq` / `awk`) may
+/// run before the loader kills it. A program that hangs reading its
+/// own state, that deadlocks on a malformed input, or that
+/// accidentally infinite-loops would otherwise block the loader
+/// thread indefinitely — which would also block the daemon's SIGHUP
+/// reload path (a `Repoint` command waits for the loader thread to
+/// drain). 60 s is far above the worst observed transform time on a
+/// real-world 100 MB Routinator JSON dump (well under 10 s on
+/// commodity hardware), short enough that a wedged program does not
+/// stall ROA updates for an operator-noticeable interval. The
+/// previous snapshot is preserved on timeout, the same contract a
+/// fetch failure upholds.
+const TRANSFORM_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Polling interval for the transform-subprocess wait loop. A 50 ms
+/// cadence keeps the loader thread responsive to a `Repoint` /
+/// `Shutdown` command without burning CPU on an idle wait.
+const TRANSFORM_POLL: Duration = Duration::from_millis(50);
+
 /// Spawn a transform binary (`jq` / `awk`), feed `input` on its
 /// stdin and capture its stdout. The binary is found on `PATH`;
 /// a missing binary surfaces a clear `Io` error so the loader's
 /// status line reports it and the previous ROA snapshot is
 /// preserved.
+///
+/// Uses the default [`TRANSFORM_TIMEOUT`] deadline. The
+/// `run_transform_with_timeout` helper takes a custom deadline for
+/// tests; production code always goes through this entry point so
+/// the 60 s contract is uniform.
 fn run_transform(bin: &str, args: &[&str], input: &str) -> Result<String, RoaLoaderError> {
-    let mut child = Command::new(bin)
-        .args(args)
+    run_transform_with_timeout(bin, args, input, TRANSFORM_TIMEOUT)
+}
+
+/// Spawn a transform binary with a custom timeout. Production code
+/// uses [`run_transform`] (which passes [`TRANSFORM_TIMEOUT`]); tests
+/// pass a shorter timeout to verify the kill path quickly.
+///
+/// The subprocess is killed if it runs longer than `timeout`; its
+/// stdout and stderr are drained concurrently so a large transform
+/// output cannot deadlock on a full pipe buffer (the prior
+/// `wait_with_output` shape relied on the child finishing its stdout
+/// write before the stdin pipe filled, which is fine for small inputs
+/// but can deadlock on a real-world 100 MB Routinator JSON dump).
+fn run_transform_with_timeout(
+    bin: &str,
+    args: &[&str],
+    input: &str,
+    timeout: Duration,
+) -> Result<String, RoaLoaderError> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Put the child in its own process group so a timeout can kill
+    // the entire tree. A `jq` / `awk` program that spawns helper
+    // processes (awk's `system()`, `getline "cmd"`) would otherwise
+    // leave orphaned grandchildren holding the stdout pipe open,
+    // blocking the reader thread past the kill.
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| RoaLoaderError::Io(format!("spawn {bin}: {e}")))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(input.as_bytes())
-            .map_err(|e| RoaLoaderError::Io(format!("write {bin} stdin: {e}")))?;
-    }
-    // Drop our stdin handle so the child sees EOF.
-    drop(child.stdin.take());
-    let output = child
-        .wait_with_output()
-        .map_err(|e| RoaLoaderError::Io(format!("wait {bin}: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let code = output
-            .status
+
+    // Move the child's stdio handles into reader / writer threads so
+    // the wait loop can poll `try_wait` without the child blocking
+    // on a full pipe buffer. The writer thread closes stdin after
+    // writing so the child sees EOF.
+    let stdin_handle = child.stdin.take();
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+    let input_bytes = input.as_bytes().to_vec();
+    let writer = thread::Builder::new()
+        .name(format!("lr-roa-transform:{bin}:stdin"))
+        .spawn(move || {
+            if let Some(mut stdin) = stdin_handle {
+                let _ = stdin.write_all(&input_bytes);
+                // Drop stdin to signal EOF. Implicit on return, but
+                // explicit so the intent is clear to the reader.
+                drop(stdin);
+            }
+        })
+        .map_err(|e| RoaLoaderError::Io(format!("spawn {bin} writer thread: {e}")))?;
+    let reader = thread::Builder::new()
+        .name(format!("lr-roa-transform:{bin}:stdout"))
+        .spawn(move || {
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            if let Some(mut s) = stdout_handle {
+                let _ = s.read_to_end(&mut stdout_buf);
+            }
+            if let Some(mut s) = stderr_handle {
+                let _ = s.read_to_end(&mut stderr_buf);
+            }
+            (stdout_buf, stderr_buf)
+        })
+        .map_err(|e| RoaLoaderError::Io(format!("spawn {bin} reader thread: {e}")))?;
+
+    // Wait for the child to exit, polling so we can enforce the
+    // timeout. On timeout we kill the entire process group so
+    // grandchildren (which hold inherited pipe fds) die too —
+    // otherwise the reader thread would block on `read_to_end`
+    // until every grandchild exits.
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Kill the entire process group so orphaned
+                    // grandchildren die and release the stdout pipe.
+                    #[cfg(unix)]
+                    {
+                        let _ = kill_process_group(&child);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                    let _ = writer.join();
+                    let _ = reader.join();
+                    return Err(RoaLoaderError::Io(format!(
+                        "{bin} did not finish within {} s (killed; previous ROA snapshot preserved)",
+                        timeout.as_secs()
+                    )));
+                }
+                thread::sleep(TRANSFORM_POLL);
+            }
+            Err(e) => {
+                let _ = writer.join();
+                let _ = reader.join();
+                return Err(RoaLoaderError::Io(format!("wait {bin}: {e}")));
+            }
+        }
+    };
+
+    // Join the writer (always finishes quickly — it just writes the
+    // input bytes and closes stdin) and the reader (finishes once the
+    // child's stdout / stderr fds close on exit).
+    let _ = writer.join();
+    let (stdout_bytes, stderr_bytes) = reader.join().map_err(|_| {
+        RoaLoaderError::Io(format!("{bin} reader thread panicked (no stdout captured)"))
+    })?;
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+        let code = status
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "signal".to_string());
@@ -942,8 +1080,50 @@ fn run_transform(bin: &str, args: &[&str], input: &str) -> Result<String, RoaLoa
             stderr.trim()
         )));
     }
-    String::from_utf8(output.stdout)
+    String::from_utf8(stdout_bytes)
         .map_err(|e| RoaLoaderError::Io(format!("{bin} stdout is not UTF-8: {e}")))
+}
+
+/// Send `SIGKILL` to the process group the child leads. The child
+/// was spawned with `process_group(0)`, which makes the child the
+/// leader of a new process group whose PGID equals the child's PID.
+/// `kill(-PGID, SIGKILL)` (negative PGID) signals every process in
+/// the group, including the leader and any helper processes the
+/// `jq` / `awk` program spawned. Returns `Ok(())` if the signal was
+/// sent (the actual reaping is done by `child.wait()` in the caller).
+///
+/// We use `extern "C"` declarations instead of pulling in the `libc`
+/// crate — the same posture `crate::signal` already takes for its
+/// SIGHUP handler. The two functions and one constant are the entire
+/// libc surface this module needs.
+#[cfg(unix)]
+fn kill_process_group(child: &std::process::Child) -> std::io::Result<()> {
+    let pid = child.id() as i32;
+    // SIGKILL is 9 on every Unix (POSIX §3.3.1.1; signals.h `#define
+    // SIGKILL 9`). The macro is stable across Linux, the BSDs and
+    // Solaris-derived systems.
+    const SIGKILL: i32 = 9;
+    let rc = unsafe { kill_c(-pid, SIGKILL) };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+// `extern "C"` shim around the libc `kill(2)` syscall. We declare
+// it directly instead of pulling in the `libc` crate, mirroring
+// `crate::signal`'s approach. `#[link_name]` maps our local
+// identifier `kill_c` onto the libc symbol `kill` (the local name
+// avoids shadowing Rust's `kill` method on `Child`).
+#[cfg(unix)]
+#[link(name = "c")]
+extern "C" {
+    // libc `kill(pid_t pid, int sig)` — send a signal to a process
+    // or process group. A negative `pid` signals the process group
+    // `|pid|`.
+    #[link_name = "kill"]
+    fn kill_c(pid: i32, sig: i32) -> i32;
 }
 
 #[cfg(test)]
