@@ -30096,6 +30096,41 @@
       ]
     },
     {
+      "name": "lr_roa_store_replace_static_from_text",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "s",
+          "type": "lr_roa_store_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "text",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "len",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "format",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_roa_store_apply_deltas",
       "return_type": "int32_t",
       "params": [
@@ -43495,6 +43530,22 @@
     {
       "name": "LR_ROA_INVALID",
       "value": "2"
+    },
+    {
+      "name": "LR_ROA_FORMAT_NATIVE",
+      "value": "0"
+    },
+    {
+      "name": "LR_ROA_FORMAT_BIRD",
+      "value": "1"
+    },
+    {
+      "name": "LR_ROA_FORMAT_JSON",
+      "value": "2"
+    },
+    {
+      "name": "LR_ROA_FORMAT_CSV",
+      "value": "3"
     },
     {
       "name": "LR_ROA_PROVENANCE_STATIC",
@@ -74344,6 +74395,41 @@
           {
             "name": "len",
             "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_roa_store_replace_static_from_text",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "s",
+            "type": "lr_roa_store_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "text",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "len",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "format",
+            "type": "uint8_t",
             "is_const": false,
             "is_ptr": false,
             "is_struct": false

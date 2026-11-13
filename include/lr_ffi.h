@@ -1893,6 +1893,18 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_ROA_INVALID 2
 
 /**
+ * Format codes for `lr_roa_store_replace_static_from_text`
+ * (issue #100). Mirrors `lr_bgp::roa_loader::RoaFormat`.
+ */
+#define LR_ROA_FORMAT_NATIVE 0
+
+#define LR_ROA_FORMAT_BIRD 1
+
+#define LR_ROA_FORMAT_JSON 2
+
+#define LR_ROA_FORMAT_CSV 3
+
+/**
  * Per-entry provenance tag for one ROA entry. Writes one of
  * `LR_ROA_PROVENANCE_STATIC` / `_RTR` / `_BOTH` to `*out`. Returns
  * `LR_ERR_INVALID_HANDLE` (-2) on a NULL store and `LR_ERR_OTHER`
@@ -17884,6 +17896,26 @@ void lr_roa_store_free(lr_roa_store_t s);
 int32_t lr_roa_store_replace_static(lr_roa_store_t s,
                                     const struct lr_roa_entry_t *entries,
                                     uintptr_t len);
+
+/**
+ * Atomically replace the **static** layer by parsing a text buffer
+ * in one of the supported formats (issue #100): native TOML
+ * `[[roa]]` subset, BIRD `roa table` body, Routinator JSON VRP
+ * output, or CSV / whitespace-separated rows. The format is
+ * selected by the `format` byte (one of the `LR_ROA_FORMAT_*`
+ * constants). RTR-learned entries are preserved. Returns 0 on
+ * success; -6 (`Other`) with the last-error string set on a parse
+ * failure — in that case nothing is applied (the previous
+ * snapshot survives).
+ *
+ * # Safety
+ * `s` must be a live store handle; `text` must point at `len`
+ * readable bytes (NULL with len 0 clears the layer).
+ */
+int32_t lr_roa_store_replace_static_from_text(lr_roa_store_t s,
+                                              const uint8_t *text,
+                                              uintptr_t len,
+                                              uint8_t format);
 
 /**
  * Apply a batch of RTR deltas atomically (one completed sync).
