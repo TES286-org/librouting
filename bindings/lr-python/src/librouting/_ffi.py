@@ -4888,12 +4888,75 @@ uint8_t lr_ospf_v3_packet_checksum_ok(
     const uint8_t * dst
 );
 
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+
 /* GENERATED ADDITIONS - do not edit by hand.
    Source: scripts/gen_python.py + scripts/abi.json
    Re-run: python3 scripts/gen_python.py */
 
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct OpaquePeerHealthTable OpaquePeerHealthTable;
+typedef struct OpaquePeerHealthTable *lr_peer_health_table_t;
 typedef struct lr_afi_safi_t lr_nlri_family_t;
+typedef struct lr_peer_health_config_t {
+    uint8_t rollout;
+    uint64_t short_window_s;
+    uint64_t mid_window_s;
+    uint64_t long_window_s;
+    uint64_t baseline_window_s;
+    uint64_t min_transition_interval_s;
+    uint64_t min_recovery_interval_s;
+    uint64_t max_stale_age_s;
+    uint64_t tick_interval_s;
+    uint32_t soft_degraded;
+    uint32_t hard_degraded;
+} lr_peer_health_config_t;
+typedef struct lr_peer_health_session_t {
+    uint64_t peer_id;
+    uint16_t afi;
+    uint8_t safi;
+    double baseline_rate;
+    uint8_t tier;
+    uint64_t updates;
+    uint64_t withdraws;
+    uint64_t escalations;
+    uint64_t recoveries;
+    uint8_t peak_tier;
+    uint64_t stale_count;
+} lr_peer_health_session_t;
+lr_peer_health_table_t lr_peer_health_table_new(const struct lr_peer_health_config_t * cfg);
+void lr_peer_health_table_free(lr_peer_health_table_t t);
+uint8_t lr_peer_health_table_account_update(
+    lr_peer_health_table_t t,
+    uint64_t peer_id,
+    uint16_t afi,
+    uint8_t safi,
+    uint64_t now_ms
+);
+uint8_t lr_peer_health_table_account_withdraw(
+    lr_peer_health_table_t t,
+    uint64_t peer_id,
+    uint16_t afi,
+    uint8_t safi,
+    uint64_t now_ms
+);
+uint8_t lr_peer_health_table_tier(
+    lr_peer_health_table_t t,
+    uint64_t peer_id,
+    uint16_t afi,
+    uint8_t safi
+);
+uintptr_t lr_peer_health_table_tick(lr_peer_health_table_t t, uint64_t now_ms);
+uintptr_t lr_peer_health_table_session_count(lr_peer_health_table_t t);
+uint32_t lr_peer_health_table_degraded_count(lr_peer_health_table_t t);
+int32_t lr_peer_health_table_session_snapshot(
+    lr_peer_health_table_t t,
+    uint64_t peer_id,
+    uint16_t afi,
+    uint8_t safi,
+    struct lr_peer_health_session_t * out
+);
 """
 
 

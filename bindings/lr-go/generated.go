@@ -1767,6 +1767,31 @@ func (x *Osroute) Closed() bool {
 	return x == nil || x.ptr == nil
 }
 
+type PeerHealthTable struct {
+	ptr C.lr_peer_health_table_t
+}
+
+func (x *PeerHealthTable) destroy() {
+	if x != nil && x.ptr != nil {
+		C.lr_peer_health_table_free(x.ptr)
+		x.ptr = nil
+	}
+}
+
+// Free releases the underlying lr_peer_health_table_t handle. Safe to call multiple times.
+func (x *PeerHealthTable) Free() {
+	if x == nil {
+		return
+	}
+	runtime.SetFinalizer(x, nil)
+	x.destroy()
+}
+
+// Closed reports whether the handle has been freed.
+func (x *PeerHealthTable) Closed() bool {
+	return x == nil || x.ptr == nil
+}
+
 type PolicyChain struct {
 	ptr C.lr_policy_chain_t
 }
@@ -2389,6 +2414,16 @@ func NewOspfV3Auth(sa_id uint16, key *C.uint8_t, key_len uintptr) (*OspfV3Auth, 
 	}
 	x := &OspfV3Auth{ptr: p}
 	runtime.SetFinalizer(x, (*OspfV3Auth).destroy)
+	return x, nil
+}
+
+func NewPeerHealthTable(cfg *C.lr_peer_health_config_t) (*PeerHealthTable, error) {
+	p := C.lr_peer_health_table_new(cfg)
+	if p == nil {
+		return nil, fmt.Errorf("lr_peer_health_table_new: %s", LastError())
+	}
+	x := &PeerHealthTable{ptr: p}
+	runtime.SetFinalizer(x, (*PeerHealthTable).destroy)
 	return x, nil
 }
 
@@ -6062,6 +6097,44 @@ func (x *Osroute) Seg6Enabled() (uint8, error) {
 func (x *Osroute) TtlCheckEnforced() (uint8, error) {
 	res := C.lr_osroute_ttl_check_enforced()
 	return uint8(res), nil
+}
+
+func (x *PeerHealthTable) AccountUpdate(peer_id uint64, afi uint16, safi uint8, now_ms uint64) (uint8, error) {
+	res := C.lr_peer_health_table_account_update(x.ptr, C.uint64_t(peer_id), C.uint16_t(afi), C.uint8_t(safi), C.uint64_t(now_ms))
+	return uint8(res), nil
+}
+
+func (x *PeerHealthTable) AccountWithdraw(peer_id uint64, afi uint16, safi uint8, now_ms uint64) (uint8, error) {
+	res := C.lr_peer_health_table_account_withdraw(x.ptr, C.uint64_t(peer_id), C.uint16_t(afi), C.uint8_t(safi), C.uint64_t(now_ms))
+	return uint8(res), nil
+}
+
+func (x *PeerHealthTable) Tier(peer_id uint64, afi uint16, safi uint8) (uint8, error) {
+	res := C.lr_peer_health_table_tier(x.ptr, C.uint64_t(peer_id), C.uint16_t(afi), C.uint8_t(safi))
+	return uint8(res), nil
+}
+
+func (x *PeerHealthTable) Tick(now_ms uint64) (uintptr, error) {
+	res := C.lr_peer_health_table_tick(x.ptr, C.uint64_t(now_ms))
+	return uintptr(res), nil
+}
+
+func (x *PeerHealthTable) SessionCount() (uintptr, error) {
+	res := C.lr_peer_health_table_session_count(x.ptr)
+	return uintptr(res), nil
+}
+
+func (x *PeerHealthTable) DegradedCount() (uint32, error) {
+	res := C.lr_peer_health_table_degraded_count(x.ptr)
+	return uint32(res), nil
+}
+
+func (x *PeerHealthTable) SessionSnapshot(peer_id uint64, afi uint16, safi uint8, out *C.lr_peer_health_session_t) (int32, error) {
+	rc := C.lr_peer_health_table_session_snapshot(x.ptr, C.uint64_t(peer_id), C.uint16_t(afi), C.uint8_t(safi), out)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_peer_health_table_session_snapshot: %s", LastError())
+	}
+	return int32(rc), nil
 }
 
 func (x *PolicyChain) Push(map_ *RouteMap) (int32, error) {

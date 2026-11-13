@@ -8868,6 +8868,11 @@ struct OsrouteDeleter {
 };
 using OsrouteHandle = std::unique_ptr<OpaqueOsRouteTable, OsrouteDeleter>;
 
+struct PeerHealthTableDeleter {
+    void operator()(lr_peer_health_table_t h) const noexcept { if (h) lr_peer_health_table_free(h); }
+};
+using PeerHealthTableHandle = std::unique_ptr<OpaquePeerHealthTable, PeerHealthTableDeleter>;
+
 struct PolicyChainDeleter {
     void operator()(lr_policy_chain_t h) const noexcept { if (h) lr_policy_chain_free(h); }
 };
@@ -10117,7 +10122,7 @@ inline std::uint8_t ospf_is_elected_translator(lr_ospf_lsdb_t lsdb, std::uint32_
     return lr_ospf_is_elected_translator(lsdb, router_id);
 }
 
-inline std::uint8_t ospf_is_elected_translator_with_reachability(lr_ospf_lsdb_t lsdb, std::uint32_t router_id, const std::uint32_t* reachable, std::size_t reachable_count) {
+inline std::uint8_t ospf_is_elected_translator_with_reachability(lr_ospf_lsdb_t lsdb, std::uint32_t router_id, const std::uint32_t* reachable, std::uintptr_t reachable_count) {
     return lr_ospf_is_elected_translator_with_reachability(lsdb, router_id, reachable, reachable_count);
 }
 
@@ -11383,6 +11388,12 @@ inline OspfV3ExternalDestHandle make_ospfv3externaldest_new(const std::uint8_t* 
     auto p = lr_ospf_v3_external_dest_new(prefix_v4, prefix_v6, prefix_len, metric, metric_type2);
     if (!p) throw Error(std::string("lr_ospf_v3_external_dest_new returned null"));
     return OspfV3ExternalDestHandle(p);
+}
+
+inline PeerHealthTableHandle make_peerhealthtable_new(const struct lr_peer_health_config_t* cfg) {
+    auto p = lr_peer_health_table_new(cfg);
+    if (!p) throw Error(std::string("lr_peer_health_table_new returned null"));
+    return PeerHealthTableHandle(p);
 }
 
 inline PolicyChainHandle make_policychain_new() {
@@ -13389,7 +13400,7 @@ inline std::uint8_t ospf_is_elected_translator(OspfLsdbHandle const& h, std::uin
     return lr_ospf_is_elected_translator(h.get(), router_id);
 }
 
-inline std::uint8_t ospf_is_elected_translator_with_reachability(OspfLsdbHandle const& h, std::uint32_t router_id, const std::uint32_t* reachable, std::size_t reachable_count) {
+inline std::uint8_t ospf_is_elected_translator_with_reachability(OspfLsdbHandle const& h, std::uint32_t router_id, const std::uint32_t* reachable, std::uintptr_t reachable_count) {
     return lr_ospf_is_elected_translator_with_reachability(h.get(), router_id, reachable, reachable_count);
 }
 
@@ -13713,6 +13724,36 @@ inline std::int32_t has_route(OsrouteHandle const& h, const struct lr_prefix_t* 
 
 inline void destroy(OsrouteHandle const& h) {
     lr_osroute_destroy(h.get());
+}
+
+inline std::uint8_t account_update(PeerHealthTableHandle const& h, std::uint64_t peer_id, std::uint16_t afi, std::uint8_t safi, std::uint64_t now_ms) {
+    return lr_peer_health_table_account_update(h.get(), peer_id, afi, safi, now_ms);
+}
+
+inline std::uint8_t account_withdraw(PeerHealthTableHandle const& h, std::uint64_t peer_id, std::uint16_t afi, std::uint8_t safi, std::uint64_t now_ms) {
+    return lr_peer_health_table_account_withdraw(h.get(), peer_id, afi, safi, now_ms);
+}
+
+inline std::uint8_t tier(PeerHealthTableHandle const& h, std::uint64_t peer_id, std::uint16_t afi, std::uint8_t safi) {
+    return lr_peer_health_table_tier(h.get(), peer_id, afi, safi);
+}
+
+inline std::uintptr_t tick(PeerHealthTableHandle const& h, std::uint64_t now_ms) {
+    return lr_peer_health_table_tick(h.get(), now_ms);
+}
+
+inline std::uintptr_t session_count(PeerHealthTableHandle const& h) {
+    return lr_peer_health_table_session_count(h.get());
+}
+
+inline std::uint32_t degraded_count(PeerHealthTableHandle const& h) {
+    return lr_peer_health_table_degraded_count(h.get());
+}
+
+inline std::int32_t session_snapshot(PeerHealthTableHandle const& h, std::uint64_t peer_id, std::uint16_t afi, std::uint8_t safi, struct lr_peer_health_session_t* out) {
+    std::int32_t rc = lr_peer_health_table_session_snapshot(h.get(), peer_id, afi, safi, out);
+    if (rc < 0) throw Error(std::string("lr_peer_health_table_session_snapshot failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
 }
 
 inline std::int32_t push(PolicyChainHandle const& h, lr_route_map_t map) {

@@ -5262,6 +5262,80 @@ class Osroute:
         _lib.lr_osroute_destroy(self._ptr)
 
 
+class PeerHealthTable:
+    """Low-level RAII wrapper around ``lr_peer_health_table_t``.
+
+    Generated; prefer the hand-written wrappers in the other modules when they exist.
+    """
+
+    __slots__ = ("_ptr",)
+
+    def __init__(self, ptr):
+        self._ptr = ptr
+
+    @classmethod
+    def __wrap__(cls, ptr):
+        """Wrap an existing C handle without taking ownership of construction.
+        The handle is still freed by ``__del__``."""
+        return cls(ptr)
+
+    def free(self) -> None:
+        """Release the underlying ``lr_peer_health_table_t`` handle."""
+        if getattr(self, "_ptr", None) is not None and self._ptr != ffi.NULL:
+            _lib.lr_peer_health_table_free(self._ptr)
+            self._ptr = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
+    @property
+    def ptr(self):
+        """Return the raw CFFI pointer for direct C ABI access."""
+        return self._ptr
+
+    @classmethod
+    def new(cls, cfg):
+        """Construct a new ``lr_peer_health_table_t``. Throws ``LrError`` on failure."""
+        p = _lib.lr_peer_health_table_new(cfg)
+        if not p:
+            raise LrError(last_error())
+        return cls(p)
+
+    def account_update(self, peer_id, afi, safi, now_ms):
+        """Low-level wrapper for ``lr_peer_health_table_account_update``. See ``include/lr_ffi.h``."""
+        return _lib.lr_peer_health_table_account_update(self._ptr, peer_id, afi, safi, now_ms)
+
+    def account_withdraw(self, peer_id, afi, safi, now_ms):
+        """Low-level wrapper for ``lr_peer_health_table_account_withdraw``. See ``include/lr_ffi.h``."""
+        return _lib.lr_peer_health_table_account_withdraw(self._ptr, peer_id, afi, safi, now_ms)
+
+    def tier(self, peer_id, afi, safi):
+        """Low-level wrapper for ``lr_peer_health_table_tier``. See ``include/lr_ffi.h``."""
+        return _lib.lr_peer_health_table_tier(self._ptr, peer_id, afi, safi)
+
+    def tick(self, now_ms):
+        """Low-level wrapper for ``lr_peer_health_table_tick``. See ``include/lr_ffi.h``."""
+        return _lib.lr_peer_health_table_tick(self._ptr, now_ms)
+
+    def session_count(self):
+        """Low-level wrapper for ``lr_peer_health_table_session_count``. See ``include/lr_ffi.h``."""
+        return _lib.lr_peer_health_table_session_count(self._ptr)
+
+    def degraded_count(self):
+        """Low-level wrapper for ``lr_peer_health_table_degraded_count``. See ``include/lr_ffi.h``."""
+        return _lib.lr_peer_health_table_degraded_count(self._ptr)
+
+    def session_snapshot(self, peer_id, afi, safi, out):
+        """Low-level wrapper for ``lr_peer_health_table_session_snapshot``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_peer_health_table_session_snapshot(self._ptr, peer_id, afi, safi, out)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
+
 class PolicyChain:
     """Low-level RAII wrapper around ``lr_policy_chain_t``.
 

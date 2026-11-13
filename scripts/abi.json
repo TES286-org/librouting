@@ -11446,6 +11446,209 @@
       ]
     },
     {
+      "name": "lr_bgp_message_update_mp_reach_present",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_reach_family",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out_afi",
+          "type": "uint16_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint16_t"
+        },
+        {
+          "name": "out_safi",
+          "type": "uint8_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_reach_next_hop",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out",
+          "type": "struct lr_bgp_next_hop_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_bgp_next_hop_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_reach_nlri_count",
+      "return_type": "uintptr_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_reach_nlri_at",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "idx",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out_path_id",
+          "type": "uint32_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint32_t"
+        },
+        {
+          "name": "out_prefix",
+          "type": "struct lr_prefix_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_prefix_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_unreach_present",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_unreach_family",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out_afi",
+          "type": "uint16_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint16_t"
+        },
+        {
+          "name": "out_safi",
+          "type": "uint8_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_unreach_nlri_count",
+      "return_type": "uintptr_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_bgp_message_update_mp_unreach_nlri_at",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "m",
+          "type": "lr_bgp_message_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "idx",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out_path_id",
+          "type": "uint32_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint32_t"
+        },
+        {
+          "name": "out_prefix",
+          "type": "struct lr_prefix_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_prefix_t"
+        }
+      ]
+    },
+    {
       "name": "lr_bgp_encode_ipv4_nlri",
       "return_type": "int32_t",
       "params": [
@@ -26844,6 +27047,237 @@
       "params": []
     },
     {
+      "name": "lr_peer_health_table_new",
+      "return_type": "lr_peer_health_table_t",
+      "params": [
+        {
+          "name": "cfg",
+          "type": "const struct lr_peer_health_config_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_peer_health_config_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_free",
+      "return_type": "void",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_account_update",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "peer_id",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "afi",
+          "type": "uint16_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "safi",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "now_ms",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_account_withdraw",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "peer_id",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "afi",
+          "type": "uint16_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "safi",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "now_ms",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_tier",
+      "return_type": "uint8_t",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "peer_id",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "afi",
+          "type": "uint16_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "safi",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_tick",
+      "return_type": "uintptr_t",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "now_ms",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_session_count",
+      "return_type": "uintptr_t",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_degraded_count",
+      "return_type": "uint32_t",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_peer_health_table_session_snapshot",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "t",
+          "type": "lr_peer_health_table_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "peer_id",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "afi",
+          "type": "uint16_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "safi",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out",
+          "type": "struct lr_peer_health_session_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_peer_health_session_t"
+        }
+      ]
+    },
+    {
       "name": "lr_router_add_redistribution_pipe",
       "return_type": "int32_t",
       "params": [
@@ -34959,6 +35393,64 @@
       ]
     },
     {
+      "name": "lr_rtr_client_step_router_key_delta_at",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "step",
+          "type": "const struct lr_rtr_client_step_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_rtr_client_step_t"
+        },
+        {
+          "name": "index",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out",
+          "type": "struct lr_router_key_delta_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_router_key_delta_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_rtr_client_step_aspa_delta_at",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "step",
+          "type": "const struct lr_rtr_client_step_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_rtr_client_step_t"
+        },
+        {
+          "name": "index",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out",
+          "type": "struct lr_aspa_delta_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": true,
+          "pointee": "lr_aspa_delta_t"
+        }
+      ]
+    },
+    {
       "name": "lr_rtr_client_step_log_at",
       "return_type": "uintptr_t",
       "params": [
@@ -38515,6 +39007,10 @@
       "c_struct": "OpaqueTcpAuth",
       "handle_name": "lr_tcp_auth_t"
     },
+    "lr_peer_health_table_t": {
+      "c_struct": "OpaquePeerHealthTable",
+      "handle_name": "lr_peer_health_table_t"
+    },
     "lr_damping_t": {
       "c_struct": "OpaqueDamping",
       "handle_name": "lr_damping_t"
@@ -40177,6 +40673,126 @@
         }
       ]
     },
+    "lr_peer_health_config_t": {
+      "c_struct": "lr_peer_health_config_t",
+      "fields": [
+        {
+          "name": "rollout",
+          "type": "uint8_t",
+          "array": null
+        },
+        {
+          "name": "short_window_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "mid_window_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "long_window_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "baseline_window_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "min_transition_interval_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "min_recovery_interval_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "max_stale_age_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "tick_interval_s",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "soft_degraded",
+          "type": "uint32_t",
+          "array": null
+        },
+        {
+          "name": "hard_degraded",
+          "type": "uint32_t",
+          "array": null
+        }
+      ]
+    },
+    "lr_peer_health_session_t": {
+      "c_struct": "lr_peer_health_session_t",
+      "fields": [
+        {
+          "name": "peer_id",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "afi",
+          "type": "uint16_t",
+          "array": null
+        },
+        {
+          "name": "safi",
+          "type": "uint8_t",
+          "array": null
+        },
+        {
+          "name": "baseline_rate",
+          "type": "double",
+          "array": null
+        },
+        {
+          "name": "tier",
+          "type": "uint8_t",
+          "array": null
+        },
+        {
+          "name": "updates",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "withdraws",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "escalations",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "recoveries",
+          "type": "uint64_t",
+          "array": null
+        },
+        {
+          "name": "peak_tier",
+          "type": "uint8_t",
+          "array": null
+        },
+        {
+          "name": "stale_count",
+          "type": "uint64_t",
+          "array": null
+        }
+      ]
+    },
     "lr_match_t": {
       "c_struct": "lr_match_t",
       "fields": [
@@ -40322,6 +40938,81 @@
         }
       ]
     },
+    "lr_router_key_entry_t": {
+      "c_struct": "lr_router_key_entry_t",
+      "fields": [
+        {
+          "name": "ski",
+          "type": "uint8_t",
+          "array": 20
+        },
+        {
+          "name": "asn",
+          "type": "uint32_t",
+          "array": null
+        },
+        {
+          "name": "subject_public_key_info",
+          "type": "uint8_t *",
+          "array": null
+        },
+        {
+          "name": "subject_public_key_info_len",
+          "type": "uintptr_t",
+          "array": null
+        }
+      ]
+    },
+    "lr_router_key_delta_t": {
+      "c_struct": "lr_router_key_delta_t",
+      "fields": [
+        {
+          "name": "announce",
+          "type": "uint8_t",
+          "array": null
+        },
+        {
+          "name": "entry",
+          "type": "struct lr_router_key_entry_t",
+          "array": null
+        }
+      ]
+    },
+    "lr_aspa_entry_t": {
+      "c_struct": "lr_aspa_entry_t",
+      "fields": [
+        {
+          "name": "customer_asn",
+          "type": "uint32_t",
+          "array": null
+        },
+        {
+          "name": "providers",
+          "type": "uint32_t *",
+          "array": null
+        },
+        {
+          "name": "provider_count",
+          "type": "uintptr_t",
+          "array": null
+        }
+      ]
+    },
+    "lr_aspa_delta_t": {
+      "c_struct": "lr_aspa_delta_t",
+      "fields": [
+        {
+          "name": "announce",
+          "type": "uint8_t",
+          "array": null
+        },
+        {
+          "name": "entry",
+          "type": "struct lr_aspa_entry_t",
+          "array": null
+        }
+      ]
+    },
     "lr_rtr_client_step_t": {
       "c_struct": "lr_rtr_client_step_t",
       "fields": [
@@ -40363,6 +41054,26 @@
         {
           "name": "logs",
           "type": "char **",
+          "array": null
+        },
+        {
+          "name": "router_key_delta_count",
+          "type": "uintptr_t",
+          "array": null
+        },
+        {
+          "name": "aspa_delta_count",
+          "type": "uintptr_t",
+          "array": null
+        },
+        {
+          "name": "router_key_deltas",
+          "type": "struct lr_router_key_delta_t *",
+          "array": null
+        },
+        {
+          "name": "aspa_deltas",
+          "type": "struct lr_aspa_delta_t *",
           "array": null
         }
       ]
@@ -51337,6 +52048,209 @@
             "is_ptr": true,
             "is_struct": true,
             "pointee": "lr_bytes_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_reach_present",
+        "return_type": "uint8_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_reach_family",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out_afi",
+            "type": "uint16_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint16_t"
+          },
+          {
+            "name": "out_safi",
+            "type": "uint8_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_reach_next_hop",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out",
+            "type": "struct lr_bgp_next_hop_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_bgp_next_hop_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_reach_nlri_count",
+        "return_type": "uintptr_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_reach_nlri_at",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "idx",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out_path_id",
+            "type": "uint32_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint32_t"
+          },
+          {
+            "name": "out_prefix",
+            "type": "struct lr_prefix_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_prefix_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_unreach_present",
+        "return_type": "uint8_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_unreach_family",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out_afi",
+            "type": "uint16_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint16_t"
+          },
+          {
+            "name": "out_safi",
+            "type": "uint8_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_unreach_nlri_count",
+        "return_type": "uintptr_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_message_update_mp_unreach_nlri_at",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "m",
+            "type": "lr_bgp_message_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "idx",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out_path_id",
+            "type": "uint32_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint32_t"
+          },
+          {
+            "name": "out_prefix",
+            "type": "struct lr_prefix_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_prefix_t"
           }
         ]
       }
@@ -71762,6 +72676,239 @@
         ]
       }
     ],
+    "lr_peer_health_table_t": [
+      {
+        "name": "lr_peer_health_table_new",
+        "return_type": "lr_peer_health_table_t",
+        "params": [
+          {
+            "name": "cfg",
+            "type": "const struct lr_peer_health_config_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_peer_health_config_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_free",
+        "return_type": "void",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_account_update",
+        "return_type": "uint8_t",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "peer_id",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "afi",
+            "type": "uint16_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "safi",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "now_ms",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_account_withdraw",
+        "return_type": "uint8_t",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "peer_id",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "afi",
+            "type": "uint16_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "safi",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "now_ms",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_tier",
+        "return_type": "uint8_t",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "peer_id",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "afi",
+            "type": "uint16_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "safi",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_tick",
+        "return_type": "uintptr_t",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "now_ms",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_session_count",
+        "return_type": "uintptr_t",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_degraded_count",
+        "return_type": "uint32_t",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_peer_health_table_session_snapshot",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "t",
+            "type": "lr_peer_health_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "peer_id",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "afi",
+            "type": "uint16_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "safi",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out",
+            "type": "struct lr_peer_health_session_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_peer_health_session_t"
+          }
+        ]
+      }
+    ],
     "lr_policy_chain_t": [
       {
         "name": "lr_policy_chain_new",
@@ -74786,6 +75933,64 @@
             "is_ptr": true,
             "is_struct": true,
             "pointee": "lr_roa_delta_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_rtr_client_step_router_key_delta_at",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "step",
+            "type": "const struct lr_rtr_client_step_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_rtr_client_step_t"
+          },
+          {
+            "name": "index",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out",
+            "type": "struct lr_router_key_delta_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_router_key_delta_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_rtr_client_step_aspa_delta_at",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "step",
+            "type": "const struct lr_rtr_client_step_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_rtr_client_step_t"
+          },
+          {
+            "name": "index",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out",
+            "type": "struct lr_aspa_delta_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": true,
+            "pointee": "lr_aspa_delta_t"
           }
         ]
       },
