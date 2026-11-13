@@ -229,6 +229,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
     let shutdown = ctx.shutdown;
     let roa_store = ctx.roa_store;
+    let peer_health_table = ctx.peer_health_table;
     let started = std::time::Instant::now();
 
     // Pre-create the first pipe instance so a bind failure shows up
@@ -263,6 +264,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                 let status_lines = Arc::clone(&status_lines);
                 let shutdown = shutdown.clone();
                 let roa_store = roa_store.clone();
+                let peer_health_table = peer_health_table.clone();
                 thread::Builder::new()
                     .name("lr-api-conn".into())
                     .spawn(move || {
@@ -274,6 +276,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                             status_lines: &status_lines,
                             shutdown: shutdown.as_ref(),
                             roa_store: roa_store.as_ref(),
+                            peer_health_table: peer_health_table.as_ref(),
                             started,
                         };
                         serve_connection(stream, &deps);
@@ -374,6 +377,9 @@ struct ConnDeps<'a> {
     /// on daemon modes without a ROA store (OSPF/Babel/BMP) — the
     /// renderer then reports `roa-total 0` instead of refusing.
     roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
+    /// Peer-health table for `show peer-health` (issue #99).
+    /// `None` when peer-health flap suppression is off.
+    peer_health_table: Option<&'a Arc<std::sync::Mutex<lr_peer_health::PeerHealthTable>>>,
     started: std::time::Instant,
 }
 
@@ -477,6 +483,16 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
         // as a sub-command.
         if cmd == "show roa" {
             let body = crate::roa_view::render(deps.roa_store);
+            let _ = out.write_all(body.as_bytes());
+            if out.flush().is_err() {
+                return;
+            }
+            continue;
+        }
+        // `show peer-health` (issue #99). Same shape on Windows and
+        // Unix — the renderer is shared.
+        if cmd == "show peer-health" {
+            let body = crate::peer_health_view::render(deps.peer_health_table);
             let _ = out.write_all(body.as_bytes());
             if out.flush().is_err() {
                 return;

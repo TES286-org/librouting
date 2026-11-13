@@ -1409,9 +1409,10 @@ mod damping_reload_toggle_tests {
         // 2000 suppress threshold, so the prefix is suppressed.
         {
             let mut r = router.write().unwrap();
-            r.hooks_mut().run_import_withdraw(&key, 0);
-            r.hooks_mut().run_import_withdraw(&key, 0);
-            r.hooks_mut().run_import_withdraw(&key, 0);
+            let origin = lr_core::rib::RouteOrigin { proto: 0, peer: 1 };
+            r.hooks_mut().run_import_withdraw(origin, &key, 0);
+            r.hooks_mut().run_import_withdraw(origin, &key, 0);
+            r.hooks_mut().run_import_withdraw(origin, &key, 0);
         }
         // Sanity: the FoM table records the prefix and marks it
         // suppressed (the hook chain dispatched the withdraws).

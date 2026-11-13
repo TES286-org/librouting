@@ -77,6 +77,12 @@ pub struct ApiContext {
     /// then reports `roa-total 0` rather than a misleading "no
     /// data".
     pub roa_store: Option<Arc<lr_bgp::RoaStore>>,
+    /// Peer-health table for `show peer-health` (issue #99). `None`
+    /// when peer-health flap suppression is not enabled (rollout =
+    /// `off`); `Some` when the daemon installed a
+    /// `PeerHealthImportHook`. The Arc is shared with the hook and
+    /// the ticker thread.
+    pub peer_health_table: Option<Arc<std::sync::Mutex<lr_peer_health::PeerHealthTable>>>,
 }
 
 #[cfg(unix)]
@@ -139,6 +145,7 @@ mod imp {
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
         let shutdown = ctx.shutdown;
         let roa_store = ctx.roa_store;
+        let peer_health_table = ctx.peer_health_table;
         let started = std::time::Instant::now();
 
         thread::Builder::new()
@@ -154,6 +161,7 @@ mod imp {
                     let status_lines = Arc::clone(&status_lines);
                     let shutdown = shutdown.clone();
                     let roa_store = roa_store.clone();
+                    let peer_health_table = peer_health_table.clone();
                     let path_owned = path_owned.clone();
                     thread::Builder::new()
                         .name("lr-api-conn".into())
@@ -168,6 +176,7 @@ mod imp {
                                 status_lines: &status_lines,
                                 shutdown: shutdown.as_ref(),
                                 roa_store: roa_store.as_ref(),
+                                peer_health_table: peer_health_table.as_ref(),
                                 started,
                                 socket_path: Some(&path_owned),
                             };
@@ -218,6 +227,9 @@ mod imp {
         /// on daemon modes without a ROA store (OSPF/Babel/BMP) — the
         /// renderer then reports `roa-total 0` instead of refusing.
         roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
+        /// Peer-health table for `show peer-health` (issue #99).
+        /// `None` when peer-health flap suppression is off.
+        peer_health_table: Option<&'a Arc<std::sync::Mutex<lr_peer_health::PeerHealthTable>>>,
         started: std::time::Instant,
         /// The `shutdown` command removes the socket file itself so the
         /// cleanup does not race the process exit.
@@ -341,6 +353,18 @@ mod imp {
             // as a sub-command.
             if cmd == "show roa" {
                 let body = crate::roa_view::render(deps.roa_store);
+                let _ = out.write_all(body.as_bytes());
+                if out.flush().is_err() {
+                    return;
+                }
+                continue;
+            }
+            // `show peer-health` (issue #99). Surfaces per-session
+            // flap-suppression state: rollout mode, degraded count,
+            // peak tier, and one line per session with its tier,
+            // baseline, window counts, and stale prefix count.
+            if cmd == "show peer-health" {
+                let body = crate::peer_health_view::render(deps.peer_health_table);
                 let _ = out.write_all(body.as_bytes());
                 if out.flush().is_err() {
                     return;
@@ -717,6 +741,7 @@ mod imp {
                 status_lines: Box::new(Vec::new),
                 shutdown: None,
                 roa_store: None,
+                peer_health_table: None,
             }
         }
 

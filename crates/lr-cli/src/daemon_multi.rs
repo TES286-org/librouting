@@ -311,6 +311,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         }),
         roa_len: None,
         roa_store: None,
+        peer_health_table: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
         shutdown: crate::build_shutdown(cfg, &router),

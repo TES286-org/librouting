@@ -927,6 +927,7 @@ pub(super) fn run_ospf_daemon(
                 status_lines: Arc::clone(&status_lines),
                 roa_len: None,
                 roa_store: None,
+                peer_health_table: None,
                 filter_metrics: Mutex::new(None),
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
                 shutdown,

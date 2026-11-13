@@ -185,6 +185,7 @@ mod daemon_ospf3;
 mod daemon_policy;
 mod daemon_rpki;
 mod metrics;
+mod peer_health_view;
 mod pipe_name;
 mod privdrop;
 mod roa_view;
@@ -1704,15 +1705,37 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // "shadow-best-path" | "limited" | "full". Installs a
     // PeerHealthImportHook on the import chain and spawns a ticker
     // thread that calls PeerHealthTable::tick every tick_interval_s.
+    //
+    // In `shadow-best-path` mode, also installs a
+    // PeerHealthShadowSelectionHook on the selection chain — it
+    // records the divergence between the standard and tiered
+    // orderings without affecting routing (issue #99 §Rollout
+    // phase 3). The divergence counter is surfaced by
+    // `lrctl show peer-health`.
+    //
+    // The table Arc is captured into `peer_health_table` so the
+    // Runtime (and thus the runtime API's `show peer-health`) can
+    // read it.
+    let mut peer_health_table: Option<Arc<Mutex<lr_peer_health::PeerHealthTable>>> = None;
     if cfg.peer_health.is_enabled() {
         let mode = cfg.peer_health.rollout_mode();
         let mut ph_cfg = cfg.peer_health.config.clone();
         ph_cfg.rollout = mode;
         let table = Arc::new(Mutex::new(lr_peer_health::PeerHealthTable::new(ph_cfg)));
-        let hook = lr_policy::hooks::PeerHealthImportHook::new(Arc::clone(&table));
+        let import_hook = lr_policy::hooks::PeerHealthImportHook::new(Arc::clone(&table));
         {
             let mut r = router.write().unwrap();
-            r.hooks_mut().import.push(Box::new(hook));
+            r.hooks_mut().import.push(Box::new(import_hook));
+            // In shadow-best-path mode, also install the shadow
+            // selection hook that records would-be-best-path
+            // divergences. The hook always returns None so the
+            // default comparator runs unchanged — routing is
+            // unaffected.
+            if mode == lr_peer_health::RolloutMode::ShadowBestPath {
+                let shadow_hook =
+                    lr_policy::hooks::PeerHealthShadowSelectionHook::new(Arc::clone(&table));
+                r.hooks_mut().selection.push(Box::new(shadow_hook));
+            }
         }
         let tick_interval = cfg.peer_health.config.tick_interval_s;
         let tick_table = Arc::clone(&table);
@@ -1739,10 +1762,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             "issue-99:     peer-health flap suppression enabled (rollout={})",
             mode.name(),
         );
-        // The hook (installed on the router's import chain) holds a
-        // clone of the table Arc; the ticker thread holds another.
-        // The local `table` binding can be dropped safely — the Arc
-        // stays alive until both the hook and the thread are gone.
+        // Hand the table Arc to the Runtime so the API's
+        // `show peer-health` can read it. The hook (installed on
+        // the router's import chain) holds another clone; the
+        // ticker thread holds a third. The local `table` binding
+        // is consumed by this move.
+        peer_health_table = Some(table);
     }
 
     // ---- Banner. ----
@@ -2108,6 +2133,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     move || roa_store.len()
                 })),
                 roa_store: Some(Arc::clone(&roa_store)),
+                peer_health_table,
                 filter_metrics: Mutex::new(filter_registry.map(Arc::new)),
                 session_labels: Arc::new(Mutex::new(session_label_map)),
                 shutdown,
@@ -4666,6 +4692,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         status_lines: Arc::new(Vec::new),
         roa_len: None,
         roa_store: None,
+        peer_health_table: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
         // BMP is a passive receiver; the drain posture does not apply
@@ -5190,6 +5217,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             status_lines: Arc::new(Vec::new),
             roa_len: None,
             roa_store: None,
+            peer_health_table: None,
             filter_metrics: Mutex::new(None),
             session_labels: Arc::new(Mutex::new(HashMap::new())),
             shutdown: build_shutdown(cfg, &router),
@@ -7313,6 +7341,12 @@ struct Runtime {
     /// because the renderer needs to enumerate the entries, not just
     /// count them.
     roa_store: Option<Arc<lr_bgp::RoaStore>>,
+    /// Peer-health table (issue #99 — `lrctl show peer-health`).
+    /// `Some` when the daemon installed a `PeerHealthImportHook`
+    /// (i.e. `[bgp.peer_health]` rollout != `off`); the Arc is shared
+    /// with the hook and the ticker thread. `None` when peer-health
+    /// is off so the renderer reports `rollout=off sessions=0`.
+    peer_health_table: Option<Arc<Mutex<lr_peer_health::PeerHealthTable>>>,
     /// Filter-eval latency histograms (ROADMAP-v3 D12.4), shared
     /// between the import/export filter hooks (which record into
     /// them per route) and the metrics endpoint (which renders
@@ -7423,6 +7457,7 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
         }),
         shutdown: rt.shutdown.clone(),
         roa_store: rt.roa_store.clone(),
+        peer_health_table: rt.peer_health_table.clone(),
     };
     api::spawn(path, ctx)
         .map(|p| log_info!(Component::Api, "runtime API on {}", p))
