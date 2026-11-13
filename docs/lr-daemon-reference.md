@@ -757,11 +757,32 @@ Rollout modes gate how far the mechanism reaches:
 
 - `off` — no accounting.
 - `observe` — accounting only; counters and baselines recorded.
-- `shadow` — full state machine runs; tiers computed but not stamped.
-- `shadow-best-path` — tiers stamped so `BestPath::rank_tiered` runs,
-  but stale markings suppressed.
-- `limited` — tiers stamped (capped at L1) and stale markings applied.
+- `shadow` — full state machine runs; tiers computed but not stamped
+  on routes. The speaker's standard `BestPath::rank` selects the best
+  path; routing is unaffected.
+- `shadow-best-path` — like `shadow` (no tier attribute stamped), plus
+  a `PeerHealthShadowSelectionHook` records the divergence between the
+  standard and tiered orderings. The hook always returns `None` so the
+  default comparator runs unchanged — routing is unaffected. The
+  divergence counter is surfaced by `lrctl show peer-health`.
+- `limited` — tiers stamped (capped at L1) and stale markings applied
+  on escalation. `BestPath::rank_tiered` runs and changes selection.
 - `full` — every tier L0..=L3 and stale markings apply.
+
+Stale semantics: when a peer escalates into a degraded tier, every
+prefix the peer has advertised is marked stale so ECMP excludes it
+(`BestPath::multipath_tiered` skips stale paths). A fresh UPDATE for a
+prefix re-admits it (clears the stale marker) — the hook does **not**
+re-mark stale on a fresh advertisement. Stale markers expire after
+`max_stale_age_s` via a rate-limited sweep in the ticker thread.
+
+The EWMA baseline (`ewma_alpha`, default 0.05) is updated only while
+the peer is at L0; it is frozen on escalation so a flap cannot inflate
+its own baseline.
+
+`lrctl show peer-health` surfaces per-session state: rollout mode,
+degraded count, peak tier, and one line per `(peer, AFI/SAFI)` with
+tier, baseline, window counts, stale count, and escalations/recoveries.
 
 ### `[bgp.rpki]`
 

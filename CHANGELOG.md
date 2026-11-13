@@ -4036,8 +4036,9 @@ unreachable), the mechanism temporarily lowers a peer's path
 preference at session granularity. The session stays up, the
 prefixes stay reachable, and the blast radius is one peer.
 
-Detection uses an EWMA-equivalent baseline (computed from a
-configurable baseline window, default 480s) plus three sliding
+Detection uses an EWMA baseline (`ewma_alpha`, default 0.05;
+updated only while the peer is at L0 and frozen on escalation
+so a flap cannot inflate its own baseline) plus three sliding
 windows (short/mid/long, default 5s/30s/120s) with
 baseline-relative budgets. Escalation requires at least two
 tripped windows including a mid- or long-window confirmation;
@@ -4045,30 +4046,47 @@ hysteresis separates enter and exit thresholds; an emergency
 path bypasses the minimum transition interval for catastrophic
 bursts. Tiers L0..=L3 represent normal through severe
 degradation; recovery is gradual with per-tier dwell and
-exponential backoff. Stale prefixes (learned from a degraded
-peer) stay reachable but are excluded from ECMP until a fresh
-UPDATE re-admits them or a rate-limited sweep clears them.
+exponential backoff. On escalation, every prefix the peer has
+advertised is marked stale so ECMP excludes it; a fresh UPDATE
+re-admits a prefix (clears its stale marker); stale markers
+expire after `max_stale_age_s` via a rate-limited sweep.
 
 Six rollout modes gate how far the mechanism reaches: `off`,
-`observe` (accounting only), `shadow` (state machine without
-stamping), `shadow-best-path` (stamping without stale),
-`limited` (L1 cap + stale), `full` (all tiers + stale). The
-daemon wires the mechanism via `[bgp.peer_health]` config and
-spawns a ticker thread; the router's `reselect` uses
-`BestPath::rank_tiered` when any candidate carries the tier
-attribute.
+`observe` (accounting only), `shadow` (state machine runs, no
+stamping, routing unaffected), `shadow-best-path` (like shadow,
+plus a `PeerHealthShadowSelectionHook` records divergence
+between standard and tiered orderings — routing still
+unaffected), `limited` (L1 cap + stale), `full` (all tiers +
+stale). The daemon wires the mechanism via `[bgp.peer_health]`
+config, spawns a ticker thread, and installs the shadow
+selection hook when `rollout = "shadow-best-path"`; the
+router's `reselect` uses `BestPath::rank_tiered` when any
+candidate carries the tier attribute.
+
+`lrctl show peer-health` surfaces per-session state: rollout
+mode, degraded count, peak tier, and one line per
+`(peer, AFI/SAFI)` with tier, baseline, window counts, stale
+count, and escalations/recoveries.
 
 New public Rust API surface: `lr_peer_health::{PeerHealthTable,
-PeerHealthConfig, PeerHealthTier, RolloutMode, ...}`, the
-`lr_policy::PeerHealthImportHook`, two BGP-private path
-attributes (`LrPeerHealthTier` = 244, `LrPeerHealthStale` =
-243), four `BestPath` methods (`tiered_candidates`,
-`rank_tiered`, `select_tiered`, `multipath_tiered`), six
-`PathAttributes` accessors, and a new `peer-health` feature on
-`lr-policy`. New C ABI: `lr_peer_health_table_t` handle,
+PeerHealthConfig, PeerHealthTier, RolloutMode,
+PeerHealthTable::internal_tier, PeerHealthTable::observe_prefix,
+PeerHealthTable::forget_prefix, ...}`, the
+`lr_policy::{PeerHealthImportHook, PeerHealthShadowSelectionHook}`,
+two BGP-private path attributes (`LrPeerHealthTier` = 244,
+`LrPeerHealthStale` = 243), four `BestPath` methods
+(`tiered_candidates`, `rank_tiered`, `select_tiered`,
+`multipath_tiered`), six `PathAttributes` accessors, and a new
+`peer-health` feature on `lr-policy`. The `ImportHook::on_withdraw`
+trait signature now takes a `RouteOrigin` parameter so per-peer
+withdrawal accounting works correctly (the peer-health hook
+accounts withdraws at the right `(peer, family)`; the damping
+hook ignores it). New C ABI: `lr_peer_health_table_t` handle,
 `lr_peer_health_config_t` / `lr_peer_health_session_t`
-structs, and 8 entry points. 30+ unit tests cover the state
-machine, hook, and tiered selection.
+structs, and 8 entry points, surfaced through the Go, Python,
+and C++ binding generators. 40+ unit tests cover the state
+machine, hook, shadow selection, and tiered selection; 4 E2E
+tests cover off/observe/shadow-best-path/full modes.
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
