@@ -280,6 +280,37 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         }
         e.close(0);
     }
+    // `[[bgp.roa_source]]` (issue #100 — advanced ROA loading). Emitted
+    // as a flat top-level `bgp.roa_source { … }` block, mirroring the
+    // `bgp.network_route_map` shape. The `program` / `program_file`
+    // keys appear only when the source's format is a transform format
+    // (`jq` / `awk`); the round-trip equality contract holds because
+    // the IR carries them verbatim.
+    for src in &cfg.roa_sources {
+        e.open(0, "bgp.roa_source", None);
+        if let Some(v) = &src.path {
+            e.kv(1, "path", &fmt_string(v));
+        }
+        if let Some(v) = &src.url {
+            e.kv(1, "url", &fmt_string(v));
+        }
+        if let Some(v) = src.format {
+            e.kv(1, "format", &fmt_string(v.as_str()));
+        }
+        if let Some(v) = src.interval {
+            e.kv(1, "interval", &v.to_string());
+        }
+        if let Some(v) = &src.user_agent {
+            e.kv(1, "user_agent", &fmt_string(v));
+        }
+        if let Some(v) = &src.program {
+            e.kv(1, "program", &fmt_string(v));
+        }
+        if let Some(v) = &src.program_file {
+            e.kv(1, "program_file", &fmt_string(v));
+        }
+        e.close(0);
+    }
 
     // --- static routes ------------------------------------------------------
     if !cfg.static_routes.is_empty() {

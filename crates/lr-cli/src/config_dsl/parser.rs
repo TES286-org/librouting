@@ -121,6 +121,13 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
         ("", "roa") => Some(array("roa", None)),
         ("", "redistribute") => Some(array("redistribute", None)),
         ("", "aggregate") => Some(array("aggregate", None)),
+        // `bgp.roa_source` (issue #100 — advanced ROA loading). The
+        // DSL form is a top-level flat block (no enclosing `bgp { … }`),
+        // mirroring `bgp.network_route_map` above and the TOML
+        // `[[bgp.roa_source]]` table. Keys dispatch through the shared
+        // `apply_roa_source_key` so both frontends share the fail-closed
+        // schema and the `RoaSourceSpec` struct.
+        ("", "bgp.roa_source") => Some(array("bgp.roa_source", None)),
         // `[[bgp.network_route_map]]` (issue #92 — defects.txt L75):
         // FRR `network PREFIX route-map NAME` qualifier applied at
         // origination. The DSL emits these as a top-level
@@ -795,6 +802,17 @@ impl<'a> Parser<'a> {
             "redistribute" => cfg.redistributes.push(RedistributeSpec::default()),
             "aggregate" => cfg.aggregates.push(AggregateSpec::default()),
             "bgp.network_route_map" => cfg.network_route_maps.push(NetworkRouteMapSpec::default()),
+            "bgp.roa_source" => cfg
+                .roa_sources
+                .push(crate::daemon_roa_loader::RoaSourceSpec {
+                    path: None,
+                    url: None,
+                    format: None,
+                    interval: None,
+                    user_agent: None,
+                    program: None,
+                    program_file: None,
+                }),
             _ => {
                 return Err(self.err(format!(
                     "internal: unhandled array section '{section}' for block '{block}'"
