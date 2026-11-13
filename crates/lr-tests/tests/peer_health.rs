@@ -23,6 +23,7 @@ use lr_core::nlri::NlriFamily;
 use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
 use lr_peer_health::{GlobalBudgets, PeerHealthConfig, PeerHealthTable, RolloutMode, WindowBudget};
 use lr_policy::hooks::{HookVerdict, ImportHook, PeerHealthImportHook};
+use lr_policy::SelectionHook;
 
 fn cfg_test() -> PeerHealthConfig {
     let mut cfg = PeerHealthConfig::default();
@@ -198,5 +199,82 @@ fn peer_health_e2e_observe_mode_accounts_without_stamping() {
     assert_eq!(
         table.lock().unwrap().tier(1, NlriFamily::IPV4_UNICAST),
         lr_peer_health::PeerHealthTier::L0
+    );
+}
+
+#[test]
+fn peer_health_e2e_shadow_best_path_does_not_affect_routing() {
+    // Issue #99 §Rollout phase 3: shadow-best-path must NOT affect
+    // routing. The import hook must not stamp the tier attribute,
+    // and the speaker's BestPath::rank (not rank_tiered) must
+    // select the actual best path. A PeerHealthShadowSelectionHook
+    // observes the divergence between the tiered and standard
+    // orderings without changing the verdict.
+    use lr_policy::hooks::PeerHealthShadowSelectionHook;
+
+    let mut cfg = cfg_test();
+    cfg.rollout = RolloutMode::ShadowBestPath;
+    let table = Arc::new(Mutex::new(PeerHealthTable::new(cfg)));
+    let import_hook = PeerHealthImportHook::new(Arc::clone(&table));
+    let shadow_hook = PeerHealthShadowSelectionHook::new(Arc::clone(&table));
+
+    // Train + burst on peer 1.
+    for i in 0..10u64 {
+        let mut r = bgp_route([203, 0, 113, 0], 24, 1, i * 1000);
+        let _ = import_hook.on_import(&mut r);
+    }
+    for i in 0..200u64 {
+        let mut r = bgp_route([203, 0, 113, 0], 24, 1, 10_000 + i * 10);
+        let _ = import_hook.on_import(&mut r);
+    }
+
+    // The internal tier is escalated (state machine ran), but the
+    // PUBLIC tier is L0 (shadow-best-path masks it).
+    assert!(
+        table
+            .lock()
+            .unwrap()
+            .internal_tier(1, NlriFamily::IPV4_UNICAST)
+            > lr_peer_health::PeerHealthTier::L0,
+        "internal tier should be escalated after the burst"
+    );
+    assert_eq!(
+        table.lock().unwrap().tier(1, NlriFamily::IPV4_UNICAST),
+        lr_peer_health::PeerHealthTier::L0,
+        "public tier must be L0 in shadow-best-path mode"
+    );
+
+    // A fresh route from the degraded peer has NO tier attribute
+    // (shadow-best-path does not stamp).
+    let mut r_degraded = bgp_route([203, 0, 113, 0], 24, 1, 20_000);
+    let _ = import_hook.on_import(&mut r_degraded);
+    let attrs: PathAttributes = r_degraded.attributes.clone().into();
+    assert!(
+        !attrs.has_peer_health_tier(),
+        "shadow-best-path must not stamp the tier attribute"
+    );
+
+    // The shadow selection hook records divergences: a route from
+    // peer 1 (degraded internally) vs peer 2 (L0) should produce
+    // a divergence (tiered ordering prefers peer 2; standard
+    // ordering prefers peer 1 by lower peer-id).
+    let r_fresh = bgp_route([203, 0, 113, 0], 24, 2, 20_000);
+    let before = shadow_hook.divergences();
+    let _ = shadow_hook.compare(&r_degraded, &r_fresh);
+    let after = shadow_hook.divergences();
+    assert!(
+        after > before,
+        "shadow hook should record a divergence for degraded-vs-fresh"
+    );
+
+    // The standard BestPath::select (not tiered) picks peer 1
+    // (lower peer-id wins the tie) — routing is unaffected by the
+    // shadow tier computation.
+    let routes = [r_fresh.clone(), r_degraded.clone()];
+    let cfg_bp = BestPathConfig::default();
+    let best = BestPath::select(&routes, &cfg_bp).unwrap();
+    assert_eq!(
+        best.origin.peer, 1,
+        "standard selection must pick peer 1 (shadow-best-path does not change routing)"
     );
 }
