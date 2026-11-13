@@ -1208,6 +1208,17 @@ pub(crate) struct DaemonConfig {
     /// `roa.state` regardless of `roa_validate` so an explicit
     /// `if roa.state == "invalid" then { reject; }` always works.
     pub roas: Vec<RoaSpec>,
+    /// `[[bgp.roa_source]]` tables — advanced ROA loading (issue
+    /// #100). Each entry points at a file on disk or an HTTP(S) URL
+    /// and is parsed by the loader thread into `RoaEntry`s that
+    /// merge with the static `[[roa]]` layer under the live
+    /// `RoaStore`. File sources are watched via mtime polling; URL
+    /// sources are re-fetched on a configurable interval. Each
+    /// source's contribution is unioned with the others (and with
+    /// the inline `[[roa]]` tables), so an operator can mix a
+    /// local override file with a live URL without either
+    /// clobbering the other.
+    pub roa_sources: Vec<crate::daemon_roa_loader::RoaSourceSpec>,
     /// RFC 6811 §2 prefix-origin validation: when on, every received
     /// BGP UPDATE is validated against `[[roa]]` tables at import
     /// time (before the user-supplied import hook chain runs). Off
@@ -1735,6 +1746,7 @@ impl DaemonConfig {
             shutdown_drain_rate_per_sec: 50,
             shutdown_drain_max_wait_secs: 600,
             roas: Vec::new(),
+            roa_sources: Vec::new(),
             roa_validate: false,
             roa_invalid_action: "reject".to_string(),
             filters: Vec::new(),
@@ -1858,6 +1870,7 @@ impl DaemonConfig {
         self.finalize_ospf()?;
         self.finalize_ldp()?;
         self.finalize_roa()?;
+        self.finalize_roa_sources()?;
         self.finalize_rpki()?;
         self.finalize_filters()?;
         self.finalize_babel_interfaces()?;
@@ -2199,6 +2212,58 @@ impl DaemonConfig {
             if !seen.insert((prefix, asn)) {
                 return Err(format!(
                     "[[roa]] {prefix_text} asn {asn} declared twice (duplicate)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate and complete the `[[bgp.roa_source]]` configuration
+    /// (issue #100). Each source must specify exactly one of `path`
+    /// or `url`, and `format` (or the inferred extension) must map
+    /// onto a known parser. URL sources must specify a non-zero
+    /// `interval` (clamped to 60 s by the loader at runtime — the
+    /// finalize step rejects a literal zero so the operator sees
+    /// the typo at config time rather than after the first poll
+    /// cycle lands).
+    fn finalize_roa_sources(&mut self) -> Result<(), String> {
+        for (i, src) in self.roa_sources.iter().enumerate() {
+            let label = match (src.path.as_deref(), src.url.as_deref()) {
+                (Some(p), _) => format!("[[bgp.roa_source]] path \"{p}\""),
+                (_, Some(u)) => format!("[[bgp.roa_source]] url \"{u}\""),
+                _ => {
+                    return Err(format!(
+                        "[[bgp.roa_source]] #{}: missing 'path' or 'url'",
+                        i + 1
+                    ));
+                }
+            };
+            if src.path.is_some() && src.url.is_some() {
+                return Err(format!(
+                    "{label}: 'path' and 'url' are mutually exclusive (set one or the other)"
+                ));
+            }
+            // Resolve the format (explicit pin or extension
+            // inference). Surface a fail-closed error here so a
+            // typo'd format name does not reach the loader thread.
+            if let Err(e) = src.resolve_format() {
+                return Err(format!("{label}: {e}"));
+            }
+            // URL sources: a literal zero interval is rejected
+            // (the loader would clamp it to 60 s, but a typo'd
+            // `interval = 0` deserves a config-time error).
+            if src.url.is_some() {
+                if let Some(0) = src.interval {
+                    return Err(format!(
+                        "{label}: 'interval = 0' (set a non-zero value, in seconds)"
+                    ));
+                }
+            }
+            // File sources: ignore `interval` (warn the operator
+            // so they know the key is a no-op for files).
+            if src.path.is_some() && src.interval.is_some() {
+                self.warnings.push(format!(
+                    "{label}: 'interval' is ignored for file sources (file is watched via mtime)"
                 ));
             }
         }
@@ -3239,6 +3304,17 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.roas.push(RoaSpec::default());
                     section = "roa".to_string();
                 }
+                "bgp.roa_source" => {
+                    cfg.roa_sources
+                        .push(crate::daemon_roa_loader::RoaSourceSpec {
+                            path: None,
+                            url: None,
+                            format: None,
+                            interval: None,
+                            user_agent: None,
+                        });
+                    section = "bgp.roa_source".to_string();
+                }
                 "filter" => {
                     cfg.filters.push(FilterSpec::default());
                     section = "filter".to_string();
@@ -3303,6 +3379,8 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "ldp"
                 && section != "damping"
                 && section != "bgp.rpki"
+                && section != "bgp.roa_source"
+                && section != "bgp.peer_health"
                 && section != "bgp_ls"
                 && section != "logging"
                 && section != "safety"
@@ -3393,6 +3471,11 @@ pub(crate) fn apply_config_key(
     // protocol surface — a typo'd prefix or filter body silently
     // changes origin validation behaviour.
     if apply_roa_key(cfg, section, key, value).map_err(|e| format!("line {}: {}", lineno + 1, e))? {
+        return Ok(());
+    }
+    if apply_roa_source_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
         return Ok(());
     }
     if apply_static_route_key(cfg, section, key, value)
@@ -4001,6 +4084,75 @@ fn apply_roa_key(
             return Err(format!(
                 "unknown [[roa]] key '{key}' (typo protection; ROA config fails closed)"
             ))
+        }
+    }
+    Ok(true)
+}
+
+/// Apply one `key = value` pair to the advanced ROA loader schema:
+/// the `[[bgp.roa_source]]` tables (issue #100). Fail-closed like
+/// every other ROA surface — a typo'd path or URL silently weakens
+/// origin validation. Returns `Ok(true)` when the key was consumed
+/// here, `Ok(false)` to fall through to the next section schema.
+fn apply_roa_source_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "bgp.roa_source" {
+        return Ok(false);
+    }
+    let Some(src) = cfg.roa_sources.last_mut() else {
+        return Err("key outside a [[bgp.roa_source]] table".into());
+    };
+    match key {
+        "path" | "file" => {
+            let v = value.trim().trim_matches('"').to_string();
+            if v.is_empty() {
+                return Err(format!("bad roa_source path '{v}' (empty)"));
+            }
+            src.path = Some(v);
+            // Path and URL are mutually exclusive — a section that
+            // sets both is rejected at finalize time.
+        }
+        "url" => {
+            let v = value.trim().trim_matches('"').to_string();
+            if v.is_empty() {
+                return Err(format!("bad roa_source url '{v}' (empty)"));
+            }
+            // Light syntax check: must look like http(s)://.
+            if !v.starts_with("http://") && !v.starts_with("https://") {
+                return Err(format!(
+                    "bad roa_source url '{v}' (expected 'http://' or 'https://' scheme)"
+                ));
+            }
+            src.url = Some(v);
+        }
+        "format" => {
+            let v = value.trim().trim_matches('"');
+            match lr_bgp::RoaFormat::from_name(v) {
+                Some(f) => src.format = Some(f),
+                None => {
+                    return Err(format!(
+                        "unknown roa_source format '{v}' (expected: native, bird, json, csv)"
+                    ));
+                }
+            }
+        }
+        "interval" => {
+            let n: u32 = value
+                .parse()
+                .map_err(|_| format!("bad roa_source interval '{value}' (u32 seconds)"))?;
+            src.interval = Some(n);
+        }
+        "user_agent" => {
+            src.user_agent = Some(value.trim().trim_matches('"').to_string());
+        }
+        _ => {
+            return Err(format!(
+                "unknown [[bgp.roa_source]] key '{key}' (typo protection; ROA loader config fails closed)"
+            ));
         }
     }
     Ok(true)

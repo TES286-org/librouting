@@ -300,6 +300,8 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                     None,
                     None,
                     None,
+                    &[],
+                    None,
                     None,
                 )
             }

@@ -1184,6 +1184,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );
@@ -1233,6 +1235,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );
@@ -1283,6 +1287,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );
@@ -1331,6 +1337,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );
@@ -1366,6 +1374,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );
@@ -1379,6 +1389,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );
@@ -1466,6 +1478,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );
@@ -1492,6 +1506,8 @@ mod damping_reload_toggle_tests {
             &current_networks,
             None,
             None,
+            None,
+            &[],
             Some(&damping_state),
             None,
         );

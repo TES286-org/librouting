@@ -53,6 +53,12 @@ lr-damping = { workspace = true }
 lr-peer-health = { workspace = true }
 siphasher.workspace = true
 
+# HTTP client for `[[bgp.roa_source]] url = "..."` (issue #100). ureq is
+# the smallest blocking HTTP client with TLS by default (rustls +
+# webpki-roots, no OpenSSL, no async runtime). Used only by the
+# daemon's ROA URL fetcher; the library crates stay dep-free.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
 # Windows named-pipe transport for the runtime API
 # (`CreateNamedPipeW`, `ConnectNamedPipe`, `ReadFile`, `WriteFile`,
 # `DuplicateHandle`). The `windows-sys` crate provides correct,

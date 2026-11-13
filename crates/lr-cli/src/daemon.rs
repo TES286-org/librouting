@@ -183,6 +183,7 @@ mod daemon_multi;
 mod daemon_ospf;
 mod daemon_ospf3;
 mod daemon_policy;
+mod daemon_roa_loader;
 mod daemon_rpki;
 mod metrics;
 mod peer_health_view;
@@ -1459,15 +1460,31 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         Ok(t) => t,
         Err(e) => return daemon_policy::policy_error(e),
     };
-    let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::from_table(roa_table));
-    if !roa_store.is_empty() {
-        log_info!(
-            Component::Rpki,
-            "roa:         {} entries, validate={} (action: {})",
-            roa_store.len(),
-            cfg.roa_validate,
-            cfg.roa_invalid_action
-        );
+    let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::new());
+    // Advanced ROA loading (issue #100): the inline `[[roa]]` tables
+    // and the per-source loader threads share one `RoaLayerRegistry`.
+    // The registry recomputes the union (deduplicated, sorted) and
+    // swaps it into the live `RoaStore` on every change — both at
+    // startup (here) and on every SIGHUP-driven reload (below).
+    let roa_layer_registry = std::sync::Arc::new(std::sync::Mutex::new(
+        daemon_roa_loader::RoaLayerRegistry::new(),
+    ));
+    {
+        let inline = roa_table.entries().to_vec();
+        let count = inline.len();
+        roa_layer_registry
+            .lock()
+            .unwrap()
+            .replace_inline(inline, &roa_store);
+        if count > 0 {
+            log_info!(
+                Component::Rpki,
+                "roa:         {} inline entries, validate={} (action: {})",
+                count,
+                cfg.roa_validate,
+                cfg.roa_invalid_action
+            );
+        }
     }
     if let Some(cache) = &cfg.rpki.cache {
         log_info!(
@@ -1485,7 +1502,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 .unwrap_or(lr_bgp::rtr::client::DEFAULT_EXPIRE_INTERVAL)
         );
     }
-    if cfg.roa_validate && !roa_store.is_empty() {
+    // Install the import hook whenever `roa_validate` is on AND
+    // any source of ROA data exists: inline `[[roa]]` tables, a
+    // `[[bgp.roa_source]]` loader, or a `[bgp.rpki]` RTR cache
+    // (issue #100 — the loader sources will populate the store
+    // asynchronously after startup, so we install the hook before
+    // the first load lands).
+    let has_roa_data =
+        !roa_store.is_empty() || !cfg.roa_sources.is_empty() || cfg.rpki.cache.is_some();
+    if cfg.roa_validate && has_roa_data {
         // Install a built-in import hook that drops Invalid routes
         // (or warns + accepts them) before the user-supplied chain.
         // Implemented as a tiny DSL filter so the same code path
@@ -2100,6 +2125,42 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             Arc::clone(&running),
         )
     });
+    // Advanced ROA loading (issue #100): one thread per configured
+    // `[[bgp.roa_source]]` entry. Each thread reads / fetches its
+    // source on the configured cadence, parses the body with the
+    // source's format, and feeds the entries to the shared
+    // `RoaLayerRegistry`. The registry recomputes the union and
+    // atomically swaps the merged table into the live `RoaStore`
+    // (the same snapshot discipline the RTR client upholds per
+    // sync). The handles stay alive across SIGHUP reloads (the
+    // operator may reconfigure the source list); the reload path
+    // sends `Repoint` / `Shutdown` commands through the control
+    // channels.
+    let roa_loader_handles: Vec<daemon_roa_loader::RoaLoaderHandle> = cfg
+        .roa_sources
+        .iter()
+        .cloned()
+        .map(|spec| {
+            daemon_roa_loader::spawn_roa_loader(
+                spec,
+                std::sync::Arc::clone(&roa_store),
+                std::sync::Arc::clone(&roa_layer_registry),
+                Arc::clone(&running),
+            )
+        })
+        .collect();
+    if !roa_loader_handles.is_empty() {
+        log_info!(
+            Component::Rpki,
+            "roa-source:  {} source{} configured",
+            roa_loader_handles.len(),
+            if roa_loader_handles.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+    }
     let runtime = match &host {
         Some(h) => {
             // Embedded (multi-protocol supervisor): hand the D12.4
@@ -2124,6 +2185,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let config_dialect = cfg.config_dialect.clone();
                     let roa_store = Arc::clone(&roa_store);
                     let rpki = rpki.clone();
+                    let roa_layer_registry = Arc::clone(&roa_layer_registry);
+                    let roa_loader_handles = roa_loader_handles.clone();
                     let damping_state = Arc::clone(&damping_state);
                     let peer_health_table_reload = peer_health_table.clone();
                     move || {
@@ -2134,6 +2197,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                             &current_networks,
                             Some(&roa_store),
                             rpki.as_ref(),
+                            Some(&roa_layer_registry),
+                            &roa_loader_handles,
                             Some(&damping_state),
                             peer_health_table_reload.as_ref(),
                         )
@@ -2143,9 +2208,16 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 running: Arc::clone(&running),
                 status_lines: Arc::new({
                     let rpki = rpki.clone();
-                    move || match &rpki {
-                        Some(h) => vec![h.status_line()],
-                        None => Vec::new(),
+                    let roa_loader_handles = roa_loader_handles.clone();
+                    move || {
+                        let mut lines = match &rpki {
+                            Some(h) => vec![h.status_line()],
+                            None => Vec::new(),
+                        };
+                        for handle in &roa_loader_handles {
+                            lines.push(handle.status_line());
+                        }
+                        lines
                     }
                 }),
                 roa_len: Some(Arc::new({
@@ -5229,6 +5301,8 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         None,
                         None,
                         None,
+                        &[],
+                        None,
                         None,
                     )
                 }
@@ -7589,6 +7663,15 @@ fn reload_config(
     current_networks: &Arc<Mutex<Vec<String>>>,
     roa_store: Option<&Arc<lr_bgp::RoaStore>>,
     rpki: Option<&daemon_rpki::RpkiHandle>,
+    // Advanced ROA loading (issue #100): the registry holds the
+    // inline `[[roa]]` tables and the per-source entry sets. The
+    // reload path re-applies the inline layer via the registry
+    // (NOT `roa_store.replace_static` directly — that would
+    // clobber the loader threads' contributions) and re-points /
+    // shuts down loader threads based on the fresh `[[bgp.roa_source]]`
+    // list. `None` for the Babel daemon and the BMP collector.
+    roa_layer_registry: Option<&Arc<Mutex<daemon_roa_loader::RoaLayerRegistry>>>,
+    roa_loader_handles: &[daemon_roa_loader::RoaLoaderHandle],
     // `Some` for the standalone BGP daemon: the reload re-syncs the
     // live damping toggle to the freshly-reloaded `[damping]` block
     // (on↔off transitions, decay-interval re-spawn). `None` for the
@@ -7806,27 +7889,108 @@ fn reload_config(
         }
     }
     *current_networks.lock().unwrap() = new;
-    // Static ROA re-application (ROADMAP-v3 D2.5): the fresh config's
-    // [[roa]] tables replace the store's static layer wholesale; the
-    // RTR cache layer is untouched (the cache does not stop talking
-    // because the operator edited a local table). The validation
-    // hooks see the new table on their next evaluation — no
-    // recompilation, no route churn.
+    // Static ROA re-application (ROADMAP-v3 D2.5 + issue #100):
+    // the fresh config's `[[roa]]` tables replace the registry's
+    // inline layer (NOT `roa_store.replace_static` directly — that
+    // would clobber the loader threads' contributions). The
+    // registry recomputes the union (inline + every loader
+    // source) and swaps the merged table into the live store
+    // atomically. The RTR cache layer is untouched (the cache
+    // does not stop talking because the operator edited a local
+    // table). The validation hooks see the new table on their
+    // next evaluation — no recompilation, no route churn.
     if let Some(store) = roa_store {
         match daemon_policy::build_roa_table(&fresh) {
             Ok(table) => {
                 let new_count = table.len();
-                let old_count = store.static_len();
-                store.replace_static(table.entries().iter().copied());
-                if old_count != new_count {
+                let entries: Vec<lr_bgp::RoaEntry> = table.entries().to_vec();
+                let applied_count = if let Some(reg) = roa_layer_registry {
+                    let mut reg = reg.lock().unwrap();
+                    reg.replace_inline(entries, store);
+                    reg.len()
+                } else {
+                    // No registry (Babel daemon, BMP collector):
+                    // fall back to the direct store swap. The
+                    // inline `[[roa]]` tables are the only static
+                    // source in this mode (no loader threads).
+                    store.replace_static(entries);
+                    store.len()
+                };
+                if new_count > 0 || applied_count != store.len() {
                     lines.push(format!(
-                        "reload: roa table: {old_count} -> {new_count} static entries"
+                        "reload: roa table: {new_count} inline entries (merged total: {applied_count})"
                     ));
                 }
             }
             Err(e) => lines.push(format!(
                 "reload: roa table rejected ({e}) — keeping current entries"
             )),
+        }
+    }
+    // Advanced ROA loader re-pointing (issue #100): diff the fresh
+    // `[[bgp.roa_source]]` list against the live loader threads.
+    // * A source present in both (matched by path / URL) is
+    //   re-pointed: any change in `format`, `interval` or
+    //   `user_agent` is forwarded to the thread via `Repoint`.
+    // * A source removed from the config is shut down (the
+    //   thread tears down, its contribution is dropped from the
+    //   registry).
+    // * A new source is logged as future work — the daemon must
+    //   be restarted to spawn its loader thread. (Spawning a
+    //   thread mid-run is structurally hard: the reload closure
+    //   owns the handles by `Arc::clone`, and a new handle would
+    //   not be visible to the supervisor's `status_lines` closure
+    //   without a wider refactor. The same limitation applies to
+    //   the RTR client thread.)
+    if !roa_loader_handles.is_empty() {
+        for handle in roa_loader_handles {
+            let live_key = handle.key().clone();
+            let fresh_spec = fresh
+                .roa_sources
+                .iter()
+                .find(|s| s.key() == Some(live_key.clone()));
+            match fresh_spec {
+                Some(spec) => {
+                    // Same source — re-point with the fresh spec
+                    // (the loader ignores unchanged fields and
+                    // re-fetches / re-reads only when the spec
+                    // actually changed).
+                    let line = handle.repoint(spec.clone());
+                    if !line.contains("reload requested") {
+                        lines.push(format!("reload: {line}"));
+                    }
+                }
+                None => {
+                    // The source was removed from the fresh config.
+                    let line = handle.shutdown();
+                    lines.push(format!("reload: roa-source removed ({line})"));
+                }
+            }
+        }
+        // New sources added in the fresh config: report them as
+        // requiring a restart (same posture as a re-added
+        // `[bgp.rpki] cache` block).
+        for spec in &fresh.roa_sources {
+            let key = spec.key();
+            let already_live = roa_loader_handles
+                .iter()
+                .any(|h| Some(h.key().clone()) == key);
+            if !already_live {
+                let name = spec.path.as_deref().or(spec.url.as_deref()).unwrap_or("?");
+                lines.push(format!(
+                    "reload: roa-source '{name}' added — restart the daemon to spawn its loader thread"
+                ));
+            }
+        }
+    } else if !fresh.roa_sources.is_empty() {
+        // No live loader threads (the daemon was started without
+        // `[[bgp.roa_source]]` blocks); the fresh config added
+        // some. The operator needs to restart.
+        for spec in &fresh.roa_sources {
+            let name = spec.path.as_deref().or(spec.url.as_deref()).unwrap_or("?");
+            lines.push(format!(
+                "reload: roa-source '{name}' added — restart the daemon to spawn its loader thread"
+            ));
         }
     }
     // RTR cache re-pointing (ROADMAP-v3 D2.5): an address change drops
