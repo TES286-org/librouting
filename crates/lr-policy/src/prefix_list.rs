@@ -30,10 +30,7 @@ impl PrefixListEntry {
             return false;
         }
         let pl = p.prefix_len;
-        if pl < self.ge || pl > self.le {
-            return false;
-        }
-        true
+        !(pl < self.ge || pl > self.le)
     }
 }
 

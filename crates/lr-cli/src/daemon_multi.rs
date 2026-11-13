@@ -450,7 +450,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             engine.gate.abort();
         }
         for engine in engines {
-            join_engine(engine.handle);
+            let _ = join_engine(engine.handle);
         }
         join_ticker(ticker);
         log_error!(Component::Daemon, "multi-protocol startup aborted");
@@ -524,7 +524,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         crate::dispatch_pending_signals(&runtime);
     }
     for engine in engines {
-        join_engine(engine.handle);
+        let _ = join_engine(engine.handle);
     }
     join_ticker(ticker);
     log_info!(Component::Daemon, "multi-protocol shutdown complete");
@@ -540,7 +540,7 @@ fn abort_all(runtime: &crate::Runtime, engines: Vec<Engine>, ticker: JoinHandle<
         engine.gate.abort();
     }
     for engine in engines {
-        join_engine(engine.handle);
+        let _ = join_engine(engine.handle);
     }
     join_ticker(ticker);
 }
@@ -556,7 +556,7 @@ fn shutdown_after_failure(runtime: &crate::Runtime, engines: Vec<Engine>, ticker
         engine.gate.abort();
     }
     for engine in engines {
-        join_engine(engine.handle);
+        let _ = join_engine(engine.handle);
     }
     join_ticker(ticker);
 }
