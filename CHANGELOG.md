@@ -4126,24 +4126,29 @@ Two pure parsers and two transform formats are supported by
 - `native` — TOML `[[roa]]` subset (the inline shape).
 - `bird` — BIRD 2 `roa table` body (`roa PREFIX max N as N;`).
 - `jq` — the daemon pipes the fetched bytes into
-  `jq -r '<program>'` (or `jq -r -f <program_file>`). The program
-  must emit one `ASN PREFIX MAXLEN` row per line on stdout; the
-  daemon parses each row into a ROA entry. The daemon must be able
-  to exec `jq` on `PATH` (the container image ships it).
-- `awk` — the daemon pipes the fetched bytes into `awk '<program>'`
-  (or `awk -f <program_file>`); the program's stdout must be one
-  `ASN PREFIX MAXLEN` row per line.
+  `jq -r -- '<program>'` (where `<program>` is the value of
+  `program`, or the contents of `program_file` read at every load
+  attempt). The program must emit BIRD-format lines
+  (`roa PREFIX max N as N;`) on stdout; the daemon parses them
+  with the `bird` parser. The daemon must be able to exec `jq` on
+  `PATH` (the container image ships it).
+- `awk` — the daemon pipes the fetched bytes into
+  `awk -- '<program>'`; the program's stdout must be BIRD-format
+  lines (same shape as `jq`). The daemon must be able to exec
+  `awk` on `PATH`.
 
-The earlier `json` (Routinator JSON VRP output) and `csv`
-(Routinator CSV / whitespace-separated) fixed-format parsers were
-removed: instead of `lr-bgp` shipping a hand-rolled recursive-descent
-JSON scanner to stay serde-free, the operator now owns the
-conversion step and supplies a `jq` / `awk` program. `lr-bgp` still
-has no serde dependency — only the daemon crate spawns the
-subprocess; the pure parsers (`native`, `bird`) stay in
-`lr-bgp::roa_loader` with no I/O dependency. The daemon crate gains
-`ureq` (blocking HTTP client with rustls + webpki-roots) for URL
-fetching.
+BIRD format is the canonical intermediate that both `jq` and `awk`
+programs are expected to emit: it is line-oriented (natural for awk)
+and trivial to produce with jq's string interpolation. The earlier
+`json` (Routinator JSON VRP output) and `csv` (Routinator CSV /
+whitespace-separated) fixed-format parsers were removed: instead of
+`lr-bgp` shipping a hand-rolled recursive-descent JSON scanner to
+stay serde-free, the operator now owns the conversion step and
+supplies a `jq` / `awk` program. `lr-bgp` still has no serde
+dependency — only the daemon crate spawns the subprocess; the pure
+parsers (`native`, `bird`) stay in `lr-bgp::roa_loader` with no I/O
+dependency. The daemon crate gains `ureq` (blocking HTTP client with
+rustls + webpki-roots) for URL fetching.
 
 New public Rust API: `lr_bgp::roa_loader::{parse, RoaFormat,
 RoaLoaderError}`, re-exported as `lr_bgp::{parse_roa, RoaFormat,
@@ -4174,15 +4179,15 @@ rewrite out-of-band. `ABI_VERSION` is unchanged at 2 (the removed
 symbol was not part of the v2 ABI contract that downstream loaders
 rely on); the `api-surface` CI gate was updated to match.
 
-Tests: `crates/lr-bgp/src/roa_loader.rs::tests` now carries 32 unit
+Tests: `crates/lr-bgp/src/roa_loader.rs::tests` now carries 29 unit
 tests covering the two pure parsers (`native`, `bird`) — the
 per-format happy paths, the malformed-input rejection paths, and the
 cross-format round-trip determinism invariant. `crates/lr-cli`'s
-daemon integration gains 21 unit tests for the `jq` / `awk`
+daemon integration gains 23 unit tests for the `jq` / `awk`
 transform paths (subprocess invocation, `program` vs `program_file`
-dispatch, program-quoting edge cases, the `ASN PREFIX MAXLEN`
-row-parser, and the empty / partial-output behaviour). The
-`[[bgp.roa_source]]` schema gains 16 config tests (including the
+dispatch, program-quoting edge cases, the BIRD-format
+line-parser, and the empty / partial-output behaviour). The
+`[[bgp.roa_source]]` schema gains 18 config tests (including the
 `program` / `program_file` mutual-exclusion rule for `jq` / `awk`
 and the must-be-absent rule for `native` / `bird`). The loader
 thread integration suite is unchanged at 23 tests (initial load,

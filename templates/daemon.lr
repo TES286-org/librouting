@@ -385,7 +385,10 @@ route-map "to-customer" {
 # a `url "..."` source is HTTP(S)-fetched on `interval`. The
 # `format "..."` key selects the parser — `native`, `bird`, `jq`
 # (with a `program "..."` / `program_file "..."` argument) or `awk`
-# (likewise). See templates/daemon.toml for the full prose.
+# (likewise). The `jq` and `awk` programs must emit BIRD-format
+# lines (`roa PREFIX max N as N;`) on stdout; the daemon parses
+# their stdout with the same `bird` parser used for `.bird` files.
+# See templates/daemon.toml for the full prose.
 #
 # bgp.roa_source {
 #     path "/etc/lr/roas.bird";
@@ -396,7 +399,7 @@ route-map "to-customer" {
 #     url "https://rpki.example.com/vrps.json";
 #     format "jq";
 #     interval 3600;
-#     program '.roas[] | "\(.asn) \(.prefix) \(.maxLength)"';
+#     program '.roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);"';
 # }
 
 # ---------------------------------------------------------------------

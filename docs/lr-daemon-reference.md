@@ -849,8 +849,8 @@ ROAs by writing a config block or by hitting the file / URL a
 | `path`, `file` | string | — | Local file path (mutually exclusive with `url`) |
 | `url` | string | — | HTTP(S) URL (mutually exclusive with `path`) |
 | `format` | enum | inferred | `native`, `bird`, `jq`, `awk` |
-| `program` | string | — | Required for `jq` / `awk`; the transform program text |
-| `program_file` | string | — | Alternative to `program`: path to a file holding the program |
+| `program` | string | — | Required for `jq` / `awk`; inline transform-program text. The program must emit BIRD-format lines on stdout |
+| `program_file` | string | — | Alternative to `program`: path to a file holding the program. The daemon reads the file at every load attempt (URL fetch or file mtime change) so the operator can update the program without a daemon restart; the file's own mtime is **not** watched, so a program-file-only change does not trigger a reload — SIGHUP forces one |
 | `interval` | int | 3600 | URL fetch interval (s); minimum 60; ignored for files |
 | `user_agent` | string | `lr-daemon/<version>` | URL fetch UA |
 
@@ -862,20 +862,28 @@ Formats:
 
 * `native` — TOML `[[roa]]` subset (the same shape as the inline tables).
 * `bird` — BIRD 2 `roa table` body (`roa PREFIX max N as N;` per line).
-* `jq` — the daemon pipes the fetched bytes into `jq -r '<program>'`
-  (or `jq -r -f <program_file>`). The program must emit one
-  `ASN PREFIX MAXLEN` row per line on stdout; the daemon parses each
-  row into a ROA entry. `jq` must be on the daemon's `PATH` (the
-  container image ships it).
-* `awk` — the daemon pipes the fetched bytes into `awk '<program>'`
-  (or `awk -f <program_file>`). The program's stdout must be one
-  `ASN PREFIX MAXLEN` row per line. `awk` must be on the daemon's
-  `PATH` (Debian's `gawk` is the baseline).
+* `jq` — the daemon pipes the fetched bytes into
+  `jq -r -- '<program>'` (where `<program>` is the value of
+  `program`, or the contents of `program_file` read at load
+  time). The program must emit BIRD-format lines
+  (`roa PREFIX max N as N;`) on stdout; the daemon parses them
+  with the `bird` parser. `jq` must be on the daemon's `PATH`
+  (the container image ships it).
+* `awk` — the daemon pipes the fetched bytes into
+  `awk -- '<program>'` (where `<program>` is the value of
+  `program`, or the contents of `program_file` read at load
+  time). The program's stdout must be BIRD-format lines (same
+  shape as `jq`). `awk` must be on the daemon's `PATH` (Debian's
+  `gawk` is the baseline; `mawk` and onetrueawk work too).
 
-The `json` and `csv` fixed-format parsers that shipped in earlier
-builds were removed in favour of the `jq` / `awk` transform formats:
-the operator now owns the conversion step instead of the daemon
-shipping a hand-rolled JSON scanner.
+BIRD format is the canonical intermediate that both `jq` and `awk`
+programs are expected to emit: it is line-oriented (natural for awk)
+and trivial to produce with jq's string interpolation
+(`"roa \(.prefix) max \(.maxLength) as \(.asn);"`). The earlier
+`json` and `csv` fixed-format parsers that shipped in earlier builds
+were removed in favour of the `jq` / `awk` transform formats: the
+operator now owns the conversion step instead of the daemon shipping
+a hand-rolled JSON scanner.
 
 File sources are watched via mtime polling (1 s cadence). URL sources
 are fetched periodically; a fetch failure keeps the previous snapshot

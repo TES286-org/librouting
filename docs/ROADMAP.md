@@ -867,8 +867,9 @@ Two pure parsers and two transform formats are supported: the
 `native` TOML `[[roa]]` subset and the `bird` BIRD 2 `roa table`
 body are read directly; the `jq` and `awk` transform formats pipe
 the fetched bytes through an operator-supplied program (`program`
-inline string or `program_file` path) and parse the resulting
-`ASN PREFIX MAXLEN` rows. The pure parsers live in
+inline string or `program_file` path) and parse the program's
+stdout as BIRD-format lines (`roa PREFIX max N as N;`). The pure
+parsers live in
 `crates/lr-bgp/src/roa_loader.rs` (no I/O dependency); the daemon
 integration lives in `crates/lr-cli/src/daemon_roa_loader.rs` (uses
 `ureq` for HTTP fetching, spawns `jq` / `awk` via subprocess for

@@ -575,13 +575,23 @@ permit = false
 #   native  TOML `[[roa]]` subset (the same shape as above)
 #   bird    BIRD 2 `roa table` body (`roa PREFIX max N as N;`)
 #   jq      operator-supplied jq program: the daemon pipes the
-#           fetched bytes into `jq -r '<program>'`, which must
-#           emit one `ASN PREFIX MAXLEN` row per line. `program`
-#           (inline string) or `program_file` (path) is required.
+#           fetched bytes into `jq -r -- '<program>'`, whose
+#           stdout must be BIRD-format lines
+#           (`roa PREFIX max N as N;`). `program` (inline string)
+#           or `program_file` (path to a file the daemon reads at
+#           every load attempt; the file's own mtime is not
+#           watched — SIGHUP forces a re-read) is required.
 #   awk     operator-supplied awk program: the daemon pipes the
-#           fetched bytes into `awk '<program>'`, whose output must
-#           be one `ASN PREFIX MAXLEN` row per line. `program`
-#           (inline string) or `program_file` (path) is required.
+#           fetched bytes into `awk -- '<program>'`, whose stdout
+#           must be BIRD-format lines (same shape as `jq`).
+#           `program` (inline string) or `program_file` (path) is
+#           required.
+#
+# BIRD format is the canonical intermediate that both `jq` and `awk`
+# programs are expected to emit: it is line-oriented (natural for awk)
+# and trivial to produce with jq's string interpolation. The daemon
+# parses the program's stdout with the same `bird` parser used for
+# `.bird` files.
 #
 # The feature is internal to lr-daemon: there is no C ABI entry to
 # feed bytes in (the loader thread is the only entry point). The
@@ -600,14 +610,18 @@ permit = false
 # interval = 3600
 # # Use a TOML literal string (single quotes) so jq's own `\(...)` and
 # # `"` survive verbatim. The program must emit one
-# # `ASN PREFIX MAXLEN` row per line.
-# program = '.roas[] | "\(.asn) \(.prefix) \(.maxLength)"'
+# # `roa PREFIX max N as N;` line per VRP.
+# program = '.roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);"'
 # # user_agent = "my-router/1.0"  # optional override (default: lr-daemon/<version>)
 #
 # [[bgp.roa_source]]
 # path = "/etc/lr/roas.csv"
 # format = "awk"
-# # program reads from a file so quoting in TOML is not a concern:
+# # program reads from a file so quoting in TOML is not a concern;
+# # the file's content is re-read on every load (URL fetch or file
+# # mtime change) so the operator can update the program without a
+# # daemon restart, but a program-file-only change does not trigger
+# # a reload — SIGHUP forces one.
 # program_file = "/etc/lr/roas.awk"
 #
 # Reload: SIGHUP re-applies the inline [[roa]] tables and re-points
