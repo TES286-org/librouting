@@ -6676,3 +6676,123 @@ fn connected_route_flows_through_redistribution_pipe() {
         "connected route re-originated into BGP via the redistribution pipe; got {events:?}"
     );
 }
+
+// ---- Peer-health dynamic tiering + stale exclusion (issue #99). ----
+
+/// A mock `PeerHealthLookup` for unit tests: returns a fixed tier per
+/// `(peer, family)` and a fixed stale set.
+#[derive(Debug, Default, Clone)]
+struct MockPeerHealth {
+    tiers: std::collections::HashMap<(u64, NlriFamily), u8>,
+    stale: std::collections::HashSet<(u64, NlriFamily, Prefix)>,
+}
+
+impl PeerHealthLookup for MockPeerHealth {
+    fn tier(&self, peer: u64, family: NlriFamily) -> u8 {
+        self.tiers.get(&(peer, family)).copied().unwrap_or(0)
+    }
+    fn is_stale(&self, peer: u64, family: NlriFamily, prefix: &Prefix) -> bool {
+        self.stale.contains(&(peer, family, *prefix))
+    }
+}
+
+/// Build a minimal BGP route for reselect tests. The AS path is a
+/// single AS so the standard comparator's first tie-breaker
+/// (LOCAL_PREF) is equal — peer-id drives the final order.
+fn ph_bgp_route(prefix: [u8; 4], plen: u8, peer: u64) -> Route {
+    let mut attrs = lr_core::attr::Attributes::new();
+    attrs.insert(lr_core::attr::Attribute {
+        tag: lr_core::attr::AttrTag(2),
+        flags: 0,
+        value: vec![2, 1, 0, 0, 100],
+    });
+    Route {
+        key: RouteKey::new(Prefix::new_v4(prefix, plen), NlriFamily::IPV4_UNICAST),
+        origin: RouteOrigin { proto: 0, peer },
+        protocol: Protocol::Bgp,
+        preference: lr_core::rib::Preference::new(20, 0),
+        next_hop: None,
+        attributes: attrs,
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+/// Dynamic tiering deprefs a candidate whose peer escalated AFTER the
+/// route was imported — the route has no stamped tier attribute, but
+/// the live lookup returns L2 for its peer, so `rank_with_dynamic_tier`
+/// excludes it when an L0 candidate exists (issue #99 §Hooks 3).
+#[test]
+fn dynamic_tier_excludes_degraded_peer_even_without_stamped_attr() {
+    let r1 = ph_bgp_route([203, 0, 113, 0], 24, 1); // peer 1 — now at L2
+    let r2 = ph_bgp_route([203, 0, 113, 0], 24, 2); // peer 2 — L0
+    let candidates = vec![r1.clone(), r2.clone()];
+    let cfg = BestPathConfig::default();
+    let mut mock = MockPeerHealth::default();
+    mock.tiers.insert((1, NlriFamily::IPV4_UNICAST), 2);
+    let ranked = rank_with_dynamic_tier(&candidates, &cfg, &mock);
+    // Only the L0 candidate (peer 2) survives the tier filter.
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].origin.peer, 2);
+}
+
+/// When every candidate is degraded, `rank_with_dynamic_tier` falls
+/// back to all candidates (issue #99: "Fall back to all candidates if
+/// every path is degraded").
+#[test]
+fn dynamic_tier_falls_back_when_all_degraded() {
+    let r1 = ph_bgp_route([203, 0, 113, 0], 24, 1);
+    let r2 = ph_bgp_route([203, 0, 113, 0], 24, 2);
+    let candidates = vec![r1, r2];
+    let cfg = BestPathConfig::default();
+    let mut mock = MockPeerHealth::default();
+    mock.tiers.insert((1, NlriFamily::IPV4_UNICAST), 2);
+    mock.tiers.insert((2, NlriFamily::IPV4_UNICAST), 3);
+    let ranked = rank_with_dynamic_tier(&candidates, &cfg, &mock);
+    assert_eq!(ranked.len(), 2, "all candidates kept in the fallback");
+}
+
+/// Stale paths are excluded from the ECMP / add-path tail, but the
+/// best path is always kept even if stale (issue #99 §Recovery).
+#[test]
+fn stale_paths_excluded_from_ecmp_tail() {
+    let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
+    let r1 = ph_bgp_route([203, 0, 113, 0], 24, 1); // best (peer 1)
+    let r2 = ph_bgp_route([203, 0, 113, 0], 24, 2); // stale
+    let r3 = ph_bgp_route([203, 0, 113, 0], 24, 3); // fresh
+    let candidates = vec![&r1, &r2, &r3];
+    let mut mock = MockPeerHealth::default();
+    mock.stale.insert((2, NlriFamily::IPV4_UNICAST, prefix));
+    let lookup: Option<std::sync::Arc<dyn PeerHealthLookup>> = Some(std::sync::Arc::new(mock));
+    let out = collect_ranked_with_stale_filter(candidates, 4, lookup.as_ref());
+    // r1 (best) + r3 (fresh) = 2 routes. r2 (stale) is excluded.
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].origin.peer, 1);
+    assert_eq!(out[1].origin.peer, 3);
+}
+
+/// When the best path itself is stale (all-degraded fallback), it is
+/// still installed so the prefix stays reachable.
+#[test]
+fn stale_best_path_is_kept_when_sole_candidate() {
+    let r1 = ph_bgp_route([203, 0, 113, 0], 24, 1);
+    let prefix = r1.key.prefix;
+    let candidates = vec![&r1];
+    let mut mock = MockPeerHealth::default();
+    mock.stale.insert((1, NlriFamily::IPV4_UNICAST, prefix));
+    let lookup: Option<std::sync::Arc<dyn PeerHealthLookup>> = Some(std::sync::Arc::new(mock));
+    let out = collect_ranked_with_stale_filter(candidates, 4, lookup.as_ref());
+    assert_eq!(out.len(), 1, "stale best is kept when sole candidate");
+}
+
+/// Without a lookup, stale filtering is skipped (back-compat with the
+/// stamp-based path).
+#[test]
+fn no_lookup_means_no_stale_filtering() {
+    let r1 = ph_bgp_route([203, 0, 113, 0], 24, 1);
+    let r2 = ph_bgp_route([203, 0, 113, 0], 24, 2);
+    let candidates = vec![&r1, &r2];
+    let out = collect_ranked_with_stale_filter(candidates, 4, None);
+    assert_eq!(out.len(), 2);
+}

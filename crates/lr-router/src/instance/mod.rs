@@ -442,6 +442,40 @@ pub struct AggregateOptions {
     pub as_set: bool,
 }
 
+/// Live peer-health tier + stale lookup for pre-best-path candidate
+/// tiering (issue #99 §Hooks 3 + §Recovery).
+///
+/// The router holds an `Option<Arc<dyn PeerHealthLookup>>` set by the
+/// daemon when `[bgp.peer_health]` rollout is not `off`. During
+/// [`DefaultRouter::reselect`], when the lookup is present, the router
+/// queries the **current** per-`(peer, AFI/SAFI)` tier for each BGP
+/// candidate and restricts the candidate set to the lowest non-empty
+/// tier (falling back to all candidates when every path is degraded).
+/// It also excludes stale paths from the ECMP / add-path set, keeping
+/// the best path even if it is stale so the prefix stays reachable in
+/// the all-degraded fallback.
+///
+/// This is a **dynamic** lookup — the tier reflects the state machine's
+/// current view, not a stamp frozen at import time. A route imported
+/// while the peer was at L0 is correctly deprefed when the peer later
+/// escalates, without needing to re-stamp the route in Adj-RIB-In.
+///
+/// The trait lives in `lr-router` (not `lr-peer-health`) so the core
+/// router has no direct dependency on the peer-health crate; the daemon
+/// supplies a concrete implementation backed by `PeerHealthTable`.
+pub trait PeerHealthLookup: Send + Sync {
+    /// Current effective tier (0..=3) for `(peer, family)`. `0` means
+    /// the peer is not degraded (or the table has no state for it).
+    /// Shadow rollout modes return `0` so routing is unaffected.
+    fn tier(&self, peer: u64, family: NlriFamily) -> u8;
+
+    /// Whether `prefix` from `(peer, family)` is currently marked
+    /// stale. Stale paths are reachable but excluded from ECMP /
+    /// add-path until re-admitted by a fresh UPDATE or swept by the
+    /// ticker (issue #99 §Recovery).
+    fn is_stale(&self, peer: u64, family: NlriFamily, prefix: &Prefix) -> bool;
+}
+
 /// Default router implementation. Poll-based, embedder-driven.
 pub struct DefaultRouter {
     sessions: BTreeMap<u64, SessionState>,
@@ -688,6 +722,14 @@ pub struct DefaultRouter {
     /// the partial-transit counter (design §7).
     #[cfg(feature = "exchange-plane")]
     exchange_plane_state: BTreeMap<u64, ExchangePlaneState>,
+    /// Live peer-health lookup for pre-best-path candidate tiering
+    /// (issue #99). `Some` when the daemon installed a
+    /// `PeerHealthImportHook` (i.e. `[bgp.peer_health]` rollout !=
+    /// `off`); the router queries it in `reselect` to restrict
+    /// candidates to the lowest non-empty health tier and exclude
+    /// stale paths from ECMP / add-path. `None` when peer-health is
+    /// off — the standard `BestPath::rank` runs unchanged.
+    peer_health: Option<std::sync::Arc<dyn PeerHealthLookup>>,
 }
 
 /// W6.3 exchange-plane bookkeeping for one BGP session (feature
@@ -797,6 +839,7 @@ impl Default for DefaultRouter {
             roa_validate_enabled: false,
             #[cfg(feature = "exchange-plane")]
             exchange_plane_state: BTreeMap::new(),
+            peer_health: None,
         }
     }
 }
@@ -810,6 +853,94 @@ fn encode_timer(session: u64, timer: TimerId) -> TimerId {
 
 fn decode_timer(id: TimerId) -> (u64, u8) {
     (u64::from(id.0) >> 8, (id.0 & 0xff) as u8)
+}
+
+/// Pre-best-path candidate tiering with a **dynamic** peer-health
+/// lookup (issue #99 §Hooks 3).
+///
+/// Queries the lookup for each BGP candidate's current
+/// per-`(peer, AFI/SAFI)` tier, restricts the candidate set to the
+/// lowest non-empty health tier, then ranks the restricted set with
+/// the standard [`BestPath::compare`] comparator. Falls back to **all**
+/// candidates (ranked) when every path is degraded — issue #99:
+/// "Fall back to all candidates if every path is degraded."
+///
+/// Unlike the stamp-based [`BestPath::rank_tiered`], the tier reflects
+/// the state machine's current view, so a route imported while the
+/// peer was at L0 is correctly deprefed when the peer later escalates
+/// (no re-stamp of Adj-RIB-In needed).
+fn rank_with_dynamic_tier<'a>(
+    candidates: &'a [Route],
+    cfg: &BestPathConfig,
+    lookup: &dyn PeerHealthLookup,
+) -> Vec<&'a Route> {
+    // Compute the current tier for each candidate. A candidate whose
+    // peer the table has no state for reads as L0 (not degraded).
+    let tiers: Vec<u8> = candidates
+        .iter()
+        .map(|r| lookup.tier(r.origin.peer, r.key.family))
+        .collect();
+    let min_tier = tiers.iter().copied().min().unwrap_or(0);
+
+    // Restrict to the lowest non-empty tier. If the lowest tier is L0,
+    // keep only L0 candidates (deprefed peers are excluded). If every
+    // candidate is degraded (min > L0), keep all (the fallback).
+    let filtered: Vec<&Route> = if min_tier == 0 {
+        candidates
+            .iter()
+            .zip(tiers.iter())
+            .filter(|(_, &t)| t == 0)
+            .map(|(r, _)| r)
+            .collect()
+    } else {
+        candidates.iter().collect()
+    };
+
+    // Rank the restricted set with the standard comparator.
+    let mut ranked: Vec<&Route> = filtered;
+    ranked.sort_by(|a, b| BestPath::compare(a, b, cfg));
+    ranked
+}
+
+/// Collect the ranked references into owned routes, truncated to
+/// `max_paths`, excluding stale paths from the ECMP / add-path set
+/// (issue #99 §Recovery: "Stale paths are excluded from ECMP until
+/// re-admitted").
+///
+/// The best path (index 0) is always kept — even if it is stale — so
+/// the prefix stays reachable in the all-degraded fallback. When no
+/// lookup is supplied (`lookup` is `None`), stale filtering is skipped
+/// (the stamp-based path has stale state on the route attribute, not
+/// in the table).
+fn collect_ranked_with_stale_filter(
+    ranked: Vec<&Route>,
+    max_paths: usize,
+    lookup: Option<&std::sync::Arc<dyn PeerHealthLookup>>,
+) -> Vec<Route> {
+    let max_paths = max_paths.max(1);
+    let mut out: Vec<Route> = Vec::with_capacity(ranked.len().min(max_paths));
+    for (i, r) in ranked.iter().enumerate() {
+        if i == 0 {
+            // The best path is always installed.
+            out.push((*r).clone());
+            if out.len() >= max_paths {
+                break;
+            }
+            continue;
+        }
+        // Skip stale paths in the add-path tail.
+        let stale = lookup
+            .map(|l| l.is_stale(r.origin.peer, r.key.family, &r.key.prefix))
+            .unwrap_or(false);
+        if stale {
+            continue;
+        }
+        out.push((*r).clone());
+        if out.len() >= max_paths {
+            break;
+        }
+    }
+    out
 }
 
 impl DefaultRouter {
@@ -1029,6 +1160,31 @@ impl DefaultRouter {
     /// Add-Path capability was negotiated.
     pub fn set_add_path_max_paths(&mut self, max_paths: usize) {
         self.add_path_max_paths = max_paths.max(1);
+    }
+
+    /// Install a live peer-health lookup (issue #99). When set,
+    /// [`Self::reselect`] queries the lookup for each BGP
+    /// candidate's current per-`(peer, AFI/SAFI)` tier and restricts
+    /// the candidate set to the lowest non-empty health tier before
+    /// the standard decision process (issue #99 §Hooks 3). Stale
+    /// paths are excluded from the ECMP / add-path set (issue #99
+    /// §Recovery). Pass `None` to disable dynamic tiering and revert
+    /// to the stamp-based `BestPath::rank_tiered` path.
+    ///
+    /// The daemon calls this when `[bgp.peer_health]` rollout is not
+    /// `off`, supplying a wrapper around the shared
+    /// `PeerHealthTable`. The lookup is `Send + Sync` so the router
+    /// can hold it across `tick()` / `feed_input()` without
+    /// borrowing the table.
+    pub fn set_peer_health_lookup(&mut self, lookup: Option<std::sync::Arc<dyn PeerHealthLookup>>) {
+        self.peer_health = lookup;
+    }
+
+    /// Read-only access to the installed peer-health lookup, if any.
+    /// Used by the daemon's `lrctl show peer-health` path and by
+    /// reload logic that needs to swap the underlying table.
+    pub fn peer_health_lookup(&self) -> Option<&std::sync::Arc<dyn PeerHealthLookup>> {
+        self.peer_health.as_ref()
     }
 
     /// Install a BMP (RFC 7854) sink. When set, the router mirrors
@@ -2901,28 +3057,49 @@ impl DefaultRouter {
         let ranked: Vec<Route> = if candidates.is_empty() {
             Vec::new()
         } else if candidates.iter().all(|r| r.protocol == Protocol::Bgp) {
-            // Issue #99: when any candidate carries a peer-health
-            // tier attribute (stamped by PeerHealthImportHook),
-            // use the tiered ranking that restricts the candidate
-            // set to the highest non-empty health tier before the
-            // standard decision process. Routes without the
-            // attribute are treated as L0 by tiered_candidates,
-            // so the tiered path is a strict superset of rank when
-            // no attribute is present — but we avoid the extra
-            // allocation in the common (no peer-health) case.
-            let has_tier = candidates
-                .iter()
-                .any(|r| r.attributes.get(lr_core::attr::AttrTag(244)).is_some());
-            let ranked_refs: Vec<&Route> = if has_tier {
-                BestPath::rank_tiered(&candidates, &self.best_path_cfg)
+            // Issue #99 §Hooks 3: pre-best-path candidate tiering.
+            // When a live peer-health lookup is installed, query the
+            // CURRENT per-(peer, AFI/SAFI) tier for each candidate
+            // (not a stamp frozen at import time — a route imported
+            // while the peer was at L0 must be deprefed when the peer
+            // later escalates). Restrict the candidate set to the
+            // lowest non-empty health tier; fall back to all
+            // candidates when every path is degraded (issue #99:
+            // "Fall back to all candidates if every path is
+            // degraded"). Then rank the restricted set with the
+            // standard comparator.
+            //
+            // Issue #99 §Recovery: stale paths are excluded from
+            // the ECMP / add-path set. The best path is always kept
+            // (even if stale) so the prefix stays reachable in the
+            // all-degraded fallback.
+            //
+            // When no lookup is installed (peer-health off), fall
+            // back to the stamp-based `rank_tiered` for routes that
+            // carry the private tier attribute (back-compat for
+            // embedders that stamp without wiring the lookup), else
+            // plain `rank`.
+            let ranked_refs: Vec<&Route> = if let Some(lookup) = &self.peer_health {
+                rank_with_dynamic_tier(&candidates, &self.best_path_cfg, lookup.as_ref())
             } else {
-                BestPath::rank(&candidates, &self.best_path_cfg)
+                let has_tier = candidates
+                    .iter()
+                    .any(|r| r.attributes.get(lr_core::attr::AttrTag(244)).is_some());
+                if has_tier {
+                    BestPath::rank_tiered(&candidates, &self.best_path_cfg)
+                } else {
+                    BestPath::rank(&candidates, &self.best_path_cfg)
+                }
             };
-            ranked_refs
-                .into_iter()
-                .take(self.add_path_max_paths)
-                .cloned()
-                .collect()
+            // Exclude stale paths from the add-path / ECMP set,
+            // keeping the best even if stale. Only meaningful when
+            // the lookup is installed (stale state lives in the
+            // table, not on the route).
+            collect_ranked_with_stale_filter(
+                ranked_refs,
+                self.add_path_max_paths,
+                self.peer_health.as_ref(),
+            )
         } else {
             RouteSelector::select(&candidates)
                 .cloned()
@@ -5677,11 +5854,32 @@ impl DefaultRouter {
                     candidates.push(bgp_route);
                     let ranked: Vec<Route> =
                         if candidates.iter().all(|r| r.protocol == Protocol::Bgp) {
-                            BestPath::rank(&candidates, &self.best_path_cfg)
-                                .into_iter()
-                                .take(self.add_path_max_paths)
-                                .cloned()
-                                .collect()
+                            // Issue #99: apply dynamic tiering + stale
+                            // exclusion on the redistribution path too,
+                            // so a redistributed BGP route competes
+                            // fairly with Adj-RIB-In paths under the
+                            // same peer-health constraints.
+                            let ranked_refs: Vec<&Route> = if let Some(lookup) = &self.peer_health {
+                                rank_with_dynamic_tier(
+                                    &candidates,
+                                    &self.best_path_cfg,
+                                    lookup.as_ref(),
+                                )
+                            } else {
+                                let has_tier = candidates.iter().any(|r| {
+                                    r.attributes.get(lr_core::attr::AttrTag(244)).is_some()
+                                });
+                                if has_tier {
+                                    BestPath::rank_tiered(&candidates, &self.best_path_cfg)
+                                } else {
+                                    BestPath::rank(&candidates, &self.best_path_cfg)
+                                }
+                            };
+                            collect_ranked_with_stale_filter(
+                                ranked_refs,
+                                self.add_path_max_paths,
+                                self.peer_health.as_ref(),
+                            )
                         } else {
                             RouteSelector::select(&candidates)
                                 .into_iter()

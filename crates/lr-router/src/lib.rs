@@ -12,7 +12,7 @@ pub mod redistribution;
 pub mod session;
 
 pub use event::{EventSink, OspfGraceEvent, RouterEvent};
-pub use instance::{AggregateOptions, DefaultRouter, RouterInstance};
+pub use instance::{AggregateOptions, DefaultRouter, PeerHealthLookup, RouterInstance};
 pub use redistribution::{MetricPolicy, RedistributionPipe};
 pub use session::{
     OspfAreaType, OspfNetworkType, Session, SessionConfig, SessionErrorKind, SessionHandle,
