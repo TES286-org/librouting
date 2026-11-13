@@ -42,7 +42,7 @@
 
 use core::cmp::Ordering;
 
-use lr_core::rib::{Route, RouteKey};
+use lr_core::rib::{Route, RouteKey, RouteOrigin};
 
 #[cfg(feature = "bgp")]
 use lr_bgp::path::{Community, PathAttributes};
@@ -79,11 +79,17 @@ pub trait ImportHook: Send + Sync {
     /// the return value is ignored (a withdraw cannot be "dropped";
     /// the route is already gone). Implementations use this to
     /// update cross-route state such as the RFC 2439 figure-of-merit
-    /// table.
+    /// table or the per-peer flap-suppression churn counter (issue #99).
+    ///
+    /// `origin` identifies the protocol instance and peer that
+    /// withdrew the route — issue #99's per-peer flap suppression
+    /// accounts withdrawals at `(peer, AFI/SAFI)` granularity and
+    /// needs the peer id; older per-prefix hooks (RFC 2439 damping)
+    /// ignore it.
     ///
     /// `now_s` is wall-clock seconds at the time of the withdraw,
     /// matching the units the damping table expects.
-    fn on_withdraw(&self, _key: &RouteKey, _now_s: u64) {
+    fn on_withdraw(&self, _origin: RouteOrigin, _key: &RouteKey, _now_s: u64) {
         // default no-op — most hooks do not care about withdrawals
     }
 }
@@ -451,7 +457,7 @@ impl ImportHook for DampingImportHook {
         }
     }
 
-    fn on_withdraw(&self, key: &RouteKey, now_s: u64) {
+    fn on_withdraw(&self, _origin: RouteOrigin, key: &RouteKey, now_s: u64) {
         if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
@@ -472,10 +478,29 @@ impl ImportHook for DampingImportHook {
 ///
 /// Wraps a shared [`lr_peer_health::PeerHealthTable`] and installs
 /// it on the import chain. On every accepted UPDATE the hook
-/// accounts the event, stamps the tier attribute when the rollout
-/// mode stamps tiers, and marks the route stale when the session
-/// is degraded and the rollout mode applies stale markings. A
-/// fresh UPDATE re-admits the prefix (clears stale in the table).
+/// accounts the event and, when the rollout mode stamps tiers
+/// (`limited` / `full`), stamps the `LrPeerHealthTier` attribute on
+/// the route so `BestPath::rank_tiered` can prefer non-degraded
+/// paths. Stale markings (`LrPeerHealthStale`) are applied **only
+/// when a peer transitions into a degraded tier** — the
+/// `PeerHealthTable::escalate_and_mark_stale` path records every
+/// prefix the peer advertises as stale so ECMP can exclude it.
+///
+/// A fresh UPDATE from a degraded peer **re-admits** its prefix
+/// (clears the stale marker) per issue #99 §Recovery: "re-admit
+/// them on a valid UPDATE or via a rate-limited sweep." The hook
+/// therefore calls `readmit` before stamping; it does **not** re-mark
+/// stale on a fresh advertisement (a fresh UPDATE is the valid
+/// re-admission signal the issue describes).
+///
+/// Shadow modes (`observe`, `shadow`, `shadow-best-path`) never
+/// stamp the attribute, so the speaker's standard `BestPath::rank`
+/// is used and routing is unaffected. The `shadow-best-path`
+/// comparison (would-be best path under tiering vs. actual best
+/// path) is delivered by the separate
+/// [`PeerHealthShadowSelectionHook`], which records the divergence
+/// without changing the comparator's return value.
+///
 /// The hook never tears down sessions, never withdraws routes,
 /// and never modifies standard BGP path attributes. Fails OPEN on
 /// a poisoned mutex (keeping the route) to avoid black-holing
@@ -510,44 +535,174 @@ impl ImportHook for PeerHealthImportHook {
         let peer_id = route.origin.peer;
         let family = route.key.family;
         let now_ms = route.age_ms;
+        let prefix = route.key.prefix;
 
         let mut table = match self.table.lock() {
             Ok(g) => g,
+            // Poisoned mutex: keep the route (fail-open) so a
+            // peer-health panic does not black-hole prefixes.
             Err(_) => return HookVerdict::Keep,
         };
 
+        // Account the UPDATE; the table runs its state machine and
+        // may escalate the peer's tier. If escalation fires, the
+        // table marks every prefix previously seen from this peer
+        // stale (issue #99 §Recovery: "Mark affected prefixes
+        // stale"). The returned tier is the effective tier after
+        // any caps (e.g. `limited` mode caps at L1).
         let tier = table.account_update(peer_id, family, now_ms);
+        // Record this prefix in the peer's advertisement set so a
+        // future escalation marks it stale. This must happen AFTER
+        // `account_update` so the current escalation (if any) sees
+        // the prefix as already observed — but the escalation path
+        // inside `apply_transition` iterates the set as it stood at
+        // the moment of escalation, so a prefix that arrives in the
+        // same UPDATE that trips escalation is recorded but not
+        // marked stale by this escalation (it will be marked stale
+        // by the next escalation, if any). The fresh-UPDATE
+        // re-admission below clears any stale marker this prefix
+        // might have carried from a prior escalation, so the route
+        // is fresh.
+        table.observe_prefix(peer_id, family, &prefix);
         let applies_stale = table.config().rollout.applies_stale();
         let stamps_tier = table.config().rollout.stamps_tier();
-        let is_degraded = tier != lr_peer_health::PeerHealthTier::L0;
 
+        // A fresh UPDATE is a re-admission signal (issue #99
+        // §Recovery: "re-admit them on a valid UPDATE"). Clear the
+        // stale marker for this prefix unconditionally — the
+        // escalation path above may have re-marked the peer's
+        // *other* prefixes stale, but this specific prefix just got
+        // a fresh advertisement and is no longer stale.
         if applies_stale {
-            table.readmit(peer_id, family, &route.key.prefix);
+            table.readmit(peer_id, family, &prefix);
         }
 
+        // Stamp the tier attribute only in modes that affect
+        // selection (`limited` / `full`). Shadow modes do not
+        // stamp, so `BestPath::rank` (not `rank_tiered`) runs and
+        // routing is unaffected.
         if stamps_tier {
             let mut attrs: PathAttributes = core::mem::take(&mut route.attributes).into();
             attrs.set_peer_health_tier(tier.as_u8());
-            if applies_stale && is_degraded {
-                attrs.set_peer_health_stale(true);
-            }
             route.attributes = attrs.into();
-        }
-
-        if applies_stale && is_degraded {
-            table.mark_stale(peer_id, family, &route.key.prefix, now_ms);
         }
 
         HookVerdict::Keep
     }
 
-    fn on_withdraw(&self, key: &RouteKey, now_s: u64) {
+    fn on_withdraw(&self, origin: RouteOrigin, key: &RouteKey, now_s: u64) {
         let mut table = match self.table.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
         let now_ms = now_s.saturating_mul(1000);
-        let _ = table.account_withdraw(0, key.family, now_ms);
+        // Account the withdraw at the correct (peer, family) — the
+        // trait's `origin` parameter carries the peer id (issue #99
+        // §Hooks: "per peer + AFI/SAFI update rate and RIB churn
+        // rate"). Withdrawals are churn; counting them at peer 0
+        // would corrupt every session's baseline.
+        let _ = table.account_withdraw(origin.peer, key.family, now_ms);
+        // Retire the prefix from the peer's advertisement set so
+        // future escalations do not mark stale prefixes that are no
+        // longer in the RIB. Also clear any existing stale marker
+        // (the prefix is gone from Adj-RIB-In).
+        if table.config().rollout.applies_stale() {
+            table.forget_prefix(origin.peer, key.family, &key.prefix);
+            table.readmit(origin.peer, key.family, &key.prefix);
+        }
+    }
+}
+
+/// Shadow-best-path comparison hook (issue #99 §Rollout phase 3).
+///
+/// Installed **only** when the rollout mode is `shadow-best-path`.
+/// The hook never stamps the `LrPeerHealthTier` attribute, so the
+/// speaker's `BestPath::rank` (standard) selects the actual best
+/// path. This hook observes the comparison the speaker is about to
+/// make, computes the **would-be** ordering under tiering (using
+/// the table's current tier for each route's peer), and records a
+/// divergence counter when the two orderings disagree. It always
+/// returns `None` so the default comparator runs unchanged.
+///
+/// The counters are read by `lrctl show peer-health` and by the
+/// daemon's periodic log line; they are the data the issue's
+/// "Shadow comparisons show no fallback black-hole events and
+/// limited degraded-to-degraded path switches" acceptance
+/// criterion is checked against.
+#[cfg(feature = "peer-health")]
+#[derive(Debug)]
+pub struct PeerHealthShadowSelectionHook {
+    table: Arc<Mutex<lr_peer_health::PeerHealthTable>>,
+    /// Count of `compare(a, b)` calls where the tiered ordering
+    /// disagreed with the standard ordering. Monotonic; read by
+    /// `lrctl show peer-health`.
+    pub divergences: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "peer-health")]
+impl PeerHealthShadowSelectionHook {
+    pub fn new(table: Arc<Mutex<lr_peer_health::PeerHealthTable>>) -> Self {
+        Self {
+            table,
+            divergences: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Read the divergence counter. Used by `lrctl show peer-health`.
+    pub fn divergences(&self) -> u64 {
+        self.divergences.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(feature = "peer-health")]
+impl SelectionHook for PeerHealthShadowSelectionHook {
+    fn name(&self) -> &str {
+        "peer-health-shadow-best-path"
+    }
+
+    fn compare(&self, a: &Route, b: &Route) -> Option<Ordering> {
+        // Both routes must be BGP for tiering to apply; otherwise
+        // there is nothing to compare (the default comparator
+        // handles cross-protocol ordering).
+        if a.protocol != lr_core::rib::Protocol::Bgp || b.protocol != lr_core::rib::Protocol::Bgp {
+            return None;
+        }
+        let Ok(table) = self.table.lock() else {
+            return None;
+        };
+        // Use the INTERNAL tier (what the state machine computed,
+        // before the rollout-mode mask) — `tier()` returns L0 in
+        // shadow modes, which would hide every divergence.
+        let tier_a = table.internal_tier(a.origin.peer, a.key.family);
+        let tier_b = table.internal_tier(b.origin.peer, b.key.family);
+        // If both peers are at L0, the tiered ordering cannot
+        // differ from the standard ordering — skip the comparison.
+        if tier_a == lr_peer_health::PeerHealthTier::L0
+            && tier_b == lr_peer_health::PeerHealthTier::L0
+        {
+            return None;
+        }
+        // Compute the would-be ordering under tiering: lower tier
+        // wins; if tiers are equal, defer to the standard
+        // comparator (no divergence possible).
+        let tiered = match tier_a.cmp(&tier_b) {
+            Ordering::Equal => return None,
+            ord => ord,
+        };
+        // Compute the standard ordering (without invoking hooks —
+        // `BestPath::compare` is a pure function).
+        let standard = lr_bgp::best_path::BestPath::compare(
+            a,
+            b,
+            &lr_bgp::best_path::BestPathConfig::default(),
+        );
+        if tiered != standard {
+            self.divergences
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Always defer so the default comparator runs unchanged —
+        // shadow-best-path never affects routing.
+        None
     }
 }
 
@@ -714,10 +869,15 @@ impl HookChain {
     /// value is intentionally `()` — a withdraw cannot be "dropped"
     /// (the route is already gone from Adj-RIB-In). Implementations
     /// use this notification to update cross-route state such as the
-    /// RFC 2439 damping figure-of-merit table.
-    pub fn run_import_withdraw(&self, key: &RouteKey, now_s: u64) {
+    /// RFC 2439 damping figure-of-merit table or the per-peer
+    /// flap-suppression churn counter (issue #99).
+    ///
+    /// `origin` carries the peer id the withdraw came from — issue
+    /// #99's per-peer accounting needs it; older per-prefix hooks
+    /// ignore it.
+    pub fn run_import_withdraw(&self, origin: RouteOrigin, key: &RouteKey, now_s: u64) {
         for h in &self.import {
-            h.on_withdraw(key, now_s);
+            h.on_withdraw(origin, key, now_s);
         }
     }
 
@@ -1157,8 +1317,9 @@ mod tests {
     }
 
     /// Helper: set a route's `age_ms` to a wall-clock-millis value so
-    /// the damping hook can derive `now_s` from it.
-    #[cfg(feature = "damping")]
+    /// the damping hook (and the peer-health hook, which derives
+    /// `now_ms` from `route.age_ms`) can read the event timestamp.
+    #[cfg(any(feature = "damping", feature = "peer-health"))]
     fn route_at(prefix: [u8; 4], plen: u8, peer: u64, age_ms: u64) -> Route {
         let mut r = route(prefix, plen, peer);
         r.age_ms = age_ms;
@@ -1187,9 +1348,10 @@ mod tests {
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
         // Simulate three withdraws — each adds 1000 to FoM.
-        hook.on_withdraw(&key, 0);
-        hook.on_withdraw(&key, 0);
-        hook.on_withdraw(&key, 0);
+        let origin = RouteOrigin { proto: 0, peer: 1 };
+        hook.on_withdraw(origin, &key, 0);
+        hook.on_withdraw(origin, &key, 0);
+        hook.on_withdraw(origin, &key, 0);
         // The third withdraw crosses the threshold — the prefix
         // is now suppressed.
         assert!(table.lock().unwrap().is_suppressed(&key.prefix));
@@ -1216,9 +1378,10 @@ mod tests {
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
         // Three withdraws through the chain.
-        chain.run_import_withdraw(&key, 0);
-        chain.run_import_withdraw(&key, 0);
-        chain.run_import_withdraw(&key, 0);
+        let origin = RouteOrigin { proto: 0, peer: 1 };
+        chain.run_import_withdraw(origin, &key, 0);
+        chain.run_import_withdraw(origin, &key, 0);
+        chain.run_import_withdraw(origin, &key, 0);
         assert!(table.lock().unwrap().is_suppressed(&key.prefix));
     }
 
@@ -1238,7 +1401,7 @@ mod tests {
             "203.0.113.0/24".parse().unwrap(),
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
-        hook.on_withdraw(&key, 0);
+        hook.on_withdraw(RouteOrigin { proto: 0, peer: 1 }, &key, 0);
         assert_eq!(table.lock().unwrap().entries().count(), 1);
     }
 
@@ -1280,9 +1443,10 @@ mod tests {
             "203.0.113.0/24".parse().unwrap(),
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
-        hook.on_withdraw(&key, 0);
-        hook.on_withdraw(&key, 0);
-        hook.on_withdraw(&key, 0);
+        let origin = RouteOrigin { proto: 0, peer: 1 };
+        hook.on_withdraw(origin, &key, 0);
+        hook.on_withdraw(origin, &key, 0);
+        hook.on_withdraw(origin, &key, 0);
         assert!(table.lock().unwrap().is_suppressed(&key.prefix));
 
         enabled.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1305,7 +1469,7 @@ mod tests {
             .next()
             .map(|e| e.figure_of_merit)
             .unwrap_or(0.0);
-        hook.on_withdraw(&key, 0);
+        hook.on_withdraw(origin, &key, 0);
         let fom_after = table
             .lock()
             .unwrap()
@@ -1397,5 +1561,423 @@ mod tests {
         assert!(matches!(hook.on_import(&mut r), HookVerdict::Drop));
         gate.store(false, std::sync::atomic::Ordering::Relaxed);
         assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
+    }
+
+    // ---- PeerHealthImportHook unit tests (issue #99). ----
+    //
+    // The hook's contract per issue #99 §Rollout + §Recovery:
+    //   - off: no accounting, no stamping.
+    //   - observe: accounting only; counters recorded; no stamping.
+    //   - shadow: state machine runs (tiers computed); no stamping.
+    //   - shadow-best-path: like shadow; no stamping (the
+    //     PeerHealthShadowSelectionHook observes divergence).
+    //   - limited: stamp tier (capped at L1); stale markings applied
+    //     on escalation.
+    //   - full: stamp tier (L0..=L3); stale markings applied on
+    //     escalation.
+    //
+    // Stale semantics: a peer's prefixes are marked stale ONLY when
+    // the peer escalates into a degraded tier. A fresh UPDATE
+    // re-admits (clears stale) — the hook does NOT re-mark stale on
+    // a fresh advertisement (issue #99 §Recovery: "re-admit them on
+    // a valid UPDATE").
+
+    /// Build a PeerHealthConfig tuned for fast, deterministic
+    /// escalation in unit tests: tiny windows, low multipliers,
+    /// no min-transition/recovery intervals, no dwell.
+    ///
+    /// The multipliers are high enough (10x enter) that a 1
+    /// event/sec training baseline does NOT trip escalation (short
+    /// budget = 10 * 0.1 * 5 = 5; 5 events in 5s = 5, not > 5), but
+    /// a 200-event burst in 2 seconds does (200 >> 5).
+    #[cfg(feature = "peer-health")]
+    fn ph_cfg(mode: lr_peer_health::RolloutMode) -> lr_peer_health::PeerHealthConfig {
+        let mut c = lr_peer_health::PeerHealthConfig::default();
+        c.rollout = mode;
+        c.short_window = lr_peer_health::WindowBudget {
+            window_s: 5,
+            enter_multiplier: 10.0,
+            exit_multiplier: 5.0,
+            emergency_multiplier: 50.0,
+        };
+        c.mid_window = lr_peer_health::WindowBudget {
+            window_s: 30,
+            enter_multiplier: 10.0,
+            exit_multiplier: 5.0,
+            emergency_multiplier: 50.0,
+        };
+        c.long_window = lr_peer_health::WindowBudget {
+            window_s: 120,
+            enter_multiplier: 10.0,
+            exit_multiplier: 5.0,
+            emergency_multiplier: 50.0,
+        };
+        c.baseline_window_s = 480;
+        c.min_baseline_rate_eps = 0.1;
+        c.min_transition_interval_s = 0;
+        c.min_recovery_interval_s = 0;
+        c.dwell_s = [0, 0, 0, 0];
+        c.max_stale_age_s = 60;
+        c.tick_interval_s = 1;
+        c.global_budgets = lr_peer_health::GlobalBudgets {
+            soft_degraded: 100,
+            hard_degraded: 0,
+        };
+        c
+    }
+
+    /// Drive a burst of UPDATEs from one peer to force escalation.
+    #[cfg(feature = "peer-health")]
+    fn ph_burst(
+        hook: &PeerHealthImportHook,
+        peer: u64,
+        prefix: [u8; 4],
+        plen: u8,
+        burst_start_ms: u64,
+        count: u32,
+        gap_ms: u64,
+    ) {
+        // Train the baseline at 1 event/sec for 10 seconds.
+        for i in 0..10u64 {
+            let mut r = route_at(prefix, plen, peer, i * 1000);
+            let _ = hook.on_import(&mut r);
+        }
+        // Burst `count` events at `gap_ms` apart starting at
+        // `burst_start_ms`.
+        let mut now = burst_start_ms;
+        for _ in 0..count {
+            let mut r = route_at(prefix, plen, peer, now);
+            let _ = hook.on_import(&mut r);
+            now += gap_ms;
+        }
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_off_mode_does_not_stamp_or_account() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_peer_health::PeerHealthTable::new(ph_cfg(lr_peer_health::RolloutMode::Off)),
+        ));
+        let hook = PeerHealthImportHook::new(std::sync::Arc::clone(&table));
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
+        let attrs: PathAttributes = r.attributes.clone().into();
+        assert!(!attrs.has_peer_health_tier(), "off mode must not stamp");
+        assert!(
+            table.lock().unwrap().is_empty(),
+            "off mode must not create session state"
+        );
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_observe_mode_accounts_without_stamping() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_peer_health::PeerHealthTable::new(ph_cfg(lr_peer_health::RolloutMode::Observe)),
+        ));
+        let hook = PeerHealthImportHook::new(std::sync::Arc::clone(&table));
+        ph_burst(&hook, 1, [203, 0, 113, 0], 24, 10_000, 200, 10);
+        let snap = table
+            .lock()
+            .unwrap()
+            .session_snapshot(1, lr_core::nlri::NlriFamily::IPV4_UNICAST)
+            .unwrap();
+        assert!(snap.counters.updates >= 200);
+        // Observe mode: the PUBLIC tier (what the hook would stamp)
+        // is L0 — observe never stamps. The snapshot's internal tier
+        // may be escalated (that's the point of observe: you see
+        // what the state machine is computing without affecting
+        // routing).
+        assert_eq!(
+            table
+                .lock()
+                .unwrap()
+                .tier(1, lr_core::nlri::NlriFamily::IPV4_UNICAST),
+            lr_peer_health::PeerHealthTier::L0,
+            "observe mode must expose L0 as the public tier"
+        );
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_shadow_mode_does_not_stamp() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_peer_health::PeerHealthTable::new(ph_cfg(lr_peer_health::RolloutMode::Shadow)),
+        ));
+        let hook = PeerHealthImportHook::new(std::sync::Arc::clone(&table));
+        ph_burst(&hook, 1, [203, 0, 113, 0], 24, 10_000, 200, 10);
+        // Shadow mode: state machine runs (internal tier may be
+        // degraded), but no stamping and the public tier is L0.
+        assert_eq!(
+            table
+                .lock()
+                .unwrap()
+                .tier(1, lr_core::nlri::NlriFamily::IPV4_UNICAST),
+            lr_peer_health::PeerHealthTier::L0,
+            "shadow mode must not expose a non-L0 tier publicly"
+        );
+        // A fresh route from the degraded peer has no tier attribute.
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 20_000);
+        let _ = hook.on_import(&mut r);
+        let attrs: PathAttributes = r.attributes.clone().into();
+        assert!(!attrs.has_peer_health_tier(), "shadow mode must not stamp");
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_shadow_best_path_mode_does_not_stamp() {
+        // Issue #99 §Rollout phase 3: shadow-best-path must NOT
+        // affect routing. The previous implementation stamped the
+        // tier attribute in this mode, which made rank_tiered run
+        // and actually changed selection — contradicting the
+        // "shadow" semantics. This test guards against that
+        // regression.
+        let table =
+            std::sync::Arc::new(std::sync::Mutex::new(lr_peer_health::PeerHealthTable::new(
+                ph_cfg(lr_peer_health::RolloutMode::ShadowBestPath),
+            )));
+        let hook = PeerHealthImportHook::new(std::sync::Arc::clone(&table));
+        ph_burst(&hook, 1, [203, 0, 113, 0], 24, 10_000, 200, 10);
+        // Public tier is L0 (no stamping).
+        assert_eq!(
+            table
+                .lock()
+                .unwrap()
+                .tier(1, lr_core::nlri::NlriFamily::IPV4_UNICAST),
+            lr_peer_health::PeerHealthTier::L0,
+            "shadow-best-path must not expose a non-L0 tier publicly"
+        );
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 20_000);
+        let _ = hook.on_import(&mut r);
+        let attrs: PathAttributes = r.attributes.clone().into();
+        assert!(
+            !attrs.has_peer_health_tier(),
+            "shadow-best-path must not stamp the tier attribute"
+        );
+        assert!(
+            !attrs.peer_health_stale(),
+            "shadow-best-path must not stamp the stale attribute"
+        );
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_limited_mode_caps_tier_at_l1() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_peer_health::PeerHealthTable::new(ph_cfg(lr_peer_health::RolloutMode::Limited)),
+        ));
+        let hook = PeerHealthImportHook::new(std::sync::Arc::clone(&table));
+        ph_burst(&hook, 1, [203, 0, 113, 0], 24, 10_000, 200, 10);
+        // Limited mode: tier is capped at L1.
+        assert_eq!(
+            table
+                .lock()
+                .unwrap()
+                .tier(1, lr_core::nlri::NlriFamily::IPV4_UNICAST),
+            lr_peer_health::PeerHealthTier::L1,
+            "limited mode must cap the public tier at L1"
+        );
+        // A fresh route from the degraded peer carries the tier
+        // attribute, but the stale attribute is cleared (fresh
+        // UPDATE re-admits).
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 20_000);
+        let _ = hook.on_import(&mut r);
+        let attrs: PathAttributes = r.attributes.clone().into();
+        assert!(attrs.has_peer_health_tier(), "limited mode must stamp tier");
+        assert_eq!(attrs.peer_health_tier(), Some(1));
+        assert!(
+            !attrs.peer_health_stale(),
+            "fresh UPDATE must clear stale (re-admission)"
+        );
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_full_mode_stamps_tier_and_clears_stale_on_fresh_update() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_peer_health::PeerHealthTable::new(ph_cfg(lr_peer_health::RolloutMode::Full)),
+        ));
+        let hook = PeerHealthImportHook::new(std::sync::Arc::clone(&table));
+        // Advertise two prefixes from the peer with monotonic
+        // timestamps (interleaved) so the event vec stays sorted
+        // and window counts are accurate. Each prefix gets 5
+        // UPDATEs over 10 seconds.
+        for i in 0..5u64 {
+            let mut r = route_at([203, 0, 113, 0], 24, 1, i * 2 * 1000);
+            let _ = hook.on_import(&mut r);
+            let mut r = route_at([198, 51, 100, 0], 24, 1, (i * 2 + 1) * 1000);
+            let _ = hook.on_import(&mut r);
+        }
+        // Burst on the first prefix to trip escalation.
+        let mut now = 10_000u64;
+        for _ in 0..200 {
+            let mut r = route_at([203, 0, 113, 0], 24, 1, now);
+            let _ = hook.on_import(&mut r);
+            now += 10;
+        }
+        // After escalation, the prefix the peer advertised that was
+        // NOT part of the burst (198.51.100.0/24) should be stale
+        // (marked by apply_transition on escalation, never
+        // re-admitted). The burst prefix (203.0.113.0/24) was
+        // re-admitted by the last burst UPDATE.
+        {
+            let t = table.lock().unwrap();
+            assert!(
+                t.is_stale(
+                    1,
+                    lr_core::nlri::NlriFamily::IPV4_UNICAST,
+                    &"198.51.100.0/24".parse().unwrap()
+                ),
+                "the non-burst advertised prefix should be stale after escalation"
+            );
+        }
+        // A fresh UPDATE for one of the prefixes re-admits it
+        // (clears stale) — the hook does NOT re-mark stale.
+        let mut r = route_at([203, 0, 113, 0], 24, 1, now);
+        let _ = hook.on_import(&mut r);
+        let attrs: PathAttributes = r.attributes.clone().into();
+        assert!(attrs.has_peer_health_tier(), "full mode must stamp tier");
+        assert!(
+            !attrs.peer_health_stale(),
+            "fresh UPDATE must clear stale (re-admission, not re-mark)"
+        );
+        assert!(
+            !table.lock().unwrap().is_stale(
+                1,
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+                &"203.0.113.0/24".parse().unwrap()
+            ),
+            "table must clear stale for the re-admitted prefix"
+        );
+        // The other prefix is still stale (no fresh UPDATE for it).
+        assert!(
+            table.lock().unwrap().is_stale(
+                1,
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+                &"198.51.100.0/24".parse().unwrap()
+            ),
+            "the non-refreshed prefix must remain stale"
+        );
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_on_withdraw_accounts_at_correct_peer() {
+        // Issue #99 §Hooks: "per peer + AFI/SAFI update rate and
+        // RIB churn rate". The previous implementation attributed
+        // every withdraw to peer 0 because the ImportHook trait
+        // did not carry the peer id. This test guards against that
+        // regression: a withdraw from peer 7 must bump peer 7's
+        // withdraw counter, not peer 0's.
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_peer_health::PeerHealthTable::new(ph_cfg(lr_peer_health::RolloutMode::Full)),
+        ));
+        let hook = PeerHealthImportHook::new(std::sync::Arc::clone(&table));
+        // Seed the session with one UPDATE so the table has state.
+        let mut r = route_at([203, 0, 113, 0], 24, 7, 1_000);
+        let _ = hook.on_import(&mut r);
+        // Withdraw from peer 7.
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        hook.on_withdraw(RouteOrigin { proto: 0, peer: 7 }, &key, 2);
+        // Peer 7's withdraw counter must be >= 1; peer 0 must not
+        // exist (or have zero withdraws).
+        let snap = table
+            .lock()
+            .unwrap()
+            .session_snapshot(7, lr_core::nlri::NlriFamily::IPV4_UNICAST)
+            .expect("peer 7 session must exist");
+        assert!(
+            snap.counters.withdraws >= 1,
+            "withdraw must be attributed to peer 7"
+        );
+        // Peer 0 must not have been created by the withdraw.
+        assert!(
+            table
+                .lock()
+                .unwrap()
+                .session_snapshot(0, lr_core::nlri::NlriFamily::IPV4_UNICAST)
+                .is_none(),
+            "withdraw must not create a spurious peer-0 session"
+        );
+    }
+
+    #[cfg(feature = "peer-health")]
+    #[test]
+    fn peer_health_shadow_selection_hook_records_divergence() {
+        // The PeerHealthShadowSelectionHook computes the would-be
+        // ordering under tiering and records a divergence counter
+        // when it disagrees with the standard ordering. It always
+        // returns None so the default comparator runs unchanged.
+        use lr_bgp::best_path::{BestPath, BestPathConfig};
+        use lr_core::rib::Preference;
+        let table =
+            std::sync::Arc::new(std::sync::Mutex::new(lr_peer_health::PeerHealthTable::new(
+                ph_cfg(lr_peer_health::RolloutMode::ShadowBestPath),
+            )));
+        // Manually escalate peer 1 by bursting the table directly
+        // (the import hook would not stamp in shadow-best-path, but
+        // the table's internal tier still escalates).
+        {
+            let mut t = table.lock().unwrap();
+            for i in 0..10u64 {
+                t.account_update(1, lr_core::nlri::NlriFamily::IPV4_UNICAST, i * 1000);
+            }
+            let mut now = 10_000u64;
+            for _ in 0..200 {
+                t.account_update(1, lr_core::nlri::NlriFamily::IPV4_UNICAST, now);
+                now += 10;
+            }
+        }
+        let hook = PeerHealthShadowSelectionHook::new(std::sync::Arc::clone(&table));
+        // Two routes from peer 1 and peer 2: identical attributes,
+        // so the standard comparator picks by peer-id (peer 1 wins).
+        // Under tiering, peer 1 is degraded and peer 2 is L0, so
+        // the tiered ordering would prefer peer 2 — a divergence.
+        let a = Route {
+            key: lr_core::rib::RouteKey::new(
+                "203.0.113.0/24".parse().unwrap(),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer: 1 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 1_000,
+            path_id: 0,
+            tag: None,
+        };
+        let b = Route {
+            key: lr_core::rib::RouteKey::new(
+                "203.0.113.0/24".parse().unwrap(),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer: 2 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 1_000,
+            path_id: 0,
+            tag: None,
+        };
+        let before = hook.divergences();
+        let verdict = hook.compare(&a, &b);
+        assert!(
+            verdict.is_none(),
+            "shadow hook must defer to the default comparator"
+        );
+        let after = hook.divergences();
+        assert!(
+            after > before,
+            "divergence counter must increment when tiered and standard orderings disagree"
+        );
+        // Sanity: the standard comparator on these two routes does
+        // not panic and returns an ordering (peer 1 wins by lower
+        // peer-id after the tiebreakers).
+        let _ = BestPath::compare(&a, &b, &BestPathConfig::default());
     }
 }
