@@ -1867,6 +1867,177 @@ fn roa_without_asn_fails() {
     assert!(err.contains("without 'asn'"), "{err}");
 }
 
+// ============================================================
+// [[bgp.roa_source]] — advanced ROA loading (issue #100)
+// ============================================================
+
+#[test]
+fn roa_source_file_path_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\nformat = \"bird\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.roa_sources.len(), 1);
+    assert_eq!(
+        cfg.roa_sources[0].path.as_deref(),
+        Some("/etc/lr/roas.bird")
+    );
+    assert_eq!(cfg.roa_sources[0].format, Some(lr_bgp::RoaFormat::Bird));
+}
+
+#[test]
+fn roa_source_url_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\nurl = \"https://rpki.example.com/roas.json\"\nformat = \"json\"\ninterval = 3600\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.roa_sources.len(), 1);
+    assert_eq!(
+        cfg.roa_sources[0].url.as_deref(),
+        Some("https://rpki.example.com/roas.json")
+    );
+    assert_eq!(cfg.roa_sources[0].format, Some(lr_bgp::RoaFormat::Json));
+    assert_eq!(cfg.roa_sources[0].interval, Some(3600));
+}
+
+#[test]
+fn roa_source_format_inferred_from_extension() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.roa_sources[0].format, None);
+    // finalize must succeed — extension inference fills the format
+    // in at resolve time.
+    assert_eq!(
+        cfg.roa_sources[0].resolve_format().unwrap(),
+        lr_bgp::RoaFormat::Json
+    );
+}
+
+#[test]
+fn roa_source_rejects_path_and_url_together() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\nurl = \"https://example.com/roas.json\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(err.contains("mutually exclusive"), "{err}");
+}
+
+#[test]
+fn roa_source_rejects_missing_path_and_url() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset("[[bgp.roa_source]]\nformat = \"bird\"\n", &mut cfg).unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(err.contains("missing 'path' or 'url'"), "{err}");
+}
+
+#[test]
+fn roa_source_rejects_unknown_format() {
+    let mut cfg = DaemonConfig::with_defaults();
+    // The parse step itself rejects an unknown format (fail
+    // closed at config time, not at loader-spawn time).
+    let err = parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\nformat = \"xml\"\n",
+        &mut cfg,
+    );
+    assert!(err.is_err());
+    let err = err.unwrap_err();
+    assert!(err.contains("unknown roa_source format"), "{err}");
+}
+
+#[test]
+fn roa_source_rejects_unknown_extension_without_format() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bin\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(err.contains("cannot infer format"), "{err}");
+}
+
+#[test]
+fn roa_source_rejects_non_http_url_scheme() {
+    let mut cfg = DaemonConfig::with_defaults();
+    // The parse step itself rejects a non-http(s) URL scheme.
+    let err = parse_toml_subset(
+        "[[bgp.roa_source]]\nurl = \"ftp://example.com/roas.json\"\n",
+        &mut cfg,
+    );
+    assert!(err.is_err());
+    let err = err.unwrap_err();
+    assert!(err.contains("expected 'http://' or 'https://'"), "{err}");
+}
+
+#[test]
+fn roa_source_rejects_zero_interval() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\nurl = \"https://example.com/roas.json\"\ninterval = 0\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(err.contains("interval = 0"), "{err}");
+}
+
+#[test]
+fn roa_source_warns_when_interval_set_for_file() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\ninterval = 60\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert!(
+        cfg.warnings
+            .iter()
+            .any(|w| w.contains("ignored for file sources")),
+        "warnings: {:?}",
+        cfg.warnings
+    );
+}
+
+#[test]
+fn roa_source_multiple_sources_parse() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\nformat = \"bird\"\n\
+         [[bgp.roa_source]]\nurl = \"https://example.com/roas.json\"\nformat = \"json\"\ninterval = 900\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.roa_sources.len(), 2);
+}
+
+#[test]
+fn roa_source_unknown_key_fails_closed() {
+    let mut cfg = DaemonConfig::with_defaults();
+    let err = parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\nhostname = \"foo\"\n",
+        &mut cfg,
+    );
+    assert!(err.is_err());
+    let err = err.unwrap_err();
+    assert!(err.contains("unknown [[bgp.roa_source]] key"), "{err}");
+}
+
 #[test]
 fn filter_tables_parse() {
     let mut cfg = DaemonConfig::with_defaults();
