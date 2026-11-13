@@ -2128,6 +2128,67 @@ fn roa_source_program_file_parses() {
 }
 
 #[test]
+fn roa_source_program_literal_string_preserves_inner_quotes() {
+    // A TOML literal string (`'...'`) preserves the inner `"`
+    // and `\` chars verbatim — exactly what a jq program needs
+    // (jq's own `\(.field)` interpolation uses both characters).
+    // Previously the parser stripped `"` via `trim_matches('"')`,
+    // which truncated `'.roas[] | "...";'` to `.roas[] | "...;`
+    // (missing the closing quote) and broke jq.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\nformat = \"jq\"\nprogram = '.roas[] | \"roa \\(.prefix) max \\(.maxLength) as \\(.asn);\"'\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.roa_sources[0].format, Some(lr_bgp::RoaFormat::Jq));
+    let program = cfg.roa_sources[0].program.as_deref().expect("program");
+    assert_eq!(
+        program,
+        ".roas[] | \"roa \\(.prefix) max \\(.maxLength) as \\(.asn);\""
+    );
+}
+
+#[test]
+fn roa_source_program_inline_comment_outside_literal_is_stripped() {
+    // A `#` outside a quoted value starts a comment; the inline
+    // comment stripper must respect both basic and literal string
+    // forms so an embedded `#` (in a jq program or a User-Agent
+    // string) survives.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\nformat = \"jq\"\nprogram = '.roas[] | \"x#y\"' # operator note\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    let program = cfg.roa_sources[0].program.as_deref().expect("program");
+    assert!(program.contains('#'), "program lost its `#`: {program}");
+    assert!(
+        !program.contains("operator note"),
+        "comment leaked: {program}"
+    );
+}
+
+#[test]
+fn roa_source_user_agent_literal_string_preserves_inner_quotes() {
+    // Same property for `user_agent` (an HTTP header value that
+    // may carry `(` and `;` chars, common in real UA strings).
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\nurl = \"https://example.com/roas.json\"\nformat = \"jq\"\nprogram = '.'\ninterval = 60\nuser_agent = 'Mozilla/5.0 (lr; #test)'\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(
+        cfg.roa_sources[0].user_agent.as_deref(),
+        Some("Mozilla/5.0 (lr; #test)")
+    );
+}
+
+#[test]
 fn filter_tables_parse() {
     let mut cfg = DaemonConfig::with_defaults();
     parse_toml_subset(

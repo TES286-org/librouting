@@ -271,7 +271,7 @@ pub fn parse_native(text: &str) -> Result<Vec<RoaEntry>, RoaLoaderError> {
             continue;
         };
         let key = key.trim();
-        let value = value.trim().trim_matches('"');
+        let value = unquote_toml_value(value);
         let Some((ref mut prefix, ref mut max_length, ref mut asn)) = current else {
             // Keys outside a [[roa]] table — ignore (the daemon's
             // other top-level keys like `[bgp] local_as = ...` are
@@ -306,14 +306,46 @@ pub fn parse_native(text: &str) -> Result<Vec<RoaEntry>, RoaLoaderError> {
     Ok(entries)
 }
 
+/// Strip one pair of surrounding quotes from a TOML scalar value.
+///
+/// Handles both basic (`"..."`) and literal (`'...'`) string forms
+/// per TOML §"Strings". A value without surrounding quotes is returned
+/// unchanged (bare values like `true` and `123` are accepted). Unlike
+/// `str::trim_matches('"')`, this strips at most one matching pair, so
+/// a value like `"hello\"world"` is correctly stripped to `hello\"world`
+/// (not `hello\`), and a literal string `'.roas[] | "x";'` is stripped
+/// to `.roas[] | "x";` verbatim.
+///
+/// The native ROA loader uses this for `prefix`, `max_length` and `asn`
+/// values inside `[[roa]]` tables, which previously rejected literal
+/// strings because the parser only stripped `"` via `trim_matches`.
+fn unquote_toml_value(value: &str) -> &str {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0] == bytes[bytes.len() - 1]
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+    {
+        return &value[1..value.len() - 1];
+    }
+    value
+}
+
 /// Strip a `#` comment from a line, preserving `#` inside quoted
 /// strings (the same rule `daemon_config::parse_toml_subset` uses).
 fn strip_comment(raw: &str) -> &str {
-    let mut in_quote = false;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
     for (i, ch) in raw.char_indices() {
-        match ch {
-            '"' => in_quote = !in_quote,
-            '#' if !in_quote => return &raw[..i],
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (ch, quote) {
+            (c, Some(q)) if c == q => quote = None,
+            ('\\', Some('"')) => escaped = true,
+            ('"' | '\'', None) => quote = Some(ch),
+            ('#', None) => return &raw[..i],
             _ => {}
         }
     }

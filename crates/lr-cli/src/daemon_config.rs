@@ -3189,7 +3189,7 @@ fn parse_str_array(value: &str) -> Vec<String> {
     let inner = value.trim_start_matches('[').trim_end_matches(']');
     inner
         .split(',')
-        .map(|item| item.trim().trim_matches('"').to_string())
+        .map(|item| unquote_toml_value(item).to_string())
         .filter(|item| !item.is_empty())
         .collect()
 }
@@ -3220,28 +3220,72 @@ fn parse_exchange_plane_policy_role(value: &str) -> Result<String, String> {
     }
 }
 
-/// Strip an inline `#` comment from a config line, honouring quoted
-/// strings: a `#` inside `"…"` is data, not a comment, and a `\"`
-/// escape does not close the string. TOML §"Comments" allows a comment
-/// after any value; the subset parser previously accepted whole-line
-/// comments only, which made `templates/daemon.toml` itself (e.g.
+/// Strip a `#`-to-end-of-line comment from a TOML line, respecting
+/// both basic (`"..."`) and literal (`'...'`) string forms so a `#`
+/// inside a quoted value is preserved (e.g. `md5_key = "a#b"` keeps
+/// its hash, and `program = '.roas[] | "x#y";'` keeps the `#` inside
+/// the inner string). TOML §"Comments" allows a comment after any
+/// value; the subset parser previously accepted whole-line comments
+/// only, which made `templates/daemon.toml` itself (e.g.
 /// `entry = 20      # everything else stays internal`) unparseable.
 fn strip_inline_comment(line: &str) -> &str {
-    let mut in_string = false;
+    // Tracks the quote char currently open (`"` or `'`), or `None`
+    // when not inside any string. A literal string (`'...'`) does
+    // not process escapes, so `\'` inside it does NOT close the
+    // string; a basic string (`"..."`) does, so `\"` inside it is
+    // an escaped quote, not a string terminator.
+    let mut quote: Option<char> = None;
     let mut escaped = false;
     for (idx, ch) in line.char_indices() {
         if escaped {
             escaped = false;
             continue;
         }
-        match ch {
-            '\\' if in_string => escaped = true,
-            '"' => in_string = !in_string,
-            '#' if !in_string => return &line[..idx],
+        match (ch, quote) {
+            (c, Some(q)) if c == q => {
+                // Closing quote of the open string.
+                quote = None;
+            }
+            ('\\', Some('"')) => {
+                // Escape inside a basic string only; literal
+                // strings do not process backslash escapes.
+                escaped = true;
+            }
+            ('"' | '\'', None) => {
+                quote = Some(ch);
+            }
+            ('#', None) => return &line[..idx],
             _ => {}
         }
     }
     line
+}
+
+/// Strip one pair of surrounding quotes from a TOML scalar value.
+///
+/// Handles both basic strings (`"..."`) and literal strings (`'...'`)
+/// per TOML §"Strings". A value without surrounding quotes is returned
+/// unchanged (bare values like `true` and `123` are accepted by the
+/// subset parser). Unlike `str::trim_matches('"')`, this strips at
+/// most one matching pair, so a value like `"hello\"world"` is correctly
+/// stripped to `hello\"world`, not `hello\` — and a literal string
+/// `'.roas[] | "roa \(.prefix);"'` is stripped to the inner
+/// `.roas[] | "roa \(.prefix);"` verbatim.
+///
+/// The caller is still responsible for unescaping basic-string escapes
+/// (`\"`, `\\`, `\n`, …) on the returned interior; that step happens
+/// only for fields whose values carry TOML escape sequences (filter
+/// DSL bodies and the like), via [`unescape_toml_string`].
+fn unquote_toml_value(value: &str) -> &str {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0] == bytes[bytes.len() - 1]
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+    {
+        return &value[1..value.len() - 1];
+    }
+    value
 }
 
 /// Minimal TOML subset parser: `key = value` lines, `[section]` headers,
@@ -3426,7 +3470,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             return Err(format!("line {}: expected `key = value`", lineno + 1));
         };
         let key = key.trim();
-        let value = value.trim().trim_matches('"');
+        let value = unquote_toml_value(value);
         apply_config_key(cfg, &section, key, value, lineno)?;
     }
     Ok(())
@@ -3937,10 +3981,10 @@ fn apply_babel_key(
                     .map_err(|_| format!("bad babel pc_window '{value}'"))?;
             }
             "import_filter" => {
-                cfg.babel_import_filter = Some(value.trim().trim_matches('"').to_string());
+                cfg.babel_import_filter = Some(unquote_toml_value(value).to_string());
             }
             "export_filter" => {
-                cfg.babel_export_filter = Some(value.trim().trim_matches('"').to_string());
+                cfg.babel_export_filter = Some(unquote_toml_value(value).to_string());
             }
             _ => {
                 return Err(format!(
@@ -3984,7 +4028,7 @@ fn apply_babel_key(
             match key {
                 "name" => iface.name = Some(value.to_string()),
                 "type" | "kind" => {
-                    let v = value.trim().trim_matches('"');
+                    let v = unquote_toml_value(value);
                     if !matches!(v, "wired" | "wireless" | "tunnel") {
                         return Err(format!(
                             "bad babel interface type '{v}' (use \"wired\" | \"wireless\" | \"tunnel\")"
@@ -4087,7 +4131,7 @@ fn apply_roa_key(
     };
     match key {
         "prefix" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             if v.parse::<lr_core::addr::Prefix>().is_err() {
                 return Err(format!("bad roa prefix '{v}' (expected CIDR)"));
             }
@@ -4134,7 +4178,7 @@ fn apply_roa_source_key(
     };
     match key {
         "path" | "file" => {
-            let v = value.trim().trim_matches('"').to_string();
+            let v = unquote_toml_value(value).to_string();
             if v.is_empty() {
                 return Err(format!("bad roa_source path '{v}' (empty)"));
             }
@@ -4143,7 +4187,7 @@ fn apply_roa_source_key(
             // sets both is rejected at finalize time.
         }
         "url" => {
-            let v = value.trim().trim_matches('"').to_string();
+            let v = unquote_toml_value(value).to_string();
             if v.is_empty() {
                 return Err(format!("bad roa_source url '{v}' (empty)"));
             }
@@ -4156,7 +4200,7 @@ fn apply_roa_source_key(
             src.url = Some(v);
         }
         "format" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             match lr_bgp::RoaFormat::from_name(v) {
                 Some(f) => src.format = Some(f),
                 None => {
@@ -4173,10 +4217,10 @@ fn apply_roa_source_key(
             src.interval = Some(n);
         }
         "user_agent" => {
-            src.user_agent = Some(value.trim().trim_matches('"').to_string());
+            src.user_agent = Some(unquote_toml_value(value).to_string());
         }
         "program" => {
-            let v = value.trim().trim_matches('"').to_string();
+            let v = unquote_toml_value(value).to_string();
             if v.is_empty() {
                 return Err(format!("bad roa_source program '{v}' (empty)"));
             }
@@ -4185,7 +4229,7 @@ fn apply_roa_source_key(
             src.program = Some(v);
         }
         "program_file" => {
-            let v = value.trim().trim_matches('"').to_string();
+            let v = unquote_toml_value(value).to_string();
             if v.is_empty() {
                 return Err(format!("bad roa_source program_file '{v}' (empty)"));
             }
@@ -4219,14 +4263,14 @@ fn apply_static_route_key(
     };
     match key {
         "prefix" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             if v.parse::<lr_core::addr::Prefix>().is_err() {
                 return Err(format!("bad static route prefix '{v}' (expected CIDR)"));
             }
             route.prefix = Some(v.to_string());
         }
         "next_hop" | "via" | "gateway" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             // Allow the operator to spell out "blackhole" or "Null0"
             // for clarity — the daemon treats these the same as a
             // missing next_hop (FRR/BIRD parity).
@@ -4529,12 +4573,12 @@ fn apply_redistribute_key(
             // Validate eagerly so the error carries the bad name, but
             // keep the raw string — `finalize_redistribution` re-parses
             // for the canonical cross-check.
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             parse_daemon_protocol(v).map_err(|e| format!("bad redistribute source: {e}"))?;
             spec.source = Some(v.to_string());
         }
         "target" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             parse_daemon_protocol(v).map_err(|e| format!("bad redistribute target: {e}"))?;
             spec.target = Some(v.to_string());
         }
@@ -4592,7 +4636,7 @@ fn apply_aggregate_key(
     };
     match key {
         "prefix" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             let p: lr_core::addr::Prefix = v
                 .parse()
                 .map_err(|_| format!("bad aggregate prefix '{v}' (expected CIDR)"))?;
@@ -4632,14 +4676,14 @@ fn apply_network_route_map_key(
     };
     match key {
         "prefix" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             let p: lr_core::addr::Prefix = v.parse().map_err(|_| {
                 format!("bad [[bgp.network_route_map]] prefix '{v}' (expected CIDR)")
             })?;
             spec.prefix = Some(p.to_string());
         }
         "route_map" => {
-            let v = value.trim().trim_matches('"');
+            let v = unquote_toml_value(value);
             if v.is_empty() {
                 return Err("[[bgp.network_route_map]] route_map is empty".to_string());
             }
@@ -5010,7 +5054,7 @@ fn apply_ospf_key(
                     );
                 }
                 "network_type" => {
-                    let v = value.trim().trim_matches('"');
+                    let v = unquote_toml_value(value);
                     if !matches!(v, "p2p" | "point-to-point" | "broadcast") {
                         return Err(format!(
                             "bad network_type '{v}' (use \"p2p\" or \"broadcast\")"
@@ -5029,7 +5073,7 @@ fn apply_ospf_key(
                 // validated against the configured locators at
                 // finalize).
                 "srv6_end_x" => {
-                    let v = value.trim().trim_matches('"');
+                    let v = unquote_toml_value(value);
                     if v.parse::<std::net::Ipv6Addr>().is_err() {
                         return Err(format!("bad srv6_end_x '{v}' (IPv6 address)"));
                     }
@@ -5039,7 +5083,7 @@ fn apply_ospf_key(
                 // (OSPFv3 broadcast segments only — validated against
                 // the configured locators at finalize).
                 "srv6_end_x_lan" => {
-                    let v = value.trim().trim_matches('"');
+                    let v = unquote_toml_value(value);
                     if v.parse::<lr_core::addr::Prefix>().is_err() {
                         return Err(format!(
                             "bad srv6_end_x_lan '{v}' (IPv6 prefix, e.g. 2001:db8:a:1:ffff::/96)"
