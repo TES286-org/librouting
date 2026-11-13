@@ -323,12 +323,26 @@ fn roa_source_url_fetches_at_startup() {
         "lr-daemon-roa-source-url-{}.toml",
         std::process::id()
     ));
+    // Write the jq transform program to a file so the TOML
+    // parser's escape handling is not a factor (the inline form
+    // works in the DSL where the lexer processes string escapes,
+    // but the TOML subset parser does not unescape \" and \\).
+    let prog = std::env::temp_dir().join(format!(
+        "lr-daemon-roa-source-url-{}.jq",
+        std::process::id()
+    ));
+    std::fs::write(
+        &prog,
+        r#".roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);""#,
+    )
+    .unwrap();
     std::fs::write(
         &config,
         format!(
             "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\n\
-             [[bgp.roa_source]]\nurl = \"http://127.0.0.1:{}/roas.json\"\nformat = \"json\"\ninterval = 60\n",
-            http.port
+             [[bgp.roa_source]]\nurl = \"http://127.0.0.1:{}/roas.json\"\nformat = \"jq\"\nprogram_file = \"{}\"\ninterval = 60\n",
+            http.port,
+            prog.display()
         ),
     )
     .unwrap();
@@ -344,10 +358,8 @@ fn roa_source_url_fetches_at_startup() {
     );
     d.wait_log("loaded 1 entries", "roa url fetch");
 
-    let line = wait_for_roa_source_status(
-        &socket,
-        &["type=url", "format=json", "entries=1", "state=ok"],
-    );
+    let line =
+        wait_for_roa_source_status(&socket, &["type=url", "format=jq", "entries=1", "state=ok"]);
     assert!(line.contains("127.0.0.1"), "line: {line}");
 
     let _ = std::fs::remove_file(&config);
@@ -430,12 +442,22 @@ fn roa_source_url_fetch_failure_keeps_previous_snapshot() {
         "lr-daemon-roa-source-fail-{}.toml",
         std::process::id()
     ));
+    let prog = std::env::temp_dir().join(format!(
+        "lr-daemon-roa-source-fail-{}.jq",
+        std::process::id()
+    ));
+    std::fs::write(
+        &prog,
+        r#".roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);""#,
+    )
+    .unwrap();
     std::fs::write(
         &config,
         format!(
             "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\n\
-             [[bgp.roa_source]]\nurl = \"http://127.0.0.1:{}/roas.json\"\nformat = \"json\"\ninterval = 60\n",
-            http.port
+             [[bgp.roa_source]]\nurl = \"http://127.0.0.1:{}/roas.json\"\nformat = \"jq\"\nprogram_file = \"{}\"\ninterval = 60\n",
+            http.port,
+            prog.display()
         ),
     )
     .unwrap();
@@ -622,12 +644,22 @@ fn roa_source_url_reload_picks_up_new_body() {
         "lr-daemon-roa-source-urlreload-{}.toml",
         std::process::id()
     ));
+    let prog = std::env::temp_dir().join(format!(
+        "lr-daemon-roa-source-urlreload-{}.jq",
+        std::process::id()
+    ));
+    std::fs::write(
+        &prog,
+        r#".roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);""#,
+    )
+    .unwrap();
     std::fs::write(
         &config,
         format!(
             "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\n\
-             [[bgp.roa_source]]\nurl = \"http://127.0.0.1:{}/roas.json\"\nformat = \"json\"\ninterval = 60\n",
-            http.port
+             [[bgp.roa_source]]\nurl = \"http://127.0.0.1:{}/roas.json\"\nformat = \"jq\"\nprogram_file = \"{}\"\ninterval = 60\n",
+            http.port,
+            prog.display()
         ),
     )
     .unwrap();

@@ -147,11 +147,13 @@ fn resolve_format_explicit_pinned() {
     let spec = RoaSourceSpec {
         path: Some("/etc/lr/roas.txt".to_string()),
         url: None,
-        format: Some(RoaFormat::Json),
+        format: Some(RoaFormat::Jq),
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
-    assert_eq!(spec.resolve_format().unwrap(), RoaFormat::Json);
+    assert_eq!(spec.resolve_format().unwrap(), RoaFormat::Jq);
 }
 
 #[test]
@@ -162,6 +164,8 @@ fn resolve_format_inferred_from_extension() {
         format: None,
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     assert_eq!(
         spec("/etc/roas.bird").resolve_format().unwrap(),
@@ -169,11 +173,11 @@ fn resolve_format_inferred_from_extension() {
     );
     assert_eq!(
         spec("/etc/roas.json").resolve_format().unwrap(),
-        RoaFormat::Json
+        RoaFormat::Jq
     );
     assert_eq!(
         spec("/etc/roas.csv").resolve_format().unwrap(),
-        RoaFormat::Csv
+        RoaFormat::Awk
     );
     assert_eq!(
         spec("/etc/roas.toml").resolve_format().unwrap(),
@@ -189,6 +193,8 @@ fn resolve_format_unknown_extension_errors() {
         format: None,
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     assert!(spec.resolve_format().is_err());
 }
@@ -201,8 +207,10 @@ fn resolve_format_for_url_uses_extension_in_path() {
         format: None,
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
-    assert_eq!(spec.resolve_format().unwrap(), RoaFormat::Json);
+    assert_eq!(spec.resolve_format().unwrap(), RoaFormat::Jq);
 }
 
 #[test]
@@ -213,6 +221,8 @@ fn resolve_interval_defaults_to_one_hour() {
         format: None,
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     assert_eq!(spec.resolve_interval(), Duration::from_secs(3600));
 }
@@ -228,6 +238,8 @@ fn resolve_interval_clamped_to_one_minute() {
         format: None,
         interval: Some(1),
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     assert_eq!(spec.resolve_interval(), Duration::from_secs(60));
 }
@@ -240,6 +252,8 @@ fn resolve_interval_honours_operator_value() {
         format: None,
         interval: Some(900),
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     assert_eq!(spec.resolve_interval(), Duration::from_secs(900));
 }
@@ -263,6 +277,8 @@ fn loader_thread_loads_bird_file_at_startup() {
         format: Some(RoaFormat::Bird),
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
     // Wait for the initial load to land.
@@ -304,6 +320,8 @@ fn loader_thread_reloads_when_file_changes() {
         format: Some(RoaFormat::Bird),
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
     // Wait for the initial load.
@@ -346,6 +364,8 @@ fn loader_thread_preserves_previous_snapshot_on_bad_file() {
         format: Some(RoaFormat::Bird),
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
     for _ in 0..50 {
@@ -380,7 +400,10 @@ fn loader_thread_preserves_previous_snapshot_on_bad_file() {
 }
 
 #[test]
-fn loader_thread_supports_json_format() {
+fn loader_thread_supports_jq_format() {
+    // The jq transform program reads Routinator JSON on stdin and
+    // emits BIRD-format lines on stdout. The loader parses the
+    // program's stdout with `parse_bird`.
     let path = tmp_roa_file(
         "roas.json",
         r#"{"roas":[{"asn":"AS64512","prefix":"203.0.113.0/24","maxLength":24}]}"#,
@@ -391,18 +414,25 @@ fn loader_thread_supports_json_format() {
     let spec = RoaSourceSpec {
         path: Some(path.to_string_lossy().into_owned()),
         url: None,
-        format: Some(RoaFormat::Json),
+        format: Some(RoaFormat::Jq),
         interval: None,
         user_agent: None,
+        program: Some(r#".roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);""#.to_string()),
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
-    for _ in 0..50 {
+    for _ in 0..100 {
         if store.len() == 1 {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(store.len(), 1);
+    assert_eq!(
+        store.len(),
+        1,
+        "jq format: entries did not load. status: {}",
+        handle.status_line()
+    );
     assert_eq!(
         store
             .load()
@@ -414,7 +444,10 @@ fn loader_thread_supports_json_format() {
 }
 
 #[test]
-fn loader_thread_supports_csv_format() {
+fn loader_thread_supports_awk_format() {
+    // The awk transform program reads CSV on stdin and emits BIRD
+    // lines on stdout. The loader parses the program's stdout with
+    // `parse_bird`.
     let path = tmp_roa_file(
         "roas.csv",
         "ASN,Prefix,MaxLength,TrustAnchor\nAS64512,203.0.113.0/24,24,ripe\n",
@@ -425,18 +458,27 @@ fn loader_thread_supports_csv_format() {
     let spec = RoaSourceSpec {
         path: Some(path.to_string_lossy().into_owned()),
         url: None,
-        format: Some(RoaFormat::Csv),
+        format: Some(RoaFormat::Awk),
         interval: None,
         user_agent: None,
+        program: Some(
+            r#"BEGIN{FS=","} NR>1 { printf "roa %s max %s as %s;\n", $2, $3, $1 }"#.to_string(),
+        ),
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
-    for _ in 0..50 {
+    for _ in 0..100 {
         if store.len() == 1 {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(store.len(), 1);
+    assert_eq!(
+        store.len(),
+        1,
+        "awk format: entries did not load. status: {}",
+        handle.status_line()
+    );
     assert_eq!(
         store
             .load()
@@ -459,6 +501,8 @@ fn loader_thread_status_line_reports_state() {
         format: Some(RoaFormat::Bird),
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
     for _ in 0..50 {
@@ -490,6 +534,8 @@ fn loader_thread_repoint_changes_path() {
         format: Some(RoaFormat::Bird),
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec_a, store.clone(), registry, running.clone());
     for _ in 0..50 {
@@ -506,6 +552,8 @@ fn loader_thread_repoint_changes_path() {
         format: Some(RoaFormat::Bird),
         interval: None,
         user_agent: None,
+        program: None,
+        program_file: None,
     };
     handle.repoint(spec_b);
     // Wait for the repoint to land. The old source's entry
@@ -568,12 +616,14 @@ fn loader_thread_fetches_url() {
     let spec = RoaSourceSpec {
         path: None,
         url: Some(format!("http://{addr}/roas.json")),
-        format: Some(RoaFormat::Json),
+        format: Some(RoaFormat::Jq),
         interval: Some(60),
         user_agent: None,
+        program: Some(r#".roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);""#.to_string()),
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
-    for _ in 0..50 {
+    for _ in 0..100 {
         if store.len() == 1 {
             break;
         }
@@ -619,12 +669,14 @@ fn loader_thread_url_fetch_failure_keeps_previous_snapshot() {
     let spec = RoaSourceSpec {
         path: None,
         url: Some(format!("http://{addr}/roas.json")),
-        format: Some(RoaFormat::Json),
+        format: Some(RoaFormat::Jq),
         interval: Some(60),
         user_agent: None,
+        program: Some(r#".roas[] | "roa \(.prefix) max \(.maxLength) as \(.asn);""#.to_string()),
+        program_file: None,
     };
     let handle = spawn_roa_loader(spec, store.clone(), registry, running.clone());
-    for _ in 0..50 {
+    for _ in 0..100 {
         if store.len() == 1 {
             break;
         }
@@ -664,6 +716,7 @@ fn status_line_includes_error_when_unhealthy() {
         last_load_age_s: None,
         last_error: Some("io: read failed".to_string()),
         format: "bird",
+        has_program: false,
     };
     let line = st.status_line();
     assert!(line.contains("state=error"), "line: {line}");
@@ -679,11 +732,12 @@ fn status_line_includes_age_when_loaded() {
         healthy: true,
         last_load_age_s: Some(300),
         last_error: None,
-        format: "json",
+        format: "jq",
+        has_program: true,
     };
     let line = st.status_line();
     assert!(line.contains("type=url"), "line: {line}");
-    assert!(line.contains("format=json"), "line: {line}");
+    assert!(line.contains("format=jq"), "line: {line}");
     assert!(line.contains("entries=42"), "line: {line}");
     assert!(line.contains("state=ok"), "line: {line}");
     assert!(line.contains("last-load=300s"), "line: {line}");

@@ -1892,7 +1892,7 @@ fn roa_source_file_path_parses() {
 fn roa_source_url_parses() {
     let mut cfg = DaemonConfig::with_defaults();
     parse_toml_subset(
-        "[[bgp.roa_source]]\nurl = \"https://rpki.example.com/roas.json\"\nformat = \"json\"\ninterval = 3600\n",
+        "[[bgp.roa_source]]\nurl = \"https://rpki.example.com/roas.json\"\nformat = \"jq\"\nprogram = \".roas[] | \\\"roa \\\\(.prefix) max \\\\(.maxLength) as \\\\(.asn);\\\"\"\ninterval = 3600\n",
         &mut cfg,
     )
     .unwrap();
@@ -1902,15 +1902,16 @@ fn roa_source_url_parses() {
         cfg.roa_sources[0].url.as_deref(),
         Some("https://rpki.example.com/roas.json")
     );
-    assert_eq!(cfg.roa_sources[0].format, Some(lr_bgp::RoaFormat::Json));
+    assert_eq!(cfg.roa_sources[0].format, Some(lr_bgp::RoaFormat::Jq));
     assert_eq!(cfg.roa_sources[0].interval, Some(3600));
+    assert!(cfg.roa_sources[0].program.is_some());
 }
 
 #[test]
 fn roa_source_format_inferred_from_extension() {
     let mut cfg = DaemonConfig::with_defaults();
     parse_toml_subset(
-        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\n",
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\nprogram = \".roas[] | \\\"roa \\\\(.prefix) max \\\\(.maxLength) as \\\\(.asn);\\\"\"\n",
         &mut cfg,
     )
     .unwrap();
@@ -1920,7 +1921,7 @@ fn roa_source_format_inferred_from_extension() {
     // in at resolve time.
     assert_eq!(
         cfg.roa_sources[0].resolve_format().unwrap(),
-        lr_bgp::RoaFormat::Json
+        lr_bgp::RoaFormat::Jq
     );
 }
 
@@ -1975,7 +1976,7 @@ fn roa_source_rejects_non_http_url_scheme() {
     let mut cfg = DaemonConfig::with_defaults();
     // The parse step itself rejects a non-http(s) URL scheme.
     let err = parse_toml_subset(
-        "[[bgp.roa_source]]\nurl = \"ftp://example.com/roas.json\"\n",
+        "[[bgp.roa_source]]\nurl = \"ftp://example.com/roas.json\"\nformat = \"jq\"\nprogram = \".\"\n",
         &mut cfg,
     );
     assert!(err.is_err());
@@ -1987,7 +1988,7 @@ fn roa_source_rejects_non_http_url_scheme() {
 fn roa_source_rejects_zero_interval() {
     let mut cfg = DaemonConfig::with_defaults();
     parse_toml_subset(
-        "[[bgp.roa_source]]\nurl = \"https://example.com/roas.json\"\ninterval = 0\n",
+        "[[bgp.roa_source]]\nurl = \"https://example.com/roas.json\"\nformat = \"jq\"\nprogram = \".\"\ninterval = 0\n",
         &mut cfg,
     )
     .unwrap();
@@ -2018,7 +2019,7 @@ fn roa_source_multiple_sources_parse() {
     let mut cfg = DaemonConfig::with_defaults();
     parse_toml_subset(
         "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\nformat = \"bird\"\n\
-         [[bgp.roa_source]]\nurl = \"https://example.com/roas.json\"\nformat = \"json\"\ninterval = 900\n",
+         [[bgp.roa_source]]\nurl = \"https://example.com/roas.json\"\nformat = \"jq\"\nprogram = \".\"\ninterval = 900\n",
         &mut cfg,
     )
     .unwrap();
@@ -2036,6 +2037,94 @@ fn roa_source_unknown_key_fails_closed() {
     assert!(err.is_err());
     let err = err.unwrap_err();
     assert!(err.contains("unknown [[bgp.roa_source]] key"), "{err}");
+}
+
+#[test]
+fn roa_source_jq_requires_program() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\nformat = \"jq\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(
+        err.contains("requires 'program' or 'program_file'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn roa_source_awk_requires_program() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.csv\"\nformat = \"awk\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(
+        err.contains("requires 'program' or 'program_file'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn roa_source_program_on_bird_is_rejected() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.bird\"\nformat = \"bird\"\nprogram = \"{ print }\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(
+        err.contains("only 'jq' and 'awk' use a transform program"),
+        "{err}"
+    );
+}
+
+#[test]
+fn roa_source_program_and_program_file_mutually_exclusive() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\nformat = \"jq\"\nprogram = \".\"\nprogram_file = \"/etc/lr/prog.jq\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(err.contains("mutually exclusive"), "{err}");
+}
+
+#[test]
+fn roa_source_program_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\nformat = \"jq\"\nprogram = \".roas[] | \\\"roa \\\\\\(.prefix) max \\\\\\(.maxLength) as \\\\\\(.asn);\\\"\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.roa_sources[0].format, Some(lr_bgp::RoaFormat::Jq));
+    assert!(cfg.roa_sources[0].program.is_some());
+    assert!(cfg.roa_sources[0].program_file.is_none());
+}
+
+#[test]
+fn roa_source_program_file_parses() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[[bgp.roa_source]]\npath = \"/etc/lr/roas.json\"\nformat = \"jq\"\nprogram_file = \"/etc/lr/transform.jq\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.roa_sources[0].format, Some(lr_bgp::RoaFormat::Jq));
+    assert!(cfg.roa_sources[0].program.is_none());
+    assert_eq!(
+        cfg.roa_sources[0].program_file.as_deref(),
+        Some("/etc/lr/transform.jq")
+    );
 }
 
 #[test]
