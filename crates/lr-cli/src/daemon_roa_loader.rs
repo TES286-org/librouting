@@ -297,14 +297,20 @@ impl RoaLoaderStatus {
             .unwrap_or_else(|| "-".to_string());
         let state = if self.healthy { "ok" } else { "error" };
         let err = self.last_error.as_deref().unwrap_or("");
+        let program = if self.has_program { "program=yes" } else { "" };
         format!(
-            "roa-source: {} type={} format={} entries={} state={} last-load={}{}",
+            "roa-source: {} type={} format={} entries={} state={} last-load={}{}{}",
             self.source,
             if self.is_url { "url" } else { "file" },
             self.format,
             self.entries,
             state,
             age,
+            if program.is_empty() {
+                String::new()
+            } else {
+                format!(" {program}")
+            },
             if err.is_empty() {
                 String::new()
             } else {

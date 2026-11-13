@@ -741,4 +741,25 @@ fn status_line_includes_age_when_loaded() {
     assert!(line.contains("entries=42"), "line: {line}");
     assert!(line.contains("state=ok"), "line: {line}");
     assert!(line.contains("last-load=300s"), "line: {line}");
+    assert!(line.contains("program=yes"), "line: {line}");
+}
+
+#[test]
+fn status_line_omits_program_for_pure_formats() {
+    // A `bird` source has no transform program; the `program=yes`
+    // token must be absent so operators can grep for transform
+    // sources (`grep 'program=yes'`).
+    let st = RoaLoaderStatus {
+        source: "/etc/lr/roas.bird".to_string(),
+        is_url: false,
+        entries: 2,
+        healthy: true,
+        last_load_age_s: Some(0),
+        last_error: None,
+        format: "bird",
+        has_program: false,
+    };
+    let line = st.status_line();
+    assert!(!line.contains("program="), "line: {line}");
+    assert!(line.contains("format=bird"), "line: {line}");
 }

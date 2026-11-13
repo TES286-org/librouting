@@ -358,8 +358,16 @@ fn roa_source_url_fetches_at_startup() {
     );
     d.wait_log("loaded 1 entries", "roa url fetch");
 
-    let line =
-        wait_for_roa_source_status(&socket, &["type=url", "format=jq", "entries=1", "state=ok"]);
+    let line = wait_for_roa_source_status(
+        &socket,
+        &[
+            "type=url",
+            "format=jq",
+            "entries=1",
+            "state=ok",
+            "program=yes",
+        ],
+    );
     assert!(line.contains("127.0.0.1"), "line: {line}");
 
     let _ = std::fs::remove_file(&config);
