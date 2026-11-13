@@ -40,8 +40,15 @@ impl RolloutMode {
         })
     }
 
+    /// True when the import hook stamps the `LrPeerHealthTier`
+    /// attribute on routes so `BestPath::rank_tiered` runs and
+    /// actually changes selection. Only `limited` and `full` do
+    /// this — issue #99 §Rollout: shadow modes must not affect
+    /// routing. The `shadow-best-path` mode observes the would-be
+    /// best path via `PeerHealthShadowSelectionHook` without
+    /// stamping.
     pub fn stamps_tier(self) -> bool {
-        matches!(self, Self::ShadowBestPath | Self::Limited | Self::Full)
+        matches!(self, Self::Limited | Self::Full)
     }
 
     pub fn applies_stale(self) -> bool {
@@ -243,10 +250,12 @@ mod tests {
 
     #[test]
     fn stamps_tier_flags() {
+        // Issue #99 §Rollout: shadow modes must not stamp the tier
+        // attribute — only `limited` and `full` affect selection.
         assert!(!RolloutMode::Off.stamps_tier());
         assert!(!RolloutMode::Observe.stamps_tier());
         assert!(!RolloutMode::Shadow.stamps_tier());
-        assert!(RolloutMode::ShadowBestPath.stamps_tier());
+        assert!(!RolloutMode::ShadowBestPath.stamps_tier());
         assert!(RolloutMode::Limited.stamps_tier());
         assert!(RolloutMode::Full.stamps_tier());
     }

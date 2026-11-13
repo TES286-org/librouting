@@ -13,11 +13,11 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use core::cmp::Ordering;
 
@@ -50,6 +50,15 @@ pub struct SessionState {
     pub counters: SessionCounters,
     pub stale: StaleSet,
     pub pending_escalation: Option<PeerHealthTier>,
+    /// All prefixes the peer has advertised (issue #99 §Recovery:
+    /// "Mark affected prefixes stale"). Populated by
+    /// [`PeerHealthTable::observe_prefix`]; retired by
+    /// [`PeerHealthTable::forget_prefix`]. On escalation to a
+    /// degraded tier, every prefix in this set is marked stale so
+    /// ECMP excludes it (`BestPath::multipath_tiered` skips stale
+    /// paths). A fresh UPDATE for a prefix re-admits it (clears
+    /// the stale marker) — see `PeerHealthImportHook::on_import`.
+    pub prefixes: BTreeSet<Prefix>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +95,7 @@ impl Default for SessionState {
             counters: SessionCounters::default(),
             stale: StaleSet::new(),
             pending_escalation: None,
+            prefixes: BTreeSet::new(),
         }
     }
 }
@@ -101,23 +111,22 @@ impl SessionState {
     }
 
     fn prune_events(&mut self, cutoff_ms: u64) {
-        let keep_from = self
-            .events
-            .iter()
-            .position(|ts| *ts >= cutoff_ms)
-            .unwrap_or(self.events.len());
-        if keep_from > 0 {
-            self.events.drain(0..keep_from);
-        }
+        // Remove events older than `cutoff_ms`. Events are
+        // monotonically non-decreasing in practice (the router's
+        // `now_ms` clock never goes backwards), but we filter
+        // unconditionally rather than relying on sorted order —
+        // a test or embedder that feeds events out of order must
+        // not corrupt the window counts.
+        self.events.retain(|ts| *ts >= cutoff_ms);
     }
 
     fn count_in_window(&self, window_s: u64, now_ms: u64) -> u64 {
         let cutoff = now_ms.saturating_sub(window_s * 1000);
-        self.events
-            .iter()
-            .rev()
-            .take_while(|ts| **ts >= cutoff)
-            .count() as u64
+        // Linear scan: correct regardless of insertion order. The
+        // events vec is bounded by `longest_window_s * peak_rate`
+        // and pruned on every `account_event`, so the scan is
+        // bounded by the longest window's event count.
+        self.events.iter().filter(|ts| **ts >= cutoff).count() as u64
     }
 
     fn is_excluded(&self, now_ms: u64) -> Option<ExclusionKind> {
@@ -134,9 +143,31 @@ impl SessionState {
     }
 
     fn compute_baseline(&mut self, now_ms: u64, cfg: &PeerHealthConfig) -> f64 {
+        // Issue #99 §Detection: "Maintain an EWMA baseline per
+        // session; freeze or restrict baseline updates while
+        // degraded." The EWMA is updated only while at L0 (frozen
+        // on escalation so a flap cannot inflate its own baseline).
+        //
+        // The sample is the per-second event rate observed over the
+        // baseline window (`count_in_window / baseline_window_s`);
+        // the EWMA blends this sample with the prior baseline at
+        // `ewma_alpha`. A small alpha (default 0.05) makes the
+        // baseline slow-tracking, so a short burst does not blow up
+        // the budget against which escalation is measured. The
+        // windowed-average sample keeps the EWMA grounded in a
+        // representative observation rather than the instantaneous
+        // rate (which would be noisy on a quiet session).
         if self.tier == PeerHealthTier::L0 {
             let count = self.count_in_window(cfg.baseline_window_s, now_ms);
-            self.baseline_rate = (count as f64) / (cfg.baseline_window_s as f64);
+            let window_s = cfg.baseline_window_s.max(1) as f64;
+            let sample = (count as f64) / window_s;
+            let alpha = cfg.ewma_alpha.clamp(0.0, 1.0);
+            self.baseline_rate = if self.last_baseline_ms == 0 {
+                // First sample seeds the EWMA.
+                sample
+            } else {
+                alpha * sample + (1.0 - alpha) * self.baseline_rate
+            };
             self.last_baseline_ms = now_ms;
         }
         self.baseline_rate
@@ -294,10 +325,24 @@ impl PeerHealthTable {
         }
     }
 
+    /// The **public** tier for `(peer, family)`. This is the tier
+    /// the import hook stamps on routes and the tier the speaker's
+    /// `BestPath::rank_tiered` sees. Shadow modes (`off`, `observe`,
+    /// `shadow`, `shadow-best-path`) return `L0` so routing is
+    /// unaffected — issue #99 §Rollout: shadow phases must not
+    /// change selection. `limited` returns the effective tier
+    /// capped at `L1`; `full` returns the effective tier as-is.
+    ///
+    /// For the **internal** tier (what the state machine actually
+    /// computed, before the rollout-mode mask), use
+    /// [`Self::session_snapshot`].
     pub fn tier(&self, peer_id: u64, family: NlriFamily) -> PeerHealthTier {
         if matches!(
             self.cfg.rollout,
-            RolloutMode::Off | RolloutMode::Observe | RolloutMode::Shadow
+            RolloutMode::Off
+                | RolloutMode::Observe
+                | RolloutMode::Shadow
+                | RolloutMode::ShadowBestPath
         ) {
             return PeerHealthTier::L0;
         }
@@ -311,6 +356,23 @@ impl PeerHealthTable {
         self.tier(peer_id, family) != PeerHealthTier::L0
     }
 
+    /// The **internal** tier for `(peer, family)` — what the state
+    /// machine actually computed, after the `effective_tier` cap
+    /// (e.g. `limited` caps at L1) but BEFORE the rollout-mode
+    /// mask. Shadow modes return L0 from [`Self::tier`] (the public
+    /// tier) but this method returns the actual escalated tier so
+    /// the `PeerHealthShadowSelectionHook` can compute the would-be
+    /// best path under tiering.
+    ///
+    /// Prefer [`Self::tier`] everywhere except shadow-mode
+    /// comparison / diagnostics.
+    pub fn internal_tier(&self, peer_id: u64, family: NlriFamily) -> PeerHealthTier {
+        match self.sessions.get(&(peer_id, family)) {
+            Some(s) => self.cfg.effective_tier(s.tier),
+            None => PeerHealthTier::L0,
+        }
+    }
+
     pub fn session_snapshot(&self, peer_id: u64, family: NlriFamily) -> Option<SessionSnapshot> {
         let s = self.sessions.get(&(peer_id, family))?;
         let now_ms = s.events.last().copied().unwrap_or(s.last_baseline_ms);
@@ -318,6 +380,12 @@ impl PeerHealthTable {
             peer_id,
             family,
             baseline_rate: s.baseline_rate,
+            // The INTERNAL tier — what the state machine computed,
+            // after the effective_tier cap (e.g. `limited` caps at
+            // L1) but BEFORE the rollout-mode mask. Shadow modes
+            // return L0 from `tier()` (the public tier) but the
+            // snapshot shows the actual escalated tier so operators
+            // can see what the state machine is doing.
             tier: self.cfg.effective_tier(s.tier),
             pending_escalation: s.pending_escalation,
             last_transition_ms: s.last_transition_ms,
@@ -341,6 +409,38 @@ impl PeerHealthTable {
     pub fn mark_stale(&mut self, peer_id: u64, family: NlriFamily, prefix: &Prefix, now_ms: u64) {
         if let Some(s) = self.sessions.get_mut(&(peer_id, family)) {
             s.stale.mark(prefix, now_ms);
+        }
+    }
+
+    /// Record that the peer advertised `prefix` (issue #99 §Recovery:
+    /// "Mark affected prefixes stale"). The import hook calls this on
+    /// every accepted UPDATE so the table knows the peer's full
+    /// advertisement set; on escalation, `apply_transition` marks
+    /// every prefix in this set stale so ECMP excludes it.
+    pub fn observe_prefix(&mut self, peer_id: u64, family: NlriFamily, prefix: &Prefix) {
+        if let Some(s) = self.sessions.get_mut(&(peer_id, family)) {
+            s.prefixes.insert(*prefix);
+        }
+    }
+
+    /// Retire `prefix` from the peer's advertisement set. The import
+    /// hook calls this on withdraw so the set does not accumulate
+    /// prefixes the peer no longer advertises (which would make
+    /// future escalations mark stale prefixes that are no longer in
+    /// the RIB).
+    pub fn forget_prefix(&mut self, peer_id: u64, family: NlriFamily, prefix: &Prefix) {
+        if let Some(s) = self.sessions.get_mut(&(peer_id, family)) {
+            s.prefixes.remove(prefix);
+        }
+    }
+
+    /// Number of prefixes the peer currently advertises (the size
+    /// of the set escalated to stale on a tier transition). Surfaced
+    /// by `lrctl show peer-health` for capacity planning.
+    pub fn prefix_count(&self, peer_id: u64, family: NlriFamily) -> usize {
+        match self.sessions.get(&(peer_id, family)) {
+            Some(s) => s.prefixes.len(),
+            None => 0,
         }
     }
 
@@ -534,6 +634,19 @@ fn apply_transition(
         s.counters.escalations = s.counters.escalations.saturating_add(1);
         if new_tier > s.counters.peak_tier {
             s.counters.peak_tier = new_tier;
+        }
+        // Issue #99 §Recovery: "Mark affected prefixes stale."
+        // Every prefix the peer has advertised is now stale so
+        // ECMP excludes it (`BestPath::multipath_tiered` skips
+        // stale paths). A fresh UPDATE for a prefix re-admits
+        // it (clears the stale marker) — see
+        // `PeerHealthImportHook::on_import`. Only applied in
+        // modes that apply stale markings (`limited` / `full`);
+        // shadow modes never mark stale.
+        if cfg.rollout.applies_stale() {
+            for p in &s.prefixes {
+                s.stale.mark(p, now_ms);
+            }
         }
     } else {
         s.last_recovery_ms = now_ms;
