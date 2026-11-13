@@ -4891,10 +4891,6 @@ uint8_t lr_ospf_v3_packet_checksum_ok(
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
 typedef struct lr_afi_safi_t lr_nlri_family_t;
 
-/* GENERATED ADDITIONS - do not edit by hand.
-   Source: scripts/gen_python.py + scripts/abi.json
-   Re-run: python3 scripts/gen_python.py */
-
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
 typedef struct OpaquePeerHealthTable OpaquePeerHealthTable;
 typedef struct OpaquePeerHealthTable *lr_peer_health_table_t;
@@ -4956,6 +4952,19 @@ int32_t lr_peer_health_table_session_snapshot(
     uint16_t afi,
     uint8_t safi,
     struct lr_peer_health_session_t * out
+);
+
+/* GENERATED ADDITIONS - do not edit by hand.
+   Source: scripts/gen_python.py + scripts/abi.json
+   Re-run: python3 scripts/gen_python.py */
+
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+int32_t lr_roa_store_replace_static_from_text(
+    lr_roa_store_t s,
+    const uint8_t * text,
+    uintptr_t len,
+    uint8_t format
 );
 """
 

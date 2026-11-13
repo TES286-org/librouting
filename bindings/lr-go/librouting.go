@@ -15,40 +15,40 @@ package librouting
 */
 import "C"
 import (
-	"fmt"
-	"runtime"
-	"strings"
-	"unsafe"
+        "fmt"
+        "runtime"
+        "strings"
+        "unsafe"
 )
 
 // Router is an owned handle to a librouting router instance.
 type Router struct {
-	ptr C.lr_router_t
+        ptr C.lr_router_t
 }
 
 // NewRouter creates a new router. The returned *Router is garbage-collected
 // via a finalizer that calls lr_router_destroy.
 func NewRouter() (*Router, error) {
-	r := C.lr_router_new()
-	if r == nil {
-		return nil, fmt.Errorf("lr_router_new returned null")
-	}
-	out := &Router{ptr: r}
-	runtime.SetFinalizer(out, func(o *Router) {
-		if o.ptr != nil {
-			C.lr_router_destroy(o.ptr)
-			o.ptr = nil
-		}
-	})
-	return out, nil
+        r := C.lr_router_new()
+        if r == nil {
+                return nil, fmt.Errorf("lr_router_new returned null")
+        }
+        out := &Router{ptr: r}
+        runtime.SetFinalizer(out, func(o *Router) {
+                if o.ptr != nil {
+                        C.lr_router_destroy(o.ptr)
+                        o.ptr = nil
+                }
+        })
+        return out, nil
 }
 
 // AddBGPSession adds a BGP session. Returns the session handle.
 // Graceful restart (RFC 4724) is enabled with a 120 s restart time;
 // Long-Lived Graceful Restart (RFC 9494) is disabled.
 func (r *Router) AddBGPSession(localAS, peerAS, localBGPID uint32, holdTime, keepalive uint16, asn4 bool) (uint64, error) {
-	return r.AddBGPSessionExt(localAS, peerAS, localBGPID, holdTime, keepalive, asn4,
-		true, 120, false, 0, 0)
+        return r.AddBGPSessionExt(localAS, peerAS, localBGPID, holdTime, keepalive, asn4,
+                true, 120, false, 0, 0)
 }
 
 // AddBGPSessionExt adds a BGP session with explicit graceful-restart
@@ -59,63 +59,63 @@ func (r *Router) AddBGPSession(localAS, peerAS, localBGPID uint32, holdTime, kee
 // advertised (RFC 9494 §4.1). llgrMaxStale caps the stale time received
 // from the peer; 0 honours the peer's value.
 func (r *Router) AddBGPSessionExt(localAS, peerAS, localBGPID uint32, holdTime, keepalive uint16, asn4 bool,
-	gracefulRestart bool, restartTime uint16, llgr bool, llgrStaleTime, llgrMaxStale uint32) (uint64, error) {
-	var h C.uint64_t
-	rc := C.lr_router_add_bgp_session_ext(
-		r.ptr,
-		C.uint32_t(localAS),
-		C.uint32_t(peerAS),
-		C.uint32_t(localBGPID),
-		C.uint16_t(holdTime),
-		C.uint16_t(keepalive),
-		toCBool(asn4),
-		toCBool(gracefulRestart),
-		C.uint16_t(restartTime),
-		toCBool(llgr),
-		C.uint32_t(llgrStaleTime),
-		C.uint32_t(llgrMaxStale),
-		&h,
-	)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_router_add_bgp_session_ext: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint64(h), nil
+        gracefulRestart bool, restartTime uint16, llgr bool, llgrStaleTime, llgrMaxStale uint32) (uint64, error) {
+        var h C.uint64_t
+        rc := C.lr_router_add_bgp_session_ext(
+                r.ptr,
+                C.uint32_t(localAS),
+                C.uint32_t(peerAS),
+                C.uint32_t(localBGPID),
+                C.uint16_t(holdTime),
+                C.uint16_t(keepalive),
+                toCBool(asn4),
+                toCBool(gracefulRestart),
+                C.uint16_t(restartTime),
+                toCBool(llgr),
+                C.uint32_t(llgrStaleTime),
+                C.uint32_t(llgrMaxStale),
+                &h,
+        )
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_router_add_bgp_session_ext: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint64(h), nil
 }
 
 // OSPF area kind ids for AddOSPFSessionExt (LR_AREA_*).
 const (
-	AreaNormal        = C.LR_AREA_NORMAL
-	AreaStub          = C.LR_AREA_STUB
-	AreaStubNoSummary = C.LR_AREA_STUB_NO_SUMMARY
-	AreaNssa          = C.LR_AREA_NSSA
-	AreaNssaNoSummary = C.LR_AREA_NSSA_NO_SUMMARY
+        AreaNormal        = C.LR_AREA_NORMAL
+        AreaStub          = C.LR_AREA_STUB
+        AreaStubNoSummary = C.LR_AREA_STUB_NO_SUMMARY
+        AreaNssa          = C.LR_AREA_NSSA
+        AreaNssaNoSummary = C.LR_AREA_NSSA_NO_SUMMARY
 )
 
 // OSPF interface network-type ids for AddOSPFSessionExt (LR_NET_*).
 const (
-	NetPtp       = C.LR_NET_PTP
-	NetBroadcast = C.LR_NET_BROADCAST
+        NetPtp       = C.LR_NET_PTP
+        NetBroadcast = C.LR_NET_BROADCAST
 )
 
 // OSPF protocol version selectors for AddOSPFSessionExt (LR_OSPF_*).
 const (
-	OspfV2 = C.LR_OSPF_V2
-	OspfV3 = C.LR_OSPF_V3
+        OspfV2 = C.LR_OSPF_V2
+        OspfV3 = C.LR_OSPF_V3
 )
 
 // AddOSPFSession adds an OSPFv2 session with the library defaults
 // (MTU 1500, point-to-point network, Normal area). Returns the session handle.
 func (r *Router) AddOSPFSession(routerID, areaID uint32) (uint64, error) {
-	return r.AddOSPFSessionExt(OspfV2, routerID, areaID, AreaNormal, 0, 1500, NetPtp,
-		false, 0, false, 0)
+        return r.AddOSPFSessionExt(OspfV2, routerID, areaID, AreaNormal, 0, 1500, NetPtp,
+                false, 0, false, 0)
 }
 
 // AddOSPFv3Session adds an OSPFv3 session (RFC 5340) with the library
 // defaults. Router IDs stay 32-bit and are shared with OSPFv2 within one
 // router; areas are version-exclusive. Returns the session handle.
 func (r *Router) AddOSPFv3Session(routerID, areaID uint32) (uint64, error) {
-	return r.AddOSPFSessionExt(OspfV3, routerID, areaID, AreaNormal, 0, 1500, NetPtp,
-		false, 0, false, 0)
+        return r.AddOSPFSessionExt(OspfV3, routerID, areaID, AreaNormal, 0, 1500, NetPtp,
+                false, 0, false, 0)
 }
 
 // AddOSPFSessionExt adds an OSPF session with the full knob set:
@@ -125,105 +125,105 @@ func (r *Router) AddOSPFv3Session(routerID, areaID uint32) (uint64, error) {
 // (hasInterfaceIP / hasNeighborIP gate the addresses; v2 uses the IPv4
 // interface address, v3 the Router ID). Returns the session handle.
 func (r *Router) AddOSPFSessionExt(version, routerID, areaID uint32,
-	areaKind uint32, defaultMetric uint32, mtu uint16, networkType uint32,
-	hasInterfaceIP bool, interfaceIP uint32, hasNeighborIP bool, neighborIP uint32) (uint64, error) {
-	var h C.uint64_t
-	rc := C.lr_router_add_ospf_session_ext(
-		r.ptr,
-		C.int32_t(version),
-		C.uint32_t(routerID),
-		C.uint32_t(areaID),
-		C.int32_t(areaKind),
-		C.uint32_t(defaultMetric),
-		C.uint16_t(mtu),
-		C.int32_t(networkType),
-		cIntBool(hasInterfaceIP),
-		C.uint32_t(interfaceIP),
-		cIntBool(hasNeighborIP),
-		C.uint32_t(neighborIP),
-		&h,
-	)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_router_add_ospf_session_ext: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint64(h), nil
+        areaKind uint32, defaultMetric uint32, mtu uint16, networkType uint32,
+        hasInterfaceIP bool, interfaceIP uint32, hasNeighborIP bool, neighborIP uint32) (uint64, error) {
+        var h C.uint64_t
+        rc := C.lr_router_add_ospf_session_ext(
+                r.ptr,
+                C.int32_t(version),
+                C.uint32_t(routerID),
+                C.uint32_t(areaID),
+                C.int32_t(areaKind),
+                C.uint32_t(defaultMetric),
+                C.uint16_t(mtu),
+                C.int32_t(networkType),
+                cIntBool(hasInterfaceIP),
+                C.uint32_t(interfaceIP),
+                cIntBool(hasNeighborIP),
+                C.uint32_t(neighborIP),
+                &h,
+        )
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_router_add_ospf_session_ext: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint64(h), nil
 }
 
 // AddBabelSession adds one Babel interface session (RFC 8966 §4.2.1).
 // addr is the 4-byte IPv4 or 16-byte IPv6 local address announced in
 // Hellos. Returns the session handle.
 func (r *Router) AddBabelSession(addr []byte) (uint64, error) {
-	if len(addr) != 4 && len(addr) != 16 {
-		return 0, fmt.Errorf("AddBabelSession: bad address length (want 4 or 16)")
-	}
-	var h C.uint64_t
-	rc := C.lr_router_add_babel_session(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&addr[0])),
-		cIntBool(len(addr) == 16),
-		&h,
-	)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_router_add_babel_session: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint64(h), nil
+        if len(addr) != 4 && len(addr) != 16 {
+                return 0, fmt.Errorf("AddBabelSession: bad address length (want 4 or 16)")
+        }
+        var h C.uint64_t
+        rc := C.lr_router_add_babel_session(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&addr[0])),
+                cIntBool(len(addr) == 16),
+                &h,
+        )
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_router_add_babel_session: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint64(h), nil
 }
 
 // FeedInput pushes bytes from the peer transport into a session.
 func (r *Router) FeedInput(session uint64, data []byte) error {
-	if len(data) == 0 {
-		return nil
-	}
-	rc := C.lr_router_feed_input(
-		r.ptr,
-		C.uint64_t(session),
-		(*C.uint8_t)(unsafe.Pointer(&data[0])),
-		C.size_t(len(data)),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_feed_input: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if len(data) == 0 {
+                return nil
+        }
+        rc := C.lr_router_feed_input(
+                r.ptr,
+                C.uint64_t(session),
+                (*C.uint8_t)(unsafe.Pointer(&data[0])),
+                C.size_t(len(data)),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_feed_input: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // DrainOutput drains bytes the session prepared for the peer transport.
 func (r *Router) DrainOutput(session uint64) ([]byte, error) {
-	var b C.struct_lr_bytes_t
-	rc := C.lr_router_drain_output(
-		r.ptr,
-		C.uint64_t(session),
-		&b,
-	)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_router_drain_output: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        var b C.struct_lr_bytes_t
+        rc := C.lr_router_drain_output(
+                r.ptr,
+                C.uint64_t(session),
+                &b,
+        )
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_router_drain_output: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // RequestRouteRefresh asks an established peer to resend the specified address
 // family. It returns false when the session did not negotiate RFC 2918.
 func (r *Router) RequestRouteRefresh(session uint64, afi uint16, safi uint8) (bool, error) {
-	rc := C.lr_router_request_route_refresh(
-		r.ptr,
-		C.uint64_t(session),
-		C.uint16_t(afi),
-		C.uint8_t(safi),
-	)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_request_route_refresh: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        rc := C.lr_router_request_route_refresh(
+                r.ptr,
+                C.uint64_t(session),
+                C.uint16_t(afi),
+                C.uint8_t(safi),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_request_route_refresh: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // SetMRAI configures the per-prefix RFC 4271 UPDATE batching interval.
 // Setting zero disables batching and flushes pending updates.
 func (r *Router) SetMRAI(session uint64, intervalMs uint64) error {
-	rc := C.lr_router_set_mrai(r.ptr, C.uint64_t(session), C.uint64_t(intervalMs))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_mrai: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_mrai(r.ptr, C.uint64_t(session), C.uint64_t(intervalMs))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_mrai: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetAddPath enables or disables RFC 7911 Add-Path on one BGP session.
@@ -231,22 +231,22 @@ func (r *Router) SetMRAI(session uint64, intervalMs uint64) error {
 // negotiated in OPEN. The peer must also offer Add-Path for it to take
 // effect; see also SetAddPathMaxPaths.
 func (r *Router) SetAddPath(session uint64, enabled bool) error {
-	rc := C.lr_router_set_add_path(r.ptr, C.uint64_t(session), toCBool(enabled))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_add_path: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_add_path(r.ptr, C.uint64_t(session), toCBool(enabled))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_add_path: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetAddPathMaxPaths caps how many paths per prefix the RFC 7911 decision
 // process keeps in the Loc-RIB and advertises to Add-Path peers
 // (router-wide; values below 1 are clamped to 1).
 func (r *Router) SetAddPathMaxPaths(maxPaths uint32) error {
-	rc := C.lr_router_set_add_path_max_paths(r.ptr, C.uint32_t(maxPaths))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_add_path_max_paths: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_add_path_max_paths(r.ptr, C.uint32_t(maxPaths))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_add_path_max_paths: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetEbgpRequiresPolicy enables or disables the RFC 8212 default eBGP
@@ -255,11 +255,11 @@ func (r *Router) SetAddPathMaxPaths(maxPaths uint32) error {
 // declared via SetSessionPolicy discards received routes, and one with
 // no export policy advertises nothing (RFC 8212 §3).
 func (r *Router) SetEbgpRequiresPolicy(enabled bool) error {
-	rc := C.lr_router_set_ebgp_requires_policy(r.ptr, toCBool(enabled))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_ebgp_requires_policy: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_ebgp_requires_policy(r.ptr, toCBool(enabled))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_ebgp_requires_policy: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetEnforceFirstAs enables or disables FRR `bgp enforce-first-as`
@@ -271,11 +271,11 @@ func (r *Router) SetEbgpRequiresPolicy(enabled bool) error {
 // policy and safety checks. iBGP and confederation-internal sessions
 // are exempt, mirroring FRR.
 func (r *Router) SetEnforceFirstAs(enabled bool) error {
-	rc := C.lr_router_set_enforce_first_as(r.ptr, toCBool(enabled))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_enforce_first_as: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_enforce_first_as(r.ptr, toCBool(enabled))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_enforce_first_as: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetSessionPolicy declares which directions of a BGP session carry an
@@ -283,20 +283,20 @@ func (r *Router) SetEnforceFirstAs(enabled bool) error {
 // the RFC 8212 default deny when SetEbgpRequiresPolicy(true) is active.
 // Call after AddBGPSession; unknown session handles return an error.
 func (r *Router) SetSessionPolicy(session uint64, import_, export bool) error {
-	rc := C.lr_router_set_session_policy(r.ptr, C.uint64_t(session), toCBool(import_), toCBool(export))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_session_policy: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_session_policy(r.ptr, C.uint64_t(session), toCBool(import_), toCBool(export))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_session_policy: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // ExtNextHopTuple is a single RFC 5549 Extended Next-Hop tuple: IPv4
 // unicast NLRI can be resolved over an IPv6 next-hop when all three
 // fields are 1, 1, 2 respectively.
 type ExtNextHopTuple struct {
-	NlriAfi    uint16
-	NlriSafi   uint8
-	NexthopAfi uint16
+        NlriAfi    uint16
+        NlriSafi   uint8
+        NexthopAfi uint16
 }
 
 // SetExtendedNextHop configures RFC 5549 Extended Next-Hop on a BGP
@@ -304,67 +304,67 @@ type ExtNextHopTuple struct {
 // AddBGPSession and before StartSession — the capability is negotiated
 // in OPEN.
 func (r *Router) SetExtendedNextHop(session uint64, tuples []ExtNextHopTuple) error {
-	if len(tuples) == 0 {
-		rc := C.lr_router_set_extended_next_hop(r.ptr, C.uint64_t(session), nil, 0)
-		if rc != 0 {
-			return fmt.Errorf("lr_router_set_extended_next_hop: %s (rc=%d)", LastError(), int(rc))
-		}
-		return nil
-	}
-	buf := make([]byte, 5*len(tuples))
-	for i, t := range tuples {
-		buf[5*i+0] = byte(t.NlriAfi >> 8)
-		buf[5*i+1] = byte(t.NlriAfi)
-		buf[5*i+2] = t.NlriSafi
-		buf[5*i+3] = byte(t.NexthopAfi >> 8)
-		buf[5*i+4] = byte(t.NexthopAfi)
-	}
-	rc := C.lr_router_set_extended_next_hop(
-		r.ptr,
-		C.uint64_t(session),
-		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
-		C.uintptr_t(len(tuples)),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_extended_next_hop: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if len(tuples) == 0 {
+                rc := C.lr_router_set_extended_next_hop(r.ptr, C.uint64_t(session), nil, 0)
+                if rc != 0 {
+                        return fmt.Errorf("lr_router_set_extended_next_hop: %s (rc=%d)", LastError(), int(rc))
+                }
+                return nil
+        }
+        buf := make([]byte, 5*len(tuples))
+        for i, t := range tuples {
+                buf[5*i+0] = byte(t.NlriAfi >> 8)
+                buf[5*i+1] = byte(t.NlriAfi)
+                buf[5*i+2] = t.NlriSafi
+                buf[5*i+3] = byte(t.NexthopAfi >> 8)
+                buf[5*i+4] = byte(t.NexthopAfi)
+        }
+        rc := C.lr_router_set_extended_next_hop(
+                r.ptr,
+                C.uint64_t(session),
+                (*C.uint8_t)(unsafe.Pointer(&buf[0])),
+                C.uintptr_t(len(tuples)),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_extended_next_hop: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // MPFamily is a single RFC 4760 multiprotocol family: AFI + SAFI.
 type MPFamily struct {
-	Afi  uint16
-	Safi uint8
+        Afi  uint16
+        Safi uint8
 }
 
 // SetMPFamilies overrides the MP-BGP address families advertised in OPEN.
 // Common values: {AFI=1, SAFI=1} for IPv4 unicast, {AFI=2, SAFI=1} for
 // IPv6 unicast. Must be called before StartSession.
 func (r *Router) SetMPFamilies(session uint64, families []MPFamily) error {
-	if len(families) == 0 {
-		rc := C.lr_router_set_mp_families(r.ptr, C.uint64_t(session), nil, 0)
-		if rc != 0 {
-			return fmt.Errorf("lr_router_set_mp_families: %s (rc=%d)", LastError(), int(rc))
-		}
-		return nil
-	}
-	buf := make([]byte, 4*len(families))
-	for i, f := range families {
-		buf[4*i+0] = byte(f.Afi >> 8)
-		buf[4*i+1] = byte(f.Afi)
-		buf[4*i+2] = 0 // reserved
-		buf[4*i+3] = f.Safi
-	}
-	rc := C.lr_router_set_mp_families(
-		r.ptr,
-		C.uint64_t(session),
-		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
-		C.uintptr_t(len(families)),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_mp_families: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if len(families) == 0 {
+                rc := C.lr_router_set_mp_families(r.ptr, C.uint64_t(session), nil, 0)
+                if rc != 0 {
+                        return fmt.Errorf("lr_router_set_mp_families: %s (rc=%d)", LastError(), int(rc))
+                }
+                return nil
+        }
+        buf := make([]byte, 4*len(families))
+        for i, f := range families {
+                buf[4*i+0] = byte(f.Afi >> 8)
+                buf[4*i+1] = byte(f.Afi)
+                buf[4*i+2] = 0 // reserved
+                buf[4*i+3] = f.Safi
+        }
+        rc := C.lr_router_set_mp_families(
+                r.ptr,
+                C.uint64_t(session),
+                (*C.uint8_t)(unsafe.Pointer(&buf[0])),
+                C.uintptr_t(len(families)),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_mp_families: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetLocalAddress sets the local source address for next-hop-self egress.
@@ -372,26 +372,26 @@ func (r *Router) SetMPFamilies(session uint64, families []MPFamily) error {
 // egress over IPv6 pass a 16-byte IPv6 address. Must be called before
 // StartSession.
 func (r *Router) SetLocalAddress(session uint64, addr []byte) error {
-	var afi uint16
-	switch len(addr) {
-	case 4:
-		afi = 1
-	case 16:
-		afi = 2
-	default:
-		return fmt.Errorf("SetLocalAddress: bad address length %d (want 4 or 16)", len(addr))
-	}
-	rc := C.lr_router_set_local_address(
-		r.ptr,
-		C.uint64_t(session),
-		C.uint16_t(afi),
-		(*C.uint8_t)(unsafe.Pointer(&addr[0])),
-		C.uintptr_t(len(addr)),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_local_address: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var afi uint16
+        switch len(addr) {
+        case 4:
+                afi = 1
+        case 16:
+                afi = 2
+        default:
+                return fmt.Errorf("SetLocalAddress: bad address length %d (want 4 or 16)", len(addr))
+        }
+        rc := C.lr_router_set_local_address(
+                r.ptr,
+                C.uint64_t(session),
+                C.uint16_t(afi),
+                (*C.uint8_t)(unsafe.Pointer(&addr[0])),
+                C.uintptr_t(len(addr)),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_local_address: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetDefaultIPv4Unicast configures FRR `bgp default ipv4-unicast`
@@ -402,15 +402,15 @@ func (r *Router) SetLocalAddress(session uint64, addr []byte) error {
 // posture. Must be called before StartSession; unknown handles or
 // already-established sessions return an error.
 func (r *Router) SetDefaultIPv4Unicast(session uint64, enabled bool) error {
-	rc := C.lr_router_set_default_ipv4_unicast(
-		r.ptr,
-		C.uint64_t(session),
-		toCBool(enabled),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_default_ipv4_unicast: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_default_ipv4_unicast(
+                r.ptr,
+                C.uint64_t(session),
+                toCBool(enabled),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_default_ipv4_unicast: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetLocalAsTolerance configures FRR `neighbor X allowas-in N` / BIRD
@@ -422,15 +422,15 @@ func (r *Router) SetDefaultIPv4Unicast(session uint64, enabled bool) error {
 // StartSession; unknown handles or already-established sessions
 // return an error.
 func (r *Router) SetLocalAsTolerance(session uint64, tolerance uint32) error {
-	rc := C.lr_router_set_local_as_tolerance(
-		r.ptr,
-		C.uint64_t(session),
-		C.uint32_t(tolerance),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_local_as_tolerance: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_local_as_tolerance(
+                r.ptr,
+                C.uint64_t(session),
+                C.uint32_t(tolerance),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_local_as_tolerance: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetSoftReconfigInbound configures FRR `neighbor X soft-reconfiguration
@@ -443,15 +443,15 @@ func (r *Router) SetLocalAsTolerance(session uint64, tolerance uint32) error {
 // before StartSession; unknown handles or already-established
 // sessions return an error.
 func (r *Router) SetSoftReconfigInbound(session uint64, enabled bool) error {
-	rc := C.lr_router_set_soft_reconfig_inbound(
-		r.ptr,
-		C.uint64_t(session),
-		toCBool(enabled),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_soft_reconfig_inbound: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_set_soft_reconfig_inbound(
+                r.ptr,
+                C.uint64_t(session),
+                toCBool(enabled),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_soft_reconfig_inbound: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SoftReconfigInbound is FRR `clear ip bgp * soft in` (W2.4):
@@ -462,69 +462,69 @@ func (r *Router) SetSoftReconfigInbound(session uint64, enabled bool) error {
 // have SetSoftReconfigInbound(true) enabled — the pre-policy RIB was
 // not retained.
 func (r *Router) SoftReconfigInbound(session uint64) (int64, error) {
-	rc := C.lr_router_soft_reconfig_inbound(r.ptr, C.uint64_t(session))
-	if rc < 0 {
-		return 0, fmt.Errorf("lr_router_soft_reconfig_inbound: %s (rc=%d)", LastError(), int(rc))
-	}
-	return int64(rc), nil
+        rc := C.lr_router_soft_reconfig_inbound(r.ptr, C.uint64_t(session))
+        if rc < 0 {
+                return 0, fmt.Errorf("lr_router_soft_reconfig_inbound: %s (rc=%d)", LastError(), int(rc))
+        }
+        return int64(rc), nil
 }
 
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
-	rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_tick: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_tick: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // StartSession begins protocol operation on a session (BGP: ManualStart +
 // TransportOpen). Call once the transport is connected.
 func (r *Router) StartSession(session uint64) error {
-	rc := C.lr_router_start_session(r.ptr, C.uint64_t(session))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_start_session: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_router_start_session(r.ptr, C.uint64_t(session))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_start_session: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // OriginateV4 injects a local IPv4 route ("203.0.113.0/24"-style addr + plen
 // + optional next-hop) into Loc-RIB and advertises it to established peers.
 func (r *Router) OriginateV4(prefix [4]byte, prefixLen uint8, nextHop *[4]byte) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	rc := C.lr_router_originate_v4(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		nhPtr,
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_originate_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        rc := C.lr_router_originate_v4(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                nhPtr,
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_originate_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // OriginateV6 injects a local IPv6 unicast route (AFI=2, SAFI=1) into
 // Loc-RIB and advertises it to established MP-BGP peers via
 // MP_REACH_NLRI. The v6 counterpart of OriginateV4.
 func (r *Router) OriginateV6(prefix [16]byte, prefixLen uint8, nextHop *[16]byte) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	rc := C.lr_router_originate_v6(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		nhPtr,
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_originate_v6: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        rc := C.lr_router_originate_v6(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                nhPtr,
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_originate_v6: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // WithdrawV4 removes a locally originated IPv4 route (FRR "no network"):
@@ -535,29 +535,29 @@ func (r *Router) OriginateV6(prefix [16]byte, prefixLen uint8, nextHop *[16]byte
 // idempotent no-op, matching FRR/BIRD "no network" on an absent
 // statement.
 func (r *Router) WithdrawV4(prefix [4]byte, prefixLen uint8) (withdrawn bool, err error) {
-	rc := C.lr_router_withdraw_v4(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-	)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_withdraw_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 0, nil
+        rc := C.lr_router_withdraw_v4(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_withdraw_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 0, nil
 }
 
 // WithdrawV6 removes a locally originated IPv6 unicast route. See
 // WithdrawV4 for the semantics.
 func (r *Router) WithdrawV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, err error) {
-	rc := C.lr_router_withdraw_v6(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-	)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_withdraw_v6: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 0, nil
+        rc := C.lr_router_withdraw_v6(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_withdraw_v6: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 0, nil
 }
 
 // InstallStaticV4 installs a static IPv4 route into the Loc-RIB (BIRD
@@ -568,72 +568,72 @@ func (r *Router) WithdrawV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, e
 // within the static protocol (lower wins); tag is an optional 32-bit
 // route tag carried through redistribution pipes (pass 0 when not set).
 func (r *Router) InstallStaticV4(prefix [4]byte, prefixLen uint8, nextHop *[4]byte, metric uint32, tag uint32) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	rc := C.lr_router_install_static_v4(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		nhPtr,
-		C.uint32_t(metric),
-		C.uint32_t(tag),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_install_static_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        rc := C.lr_router_install_static_v4(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                nhPtr,
+                C.uint32_t(metric),
+                C.uint32_t(tag),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_install_static_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // InstallStaticV6 installs a static IPv6 route into the Loc-RIB.
 // See InstallStaticV4 for the semantics.
 func (r *Router) InstallStaticV6(prefix [16]byte, prefixLen uint8, nextHop *[16]byte, metric uint32, tag uint32) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	rc := C.lr_router_install_static_v6(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		nhPtr,
-		C.uint32_t(metric),
-		C.uint32_t(tag),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_install_static_v6: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        rc := C.lr_router_install_static_v6(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                nhPtr,
+                C.uint32_t(metric),
+                C.uint32_t(tag),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_install_static_v6: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // UninstallStaticV4 removes a previously-installed static IPv4 route.
 // Returns nil and withdrawn=false when the prefix was not a static
 // route (idempotent no-op, matching WithdrawV4's contract).
 func (r *Router) UninstallStaticV4(prefix [4]byte, prefixLen uint8) (withdrawn bool, err error) {
-	rc := C.lr_router_uninstall_static_v4(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-	)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_uninstall_static_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 0, nil
+        rc := C.lr_router_uninstall_static_v4(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_uninstall_static_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 0, nil
 }
 
 // UninstallStaticV6 removes a previously-installed static IPv6 route.
 // See UninstallStaticV4 for the semantics.
 func (r *Router) UninstallStaticV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, err error) {
-	rc := C.lr_router_uninstall_static_v6(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-	)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_uninstall_static_v6: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 0, nil
+        rc := C.lr_router_uninstall_static_v6(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_uninstall_static_v6: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 0, nil
 }
 
 // InstallConnectedV4 installs an interface-connected IPv4 route into
@@ -649,43 +649,43 @@ func (r *Router) UninstallStaticV6(prefix [16]byte, prefixLen uint8) (withdrawn 
 // renderer can attribute the route back to the interface it came
 // from. Pass 0 when the caller does not allocate per-interface ids.
 func (r *Router) InstallConnectedV4(prefix [4]byte, prefixLen uint8, nextHop *[4]byte, metric uint32, ifID uint64) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	rc := C.lr_router_install_connected_v4(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		nhPtr,
-		C.uint32_t(metric),
-		C.uint64_t(ifID),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_install_connected_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        rc := C.lr_router_install_connected_v4(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                nhPtr,
+                C.uint32_t(metric),
+                C.uint64_t(ifID),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_install_connected_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // InstallConnectedV6 installs an interface-connected IPv6 route into
 // the Loc-RIB. See InstallConnectedV4 for the semantics.
 func (r *Router) InstallConnectedV6(prefix [16]byte, prefixLen uint8, nextHop *[16]byte, metric uint32, ifID uint64) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	rc := C.lr_router_install_connected_v6(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		nhPtr,
-		C.uint32_t(metric),
-		C.uint64_t(ifID),
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_install_connected_v6: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        rc := C.lr_router_install_connected_v6(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                nhPtr,
+                C.uint32_t(metric),
+                C.uint64_t(ifID),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_install_connected_v6: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // UninstallConnectedV4 removes a previously-installed connected IPv4
@@ -693,29 +693,29 @@ func (r *Router) InstallConnectedV6(prefix [16]byte, prefixLen uint8, nextHop *[
 // connected route (idempotent no-op, matching UninstallStaticV4's
 // contract).
 func (r *Router) UninstallConnectedV4(prefix [4]byte, prefixLen uint8) (withdrawn bool, err error) {
-	rc := C.lr_router_uninstall_connected_v4(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-	)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_uninstall_connected_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 0, nil
+        rc := C.lr_router_uninstall_connected_v4(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_uninstall_connected_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 0, nil
 }
 
 // UninstallConnectedV6 removes a previously-installed connected IPv6
 // route. See UninstallConnectedV4 for the semantics.
 func (r *Router) UninstallConnectedV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, err error) {
-	rc := C.lr_router_uninstall_connected_v6(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-	)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_uninstall_connected_v6: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 0, nil
+        rc := C.lr_router_uninstall_connected_v6(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_uninstall_connected_v6: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 0, nil
 }
 
 // OriginateLabeledV4 injects an RFC 8277 labelled IPv4 BGP route
@@ -724,88 +724,88 @@ func (r *Router) UninstallConnectedV6(prefix [16]byte, prefixLen uint8) (withdra
 // Pass nil for nextHop to leave the route without a next-hop (the egress
 // path will synthesise one from the local address where appropriate).
 func (r *Router) OriginateLabeledV4(prefix [4]byte, prefixLen uint8, labels []uint32, nextHop *[4]byte) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	var labelsPtr *C.uint32_t
-	if len(labels) > 0 {
-		labelsPtr = (*C.uint32_t)(unsafe.Pointer(&labels[0]))
-	}
-	rc := C.lr_router_originate_labeled_v4(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		labelsPtr,
-		C.size_t(len(labels)),
-		nhPtr,
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_originate_labeled_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        var labelsPtr *C.uint32_t
+        if len(labels) > 0 {
+                labelsPtr = (*C.uint32_t)(unsafe.Pointer(&labels[0]))
+        }
+        rc := C.lr_router_originate_labeled_v4(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                labelsPtr,
+                C.size_t(len(labels)),
+                nhPtr,
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_originate_labeled_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // OriginateLabeledV6 injects an RFC 8277 labelled IPv6 BGP route
 // (AFI=2, SAFI=4). See OriginateLabeledV4 for label-stack semantics.
 func (r *Router) OriginateLabeledV6(prefix [16]byte, prefixLen uint8, labels []uint32, nextHop *[16]byte) error {
-	var nhPtr *C.uint8_t
-	if nextHop != nil {
-		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
-	}
-	var labelsPtr *C.uint32_t
-	if len(labels) > 0 {
-		labelsPtr = (*C.uint32_t)(unsafe.Pointer(&labels[0]))
-	}
-	rc := C.lr_router_originate_labeled_v6(
-		r.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
-		C.uint8_t(prefixLen),
-		labelsPtr,
-		C.size_t(len(labels)),
-		nhPtr,
-	)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_originate_labeled_v6: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var nhPtr *C.uint8_t
+        if nextHop != nil {
+                nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+        }
+        var labelsPtr *C.uint32_t
+        if len(labels) > 0 {
+                labelsPtr = (*C.uint32_t)(unsafe.Pointer(&labels[0]))
+        }
+        rc := C.lr_router_originate_labeled_v6(
+                r.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+                C.uint8_t(prefixLen),
+                labelsPtr,
+                C.size_t(len(labels)),
+                nhPtr,
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_originate_labeled_v6: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // MplsPlatformLabels returns the kernel's MPLS platform-labels
 // capability (Linux only). Returns 0 when MPLS routing is not enabled,
 // 16 or 20 when it is. Non-Linux platforms always return 0.
 func MplsPlatformLabels() uint32 {
-	return uint32(C.lr_mpls_platform_labels())
+        return uint32(C.lr_mpls_platform_labels())
 }
 
 // Event is one serialized router event (ROADMAP-v3 D5.5): a peer-state
 // change, a route install/withdrawal, an advertisement or retraction,
 // a log line, a protocol error or one of the maximum-prefix signals.
 type Event struct {
-	Kind      int32
-	Session   uint64
-	Prefix    [16]byte
-	PrefixLen uint8
-	IsIPv6    bool
-	PathID    uint32
-	Count     uint32
-	Limit     uint32
-	Pct       uint32
-	Action    int32
-	Text      string
+        Kind      int32
+        Session   uint64
+        Prefix    [16]byte
+        PrefixLen uint8
+        IsIPv6    bool
+        PathID    uint32
+        Count     uint32
+        Limit     uint32
+        Pct       uint32
+        Action    int32
+        Text      string
 }
 
 // Event kind constants (mirror lr_event_kind_t / LR_EVENT_*).
 const (
-	EventPeerState          = 1
-	EventRouteInstalled     = 2
-	EventRouteWithdrawn     = 3
-	EventLog                = 4
-	EventPrefixAdvertised   = 5
-	EventPrefixRetracted    = 6
-	EventProtocolError      = 7
-	EventMaxPrefixExceeded  = 8
-	EventMaxPrefixThreshold = 9
+        EventPeerState          = 1
+        EventRouteInstalled     = 2
+        EventRouteWithdrawn     = 3
+        EventLog                = 4
+        EventPrefixAdvertised   = 5
+        EventPrefixRetracted    = 6
+        EventProtocolError      = 7
+        EventMaxPrefixExceeded  = 8
+        EventMaxPrefixThreshold = 9
 )
 
 // PollEvents returns up to cap pending router events. Events beyond
@@ -813,72 +813,72 @@ const (
 // nothing. Transport-plane events (outgoing bytes, timers) never
 // surface here — bytes ride DrainOutput.
 func (r *Router) PollEvents(capacity int) ([]Event, error) {
-	if capacity <= 0 {
-		return nil, fmt.Errorf("PollEvents: capacity must be positive")
-	}
-	cArr := (*C.lr_event_t)(C.malloc(C.sizeof_lr_event_t * C.size_t(capacity)))
-	if cArr == nil {
-		return nil, fmt.Errorf("PollEvents: out of memory")
-	}
-	defer C.free(unsafe.Pointer(cArr))
-	n := C.lr_router_poll_events(r.ptr, cArr, C.int32_t(capacity))
-	if n < 0 {
-		return nil, fmt.Errorf("lr_router_poll_events: %s (rc=%d)", LastError(), int(n))
-	}
-	slice := (*[1 << 20]C.lr_event_t)(unsafe.Pointer(cArr))[:n:n]
-	out := make([]Event, 0, n)
-	for _, e := range slice {
-		var ev Event
-		ev.Kind = int32(e.kind)
-		ev.Session = uint64(e.session)
-		copy(ev.Prefix[:], (*[16]byte)(unsafe.Pointer(&e.prefix[0]))[:])
-		ev.PrefixLen = uint8(e.prefix_len)
-		ev.IsIPv6 = e.is_ipv6 != 0
-		ev.PathID = uint32(e.path_id)
-		ev.Count = uint32(e.count)
-		ev.Limit = uint32(e.limit)
-		ev.Pct = uint32(e.pct)
-		ev.Action = int32(e.action)
-		end := 0
-		for end < len(e.text) && e.text[end] != 0 {
-			end++
-		}
-		ev.Text = string(unsafe.Slice((*byte)(unsafe.Pointer(&e.text[0])), end))
-		out = append(out, ev)
-	}
-	return out, nil
+        if capacity <= 0 {
+                return nil, fmt.Errorf("PollEvents: capacity must be positive")
+        }
+        cArr := (*C.lr_event_t)(C.malloc(C.sizeof_lr_event_t * C.size_t(capacity)))
+        if cArr == nil {
+                return nil, fmt.Errorf("PollEvents: out of memory")
+        }
+        defer C.free(unsafe.Pointer(cArr))
+        n := C.lr_router_poll_events(r.ptr, cArr, C.int32_t(capacity))
+        if n < 0 {
+                return nil, fmt.Errorf("lr_router_poll_events: %s (rc=%d)", LastError(), int(n))
+        }
+        slice := (*[1 << 20]C.lr_event_t)(unsafe.Pointer(cArr))[:n:n]
+        out := make([]Event, 0, n)
+        for _, e := range slice {
+                var ev Event
+                ev.Kind = int32(e.kind)
+                ev.Session = uint64(e.session)
+                copy(ev.Prefix[:], (*[16]byte)(unsafe.Pointer(&e.prefix[0]))[:])
+                ev.PrefixLen = uint8(e.prefix_len)
+                ev.IsIPv6 = e.is_ipv6 != 0
+                ev.PathID = uint32(e.path_id)
+                ev.Count = uint32(e.count)
+                ev.Limit = uint32(e.limit)
+                ev.Pct = uint32(e.pct)
+                ev.Action = int32(e.action)
+                end := 0
+                for end < len(e.text) && e.text[end] != 0 {
+                        end++
+                }
+                ev.Text = string(unsafe.Slice((*byte)(unsafe.Pointer(&e.text[0])), end))
+                out = append(out, ev)
+        }
+        return out, nil
 }
 
 // RibLen returns the number of routes currently in Loc-RIB.
 func (r *Router) RibLen() (int64, error) {
-	n := C.lr_router_rib_len(r.ptr)
-	if n < 0 {
-		return 0, fmt.Errorf("lr_router_rib_len failed (rc=%d)", int(n))
-	}
-	return int64(n), nil
+        n := C.lr_router_rib_len(r.ptr)
+        if n < 0 {
+                return 0, fmt.Errorf("lr_router_rib_len failed (rc=%d)", int(n))
+        }
+        return int64(n), nil
 }
 
 // RibDump renders the Loc-RIB as a text table (one route per line).
 func (r *Router) RibDump() (string, error) {
-	var b C.struct_lr_bytes_t
-	rc := C.lr_router_rib_dump(r.ptr, &b)
-	if rc != 0 {
-		return "", fmt.Errorf("lr_router_rib_dump: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return string(copyBytes(&b)), nil
+        var b C.struct_lr_bytes_t
+        rc := C.lr_router_rib_dump(r.ptr, &b)
+        if rc != 0 {
+                return "", fmt.Errorf("lr_router_rib_dump: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return string(copyBytes(&b)), nil
 }
 
 // SessionsDump renders every session's operational summary as a text
 // table (one line per session: handle, kind, ASNs, state, ...).
 func (r *Router) SessionsDump() (string, error) {
-	var b C.struct_lr_bytes_t
-	rc := C.lr_router_sessions_dump(r.ptr, &b)
-	if rc != 0 {
-		return "", fmt.Errorf("lr_router_sessions_dump: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return string(copyBytes(&b)), nil
+        var b C.struct_lr_bytes_t
+        rc := C.lr_router_sessions_dump(r.ptr, &b)
+        if rc != 0 {
+                return "", fmt.Errorf("lr_router_sessions_dump: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return string(copyBytes(&b)), nil
 }
 
 // ===== Structured inspection surface (issue #92) =====
@@ -893,150 +893,150 @@ func (r *Router) SessionsDump() (string, error) {
 type SessionKind int32
 
 const (
-	SessionKindBGP   SessionKind = 1
-	SessionKindOSPF  SessionKind = 2
-	SessionKindOSPF3 SessionKind = 3
-	SessionKindBabel SessionKind = 4
+        SessionKindBGP   SessionKind = 1
+        SessionKindOSPF  SessionKind = 2
+        SessionKindOSPF3 SessionKind = 3
+        SessionKindBabel SessionKind = 4
 )
 
 // String returns the lower-case ASCII name of the kind ("bgp",
 // "ospf", "ospf3", "babel") — the same form as Rust's
 // SessionSummary::kind.
 func (k SessionKind) String() string {
-	switch k {
-	case SessionKindBGP:
-		return "bgp"
-	case SessionKindOSPF:
-		return "ospf"
-	case SessionKindOSPF3:
-		return "ospf3"
-	case SessionKindBabel:
-		return "babel"
-	default:
-		return "unknown"
-	}
+        switch k {
+        case SessionKindBGP:
+                return "bgp"
+        case SessionKindOSPF:
+                return "ospf"
+        case SessionKindOSPF3:
+                return "ospf3"
+        case SessionKindBabel:
+                return "babel"
+        default:
+                return "unknown"
+        }
 }
 
 // SessionSummary is one session's operational summary. Mirrors
 // lr_router::SessionSummary.
 type SessionSummary struct {
-	Handle             uint64
-	Kind               SessionKind
-	KindText           string
-	LocalAS            uint32
-	PeerAS             uint32
-	State              string
-	Established        bool
-	PeerBgpIDPresent   bool
-	PeerBgpID          uint32
-	NegotiatedHoldTime uint16
-	AdjRibInLen        uint64
-	UpdatesReceived    uint64
-	UpdatesSent        uint64
+        Handle             uint64
+        Kind               SessionKind
+        KindText           string
+        LocalAS            uint32
+        PeerAS             uint32
+        State              string
+        Established        bool
+        PeerBgpIDPresent   bool
+        PeerBgpID          uint32
+        NegotiatedHoldTime uint16
+        AdjRibInLen        uint64
+        UpdatesReceived    uint64
+        UpdatesSent        uint64
 }
 
 // OspfLsa is one OSPF LSA projection — fixed-layout header plus
 // the body bytes owned by Go (the caller does not need to free
 // them; they are copied out of the C buffer before it is freed).
 type OspfLsa struct {
-	LsAge             uint16
-	Options           uint8
-	LsType            uint16
-	LinkStateID       uint32
-	AdvertisingRouter uint32
-	LsSequenceNumber  uint32
-	LsChecksum        uint16
-	Length            uint16
-	Body              []byte
+        LsAge             uint16
+        Options           uint8
+        LsType            uint16
+        LinkStateID       uint32
+        AdvertisingRouter uint32
+        LsSequenceNumber  uint32
+        LsChecksum        uint16
+        Length            uint16
+        Body              []byte
 }
 
 // OspfGraceEvent is one OSPF Graceful-Restart event (RFC 3623 §3 /
 // RFC 5187 §2). Mirrors lr_router::OspfGraceEvent.
 type OspfGraceEvent struct {
-	Area                 uint32
-	AdvertisingRouter    uint32
-	GracePeriodSecs      uint32
-	Reason               uint8
-	InterfaceAddrV4      [4]byte
-	InterfaceAddrV4Valid bool
-	InterfaceAddrV6      [16]byte
-	InterfaceAddrV6Valid bool
-	LsAgeSecs            uint16
-	Purged               bool
+        Area                 uint32
+        AdvertisingRouter    uint32
+        GracePeriodSecs      uint32
+        Reason               uint8
+        InterfaceAddrV4      [4]byte
+        InterfaceAddrV4Valid bool
+        InterfaceAddrV6      [16]byte
+        InterfaceAddrV6Valid bool
+        LsAgeSecs            uint16
+        Purged               bool
 }
 
 // SessionCount returns the number of sessions currently registered
 // on the router. Mirrors DefaultRouter::session_summaries().len().
 func (r *Router) SessionCount() (int, error) {
-	n := C.lr_router_session_count(r.ptr)
-	return int(n), nil
+        n := C.lr_router_session_count(r.ptr)
+        return int(n), nil
 }
 
 // SessionSummaryAt reads one session summary by index. Mirrors
 // DefaultRouter::session_summaries()[index]. The order is stable
 // (insertion order, sorted by handle).
 func (r *Router) SessionSummaryAt(index int) (SessionSummary, error) {
-	var c C.struct_lr_session_summary_t
-	rc := C.lr_router_session_summary_at(r.ptr, C.uintptr_t(index), &c)
-	if rc != 0 {
-		return SessionSummary{}, fmt.Errorf("lr_router_session_summary_at: %s (rc=%d)", LastError(), int(rc))
-	}
-	return decodeSessionSummary(&c), nil
+        var c C.struct_lr_session_summary_t
+        rc := C.lr_router_session_summary_at(r.ptr, C.uintptr_t(index), &c)
+        if rc != 0 {
+                return SessionSummary{}, fmt.Errorf("lr_router_session_summary_at: %s (rc=%d)", LastError(), int(rc))
+        }
+        return decodeSessionSummary(&c), nil
 }
 
 // SessionSummaries returns every session's operational summary.
 // Convenience wrapper around SessionCount + SessionSummaryAt.
 func (r *Router) SessionSummaries() ([]SessionSummary, error) {
-	n, err := r.SessionCount()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]SessionSummary, 0, n)
-	for i := 0; i < n; i++ {
-		s, err := r.SessionSummaryAt(i)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, nil
+        n, err := r.SessionCount()
+        if err != nil {
+                return nil, err
+        }
+        out := make([]SessionSummary, 0, n)
+        for i := 0; i < n; i++ {
+                s, err := r.SessionSummaryAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                out = append(out, s)
+        }
+        return out, nil
 }
 
 // OspfAreaCount returns the number of OSPF areas the router
 // currently holds. Mirrors DefaultRouter::ospf_area_ids().len().
 func (r *Router) OspfAreaCount() (int, error) {
-	n := C.lr_router_ospf_area_count(r.ptr)
-	return int(n), nil
+        n := C.lr_router_ospf_area_count(r.ptr)
+        return int(n), nil
 }
 
 // OspfAreaIDAt reads one OSPF area ID by index. Mirrors
 // DefaultRouter::ospf_area_ids()[index]. The order is ascending
 // (BTreeMap iteration).
 func (r *Router) OspfAreaIDAt(index int) (uint32, error) {
-	var id C.uint32_t
-	rc := C.lr_router_ospf_area_id_at(r.ptr, C.uintptr_t(index), &id)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_router_ospf_area_id_at: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint32(id), nil
+        var id C.uint32_t
+        rc := C.lr_router_ospf_area_id_at(r.ptr, C.uintptr_t(index), &id)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_router_ospf_area_id_at: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint32(id), nil
 }
 
 // OspfAreaIDs returns every OSPF area ID the router currently
 // holds. Convenience wrapper around OspfAreaCount + OspfAreaIDAt.
 func (r *Router) OspfAreaIDs() ([]uint32, error) {
-	n, err := r.OspfAreaCount()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]uint32, 0, n)
-	for i := 0; i < n; i++ {
-		id, err := r.OspfAreaIDAt(i)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, nil
+        n, err := r.OspfAreaCount()
+        if err != nil {
+                return nil, err
+        }
+        out := make([]uint32, 0, n)
+        for i := 0; i < n; i++ {
+                id, err := r.OspfAreaIDAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                out = append(out, id)
+        }
+        return out, nil
 }
 
 // OspfAreaTopologyVersion returns the OSPF area topology version —
@@ -1045,12 +1045,12 @@ func (r *Router) OspfAreaIDs() ([]uint32, error) {
 // DefaultRouter::ospf_area_topology_version. Returns an error when
 // the area is unknown.
 func (r *Router) OspfAreaTopologyVersion(areaID uint32) (uint64, error) {
-	var v C.uint64_t
-	rc := C.lr_router_ospf_area_topology_version(r.ptr, C.uint32_t(areaID), &v)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_router_ospf_area_topology_version: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint64(v), nil
+        var v C.uint64_t
+        rc := C.lr_router_ospf_area_topology_version(r.ptr, C.uint32_t(areaID), &v)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_router_ospf_area_topology_version: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint64(v), nil
 }
 
 // OspfAreaLsa reads one LSA out of an area's LSDB by its exact key
@@ -1058,14 +1058,14 @@ func (r *Router) OspfAreaTopologyVersion(areaID uint32) (uint64, error) {
 // DefaultRouter::ospf_area_lsa. Returns an error when the area or
 // LSA is unknown.
 func (r *Router) OspfAreaLsa(areaID uint32, lsType uint16, linkStateID uint32, advertisingRouter uint32) (OspfLsa, error) {
-	var c C.struct_lr_ospf_lsa_t
-	rc := C.lr_router_ospf_area_lsa(r.ptr, C.uint32_t(areaID), C.uint16_t(lsType),
-		C.uint32_t(linkStateID), C.uint32_t(advertisingRouter), &c)
-	if rc != 0 {
-		return OspfLsa{}, fmt.Errorf("lr_router_ospf_area_lsa: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&c.body)
-	return decodeOspfLsa(&c), nil
+        var c C.struct_lr_ospf_lsa_t
+        rc := C.lr_router_ospf_area_lsa(r.ptr, C.uint32_t(areaID), C.uint16_t(lsType),
+                C.uint32_t(linkStateID), C.uint32_t(advertisingRouter), &c)
+        if rc != 0 {
+                return OspfLsa{}, fmt.Errorf("lr_router_ospf_area_lsa: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&c.body)
+        return decodeOspfLsa(&c), nil
 }
 
 // BgpSessionIdentityHash returns a stable, content-derived hash that
@@ -1073,7 +1073,7 @@ func (r *Router) OspfAreaLsa(areaID uint32, lsType uint16, linkStateID uint32, a
 // added/removed, peer address changed, ASN4 mode flipped). Mirrors
 // DefaultRouter::bgp_session_identity_hash.
 func (r *Router) BgpSessionIdentityHash() (uint64, error) {
-	return uint64(C.lr_router_bgp_session_identity_hash(r.ptr)), nil
+        return uint64(C.lr_router_bgp_session_identity_hash(r.ptr)), nil
 }
 
 // DrainOspfGraceEvents drains pending OSPF Graceful-Restart events
@@ -1081,24 +1081,24 @@ func (r *Router) BgpSessionIdentityHash() (uint64, error) {
 // DefaultRouter::drain_ospf_grace_events. Events past capacity stay
 // queued for the next call.
 func (r *Router) DrainOspfGraceEvents(capacity int) ([]OspfGraceEvent, error) {
-	if capacity <= 0 {
-		return nil, fmt.Errorf("DrainOspfGraceEvents: capacity must be positive")
-	}
-	cArr := (*C.struct_lr_ospf_grace_event_t)(C.malloc(C.sizeof_struct_lr_ospf_grace_event_t * C.size_t(capacity)))
-	if cArr == nil {
-		return nil, fmt.Errorf("DrainOspfGraceEvents: out of memory")
-	}
-	defer C.free(unsafe.Pointer(cArr))
-	n := C.lr_router_drain_ospf_grace_events(r.ptr, cArr, C.uintptr_t(capacity))
-	if n < 0 {
-		return nil, fmt.Errorf("lr_router_drain_ospf_grace_events: %s (rc=%d)", LastError(), int(n))
-	}
-	slice := (*[1 << 20]C.struct_lr_ospf_grace_event_t)(unsafe.Pointer(cArr))[:n:n]
-	out := make([]OspfGraceEvent, 0, n)
-	for _, e := range slice {
-		out = append(out, decodeOspfGraceEvent(&e))
-	}
-	return out, nil
+        if capacity <= 0 {
+                return nil, fmt.Errorf("DrainOspfGraceEvents: capacity must be positive")
+        }
+        cArr := (*C.struct_lr_ospf_grace_event_t)(C.malloc(C.sizeof_struct_lr_ospf_grace_event_t * C.size_t(capacity)))
+        if cArr == nil {
+                return nil, fmt.Errorf("DrainOspfGraceEvents: out of memory")
+        }
+        defer C.free(unsafe.Pointer(cArr))
+        n := C.lr_router_drain_ospf_grace_events(r.ptr, cArr, C.uintptr_t(capacity))
+        if n < 0 {
+                return nil, fmt.Errorf("lr_router_drain_ospf_grace_events: %s (rc=%d)", LastError(), int(n))
+        }
+        slice := (*[1 << 20]C.struct_lr_ospf_grace_event_t)(unsafe.Pointer(cArr))[:n:n]
+        out := make([]OspfGraceEvent, 0, n)
+        for _, e := range slice {
+                out = append(out, decodeOspfGraceEvent(&e))
+        }
+        return out, nil
 }
 
 // ----------------------------------------------------------------------
@@ -1113,11 +1113,11 @@ func (r *Router) DrainOspfGraceEvents(capacity int) ([]OspfGraceEvent, error) {
 // a stub/NSSA area, the endpoint is this router itself, or the link
 // already exists.
 func (r *Router) OspfAddVirtualLink(transitArea uint32, endpoint uint32) (bool, error) {
-	rc := C.lr_router_ospf_add_virtual_link(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_add_virtual_link: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        rc := C.lr_router_ospf_add_virtual_link(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_add_virtual_link: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfRemoveVirtualLink removes a configured virtual link, tearing
@@ -1125,21 +1125,21 @@ func (r *Router) OspfAddVirtualLink(transitArea uint32, endpoint uint32) (bool, 
 // was up. Returns (true, nil) when the link existed and was removed;
 // (false, nil) when no such link was configured.
 func (r *Router) OspfRemoveVirtualLink(transitArea uint32, endpoint uint32) (bool, error) {
-	rc := C.lr_router_ospf_remove_virtual_link(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_remove_virtual_link: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        rc := C.lr_router_ospf_remove_virtual_link(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_remove_virtual_link: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfVirtualLinkUp reports whether the virtual link through
 // transitArea to endpoint is currently up (RFC 2328 §15).
 func (r *Router) OspfVirtualLinkUp(transitArea uint32, endpoint uint32) (bool, error) {
-	rc := C.lr_router_ospf_virtual_link_up(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_virtual_link_up: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        rc := C.lr_router_ospf_virtual_link_up(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint))
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_virtual_link_up: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfVirtualLinkSession returns the backbone session handle of an
@@ -1149,15 +1149,15 @@ func (r *Router) OspfVirtualLinkUp(transitArea uint32, endpoint uint32) (bool, e
 // bytes to the peer endpoint's virtual session (tunnelled through
 // the transit area), feeding what returns the same way.
 func (r *Router) OspfVirtualLinkSession(transitArea uint32, endpoint uint32) (uint64, bool, error) {
-	var out C.uint64_t
-	rc := C.lr_router_ospf_virtual_link_session(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint), &out)
-	if rc < 0 {
-		return 0, false, fmt.Errorf("lr_router_ospf_virtual_link_session: %s (rc=%d)", LastError(), int(rc))
-	}
-	if rc == 1 {
-		return uint64(out), true, nil
-	}
-	return 0, false, nil
+        var out C.uint64_t
+        rc := C.lr_router_ospf_virtual_link_session(r.ptr, C.uint32_t(transitArea), C.uint32_t(endpoint), &out)
+        if rc < 0 {
+                return 0, false, fmt.Errorf("lr_router_ospf_virtual_link_session: %s (rc=%d)", LastError(), int(rc))
+        }
+        if rc == 1 {
+                return uint64(out), true, nil
+        }
+        return 0, false, nil
 }
 
 // OspfRedistribute redistributes one external destination on the
@@ -1167,14 +1167,14 @@ func (r *Router) OspfVirtualLinkSession(transitArea uint32, endpoint uint32) (ui
 // (false, nil) when the destination's prefix is not IPv4 — use
 // OspfRedistributeV3 for IPv6.
 func (r *Router) OspfRedistribute(dest *OspfExternalDest) (bool, error) {
-	if dest == nil || dest.ptr == nil {
-		return false, fmt.Errorf("OspfRedistribute: dest is nil")
-	}
-	rc := C.lr_router_ospf_redistribute(r.ptr, dest.ptr)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_redistribute: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        if dest == nil || dest.ptr == nil {
+                return false, fmt.Errorf("OspfRedistribute: dest is nil")
+        }
+        rc := C.lr_router_ospf_redistribute(r.ptr, dest.ptr)
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_redistribute: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfUnredistribute drops the redistribution intent covering
@@ -1184,16 +1184,16 @@ func (r *Router) OspfRedistribute(dest *OspfExternalDest) (bool, error) {
 // existed and was flushed. addr must be 4 bytes for IPv4 (use
 // OspfUnredistributeV3 for IPv6).
 func (r *Router) OspfUnredistribute(addr []byte, prefixLen uint8) (bool, error) {
-	if len(addr) != 4 {
-		return false, fmt.Errorf("OspfUnredistribute: addr must be 4 bytes for v4, got %d", len(addr))
-	}
-	var cP C.struct_lr_core_prefix_t
-	writeCorePrefix(&cP, addr, prefixLen)
-	rc := C.lr_router_ospf_unredistribute(r.ptr, cP)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_unredistribute: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        if len(addr) != 4 {
+                return false, fmt.Errorf("OspfUnredistribute: addr must be 4 bytes for v4, got %d", len(addr))
+        }
+        var cP C.struct_lr_core_prefix_t
+        writeCorePrefix(&cP, addr, prefixLen)
+        rc := C.lr_router_ospf_unredistribute(r.ptr, cP)
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_unredistribute: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfRedistributeV3 redistributes one external destination on the
@@ -1201,30 +1201,30 @@ func (r *Router) OspfUnredistribute(addr []byte, prefixLen uint8) (bool, error) 
 // Returns (true, nil) when the intent was recorded; (false, nil)
 // when the prefix is not IPv6 or the forwarding address is illegal.
 func (r *Router) OspfRedistributeV3(dest *OspfV3ExternalDest) (bool, error) {
-	if dest == nil || dest.ptr == nil {
-		return false, fmt.Errorf("OspfRedistributeV3: dest is nil")
-	}
-	rc := C.lr_router_ospf_redistribute_v3(r.ptr, dest.ptr)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_redistribute_v3: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        if dest == nil || dest.ptr == nil {
+                return false, fmt.Errorf("OspfRedistributeV3: dest is nil")
+        }
+        rc := C.lr_router_ospf_redistribute_v3(r.ptr, dest.ptr)
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_redistribute_v3: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfUnredistributeV3 drops the redistribution intent covering
 // (addr/prefixLen) on the OSPFv3 plane (RFC 5340 §A.4.7). addr must
 // be 16 bytes for IPv6.
 func (r *Router) OspfUnredistributeV3(addr []byte, prefixLen uint8) (bool, error) {
-	if len(addr) != 16 {
-		return false, fmt.Errorf("OspfUnredistributeV3: addr must be 16 bytes for v6, got %d", len(addr))
-	}
-	var cP C.struct_lr_core_prefix_t
-	writeCorePrefix(&cP, addr, prefixLen)
-	rc := C.lr_router_ospf_unredistribute_v3(r.ptr, cP)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_unredistribute_v3: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        if len(addr) != 16 {
+                return false, fmt.Errorf("OspfUnredistributeV3: addr must be 16 bytes for v6, got %d", len(addr))
+        }
+        var cP C.struct_lr_core_prefix_t
+        writeCorePrefix(&cP, addr, prefixLen)
+        rc := C.lr_router_ospf_unredistribute_v3(r.ptr, cP)
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_unredistribute_v3: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfIsAsbr reports whether at least one AS-external redistribution
@@ -1232,11 +1232,11 @@ func (r *Router) OspfUnredistributeV3(addr []byte, prefixLen uint8) (bool, error
 // lets the daemon notice the ASBR status flip and re-originate its
 // Router-LSAs immediately). Mirrors DefaultRouter::ospf_is_asbr.
 func (r *Router) OspfIsAsbr() (bool, error) {
-	rc := C.lr_router_ospf_is_asbr(r.ptr)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_is_asbr: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        rc := C.lr_router_ospf_is_asbr(r.ptr)
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_is_asbr: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfSetAreaType sets an attached OSPF area's type policy (RFC 2328
@@ -1248,11 +1248,11 @@ func (r *Router) OspfIsAsbr() (bool, error) {
 // lr_router_ospf_set_area_type_ext entry point that takes the full
 // lr_ospf_area_type_t struct).
 func (r *Router) OspfSetAreaType(areaID uint32, t OspfAreaType) (bool, error) {
-	rc := C.lr_router_ospf_set_area_type_ext(r.ptr, C.uint32_t(areaID), t.cHandle())
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_set_area_type_ext: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        rc := C.lr_router_ospf_set_area_type_ext(r.ptr, C.uint32_t(areaID), t.cHandle())
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_set_area_type_ext: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfSetAreaTypeKind is the legacy i32-kind variant of OspfSetAreaType
@@ -1267,11 +1267,11 @@ func (r *Router) OspfSetAreaType(areaID uint32, t OspfAreaType) (bool, error) {
 // conversion (the backbone cannot become stub/NSSA), and (false,
 // err) on an unexpected C ABI failure.
 func (r *Router) OspfSetAreaTypeKind(areaID uint32, kind int32) (bool, error) {
-	rc := C.lr_router_ospf_set_area_type(r.ptr, C.uint32_t(areaID), C.int32_t(kind))
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_ospf_set_area_type: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        rc := C.lr_router_ospf_set_area_type(r.ptr, C.uint32_t(areaID), C.int32_t(kind))
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_ospf_set_area_type: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // OspfAreaType reads one attached OSPF area's type policy (RFC 2328
@@ -1280,15 +1280,15 @@ func (r *Router) OspfSetAreaTypeKind(areaID uint32, kind int32) (bool, error) {
 // area is unknown (not yet attached or already torn down). Mirrors
 // DefaultRouter::ospf_area_type.
 func (r *Router) OspfAreaType(areaID uint32) (OspfAreaType, bool, error) {
-	var out C.struct_lr_ospf_area_type_t
-	rc := C.lr_router_ospf_area_type(r.ptr, C.uint32_t(areaID), &out)
-	if rc < 0 {
-		return OspfAreaType{}, false, fmt.Errorf("lr_router_ospf_area_type: %s (rc=%d)", LastError(), int(rc))
-	}
-	if rc == 1 {
-		return OspfAreaType{kind: int32(out.kind), defaultMetric: uint32(out.default_metric)}, true, nil
-	}
-	return OspfAreaType{}, false, nil
+        var out C.struct_lr_ospf_area_type_t
+        rc := C.lr_router_ospf_area_type(r.ptr, C.uint32_t(areaID), &out)
+        if rc < 0 {
+                return OspfAreaType{}, false, fmt.Errorf("lr_router_ospf_area_type: %s (rc=%d)", LastError(), int(rc))
+        }
+        if rc == 1 {
+                return OspfAreaType{kind: int32(out.kind), defaultMetric: uint32(out.default_metric)}, true, nil
+        }
+        return OspfAreaType{}, false, nil
 }
 
 // OspfRouterLsaFlags carries the Router-LSA body flags (RFC 2328
@@ -1297,16 +1297,16 @@ func (r *Router) OspfAreaType(areaID uint32) (OspfAreaType, bool, error) {
 // lr_ospf::origination::RouterLsaFlags (and
 // DefaultRouter::ospf_router_lsa_flags).
 type OspfRouterLsaFlags struct {
-	// V — the router is an endpoint of a virtual link whose
-	// transit area is `areaID` (§15: the V-bit rides the transit
-	// area's Router-LSA).
-	VirtualLink bool
-	// E — at least one AS-external redistribution intent exists
-	// (the ASBR condition — §12.4.1.1).
-	Asbr bool
-	// B — the router is attached to more than one OSPFv2 area
-	// (the ABR condition — §12.4.1).
-	Border bool
+        // V — the router is an endpoint of a virtual link whose
+        // transit area is `areaID` (§15: the V-bit rides the transit
+        // area's Router-LSA).
+        VirtualLink bool
+        // E — at least one AS-external redistribution intent exists
+        // (the ASBR condition — §12.4.1.1).
+        Asbr bool
+        // B — the router is attached to more than one OSPFv2 area
+        // (the ABR condition — §12.4.1).
+        Border bool
 }
 
 // OspfRouterLsaFlags reads the Router-LSA body flags (RFC 2328
@@ -1320,21 +1320,21 @@ type OspfRouterLsaFlags struct {
 // nil) when the area is unknown (not yet attached), or (zero, false,
 // err) on a NULL router handle / NULL out pointer / panic.
 func (r *Router) OspfRouterLsaFlags(areaID uint32) (OspfRouterLsaFlags, bool, error) {
-	var v, e, b C.uint8_t
-	rc := C.lr_router_ospf_router_lsa_flags(r.ptr, C.uint32_t(areaID), &v, &e, &b)
-	if rc < 0 {
-		// -6 (LR_ERR_OTHER) on an unknown area: surface as
-		// (zero, false, nil) to mirror OspfAreaType's contract.
-		if rc == -6 {
-			return OspfRouterLsaFlags{}, false, nil
-		}
-		return OspfRouterLsaFlags{}, false, fmt.Errorf("lr_router_ospf_router_lsa_flags: %s (rc=%d)", LastError(), int(rc))
-	}
-	return OspfRouterLsaFlags{
-		VirtualLink: v != 0,
-		Asbr:        e != 0,
-		Border:      b != 0,
-	}, true, nil
+        var v, e, b C.uint8_t
+        rc := C.lr_router_ospf_router_lsa_flags(r.ptr, C.uint32_t(areaID), &v, &e, &b)
+        if rc < 0 {
+                // -6 (LR_ERR_OTHER) on an unknown area: surface as
+                // (zero, false, nil) to mirror OspfAreaType's contract.
+                if rc == -6 {
+                        return OspfRouterLsaFlags{}, false, nil
+                }
+                return OspfRouterLsaFlags{}, false, fmt.Errorf("lr_router_ospf_router_lsa_flags: %s (rc=%d)", LastError(), int(rc))
+        }
+        return OspfRouterLsaFlags{
+                VirtualLink: v != 0,
+                Asbr:        e != 0,
+                Border:      b != 0,
+        }, true, nil
 }
 
 // SetOspfDrState pushes the current DR/BDR election result (RFC 2328
@@ -1355,12 +1355,12 @@ func (r *Router) OspfRouterLsaFlags(areaID uint32) (OspfRouterLsaFlags, bool, er
 // session's neighbor) and false when it did not. Returns (false, err)
 // on an unknown session, a non-OSPF session, or a NULL router handle.
 func (r *Router) SetOspfDrState(session uint64, dr, bdr uint32) (bool, error) {
-	var changed C.uint8_t
-	rc := C.lr_router_set_ospf_dr_state(r.ptr, C.uint64_t(session), C.uint32_t(dr), C.uint32_t(bdr), &changed)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_router_set_ospf_dr_state: %s (rc=%d)", LastError(), int(rc))
-	}
-	return changed != 0, nil
+        var changed C.uint8_t
+        rc := C.lr_router_set_ospf_dr_state(r.ptr, C.uint64_t(session), C.uint32_t(dr), C.uint32_t(bdr), &changed)
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_set_ospf_dr_state: %s (rc=%d)", LastError(), int(rc))
+        }
+        return changed != 0, nil
 }
 
 // EnforceFirstAs reports whether the FRR `bgp enforce-first-as` check
@@ -1370,7 +1370,7 @@ func (r *Router) SetOspfDrState(session uint64, dr, bdr uint32) (bool, error) {
 // before the Adj-RIB-In. Returns false on a NULL router handle (the
 // reader cannot observe a panic).
 func (r *Router) EnforceFirstAs() bool {
-	return C.lr_router_enforce_first_as(r.ptr) != 0
+        return C.lr_router_enforce_first_as(r.ptr) != 0
 }
 
 // AddPathMaxPaths returns the router-wide Add-Path cap (RFC 7911):
@@ -1380,7 +1380,7 @@ func (r *Router) EnforceFirstAs() bool {
 // Returns 0 on a NULL router handle (the reader cannot observe a
 // panic).
 func (r *Router) AddPathMaxPaths() uint32 {
-	return uint32(C.lr_router_add_path_max_paths(r.ptr))
+        return uint32(C.lr_router_add_path_max_paths(r.ptr))
 }
 
 // RoaValidateEnabled reports whether the RFC 6811 §2 prefix-origin
@@ -1390,60 +1390,60 @@ func (r *Router) AddPathMaxPaths() uint32 {
 // routes whose origin AS is not authorized are rejected. Returns
 // false on a NULL router handle (the reader cannot observe a panic).
 func (r *Router) RoaValidateEnabled() bool {
-	return C.lr_router_roa_validate_enabled(r.ptr) != 0
+        return C.lr_router_roa_validate_enabled(r.ptr) != 0
 }
 
 // decodeSessionSummary translates one C struct into the Go form.
 // Returns a value, not a pointer — the caller already has its own
 // copy of the C struct on the stack.
 func decodeSessionSummary(c *C.struct_lr_session_summary_t) SessionSummary {
-	var s SessionSummary
-	s.Handle = uint64(c.handle)
-	s.Kind = SessionKind(int32(c.kind))
-	s.KindText = cUint8ArrayToString(c.kind_text[:])
-	s.LocalAS = uint32(c.local_as)
-	s.PeerAS = uint32(c.peer_as)
-	s.State = cUint8ArrayToString(c.state_text[:])
-	s.Established = c.established != 0
-	s.PeerBgpIDPresent = c.peer_bgp_id_present != 0
-	s.PeerBgpID = uint32(c.peer_bgp_id)
-	s.NegotiatedHoldTime = uint16(c.negotiated_hold_time)
-	s.AdjRibInLen = uint64(c.adj_rib_in_len)
-	s.UpdatesReceived = uint64(c.updates_received)
-	s.UpdatesSent = uint64(c.updates_sent)
-	return s
+        var s SessionSummary
+        s.Handle = uint64(c.handle)
+        s.Kind = SessionKind(int32(c.kind))
+        s.KindText = cUint8ArrayToString(c.kind_text[:])
+        s.LocalAS = uint32(c.local_as)
+        s.PeerAS = uint32(c.peer_as)
+        s.State = cUint8ArrayToString(c.state_text[:])
+        s.Established = c.established != 0
+        s.PeerBgpIDPresent = c.peer_bgp_id_present != 0
+        s.PeerBgpID = uint32(c.peer_bgp_id)
+        s.NegotiatedHoldTime = uint16(c.negotiated_hold_time)
+        s.AdjRibInLen = uint64(c.adj_rib_in_len)
+        s.UpdatesReceived = uint64(c.updates_received)
+        s.UpdatesSent = uint64(c.updates_sent)
+        return s
 }
 
 // decodeOspfLsa translates one C struct into the Go form, copying
 // the LSA body bytes out of the C-owned buffer.
 func decodeOspfLsa(c *C.struct_lr_ospf_lsa_t) OspfLsa {
-	var l OspfLsa
-	l.LsAge = uint16(c.ls_age)
-	l.Options = uint8(c.options)
-	l.LsType = uint16(c.ls_type)
-	l.LinkStateID = uint32(c.link_state_id)
-	l.AdvertisingRouter = uint32(c.advertising_router)
-	l.LsSequenceNumber = uint32(c.ls_sequence_number)
-	l.LsChecksum = uint16(c.ls_checksum)
-	l.Length = uint16(c.length)
-	l.Body = copyBytes(&c.body)
-	return l
+        var l OspfLsa
+        l.LsAge = uint16(c.ls_age)
+        l.Options = uint8(c.options)
+        l.LsType = uint16(c.ls_type)
+        l.LinkStateID = uint32(c.link_state_id)
+        l.AdvertisingRouter = uint32(c.advertising_router)
+        l.LsSequenceNumber = uint32(c.ls_sequence_number)
+        l.LsChecksum = uint16(c.ls_checksum)
+        l.Length = uint16(c.length)
+        l.Body = copyBytes(&c.body)
+        return l
 }
 
 // decodeOspfGraceEvent translates one C struct into the Go form.
 func decodeOspfGraceEvent(c *C.struct_lr_ospf_grace_event_t) OspfGraceEvent {
-	var e OspfGraceEvent
-	e.Area = uint32(c.area)
-	e.AdvertisingRouter = uint32(c.advertising_router)
-	e.GracePeriodSecs = uint32(c.grace_period_secs)
-	e.Reason = uint8(c.reason)
-	e.InterfaceAddrV4Valid = c.interface_addr_v4_present != 0
-	copy(e.InterfaceAddrV4[:], (*[4]byte)(unsafe.Pointer(&c.interface_addr_v4[0]))[:])
-	e.InterfaceAddrV6Valid = c.interface_addr_v6_present != 0
-	copy(e.InterfaceAddrV6[:], (*[16]byte)(unsafe.Pointer(&c.interface_addr_v6[0]))[:])
-	e.LsAgeSecs = uint16(c.ls_age_secs)
-	e.Purged = c.purged != 0
-	return e
+        var e OspfGraceEvent
+        e.Area = uint32(c.area)
+        e.AdvertisingRouter = uint32(c.advertising_router)
+        e.GracePeriodSecs = uint32(c.grace_period_secs)
+        e.Reason = uint8(c.reason)
+        e.InterfaceAddrV4Valid = c.interface_addr_v4_present != 0
+        copy(e.InterfaceAddrV4[:], (*[4]byte)(unsafe.Pointer(&c.interface_addr_v4[0]))[:])
+        e.InterfaceAddrV6Valid = c.interface_addr_v6_present != 0
+        copy(e.InterfaceAddrV6[:], (*[16]byte)(unsafe.Pointer(&c.interface_addr_v6[0]))[:])
+        e.LsAgeSecs = uint16(c.ls_age_secs)
+        e.Purged = c.purged != 0
+        return e
 }
 
 // cUint8ArrayToString decodes a NUL-terminated fixed-size uint8
@@ -1452,15 +1452,15 @@ func decodeOspfGraceEvent(c *C.struct_lr_ospf_grace_event_t) OspfGraceEvent {
 // `[N]C.uint8_t` and slice conversion on a `[N]C.uint8_t` value
 // yields `[]C.uint8_t`, which is iterated byte-by-byte here.
 func cUint8ArrayToString(buf []C.uint8_t) string {
-	end := 0
-	for end < len(buf) && buf[end] != 0 {
-		end++
-	}
-	out := make([]byte, end)
-	for i := 0; i < end; i++ {
-		out[i] = byte(buf[i])
-	}
-	return string(out)
+        end := 0
+        for end < len(buf) && buf[end] != 0 {
+                end++
+        }
+        out := make([]byte, end)
+        for i := 0; i < end; i++ {
+                out[i] = byte(buf[i])
+        }
+        return string(out)
 }
 
 // AddROAEntry adds one Route Origin Authorization entry to the
@@ -1472,27 +1472,27 @@ func cUint8ArrayToString(buf []C.uint8_t) string {
 // authorized at import time. The filter DSL's roa.state accessor
 // reads the same table.
 func (r *Router) AddROAEntry(prefixV4, prefixV6 []byte, prefixLen, maxLength uint8, asn uint32) error {
-	var v4Ptr, v6Ptr *C.uint8_t
-	if prefixV4 != nil {
-		if len(prefixV4) != 4 {
-			return fmt.Errorf("AddROAEntry: prefixV4 must be 4 bytes, got %d", len(prefixV4))
-		}
-		v4Ptr = (*C.uint8_t)(&prefixV4[0])
-	}
-	if prefixV6 != nil {
-		if len(prefixV6) != 16 {
-			return fmt.Errorf("AddROAEntry: prefixV6 must be 16 bytes, got %d", len(prefixV6))
-		}
-		v6Ptr = (*C.uint8_t)(&prefixV6[0])
-	}
-	if v4Ptr == nil && v6Ptr == nil {
-		return fmt.Errorf("AddROAEntry: at least one of prefixV4 / prefixV6 must be non-nil")
-	}
-	rc := C.lr_router_add_roa_entry(r.ptr, v4Ptr, v6Ptr, C.uint8_t(prefixLen), C.uint8_t(maxLength), C.uint32_t(asn))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_add_roa_entry: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var v4Ptr, v6Ptr *C.uint8_t
+        if prefixV4 != nil {
+                if len(prefixV4) != 4 {
+                        return fmt.Errorf("AddROAEntry: prefixV4 must be 4 bytes, got %d", len(prefixV4))
+                }
+                v4Ptr = (*C.uint8_t)(&prefixV4[0])
+        }
+        if prefixV6 != nil {
+                if len(prefixV6) != 16 {
+                        return fmt.Errorf("AddROAEntry: prefixV6 must be 16 bytes, got %d", len(prefixV6))
+                }
+                v6Ptr = (*C.uint8_t)(&prefixV6[0])
+        }
+        if v4Ptr == nil && v6Ptr == nil {
+                return fmt.Errorf("AddROAEntry: at least one of prefixV4 / prefixV6 must be non-nil")
+        }
+        rc := C.lr_router_add_roa_entry(r.ptr, v4Ptr, v6Ptr, C.uint8_t(prefixLen), C.uint8_t(maxLength), C.uint32_t(asn))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_add_roa_entry: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetROAValidate toggles RFC 6811 §2 prefix-origin validation on
@@ -1500,40 +1500,40 @@ func (r *Router) AddROAEntry(prefixV4, prefixV6 []byte, prefixLen, maxLength uin
 // UPDATE is validated against the router's ROA table; Invalid
 // routes are rejected at import time.
 func (r *Router) SetROAValidate(enable bool) error {
-	var v C.uint8_t
-	if enable {
-		v = 1
-	}
-	rc := C.lr_router_set_roa_validate(r.ptr, v)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_set_roa_validate: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var v C.uint8_t
+        if enable {
+                v = 1
+        }
+        rc := C.lr_router_set_roa_validate(r.ptr, v)
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_roa_validate: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // ABIVersion returns the packed ABI version of the linked library.
 func ABIVersion() uint32 {
-	return uint32(C.lr_abi_version())
+        return uint32(C.lr_abi_version())
 }
 
 // LastError returns the most recent error message from the C side.
 func LastError() string {
-	cstr := C.lr_last_error()
-	if cstr == nil {
-		return "no error"
-	}
-	return C.GoString(cstr)
+        cstr := C.lr_last_error()
+        if cstr == nil {
+                return "no error"
+        }
+        return C.GoString(cstr)
 }
 
 // EncodeKeepalive returns the bytes of a BGP KEEPALIVE message.
 func EncodeKeepalive() ([]byte, error) {
-	var b C.struct_lr_bytes_t
-	rc := C.lr_bgp_encode_keepalive(&b)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_bgp_encode_keepalive: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        var b C.struct_lr_bytes_t
+        rc := C.lr_bgp_encode_keepalive(&b)
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_bgp_encode_keepalive: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // EncodeOpen returns the bytes of a BGP OPEN message (RFC 4271 §4.2).
@@ -1541,42 +1541,42 @@ func EncodeKeepalive() ([]byte, error) {
 // appended; an AS above 65535 then travels as AS_TRANS (23456) in the
 // 16-bit field. Hold time must be 0 or >= 3.
 func EncodeOpen(myAs uint32, holdTime uint16, bgpId [4]byte, as4 bool) ([]byte, error) {
-	var b C.struct_lr_bytes_t
-	rc := C.lr_bgp_encode_open(
-		C.uint32_t(myAs),
-		C.uint16_t(holdTime),
-		(*C.uint8_t)(unsafe.Pointer(&bgpId[0])),
-		boolToU8(as4),
-		&b,
-	)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_bgp_encode_open: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        var b C.struct_lr_bytes_t
+        rc := C.lr_bgp_encode_open(
+                C.uint32_t(myAs),
+                C.uint16_t(holdTime),
+                (*C.uint8_t)(unsafe.Pointer(&bgpId[0])),
+                boolToU8(as4),
+                &b,
+        )
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_bgp_encode_open: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // EncodeNotification returns the bytes of a BGP NOTIFICATION message
 // (RFC 4271 §4.5): the error code, the subcode and an optional data
 // payload (nil for none).
 func EncodeNotification(code, subcode uint8, data []byte) ([]byte, error) {
-	var b C.struct_lr_bytes_t
-	var dataPtr *C.uint8_t
-	if len(data) > 0 {
-		dataPtr = (*C.uint8_t)(unsafe.Pointer(&data[0]))
-	}
-	rc := C.lr_bgp_encode_notification(
-		C.uint8_t(code),
-		C.uint8_t(subcode),
-		dataPtr,
-		C.size_t(len(data)),
-		&b,
-	)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_bgp_encode_notification: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        var b C.struct_lr_bytes_t
+        var dataPtr *C.uint8_t
+        if len(data) > 0 {
+                dataPtr = (*C.uint8_t)(unsafe.Pointer(&data[0]))
+        }
+        rc := C.lr_bgp_encode_notification(
+                C.uint8_t(code),
+                C.uint8_t(subcode),
+                dataPtr,
+                C.size_t(len(data)),
+                &b,
+        )
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_bgp_encode_notification: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // EncodeUpdateWithdrawV4 returns the bytes of a withdraw-only UPDATE
@@ -1584,17 +1584,17 @@ func EncodeNotification(code, subcode uint8, data []byte) ([]byte, error) {
 // withdrawn-routes section. IPv6 entries are rejected (the legacy
 // NLRI section carries IPv4 only).
 func EncodeUpdateWithdrawV4(prefixes []PrefixSpec) ([]byte, error) {
-	cPrefixes, err := prefixSpecsToC(prefixes)
-	if err != nil {
-		return nil, fmt.Errorf("EncodeUpdateWithdrawV4: %v", err)
-	}
-	var b C.struct_lr_bytes_t
-	rc := C.lr_bgp_encode_update_withdraw_v4(cPrefixes.ptr(), C.size_t(len(prefixes)), &b)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_bgp_encode_update_withdraw_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        cPrefixes, err := prefixSpecsToC(prefixes)
+        if err != nil {
+                return nil, fmt.Errorf("EncodeUpdateWithdrawV4: %v", err)
+        }
+        var b C.struct_lr_bytes_t
+        rc := C.lr_bgp_encode_update_withdraw_v4(cPrefixes.ptr(), C.size_t(len(prefixes)), &b)
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_bgp_encode_update_withdraw_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // EncodeUpdateAnnounceV4 returns the bytes of an announcement UPDATE
@@ -1604,31 +1604,31 @@ func EncodeUpdateWithdrawV4(prefixes []PrefixSpec) ([]byte, error) {
 // a locally originated route); with as4 set the segments use the
 // RFC 6793 four-octet encoding.
 func EncodeUpdateAnnounceV4(prefixes []PrefixSpec, nextHop [4]byte, asPath []uint32,
-	origin uint8, as4 bool) ([]byte, error) {
-	cPrefixes, err := prefixSpecsToC(prefixes)
-	if err != nil {
-		return nil, fmt.Errorf("EncodeUpdateAnnounceV4: %v", err)
-	}
-	var asPathPtr *C.uint32_t
-	if len(asPath) > 0 {
-		asPathPtr = (*C.uint32_t)(unsafe.Pointer(&asPath[0]))
-	}
-	var b C.struct_lr_bytes_t
-	rc := C.lr_bgp_encode_update_announce_v4(
-		cPrefixes.ptr(),
-		C.size_t(len(prefixes)),
-		(*C.uint8_t)(unsafe.Pointer(&nextHop[0])),
-		asPathPtr,
-		C.size_t(len(asPath)),
-		C.uint8_t(origin),
-		boolToU8(as4),
-		&b,
-	)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_bgp_encode_update_announce_v4: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        origin uint8, as4 bool) ([]byte, error) {
+        cPrefixes, err := prefixSpecsToC(prefixes)
+        if err != nil {
+                return nil, fmt.Errorf("EncodeUpdateAnnounceV4: %v", err)
+        }
+        var asPathPtr *C.uint32_t
+        if len(asPath) > 0 {
+                asPathPtr = (*C.uint32_t)(unsafe.Pointer(&asPath[0]))
+        }
+        var b C.struct_lr_bytes_t
+        rc := C.lr_bgp_encode_update_announce_v4(
+                cPrefixes.ptr(),
+                C.size_t(len(prefixes)),
+                (*C.uint8_t)(unsafe.Pointer(&nextHop[0])),
+                asPathPtr,
+                C.size_t(len(asPath)),
+                C.uint8_t(origin),
+                boolToU8(as4),
+                &b,
+        )
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_bgp_encode_update_announce_v4: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // ===== BGP message inspection (parsed-form readers) =====
@@ -1641,18 +1641,18 @@ func EncodeUpdateAnnounceV4(prefixes []PrefixSpec, nextHop [4]byte, asPath []uin
 
 // BGP message type codes (RFC 4271 §4.1 + RFC 2918).
 const (
-	BGPMsgOpen         = 1
-	BGPMsgUpdate       = 2
-	BGPMsgNotification = 3
-	BGPMsgKeepalive    = 4
-	BGPMsgRouteRefresh = 5
+        BGPMsgOpen         = 1
+        BGPMsgUpdate       = 2
+        BGPMsgNotification = 3
+        BGPMsgKeepalive    = 4
+        BGPMsgRouteRefresh = 5
 )
 
 // Route-Refresh subtype (RFC 7313 §3.2).
 const (
-	BGPRRSubtypeNormal = 0
-	BGPRRSubtypeBoRR   = 1
-	BGPRRSubtypeEoRR   = 2
+        BGPRRSubtypeNormal = 0
+        BGPRRSubtypeBoRR   = 1
+        BGPRRSubtypeEoRR   = 2
 )
 
 // BgpMessage is an owned BGP-message handle (a boxed
@@ -1661,7 +1661,7 @@ const (
 // RouteRefresh* / Update* accessors. The handle is freed automatically
 // by the runtime finalizer (or by an explicit Close).
 type BgpMessage struct {
-	handle C.lr_bgp_message_t
+        handle C.lr_bgp_message_t
 }
 
 // DecodeBgpMessage decodes one BGP message and returns an owned handle
@@ -1670,308 +1670,308 @@ type BgpMessage struct {
 // keeps the structured `BgpMessage` alive so its variant fields can be
 // read by the matching accessors.
 func DecodeBgpMessage(data []byte) (*BgpMessage, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("DecodeBgpMessage: empty data")
-	}
-	h := C.lr_bgp_decode_message((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	if h == nil {
-		return nil, fmt.Errorf("lr_bgp_decode_message: %s", LastError())
-	}
-	m := &BgpMessage{handle: h}
-	// runtime.SetFinalizer frees the handle when the wrapper leaves
-	// scope — same shape as the Bytes / Router helpers above.
-	runtime.SetFinalizer(m, (*BgpMessage).Close)
-	return m, nil
+        if len(data) == 0 {
+                return nil, fmt.Errorf("DecodeBgpMessage: empty data")
+        }
+        h := C.lr_bgp_decode_message((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
+        if h == nil {
+                return nil, fmt.Errorf("lr_bgp_decode_message: %s", LastError())
+        }
+        m := &BgpMessage{handle: h}
+        // runtime.SetFinalizer frees the handle when the wrapper leaves
+        // scope — same shape as the Bytes / Router helpers above.
+        runtime.SetFinalizer(m, (*BgpMessage).Close)
+        return m, nil
 }
 
 // Close releases the underlying handle. Safe to call more than once.
 func (m *BgpMessage) Close() {
-	if m.handle != nil {
-		C.lr_bgp_message_free(m.handle)
-		m.handle = nil
-	}
-	runtime.SetFinalizer(m, nil)
+        if m.handle != nil {
+                C.lr_bgp_message_free(m.handle)
+                m.handle = nil
+        }
+        runtime.SetFinalizer(m, nil)
 }
 
 func (m *BgpMessage) require() (C.lr_bgp_message_t, error) {
-	if m == nil || m.handle == nil {
-		return nil, fmt.Errorf("BgpMessage: handle already closed")
-	}
-	return m.handle, nil
+        if m == nil || m.handle == nil {
+                return nil, fmt.Errorf("BgpMessage: handle already closed")
+        }
+        return m.handle, nil
 }
 
 // Kind returns the BGP message type code (1..5, see BGPMsg*).
 func (m *BgpMessage) Kind() (uint8, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint8_t
-	rc := C.lr_bgp_message_type(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_type: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint8(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint8_t
+        rc := C.lr_bgp_message_type(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_type: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint8(out), nil
 }
 
 // ---- OPEN readers (RFC 4271 §4.2) ----
 
 // OpenVersion returns the OPEN version (always 4 on a well-formed message).
 func (m *BgpMessage) OpenVersion() (uint8, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint8_t
-	rc := C.lr_bgp_message_open_version(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_open_version: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint8(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint8_t
+        rc := C.lr_bgp_message_open_version(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_open_version: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint8(out), nil
 }
 
 // OpenMyAs returns the sender AS. When the OPEN carries the RFC 6793
 // four-octet-AS capability, the real 32-bit AS is unwrapped from the
 // capability; otherwise the 16-bit `my_as` field is returned.
 func (m *BgpMessage) OpenMyAs() (uint32, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint32_t
-	rc := C.lr_bgp_message_open_my_as(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_open_my_as: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint32(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint32_t
+        rc := C.lr_bgp_message_open_my_as(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_open_my_as: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint32(out), nil
 }
 
 // OpenHoldTime returns the OPEN hold time in seconds.
 func (m *BgpMessage) OpenHoldTime() (uint16, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint16_t
-	rc := C.lr_bgp_message_open_hold_time(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_open_hold_time: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint16(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint16_t
+        rc := C.lr_bgp_message_open_hold_time(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_open_hold_time: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint16(out), nil
 }
 
 // OpenBgpID returns the 4-byte BGP identifier (network order).
 func (m *BgpMessage) OpenBgpID() ([4]byte, error) {
-	h, err := m.require()
-	if err != nil {
-		return [4]byte{}, err
-	}
-	var out [4]C.uint8_t
-	rc := C.lr_bgp_message_open_bgp_id(h, &out[0])
-	if rc != 0 {
-		return [4]byte{}, fmt.Errorf("lr_bgp_message_open_bgp_id: %s (rc=%d)", LastError(), int(rc))
-	}
-	return [4]byte{byte(out[0]), byte(out[1]), byte(out[2]), byte(out[3])}, nil
+        h, err := m.require()
+        if err != nil {
+                return [4]byte{}, err
+        }
+        var out [4]C.uint8_t
+        rc := C.lr_bgp_message_open_bgp_id(h, &out[0])
+        if rc != 0 {
+                return [4]byte{}, fmt.Errorf("lr_bgp_message_open_bgp_id: %s (rc=%d)", LastError(), int(rc))
+        }
+        return [4]byte{byte(out[0]), byte(out[1]), byte(out[2]), byte(out[3])}, nil
 }
 
 // OpenParamCount returns the number of OPEN optional parameters
 // (RFC 5492 capabilities).
 func (m *BgpMessage) OpenParamCount() (int, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	return int(C.lr_bgp_message_open_param_count(h)), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        return int(C.lr_bgp_message_open_param_count(h)), nil
 }
 
 // OpenParam is one OPEN optional parameter: the type byte plus the raw
 // capability payload (RFC 5492 §3 — a sequence of
 // `(code:1, length:1, value:length)` triples).
 type OpenParam struct {
-	ParamType uint8
-	Value     []byte
+        ParamType uint8
+        Value     []byte
 }
 
 // OpenParamAt returns the optional parameter at idx.
 func (m *BgpMessage) OpenParamAt(idx int) (OpenParam, error) {
-	h, err := m.require()
-	if err != nil {
-		return OpenParam{}, err
-	}
-	var ptype C.uint8_t
-	var pval C.struct_lr_bytes_t
-	rc := C.lr_bgp_message_open_param_at(h, C.size_t(idx), &ptype, &pval)
-	if rc != 0 {
-		return OpenParam{}, fmt.Errorf("lr_bgp_message_open_param_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&pval)
-	return OpenParam{ParamType: uint8(ptype), Value: copyBytes(&pval)}, nil
+        h, err := m.require()
+        if err != nil {
+                return OpenParam{}, err
+        }
+        var ptype C.uint8_t
+        var pval C.struct_lr_bytes_t
+        rc := C.lr_bgp_message_open_param_at(h, C.size_t(idx), &ptype, &pval)
+        if rc != 0 {
+                return OpenParam{}, fmt.Errorf("lr_bgp_message_open_param_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&pval)
+        return OpenParam{ParamType: uint8(ptype), Value: copyBytes(&pval)}, nil
 }
 
 // OpenParams walks every optional parameter.
 func (m *BgpMessage) OpenParams() ([]OpenParam, error) {
-	n, err := m.OpenParamCount()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]OpenParam, 0, n)
-	for i := 0; i < n; i++ {
-		p, err := m.OpenParamAt(i)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, nil
+        n, err := m.OpenParamCount()
+        if err != nil {
+                return nil, err
+        }
+        out := make([]OpenParam, 0, n)
+        for i := 0; i < n; i++ {
+                p, err := m.OpenParamAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                out = append(out, p)
+        }
+        return out, nil
 }
 
 // ---- NOTIFICATION readers (RFC 4271 §4.5) ----
 
 // NotificationCode returns the NOTIFICATION error code.
 func (m *BgpMessage) NotificationCode() (uint8, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint8_t
-	rc := C.lr_bgp_message_notification_code(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_notification_code: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint8(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint8_t
+        rc := C.lr_bgp_message_notification_code(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_notification_code: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint8(out), nil
 }
 
 // NotificationSubcode returns the NOTIFICATION error subcode.
 func (m *BgpMessage) NotificationSubcode() (uint8, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint8_t
-	rc := C.lr_bgp_message_notification_subcode(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_notification_subcode: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint8(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint8_t
+        rc := C.lr_bgp_message_notification_subcode(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_notification_subcode: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint8(out), nil
 }
 
 // NotificationData returns the NOTIFICATION diagnostic payload
 // (often empty).
 func (m *BgpMessage) NotificationData() ([]byte, error) {
-	h, err := m.require()
-	if err != nil {
-		return nil, err
-	}
-	var out C.struct_lr_bytes_t
-	rc := C.lr_bgp_message_notification_data(h, &out)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_bgp_message_notification_data: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&out)
-	return copyBytes(&out), nil
+        h, err := m.require()
+        if err != nil {
+                return nil, err
+        }
+        var out C.struct_lr_bytes_t
+        rc := C.lr_bgp_message_notification_data(h, &out)
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_bgp_message_notification_data: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&out)
+        return copyBytes(&out), nil
 }
 
 // ---- ROUTE-REFRESH readers (RFC 2918 + RFC 7313) ----
 
 // RouteRefreshAfi returns the ROUTE-REFRESH address-family identifier.
 func (m *BgpMessage) RouteRefreshAfi() (uint16, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint16_t
-	rc := C.lr_bgp_message_route_refresh_afi(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_route_refresh_afi: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint16(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint16_t
+        rc := C.lr_bgp_message_route_refresh_afi(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_route_refresh_afi: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint16(out), nil
 }
 
 // RouteRefreshSafi returns the ROUTE-REFRESH sub-address-family identifier.
 func (m *BgpMessage) RouteRefreshSafi() (uint8, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint8_t
-	rc := C.lr_bgp_message_route_refresh_safi(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_route_refresh_safi: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint8(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint8_t
+        rc := C.lr_bgp_message_route_refresh_safi(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_route_refresh_safi: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint8(out), nil
 }
 
 // RouteRefreshSubtype returns the RFC 7313 subtype (0 = Normal,
 // 1 = BoRR, 2 = EoRR, 0xff = unknown).
 func (m *BgpMessage) RouteRefreshSubtype() (uint8, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	var out C.uint8_t
-	rc := C.lr_bgp_message_route_refresh_subtype(h, &out)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_bgp_message_route_refresh_subtype: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint8(out), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        var out C.uint8_t
+        rc := C.lr_bgp_message_route_refresh_subtype(h, &out)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_bgp_message_route_refresh_subtype: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint8(out), nil
 }
 
 // ---- UPDATE readers (RFC 4271 §4.3) ----
 
 // UpdateWithdrawnCount returns the number of withdrawn routes.
 func (m *BgpMessage) UpdateWithdrawnCount() (int, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	return int(C.lr_bgp_message_update_withdrawn_count(h)), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        return int(C.lr_bgp_message_update_withdrawn_count(h)), nil
 }
 
 // UpdateNlriCount returns the number of NLRI entries (IPv4 unicast
 // legacy NLRI only; MP-BGP NLRI lives inside MpReach/MpUnreach).
 func (m *BgpMessage) UpdateNlriCount() (int, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	return int(C.lr_bgp_message_update_nlri_count(h)), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        return int(C.lr_bgp_message_update_nlri_count(h)), nil
 }
 
 // UpdateAttrCount returns the number of path attributes.
 func (m *BgpMessage) UpdateAttrCount() (int, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	return int(C.lr_bgp_message_update_attr_count(h)), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        return int(C.lr_bgp_message_update_attr_count(h)), nil
 }
 
 // UpdateWithdrawnAt returns the withdrawn route at idx as a PrefixSpec.
 func (m *BgpMessage) UpdateWithdrawnAt(idx int) (PrefixSpec, error) {
-	h, err := m.require()
-	if err != nil {
-		return PrefixSpec{}, err
-	}
-	var p C.struct_lr_prefix_t
-	rc := C.lr_bgp_message_update_withdrawn_at(h, C.size_t(idx), &p)
-	if rc != 0 {
-		return PrefixSpec{}, fmt.Errorf("lr_bgp_message_update_withdrawn_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
-	}
-	return prefixFromC(p), nil
+        h, err := m.require()
+        if err != nil {
+                return PrefixSpec{}, err
+        }
+        var p C.struct_lr_prefix_t
+        rc := C.lr_bgp_message_update_withdrawn_at(h, C.size_t(idx), &p)
+        if rc != 0 {
+                return PrefixSpec{}, fmt.Errorf("lr_bgp_message_update_withdrawn_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+        }
+        return prefixFromC(p), nil
 }
 
 // UpdateNlriAt returns the NLRI entry at idx as a PrefixSpec.
 func (m *BgpMessage) UpdateNlriAt(idx int) (PrefixSpec, error) {
-	h, err := m.require()
-	if err != nil {
-		return PrefixSpec{}, err
-	}
-	var p C.struct_lr_prefix_t
-	rc := C.lr_bgp_message_update_nlri_at(h, C.size_t(idx), &p)
-	if rc != 0 {
-		return PrefixSpec{}, fmt.Errorf("lr_bgp_message_update_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
-	}
-	return prefixFromC(p), nil
+        h, err := m.require()
+        if err != nil {
+                return PrefixSpec{}, err
+        }
+        var p C.struct_lr_prefix_t
+        rc := C.lr_bgp_message_update_nlri_at(h, C.size_t(idx), &p)
+        if rc != 0 {
+                return PrefixSpec{}, fmt.Errorf("lr_bgp_message_update_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+        }
+        return prefixFromC(p), nil
 }
 
 // ---- MP-BGP typed readers (RFC 4760 + RFC 7911) ----
@@ -1987,8 +1987,8 @@ func (m *BgpMessage) UpdateNlriAt(idx int) (PrefixSpec, error) {
 // BgpMpFamily is one MP-BGP address family: (AFI, SAFI). Mirrors
 // lr_core::nlri::NlriFamily.
 type BgpMpFamily struct {
-	Afi  uint16
-	Safi uint8
+        Afi  uint16
+        Safi uint8
 }
 
 // BgpMpNlriEntry is one MP_REACH_NLRI / MP_UNREACH_NLRI NLRI entry.
@@ -1997,8 +1997,8 @@ type BgpMpFamily struct {
 // into the PrefixSpec shape the legacy IPv4 NLRI / withdrawn readers
 // use.
 type BgpMpNlriEntry struct {
-	PathID uint32
-	Prefix PrefixSpec
+        PathID uint32
+        Prefix PrefixSpec
 }
 
 // UpdateMpReachPresent returns true when the UPDATE carries an
@@ -2007,28 +2007,28 @@ type BgpMpNlriEntry struct {
 // from "present with zero NLRI entries" the same way the C ABI's
 // present reader does.
 func (m *BgpMessage) UpdateMpReachPresent() (bool, error) {
-	h, err := m.require()
-	if err != nil {
-		return false, err
-	}
-	return C.lr_bgp_message_update_mp_reach_present(h) != 0, nil
+        h, err := m.require()
+        if err != nil {
+                return false, err
+        }
+        return C.lr_bgp_message_update_mp_reach_present(h) != 0, nil
 }
 
 // UpdateMpReachFamily returns the MP_REACH_NLRI address family.
 // Returns an error on a non-UPDATE message or an UPDATE without
 // MP_REACH_NLRI — use UpdateMpReachPresent to distinguish.
 func (m *BgpMessage) UpdateMpReachFamily() (BgpMpFamily, error) {
-	h, err := m.require()
-	if err != nil {
-		return BgpMpFamily{}, err
-	}
-	var afi C.uint16_t
-	var safi C.uint8_t
-	rc := C.lr_bgp_message_update_mp_reach_family(h, &afi, &safi)
-	if rc != 0 {
-		return BgpMpFamily{}, fmt.Errorf("lr_bgp_message_update_mp_reach_family: %s (rc=%d)", LastError(), int(rc))
-	}
-	return BgpMpFamily{Afi: uint16(afi), Safi: uint8(safi)}, nil
+        h, err := m.require()
+        if err != nil {
+                return BgpMpFamily{}, err
+        }
+        var afi C.uint16_t
+        var safi C.uint8_t
+        rc := C.lr_bgp_message_update_mp_reach_family(h, &afi, &safi)
+        if rc != 0 {
+                return BgpMpFamily{}, fmt.Errorf("lr_bgp_message_update_mp_reach_family: %s (rc=%d)", LastError(), int(rc))
+        }
+        return BgpMpFamily{Afi: uint16(afi), Safi: uint8(safi)}, nil
 }
 
 // UpdateMpReachNextHop returns the MP_REACH_NLRI next-hop (RFC 4760 §3
@@ -2039,16 +2039,16 @@ func (m *BgpMessage) UpdateMpReachFamily() (BgpMpFamily, error) {
 // read the raw attribute bytes via UpdateAttrAt for the MP_REACH_NLRI
 // index).
 func (m *BgpMessage) UpdateMpReachNextHop() (BgpNextHop, error) {
-	h, err := m.require()
-	if err != nil {
-		return BgpNextHop{}, err
-	}
-	var c C.struct_lr_bgp_next_hop_t
-	rc := C.lr_bgp_message_update_mp_reach_next_hop(h, &c)
-	if rc != 0 {
-		return BgpNextHop{}, fmt.Errorf("lr_bgp_message_update_mp_reach_next_hop: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nextHopFromC(&c), nil
+        h, err := m.require()
+        if err != nil {
+                return BgpNextHop{}, err
+        }
+        var c C.struct_lr_bgp_next_hop_t
+        rc := C.lr_bgp_message_update_mp_reach_next_hop(h, &c)
+        if rc != 0 {
+                return BgpNextHop{}, fmt.Errorf("lr_bgp_message_update_mp_reach_next_hop: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nextHopFromC(&c), nil
 }
 
 // UpdateMpReachNlriCount returns the number of NLRI entries carried
@@ -2057,27 +2057,27 @@ func (m *BgpMessage) UpdateMpReachNextHop() (BgpNextHop, error) {
 // MP_REACH_NLRI with zero NLRI entries — use UpdateMpReachPresent to
 // distinguish the absent case from a zero-NLRI attribute.
 func (m *BgpMessage) UpdateMpReachNlriCount() (int, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	return int(C.lr_bgp_message_update_mp_reach_nlri_count(h)), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        return int(C.lr_bgp_message_update_mp_reach_nlri_count(h)), nil
 }
 
 // UpdateMpReachNlriAt returns the MP_REACH_NLRI entry at idx (RFC 4760
 // §3 + RFC 7911 Add-Path) as a (path_id, prefix) tuple.
 func (m *BgpMessage) UpdateMpReachNlriAt(idx int) (BgpMpNlriEntry, error) {
-	h, err := m.require()
-	if err != nil {
-		return BgpMpNlriEntry{}, err
-	}
-	var pathID C.uint32_t
-	var p C.struct_lr_prefix_t
-	rc := C.lr_bgp_message_update_mp_reach_nlri_at(h, C.size_t(idx), &pathID, &p)
-	if rc != 0 {
-		return BgpMpNlriEntry{}, fmt.Errorf("lr_bgp_message_update_mp_reach_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
-	}
-	return BgpMpNlriEntry{PathID: uint32(pathID), Prefix: prefixFromC(p)}, nil
+        h, err := m.require()
+        if err != nil {
+                return BgpMpNlriEntry{}, err
+        }
+        var pathID C.uint32_t
+        var p C.struct_lr_prefix_t
+        rc := C.lr_bgp_message_update_mp_reach_nlri_at(h, C.size_t(idx), &pathID, &p)
+        if rc != 0 {
+                return BgpMpNlriEntry{}, fmt.Errorf("lr_bgp_message_update_mp_reach_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+        }
+        return BgpMpNlriEntry{PathID: uint32(pathID), Prefix: prefixFromC(p)}, nil
 }
 
 // UpdateMpUnreachPresent returns true when the UPDATE carries an
@@ -2086,26 +2086,26 @@ func (m *BgpMessage) UpdateMpReachNlriAt(idx int) (BgpMpNlriEntry, error) {
 // the only way to distinguish "EoR marker" from "no MP_UNREACH at
 // all".
 func (m *BgpMessage) UpdateMpUnreachPresent() (bool, error) {
-	h, err := m.require()
-	if err != nil {
-		return false, err
-	}
-	return C.lr_bgp_message_update_mp_unreach_present(h) != 0, nil
+        h, err := m.require()
+        if err != nil {
+                return false, err
+        }
+        return C.lr_bgp_message_update_mp_unreach_present(h) != 0, nil
 }
 
 // UpdateMpUnreachFamily returns the MP_UNREACH_NLRI address family.
 func (m *BgpMessage) UpdateMpUnreachFamily() (BgpMpFamily, error) {
-	h, err := m.require()
-	if err != nil {
-		return BgpMpFamily{}, err
-	}
-	var afi C.uint16_t
-	var safi C.uint8_t
-	rc := C.lr_bgp_message_update_mp_unreach_family(h, &afi, &safi)
-	if rc != 0 {
-		return BgpMpFamily{}, fmt.Errorf("lr_bgp_message_update_mp_unreach_family: %s (rc=%d)", LastError(), int(rc))
-	}
-	return BgpMpFamily{Afi: uint16(afi), Safi: uint8(safi)}, nil
+        h, err := m.require()
+        if err != nil {
+                return BgpMpFamily{}, err
+        }
+        var afi C.uint16_t
+        var safi C.uint8_t
+        rc := C.lr_bgp_message_update_mp_unreach_family(h, &afi, &safi)
+        if rc != 0 {
+                return BgpMpFamily{}, fmt.Errorf("lr_bgp_message_update_mp_unreach_family: %s (rc=%d)", LastError(), int(rc))
+        }
+        return BgpMpFamily{Afi: uint16(afi), Safi: uint8(safi)}, nil
 }
 
 // UpdateMpUnreachNlriCount returns the number of NLRI entries carried
@@ -2115,71 +2115,71 @@ func (m *BgpMessage) UpdateMpUnreachFamily() (BgpMpFamily, error) {
 // UpdateMpUnreachPresent to distinguish the absent case from an EoR
 // marker.
 func (m *BgpMessage) UpdateMpUnreachNlriCount() (int, error) {
-	h, err := m.require()
-	if err != nil {
-		return 0, err
-	}
-	return int(C.lr_bgp_message_update_mp_unreach_nlri_count(h)), nil
+        h, err := m.require()
+        if err != nil {
+                return 0, err
+        }
+        return int(C.lr_bgp_message_update_mp_unreach_nlri_count(h)), nil
 }
 
 // UpdateMpUnreachNlriAt returns the MP_UNREACH_NLRI entry at idx (RFC
 // 4760 §4 + RFC 7911 Add-Path) as a (path_id, prefix) tuple.
 func (m *BgpMessage) UpdateMpUnreachNlriAt(idx int) (BgpMpNlriEntry, error) {
-	h, err := m.require()
-	if err != nil {
-		return BgpMpNlriEntry{}, err
-	}
-	var pathID C.uint32_t
-	var p C.struct_lr_prefix_t
-	rc := C.lr_bgp_message_update_mp_unreach_nlri_at(h, C.size_t(idx), &pathID, &p)
-	if rc != 0 {
-		return BgpMpNlriEntry{}, fmt.Errorf("lr_bgp_message_update_mp_unreach_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
-	}
-	return BgpMpNlriEntry{PathID: uint32(pathID), Prefix: prefixFromC(p)}, nil
+        h, err := m.require()
+        if err != nil {
+                return BgpMpNlriEntry{}, err
+        }
+        var pathID C.uint32_t
+        var p C.struct_lr_prefix_t
+        rc := C.lr_bgp_message_update_mp_unreach_nlri_at(h, C.size_t(idx), &pathID, &p)
+        if rc != 0 {
+                return BgpMpNlriEntry{}, fmt.Errorf("lr_bgp_message_update_mp_unreach_nlri_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+        }
+        return BgpMpNlriEntry{PathID: uint32(pathID), Prefix: prefixFromC(p)}, nil
 }
 
 // PathAttr is one path attribute: type code, flags byte and raw value bytes.
 type PathAttr struct {
-	AttrType uint8
-	Flags    uint8
-	Value    []byte
+        AttrType uint8
+        Flags    uint8
+        Value    []byte
 }
 
 // UpdateAttrAt returns the path attribute at idx.
 func (m *BgpMessage) UpdateAttrAt(idx int) (PathAttr, error) {
-	h, err := m.require()
-	if err != nil {
-		return PathAttr{}, err
-	}
-	var atype, aflags C.uint8_t
-	var aval C.struct_lr_bytes_t
-	rc := C.lr_bgp_message_update_attr_at(h, C.size_t(idx), &atype, &aflags, &aval)
-	if rc != 0 {
-		return PathAttr{}, fmt.Errorf("lr_bgp_message_update_attr_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&aval)
-	return PathAttr{
-		AttrType: uint8(atype),
-		Flags:    uint8(aflags),
-		Value:    copyBytes(&aval),
-	}, nil
+        h, err := m.require()
+        if err != nil {
+                return PathAttr{}, err
+        }
+        var atype, aflags C.uint8_t
+        var aval C.struct_lr_bytes_t
+        rc := C.lr_bgp_message_update_attr_at(h, C.size_t(idx), &atype, &aflags, &aval)
+        if rc != 0 {
+                return PathAttr{}, fmt.Errorf("lr_bgp_message_update_attr_at(%d): %s (rc=%d)", idx, LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&aval)
+        return PathAttr{
+                AttrType: uint8(atype),
+                Flags:    uint8(aflags),
+                Value:    copyBytes(&aval),
+        }, nil
 }
 
 // UpdateAttrs walks every path attribute.
 func (m *BgpMessage) UpdateAttrs() ([]PathAttr, error) {
-	n, err := m.UpdateAttrCount()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]PathAttr, 0, n)
-	for i := 0; i < n; i++ {
-		a, err := m.UpdateAttrAt(i)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, nil
+        n, err := m.UpdateAttrCount()
+        if err != nil {
+                return nil, err
+        }
+        out := make([]PathAttr, 0, n)
+        for i := 0; i < n; i++ {
+                a, err := m.UpdateAttrAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                out = append(out, a)
+        }
+        return out, nil
 }
 
 // prefixFromC projects a `C.struct_lr_prefix_t` into the Go-side
@@ -2188,21 +2188,21 @@ func (m *BgpMessage) UpdateAttrs() ([]PathAttr, error) {
 // from the C struct's `is_ipv6` discriminator so the value type's
 // field stays consistent with `Addr`'s length.
 func prefixFromC(p C.struct_lr_prefix_t) PrefixSpec {
-	spec := PrefixSpec{PrefixLen: uint8(p.prefix_len)}
-	if p.is_ipv6 != 0 {
-		spec.IsIPv6 = true
-		spec.Addr = make([]byte, 16)
-		for i := 0; i < 16; i++ {
-			spec.Addr[i] = byte(p.addr[i])
-		}
-	} else {
-		spec.IsIPv6 = false
-		spec.Addr = make([]byte, 4)
-		for i := 0; i < 4; i++ {
-			spec.Addr[i] = byte(p.addr[i])
-		}
-	}
-	return spec
+        spec := PrefixSpec{PrefixLen: uint8(p.prefix_len)}
+        if p.is_ipv6 != 0 {
+                spec.IsIPv6 = true
+                spec.Addr = make([]byte, 16)
+                for i := 0; i < 16; i++ {
+                        spec.Addr[i] = byte(p.addr[i])
+                }
+        } else {
+                spec.IsIPv6 = false
+                spec.Addr = make([]byte, 4)
+                for i := 0; i < 4; i++ {
+                        spec.Addr[i] = byte(p.addr[i])
+                }
+        }
+        return spec
 }
 
 // cPrefixArray is a scratch []C.lr_prefix_t kept alive until the FFI
@@ -2210,48 +2210,48 @@ func prefixFromC(p C.struct_lr_prefix_t) PrefixSpec {
 type cPrefixArray []C.lr_prefix_t
 
 func (c cPrefixArray) ptr() *C.lr_prefix_t {
-	if len(c) == 0 {
-		return nil
-	}
-	return (*C.lr_prefix_t)(unsafe.Pointer(&c[0]))
+        if len(c) == 0 {
+                return nil
+        }
+        return (*C.lr_prefix_t)(unsafe.Pointer(&c[0]))
 }
 
 func prefixSpecsToC(prefixes []PrefixSpec) (cPrefixArray, error) {
-	out := make(cPrefixArray, 0, len(prefixes))
-	for _, p := range prefixes {
-		cp, err := p.toC()
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, cp)
-	}
-	return out, nil
+        out := make(cPrefixArray, 0, len(prefixes))
+        for _, p := range prefixes {
+                cp, err := p.toC()
+                if err != nil {
+                        return nil, err
+                }
+                out = append(out, cp)
+        }
+        return out, nil
 }
 
 func boolToU8(v bool) C.uint8_t {
-	if v {
-		return 1
-	}
-	return 0
+        if v {
+                return 1
+        }
+        return 0
 }
 
 // DecodeBGP decodes a single BGP message from `data`. Returns the canonical
 // re-encoded bytes of the message on success.
 func DecodeBGP(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("empty input")
-	}
-	var b C.struct_lr_bytes_t
-	rc := C.lr_bgp_decode(
-		(*C.uint8_t)(unsafe.Pointer(&data[0])),
-		C.size_t(len(data)),
-		&b,
-	)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_bgp_decode: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        if len(data) == 0 {
+                return nil, fmt.Errorf("empty input")
+        }
+        var b C.struct_lr_bytes_t
+        rc := C.lr_bgp_decode(
+                (*C.uint8_t)(unsafe.Pointer(&data[0])),
+                C.size_t(len(data)),
+                &b,
+        )
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_bgp_decode: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // EncodeSRv6SRH encodes an SRv6 Segment Routing Header (RFC 8754 §2)
@@ -2259,96 +2259,122 @@ func DecodeBGP(data []byte) ([]byte, error) {
 // have length `n * 16`. Returns the on-wire SRH bytes (8-octet fixed
 // header + segment list).
 func EncodeSRv6SRH(sids []byte) ([]byte, error) {
-	if len(sids) == 0 {
-		return nil, fmt.Errorf("empty SID list")
-	}
-	if len(sids)%16 != 0 {
-		return nil, fmt.Errorf("SID list length %d is not a multiple of 16", len(sids))
-	}
-	var b C.struct_lr_bytes_t
-	rc := C.lr_srv6_encode_srh(
-		(*C.uint8_t)(unsafe.Pointer(&sids[0])),
-		C.size_t(len(sids)),
-		&b,
-	)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_srv6_encode_srh: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        if len(sids) == 0 {
+                return nil, fmt.Errorf("empty SID list")
+        }
+        if len(sids)%16 != 0 {
+                return nil, fmt.Errorf("SID list length %d is not a multiple of 16", len(sids))
+        }
+        var b C.struct_lr_bytes_t
+        rc := C.lr_srv6_encode_srh(
+                (*C.uint8_t)(unsafe.Pointer(&sids[0])),
+                C.size_t(len(sids)),
+                &b,
+        )
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_srv6_encode_srh: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // DecodeSRv6SRH decodes an SRv6 SRH (RFC 8754 §2) from `data`. Returns
 // the concatenation of the segment list (16 bytes per SID) and any TLV
 // bytes present in the SRH.
 func DecodeSRv6SRH(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("empty input")
-	}
-	var b C.struct_lr_bytes_t
-	rc := C.lr_srv6_decode_srh(
-		(*C.uint8_t)(unsafe.Pointer(&data[0])),
-		C.size_t(len(data)),
-		&b,
-	)
-	if rc != 0 {
-		return nil, fmt.Errorf("lr_srv6_decode_srh: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&b)
-	return copyBytes(&b), nil
+        if len(data) == 0 {
+                return nil, fmt.Errorf("empty input")
+        }
+        var b C.struct_lr_bytes_t
+        rc := C.lr_srv6_decode_srh(
+                (*C.uint8_t)(unsafe.Pointer(&data[0])),
+                C.size_t(len(data)),
+                &b,
+        )
+        if rc != 0 {
+                return nil, fmt.Errorf("lr_srv6_decode_srh: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return copyBytes(&b), nil
 }
 
 // toCBool converts a Go bool to a C.uint8_t (0 or 1).
 // cIntBool maps a Go bool onto the C int32_t flag convention (0 / 1).
 func cIntBool(b bool) C.int32_t {
-	if b {
-		return 1
-	}
-	return 0
+        if b {
+                return 1
+        }
+        return 0
 }
 
 func toCBool(b bool) C.uint8_t {
-	if b {
-		return 1
-	}
-	return 0
+        if b {
+                return 1
+        }
+        return 0
 }
 
 // copyBytes copies a C lr_bytes_t's contents into a Go slice.
 func copyBytes(b *C.struct_lr_bytes_t) []byte {
-	n := int(C.lr_bytes_len(b))
-	if n == 0 {
-		return nil
-	}
-	ptr := C.lr_bytes_ptr(b)
-	out := make([]byte, n)
-	copy(out, C.GoBytes(unsafe.Pointer(ptr), C.int(n)))
-	return out
+        n := int(C.lr_bytes_len(b))
+        if n == 0 {
+                return nil
+        }
+        ptr := C.lr_bytes_ptr(b)
+        out := make([]byte, n)
+        copy(out, C.GoBytes(unsafe.Pointer(ptr), C.int(n)))
+        return out
 }
 
 // ---- ROA store (RFC 6482 / RFC 6811 / RFC 8210, ROADMAP-v3 D2.3) ----
 
 // ROA validation outcomes (RFC 6811 §2) returned by RoaStore.Validate.
 const (
-	RoaValid    = 0
-	RoaNotFound = 1
-	RoaInvalid  = 2
+        RoaValid    = 0
+        RoaNotFound = 1
+        RoaInvalid  = 2
 )
+
+// ROA format codes accepted by RoaStore.ReplaceStaticFromText (issue #100).
+// Mirrors the C LR_ROA_FORMAT_* constants and lr_bgp::roa_loader::RoaFormat.
+const (
+        RoaFormatNative = 0
+        RoaFormatBird   = 1
+        RoaFormatJSON   = 2
+        RoaFormatCSV    = 3
+)
+
+// roaFormatName maps the string alias accepted by
+// ReplaceStaticFromText to the C format code. The accepted aliases
+// match the daemon's `[[bgp.roa_source]] format` key.
+func roaFormatCode(name string) (C.uint8_t, error) {
+        switch name {
+        case "native", "lr", "toml", "NATIVE", "LR", "TOML":
+                return C.uint8_t(RoaFormatNative), nil
+        case "bird", "bird2", "BIRD", "BIRD2":
+                return C.uint8_t(RoaFormatBird), nil
+        case "json", "JSON":
+                return C.uint8_t(RoaFormatJSON), nil
+        case "csv", "tsv", "text", "plain", "CSV", "TSV", "TEXT", "PLAIN":
+                return C.uint8_t(RoaFormatCSV), nil
+        }
+        return 0, fmt.Errorf("unknown ROA format %q (expected: native, bird, json, csv)", name)
+}
 
 // RoaEntry is one ROA record (RFC 6482 §3): the authorized prefix, the
 // longest authorized prefix length, and the origin AS. Addr is 4 bytes
 // (IPv4) or 16 bytes (IPv6). AS 0 marks the blackhole range (RFC 6483 §4).
 type RoaEntry struct {
-	Addr      []byte
-	PrefixLen uint8
-	MaxLength uint8
-	ASN       uint32
+        Addr      []byte
+        PrefixLen uint8
+        MaxLength uint8
+        ASN       uint32
 }
 
 // RoaDelta is one record delta of a completed RTR sync (RFC 8210 §5.6/§5.7).
 type RoaDelta struct {
-	Announce bool
-	Entry    RoaEntry
+        Announce bool
+        Entry    RoaEntry
 }
 
 // RouterKeyEntry is one BGPsec Router Key entry (RFC 8210 §5.10):
@@ -2357,20 +2383,20 @@ type RoaDelta struct {
 // binding copies the SPKI into a []byte so the value is owned and
 // garbage-collected independently of the step's lifetime.
 type RouterKeyEntry struct {
-	// 20-byte SHA-1 hash of the SPKI.
-	SKI [20]byte
-	// The AS number the router key is valid for.
-	ASN uint32
-	// Full DER subjectPublicKeyInfo blob (tag + length + value).
-	SubjectPublicKeyInfo []byte
+        // 20-byte SHA-1 hash of the SPKI.
+        SKI [20]byte
+        // The AS number the router key is valid for.
+        ASN uint32
+        // Full DER subjectPublicKeyInfo blob (tag + length + value).
+        SubjectPublicKeyInfo []byte
 }
 
 // RouterKeyDelta is one BGPsec Router Key delta of a completed RTR
 // sync (RFC 8210 §5.10). Announce=true adds the entry to the
 // authoritative set; Announce=false removes it.
 type RouterKeyDelta struct {
-	Announce bool
-	Entry    RouterKeyEntry
+        Announce bool
+        Entry    RouterKeyEntry
 }
 
 // AspaEntry is one ASPA record (RFC 8210 §5.11, SIDROPS ASPA profile):
@@ -2378,136 +2404,170 @@ type RouterKeyDelta struct {
 // providers are in ascending order (the Rust side canonicalises to a
 // BTreeSet<u32> so wire order does not affect equality).
 type AspaEntry struct {
-	// The customer AS the providers are attested for.
-	CustomerASN uint32
-	// The provider ASNs the cache attests, in ascending order.
-	Providers []uint32
+        // The customer AS the providers are attested for.
+        CustomerASN uint32
+        // The provider ASNs the cache attests, in ascending order.
+        Providers []uint32
 }
 
 // AspaDelta is one ASPA delta of a completed RTR sync (RFC 8210
 // §5.11). Announce=true adds the entry to the authoritative set;
 // Announce=false removes it.
 type AspaDelta struct {
-	Announce bool
-	Entry    AspaEntry
+        Announce bool
+        Entry    AspaEntry
 }
 
 // RoaStore is a live, thread-safe ROA database with two provenance
 // layers (static configuration + RTR cache) and atomic whole-table
 // snapshot swaps. Validation reads run lock-free against a snapshot.
 type RoaStore struct {
-	ptr C.lr_roa_store_t
+        ptr C.lr_roa_store_t
 }
 
 // NewRoaStore creates an empty store. The returned *RoaStore is
 // garbage-collected via a finalizer that calls lr_roa_store_free.
 func NewRoaStore() (*RoaStore, error) {
-	s := C.lr_roa_store_new()
-	if s == nil {
-		return nil, fmt.Errorf("lr_roa_store_new returned null")
-	}
-	out := &RoaStore{ptr: s}
-	runtime.SetFinalizer(out, func(o *RoaStore) {
-		if o.ptr != nil {
-			C.lr_roa_store_free(o.ptr)
-			o.ptr = nil
-		}
-	})
-	return out, nil
+        s := C.lr_roa_store_new()
+        if s == nil {
+                return nil, fmt.Errorf("lr_roa_store_new returned null")
+        }
+        out := &RoaStore{ptr: s}
+        runtime.SetFinalizer(out, func(o *RoaStore) {
+                if o.ptr != nil {
+                        C.lr_roa_store_free(o.ptr)
+                        o.ptr = nil
+                }
+        })
+        return out, nil
 }
 
 // Close releases the store early. Idempotent; the finalizer covers
 // missing Close calls, but calling Close twice is still safe.
 func (s *RoaStore) Close() {
-	if s.ptr != nil {
-		C.lr_roa_store_free(s.ptr)
-		s.ptr = nil
-	}
+        if s.ptr != nil {
+                C.lr_roa_store_free(s.ptr)
+                s.ptr = nil
+        }
 }
 
 // fillCEntry copies a Go RoaEntry into a C lr_roa_entry_t. Returns an
 // error when the address byte count is neither 4 nor 16.
 func fillCEntry(dst *C.struct_lr_roa_entry_t, e RoaEntry) error {
-	switch len(e.Addr) {
-	case 4:
-		dst.is_ipv6 = 0
-		for i := 0; i < 4; i++ {
-			dst.addr[i] = C.uint8_t(e.Addr[i])
-		}
-	case 16:
-		dst.is_ipv6 = 1
-		for i := 0; i < 16; i++ {
-			dst.addr[i] = C.uint8_t(e.Addr[i])
-		}
-	default:
-		return fmt.Errorf("RoaEntry.Addr must be 4 or 16 bytes, got %d", len(e.Addr))
-	}
-	dst.prefix_len = C.uint8_t(e.PrefixLen)
-	dst.max_length = C.uint8_t(e.MaxLength)
-	dst.asn = C.uint32_t(e.ASN)
-	return nil
+        switch len(e.Addr) {
+        case 4:
+                dst.is_ipv6 = 0
+                for i := 0; i < 4; i++ {
+                        dst.addr[i] = C.uint8_t(e.Addr[i])
+                }
+        case 16:
+                dst.is_ipv6 = 1
+                for i := 0; i < 16; i++ {
+                        dst.addr[i] = C.uint8_t(e.Addr[i])
+                }
+        default:
+                return fmt.Errorf("RoaEntry.Addr must be 4 or 16 bytes, got %d", len(e.Addr))
+        }
+        dst.prefix_len = C.uint8_t(e.PrefixLen)
+        dst.max_length = C.uint8_t(e.MaxLength)
+        dst.asn = C.uint32_t(e.ASN)
+        return nil
 }
 
 // ReplaceStatic atomically replaces the store's static (configuration)
 // layer. RTR-learned entries are preserved. A malformed entry fails the
 // whole call atomically (nothing is applied).
 func (s *RoaStore) ReplaceStatic(entries []RoaEntry) error {
-	// An empty slice clears the layer — the C contract is
-	// "NULL with len 0" and Go maps nil onto it directly.
-	if len(entries) == 0 {
-		rc := C.lr_roa_store_replace_static(s.ptr, nil, 0)
-		if rc != 0 {
-			return fmt.Errorf("lr_roa_store_replace_static: %s (rc=%d)", LastError(), int(rc))
-		}
-		return nil
-	}
-	cEntries := make([]C.struct_lr_roa_entry_t, len(entries))
-	for i := range entries {
-		if err := fillCEntry(&cEntries[i], entries[i]); err != nil {
-			return fmt.Errorf("ReplaceStatic: %w", err)
-		}
-	}
-	rc := C.lr_roa_store_replace_static(s.ptr, &cEntries[0], C.size_t(len(cEntries)))
-	if rc != 0 {
-		return fmt.Errorf("lr_roa_store_replace_static: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        // An empty slice clears the layer — the C contract is
+        // "NULL with len 0" and Go maps nil onto it directly.
+        if len(entries) == 0 {
+                rc := C.lr_roa_store_replace_static(s.ptr, nil, 0)
+                if rc != 0 {
+                        return fmt.Errorf("lr_roa_store_replace_static: %s (rc=%d)", LastError(), int(rc))
+                }
+                return nil
+        }
+        cEntries := make([]C.struct_lr_roa_entry_t, len(entries))
+        for i := range entries {
+                if err := fillCEntry(&cEntries[i], entries[i]); err != nil {
+                        return fmt.Errorf("ReplaceStatic: %w", err)
+                }
+        }
+        rc := C.lr_roa_store_replace_static(s.ptr, &cEntries[0], C.size_t(len(cEntries)))
+        if rc != 0 {
+                return fmt.Errorf("lr_roa_store_replace_static: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// ReplaceStaticFromText atomically replaces the static layer by
+// parsing text in one of the supported ROA formats (issue #100):
+// "native" (TOML `[[roa]]` subset), "bird" (BIRD 2 `roa table`
+// body), "json" (Routinator JSON VRP output) or "csv" (Routinator
+// CSV / awk-produced whitespace-separated rows). The format string
+// accepts the same aliases as the daemon's `[[bgp.roa_source]]
+// format` key (case-insensitive). RTR-learned entries are
+// preserved. A parse failure leaves the previous snapshot in
+// place (a truncated fetch must never weaken origin validation).
+func (s *RoaStore) ReplaceStaticFromText(text, format string) error {
+        if len(text) == 0 {
+                // Empty input clears the layer — matches the C contract.
+                rc := C.lr_roa_store_replace_static_from_text(s.ptr, nil, 0, 0)
+                if rc != 0 {
+                        return fmt.Errorf("lr_roa_store_replace_static_from_text: %s (rc=%d)", LastError(), int(rc))
+                }
+                return nil
+        }
+        code, err := roaFormatCode(format)
+        if err != nil {
+                return fmt.Errorf("ReplaceStaticFromText: %w", err)
+        }
+        rc := C.lr_roa_store_replace_static_from_text(
+                s.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&[]byte(text)[0])),
+                C.size_t(len(text)),
+                code,
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_roa_store_replace_static_from_text: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // ApplyDeltas applies one completed sync's delta batch atomically.
 // Duplicates coalesce and unknown withdrawals are no-ops (the RFC 8210
 // §5.6 / §12 code-6 semantics).
 func (s *RoaStore) ApplyDeltas(deltas []RoaDelta) error {
-	if len(deltas) == 0 {
-		return nil
-	}
-	cDeltas := make([]C.struct_lr_roa_delta_t, len(deltas))
-	for i := range deltas {
-		if err := fillCEntry(&cDeltas[i].entry, deltas[i].Entry); err != nil {
-			return fmt.Errorf("ApplyDeltas: %w", err)
-		}
-		cDeltas[i].announce = toCBool(deltas[i].Announce)
-	}
-	rc := C.lr_roa_store_apply_deltas(s.ptr, &cDeltas[0], C.size_t(len(cDeltas)))
-	if rc != 0 {
-		return fmt.Errorf("lr_roa_store_apply_deltas: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if len(deltas) == 0 {
+                return nil
+        }
+        cDeltas := make([]C.struct_lr_roa_delta_t, len(deltas))
+        for i := range deltas {
+                if err := fillCEntry(&cDeltas[i].entry, deltas[i].Entry); err != nil {
+                        return fmt.Errorf("ApplyDeltas: %w", err)
+                }
+                cDeltas[i].announce = toCBool(deltas[i].Announce)
+        }
+        rc := C.lr_roa_store_apply_deltas(s.ptr, &cDeltas[0], C.size_t(len(cDeltas)))
+        if rc != 0 {
+                return fmt.Errorf("lr_roa_store_apply_deltas: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // ClearRTR withdraws every RTR-learned entry — the RFC 8210 §6
 // data-expiry and cache-change response. Static entries survive.
 func (s *RoaStore) ClearRTR() error {
-	rc := C.lr_roa_store_clear_rtr(s.ptr)
-	if rc != 0 {
-		return fmt.Errorf("lr_roa_store_clear_rtr: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        rc := C.lr_roa_store_clear_rtr(s.ptr)
+        if rc != 0 {
+                return fmt.Errorf("lr_roa_store_clear_rtr: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Len returns the current merged entry count (static + RTR, deduplicated).
 func (s *RoaStore) Len() int {
-	return int(C.lr_roa_store_len(s.ptr))
+        return int(C.lr_roa_store_len(s.ptr))
 }
 
 // Validate runs the RFC 6811 §2 validation for (prefixAddr, prefixLen,
@@ -2515,21 +2575,21 @@ func (s *RoaStore) Len() int {
 // = false (no AS_PATH) validates as RoaNotFound. Returns one of the
 // Roa* outcome constants.
 func (s *RoaStore) Validate(prefixAddr []byte, prefixLen uint8, originAS uint32, hasOrigin bool) (int, error) {
-	var state C.uint8_t
-	var v4, v6 *C.uint8_t
-	switch len(prefixAddr) {
-	case 4:
-		v4 = (*C.uint8_t)(unsafe.Pointer(&prefixAddr[0]))
-	case 16:
-		v6 = (*C.uint8_t)(unsafe.Pointer(&prefixAddr[0]))
-	default:
-		return 0, fmt.Errorf("Validate: prefixAddr must be 4 or 16 bytes, got %d", len(prefixAddr))
-	}
-	rc := C.lr_roa_store_validate(s.ptr, v4, v6, C.uint8_t(prefixLen), C.uint32_t(originAS), toCBool(hasOrigin), &state)
-	if rc != 0 {
-		return 0, fmt.Errorf("lr_roa_store_validate: %s (rc=%d)", LastError(), int(rc))
-	}
-	return int(state), nil
+        var state C.uint8_t
+        var v4, v6 *C.uint8_t
+        switch len(prefixAddr) {
+        case 4:
+                v4 = (*C.uint8_t)(unsafe.Pointer(&prefixAddr[0]))
+        case 16:
+                v6 = (*C.uint8_t)(unsafe.Pointer(&prefixAddr[0]))
+        default:
+                return 0, fmt.Errorf("Validate: prefixAddr must be 4 or 16 bytes, got %d", len(prefixAddr))
+        }
+        rc := C.lr_roa_store_validate(s.ptr, v4, v6, C.uint8_t(prefixLen), C.uint32_t(originAS), toCBool(hasOrigin), &state)
+        if rc != 0 {
+                return 0, fmt.Errorf("lr_roa_store_validate: %s (rc=%d)", LastError(), int(rc))
+        }
+        return int(state), nil
 }
 
 // ===== D4.4 — redistribution / aggregation / damping =====
@@ -2539,52 +2599,52 @@ func (s *RoaStore) Validate(prefixAddr []byte, prefixLen uint8, originAS uint32,
 type Protocol int
 
 const (
-	ProtoBgp       Protocol = 0
-	ProtoOspf      Protocol = 1
-	ProtoOspf3     Protocol = 2
-	ProtoBabel     Protocol = 3
-	ProtoStatic    Protocol = 4
-	ProtoConnected Protocol = 5
+        ProtoBgp       Protocol = 0
+        ProtoOspf      Protocol = 1
+        ProtoOspf3     Protocol = 2
+        ProtoBabel     Protocol = 3
+        ProtoStatic    Protocol = 4
+        ProtoConnected Protocol = 5
 )
 
 // Metric transformation for a redistribution pipe.
 type MetricPolicy int
 
 const (
-	MetricInherit MetricPolicy = 0
-	MetricFixed   MetricPolicy = 1
-	MetricAdd     MetricPolicy = 2
+        MetricInherit MetricPolicy = 0
+        MetricFixed   MetricPolicy = 1
+        MetricAdd     MetricPolicy = 2
 )
 
 // PrefixSpec is one IPv4/IPv6 prefix. Addr is 4 bytes (IPv4) or
 // 16 bytes (IPv6) — the same convention as the ROA entry API.
 type PrefixSpec struct {
-	Addr      []byte
-	IsIPv6    bool
-	PrefixLen uint8
+        Addr      []byte
+        IsIPv6    bool
+        PrefixLen uint8
 }
 
 func (p PrefixSpec) toC() (C.lr_prefix_t, error) {
-	var out C.lr_prefix_t
-	if p.IsIPv6 {
-		if len(p.Addr) != 16 {
-			return out, fmt.Errorf("IPv6 prefix Addr must be 16 bytes, got %d", len(p.Addr))
-		}
-		for i := 0; i < 16; i++ {
-			out.addr[i] = C.uint8_t(p.Addr[i])
-		}
-		out.is_ipv6 = 1
-	} else {
-		if len(p.Addr) != 4 {
-			return out, fmt.Errorf("IPv4 prefix Addr must be 4 bytes, got %d", len(p.Addr))
-		}
-		for i := 0; i < 4; i++ {
-			out.addr[i] = C.uint8_t(p.Addr[i])
-		}
-		out.is_ipv6 = 0
-	}
-	out.prefix_len = C.uint8_t(p.PrefixLen)
-	return out, nil
+        var out C.lr_prefix_t
+        if p.IsIPv6 {
+                if len(p.Addr) != 16 {
+                        return out, fmt.Errorf("IPv6 prefix Addr must be 16 bytes, got %d", len(p.Addr))
+                }
+                for i := 0; i < 16; i++ {
+                        out.addr[i] = C.uint8_t(p.Addr[i])
+                }
+                out.is_ipv6 = 1
+        } else {
+                if len(p.Addr) != 4 {
+                        return out, fmt.Errorf("IPv4 prefix Addr must be 4 bytes, got %d", len(p.Addr))
+                }
+                for i := 0; i < 4; i++ {
+                        out.addr[i] = C.uint8_t(p.Addr[i])
+                }
+                out.is_ipv6 = 0
+        }
+        out.prefix_len = C.uint8_t(p.PrefixLen)
+        return out, nil
 }
 
 // AddRedistributionPipe installs a redistribution pipe (BIRD `pipe` /
@@ -2592,78 +2652,78 @@ func (p PrefixSpec) toC() (C.lr_prefix_t, error) {
 // target with the configured metric policy, optional tag and optional
 // allow-list. allow == nil redistributes everything.
 func (r *Router) AddRedistributionPipe(source, target Protocol, metricPolicy MetricPolicy,
-	metric uint32, hasTag bool, tag uint32, allow []PrefixSpec) error {
-	var allowPtr *C.lr_prefix_t
-	var cAllow []C.lr_prefix_t
-	if len(allow) > 0 {
-		for _, a := range allow {
-			cp, err := a.toC()
-			if err != nil {
-				return fmt.Errorf("AddRedistributionPipe: %v", err)
-			}
-			cAllow = append(cAllow, cp)
-		}
-		allowPtr = &cAllow[0]
-	}
-	var ht C.int
-	if hasTag {
-		ht = 1
-	}
-	rc := C.lr_router_add_redistribution_pipe(r.ptr, C.int(source), C.int(target),
-		C.int(metricPolicy), C.uint32_t(metric), ht, C.uint32_t(tag), allowPtr,
-		C.size_t(len(cAllow)))
-	if rc != 0 {
-		return fmt.Errorf("lr_router_add_redistribution_pipe: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        metric uint32, hasTag bool, tag uint32, allow []PrefixSpec) error {
+        var allowPtr *C.lr_prefix_t
+        var cAllow []C.lr_prefix_t
+        if len(allow) > 0 {
+                for _, a := range allow {
+                        cp, err := a.toC()
+                        if err != nil {
+                                return fmt.Errorf("AddRedistributionPipe: %v", err)
+                        }
+                        cAllow = append(cAllow, cp)
+                }
+                allowPtr = &cAllow[0]
+        }
+        var ht C.int
+        if hasTag {
+                ht = 1
+        }
+        rc := C.lr_router_add_redistribution_pipe(r.ptr, C.int(source), C.int(target),
+                C.int(metricPolicy), C.uint32_t(metric), ht, C.uint32_t(tag), allowPtr,
+                C.size_t(len(cAllow)))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_add_redistribution_pipe: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // AddAggregate registers an RFC 4271 §9.2.2.2 aggregate: originated
 // with a zeroed AS_PATH + ATOMIC_AGGREGATE + AGGREGATOR while a
 // more-specific exists, withdrawn when the last one disappears.
 func (r *Router) AddAggregate(prefix PrefixSpec) error {
-	cp, err := prefix.toC()
-	if err != nil {
-		return fmt.Errorf("AddAggregate: %v", err)
-	}
-	rc := C.lr_router_add_aggregate(r.ptr, &cp)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_add_aggregate: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        cp, err := prefix.toC()
+        if err != nil {
+                return fmt.Errorf("AddAggregate: %v", err)
+        }
+        rc := C.lr_router_add_aggregate(r.ptr, &cp)
+        if rc != 0 {
+                return fmt.Errorf("lr_router_add_aggregate: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // RemoveAggregate withdraws a previously registered aggregate.
 // Unknown prefixes are a no-op.
 func (r *Router) RemoveAggregate(prefix PrefixSpec) error {
-	cp, err := prefix.toC()
-	if err != nil {
-		return fmt.Errorf("RemoveAggregate: %v", err)
-	}
-	rc := C.lr_router_remove_aggregate(r.ptr, &cp)
-	if rc != 0 {
-		return fmt.Errorf("lr_router_remove_aggregate: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        cp, err := prefix.toC()
+        if err != nil {
+                return fmt.Errorf("RemoveAggregate: %v", err)
+        }
+        rc := C.lr_router_remove_aggregate(r.ptr, &cp)
+        if rc != 0 {
+                return fmt.Errorf("lr_router_remove_aggregate: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // DampingConfig carries the RFC 2439 §4.7 tunables (mirrors
 // lr_damping_config_t).
 type DampingConfig struct {
-	AdditiveIncr         uint32
-	SuppressThreshold    uint32
-	ReuseThreshold       uint32
-	UpperLimit           uint32
-	DecayIntervalS       uint64
-	DecayFactorActive    float64
-	DecayFactorWithdrawn float64
+        AdditiveIncr         uint32
+        SuppressThreshold    uint32
+        ReuseThreshold       uint32
+        UpperLimit           uint32
+        DecayIntervalS       uint64
+        DecayFactorActive    float64
+        DecayFactorWithdrawn float64
 }
 
 // Damping is an owned handle to a shared damping table. The router's
 // import hook keeps its own reference; Destroy releases the
 // embedder's decay access. A runtime finalizer also destroys it.
 type Damping struct {
-	ptr C.lr_damping_t
+        ptr C.lr_damping_t
 }
 
 // SetDamping installs the RFC 2439 damping import hook on the router
@@ -2671,47 +2731,47 @@ type Damping struct {
 // (*Damping).Decay — the in-process analogue of the daemon's
 // lr-damping-decay thread.
 func (r *Router) SetDamping(cfg DampingConfig) (*Damping, error) {
-	d := C.lr_router_set_damping(r.ptr, &C.lr_damping_config_t{
-		additive_incr:          C.uint32_t(cfg.AdditiveIncr),
-		suppress_threshold:     C.uint32_t(cfg.SuppressThreshold),
-		reuse_threshold:        C.uint32_t(cfg.ReuseThreshold),
-		upper_limit:            C.uint32_t(cfg.UpperLimit),
-		decay_interval_s:       C.uint64_t(cfg.DecayIntervalS),
-		decay_factor_active:    C.double(cfg.DecayFactorActive),
-		decay_factor_withdrawn: C.double(cfg.DecayFactorWithdrawn),
-	})
-	if d == nil {
-		return nil, fmt.Errorf("lr_router_set_damping: %s", LastError())
-	}
-	out := &Damping{ptr: d}
-	runtime.SetFinalizer(out, func(o *Damping) {
-		if o.ptr != nil {
-			C.lr_damping_destroy(o.ptr)
-			o.ptr = nil
-		}
-	})
-	return out, nil
+        d := C.lr_router_set_damping(r.ptr, &C.lr_damping_config_t{
+                additive_incr:          C.uint32_t(cfg.AdditiveIncr),
+                suppress_threshold:     C.uint32_t(cfg.SuppressThreshold),
+                reuse_threshold:        C.uint32_t(cfg.ReuseThreshold),
+                upper_limit:            C.uint32_t(cfg.UpperLimit),
+                decay_interval_s:       C.uint64_t(cfg.DecayIntervalS),
+                decay_factor_active:    C.double(cfg.DecayFactorActive),
+                decay_factor_withdrawn: C.double(cfg.DecayFactorWithdrawn),
+        })
+        if d == nil {
+                return nil, fmt.Errorf("lr_router_set_damping: %s", LastError())
+        }
+        out := &Damping{ptr: d}
+        runtime.SetFinalizer(out, func(o *Damping) {
+                if o.ptr != nil {
+                        C.lr_damping_destroy(o.ptr)
+                        o.ptr = nil
+                }
+        })
+        return out, nil
 }
 
 // Decay drives one damping decay pass at wall-clock nowS (seconds)
 // and returns the number of prefixes that re-emerged.
 func (d *Damping) Decay(nowS uint64) (int, error) {
-	if d.ptr == nil {
-		return 0, fmt.Errorf("Decay: damping handle destroyed")
-	}
-	rc := C.lr_damping_decay(d.ptr, C.uint64_t(nowS))
-	if rc < 0 {
-		return 0, fmt.Errorf("lr_damping_decay: %s (rc=%d)", LastError(), int(rc))
-	}
-	return int(rc), nil
+        if d.ptr == nil {
+                return 0, fmt.Errorf("Decay: damping handle destroyed")
+        }
+        rc := C.lr_damping_decay(d.ptr, C.uint64_t(nowS))
+        if rc < 0 {
+                return 0, fmt.Errorf("lr_damping_decay: %s (rc=%d)", LastError(), int(rc))
+        }
+        return int(rc), nil
 }
 
 // Destroy releases the damping handle (idempotent).
 func (d *Damping) Destroy() {
-	if d.ptr != nil {
-		C.lr_damping_destroy(d.ptr)
-		d.ptr = nil
-	}
+        if d.ptr != nil {
+                C.lr_damping_destroy(d.ptr)
+                d.ptr = nil
+        }
 }
 
 // ===== D5.3 — policy objects: route handle, prefix-list, route-map,
@@ -2719,383 +2779,383 @@ func (d *Damping) Destroy() {
 
 // Route-map match condition kinds (LR_MATCH_*).
 const (
-	MatchPrefixIn    = C.LR_MATCH_PREFIX_IN
-	MatchAsPathIn    = C.LR_MATCH_AS_PATH_IN
-	MatchCommunityIn = C.LR_MATCH_COMMUNITY_IN
-	MatchProtocolIs  = C.LR_MATCH_PROTOCOL_IS
-	MatchNextHopIn   = C.LR_MATCH_NEXT_HOP_IN
+        MatchPrefixIn    = C.LR_MATCH_PREFIX_IN
+        MatchAsPathIn    = C.LR_MATCH_AS_PATH_IN
+        MatchCommunityIn = C.LR_MATCH_COMMUNITY_IN
+        MatchProtocolIs  = C.LR_MATCH_PROTOCOL_IS
+        MatchNextHopIn   = C.LR_MATCH_NEXT_HOP_IN
 )
 
 // Route-map set action kinds (LR_SET_*).
 const (
-	SetLocalPref    = C.LR_SET_LOCAL_PREF
-	SetMed          = C.LR_SET_MED
-	SetNextHopKind  = C.LR_SET_NEXT_HOP
-	SetPrependAs    = C.LR_SET_PREPEND_AS
-	SetAddCommunity = C.LR_SET_ADD_COMMUNITY
-	SetMetric       = C.LR_SET_METRIC
-	SetTag          = C.LR_SET_TAG
+        SetLocalPref    = C.LR_SET_LOCAL_PREF
+        SetMed          = C.LR_SET_MED
+        SetNextHopKind  = C.LR_SET_NEXT_HOP
+        SetPrependAs    = C.LR_SET_PREPEND_AS
+        SetAddCommunity = C.LR_SET_ADD_COMMUNITY
+        SetMetric       = C.LR_SET_METRIC
+        SetTag          = C.LR_SET_TAG
 )
 
 // Route-map entry verdicts (LR_VERDICT_*).
 const (
-	VerdictContinue = C.LR_VERDICT_CONTINUE
-	VerdictPermit   = C.LR_VERDICT_PERMIT
-	VerdictDeny     = C.LR_VERDICT_DENY
+        VerdictContinue = C.LR_VERDICT_CONTINUE
+        VerdictPermit   = C.LR_VERDICT_PERMIT
+        VerdictDeny     = C.LR_VERDICT_DENY
 )
 
 // lr_route_map_evaluate outcomes (LR_EVAL_*).
 const (
-	EvalFallthrough = C.LR_EVAL_FALLTHROUGH
-	EvalDeny        = C.LR_EVAL_DENY
-	EvalPermit      = C.LR_EVAL_PERMIT
+        EvalFallthrough = C.LR_EVAL_FALLTHROUGH
+        EvalDeny        = C.LR_EVAL_DENY
+        EvalPermit      = C.LR_EVAL_PERMIT
 )
 
 // Route is an owned policy route handle (a boxed lr_core::rib::Route):
 // the exact data model filter and route-map evaluation run against.
 type Route struct {
-	ptr C.lr_route_t
+        ptr C.lr_route_t
 }
 
 // NewRouteV4 creates a route handle for an IPv4 prefix. proto is one of
 // the Proto* constants.
 func NewRouteV4(octets [4]byte, prefixLen uint8, proto Protocol) (*Route, error) {
-	var p [16]byte
-	copy(p[:4], octets[:])
-	ptr := C.lr_route_new_v4((*C.uint8_t)(unsafe.Pointer(&p[0])), C.uint8_t(prefixLen), C.int32_t(proto))
-	if ptr == nil {
-		return nil, fmt.Errorf("lr_route_new_v4: %s", LastError())
-	}
-	r := &Route{ptr: ptr}
-	runtime.SetFinalizer(r, (*Route).destroy)
-	return r, nil
+        var p [16]byte
+        copy(p[:4], octets[:])
+        ptr := C.lr_route_new_v4((*C.uint8_t)(unsafe.Pointer(&p[0])), C.uint8_t(prefixLen), C.int32_t(proto))
+        if ptr == nil {
+                return nil, fmt.Errorf("lr_route_new_v4: %s", LastError())
+        }
+        r := &Route{ptr: ptr}
+        runtime.SetFinalizer(r, (*Route).destroy)
+        return r, nil
 }
 
 // NewRouteV6 creates a route handle for an IPv6 prefix.
 func NewRouteV6(octets [16]byte, prefixLen uint8, proto Protocol) (*Route, error) {
-	var p [16]byte
-	copy(p[:], octets[:])
-	ptr := C.lr_route_new_v6((*C.uint8_t)(unsafe.Pointer(&p[0])), C.uint8_t(prefixLen), C.int32_t(proto))
-	if ptr == nil {
-		return nil, fmt.Errorf("lr_route_new_v6: %s", LastError())
-	}
-	r := &Route{ptr: ptr}
-	runtime.SetFinalizer(r, (*Route).destroy)
-	return r, nil
+        var p [16]byte
+        copy(p[:], octets[:])
+        ptr := C.lr_route_new_v6((*C.uint8_t)(unsafe.Pointer(&p[0])), C.uint8_t(prefixLen), C.int32_t(proto))
+        if ptr == nil {
+                return nil, fmt.Errorf("lr_route_new_v6: %s", LastError())
+        }
+        r := &Route{ptr: ptr}
+        runtime.SetFinalizer(r, (*Route).destroy)
+        return r, nil
 }
 
 func (r *Route) destroy() {
-	if r.ptr != nil {
-		C.lr_route_free(r.ptr)
-		r.ptr = nil
-	}
+        if r.ptr != nil {
+                C.lr_route_free(r.ptr)
+                r.ptr = nil
+        }
 }
 
 // Free releases the route handle (optional; a finalizer also runs).
 func (r *Route) Free() {
-	runtime.SetFinalizer(r, nil)
-	r.destroy()
+        runtime.SetFinalizer(r, nil)
+        r.destroy()
 }
 
 // SetNextHop sets the route's next hop (4- or 16-byte address).
 func (r *Route) SetNextHop(addr []byte) error {
-	if len(addr) != 4 && len(addr) != 16 {
-		return fmt.Errorf("SetNextHop: bad address length (want 4 or 16)")
-	}
-	rc := C.lr_route_set_next_hop(r.ptr, (*C.uint8_t)(unsafe.Pointer(&addr[0])),
-		cIntBool(len(addr) == 16))
-	if rc != 0 {
-		return fmt.Errorf("lr_route_set_next_hop: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if len(addr) != 4 && len(addr) != 16 {
+                return fmt.Errorf("SetNextHop: bad address length (want 4 or 16)")
+        }
+        rc := C.lr_route_set_next_hop(r.ptr, (*C.uint8_t)(unsafe.Pointer(&addr[0])),
+                cIntBool(len(addr) == 16))
+        if rc != 0 {
+                return fmt.Errorf("lr_route_set_next_hop: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // NextHop reads the route's next hop (RFC 4271 §5.1.3). The returned
 // slice is 4 bytes for IPv4, 16 bytes for IPv6. ok is false when the
 // attribute is absent.
 func (r *Route) NextHop() (addr []byte, ok bool, err error) {
-	var buf [16]C.uint8_t
-	var isV6 C.int32_t
-	rc := C.lr_route_next_hop(r.ptr, &buf[0], &isV6)
-	if rc == 1 {
-		return nil, false, nil
-	}
-	if rc != 0 {
-		return nil, false, fmt.Errorf("lr_route_next_hop: %s (rc=%d)", LastError(), int(rc))
-	}
-	n := 4
-	if isV6 != 0 {
-		n = 16
-	}
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		out[i] = byte(buf[i])
-	}
-	return out, true, nil
+        var buf [16]C.uint8_t
+        var isV6 C.int32_t
+        rc := C.lr_route_next_hop(r.ptr, &buf[0], &isV6)
+        if rc == 1 {
+                return nil, false, nil
+        }
+        if rc != 0 {
+                return nil, false, fmt.Errorf("lr_route_next_hop: %s (rc=%d)", LastError(), int(rc))
+        }
+        n := 4
+        if isV6 != 0 {
+                n = 16
+        }
+        out := make([]byte, n)
+        for i := 0; i < n; i++ {
+                out[i] = byte(buf[i])
+        }
+        return out, true, nil
 }
 
 // SetLocalPref sets the BGP LOCAL_PREF (RFC 4271 §5.1.5).
 func (r *Route) SetLocalPref(value uint32) error {
-	if rc := C.lr_route_set_local_pref(r.ptr, C.uint32_t(value)); rc != 0 {
-		return fmt.Errorf("lr_route_set_local_pref: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_set_local_pref(r.ptr, C.uint32_t(value)); rc != 0 {
+                return fmt.Errorf("lr_route_set_local_pref: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // LocalPref reads LOCAL_PREF; false when absent.
 func (r *Route) LocalPref() (uint32, bool, error) {
-	var v C.uint32_t
-	rc := C.lr_route_local_pref(r.ptr, &v)
-	if rc == 1 {
-		return 0, false, nil
-	}
-	if rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_local_pref: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint32(v), true, nil
+        var v C.uint32_t
+        rc := C.lr_route_local_pref(r.ptr, &v)
+        if rc == 1 {
+                return 0, false, nil
+        }
+        if rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_local_pref: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint32(v), true, nil
 }
 
 // SetMed sets the BGP MULTI_EXIT_DISC (RFC 4271 §4.2.4).
 func (r *Route) SetMed(value uint32) error {
-	if rc := C.lr_route_set_med(r.ptr, C.uint32_t(value)); rc != 0 {
-		return fmt.Errorf("lr_route_set_med: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_set_med(r.ptr, C.uint32_t(value)); rc != 0 {
+                return fmt.Errorf("lr_route_set_med: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Med reads MULTI_EXIT_DISC; false when absent.
 func (r *Route) Med() (uint32, bool, error) {
-	var v C.uint32_t
-	rc := C.lr_route_med(r.ptr, &v)
-	if rc == 1 {
-		return 0, false, nil
-	}
-	if rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_med: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint32(v), true, nil
+        var v C.uint32_t
+        rc := C.lr_route_med(r.ptr, &v)
+        if rc == 1 {
+                return 0, false, nil
+        }
+        if rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_med: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint32(v), true, nil
 }
 
 // SetOrigin sets the BGP ORIGIN (0 IGP / 1 EGP / 2 INCOMPLETE).
 func (r *Route) SetOrigin(origin byte) error {
-	if rc := C.lr_route_set_origin(r.ptr, C.uint8_t(origin)); rc != 0 {
-		return fmt.Errorf("lr_route_set_origin: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_set_origin(r.ptr, C.uint8_t(origin)); rc != 0 {
+                return fmt.Errorf("lr_route_set_origin: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Origin reads the BGP ORIGIN (RFC 4271 §5.1.1): 0 IGP, 1 EGP, 2
 // INCOMPLETE. ok is false when the attribute is absent.
 func (r *Route) Origin() (byte, bool, error) {
-	var v C.uint8_t
-	rc := C.lr_route_origin(r.ptr, &v)
-	if rc == 1 {
-		return 0, false, nil
-	}
-	if rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_origin: %s (rc=%d)", LastError(), int(rc))
-	}
-	return byte(v), true, nil
+        var v C.uint8_t
+        rc := C.lr_route_origin(r.ptr, &v)
+        if rc == 1 {
+                return 0, false, nil
+        }
+        if rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_origin: %s (rc=%d)", LastError(), int(rc))
+        }
+        return byte(v), true, nil
 }
 
 // SetAsPath replaces the AS_PATH with a flat sequence (empty drops it).
 func (r *Route) SetAsPath(asns []uint32) error {
-	var p *C.uint32_t
-	if len(asns) > 0 {
-		p = (*C.uint32_t)(unsafe.Pointer(&asns[0]))
-	}
-	if rc := C.lr_route_set_as_path(r.ptr, p, C.size_t(len(asns))); rc != 0 {
-		return fmt.Errorf("lr_route_set_as_path: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var p *C.uint32_t
+        if len(asns) > 0 {
+                p = (*C.uint32_t)(unsafe.Pointer(&asns[0]))
+        }
+        if rc := C.lr_route_set_as_path(r.ptr, p, C.size_t(len(asns))); rc != 0 {
+                return fmt.Errorf("lr_route_set_as_path: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // AsPath reads the AS_PATH's flat AS_SEQUENCE.
 func (r *Route) AsPath() ([]uint32, error) {
-	n := C.lr_route_as_path(r.ptr, nil, 0)
-	if n < 0 {
-		return nil, fmt.Errorf("lr_route_as_path: %s (rc=%d)", LastError(), int(n))
-	}
-	out := make([]uint32, n)
-	if n > 0 {
-		if rc := C.lr_route_as_path(r.ptr, (*C.uint32_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
-			return nil, fmt.Errorf("lr_route_as_path: %s (rc=%d)", LastError(), int(rc))
-		}
-	}
-	return out, nil
+        n := C.lr_route_as_path(r.ptr, nil, 0)
+        if n < 0 {
+                return nil, fmt.Errorf("lr_route_as_path: %s (rc=%d)", LastError(), int(n))
+        }
+        out := make([]uint32, n)
+        if n > 0 {
+                if rc := C.lr_route_as_path(r.ptr, (*C.uint32_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
+                        return nil, fmt.Errorf("lr_route_as_path: %s (rc=%d)", LastError(), int(rc))
+                }
+        }
+        return out, nil
 }
 
 // AddCommunity appends one standard community (2-byte ASN).
 func (r *Route) AddCommunity(asn uint32, value uint16) error {
-	if rc := C.lr_route_add_community(r.ptr, C.uint32_t(asn), C.uint16_t(value)); rc != 0 {
-		return fmt.Errorf("lr_route_add_community: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_add_community(r.ptr, C.uint32_t(asn), C.uint16_t(value)); rc != 0 {
+                return fmt.Errorf("lr_route_add_community: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // SetCommunities replaces the standard communities from packed
 // asn<<16|value items (empty drops the attribute).
 func (r *Route) SetCommunities(packed []uint64) error {
-	var p *C.uint64_t
-	if len(packed) > 0 {
-		p = (*C.uint64_t)(unsafe.Pointer(&packed[0]))
-	}
-	if rc := C.lr_route_set_communities(r.ptr, p, C.size_t(len(packed))); rc != 0 {
-		return fmt.Errorf("lr_route_set_communities: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var p *C.uint64_t
+        if len(packed) > 0 {
+                p = (*C.uint64_t)(unsafe.Pointer(&packed[0]))
+        }
+        if rc := C.lr_route_set_communities(r.ptr, p, C.size_t(len(packed))); rc != 0 {
+                return fmt.Errorf("lr_route_set_communities: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Communities reads the standard communities as packed asn<<16|value.
 func (r *Route) Communities() ([]uint64, error) {
-	n := C.lr_route_communities(r.ptr, nil, 0)
-	if n < 0 {
-		return nil, fmt.Errorf("lr_route_communities: %s (rc=%d)", LastError(), int(n))
-	}
-	out := make([]uint64, n)
-	if n > 0 {
-		if rc := C.lr_route_communities(r.ptr, (*C.uint64_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
-			return nil, fmt.Errorf("lr_route_communities: %s (rc=%d)", LastError(), int(rc))
-		}
-	}
-	return out, nil
+        n := C.lr_route_communities(r.ptr, nil, 0)
+        if n < 0 {
+                return nil, fmt.Errorf("lr_route_communities: %s (rc=%d)", LastError(), int(n))
+        }
+        out := make([]uint64, n)
+        if n > 0 {
+                if rc := C.lr_route_communities(r.ptr, (*C.uint64_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
+                        return nil, fmt.Errorf("lr_route_communities: %s (rc=%d)", LastError(), int(rc))
+                }
+        }
+        return out, nil
 }
 
 // AddLargeCommunity appends one RFC 8092 large community.
 func (r *Route) AddLargeCommunity(globalAdmin, localData1, localData2 uint32) error {
-	if rc := C.lr_route_add_large_community(r.ptr, C.uint32_t(globalAdmin),
-		C.uint32_t(localData1), C.uint32_t(localData2)); rc != 0 {
-		return fmt.Errorf("lr_route_add_large_community: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_add_large_community(r.ptr, C.uint32_t(globalAdmin),
+                C.uint32_t(localData1), C.uint32_t(localData2)); rc != 0 {
+                return fmt.Errorf("lr_route_add_large_community: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // LargeCommunities reads the large communities as flat triples.
 func (r *Route) LargeCommunities() ([]uint32, error) {
-	n := C.lr_route_large_communities(r.ptr, nil, 0)
-	if n < 0 {
-		return nil, fmt.Errorf("lr_route_large_communities: %s (rc=%d)", LastError(), int(n))
-	}
-	out := make([]uint32, n)
-	if n > 0 {
-		if rc := C.lr_route_large_communities(r.ptr, (*C.uint32_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
-			return nil, fmt.Errorf("lr_route_large_communities: %s (rc=%d)", LastError(), int(rc))
-		}
-	}
-	return out, nil
+        n := C.lr_route_large_communities(r.ptr, nil, 0)
+        if n < 0 {
+                return nil, fmt.Errorf("lr_route_large_communities: %s (rc=%d)", LastError(), int(n))
+        }
+        out := make([]uint32, n)
+        if n > 0 {
+                if rc := C.lr_route_large_communities(r.ptr, (*C.uint32_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
+                        return nil, fmt.Errorf("lr_route_large_communities: %s (rc=%d)", LastError(), int(rc))
+                }
+        }
+        return out, nil
 }
 
 // SetLargeCommunities replaces the LARGE_COMMUNITIES attribute (RFC 8092)
 // from flat triples [g1, d1_1, d1_2, g2, d2_1, d2_2, ...]. An empty slice
 // drops the attribute. len(triples) must be a multiple of three.
 func (r *Route) SetLargeCommunities(triples []uint32) error {
-	if len(triples)%3 != 0 {
-		return fmt.Errorf("SetLargeCommunities: triples must come in groups of three")
-	}
-	var p *C.uint32_t
-	if len(triples) > 0 {
-		p = (*C.uint32_t)(unsafe.Pointer(&triples[0]))
-	}
-	// The C ABI takes the entry count, not the u32 count.
-	if rc := C.lr_route_set_large_communities(r.ptr, p, C.size_t(len(triples)/3)); rc != 0 {
-		return fmt.Errorf("lr_route_set_large_communities: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if len(triples)%3 != 0 {
+                return fmt.Errorf("SetLargeCommunities: triples must come in groups of three")
+        }
+        var p *C.uint32_t
+        if len(triples) > 0 {
+                p = (*C.uint32_t)(unsafe.Pointer(&triples[0]))
+        }
+        // The C ABI takes the entry count, not the u32 count.
+        if rc := C.lr_route_set_large_communities(r.ptr, p, C.size_t(len(triples)/3)); rc != 0 {
+                return fmt.Errorf("lr_route_set_large_communities: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // AddExtCommunity appends one RFC 4360 extended community.
 func (r *Route) AddExtCommunity(kind, subtype byte, global uint32, local uint16) error {
-	if rc := C.lr_route_add_ext_community(r.ptr, C.uint8_t(kind), C.uint8_t(subtype),
-		C.uint32_t(global), C.uint16_t(local)); rc != 0 {
-		return fmt.Errorf("lr_route_add_ext_community: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_add_ext_community(r.ptr, C.uint8_t(kind), C.uint8_t(subtype),
+                C.uint32_t(global), C.uint16_t(local)); rc != 0 {
+                return fmt.Errorf("lr_route_add_ext_community: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // ExtCommunities reads the extended communities.
 func (r *Route) ExtCommunities() ([]ExtCommunity, error) {
-	n := C.lr_route_ext_communities(r.ptr, nil, 0)
-	if n < 0 {
-		return nil, fmt.Errorf("lr_route_ext_communities: %s (rc=%d)", LastError(), int(n))
-	}
-	raw := make([]C.struct_lr_ext_comm_t, n)
-	if n > 0 {
-		if rc := C.lr_route_ext_communities(r.ptr, &raw[0], C.size_t(n)); rc < 0 {
-			return nil, fmt.Errorf("lr_route_ext_communities: %s (rc=%d)", LastError(), int(rc))
-		}
-	}
-	out := make([]ExtCommunity, 0, len(raw))
-	for _, e := range raw {
-		out = append(out, ExtCommunity{Kind: byte(e.kind), Subtype: byte(e.subtype),
-			Global: uint32(e.global), Local: uint16(e.local)})
-	}
-	return out, nil
+        n := C.lr_route_ext_communities(r.ptr, nil, 0)
+        if n < 0 {
+                return nil, fmt.Errorf("lr_route_ext_communities: %s (rc=%d)", LastError(), int(n))
+        }
+        raw := make([]C.struct_lr_ext_comm_t, n)
+        if n > 0 {
+                if rc := C.lr_route_ext_communities(r.ptr, &raw[0], C.size_t(n)); rc < 0 {
+                        return nil, fmt.Errorf("lr_route_ext_communities: %s (rc=%d)", LastError(), int(rc))
+                }
+        }
+        out := make([]ExtCommunity, 0, len(raw))
+        for _, e := range raw {
+                out = append(out, ExtCommunity{Kind: byte(e.kind), Subtype: byte(e.subtype),
+                        Global: uint32(e.global), Local: uint16(e.local)})
+        }
+        return out, nil
 }
 
 // SetExtCommunities replaces the whole EXTENDED_COMMUNITIES attribute
 // (RFC 4360). An empty slice drops the attribute.
 func (r *Route) SetExtCommunities(items []ExtCommunity) error {
-	var p *C.struct_lr_ext_comm_t
-	if len(items) > 0 {
-		raw := make([]C.struct_lr_ext_comm_t, len(items))
-		for i, it := range items {
-			raw[i].kind = C.uint8_t(it.Kind)
-			raw[i].subtype = C.uint8_t(it.Subtype)
-			raw[i].global = C.uint32_t(it.Global)
-			raw[i].local = C.uint16_t(it.Local)
-		}
-		p = &raw[0]
-	}
-	if rc := C.lr_route_set_ext_communities(r.ptr, p, C.size_t(len(items))); rc != 0 {
-		return fmt.Errorf("lr_route_set_ext_communities: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var p *C.struct_lr_ext_comm_t
+        if len(items) > 0 {
+                raw := make([]C.struct_lr_ext_comm_t, len(items))
+                for i, it := range items {
+                        raw[i].kind = C.uint8_t(it.Kind)
+                        raw[i].subtype = C.uint8_t(it.Subtype)
+                        raw[i].global = C.uint32_t(it.Global)
+                        raw[i].local = C.uint16_t(it.Local)
+                }
+                p = &raw[0]
+        }
+        if rc := C.lr_route_set_ext_communities(r.ptr, p, C.size_t(len(items))); rc != 0 {
+                return fmt.Errorf("lr_route_set_ext_communities: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // ExtCommunity mirrors lr_ext_comm_t (RFC 4360).
 type ExtCommunity struct {
-	Kind    byte
-	Subtype byte
-	Global  uint32
-	Local   uint16
+        Kind    byte
+        Subtype byte
+        Global  uint32
+        Local   uint16
 }
 
 // SetMetric sets the route's cross-protocol metric.
 func (r *Route) SetMetric(value uint32) error {
-	if rc := C.lr_route_set_metric(r.ptr, C.uint32_t(value)); rc != 0 {
-		return fmt.Errorf("lr_route_set_metric: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_set_metric(r.ptr, C.uint32_t(value)); rc != 0 {
+                return fmt.Errorf("lr_route_set_metric: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Metric reads the route's cross-protocol metric.
 func (r *Route) Metric() (uint32, error) {
-	var v C.uint32_t
-	if rc := C.lr_route_metric(r.ptr, &v); rc != 0 {
-		return 0, fmt.Errorf("lr_route_metric: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint32(v), nil
+        var v C.uint32_t
+        if rc := C.lr_route_metric(r.ptr, &v); rc != 0 {
+                return 0, fmt.Errorf("lr_route_metric: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint32(v), nil
 }
 
 // SetTag sets (or, with ok=false, clears) the route tag.
 func (r *Route) SetTag(tag uint32, ok bool) error {
-	if rc := C.lr_route_set_tag(r.ptr, cIntBool(ok), C.uint32_t(tag)); rc != 0 {
-		return fmt.Errorf("lr_route_set_tag: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_set_tag(r.ptr, cIntBool(ok), C.uint32_t(tag)); rc != 0 {
+                return fmt.Errorf("lr_route_set_tag: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Tag reads the operator route tag. ok is false when the tag is absent.
 func (r *Route) Tag() (uint32, bool, error) {
-	var v C.uint32_t
-	rc := C.lr_route_tag(r.ptr, &v)
-	if rc == 1 {
-		return 0, false, nil
-	}
-	if rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_tag: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint32(v), true, nil
+        var v C.uint32_t
+        rc := C.lr_route_tag(r.ptr, &v)
+        if rc == 1 {
+                return 0, false, nil
+        }
+        if rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_tag: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint32(v), true, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -3110,465 +3170,465 @@ func (r *Route) Tag() (uint32, bool, error) {
 // AtomicAggregate reports whether the route carries an
 // ATOMIC_AGGREGATE attribute (RFC 4271 §5.1.6).
 func (r *Route) AtomicAggregate() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_atomic_aggregate(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_atomic_aggregate: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_atomic_aggregate(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_atomic_aggregate: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // OriginatorID reads the ORIGINATOR_ID (RFC 4456 §8). 4-byte IPv4.
 // ok is false when the attribute is absent.
 func (r *Route) OriginatorID() (addr [4]byte, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_originator_id(r.ptr, (*C.uint8_t)(&addr[0]), &present); rc != 0 {
-		return [4]byte{}, false, fmt.Errorf("lr_route_originator_id: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return [4]byte{}, false, nil
-	}
-	return addr, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_originator_id(r.ptr, (*C.uint8_t)(&addr[0]), &present); rc != 0 {
+                return [4]byte{}, false, fmt.Errorf("lr_route_originator_id: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return [4]byte{}, false, nil
+        }
+        return addr, true, nil
 }
 
 // HasClusterList reports whether the route carries a CLUSTER_LIST
 // attribute (RFC 4456 §8).
 func (r *Route) HasClusterList() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_cluster_list(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_cluster_list: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_cluster_list(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_cluster_list: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // ClusterList reads the CLUSTER_LIST (RFC 4456 §8) — flat 4-byte
 // IPv4 Cluster-IDs.
 func (r *Route) ClusterList() ([][4]byte, error) {
-	var n C.uintptr_t
-	if rc := C.lr_route_cluster_list_len(r.ptr, &n); rc != 0 {
-		return nil, fmt.Errorf("lr_route_cluster_list_len: %s (rc=%d)", LastError(), int(rc))
-	}
-	out := make([][4]byte, int(n))
-	for i := 0; i < int(n); i++ {
-		var addr [4]byte
-		if rc := C.lr_route_cluster_list_at(r.ptr, C.uintptr_t(i), (*C.uint8_t)(&addr[0])); rc != 0 {
-			return nil, fmt.Errorf("lr_route_cluster_list_at: %s (rc=%d)", LastError(), int(rc))
-		}
-		out[i] = addr
-	}
-	return out, nil
+        var n C.uintptr_t
+        if rc := C.lr_route_cluster_list_len(r.ptr, &n); rc != 0 {
+                return nil, fmt.Errorf("lr_route_cluster_list_len: %s (rc=%d)", LastError(), int(rc))
+        }
+        out := make([][4]byte, int(n))
+        for i := 0; i < int(n); i++ {
+                var addr [4]byte
+                if rc := C.lr_route_cluster_list_at(r.ptr, C.uintptr_t(i), (*C.uint8_t)(&addr[0])); rc != 0 {
+                        return nil, fmt.Errorf("lr_route_cluster_list_at: %s (rc=%d)", LastError(), int(rc))
+                }
+                out[i] = addr
+        }
+        return out, nil
 }
 
 // HasOtc reports whether the route carries an OTC attribute
 // (RFC 9231 §4).
 func (r *Route) HasOtc() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_otc(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_otc: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_otc(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_otc: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // Otc reads the OTC value (RFC 9231 §4). ok is false when absent.
 func (r *Route) Otc() (value uint32, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_otc(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_otc: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_otc(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_otc: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // HasAigp reports whether the route carries an AIGP attribute
 // (RFC 7311).
 func (r *Route) HasAigp() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_aigp(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_aigp: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_aigp(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_aigp: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // Aigp reads the AIGP value (RFC 7311). ok is false when absent.
 func (r *Route) Aigp() (value uint64, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_aigp(r.ptr, (*C.uint64_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_aigp: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_aigp(r.ptr, (*C.uint64_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_aigp: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // HasAggregator reports whether the route carries an AGGREGATOR
 // attribute (RFC 4271 §5.1.7 / RFC 6793 §4).
 func (r *Route) HasAggregator() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_aggregator(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_aggregator: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_aggregator(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_aggregator: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // AggregatorAsn reads the AGGREGATOR AS number (RFC 4271 §5.1.7 /
 // RFC 6793 §4). ok is false when absent.
 func (r *Route) AggregatorAsn() (value uint32, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_aggregator_asn(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_aggregator_asn: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_aggregator_asn(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_aggregator_asn: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // AggregatorSpeaker reads the AGGREGATOR speaker IPv4 address
 // (RFC 4271 §5.1.7 / RFC 6793 §4). 4 bytes. ok is false when absent.
 func (r *Route) AggregatorSpeaker() (addr [4]byte, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_aggregator_speaker(r.ptr, (*C.uint8_t)(&addr[0]), &present); rc != 0 {
-		return [4]byte{}, false, fmt.Errorf("lr_route_aggregator_speaker: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return [4]byte{}, false, nil
-	}
-	return addr, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_aggregator_speaker(r.ptr, (*C.uint8_t)(&addr[0]), &present); rc != 0 {
+                return [4]byte{}, false, fmt.Errorf("lr_route_aggregator_speaker: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return [4]byte{}, false, nil
+        }
+        return addr, true, nil
 }
 
 // HasPmsiTunnel reports whether the route carries a PMSI_TUNNEL
 // attribute (RFC 6514 §5).
 func (r *Route) HasPmsiTunnel() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_pmsi_tunnel(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_pmsi_tunnel: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_pmsi_tunnel(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_pmsi_tunnel: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // PmsiTunnelFlags reads the PMSI_TUNNEL flags (RFC 6514 §5). ok is
 // false when the attribute is absent.
 func (r *Route) PmsiTunnelFlags() (flags uint8, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_pmsi_tunnel_flags(r.ptr, (*C.uint8_t)(&flags), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_pmsi_tunnel_flags: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return flags, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_pmsi_tunnel_flags(r.ptr, (*C.uint8_t)(&flags), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_pmsi_tunnel_flags: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return flags, true, nil
 }
 
 // AsSequence reads the flat AS_SEQUENCE (RFC 4271 §5.1.2) — sets
 // flattened in order.
 func (r *Route) AsSequence() ([]uint32, error) {
-	var n C.uintptr_t
-	if rc := C.lr_route_as_sequence_len(r.ptr, &n); rc != 0 {
-		return nil, fmt.Errorf("lr_route_as_sequence_len: %s (rc=%d)", LastError(), int(rc))
-	}
-	out := make([]uint32, int(n))
-	for i := 0; i < int(n); i++ {
-		var v C.uint32_t
-		if rc := C.lr_route_as_sequence_at(r.ptr, C.uintptr_t(i), &v); rc != 0 {
-			return nil, fmt.Errorf("lr_route_as_sequence_at: %s (rc=%d)", LastError(), int(rc))
-		}
-		out[i] = uint32(v)
-	}
-	return out, nil
+        var n C.uintptr_t
+        if rc := C.lr_route_as_sequence_len(r.ptr, &n); rc != 0 {
+                return nil, fmt.Errorf("lr_route_as_sequence_len: %s (rc=%d)", LastError(), int(rc))
+        }
+        out := make([]uint32, int(n))
+        for i := 0; i < int(n); i++ {
+                var v C.uint32_t
+                if rc := C.lr_route_as_sequence_at(r.ptr, C.uintptr_t(i), &v); rc != 0 {
+                        return nil, fmt.Errorf("lr_route_as_sequence_at: %s (rc=%d)", LastError(), int(rc))
+                }
+                out[i] = uint32(v)
+        }
+        return out, nil
 }
 
 // SetAsSequence replaces the route's AS_PATH with a flat
 // AS_SEQUENCE (RFC 4271 §5.1.2). The previous AS_PATH is overwritten.
 func (r *Route) SetAsSequence(asns []uint32) error {
-	var p *C.uint32_t
-	if len(asns) > 0 {
-		tmp := make([]C.uint32_t, len(asns))
-		for i, v := range asns {
-			tmp[i] = C.uint32_t(v)
-		}
-		p = &tmp[0]
-	}
-	if rc := C.lr_route_set_as_sequence(r.ptr, p, C.uintptr_t(len(asns))); rc != 0 {
-		return fmt.Errorf("lr_route_set_as_sequence: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        var p *C.uint32_t
+        if len(asns) > 0 {
+                tmp := make([]C.uint32_t, len(asns))
+                for i, v := range asns {
+                        tmp[i] = C.uint32_t(v)
+                }
+                p = &tmp[0]
+        }
+        if rc := C.lr_route_set_as_sequence(r.ptr, p, C.uintptr_t(len(asns))); rc != 0 {
+                return fmt.Errorf("lr_route_set_as_sequence: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // PrependAs prepends asn to the route's AS_PATH (RFC 4271 §5.1.2 —
 // the standard eBGP AS_PATH prepend action).
 func (r *Route) PrependAs(asn uint32) error {
-	if rc := C.lr_route_prepend_as(r.ptr, C.uint32_t(asn)); rc != 0 {
-		return fmt.Errorf("lr_route_prepend_as: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_prepend_as(r.ptr, C.uint32_t(asn)); rc != 0 {
+                return fmt.Errorf("lr_route_prepend_as: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // RemoveCommunity removes the (asn, value) community from the
 // COMMUNITIES attribute (RFC 1997 §4). No-op when the route carries
 // no COMMUNITIES or the community is not present.
 func (r *Route) RemoveCommunity(asn uint32, value uint16) error {
-	if rc := C.lr_route_remove_community(r.ptr, C.uint32_t(asn), C.uint16_t(value)); rc != 0 {
-		return fmt.Errorf("lr_route_remove_community: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_route_remove_community(r.ptr, C.uint32_t(asn), C.uint16_t(value)); rc != 0 {
+                return fmt.Errorf("lr_route_remove_community: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // HasBabelMetric reports whether the route carries a Babel metric
 // attribute (RFC 8966 §3.2).
 func (r *Route) HasBabelMetric() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_babel_metric(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_babel_metric: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_babel_metric(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_babel_metric: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // BabelMetric reads the Babel primary metric (RFC 8966 §3.2 + §3.4.3).
 // ok is false when absent.
 func (r *Route) BabelMetric() (value uint32, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_babel_metric(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_babel_metric: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_babel_metric(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_babel_metric: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // HasBabelSeqno reports whether the route carries a Babel sequence
 // number attribute.
 func (r *Route) HasBabelSeqno() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_babel_seqno(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_babel_seqno: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_babel_seqno(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_babel_seqno: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // BabelSeqno reads the Babel sequence number (RFC 8966 §3.2 + §4.6.9).
 // ok is false when absent.
 func (r *Route) BabelSeqno() (value uint16, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_babel_seqno(r.ptr, (*C.uint16_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_babel_seqno: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_babel_seqno(r.ptr, (*C.uint16_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_babel_seqno: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // HasBabelRouterID reports whether the route carries a Babel
 // router-id attribute.
 func (r *Route) HasBabelRouterID() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_babel_router_id(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_babel_router_id: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_babel_router_id(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_babel_router_id: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // BabelRouterID reads the Babel router-id (RFC 8966 §3.2 + §4.6.9),
 // 8 bytes big-endian. ok is false when absent.
 func (r *Route) BabelRouterID() (rid [8]byte, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_babel_router_id(r.ptr, (*C.uint8_t)(&rid[0]), &present); rc != 0 {
-		return [8]byte{}, false, fmt.Errorf("lr_route_babel_router_id: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return [8]byte{}, false, nil
-	}
-	return rid, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_babel_router_id(r.ptr, (*C.uint8_t)(&rid[0]), &present); rc != 0 {
+                return [8]byte{}, false, fmt.Errorf("lr_route_babel_router_id: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return [8]byte{}, false, nil
+        }
+        return rid, true, nil
 }
 
 // HasOspfMetric1 reports whether the route carries an OSPF metric1
 // attribute (RFC 2328 §16).
 func (r *Route) HasOspfMetric1() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_ospf_metric1(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_ospf_metric1: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_ospf_metric1(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_ospf_metric1: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // OspfMetric1 reads the OSPF primary metric (RFC 2328 §16 /
 // RFC 5340 §4.1). ok is false when absent.
 func (r *Route) OspfMetric1() (value uint32, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_ospf_metric1(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_ospf_metric1: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_ospf_metric1(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_ospf_metric1: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // HasOspfMetric2 reports whether the route carries an OSPF metric2
 // attribute.
 func (r *Route) HasOspfMetric2() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_ospf_metric2(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_ospf_metric2: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_ospf_metric2(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_ospf_metric2: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // OspfMetric2 reads the OSPF type-2 external metric (RFC 2328 §16.4 /
 // RFC 5340 §4.8.5). ok is false when absent.
 func (r *Route) OspfMetric2() (value uint32, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_ospf_metric2(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_ospf_metric2: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_ospf_metric2(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_ospf_metric2: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // HasOspfTag reports whether the route carries an OSPF tag attribute.
 func (r *Route) HasOspfTag() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_ospf_tag(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_ospf_tag: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_ospf_tag(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_ospf_tag: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // OspfTag reads the OSPF external route tag (RFC 2328 §A.4.5 /
 // RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 External-Prefix
 // sub-TLV 3). ok is false when absent.
 func (r *Route) OspfTag() (value uint32, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_ospf_tag(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_ospf_tag: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_ospf_tag(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_ospf_tag: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // HasOspfRouterID reports whether the route carries an OSPF router-id
 // attribute.
 func (r *Route) HasOspfRouterID() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_has_ospf_router_id(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_has_ospf_router_id: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_has_ospf_router_id(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_has_ospf_router_id: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // OspfRouterID reads the OSPF advertising router (RFC 2328 §A.4 /
 // RFC 5340 §A.4). ok is false when absent.
 func (r *Route) OspfRouterID() (value uint32, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_ospf_router_id(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_ospf_router_id: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return value, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_ospf_router_id(r.ptr, (*C.uint32_t)(&value), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_ospf_router_id: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return value, true, nil
 }
 
 // LrxpStoreKind reads the LRXP store-kind tag (design §4):
 //
-//	0 = no LRXP attribute, 1 = verified record set, 2 = partial-raw.
+//      0 = no LRXP attribute, 1 = verified record set, 2 = partial-raw.
 //
 // ok is false when the route carries no LRXP attribute at all.
 func (r *Route) LrxpStoreKind() (kind uint8, ok bool, err error) {
-	var present C.uint8_t
-	if rc := C.lr_route_lrxp_store_kind(r.ptr, (*C.uint8_t)(&kind), &present); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_store_kind: %s (rc=%d)", LastError(), int(rc))
-	}
-	if present == 0 {
-		return 0, false, nil
-	}
-	return kind, true, nil
+        var present C.uint8_t
+        if rc := C.lr_route_lrxp_store_kind(r.ptr, (*C.uint8_t)(&kind), &present); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_store_kind: %s (rc=%d)", LastError(), int(rc))
+        }
+        if present == 0 {
+                return 0, false, nil
+        }
+        return kind, true, nil
 }
 
 // LrxpVerified reports whether the route carries a verified LRXP
 // record set (design §4).
 func (r *Route) LrxpVerified() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_lrxp_verified(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_lrxp_verified: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_lrxp_verified(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_lrxp_verified: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // LrxpPartialTransit reports whether the route carries partial-transit
 // LRXP forwarding material (design §4).
 func (r *Route) LrxpPartialTransit() (bool, error) {
-	var v C.uint8_t
-	if rc := C.lr_route_lrxp_partial_transit(r.ptr, &v); rc != 0 {
-		return false, fmt.Errorf("lr_route_lrxp_partial_transit: %s (rc=%d)", LastError(), int(rc))
-	}
-	return v != 0, nil
+        var v C.uint8_t
+        if rc := C.lr_route_lrxp_partial_transit(r.ptr, &v); rc != 0 {
+                return false, fmt.Errorf("lr_route_lrxp_partial_transit: %s (rc=%d)", LastError(), int(rc))
+        }
+        return v != 0, nil
 }
 
 // LrxpHintRank reads the sender's best-path rank for this path
 // among its alternates (design §5.1: 1 = the path the sender itself
 // uses). ok is false when the route carries no verified hint record.
 func (r *Route) LrxpHintRank() (rank uint8, ok bool, err error) {
-	if rc := C.lr_route_lrxp_hint_rank(r.ptr, (*C.uint8_t)(&rank)); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_hint_rank: %s (rc=%d)", LastError(), int(rc))
-	}
-	// 0 means "no verified hint record"; valid ranks start at 1.
-	return rank, rank != 0, nil
+        if rc := C.lr_route_lrxp_hint_rank(r.ptr, (*C.uint8_t)(&rank)); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_hint_rank: %s (rc=%d)", LastError(), int(rc))
+        }
+        // 0 means "no verified hint record"; valid ranks start at 1.
+        return rank, rank != 0, nil
 }
 
 // LrxpHintDampFom reads the sender's route-flap figure of merit
 // for the prefix (design §5.1: 0 when damping is off). ok is false
 // when the route carries no verified hint record.
 func (r *Route) LrxpHintDampFom() (fom uint16, ok bool, err error) {
-	if rc := C.lr_route_lrxp_hint_damp_fom(r.ptr, (*C.uint16_t)(&fom)); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_hint_damp_fom: %s (rc=%d)", LastError(), int(rc))
-	}
-	// The C ABI returns 0 for "no verified hint record"; a non-zero
-	// FOM is unambiguous, but a 0 with no hint record is the common
-	// case. Use LrxpVerified to disambiguate when needed.
-	return fom, true, nil
+        if rc := C.lr_route_lrxp_hint_damp_fom(r.ptr, (*C.uint16_t)(&fom)); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_hint_damp_fom: %s (rc=%d)", LastError(), int(rc))
+        }
+        // The C ABI returns 0 for "no verified hint record"; a non-zero
+        // FOM is unambiguous, but a 0 with no hint record is the common
+        // case. Use LrxpVerified to disambiguate when needed.
+        return fom, true, nil
 }
 
 // LrxpHintIgpCost reads the sender's IGP cost from its decision
 // point to this path's next hop (design §5.1). ok is false when
 // the route carries no verified hint record.
 func (r *Route) LrxpHintIgpCost() (cost uint32, ok bool, err error) {
-	if rc := C.lr_route_lrxp_hint_igp_cost(r.ptr, (*C.uint32_t)(&cost)); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_hint_igp_cost: %s (rc=%d)", LastError(), int(rc))
-	}
-	return cost, true, nil
+        if rc := C.lr_route_lrxp_hint_igp_cost(r.ptr, (*C.uint32_t)(&cost)); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_hint_igp_cost: %s (rc=%d)", LastError(), int(rc))
+        }
+        return cost, true, nil
 }
 
 // LrxpPolicyRole reads the sender's RFC 9234 role claim for this
 // session (design §5.2):
 //
-//	0 = provider, 1 = customer, 2 = RS, 3 = RS-client, 4 = peer,
-//	255 = unspecified.
+//      0 = provider, 1 = customer, 2 = RS, 3 = RS-client, 4 = peer,
+//      255 = unspecified.
 //
 // ok is false when the route carries no verified policy record.
 func (r *Route) LrxpPolicyRole() (role uint8, ok bool, err error) {
-	if rc := C.lr_route_lrxp_policy_role(r.ptr, (*C.uint8_t)(&role)); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_policy_role: %s (rc=%d)", LastError(), int(rc))
-	}
-	// 255 (unspecified) signals "no verified policy record".
-	return role, role != 255, nil
+        if rc := C.lr_route_lrxp_policy_role(r.ptr, (*C.uint8_t)(&role)); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_policy_role: %s (rc=%d)", LastError(), int(rc))
+        }
+        // 255 (unspecified) signals "no verified policy record".
+        return role, role != 255, nil
 }
 
 // LrxpOriginAs reads the origin AS the attestation authorises for
 // this announcement set (design §5.3). ok is false when the route
 // carries no verified origin record.
 func (r *Route) LrxpOriginAs() (asn uint32, ok bool, err error) {
-	if rc := C.lr_route_lrxp_origin_as(r.ptr, (*C.uint32_t)(&asn)); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_origin_as: %s (rc=%d)", LastError(), int(rc))
-	}
-	return asn, asn != 0, nil
+        if rc := C.lr_route_lrxp_origin_as(r.ptr, (*C.uint32_t)(&asn)); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_origin_as: %s (rc=%d)", LastError(), int(rc))
+        }
+        return asn, asn != 0, nil
 }
 
 // LrxpOriginMaxValidLen reads the maximum prefix length the origin
@@ -3576,349 +3636,349 @@ func (r *Route) LrxpOriginAs() (asn uint32, ok bool, err error) {
 // maxLength idea, RFC 6811 §3, without the PKI). ok is false when
 // the route carries no verified origin record.
 func (r *Route) LrxpOriginMaxValidLen() (maxLen uint8, ok bool, err error) {
-	if rc := C.lr_route_lrxp_origin_max_valid_len(r.ptr, (*C.uint8_t)(&maxLen)); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_origin_max_valid_len: %s (rc=%d)", LastError(), int(rc))
-	}
-	return maxLen, maxLen != 0, nil
+        if rc := C.lr_route_lrxp_origin_max_valid_len(r.ptr, (*C.uint8_t)(&maxLen)); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_origin_max_valid_len: %s (rc=%d)", LastError(), int(rc))
+        }
+        return maxLen, maxLen != 0, nil
 }
 
 // LrxpOriginExpiry reads the absolute timestamp after which
 // downstream speakers stop trusting the record (design §5.3).
 // ok is false when the route carries no verified origin record.
 func (r *Route) LrxpOriginExpiry() (expiry uint32, ok bool, err error) {
-	if rc := C.lr_route_lrxp_origin_expiry(r.ptr, (*C.uint32_t)(&expiry)); rc != 0 {
-		return 0, false, fmt.Errorf("lr_route_lrxp_origin_expiry: %s (rc=%d)", LastError(), int(rc))
-	}
-	return expiry, expiry != 0, nil
+        if rc := C.lr_route_lrxp_origin_expiry(r.ptr, (*C.uint32_t)(&expiry)); rc != 0 {
+                return 0, false, fmt.Errorf("lr_route_lrxp_origin_expiry: %s (rc=%d)", LastError(), int(rc))
+        }
+        return expiry, expiry != 0, nil
 }
 
 // PrefixList is an owned prefix-list handle (FRR ge/le semantics,
 // first-match evaluation, implicit deny).
 type PrefixList struct {
-	ptr C.lr_prefix_list_t
+        ptr C.lr_prefix_list_t
 }
 
 // NewPrefixList creates an empty prefix-list.
 func NewPrefixList() (*PrefixList, error) {
-	ptr := C.lr_prefix_list_new()
-	if ptr == nil {
-		return nil, fmt.Errorf("lr_prefix_list_new returned null")
-	}
-	l := &PrefixList{ptr: ptr}
-	runtime.SetFinalizer(l, (*PrefixList).destroy)
-	return l, nil
+        ptr := C.lr_prefix_list_new()
+        if ptr == nil {
+                return nil, fmt.Errorf("lr_prefix_list_new returned null")
+        }
+        l := &PrefixList{ptr: ptr}
+        runtime.SetFinalizer(l, (*PrefixList).destroy)
+        return l, nil
 }
 
 func (l *PrefixList) destroy() {
-	if l.ptr != nil {
-		C.lr_prefix_list_free(l.ptr)
-		l.ptr = nil
-	}
+        if l.ptr != nil {
+                C.lr_prefix_list_free(l.ptr)
+                l.ptr = nil
+        }
 }
 
 // Free releases the handle (optional; a finalizer also runs).
 func (l *PrefixList) Free() {
-	runtime.SetFinalizer(l, nil)
-	l.destroy()
+        runtime.SetFinalizer(l, nil)
+        l.destroy()
 }
 
 // Add appends one entry (le = 255 means no upper bound).
 func (l *PrefixList) Add(spec PrefixSpec, ge, le uint8, permit bool) error {
-	if len(spec.Addr) != 4 && len(spec.Addr) != 16 {
-		return fmt.Errorf("PrefixList.Add: bad address length (want 4 or 16)")
-	}
-	var p C.struct_lr_prefix_t
-	for i := 0; i < len(spec.Addr); i++ {
-		p.addr[i] = C.uint8_t(spec.Addr[i])
-	}
-	p.is_ipv6 = toCBool(len(spec.Addr) == 16)
-	p.prefix_len = C.uint8_t(spec.PrefixLen)
-	if rc := C.lr_prefix_list_add(l.ptr, &p, C.uint8_t(ge), C.uint8_t(le), cIntBool(permit)); rc != 0 {
-		return fmt.Errorf("lr_prefix_list_add: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if len(spec.Addr) != 4 && len(spec.Addr) != 16 {
+                return fmt.Errorf("PrefixList.Add: bad address length (want 4 or 16)")
+        }
+        var p C.struct_lr_prefix_t
+        for i := 0; i < len(spec.Addr); i++ {
+                p.addr[i] = C.uint8_t(spec.Addr[i])
+        }
+        p.is_ipv6 = toCBool(len(spec.Addr) == 16)
+        p.prefix_len = C.uint8_t(spec.PrefixLen)
+        if rc := C.lr_prefix_list_add(l.ptr, &p, C.uint8_t(ge), C.uint8_t(le), cIntBool(permit)); rc != 0 {
+                return fmt.Errorf("lr_prefix_list_add: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Match evaluates the list: true = permit (false covers deny +
 // implicit deny).
 func (l *PrefixList) Match(spec PrefixSpec) (bool, error) {
-	if len(spec.Addr) != 4 && len(spec.Addr) != 16 {
-		return false, fmt.Errorf("PrefixList.Match: bad address length (want 4 or 16)")
-	}
-	var p C.struct_lr_prefix_t
-	for i := 0; i < len(spec.Addr); i++ {
-		p.addr[i] = C.uint8_t(spec.Addr[i])
-	}
-	p.is_ipv6 = toCBool(len(spec.Addr) == 16)
-	p.prefix_len = C.uint8_t(spec.PrefixLen)
-	rc := C.lr_prefix_list_match(l.ptr, &p)
-	if rc < 0 {
-		return false, fmt.Errorf("lr_prefix_list_match: %s (rc=%d)", LastError(), int(rc))
-	}
-	return rc == 1, nil
+        if len(spec.Addr) != 4 && len(spec.Addr) != 16 {
+                return false, fmt.Errorf("PrefixList.Match: bad address length (want 4 or 16)")
+        }
+        var p C.struct_lr_prefix_t
+        for i := 0; i < len(spec.Addr); i++ {
+                p.addr[i] = C.uint8_t(spec.Addr[i])
+        }
+        p.is_ipv6 = toCBool(len(spec.Addr) == 16)
+        p.prefix_len = C.uint8_t(spec.PrefixLen)
+        rc := C.lr_prefix_list_match(l.ptr, &p)
+        if rc < 0 {
+                return false, fmt.Errorf("lr_prefix_list_match: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
 }
 
 // RouteMap is an owned route-map handle: ordered entries, first match
 // wins (FRR route-map semantics).
 type RouteMap struct {
-	ptr C.lr_route_map_t
+        ptr C.lr_route_map_t
 }
 
 // NewRouteMap creates an empty route-map.
 func NewRouteMap() (*RouteMap, error) {
-	ptr := C.lr_route_map_new()
-	if ptr == nil {
-		return nil, fmt.Errorf("lr_route_map_new returned null")
-	}
-	m := &RouteMap{ptr: ptr}
-	runtime.SetFinalizer(m, (*RouteMap).destroy)
-	return m, nil
+        ptr := C.lr_route_map_new()
+        if ptr == nil {
+                return nil, fmt.Errorf("lr_route_map_new returned null")
+        }
+        m := &RouteMap{ptr: ptr}
+        runtime.SetFinalizer(m, (*RouteMap).destroy)
+        return m, nil
 }
 
 func (m *RouteMap) destroy() {
-	if m.ptr != nil {
-		C.lr_route_map_free(m.ptr)
-		m.ptr = nil
-	}
+        if m.ptr != nil {
+                C.lr_route_map_free(m.ptr)
+                m.ptr = nil
+        }
 }
 
 // Free releases the handle (optional; a finalizer also runs).
 func (m *RouteMap) Free() {
-	runtime.SetFinalizer(m, nil)
-	m.destroy()
+        runtime.SetFinalizer(m, nil)
+        m.destroy()
 }
 
 // Match is one route-map match condition.
 type Match struct {
-	Kind   uint8  // Match* constant
-	ListID uint32 // resolved list id for the *_IN kinds
-	Proto  Protocol
+        Kind   uint8  // Match* constant
+        ListID uint32 // resolved list id for the *_IN kinds
+        Proto  Protocol
 }
 
 // Set is one route-map set action.
 type Set struct {
-	Kind   uint8 // Set* constant
-	IsIPv6 bool
-	Addr   []byte // next-hop address (4 or 16 bytes) for SetNextHopKind
-	Value  uint32 // local-pref / med / AS / metric / tag / community ASN
-	Value2 uint16 // community value for SetAddCommunity
+        Kind   uint8 // Set* constant
+        IsIPv6 bool
+        Addr   []byte // next-hop address (4 or 16 bytes) for SetNextHopKind
+        Value  uint32 // local-pref / med / AS / metric / tag / community ASN
+        Value2 uint16 // community value for SetAddCommunity
 }
 
 // AddEntry appends one entry. verdict is one of the Verdict* constants.
 func (m *RouteMap) AddEntry(matches []Match, sets []Set, verdict int32) error {
-	cm := make([]C.struct_lr_match_t, len(matches))
-	for i, x := range matches {
-		cm[i].kind = C.uint8_t(x.Kind)
-		cm[i].list_id = C.uint32_t(x.ListID)
-		cm[i].protocol = C.uint8_t(x.Proto)
-	}
-	cs := make([]C.struct_lr_set_t, len(sets))
-	for i, x := range sets {
-		cs[i].kind = C.uint8_t(x.Kind)
-		cs[i].is_ipv6 = toCBool(x.IsIPv6)
-		for j := 0; j < len(x.Addr) && j < 16; j++ {
-			cs[i].addr[j] = C.uint8_t(x.Addr[j])
-		}
-		cs[i].value = C.uint32_t(x.Value)
-		cs[i].value2 = C.uint16_t(x.Value2)
-	}
-	var mp *C.struct_lr_match_t
-	var sp *C.struct_lr_set_t
-	if len(cm) > 0 {
-		mp = &cm[0]
-	}
-	if len(cs) > 0 {
-		sp = &cs[0]
-	}
-	if rc := C.lr_route_map_add_entry(m.ptr, mp, C.size_t(len(cm)), sp,
-		C.size_t(len(cs)), C.int32_t(verdict)); rc != 0 {
-		return fmt.Errorf("lr_route_map_add_entry: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        cm := make([]C.struct_lr_match_t, len(matches))
+        for i, x := range matches {
+                cm[i].kind = C.uint8_t(x.Kind)
+                cm[i].list_id = C.uint32_t(x.ListID)
+                cm[i].protocol = C.uint8_t(x.Proto)
+        }
+        cs := make([]C.struct_lr_set_t, len(sets))
+        for i, x := range sets {
+                cs[i].kind = C.uint8_t(x.Kind)
+                cs[i].is_ipv6 = toCBool(x.IsIPv6)
+                for j := 0; j < len(x.Addr) && j < 16; j++ {
+                        cs[i].addr[j] = C.uint8_t(x.Addr[j])
+                }
+                cs[i].value = C.uint32_t(x.Value)
+                cs[i].value2 = C.uint16_t(x.Value2)
+        }
+        var mp *C.struct_lr_match_t
+        var sp *C.struct_lr_set_t
+        if len(cm) > 0 {
+                mp = &cm[0]
+        }
+        if len(cs) > 0 {
+                sp = &cs[0]
+        }
+        if rc := C.lr_route_map_add_entry(m.ptr, mp, C.size_t(len(cm)), sp,
+                C.size_t(len(cs)), C.int32_t(verdict)); rc != 0 {
+                return fmt.Errorf("lr_route_map_add_entry: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // Evaluate runs the map against the route (sets mutate it). resolver
 // may be nil: list-backed matches then fail (fail-closed). Returns one
 // of the Eval* constants.
 func (m *RouteMap) Evaluate(route *Route, resolver *Resolver) (int32, error) {
-	var rp C.lr_resolver_t
-	if resolver != nil {
-		rp = resolver.ptr
-	}
-	var verdict C.int32_t
-	if rc := C.lr_route_map_evaluate(m.ptr, route.ptr, rp, &verdict); rc != 0 {
-		return 0, fmt.Errorf("lr_route_map_evaluate: %s (rc=%d)", LastError(), int(rc))
-	}
-	return int32(verdict), nil
+        var rp C.lr_resolver_t
+        if resolver != nil {
+                rp = resolver.ptr
+        }
+        var verdict C.int32_t
+        if rc := C.lr_route_map_evaluate(m.ptr, route.ptr, rp, &verdict); rc != 0 {
+                return 0, fmt.Errorf("lr_route_map_evaluate: %s (rc=%d)", LastError(), int(rc))
+        }
+        return int32(verdict), nil
 }
 
 // Resolver is an owned policy resolver (a lr_policy::PolicySet): the
 // named registry of prefix-lists / AS-path filters / community lists
 // that route-map match conditions resolve against.
 type Resolver struct {
-	ptr C.lr_resolver_t
+        ptr C.lr_resolver_t
 }
 
 // NewResolver creates an empty resolver.
 func NewResolver() (*Resolver, error) {
-	ptr := C.lr_resolver_new()
-	if ptr == nil {
-		return nil, fmt.Errorf("lr_resolver_new returned null")
-	}
-	r := &Resolver{ptr: ptr}
-	runtime.SetFinalizer(r, (*Resolver).destroy)
-	return r, nil
+        ptr := C.lr_resolver_new()
+        if ptr == nil {
+                return nil, fmt.Errorf("lr_resolver_new returned null")
+        }
+        r := &Resolver{ptr: ptr}
+        runtime.SetFinalizer(r, (*Resolver).destroy)
+        return r, nil
 }
 
 func (r *Resolver) destroy() {
-	if r.ptr != nil {
-		C.lr_resolver_free(r.ptr)
-		r.ptr = nil
-	}
+        if r.ptr != nil {
+                C.lr_resolver_free(r.ptr)
+                r.ptr = nil
+        }
 }
 
 // Free releases the handle (optional; a finalizer also runs).
 func (r *Resolver) Free() {
-	runtime.SetFinalizer(r, nil)
-	r.destroy()
+        runtime.SetFinalizer(r, nil)
+        r.destroy()
 }
 
 // AddPrefixList registers the list under name (copied in) and returns
 // its numeric list id.
 func (r *Resolver) AddPrefixList(name string, list *PrefixList) (int32, error) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	id := C.lr_resolver_add_prefix_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), list.ptr)
-	if id < 0 {
-		return 0, fmt.Errorf("lr_resolver_add_prefix_list: %s (rc=%d)", LastError(), int(id))
-	}
-	return int32(id), nil
+        cname := C.CString(name)
+        defer C.free(unsafe.Pointer(cname))
+        id := C.lr_resolver_add_prefix_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), list.ptr)
+        if id < 0 {
+                return 0, fmt.Errorf("lr_resolver_add_prefix_list: %s (rc=%d)", LastError(), int(id))
+        }
+        return int32(id), nil
 }
 
 // AsPathFilter is one FRR-dialect AS-path access-list line.
 type AsPathFilter struct {
-	Pattern string
-	Permit  bool
+        Pattern string
+        Permit  bool
 }
 
 // AddAsPathList registers an AS-path access-list under name and
 // returns its numeric list id.
 func (r *Resolver) AddAsPathList(name string, filters []AsPathFilter) (int32, error) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	cf := make([]C.struct_lr_as_path_filter_t, len(filters))
-	ptrs := make([](*C.char), 0, len(filters))
-	for i, f := range filters {
-		p := C.CString(f.Pattern)
-		ptrs = append(ptrs, p)
-		cf[i].pattern = (*C.char)(unsafe.Pointer(p))
-		if f.Permit {
-			cf[i].permit = 1
-		}
-	}
-	defer func() {
-		for _, p := range ptrs {
-			C.free(unsafe.Pointer(p))
-		}
-	}()
-	var fp *C.struct_lr_as_path_filter_t
-	if len(cf) > 0 {
-		fp = &cf[0]
-	}
-	id := C.lr_resolver_add_as_path_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), fp, C.size_t(len(cf)))
-	if id < 0 {
-		return 0, fmt.Errorf("lr_resolver_add_as_path_list: %s (rc=%d)", LastError(), int(id))
-	}
-	return int32(id), nil
+        cname := C.CString(name)
+        defer C.free(unsafe.Pointer(cname))
+        cf := make([]C.struct_lr_as_path_filter_t, len(filters))
+        ptrs := make([](*C.char), 0, len(filters))
+        for i, f := range filters {
+                p := C.CString(f.Pattern)
+                ptrs = append(ptrs, p)
+                cf[i].pattern = (*C.char)(unsafe.Pointer(p))
+                if f.Permit {
+                        cf[i].permit = 1
+                }
+        }
+        defer func() {
+                for _, p := range ptrs {
+                        C.free(unsafe.Pointer(p))
+                }
+        }()
+        var fp *C.struct_lr_as_path_filter_t
+        if len(cf) > 0 {
+                fp = &cf[0]
+        }
+        id := C.lr_resolver_add_as_path_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), fp, C.size_t(len(cf)))
+        if id < 0 {
+                return 0, fmt.Errorf("lr_resolver_add_as_path_list: %s (rc=%d)", LastError(), int(id))
+        }
+        return int32(id), nil
 }
 
 // CommunityEntry is one standard community-list line.
 type CommunityEntry struct {
-	Communities []uint64 // packed asn<<16|value
-	Permit      bool
+        Communities []uint64 // packed asn<<16|value
+        Permit      bool
 }
 
 // AddCommunityList registers a community list under name and returns
 // its numeric list id.
 func (r *Resolver) AddCommunityList(name string, entries []CommunityEntry) (int32, error) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	ce := make([]C.struct_lr_community_entry_t, len(entries))
-	for i, e := range entries {
-		if len(e.Communities) > 0 {
-			ce[i].communities = (*C.uint64_t)(unsafe.Pointer(&e.Communities[0]))
-		}
-		ce[i].count = C.size_t(len(e.Communities))
-		if e.Permit {
-			ce[i].permit = 1
-		}
-	}
-	var ep *C.struct_lr_community_entry_t
-	if len(ce) > 0 {
-		ep = &ce[0]
-	}
-	id := C.lr_resolver_add_community_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), ep, C.size_t(len(ce)))
-	if id < 0 {
-		return 0, fmt.Errorf("lr_resolver_add_community_list: %s (rc=%d)", LastError(), int(id))
-	}
-	return int32(id), nil
+        cname := C.CString(name)
+        defer C.free(unsafe.Pointer(cname))
+        ce := make([]C.struct_lr_community_entry_t, len(entries))
+        for i, e := range entries {
+                if len(e.Communities) > 0 {
+                        ce[i].communities = (*C.uint64_t)(unsafe.Pointer(&e.Communities[0]))
+                }
+                ce[i].count = C.size_t(len(e.Communities))
+                if e.Permit {
+                        ce[i].permit = 1
+                }
+        }
+        var ep *C.struct_lr_community_entry_t
+        if len(ce) > 0 {
+                ep = &ce[0]
+        }
+        id := C.lr_resolver_add_community_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), ep, C.size_t(len(ce)))
+        if id < 0 {
+                return 0, fmt.Errorf("lr_resolver_add_community_list: %s (rc=%d)", LastError(), int(id))
+        }
+        return int32(id), nil
 }
 
 // ===== D5.2 — Filter DSL: compile / evaluate / free =====
 
 // lr_filter_evaluate verdicts (LR_FILTER_*).
 const (
-	FilterAccept      = C.LR_FILTER_ACCEPT
-	FilterReject      = C.LR_FILTER_REJECT
-	FilterFallthrough = C.LR_FILTER_FALLTHROUGH
+        FilterAccept      = C.LR_FILTER_ACCEPT
+        FilterReject      = C.LR_FILTER_REJECT
+        FilterFallthrough = C.LR_FILTER_FALLTHROUGH
 )
 
 // Compile parses and compiles a BIRD-like filter body to the D3.7
 // stack VM (the daemon's hot path). Returns an error on a parse
 // failure; LastError carries the line/column diagnostic.
 func Compile(name, body string) (*CompiledFilter, error) {
-	cn := C.CString(name)
-	defer C.free(unsafe.Pointer(cn))
-	cb := C.CString(body)
-	defer C.free(unsafe.Pointer(cb))
-	ptr := C.lr_filter_compile((*C.char)(unsafe.Pointer(cn)), (*C.char)(unsafe.Pointer(cb)))
-	if ptr == nil {
-		return nil, fmt.Errorf("lr_filter_compile: %s", LastError())
-	}
-	f := &CompiledFilter{ptr: ptr}
-	runtime.SetFinalizer(f, (*CompiledFilter).destroy)
-	return f, nil
+        cn := C.CString(name)
+        defer C.free(unsafe.Pointer(cn))
+        cb := C.CString(body)
+        defer C.free(unsafe.Pointer(cb))
+        ptr := C.lr_filter_compile((*C.char)(unsafe.Pointer(cn)), (*C.char)(unsafe.Pointer(cb)))
+        if ptr == nil {
+                return nil, fmt.Errorf("lr_filter_compile: %s", LastError())
+        }
+        f := &CompiledFilter{ptr: ptr}
+        runtime.SetFinalizer(f, (*CompiledFilter).destroy)
+        return f, nil
 }
 
 // CompiledFilter is an owned compiled-filter handle.
 type CompiledFilter struct {
-	ptr C.lr_filter_t
+        ptr C.lr_filter_t
 }
 
 func (f *CompiledFilter) destroy() {
-	if f.ptr != nil {
-		C.lr_filter_free(f.ptr)
-		f.ptr = nil
-	}
+        if f.ptr != nil {
+                C.lr_filter_free(f.ptr)
+                f.ptr = nil
+        }
 }
 
 // Free releases the handle (optional; a finalizer also runs).
 func (f *CompiledFilter) Free() {
-	runtime.SetFinalizer(f, nil)
-	f.destroy()
+        runtime.SetFinalizer(f, nil)
+        f.destroy()
 }
 
 // Name reads the compiled filter's name.
 func (f *CompiledFilter) Name() (string, error) {
-	need := C.lr_filter_name(f.ptr, nil, 0)
-	if need < 0 {
-		return "", fmt.Errorf("lr_filter_name: %s (rc=%d)", LastError(), int(need))
-	}
-	buf := make([]byte, need)
-	if rc := C.lr_filter_name(f.ptr, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(need)); rc < 0 {
-		return "", fmt.Errorf("lr_filter_name: %s (rc=%d)", LastError(), int(rc))
-	}
-	return string(buf[:need-1]), nil
+        need := C.lr_filter_name(f.ptr, nil, 0)
+        if need < 0 {
+                return "", fmt.Errorf("lr_filter_name: %s (rc=%d)", LastError(), int(need))
+        }
+        buf := make([]byte, need)
+        if rc := C.lr_filter_name(f.ptr, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(need)); rc < 0 {
+                return "", fmt.Errorf("lr_filter_name: %s (rc=%d)", LastError(), int(rc))
+        }
+        return string(buf[:need-1]), nil
 }
 
 // Evaluate runs the filter against the route (mutations persist) with
@@ -3930,20 +3990,20 @@ func (f *CompiledFilter) Name() (string, error) {
 // verdict constants; for FilterReject, reason carries the
 // `reject with` payload when present.
 func (f *CompiledFilter) Evaluate(route *Route) (int32, string, error) {
-	var verdict C.int32_t
-	var reason C.struct_lr_bytes_t
-	rc := C.lr_filter_evaluate(f.ptr, route.ptr, nil, &verdict, &reason)
-	if rc != 0 {
-		return 0, "", fmt.Errorf("lr_filter_evaluate: %s (rc=%d)", LastError(), int(rc))
-	}
-	out := ""
-	if reason.ptr != nil {
-		n := C.lr_bytes_len(&reason)
-		raw := C.GoBytes(unsafe.Pointer(C.lr_bytes_ptr(&reason)), C.int(n))
-		C.lr_bytes_free(&reason)
-		out = strings.TrimRight(string(raw), "\x00")
-	}
-	return int32(verdict), out, nil
+        var verdict C.int32_t
+        var reason C.struct_lr_bytes_t
+        rc := C.lr_filter_evaluate(f.ptr, route.ptr, nil, &verdict, &reason)
+        if rc != 0 {
+                return 0, "", fmt.Errorf("lr_filter_evaluate: %s (rc=%d)", LastError(), int(rc))
+        }
+        out := ""
+        if reason.ptr != nil {
+                n := C.lr_bytes_len(&reason)
+                raw := C.GoBytes(unsafe.Pointer(C.lr_bytes_ptr(&reason)), C.int(n))
+                C.lr_bytes_free(&reason)
+                out = strings.TrimRight(string(raw), "\x00")
+        }
+        return int32(verdict), out, nil
 }
 
 // ---- RTR client (RFC 8210 §6-§8 RPKI-Router protocol state machine) ----
@@ -3961,7 +4021,7 @@ func (f *CompiledFilter) Evaluate(route *Route) (int32, string, error) {
 
 // RtrClient is a transport-agnostic RTR client state machine.
 type RtrClient struct {
-	ptr C.lr_rtr_client_t
+        ptr C.lr_rtr_client_t
 }
 
 // NewRtrClient constructs a fresh RtrClient (RFC 8210 §8.1 cold
@@ -3969,100 +4029,100 @@ type RtrClient struct {
 // RTR_VERSION_MAX). The returned *RtrClient is garbage-collected
 // via a finalizer that calls lr_rtr_client_free.
 func NewRtrClient() (*RtrClient, error) {
-	c := C.lr_rtr_client_new()
-	if c == nil {
-		return nil, fmt.Errorf("lr_rtr_client_new returned null")
-	}
-	out := &RtrClient{ptr: c}
-	runtime.SetFinalizer(out, func(o *RtrClient) {
-		if o.ptr != nil {
-			C.lr_rtr_client_free(o.ptr)
-			o.ptr = nil
-		}
-	})
-	return out, nil
+        c := C.lr_rtr_client_new()
+        if c == nil {
+                return nil, fmt.Errorf("lr_rtr_client_new returned null")
+        }
+        out := &RtrClient{ptr: c}
+        runtime.SetFinalizer(out, func(o *RtrClient) {
+                if o.ptr != nil {
+                        C.lr_rtr_client_free(o.ptr)
+                        o.ptr = nil
+                }
+        })
+        return out, nil
 }
 
 // Close releases the client early. Idempotent; the finalizer covers
 // missing Close calls.
 func (c *RtrClient) Close() {
-	if c.ptr != nil {
-		C.lr_rtr_client_free(c.ptr)
-		c.ptr = nil
-	}
+        if c.ptr != nil {
+                C.lr_rtr_client_free(c.ptr)
+                c.ptr = nil
+        }
 }
 
 // Version returns the protocol version currently spoken (post-§7
 // downgrade).
 func (c *RtrClient) Version() uint8 {
-	return uint8(C.lr_rtr_client_version(c.ptr))
+        return uint8(C.lr_rtr_client_version(c.ptr))
 }
 
 // SessionID returns the remembered session ID and true when a
 // Cache Response has been received, or 0 and false otherwise.
 func (c *RtrClient) SessionID() (uint16, bool) {
-	var v C.uint16_t
-	if C.lr_rtr_client_session_id(c.ptr, &v) == 0 {
-		return 0, false
-	}
-	return uint16(v), true
+        var v C.uint16_t
+        if C.lr_rtr_client_session_id(c.ptr, &v) == 0 {
+                return 0, false
+        }
+        return uint16(v), true
 }
 
 // Serial returns the serial of the last completed sync and true
 // when present, or 0 and false otherwise.
 func (c *RtrClient) Serial() (uint32, bool) {
-	var v C.uint32_t
-	if C.lr_rtr_client_serial(c.ptr, &v) == 0 {
-		return 0, false
-	}
-	return uint32(v), true
+        var v C.uint32_t
+        if C.lr_rtr_client_serial(c.ptr, &v) == 0 {
+                return 0, false
+        }
+        return uint32(v), true
 }
 
 // PhaseName returns the current phase name for diagnostics:
 // "awaiting-reset", "awaiting-serial", "receiving" or "synced".
 func (c *RtrClient) PhaseName() (string, error) {
-	need := C.lr_rtr_client_phase_name(c.ptr, nil, 0)
-	if need == 0 {
-		return "", nil
-	}
-	buf := make([]byte, int(need)+1)
-	n := C.lr_rtr_client_phase_name(c.ptr, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
-	if n == 0 {
-		return "", fmt.Errorf("lr_rtr_client_phase_name: %s", LastError())
-	}
-	return string(buf[:int(n)]), nil
+        need := C.lr_rtr_client_phase_name(c.ptr, nil, 0)
+        if need == 0 {
+                return "", nil
+        }
+        buf := make([]byte, int(need)+1)
+        n := C.lr_rtr_client_phase_name(c.ptr, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+        if n == 0 {
+                return "", fmt.Errorf("lr_rtr_client_phase_name: %s", LastError())
+        }
+        return string(buf[:int(n)]), nil
 }
 
 // Intervals returns the §6 timing intervals (refresh, retry, expire
 // — seconds) currently in effect.
 func (c *RtrClient) Intervals() (refresh, retry, expire uint32, err error) {
-	var r, re, e C.uint32_t
-	if rc := C.lr_rtr_client_intervals(c.ptr, &r, &re, &e); rc != 0 {
-		return 0, 0, 0, fmt.Errorf("lr_rtr_client_intervals: %s (rc=%d)", LastError(), int(rc))
-	}
-	return uint32(r), uint32(re), uint32(e), nil
+        var r, re, e C.uint32_t
+        if rc := C.lr_rtr_client_intervals(c.ptr, &r, &re, &e); rc != 0 {
+                return 0, 0, 0, fmt.Errorf("lr_rtr_client_intervals: %s (rc=%d)", LastError(), int(rc))
+        }
+        return uint32(r), uint32(re), uint32(e), nil
 }
 
 // SetIntervals overrides the initial §6 intervals. The embedder
 // calls this once at construction from its configuration; a v1+
 // cache replaces all three from every End-of-Data PDU (§6).
 func (c *RtrClient) SetIntervals(refresh, retry, expire uint32) error {
-	if rc := C.lr_rtr_client_set_intervals(c.ptr, C.uint32_t(refresh), C.uint32_t(retry), C.uint32_t(expire)); rc != 0 {
-		return fmt.Errorf("lr_rtr_client_set_intervals: %s (rc=%d)", LastError(), int(rc))
-	}
-	return nil
+        if rc := C.lr_rtr_client_set_intervals(c.ptr, C.uint32_t(refresh), C.uint32_t(retry), C.uint32_t(expire)); rc != 0 {
+                return fmt.Errorf("lr_rtr_client_set_intervals: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
 }
 
 // OnConnect returns the bytes to transmit when the transport comes
 // up (§8.1): a Serial Query when the client remembers an unexpired
 // session, a Reset Query otherwise.
 func (c *RtrClient) OnConnect() ([]byte, error) {
-	var out C.struct_lr_bytes_t
-	if rc := C.lr_rtr_client_on_connect(c.ptr, &out); rc != 0 {
-		return nil, fmt.Errorf("lr_rtr_client_on_connect: %s (rc=%d)", LastError(), int(rc))
-	}
-	defer C.lr_bytes_free(&out)
-	return copyBytes(&out), nil
+        var out C.struct_lr_bytes_t
+        if rc := C.lr_rtr_client_on_connect(c.ptr, &out); rc != 0 {
+                return nil, fmt.Errorf("lr_rtr_client_on_connect: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&out)
+        return copyBytes(&out), nil
 }
 
 // Snapshot returns the authoritative ROA record set after the last
@@ -4070,20 +4130,20 @@ func (c *RtrClient) OnConnect() ([]byte, error) {
 // (no entries) on a fresh client or one whose first sync has not
 // yet completed.
 func (c *RtrClient) Snapshot() ([]RoaEntry, error) {
-	n := C.lr_rtr_client_snapshot(c.ptr, nil, 0)
-	if n == 0 {
-		return nil, nil
-	}
-	cEntries := make([]C.struct_lr_roa_entry_t, int(n))
-	got := C.lr_rtr_client_snapshot(c.ptr, &cEntries[0], C.size_t(len(cEntries)))
-	if got == 0 {
-		return nil, fmt.Errorf("lr_rtr_client_snapshot: %s", LastError())
-	}
-	out := make([]RoaEntry, int(got))
-	for i := range out {
-		out[i] = roaEntryFromC(&cEntries[i])
-	}
-	return out, nil
+        n := C.lr_rtr_client_snapshot(c.ptr, nil, 0)
+        if n == 0 {
+                return nil, nil
+        }
+        cEntries := make([]C.struct_lr_roa_entry_t, int(n))
+        got := C.lr_rtr_client_snapshot(c.ptr, &cEntries[0], C.size_t(len(cEntries)))
+        if got == 0 {
+                return nil, fmt.Errorf("lr_rtr_client_snapshot: %s", LastError())
+        }
+        out := make([]RoaEntry, int(got))
+        for i := range out {
+                out[i] = roaEntryFromC(&cEntries[i])
+        }
+        return out, nil
 }
 
 // Poll runs the §6 timing rules at nowMs (milliseconds since the
@@ -4091,27 +4151,27 @@ func (c *RtrClient) Snapshot() ([]RoaEntry, error) {
 // caller must call Free on the returned step once it has drained
 // the wire bytes / deltas / logs.
 func (c *RtrClient) Poll(nowMs uint64) (*RtrClientStep, error) {
-	var step C.struct_lr_rtr_client_step_t
-	if rc := C.lr_rtr_client_poll(c.ptr, C.uint64_t(nowMs), &step); rc != 0 {
-		return nil, fmt.Errorf("lr_rtr_client_poll: %s (rc=%d)", LastError(), int(rc))
-	}
-	return adoptRtrClientStep(&step), nil
+        var step C.struct_lr_rtr_client_step_t
+        if rc := C.lr_rtr_client_poll(c.ptr, C.uint64_t(nowMs), &step); rc != 0 {
+                return nil, fmt.Errorf("lr_rtr_client_poll: %s (rc=%d)", LastError(), int(rc))
+        }
+        return adoptRtrClientStep(&step), nil
 }
 
 // OnPduRaw decodes one RTR PDU from data and feeds it to the client
 // (RFC 8210 §5 / §8.2 — the receive-side entry point). Returns the
 // same projection as Poll.
 func (c *RtrClient) OnPduRaw(data []byte, nowMs uint64) (*RtrClientStep, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("OnPduRaw: data is empty")
-	}
-	var step C.struct_lr_rtr_client_step_t
-	if rc := C.lr_rtr_client_on_pdu_raw(c.ptr,
-		(*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)),
-		C.uint64_t(nowMs), &step); rc != 0 {
-		return nil, fmt.Errorf("lr_rtr_client_on_pdu_raw: %s (rc=%d)", LastError(), int(rc))
-	}
-	return adoptRtrClientStep(&step), nil
+        if len(data) == 0 {
+                return nil, fmt.Errorf("OnPduRaw: data is empty")
+        }
+        var step C.struct_lr_rtr_client_step_t
+        if rc := C.lr_rtr_client_on_pdu_raw(c.ptr,
+                (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)),
+                C.uint64_t(nowMs), &step); rc != 0 {
+                return nil, fmt.Errorf("lr_rtr_client_on_pdu_raw: %s (rc=%d)", LastError(), int(rc))
+        }
+        return adoptRtrClientStep(&step), nil
 }
 
 // RtrClientStep is the projection of one RTR protocol step: the
@@ -4120,35 +4180,35 @@ func (c *RtrClient) OnPduRaw(data []byte, nowMs uint64) (*RtrClientStep, error) 
 // The Go wrapper owns the underlying C arrays and frees them via
 // Free (or a finalizer safety net).
 type RtrClientStep struct {
-	step C.struct_lr_rtr_client_step_t
-	// keep a reference to the Go-side "owned" flag so the
-	// finalizer + explicit Free agree on who runs the cleanup.
-	freed bool
+        step C.struct_lr_rtr_client_step_t
+        // keep a reference to the Go-side "owned" flag so the
+        // finalizer + explicit Free agree on who runs the cleanup.
+        freed bool
 }
 
 // adoptRtrClientStep wraps a freshly-filled C struct in a
 // RtrClientStep and installs the finalizer safety net.
 func adoptRtrClientStep(s *C.struct_lr_rtr_client_step_t) *RtrClientStep {
-	out := &RtrClientStep{step: *s}
-	runtime.SetFinalizer(out, func(o *RtrClientStep) {
-		o.destroy()
-	})
-	return out
+        out := &RtrClientStep{step: *s}
+        runtime.SetFinalizer(out, func(o *RtrClientStep) {
+                o.destroy()
+        })
+        return out
 }
 
 func (s *RtrClientStep) destroy() {
-	if !s.freed {
-		C.lr_rtr_client_step_free(&s.step)
-		s.freed = true
-	}
+        if !s.freed {
+                C.lr_rtr_client_step_free(&s.step)
+                s.freed = true
+        }
 }
 
 // Free releases the step's underlying C arrays. Idempotent; the
 // finalizer covers missing Free calls but explicit Close keeps
 // step churn from piling up finalizers in long-running embedders.
 func (s *RtrClientStep) Free() {
-	runtime.SetFinalizer(s, nil)
-	s.destroy()
+        runtime.SetFinalizer(s, nil)
+        s.destroy()
 }
 
 // Synced reports whether this step completed a sync (End of Data
@@ -4166,7 +4226,7 @@ func (s *RtrClientStep) Expired() bool { return s.step.expired != 0 }
 // SendBytes returns the wire bytes to transmit (zero or more
 // complete PDUs). Returns nil when the step carries no outgoing PDU.
 func (s *RtrClientStep) SendBytes() []byte {
-	return copyBytes(&s.step.send_bytes)
+        return copyBytes(&s.step.send_bytes)
 }
 
 // RoaDeltaCount returns the number of ROA deltas in this step
@@ -4176,38 +4236,38 @@ func (s *RtrClientStep) RoaDeltaCount() int { return int(s.step.roa_delta_count)
 // RoaDeltaAt returns the i-th ROA delta and nil on success, or
 // (0, false, error) on an out-of-bounds index.
 func (s *RtrClientStep) RoaDeltaAt(i int) (RoaDelta, bool, error) {
-	if i < 0 || i >= int(s.step.roa_delta_count) {
-		return RoaDelta{}, false, nil
-	}
-	var d C.struct_lr_roa_delta_t
-	if rc := C.lr_rtr_client_step_roa_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
-		return RoaDelta{}, false, fmt.Errorf("lr_rtr_client_step_roa_delta_at: %s (rc=%d)", LastError(), int(rc))
-	}
-	return RoaDelta{
-		Announce: d.announce != 0,
-		Entry:    roaEntryFromC(&d.entry),
-	}, true, nil
+        if i < 0 || i >= int(s.step.roa_delta_count) {
+                return RoaDelta{}, false, nil
+        }
+        var d C.struct_lr_roa_delta_t
+        if rc := C.lr_rtr_client_step_roa_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
+                return RoaDelta{}, false, fmt.Errorf("lr_rtr_client_step_roa_delta_at: %s (rc=%d)", LastError(), int(rc))
+        }
+        return RoaDelta{
+                Announce: d.announce != 0,
+                Entry:    roaEntryFromC(&d.entry),
+        }, true, nil
 }
 
 // RoaDeltas returns every ROA delta in the step as a slice. Returns
 // nil when the step carries no deltas.
 func (s *RtrClientStep) RoaDeltas() ([]RoaDelta, error) {
-	n := int(s.step.roa_delta_count)
-	if n == 0 {
-		return nil, nil
-	}
-	out := make([]RoaDelta, 0, n)
-	for i := 0; i < n; i++ {
-		d, ok, err := s.RoaDeltaAt(i)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			break
-		}
-		out = append(out, d)
-	}
-	return out, nil
+        n := int(s.step.roa_delta_count)
+        if n == 0 {
+                return nil, nil
+        }
+        out := make([]RoaDelta, 0, n)
+        for i := 0; i < n; i++ {
+                d, ok, err := s.RoaDeltaAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                if !ok {
+                        break
+                }
+                out = append(out, d)
+        }
+        return out, nil
 }
 
 // LogCount returns the number of diagnostic log lines the state
@@ -4217,47 +4277,47 @@ func (s *RtrClientStep) LogCount() int { return int(s.step.log_count) }
 // LogAt returns the i-th log line, or ("", false, nil) on an
 // out-of-bounds index.
 func (s *RtrClientStep) LogAt(i int) (string, bool, error) {
-	if i < 0 || i >= int(s.step.log_count) {
-		return "", false, nil
-	}
-	need := C.lr_rtr_client_step_log_at(&s.step, C.size_t(i), nil, 0)
-	if need == 0 {
-		return "", false, nil
-	}
-	buf := make([]byte, int(need)+1)
-	n := C.lr_rtr_client_step_log_at(&s.step, C.size_t(i),
-		(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
-	if n == 0 {
-		return "", false, nil
-	}
-	return string(buf[:int(n)]), true, nil
+        if i < 0 || i >= int(s.step.log_count) {
+                return "", false, nil
+        }
+        need := C.lr_rtr_client_step_log_at(&s.step, C.size_t(i), nil, 0)
+        if need == 0 {
+                return "", false, nil
+        }
+        buf := make([]byte, int(need)+1)
+        n := C.lr_rtr_client_step_log_at(&s.step, C.size_t(i),
+                (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+        if n == 0 {
+                return "", false, nil
+        }
+        return string(buf[:int(n)]), true, nil
 }
 
 // Logs returns every diagnostic log line in the step as a slice.
 func (s *RtrClientStep) Logs() ([]string, error) {
-	n := int(s.step.log_count)
-	if n == 0 {
-		return nil, nil
-	}
-	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		s, ok, err := s.LogAt(i)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			break
-		}
-		out = append(out, s)
-	}
-	return out, nil
+        n := int(s.step.log_count)
+        if n == 0 {
+                return nil, nil
+        }
+        out := make([]string, 0, n)
+        for i := 0; i < n; i++ {
+                s, ok, err := s.LogAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                if !ok {
+                        break
+                }
+                out = append(out, s)
+        }
+        return out, nil
 }
 
 // RouterKeyDeltaCount returns the number of BGPsec Router Key
 // deltas in this step (RFC 8210 §5.10 — zero unless Synced is true,
 // always zero for v0 caches).
 func (s *RtrClientStep) RouterKeyDeltaCount() int {
-	return int(s.step.router_key_delta_count)
+        return int(s.step.router_key_delta_count)
 }
 
 // RouterKeyDeltaAt returns the i-th BGPsec Router Key delta (RFC
@@ -4267,43 +4327,43 @@ func (s *RtrClientStep) RouterKeyDeltaCount() int {
 // SubjectPublicKeyInfo slice, so the value is owned and
 // garbage-collected independently of the step's lifetime.
 func (s *RtrClientStep) RouterKeyDeltaAt(i int) (RouterKeyDelta, bool, error) {
-	if i < 0 || i >= int(s.step.router_key_delta_count) {
-		return RouterKeyDelta{}, false, nil
-	}
-	var d C.struct_lr_router_key_delta_t
-	if rc := C.lr_rtr_client_step_router_key_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
-		return RouterKeyDelta{}, false, fmt.Errorf(
-			"lr_rtr_client_step_router_key_delta_at: %s (rc=%d)", LastError(), int(rc))
-	}
-	return routerKeyDeltaFromC(&d), true, nil
+        if i < 0 || i >= int(s.step.router_key_delta_count) {
+                return RouterKeyDelta{}, false, nil
+        }
+        var d C.struct_lr_router_key_delta_t
+        if rc := C.lr_rtr_client_step_router_key_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
+                return RouterKeyDelta{}, false, fmt.Errorf(
+                        "lr_rtr_client_step_router_key_delta_at: %s (rc=%d)", LastError(), int(rc))
+        }
+        return routerKeyDeltaFromC(&d), true, nil
 }
 
 // RouterKeyDeltas returns every BGPsec Router Key delta in the step
 // as a slice. Returns nil when the step carries no Router Key deltas.
 func (s *RtrClientStep) RouterKeyDeltas() ([]RouterKeyDelta, error) {
-	n := int(s.step.router_key_delta_count)
-	if n == 0 {
-		return nil, nil
-	}
-	out := make([]RouterKeyDelta, 0, n)
-	for i := 0; i < n; i++ {
-		d, ok, err := s.RouterKeyDeltaAt(i)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			break
-		}
-		out = append(out, d)
-	}
-	return out, nil
+        n := int(s.step.router_key_delta_count)
+        if n == 0 {
+                return nil, nil
+        }
+        out := make([]RouterKeyDelta, 0, n)
+        for i := 0; i < n; i++ {
+                d, ok, err := s.RouterKeyDeltaAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                if !ok {
+                        break
+                }
+                out = append(out, d)
+        }
+        return out, nil
 }
 
 // AspaDeltaCount returns the number of ASPA deltas in this step
 // (RFC 8210 §5.11 — zero unless Synced is true, always zero for
 // v0/v1 caches).
 func (s *RtrClientStep) AspaDeltaCount() int {
-	return int(s.step.aspa_delta_count)
+        return int(s.step.aspa_delta_count)
 }
 
 // AspaDeltaAt returns the i-th ASPA delta (RFC 8210 §5.11) and
@@ -4312,59 +4372,59 @@ func (s *RtrClientStep) AspaDeltaCount() int {
 // returned AspaEntry's Providers slice, so the value is owned and
 // garbage-collected independently of the step's lifetime.
 func (s *RtrClientStep) AspaDeltaAt(i int) (AspaDelta, bool, error) {
-	if i < 0 || i >= int(s.step.aspa_delta_count) {
-		return AspaDelta{}, false, nil
-	}
-	var d C.struct_lr_aspa_delta_t
-	if rc := C.lr_rtr_client_step_aspa_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
-		return AspaDelta{}, false, fmt.Errorf(
-			"lr_rtr_client_step_aspa_delta_at: %s (rc=%d)", LastError(), int(rc))
-	}
-	return aspaDeltaFromC(&d), true, nil
+        if i < 0 || i >= int(s.step.aspa_delta_count) {
+                return AspaDelta{}, false, nil
+        }
+        var d C.struct_lr_aspa_delta_t
+        if rc := C.lr_rtr_client_step_aspa_delta_at(&s.step, C.size_t(i), &d); rc != 0 {
+                return AspaDelta{}, false, fmt.Errorf(
+                        "lr_rtr_client_step_aspa_delta_at: %s (rc=%d)", LastError(), int(rc))
+        }
+        return aspaDeltaFromC(&d), true, nil
 }
 
 // AspaDeltas returns every ASPA delta in the step as a slice.
 // Returns nil when the step carries no ASPA deltas.
 func (s *RtrClientStep) AspaDeltas() ([]AspaDelta, error) {
-	n := int(s.step.aspa_delta_count)
-	if n == 0 {
-		return nil, nil
-	}
-	out := make([]AspaDelta, 0, n)
-	for i := 0; i < n; i++ {
-		d, ok, err := s.AspaDeltaAt(i)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			break
-		}
-		out = append(out, d)
-	}
-	return out, nil
+        n := int(s.step.aspa_delta_count)
+        if n == 0 {
+                return nil, nil
+        }
+        out := make([]AspaDelta, 0, n)
+        for i := 0; i < n; i++ {
+                d, ok, err := s.AspaDeltaAt(i)
+                if err != nil {
+                        return nil, err
+                }
+                if !ok {
+                        break
+                }
+                out = append(out, d)
+        }
+        return out, nil
 }
 
 // roaEntryFromC copies a C lr_roa_entry_t into a Go RoaEntry. The
 // address bytes are returned as 4 (IPv4) or 16 (IPv6) bytes.
 func roaEntryFromC(e *C.struct_lr_roa_entry_t) RoaEntry {
-	var addr []byte
-	if e.is_ipv6 == 0 {
-		addr = make([]byte, 4)
-		for i := 0; i < 4; i++ {
-			addr[i] = byte(e.addr[i])
-		}
-	} else {
-		addr = make([]byte, 16)
-		for i := 0; i < 16; i++ {
-			addr[i] = byte(e.addr[i])
-		}
-	}
-	return RoaEntry{
-		Addr:      addr,
-		PrefixLen: uint8(e.prefix_len),
-		MaxLength: uint8(e.max_length),
-		ASN:       uint32(e.asn),
-	}
+        var addr []byte
+        if e.is_ipv6 == 0 {
+                addr = make([]byte, 4)
+                for i := 0; i < 4; i++ {
+                        addr[i] = byte(e.addr[i])
+                }
+        } else {
+                addr = make([]byte, 16)
+                for i := 0; i < 16; i++ {
+                        addr[i] = byte(e.addr[i])
+                }
+        }
+        return RoaEntry{
+                Addr:      addr,
+                PrefixLen: uint8(e.prefix_len),
+                MaxLength: uint8(e.max_length),
+                ASN:       uint32(e.asn),
+        }
 }
 
 // routerKeyEntryFromC copies a C lr_router_key_entry_t into a Go
@@ -4372,38 +4432,38 @@ func roaEntryFromC(e *C.struct_lr_roa_entry_t) RoaEntry {
 // the returned value is owned and garbage-collected independently
 // of the step's lifetime.
 func routerKeyEntryFromC(e *C.struct_lr_router_key_entry_t) RouterKeyEntry {
-	var ski [20]byte
-	for i := 0; i < 20; i++ {
-		ski[i] = byte(e.ski[i])
-	}
-	var spki []byte
-	if e.subject_public_key_info != nil && e.subject_public_key_info_len > 0 {
-		spki = make([]byte, int(e.subject_public_key_info_len))
-		// The C pointer borrows from the step's heap allocation;
-		// the Go-owned []byte is a copy, so the step can be freed
-		// without invalidating the returned entry. Element-by-element
-		// copy avoids relying on a C stdlib declaration cgo may or
-		// may not pick up across platforms.
-		base := uintptr(unsafe.Pointer(e.subject_public_key_info))
-		for i := 0; i < int(e.subject_public_key_info_len); i++ {
-			b := (*C.uint8_t)(unsafe.Pointer(base + uintptr(i)))
-			spki[i] = byte(*b)
-		}
-	}
-	return RouterKeyEntry{
-		SKI:                  ski,
-		ASN:                  uint32(e.asn),
-		SubjectPublicKeyInfo: spki,
-	}
+        var ski [20]byte
+        for i := 0; i < 20; i++ {
+                ski[i] = byte(e.ski[i])
+        }
+        var spki []byte
+        if e.subject_public_key_info != nil && e.subject_public_key_info_len > 0 {
+                spki = make([]byte, int(e.subject_public_key_info_len))
+                // The C pointer borrows from the step's heap allocation;
+                // the Go-owned []byte is a copy, so the step can be freed
+                // without invalidating the returned entry. Element-by-element
+                // copy avoids relying on a C stdlib declaration cgo may or
+                // may not pick up across platforms.
+                base := uintptr(unsafe.Pointer(e.subject_public_key_info))
+                for i := 0; i < int(e.subject_public_key_info_len); i++ {
+                        b := (*C.uint8_t)(unsafe.Pointer(base + uintptr(i)))
+                        spki[i] = byte(*b)
+                }
+        }
+        return RouterKeyEntry{
+                SKI:                  ski,
+                ASN:                  uint32(e.asn),
+                SubjectPublicKeyInfo: spki,
+        }
 }
 
 // routerKeyDeltaFromC copies a C lr_router_key_delta_t into a Go
 // RouterKeyDelta.
 func routerKeyDeltaFromC(d *C.struct_lr_router_key_delta_t) RouterKeyDelta {
-	return RouterKeyDelta{
-		Announce: d.announce != 0,
-		Entry:    routerKeyEntryFromC(&d.entry),
-	}
+        return RouterKeyDelta{
+                Announce: d.announce != 0,
+                Entry:    routerKeyEntryFromC(&d.entry),
+        }
 }
 
 // aspaEntryFromC copies a C lr_aspa_entry_t into a Go AspaEntry.
@@ -4411,34 +4471,34 @@ func routerKeyDeltaFromC(d *C.struct_lr_router_key_delta_t) RouterKeyDelta {
 // returned value is owned and garbage-collected independently of
 // the step's lifetime.
 func aspaEntryFromC(e *C.struct_lr_aspa_entry_t) AspaEntry {
-	var providers []uint32
-	if e.providers != nil && e.provider_count > 0 {
-		providers = make([]uint32, int(e.provider_count))
-		// Read the C array element-by-element; the C array is
-		// uint32_t (4-byte aligned per element) and the Go slice
-		// is uint32 (also 4-byte aligned on platforms where this
-		// crate compiles).
-		for i := 0; i < int(e.provider_count); i++ {
-			// *(*C.uint32_t)(unsafe.Pointer(e.providers)) reads
-			// the i-th element through pointer arithmetic; the
-			// pointer is non-nil and the index is bounds-checked
-			// against provider_count above.
-			p := (*C.uint32_t)(unsafe.Pointer(
-				uintptr(unsafe.Pointer(e.providers)) +
-					uintptr(i)*unsafe.Sizeof(C.uint32_t(0))))
-			providers[i] = uint32(*p)
-		}
-	}
-	return AspaEntry{
-		CustomerASN: uint32(e.customer_asn),
-		Providers:   providers,
-	}
+        var providers []uint32
+        if e.providers != nil && e.provider_count > 0 {
+                providers = make([]uint32, int(e.provider_count))
+                // Read the C array element-by-element; the C array is
+                // uint32_t (4-byte aligned per element) and the Go slice
+                // is uint32 (also 4-byte aligned on platforms where this
+                // crate compiles).
+                for i := 0; i < int(e.provider_count); i++ {
+                        // *(*C.uint32_t)(unsafe.Pointer(e.providers)) reads
+                        // the i-th element through pointer arithmetic; the
+                        // pointer is non-nil and the index is bounds-checked
+                        // against provider_count above.
+                        p := (*C.uint32_t)(unsafe.Pointer(
+                                uintptr(unsafe.Pointer(e.providers)) +
+                                        uintptr(i)*unsafe.Sizeof(C.uint32_t(0))))
+                        providers[i] = uint32(*p)
+                }
+        }
+        return AspaEntry{
+                CustomerASN: uint32(e.customer_asn),
+                Providers:   providers,
+        }
 }
 
 // aspaDeltaFromC copies a C lr_aspa_delta_t into a Go AspaDelta.
 func aspaDeltaFromC(d *C.struct_lr_aspa_delta_t) AspaDelta {
-	return AspaDelta{
-		Announce: d.announce != 0,
-		Entry:    aspaEntryFromC(&d.entry),
-	}
+        return AspaDelta{
+                Announce: d.announce != 0,
+                Entry:    aspaEntryFromC(&d.entry),
+        }
 }
