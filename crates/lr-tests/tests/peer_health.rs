@@ -278,3 +278,155 @@ fn peer_health_e2e_shadow_best_path_does_not_affect_routing() {
         "standard selection must pick peer 1 (shadow-best-path does not change routing)"
     );
 }
+
+/// E2E: demonstrates the core correctness gap the dynamic
+/// `PeerHealthLookup` in the router fixes.
+///
+/// A route imported while the peer is healthy (L0) carries no stamped
+/// tier attribute. When the peer later escalates, the stamp-based
+/// `BestPath::select_tiered` still treats the route as L0 (no stamp =
+/// L0) and fails to depref it. The dynamic lookup — which the router
+/// queries via `PeerHealthLookup::tier()` — returns the **current**
+/// escalated tier and correctly excludes the route.
+///
+/// This test verifies:
+/// 1. The pre-escalation route has no stamped tier attribute.
+/// 2. After escalation, the table's `tier()` returns > L0 for the peer.
+/// 3. The stamp-based `select_tiered` fails to depref the route (the bug).
+/// 4. The table's `tier()` for an unseen peer is L0.
+///
+/// The router's `rank_with_dynamic_tier` (which uses the live lookup)
+/// is unit-tested in `lr-router::instance::tests`.
+#[test]
+fn peer_health_e2e_dynamic_lookup_vs_stamp_based_gap() {
+    let table = Arc::new(Mutex::new(PeerHealthTable::new(cfg_test())));
+    let hook = PeerHealthImportHook::new(Arc::clone(&table));
+
+    // Import a route from peer 1 while the peer is healthy (L0).
+    // The hook accounts the UPDATE and (in Full mode) stamps the
+    // tier attribute at 0 (L0). The stamp is frozen at import time.
+    let mut r_peer1 = bgp_route([203, 0, 113, 0], 24, 1, 1_000);
+    let _ = hook.on_import(&mut r_peer1);
+    let attrs1: PathAttributes = r_peer1.attributes.clone().into();
+    assert_eq!(
+        attrs1.peer_health_tier(),
+        Some(0),
+        "pre-escalation route is stamped at L0"
+    );
+
+    // Now burst on peer 1 to escalate it past L0.
+    for i in 0..200u64 {
+        let mut r = bgp_route([203, 0, 113, 0], 24, 1, 10_000 + i * 10);
+        let _ = hook.on_import(&mut r);
+    }
+    assert!(
+        table
+            .lock()
+            .unwrap()
+            .internal_tier(1, NlriFamily::IPV4_UNICAST)
+            > lr_peer_health::PeerHealthTier::L0,
+        "peer 1 should be escalated after the burst"
+    );
+
+    // The table's tier() returns the CURRENT (escalated) tier for
+    // peer 1. The stamped attribute on r_peer1 is still 0 (frozen at
+    // import time) — the dynamic lookup returns the live value.
+    let tier_peer1 = table.lock().unwrap().tier(1, NlriFamily::IPV4_UNICAST);
+    assert!(
+        tier_peer1 > lr_peer_health::PeerHealthTier::L0,
+        "table tier() must return the current escalated tier for peer 1, got {tier_peer1:?}"
+    );
+    // The stamped attribute is still L0 (frozen).
+    assert_eq!(
+        attrs1.peer_health_tier(),
+        Some(0),
+        "stamped tier is frozen at the import-time L0 value"
+    );
+
+    // A route from peer 2 (never seen by the table) is L0.
+    let tier_peer2 = table.lock().unwrap().tier(2, NlriFamily::IPV4_UNICAST);
+    assert_eq!(tier_peer2, lr_peer_health::PeerHealthTier::L0);
+
+    // The stamp-based select_tiered: both routes read as L0 (no
+    // stamp), so tiered_candidates keeps both and the standard
+    // comparator picks peer 1 (lower peer-id). This is the BUG the
+    // dynamic lookup fixes — the router's rank_with_dynamic_tier
+    // would exclude peer 1 because the live lookup returns L2.
+    let r_peer2 = bgp_route([203, 0, 113, 0], 24, 2, 20_000);
+    let routes = [r_peer1.clone(), r_peer2.clone()];
+    let cfg = BestPathConfig::default();
+    let stamp_best = BestPath::select_tiered(&routes, &cfg).unwrap();
+    assert_eq!(
+        stamp_best.origin.peer, 1,
+        "stamp-based tiering fails to depref the pre-escalation route (the gap the dynamic lookup fixes)"
+    );
+}
+
+/// E2E: stale state is queryable through the table after escalation.
+/// The router's `reselect` queries `PeerHealthLookup::is_stale()` to
+/// exclude stale paths from ECMP / add-path (issue #99 §Recovery).
+/// This test verifies the table's stale state matches what the lookup
+/// would return.
+///
+/// The stale marker persists for prefixes advertised BEFORE escalation
+/// that are NOT re-advertised during the burst — a fresh UPDATE for a
+/// prefix re-admits it (clears stale), so we burst on a *different*
+/// prefix to leave the observed prefix stale.
+#[test]
+fn peer_health_e2e_table_reports_stale_state_after_escalation() {
+    let table = Arc::new(Mutex::new(PeerHealthTable::new(cfg_test())));
+    let hook = PeerHealthImportHook::new(Arc::clone(&table));
+
+    // Import prefix P from peer 1 while the peer is healthy.
+    // This adds P to the peer's advertisement set (`observe_prefix`).
+    let prefix_p: Prefix = "203.0.113.0/24".parse().unwrap();
+    let mut r = bgp_route([203, 0, 113, 0], 24, 1, 1_000);
+    r.key.prefix = prefix_p;
+    let _ = hook.on_import(&mut r);
+
+    // Burst on a DIFFERENT prefix Q to escalate the peer without
+    // re-admitting P (a fresh UPDATE for Q does not clear P's stale
+    // marker).
+    let prefix_q: Prefix = "198.51.100.0/24".parse().unwrap();
+    for i in 0..200u64 {
+        let mut r = bgp_route([198, 51, 100, 0], 24, 1, 10_000 + i * 10);
+        r.key.prefix = prefix_q;
+        let _ = hook.on_import(&mut r);
+    }
+    assert!(
+        table
+            .lock()
+            .unwrap()
+            .internal_tier(1, NlriFamily::IPV4_UNICAST)
+            > lr_peer_health::PeerHealthTier::L0,
+        "peer 1 should be escalated after the burst"
+    );
+
+    // P is stale for peer 1 (marked on escalation, not re-admitted
+    // because the burst was on Q).
+    assert!(
+        table
+            .lock()
+            .unwrap()
+            .is_stale(1, NlriFamily::IPV4_UNICAST, &prefix_p),
+        "prefix P should be stale for the escalated peer (not re-admitted during the burst on Q)"
+    );
+    // Q is NOT stale — it was re-admitted by the last fresh UPDATE
+    // in the burst (issue #99 §Recovery: "re-admit them on a valid
+    // UPDATE").
+    assert!(
+        !table
+            .lock()
+            .unwrap()
+            .is_stale(1, NlriFamily::IPV4_UNICAST, &prefix_q),
+        "prefix Q should not be stale (re-admitted by the last fresh UPDATE)"
+    );
+    // The prefix is not stale for peer 2 (never seen).
+    assert!(
+        !table
+            .lock()
+            .unwrap()
+            .is_stale(2, NlriFamily::IPV4_UNICAST, &prefix_p),
+        "prefix should not be stale for an unseen peer"
+    );
+}
