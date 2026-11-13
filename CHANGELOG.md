@@ -4092,13 +4092,18 @@ two BGP-private path attributes (`LrPeerHealthTier` = 244,
 `LrPeerHealthStale` = 243), four `BestPath` methods
 (`tiered_candidates`, `rank_tiered`, `select_tiered`,
 `multipath_tiered`), six `PathAttributes` accessors, and a new
-`peer-health` feature on `lr-policy`. The `ImportHook::on_withdraw`
-trait signature now takes a `RouteOrigin` parameter so per-peer
-withdrawal accounting works correctly (the peer-health hook
-accounts withdraws at the right `(peer, family)`; the damping
-hook ignores it). New C ABI: `lr_peer_health_table_t` handle,
+`peer-health` feature on `lr-policy`. A new
+`ImportHook::on_withdraw_with_origin` trait method (default impl
+delegating to the existing 2-parameter `on_withdraw`) carries the
+`RouteOrigin` so per-peer withdrawal accounting works correctly
+without breaking existing `ImportHook` implementations — the
+peer-health hook overrides the new method; the damping hook keeps
+its 2-parameter override. `HookChain::run_import_withdraw_with_origin`
+dispatches the per-origin variant; the legacy 2-parameter
+`run_import_withdraw` is retained for semver stability. New C ABI:
+`lr_peer_health_table_t` handle,
 `lr_peer_health_config_t` / `lr_peer_health_session_t`
-structs, and 8 entry points, surfaced through the Go, Python,
+structs, and 9 entry points, surfaced through the Go, Python,
 and C++ binding generators. 45+ unit tests cover the state
 machine, hook, shadow selection, dynamic tiering, stale exclusion,
 and SIGHUP mode flip; 6 E2E tests cover off/observe/shadow-best-path/full

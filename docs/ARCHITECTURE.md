@@ -426,7 +426,12 @@ Ordering rules worth knowing before writing a hook:
   delegates to `on_export`.
 - `ImportHook::on_withdraw` is a notification, not a filter. Fires
   after the route has left Adj-RIB-In, and the return value is ignored.
-  The RFC 2439 damping table is fed from here.
+  The RFC 2439 damping table is fed from here. The per-origin variant
+  `on_withdraw_with_origin` (issue #99) carries the `RouteOrigin` so
+  per-`(peer, AFI/SAFI)` hooks like `PeerHealthImportHook` account
+  churn at the right session; its default implementation delegates to
+  the 2-parameter `on_withdraw`, so existing hooks keep working. The
+  router dispatches through `HookChain::run_import_withdraw_with_origin`.
 
 ## Thread model and mutability
 
