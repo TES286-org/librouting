@@ -3006,8 +3006,14 @@ impl DefaultRouter {
         // Adj-RIB-In) — RFC 2439 damping needs every flap event to
         // keep its figure-of-merit accurate. The hook's return is
         // informational only; it cannot "drop" a withdraw.
+        //
+        // The per-origin variant (issue #99) carries `origin` so
+        // per-(peer, AFI/SAFI) hooks like `PeerHealthImportHook`
+        // account the churn at the right session. The legacy
+        // 2-parameter `run_import_withdraw` is still available for
+        // embedders that do not have the origin.
         self.hooks
-            .run_import_withdraw(origin, key, self.now_ms / 1000);
+            .run_import_withdraw_with_origin(origin, key, self.now_ms / 1000);
         // W2.4: a withdrawal also removes the route from the pre-policy
         // RIB (it is gone from the peer either way).
         self.pre_policy_adj_rib_in.withdraw(origin, key, path_id);

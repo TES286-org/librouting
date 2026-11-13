@@ -79,18 +79,36 @@ pub trait ImportHook: Send + Sync {
     /// the return value is ignored (a withdraw cannot be "dropped";
     /// the route is already gone). Implementations use this to
     /// update cross-route state such as the RFC 2439 figure-of-merit
-    /// table or the per-peer flap-suppression churn counter (issue #99).
-    ///
-    /// `origin` identifies the protocol instance and peer that
-    /// withdrew the route — issue #99's per-peer flap suppression
-    /// accounts withdrawals at `(peer, AFI/SAFI)` granularity and
-    /// needs the peer id; older per-prefix hooks (RFC 2439 damping)
-    /// ignore it.
+    /// table.
     ///
     /// `now_s` is wall-clock seconds at the time of the withdraw,
     /// matching the units the damping table expects.
-    fn on_withdraw(&self, _origin: RouteOrigin, _key: &RouteKey, _now_s: u64) {
+    ///
+    /// This is the legacy 2-parameter form preserved for semver
+    /// stability (issue #99 follow-up). Implementations that need
+    /// the `(peer, AFI/SAFI)` origin — issue #99's per-peer flap
+    /// suppression — should override [`Self::on_withdraw_with_origin`]
+    /// instead; its default implementation delegates here so older
+    /// hooks keep working unchanged.
+    fn on_withdraw(&self, _key: &RouteKey, _now_s: u64) {
         // default no-op — most hooks do not care about withdrawals
+    }
+
+    /// Per-origin withdraw notification (issue #99).
+    ///
+    /// Same contract as [`Self::on_withdraw`] but carries the
+    /// [`RouteOrigin`] so per-`(peer, AFI/SAFI)` accounting works.
+    /// The default implementation discards `origin` and delegates to
+    /// [`Self::on_withdraw`], so existing `ImportHook` impls that
+    /// only override the 2-parameter form continue to receive every
+    /// withdraw. New hooks that need the peer id (e.g.
+    /// `PeerHealthImportHook`) override this method directly.
+    ///
+    /// The router dispatches withdraws through
+    /// [`HookChain::run_import_withdraw_with_origin`], which calls
+    /// this method on every hook in the import chain.
+    fn on_withdraw_with_origin(&self, _origin: RouteOrigin, key: &RouteKey, now_s: u64) {
+        self.on_withdraw(key, now_s);
     }
 }
 
@@ -457,7 +475,7 @@ impl ImportHook for DampingImportHook {
         }
     }
 
-    fn on_withdraw(&self, _origin: RouteOrigin, key: &RouteKey, now_s: u64) {
+    fn on_withdraw(&self, key: &RouteKey, now_s: u64) {
         if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
@@ -590,7 +608,7 @@ impl ImportHook for PeerHealthImportHook {
         HookVerdict::Keep
     }
 
-    fn on_withdraw(&self, origin: RouteOrigin, key: &RouteKey, now_s: u64) {
+    fn on_withdraw_with_origin(&self, origin: RouteOrigin, key: &RouteKey, now_s: u64) {
         let mut table = match self.table.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -869,15 +887,31 @@ impl HookChain {
     /// value is intentionally `()` — a withdraw cannot be "dropped"
     /// (the route is already gone from Adj-RIB-In). Implementations
     /// use this notification to update cross-route state such as the
-    /// RFC 2439 damping figure-of-merit table or the per-peer
-    /// flap-suppression churn counter (issue #99).
+    /// RFC 2439 damping figure-of-merit table.
     ///
-    /// `origin` carries the peer id the withdraw came from — issue
-    /// #99's per-peer accounting needs it; older per-prefix hooks
-    /// ignore it.
-    pub fn run_import_withdraw(&self, origin: RouteOrigin, key: &RouteKey, now_s: u64) {
+    /// This is the legacy 2-parameter form (no `RouteOrigin`).
+    /// Callers that have the withdraw's origin available should
+    /// prefer [`Self::run_import_withdraw_with_origin`] so
+    /// per-`(peer, AFI/SAFI)` hooks (issue #99 peer-health) receive
+    /// the peer id. This entry point is retained for semver stability
+    /// and dispatches through [`ImportHook::on_withdraw`].
+    pub fn run_import_withdraw(&self, key: &RouteKey, now_s: u64) {
         for h in &self.import {
-            h.on_withdraw(origin, key, now_s);
+            h.on_withdraw(key, now_s);
+        }
+    }
+
+    /// Per-origin variant of [`Self::run_import_withdraw`] (issue #99).
+    ///
+    /// Dispatches to [`ImportHook::on_withdraw_with_origin`] on every
+    /// import hook, carrying the [`RouteOrigin`] so per-`(peer,
+    /// AFI/SAFI)` accounting works. The default trait implementation
+    /// delegates to the legacy 2-parameter [`ImportHook::on_withdraw`],
+    /// so hooks that only override the older form still receive every
+    /// withdraw.
+    pub fn run_import_withdraw_with_origin(&self, origin: RouteOrigin, key: &RouteKey, now_s: u64) {
+        for h in &self.import {
+            h.on_withdraw_with_origin(origin, key, now_s);
         }
     }
 
@@ -1347,11 +1381,14 @@ mod tests {
             "203.0.113.0/24".parse().unwrap(),
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
-        // Simulate three withdraws — each adds 1000 to FoM.
+        // Simulate three withdraws — each adds 1000 to FoM. The
+        // router dispatches withdraws through the per-origin variant
+        // (issue #99); the damping hook's default delegation routes
+        // them to its 2-parameter `on_withdraw` override.
         let origin = RouteOrigin { proto: 0, peer: 1 };
-        hook.on_withdraw(origin, &key, 0);
-        hook.on_withdraw(origin, &key, 0);
-        hook.on_withdraw(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
         // The third withdraw crosses the threshold — the prefix
         // is now suppressed.
         assert!(table.lock().unwrap().is_suppressed(&key.prefix));
@@ -1377,11 +1414,13 @@ mod tests {
             "203.0.113.0/24".parse().unwrap(),
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
-        // Three withdraws through the chain.
+        // Three withdraws through the chain. The per-origin variant
+        // dispatches to `on_withdraw_with_origin`, whose default
+        // impl delegates to the damping hook's 2-param `on_withdraw`.
         let origin = RouteOrigin { proto: 0, peer: 1 };
-        chain.run_import_withdraw(origin, &key, 0);
-        chain.run_import_withdraw(origin, &key, 0);
-        chain.run_import_withdraw(origin, &key, 0);
+        chain.run_import_withdraw_with_origin(origin, &key, 0);
+        chain.run_import_withdraw_with_origin(origin, &key, 0);
+        chain.run_import_withdraw_with_origin(origin, &key, 0);
         assert!(table.lock().unwrap().is_suppressed(&key.prefix));
     }
 
@@ -1401,7 +1440,7 @@ mod tests {
             "203.0.113.0/24".parse().unwrap(),
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
-        hook.on_withdraw(RouteOrigin { proto: 0, peer: 1 }, &key, 0);
+        hook.on_withdraw_with_origin(RouteOrigin { proto: 0, peer: 1 }, &key, 0);
         assert_eq!(table.lock().unwrap().entries().count(), 1);
     }
 
@@ -1444,9 +1483,9 @@ mod tests {
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
         let origin = RouteOrigin { proto: 0, peer: 1 };
-        hook.on_withdraw(origin, &key, 0);
-        hook.on_withdraw(origin, &key, 0);
-        hook.on_withdraw(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
         assert!(table.lock().unwrap().is_suppressed(&key.prefix));
 
         enabled.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1469,7 +1508,7 @@ mod tests {
             .next()
             .map(|e| e.figure_of_merit)
             .unwrap_or(0.0);
-        hook.on_withdraw(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
         let fom_after = table
             .lock()
             .unwrap()
@@ -1881,7 +1920,7 @@ mod tests {
             "203.0.113.0/24".parse().unwrap(),
             lr_core::nlri::NlriFamily::IPV4_UNICAST,
         );
-        hook.on_withdraw(RouteOrigin { proto: 0, peer: 7 }, &key, 2);
+        hook.on_withdraw_with_origin(RouteOrigin { proto: 0, peer: 7 }, &key, 2);
         // Peer 7's withdraw counter must be >= 1; peer 0 must not
         // exist (or have zero withdraws).
         let snap = table

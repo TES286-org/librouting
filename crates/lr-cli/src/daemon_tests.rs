@@ -1416,9 +1416,12 @@ mod damping_reload_toggle_tests {
         {
             let mut r = router.write().unwrap();
             let origin = lr_core::rib::RouteOrigin { proto: 0, peer: 1 };
-            r.hooks_mut().run_import_withdraw(origin, &key, 0);
-            r.hooks_mut().run_import_withdraw(origin, &key, 0);
-            r.hooks_mut().run_import_withdraw(origin, &key, 0);
+            r.hooks_mut()
+                .run_import_withdraw_with_origin(origin, &key, 0);
+            r.hooks_mut()
+                .run_import_withdraw_with_origin(origin, &key, 0);
+            r.hooks_mut()
+                .run_import_withdraw_with_origin(origin, &key, 0);
         }
         // Sanity: the FoM table records the prefix and marks it
         // suppressed (the hook chain dispatched the withdraws).
