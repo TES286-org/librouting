@@ -13816,12 +13816,6 @@ inline std::int32_t policy_set_validate(ResolverHandle const& h) {
     return rc;
 }
 
-inline std::int32_t replace_static_from_text(RoaStoreHandle const& h, const std::uint8_t* text, std::uintptr_t len, std::uint8_t format) {
-    std::int32_t rc = lr_roa_store_replace_static_from_text(h.get(), text, len, format);
-    if (rc < 0) throw Error(std::string("lr_roa_store_replace_static_from_text failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
-    return rc;
-}
-
 inline std::int32_t clear_rtr(RoaStoreHandle const& h) {
     std::int32_t rc = lr_roa_store_clear_rtr(h.get());
     if (rc < 0) throw Error(std::string("lr_roa_store_clear_rtr failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));

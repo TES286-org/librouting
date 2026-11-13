@@ -4960,12 +4960,6 @@ int32_t lr_peer_health_table_session_snapshot(
 
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
 typedef struct lr_afi_safi_t lr_nlri_family_t;
-int32_t lr_roa_store_replace_static_from_text(
-    lr_roa_store_t s,
-    const uint8_t * text,
-    uintptr_t len,
-    uint8_t format
-);
 """
 
 
