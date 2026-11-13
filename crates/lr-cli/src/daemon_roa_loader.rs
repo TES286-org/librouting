@@ -43,8 +43,9 @@
 //! union on every reload.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -86,16 +87,19 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// One ROA source — a file on disk or a URL fetched periodically.
 ///
-/// The schema mirrors `[[bgp.roa_source]]` in `daemon.toml`:
+/// The schema mirrors the `bgp.roa_source { … }` block in the LR
+/// config DSL (and the legacy `[[bgp.roa_source]]` TOML table):
 ///
-/// ```toml
+/// ```text
+/// # Legacy TOML (deprecated; use the .lr DSL instead):
 /// [[bgp.roa_source]]
 /// path = "/etc/lr/roas.bird"
 /// format = "bird"
 ///
 /// [[bgp.roa_source]]
 /// url = "https://rpki.example.com/roas.json"
-/// format = "json"
+/// format = "jq"
+/// program = ".roas[] | \"roa \\(.prefix) max \\(.maxLength) as \\(.asn);\""
 /// interval = 3600
 /// ```
 #[derive(Debug, Clone)]
@@ -106,7 +110,7 @@ pub(crate) struct RoaSourceSpec {
     pub url: Option<String>,
     /// The on-the-wire format. When `None`, the loader infers it
     /// from the path extension (a `.bird` file is BIRD, a `.json`
-    /// URL is JSON, etc.).
+    /// URL is `jq`, etc.).
     pub format: Option<RoaFormat>,
     /// Refresh interval for URL sources (seconds). Defaults to
     /// 3600 (RFC 8210 §6 refresh). Ignored for file sources —
@@ -116,6 +120,20 @@ pub(crate) struct RoaSourceSpec {
     /// ROA origins (Cloudflare, Google) require a UA; the default
     /// `lr-daemon/<version>` is sent when unset.
     pub user_agent: Option<String>,
+    /// Inline transform program for `jq` / `awk` format sources
+    /// (issue #100). The program is fed to `jq -r PROGRAM` or
+    /// `awk 'PROGRAM'` with the source bytes on stdin; the
+    /// program's stdout is parsed as BIRD-format ROA lines.
+    /// Mutually exclusive with [`program_file`](Self::program_file);
+    /// required (one of the two) when `format` is `jq` or `awk`.
+    pub program: Option<String>,
+    /// Path to a file holding the transform program. Read at load
+    /// time so the operator can update the program without
+    /// restarting the daemon (an mtime change on this file is
+    /// **not** watched — only the source's own path / URL is;
+    /// SIGHUP re-reads the program). Mutually exclusive with
+    /// [`program`](Self::program).
+    pub program_file: Option<String>,
 }
 
 impl RoaSourceSpec {
@@ -133,7 +151,7 @@ impl RoaSourceSpec {
             .or(self.url.as_deref())
             .ok_or_else(|| RoaLoaderError::Missing {
                 line_no: 0,
-                message: "[[bgp.roa_source]] without 'path' or 'url'".to_string(),
+                message: "roa_source without 'path' or 'url'".to_string(),
             })?;
         RoaFormat::from_extension(name).ok_or_else(|| {
             RoaLoaderError::UnknownFormat(format!(
@@ -154,6 +172,23 @@ impl RoaSourceSpec {
         let secs = secs.max(60);
         Duration::from_secs(u64::from(secs))
     }
+
+    /// Resolve the transform program for `jq` / `awk` format
+    /// sources. Returns the inline [`program`](Self::program) when
+    /// set, otherwise reads [`program_file`](Self::program_file).
+    /// Returns `Ok(None)` for non-transform formats (the caller
+    /// checks `format.requires_program()` first).
+    pub(crate) fn resolve_program(&self) -> Result<Option<String>, RoaLoaderError> {
+        if let Some(p) = &self.program {
+            return Ok(Some(p.clone()));
+        }
+        if let Some(path) = &self.program_file {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| RoaLoaderError::Io(format!("read program_file {path}: {e}")))?;
+            return Ok(Some(text));
+        }
+        Ok(None)
+    }
 }
 
 impl PartialEq for RoaSourceSpec {
@@ -163,6 +198,8 @@ impl PartialEq for RoaSourceSpec {
             && self.format == other.format
             && self.interval == other.interval
             && self.user_agent == other.user_agent
+            && self.program == other.program
+            && self.program_file == other.program_file
     }
 }
 
@@ -239,11 +276,15 @@ pub(crate) struct RoaLoaderStatus {
     /// Human-readable description of the last error, when
     /// `healthy = false`. Cleared on the next successful load.
     pub last_error: Option<String>,
-    /// The source's resolved format name — `"bird"`, `"json"`,
-    /// `"csv"` or `"native"`. Rendered by the `status` API so
+    /// The source's resolved format name — `"native"`, `"bird"`,
+    /// `"jq"` or `"awk"`. Rendered by the `status` API so
     /// the operator can verify the loader picked the right
     /// parser.
     pub format: &'static str,
+    /// Whether the source has a transform program (`jq` / `awk`).
+    /// Rendered by the `status` API so the operator can verify
+    /// the transform is wired.
+    pub has_program: bool,
 }
 
 impl RoaLoaderStatus {
@@ -404,6 +445,7 @@ pub(crate) fn spawn_roa_loader(
         .resolve_format()
         .map(|f| f.as_str())
         .unwrap_or("native");
+    let has_program = spec.program.is_some() || spec.program_file.is_some();
     let status = Arc::new(Mutex::new(RoaLoaderStatus {
         source: source_str.clone(),
         is_url,
@@ -412,6 +454,7 @@ pub(crate) fn spawn_roa_loader(
         last_load_age_s: None,
         last_error: None,
         format: format_str,
+        has_program,
     }));
     let (tx, rx) = mpsc::channel::<RoaLoaderCommand>();
     let handle = RoaLoaderHandle {
@@ -594,6 +637,8 @@ impl LoaderLoop {
                         .resolve_format()
                         .map(|f| f.as_str())
                         .unwrap_or("native");
+                    st.has_program =
+                        self.spec.program.is_some() || self.spec.program_file.is_some();
                 }
                 Control::Interrupt
             }
@@ -654,6 +699,11 @@ impl LoaderLoop {
     /// Fetch (URL) or read (file) and apply. The actual I/O is
     /// dispatched through `fetch_url` / `read_file`; this method
     /// feeds the parsed entries to the layer registry.
+    ///
+    /// For the transform formats (`jq`, `awk`) the source bytes are
+    /// first piped through the operator-supplied program (see
+    /// [`run_jq`] / [`run_awk`]); the program's stdout is then
+    /// parsed as BIRD-format lines by [`lr_bgp::parse_roa`].
     fn fetch_and_apply(&self) -> Result<usize, RoaLoaderError> {
         let format = self.spec.resolve_format()?;
         let text = if let Some(url) = self.spec.url.as_deref() {
@@ -663,10 +713,38 @@ impl LoaderLoop {
         } else {
             return Err(RoaLoaderError::Missing {
                 line_no: 0,
-                message: "[[bgp.roa_source]] without 'path' or 'url'".to_string(),
+                message: "roa_source without 'path' or 'url'".to_string(),
             });
         };
-        let entries = lr_bgp::parse_roa(&text, format)?;
+        // For transform formats, pipe the source bytes through the
+        // operator's jq / awk program; the program's stdout is the
+        // canonical BIRD-format text that `parse_roa` consumes.
+        let (parse_text, parse_format) = if format.requires_program() {
+            let program = self
+                .spec
+                .resolve_program()?
+                .ok_or_else(|| RoaLoaderError::Missing {
+                    line_no: 0,
+                    message: format!(
+                        "roa_source format '{}' requires 'program' or 'program_file'",
+                        format.as_str()
+                    ),
+                })?;
+            let transformed = match format {
+                RoaFormat::Jq => run_jq(&program, &text)?,
+                RoaFormat::Awk => run_awk(&program, &text)?,
+                // Unreachable: `requires_program()` is false for
+                // Native and Bird.
+                _ => text,
+            };
+            // The transform program's output is BIRD-format text —
+            // parse it with the BIRD parser, not the transform format
+            // (which `parse_roa` rejects with `TransformFormatDirect`).
+            (transformed, RoaFormat::Bird)
+        } else {
+            (text, format)
+        };
+        let entries = lr_bgp::parse_roa(&parse_text, parse_format)?;
         let count = entries.len();
         let source_key = self
             .spec
@@ -786,6 +864,80 @@ impl LoaderLoop {
 fn default_user_agent() -> String {
     let version = env!("CARGO_PKG_VERSION");
     format!("lr-daemon/{version}")
+}
+
+/// Run a `jq` program against `input` and return its stdout.
+///
+/// The program is invoked as `jq -r -- PROGRAM`, reading `input`
+/// on stdin and writing the transform's output on stdout. `-r`
+/// (raw output) means string values are emitted without JSON
+/// quoting — the canonical shape for BIRD-format lines (`roa
+/// PREFIX max N as N;`). The `--` separator protects against a
+/// program that starts with `-` being parsed as a jq flag.
+///
+/// `jq` is found on `PATH`. The daemon's Docker image ships jq;
+/// on a bare-metal install the operator installs jq separately
+/// (the loader's status line surfaces a clear error if the
+/// binary is missing).
+///
+/// This is an internal daemon helper — it is not exposed through
+/// the C ABI (issue #100 follow-up: the transform feature is a
+/// daemon-internal concern, not a library API).
+fn run_jq(program: &str, input: &str) -> Result<String, RoaLoaderError> {
+    run_transform("jq", &["-r", "--", program], input)
+}
+
+/// Run an `awk` program against `input` and return its stdout.
+///
+/// The program is invoked as `awk -- PROGRAM`, reading `input`
+/// on stdin. `awk` (whether gawk, mawk or onetrueawk — all ship
+/// on every Unix) writes the transform's output on stdout. The
+/// `--` separator protects against a program that starts with
+/// `-` being parsed as an awk flag.
+///
+/// `awk` is found on `PATH`; every Unix system ships one. This
+/// is an internal daemon helper — not exposed through the C ABI.
+fn run_awk(program: &str, input: &str) -> Result<String, RoaLoaderError> {
+    run_transform("awk", &["--", program], input)
+}
+
+/// Spawn a transform binary (`jq` / `awk`), feed `input` on its
+/// stdin and capture its stdout. The binary is found on `PATH`;
+/// a missing binary surfaces a clear `Io` error so the loader's
+/// status line reports it and the previous ROA snapshot is
+/// preserved.
+fn run_transform(bin: &str, args: &[&str], input: &str) -> Result<String, RoaLoaderError> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| RoaLoaderError::Io(format!("spawn {bin}: {e}")))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| RoaLoaderError::Io(format!("write {bin} stdin: {e}")))?;
+    }
+    // Drop our stdin handle so the child sees EOF.
+    drop(child.stdin.take());
+    let output = child
+        .wait_with_output()
+        .map_err(|e| RoaLoaderError::Io(format!("wait {bin}: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        return Err(RoaLoaderError::Io(format!(
+            "{bin} exited {code}: {}",
+            stderr.trim()
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|e| RoaLoaderError::Io(format!("{bin} stdout is not UTF-8: {e}")))
 }
 
 #[cfg(test)]
