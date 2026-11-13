@@ -2335,32 +2335,6 @@ const (
         RoaInvalid  = 2
 )
 
-// ROA format codes accepted by RoaStore.ReplaceStaticFromText (issue #100).
-// Mirrors the C LR_ROA_FORMAT_* constants and lr_bgp::roa_loader::RoaFormat.
-const (
-        RoaFormatNative = 0
-        RoaFormatBird   = 1
-        RoaFormatJSON   = 2
-        RoaFormatCSV    = 3
-)
-
-// roaFormatName maps the string alias accepted by
-// ReplaceStaticFromText to the C format code. The accepted aliases
-// match the daemon's `[[bgp.roa_source]] format` key.
-func roaFormatCode(name string) (C.uint8_t, error) {
-        switch name {
-        case "native", "lr", "toml", "NATIVE", "LR", "TOML":
-                return C.uint8_t(RoaFormatNative), nil
-        case "bird", "bird2", "BIRD", "BIRD2":
-                return C.uint8_t(RoaFormatBird), nil
-        case "json", "JSON":
-                return C.uint8_t(RoaFormatJSON), nil
-        case "csv", "tsv", "text", "plain", "CSV", "TSV", "TEXT", "PLAIN":
-                return C.uint8_t(RoaFormatCSV), nil
-        }
-        return 0, fmt.Errorf("unknown ROA format %q (expected: native, bird, json, csv)", name)
-}
-
 // RoaEntry is one ROA record (RFC 6482 §3): the authorized prefix, the
 // longest authorized prefix length, and the origin AS. Addr is 4 bytes
 // (IPv4) or 16 bytes (IPv6). AS 0 marks the blackhole range (RFC 6483 §4).
@@ -2496,40 +2470,6 @@ func (s *RoaStore) ReplaceStatic(entries []RoaEntry) error {
         rc := C.lr_roa_store_replace_static(s.ptr, &cEntries[0], C.size_t(len(cEntries)))
         if rc != 0 {
                 return fmt.Errorf("lr_roa_store_replace_static: %s (rc=%d)", LastError(), int(rc))
-        }
-        return nil
-}
-
-// ReplaceStaticFromText atomically replaces the static layer by
-// parsing text in one of the supported ROA formats (issue #100):
-// "native" (TOML `[[roa]]` subset), "bird" (BIRD 2 `roa table`
-// body), "json" (Routinator JSON VRP output) or "csv" (Routinator
-// CSV / awk-produced whitespace-separated rows). The format string
-// accepts the same aliases as the daemon's `[[bgp.roa_source]]
-// format` key (case-insensitive). RTR-learned entries are
-// preserved. A parse failure leaves the previous snapshot in
-// place (a truncated fetch must never weaken origin validation).
-func (s *RoaStore) ReplaceStaticFromText(text, format string) error {
-        if len(text) == 0 {
-                // Empty input clears the layer — matches the C contract.
-                rc := C.lr_roa_store_replace_static_from_text(s.ptr, nil, 0, 0)
-                if rc != 0 {
-                        return fmt.Errorf("lr_roa_store_replace_static_from_text: %s (rc=%d)", LastError(), int(rc))
-                }
-                return nil
-        }
-        code, err := roaFormatCode(format)
-        if err != nil {
-                return fmt.Errorf("ReplaceStaticFromText: %w", err)
-        }
-        rc := C.lr_roa_store_replace_static_from_text(
-                s.ptr,
-                (*C.uint8_t)(unsafe.Pointer(&[]byte(text)[0])),
-                C.size_t(len(text)),
-                code,
-        )
-        if rc != 0 {
-                return fmt.Errorf("lr_roa_store_replace_static_from_text: %s (rc=%d)", LastError(), int(rc))
         }
         return nil
 }

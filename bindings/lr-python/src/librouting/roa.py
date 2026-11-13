@@ -21,40 +21,6 @@ ROA_VALID = 0
 ROA_NOT_FOUND = 1
 ROA_INVALID = 2
 
-# Format codes for `lr_roa_store_replace_static_from_text` (issue #100).
-ROA_FORMAT_NATIVE = 0
-ROA_FORMAT_BIRD = 1
-ROA_FORMAT_JSON = 2
-ROA_FORMAT_CSV = 3
-
-# String aliases for the format codes — accepted by
-# `RoaStore.replace_static_from_text`.
-_ROA_FORMAT_NAMES = {
-    "native": ROA_FORMAT_NATIVE,
-    "lr": ROA_FORMAT_NATIVE,
-    "toml": ROA_FORMAT_NATIVE,
-    "bird": ROA_FORMAT_BIRD,
-    "bird2": ROA_FORMAT_BIRD,
-    "json": ROA_FORMAT_JSON,
-    "csv": ROA_FORMAT_CSV,
-    "tsv": ROA_FORMAT_CSV,
-    "text": ROA_FORMAT_CSV,
-    "plain": ROA_FORMAT_CSV,
-}
-
-
-def _roa_format_code(fmt) -> int:
-    if isinstance(fmt, int):
-        return fmt
-    if isinstance(fmt, str):
-        try:
-            return _ROA_FORMAT_NAMES[fmt.strip().lower()]
-        except KeyError:
-            raise LrError(
-                f"unknown ROA format '{fmt}' (expected: native, bird, json, csv)"
-            )
-    raise LrError(f"invalid ROA format {fmt!r} (expected str or int)")
-
 
 def _parse_network(prefix: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
     try:
@@ -123,28 +89,6 @@ class RoaStore:
         rc = get_lib().lr_roa_store_replace_static(self._ptr, c_entries, len(entries))
         if rc != 0:
             raise LrError(f"lr_roa_store_replace_static failed (rc={rc}): {last_error()}")
-
-    def replace_static_from_text(self, text: str, fmt) -> None:
-        """Atomically replace the static (configuration) layer by
-        parsing ``text`` in one of the supported ROA formats (issue
-        #100). ``fmt`` is either an integer format code (one of the
-        ``ROA_FORMAT_*`` constants) or a string name (``"native"``,
-        ``"bird"``, ``"json"``, ``"csv"`` — case-insensitive, with
-        the same aliases accepted by the daemon's
-        ``[[bgp.roa_source]] format`` key).
-
-        RTR-learned entries are preserved. A parse failure raises
-        ``LrError`` and leaves the previous snapshot in place (a
-        truncated fetch must never weaken origin validation)."""
-        data = text.encode("utf-8")
-        code = _roa_format_code(fmt)
-        rc = get_lib().lr_roa_store_replace_static_from_text(
-            self._ptr, data, len(data), code
-        )
-        if rc != 0:
-            raise LrError(
-                f"lr_roa_store_replace_static_from_text failed (rc={rc}): {last_error()}"
-            )
 
     def apply_deltas(self, deltas) -> None:
         """Apply one completed sync's delta batch atomically — a list of
