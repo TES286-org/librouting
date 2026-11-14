@@ -201,7 +201,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Categorised logging: severity, components, per-component levels, plain/JSON format, file mirror | yes | `crates/lr-cli/src/daemon_logger.rs` |
 | Runtime API socket and `lrctl` client | yes | `crates/lr-cli/src/api.rs`, `crates/lr-cli/src/lrctl.rs` |
 | Prometheus exposition on `/metrics` | yes | `crates/lr-cli/src/metrics.rs` |
-| Config: native `.lr` DSL, TOML, BIRD and FRR dialects | yes | `crates/lr-cli/src/daemon_config.rs`, `crates/lr-cli/src/compat.rs`, `crates/lr-cli/src/translate.rs` |
+| Config: native `.lr` DSL (primary), deprecated TOML subset, BIRD and FRR dialects (adoption inputs) | yes | `crates/lr-cli/src/daemon_config.rs`, `crates/lr-cli/src/compat.rs`, `crates/lr-cli/src/translate.rs` |
 | BIRD `protocol babel` interface-block translation (RFC 8966 §A.2) | yes | `crates/lr-cli/src/translate::translate_bird` |
 | BIRD `protocol ospf` area/interface translation (RFC 2328 §C / RFC 5340 §A.4) | yes | `crates/lr-cli/src/translate::translate_bird` |
 | FRR `router ospf` and `interface IFNAME` OSPF translation (RFC 2328 §C) | yes | `crates/lr-cli/src/translate::translate_frr` |

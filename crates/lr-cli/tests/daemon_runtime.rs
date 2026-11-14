@@ -301,6 +301,111 @@ fn api_socket_serves_status_sessions_routes_and_shutdown() {
     );
 }
 
+/// Issue #101: a daemon started on a TOML config must surface the
+/// deprecation notice through `status` and `show status` too — the
+/// startup stderr line alone is easy to miss on a daemon under
+/// systemd, so the runtime API carries the same warning an operator
+/// gets from `lrctl status`. The DSL dialect stamps the dialect
+/// without a deprecation line.
+#[test]
+fn status_surfaces_toml_deprecation_notice() {
+    let socket =
+        std::env::temp_dir().join(format!("lr-daemon-test-deprec-{}.sock", std::process::id()));
+    let conf =
+        std::env::temp_dir().join(format!("lr-daemon-test-deprec-{}.toml", std::process::id()));
+    std::fs::write(
+        &conf,
+        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+         listen_addr = \"127.0.0.1:17987\"\n\nnetworks = [\"203.0.113.0/24\"]\n",
+    )
+    .unwrap();
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "deprec",
+    );
+    d.wait_log("runtime API on", "api socket up");
+    // The startup stderr captures the deprecation notice too — pin it
+    // so a regression that drops the `eprintln!` path fails here.
+    d.wait_log("config deprecation:", "stderr deprecation notice");
+
+    let status = api_ask(&socket, "status");
+    assert!(
+        status.contains("config-dialect toml"),
+        "status should name the TOML dialect: {status}"
+    );
+    assert!(
+        status.contains("config-deprecation "),
+        "status should surface the deprecation notice: {status}"
+    );
+    assert!(
+        status.contains("to-dsl"),
+        "notice should point at the migration tool: {status}"
+    );
+
+    // `show status` (BIRD-style) carries the same lines — an
+    // operator's muscle memory lands on the same warning whichever
+    // command they reach for.
+    let show = api_ask(&socket, "show status");
+    assert!(
+        show.contains("config-dialect toml"),
+        "show status should name the TOML dialect: {show}"
+    );
+    assert!(
+        show.contains("config-deprecation "),
+        "show status should surface the deprecation notice: {show}"
+    );
+
+    let _ = api_ask(&socket, "shutdown");
+    let _ = d.wait_exit();
+    let _ = std::fs::remove_file(&conf);
+}
+
+/// The native `.lr` dialect stamps the runtime API with the dialect
+/// label but no deprecation notice — the DSL is the migration target.
+#[test]
+fn status_dsl_dialect_has_no_deprecation() {
+    let socket =
+        std::env::temp_dir().join(format!("lr-daemon-test-dsl-{}.sock", std::process::id()));
+    let conf = std::env::temp_dir().join(format!("lr-daemon-test-dsl-{}.lr", std::process::id()));
+    std::fs::write(
+        &conf,
+        "bgp {\n    local_as 64512;\n    peer_as 64513;\n    router_id 10.0.0.1;\n    \
+         listen_addr 127.0.0.1:17988;\n    networks [203.0.113.0/24];\n}\n",
+    )
+    .unwrap();
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "dsl",
+    );
+    d.wait_log("runtime API on", "api socket up");
+
+    let status = api_ask(&socket, "status");
+    assert!(
+        status.contains("config-dialect lr"),
+        "status should name the DSL dialect: {status}"
+    );
+    assert!(
+        !status.contains("config-deprecation"),
+        "DSL dialect has no deprecation notice: {status}"
+    );
+
+    let _ = api_ask(&socket, "shutdown");
+    let _ = d.wait_exit();
+    let _ = std::fs::remove_file(&conf);
+}
+
 #[test]
 fn sigterm_shuts_down_gracefully() {
     let socket =

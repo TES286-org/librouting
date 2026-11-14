@@ -112,6 +112,17 @@ fn render_show_status(ctx: &ShowCtx<'_>) -> String {
         "config {}",
         ctx.info.config_path.as_deref().unwrap_or("(none)")
     );
+    if let Some(d) = ctx.info.config_dialect.as_deref() {
+        let _ = writeln!(out, "config-dialect {}", d);
+        // Issue #101: keep `show status` in lock-step with `status` —
+        // both surface the deprecation notice for dialects in their
+        // window (the native TOML subset), so an operator's BIRD-style
+        // `show status` muscle memory lands on the same warning the
+        // legacy command prints.
+        if let Some(notice) = crate::daemon_config::deprecation_notice(Some(d)) {
+            let _ = writeln!(out, "config-deprecation {notice}");
+        }
+    }
     let _ = writeln!(out, "uptime-secs {}", ctx.started.elapsed().as_secs());
     let _ = writeln!(out, "sessions {} established {}", sessions, established);
     let _ = writeln!(out, "rib-entries {}", rib_len);
@@ -336,6 +347,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -354,6 +366,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -366,6 +379,75 @@ mod tests {
             "body: {body}"
         );
         assert!(body.contains("memory rss-bytes="), "body: {body}");
+        // No dialect stamped → no deprecation line.
+        assert!(
+            !body.contains("config-deprecation"),
+            "no deprecation without a dialect: {body}"
+        );
+        assert!(
+            !body.contains("config-dialect"),
+            "no dialect line without a dialect: {body}"
+        );
+    }
+
+    /// Issue #101: `show status` surfaces the deprecation notice when
+    /// the daemon is running on the deprecated TOML dialect, so an
+    /// operator's `lrctl show status` does not hide the window the
+    /// startup banner already named. The DSL, BIRD and FRR dialects
+    /// stamp themselves without a notice — only the TOML subset is in
+    /// its deprecation window.
+    #[test]
+    fn show_status_surfaces_toml_deprecation() {
+        let router = make_router_with_session();
+        let info = DaemonInfo {
+            version: "test".into(),
+            local_as: 64512,
+            peer_as: 64513,
+            router_id: "10.0.0.1".into(),
+            config_path: Some("/etc/lr/daemon.toml".into()),
+            config_dialect: Some("toml".into()),
+        };
+        let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
+        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let body = dispatch("show status", &cx).expect("show status matched");
+        assert!(
+            body.contains("config-dialect toml"),
+            "dialect stamped: {body}"
+        );
+        assert!(
+            body.contains("config-deprecation "),
+            "deprecation surfaced: {body}"
+        );
+        assert!(
+            body.contains("to-dsl"),
+            "migration pointer in the notice: {body}"
+        );
+    }
+
+    /// The native `.lr` DSL stamps the dialect without a deprecation
+    /// line — it is the migration target, not the deprecated dialect.
+    #[test]
+    fn show_status_dsl_dialect_has_no_deprecation() {
+        let router = make_router_with_session();
+        let info = DaemonInfo {
+            version: "test".into(),
+            local_as: 64512,
+            peer_as: 64513,
+            router_id: "10.0.0.1".into(),
+            config_path: Some("/etc/lr/daemon.lr".into()),
+            config_dialect: Some("lr".into()),
+        };
+        let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
+        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let body = dispatch("show status", &cx).expect("show status matched");
+        assert!(
+            body.contains("config-dialect lr"),
+            "dialect stamped: {body}"
+        );
+        assert!(
+            !body.contains("config-deprecation"),
+            "DSL has no deprecation: {body}"
+        );
     }
 
     #[test]
@@ -377,6 +459,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -402,6 +485,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -420,6 +504,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -440,6 +525,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -459,6 +545,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -480,6 +567,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -498,6 +586,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
@@ -517,6 +606,7 @@ mod tests {
             peer_as: 64513,
             router_id: "10.0.0.1".into(),
             config_path: None,
+            config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
         let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());

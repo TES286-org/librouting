@@ -87,7 +87,7 @@ Unknown filter names fail at startup, as do duplicate filter names.
 Startup reports both halves:
 
 ```text
-  roa:         2 entries, validate=true (action: reject)
+  roa:         2 inline entries, validate=true (action: reject)
   filters:     1 compiled, 1 import / 0 export bindings
 ```
 

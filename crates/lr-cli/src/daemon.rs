@@ -438,6 +438,15 @@ fn daemon_main() -> ExitCode {
         eprintln!("error: {e}");
         return ExitCode::from(2);
     }
+    // Issue #101: the startup `eprintln!` in `parse_args` covers the
+    // one-shot stderr channel; re-emit through the structured logger
+    // too so an operator's `--log-target config=warn` filter (or a
+    // syslog / file destination) sees the same notice. The structured
+    // record is the channel a fleet collector scrapes, where stderr is
+    // easy to miss on a daemon under systemd.
+    if let Some(notice) = daemon_config::deprecation_notice(cfg.config_dialect.as_deref()) {
+        log_warn!(Component::Config, "config deprecation: {notice}");
+    }
     // rc.3: the protocol surface is a set. Fail closed on a typo'd or
     // degenerate value instead of silently running BGP (an all-comma
     // value names nothing).
@@ -7539,6 +7548,7 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             peer_as: cfg.peer_as,
             router_id: cfg.router_id.clone(),
             config_path: cfg.config_path.clone(),
+            config_dialect: cfg.config_dialect.clone(),
         },
         router: Arc::clone(&rt.router),
         running: Arc::clone(&rt.running),
@@ -7624,6 +7634,7 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
                 .clone()
                 .unwrap_or_else(|| "(none)".to_string()),
             peer_as: cfg.peer_as,
+            config_dialect: cfg.config_dialect.clone().unwrap_or_default(),
         },
         router: Arc::clone(&rt.router),
         running: Arc::clone(&rt.running),

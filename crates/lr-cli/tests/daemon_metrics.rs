@@ -230,16 +230,23 @@ fn metrics_endpoint_serves_prometheus_exposition() {
     }
 
     // Identity gauge carries the daemon's local_as, peer_as,
-    // router_id and config_path. The version string tracks the
-    // workspace version in Cargo.toml. The peer_as and config_path
-    // labels were added in 1.3.0 — pin them so a future rename
-    // breaks loudly.
+    // router_id, config_path and config_dialect. The version string
+    // tracks the workspace version in Cargo.toml. The peer_as and
+    // config_path labels were added in 1.3.0; the config_dialect
+    // label and the `lr_config_dialect_deprecated` gauge landed in
+    // the issue #101 deprecation-cleanup pass — pin them so a future
+    // rename breaks loudly. A daemon started without a config file
+    // stamps an empty dialect and reads 0 on the deprecation gauge.
     assert!(
         body.contains(&format!(
-            "lr_info{{version=\"{}\",local_as=\"64512\",peer_as=\"64513\",router_id=\"10.0.0.1\",config_path=\"(none)\"}} 1",
+            "lr_info{{version=\"{}\",local_as=\"64512\",peer_as=\"64513\",router_id=\"10.0.0.1\",config_path=\"(none)\",config_dialect=\"\"}} 1",
             env!("CARGO_PKG_VERSION")
         )),
         "lr_info line missing or wrong; body:\n{body}"
+    );
+    assert!(
+        body.contains("lr_config_dialect_deprecated{config_dialect=\"\"} 0"),
+        "deprecation gauge should read 0 with no dialect stamped; body:\n{body}"
     );
 
     // One BGP session, Idle (no peer connecting).

@@ -9,6 +9,12 @@ Read the page that matches your task. Vocabulary and the configuration
 grammar live in [`../config_dsl_grammar.md`](../config_dsl_grammar.md)
 and [`../filter_dsl_grammar.md`](../filter_dsl_grammar.md).
 
+## First deployment
+
+| Example | What it covers |
+| ------- | -------------- |
+| [`first_deployment.md`](first_deployment.md) | Zero to a running two-router BGP deployment: build, write `.lr`, run, verify against a second `lr-daemon`, import policy, ROA, kernel install, reload, troubleshooting |
+
 ## BGP
 
 | Example | RFC | What it covers |
