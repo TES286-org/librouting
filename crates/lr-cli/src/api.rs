@@ -45,6 +45,11 @@ pub struct DaemonInfo {
     pub peer_as: u32,
     pub router_id: String,
     pub config_path: Option<String>,
+    /// Resolved config dialect (`lr`, `toml`, `bird`, `frr`); `None`
+    /// when the daemon was started without a config file. Surfaced so
+    /// the runtime API can echo the deprecation notice for dialects in
+    /// their deprecation window (the native TOML subset; issue #101).
+    pub config_dialect: Option<String>,
 }
 
 /// Everything the API thread needs to answer commands.
@@ -447,6 +452,18 @@ mod imp {
                         "config {}",
                         deps.info.config_path.as_deref().unwrap_or("(none)")
                     );
+                    if let Some(d) = deps.info.config_dialect.as_deref() {
+                        let _ = writeln!(out, "config-dialect {}", d);
+                        // Issue #101: surface the deprecation notice for
+                        // dialects in their window (the native TOML subset)
+                        // so an operator inspecting a running daemon via
+                        // `lrctl status` sees the same warning that startup
+                        // and `config check` print, not a silent running
+                        // state.
+                        if let Some(notice) = crate::daemon_config::deprecation_notice(Some(d)) {
+                            let _ = writeln!(out, "config-deprecation {notice}");
+                        }
+                    }
                     let _ = writeln!(out, "uptime-secs {}", deps.started.elapsed().as_secs());
                     let _ = writeln!(out, "sessions {}", sessions);
                     let _ = writeln!(out, "rib-entries {}", rib);
@@ -734,6 +751,7 @@ mod imp {
                     peer_as: 64513,
                     router_id: "10.0.0.1".into(),
                     config_path: None,
+                    config_dialect: None,
                 },
                 router,
                 running,

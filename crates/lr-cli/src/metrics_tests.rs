@@ -162,6 +162,7 @@ fn test_ctx(router: Arc<RwLock<DefaultRouter>>, running: Arc<AtomicBool>) -> Met
             router_id: "10.0.0.1".into(),
             config_path: "(none)".into(),
             peer_as: 64513,
+            config_dialect: String::new(),
         },
         router,
         running,
@@ -253,21 +254,33 @@ fn spawn_serves_metrics_on_tcp() {
         "Content-Type should declare version=0.0.4; response:\n{resp}"
     );
     // Body must carry the identity gauge (with the configured
-    // local_as / peer_as / router_id / config_path), the uptime
-    // gauge, and at least one session / RIB counter line. The
+    // local_as / peer_as / router_id / config_path / config_dialect
+    // labels), the uptime gauge, the config-dialect deprecation
+    // gauge (issue #101 — 0 here because the test fixture stamps no
+    // dialect), and at least one session / RIB counter line. The
     // enrichment work in 1.3.0 added the `peer_as` and
-    // `config_path` labels to `lr_info` — the test pins them so
-    // a future rename of either does not silently break a scraper.
+    // `config_path` labels to `lr_info`; issue #101 added the
+    // `config_dialect` label and the `lr_config_dialect_deprecated`
+    // gauge — the test pins them so a future rename of either does
+    // not silently break a scraper.
     let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
     assert!(
         body.contains(
-            "lr_info{version=\"test\",local_as=\"64512\",peer_as=\"64513\",router_id=\"10.0.0.1\",config_path=\"(none)\"} 1"
+            "lr_info{version=\"test\",local_as=\"64512\",peer_as=\"64513\",router_id=\"10.0.0.1\",config_path=\"(none)\",config_dialect=\"\"} 1"
         ),
         "lr_info line missing or wrong; body:\n{body}"
     );
     assert!(
         body.contains("# TYPE lr_uptime_seconds gauge"),
         "uptime TYPE missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("# TYPE lr_config_dialect_deprecated gauge"),
+        "config_dialect_deprecated TYPE missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("lr_config_dialect_deprecated{config_dialect=\"\"} 0"),
+        "deprecated gauge should read 0 with no dialect stamped; body:\n{body}"
     );
     assert!(
         body.contains("lr_sessions_total{kind=\"bgp\",state=\"Idle\"} 1"),
@@ -451,4 +464,68 @@ fn spawn_bind_failure_does_not_mention_unix_sockets() {
         "bind failure must not mention Unix domain sockets; got: {err}"
     );
     drop(squatter);
+}
+
+/// Issue #101: when the daemon is running on the deprecated TOML
+/// dialect, the metrics endpoint surfaces `lr_config_dialect_deprecated
+/// {config_dialect="toml"} 1` so a fleet operator can alert on the
+/// migration state without scraping the daemon's startup stderr. The
+/// DSL dialect stamps the same gauge at 0 — it is the migration target,
+/// not the deprecated dialect.
+#[test]
+fn deprecation_gauge_reads_one_for_toml_dialect() {
+    let router = Arc::new(RwLock::new(DefaultRouter::new()));
+    let running = Arc::new(AtomicBool::new(true));
+    let mut ctx = test_ctx(Arc::clone(&router), Arc::clone(&running));
+    ctx.info.config_dialect = "toml".to_string();
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let _ = spawn(&addr, ctx).expect("metrics server spawns");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let resp = loop {
+        let r = http_get(&addr, "/metrics");
+        if r.starts_with("HTTP/1.0 200") || std::time::Instant::now() >= deadline {
+            break r;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(resp.starts_with("HTTP/1.0 200"), "scrape failed: {resp}");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+    assert!(
+        body.contains("lr_config_dialect_deprecated{config_dialect=\"toml\"} 1"),
+        "TOML dialect should set the deprecated gauge to 1; body:\n{body}"
+    );
+    assert!(
+        body.contains("config_dialect=\"toml\""),
+        "lr_info should carry the dialect label; body:\n{body}"
+    );
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The native `.lr` DSL is the migration target — the deprecation
+/// gauge reads 0 when the daemon is running on it.
+#[test]
+fn deprecation_gauge_reads_zero_for_lr_dialect() {
+    let router = Arc::new(RwLock::new(DefaultRouter::new()));
+    let running = Arc::new(AtomicBool::new(true));
+    let mut ctx = test_ctx(Arc::clone(&router), Arc::clone(&running));
+    ctx.info.config_dialect = "lr".to_string();
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let _ = spawn(&addr, ctx).expect("metrics server spawns");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let resp = loop {
+        let r = http_get(&addr, "/metrics");
+        if r.starts_with("HTTP/1.0 200") || std::time::Instant::now() >= deadline {
+            break r;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(resp.starts_with("HTTP/1.0 200"), "scrape failed: {resp}");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+    assert!(
+        body.contains("lr_config_dialect_deprecated{config_dialect=\"lr\"} 0"),
+        "DSL dialect should set the deprecated gauge to 0; body:\n{body}"
+    );
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
 }

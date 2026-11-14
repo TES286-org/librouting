@@ -31,8 +31,9 @@
 //!
 //! | Metric                       | Type    | Labels                          | Source                                   |
 //! | ---------------------------- | ------- | ------------------------------- | ---------------------------------------- |
-//! | `lr_info`                    | gauge=1 | `version`, `local_as`, `peer_as`, `router_id`, `config_path` | daemon identity (for join queries)  |
+//! | `lr_info`                    | gauge=1 | `version`, `local_as`, `peer_as`, `router_id`, `config_path`, `config_dialect` | daemon identity (for join queries)  |
 //! | `lr_uptime_seconds`          | gauge   | —                               | `Instant::elapsed()` since `spawn`       |
+//! | `lr_config_dialect_deprecated` | gauge=0/1 | `config_dialect`             | 1 when the daemon runs on a deprecated dialect (the native TOML subset) — issue #101 |
 //! | `lr_sessions_total`          | gauge   | `kind`, `state`                 | `session_summaries()` count per (kind, state) |
 //! | `lr_established_sessions`    | gauge   | `kind`                          | `session_summaries().established` count |
 //! | `lr_session_up`              | gauge=0/1 | `kind`, `session`, `peer`     | per-session established flag            |
@@ -308,6 +309,13 @@ pub struct MetricsInfo {
     /// Surfaced as a label on `lr_info` so a scraper can tell
     /// single-peer daemons apart from multi-peer ones at a glance.
     pub peer_as: u32,
+    /// Resolved config dialect (`lr`, `toml`, `bird`, `frr`); empty
+    /// string when the daemon was started without a config file.
+    /// Surfaced as a label on `lr_info` and drives the
+    /// `lr_config_dialect_deprecated` gauge (issue #101) — a scraper
+    /// alerting on `lr_config_dialect_deprecated == 1` flags every
+    /// daemon still running on the deprecated TOML subset.
+    pub config_dialect: String,
 }
 
 mod imp {
@@ -546,13 +554,14 @@ mod imp {
                 // been running (a proxy for "the daemon restarted
                 // recently").
                 return format!(
-                    "# lr_info\nlr_info{{version=\"{ver}\",local_as=\"{la}\",peer_as=\"{pa}\",router_id=\"{rid}\",config_path=\"{cfg}\"}} 1\n\
+                    "# lr_info\nlr_info{{version=\"{ver}\",local_as=\"{la}\",peer_as=\"{pa}\",router_id=\"{rid}\",config_path=\"{cfg}\",config_dialect=\"{cdia}\"}} 1\n\
                      # lr_uptime_seconds\nlr_uptime_seconds {up}\n",
                     ver = escape_label(&info.version),
                     la = info.local_as,
                     pa = info.peer_as,
                     rid = escape_label(&info.router_id),
                     cfg = escape_label(&info.config_path),
+                    cdia = escape_label(&info.config_dialect),
                     up = started.elapsed().as_secs(),
                 );
             }
@@ -566,12 +575,13 @@ mod imp {
         writeln!(out, "# TYPE lr_info gauge").ok();
         writeln!(
             out,
-            "lr_info{{version=\"{ver}\",local_as=\"{la}\",peer_as=\"{pa}\",router_id=\"{rid}\",config_path=\"{cfg}\"}} 1",
+            "lr_info{{version=\"{ver}\",local_as=\"{la}\",peer_as=\"{pa}\",router_id=\"{rid}\",config_path=\"{cfg}\",config_dialect=\"{cdia}\"}} 1",
             ver = escape_label(&info.version),
             la = info.local_as,
             pa = info.peer_as,
             rid = escape_label(&info.router_id),
             cfg = escape_label(&info.config_path),
+            cdia = escape_label(&info.config_dialect),
         )
         .ok();
 
@@ -579,6 +589,34 @@ mod imp {
         writeln!(out, "# HELP lr_uptime_seconds Daemon uptime in seconds.").ok();
         writeln!(out, "# TYPE lr_uptime_seconds gauge").ok();
         writeln!(out, "lr_uptime_seconds {}", snap.uptime).ok();
+
+        // lr_config_dialect_deprecated — 1 when the daemon is running on
+        // a config dialect in its deprecation window (the native TOML
+        // subset), 0 otherwise. Issue #101: a scraper alerting on
+        // `lr_config_dialect_deprecated == 1` flags every daemon still
+        // running on the deprecated dialect, so a fleet operator can
+        // track the migration off TOML ahead of the 2.x removal without
+        // scraping the startup stderr.
+        writeln!(
+            out,
+            "# HELP lr_config_dialect_deprecated 1 when the daemon is running on a config dialect in its deprecation window (the native TOML subset), 0 otherwise."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_config_dialect_deprecated gauge").ok();
+        let deprecated =
+            if crate::daemon_config::deprecation_notice(Some(info.config_dialect.as_str()))
+                .is_some()
+            {
+                1
+            } else {
+                0
+            };
+        writeln!(
+            out,
+            "lr_config_dialect_deprecated{{config_dialect=\"{cdia}\"}} {deprecated}",
+            cdia = escape_label(&info.config_dialect),
+        )
+        .ok();
 
         // lr_sessions_total — count per (kind, state). Gauges because
         // the value can go down (session teardown).
