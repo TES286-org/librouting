@@ -254,6 +254,24 @@ plane — all pinned by the `lrxp_tests` module in
 
 ## Scaling
 
+The three items below are the daemon-refactoring block of the 2.x
+release plan (issue #101). They are sequenced — async I/O lands
+first because it is the substrate the RIB concurrency work builds
+on; per-AFI RIB sharding lands second because it is the
+interior-concurrency boundary the multi-threaded RIB shards across;
+the multi-threaded RIB and the lock-free event bus land together
+third because the bus is what lets the API thread read without the
+writer's lock.
+
+The 1.x stability window freezes the public Rust API and the C ABI
+(see [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §4). Each landing must
+preserve that surface: `LocRib`'s public methods and the
+`RouterInstance` trait stay shape-compatible, with new family-aware
+methods added alongside the existing cross-family ones (the
+`abi-freeze` CI job enforces the C half mechanically). A breaking
+change ships as the 2.0 major bump and lands in one PR after the
+three below have stabilised on a release window.
+
 **Async I/O.** The daemon runs a thread per socket, and its transports poll
 with a short `sleep` between reads (`crates/lr-cli/src/daemon.rs`,
 [`lr-osroute::ospf_transport`](../crates/lr-osroute/src/ospf_transport/mod.rs),
@@ -263,6 +281,14 @@ holds. The work is to move the session and transport layer onto an event
 loop — `mio` or `tokio` — with readiness driving the FSM instead of a timer.
 Done when the poll-and-sleep loops are gone, an idle session wakes only on
 an event, and the session, timer and interop tests still pass.
+
+The first PR lands the event loop for the BGP session layer only —
+the OSPF and Babel transports stay on their raw sockets for one
+release, because OSPF uses `AF_PACKET` / raw IP and Babel uses a
+UDP-plus-multicast pair that the event loop wraps differently.
+`mio` is the smaller dependency and the daemon already avoids
+`tokio` for the API and metrics threads; `tokio` is the alternative
+if the rest of the daemon's I/O surfaces converge on it.
 
 **Per-AFI RIB sharding.** [`ARCHITECTURE.md`](ARCHITECTURE.md) describes one
 Loc-RIB for every family.
@@ -274,6 +300,16 @@ the right shard. Done when the family is part of the RIB's identity, an
 update in one family never blocks selection in another, and the selection
 and Add-Path tests still hold.
 
+`LocRib`'s public API is frozen (it is exposed through the C ABI as
+`lr_loc_rib_t`); the landing keeps every existing method's signature
+and shards the internal storage. New family-aware methods
+(`iter_best_by_family`, `len_by_family`, `diff_since_by_family`)
+land alongside the cross-family ones, and the `RouterInstance`
+implementation routes install / uninstall / reselect to the right
+shard by family. The kernel mirror (`OsRouteTable`) already keys on
+`RouteKey { prefix, family }` so it reads the right shard without an
+API change.
+
 **Multi-threaded RIB and a lock-free event bus.** The whole router sits
 behind `Arc<RwLock<DefaultRouter>>` (`crates/lr-cli/src/daemon.rs`,
 `crates/lr-cli/src/api.rs`), so one writer at a time is the ceiling and an
@@ -282,6 +318,16 @@ API read waits behind it. The work is interior concurrency in the RIB
 subscribe to in place of the shared lock. Done when import, reselection and
 export proceed concurrently, the best-path result is unchanged, and the API
 reads without taking the writer's lock.
+
+This lands last because the per-shard locks it depends on come from
+the per-AFI sharding PR, and the event bus is what retires the
+`Arc<RwLock<DefaultRouter>>` the API thread holds today. The bus is
+a new `lr-router::event_bus` module — a bounded MPSC broadcast
+consumers subscribe to in place of the shared lock — and the
+`RouterEvent` enum (`lr-router::event`) becomes the wire format.
+The ticker thread, the API socket, the metrics endpoint, the BMP
+mirror and the kernel mirror all become subscribers; the writer's
+lock goes away. The `abi-freeze` CI job gates the C ABI half.
 
 ## Compatibility
 
