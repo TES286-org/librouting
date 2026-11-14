@@ -329,6 +329,20 @@ The ticker thread, the API socket, the metrics endpoint, the BMP
 mirror and the kernel mirror all become subscribers; the writer's
 lock goes away. The `abi-freeze` CI job gates the C ABI half.
 
+The event bus data structure itself has landed
+(`lr-router::event_bus::EventBus`): a bounded MPMC broadcast where
+each subscriber gets its own `std::sync::mpsc::Receiver`,
+`publish` writes to every active subscriber in one pass with
+`try_send` (a full subscriber drops the event rather than blocking
+the publisher), and disconnected subscribers are pruned on the next
+publish. Nine unit tests pin the contract (every subscriber gets
+every event in order, full-subscriber drop is isolated, pruning,
+clone shares state, concurrent publish + drain, counters are
+monotonic, capacity clamping, `recv_or_none` timeout/disconnect).
+The wiring — the daemon's read-side consumers subscribing to the
+bus in place of the `Arc<RwLock<DefaultRouter>>` read — is the
+follow-up PR; the data structure's contract is stable across it.
+
 ## Compatibility
 
 **RISC-V targeted compatibility improvements.** The CI matrix covers
