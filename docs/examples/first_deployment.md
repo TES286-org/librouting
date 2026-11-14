@@ -290,7 +290,7 @@ grep "roa:" /tmp/lr-first/b.out | tail -1
 ```
 
 ```text
-  roa:         2 entries, validate=true (action: reject)
+  roa:         2 inline entries, validate=true (action: reject)
 ```
 
 `lrctl show roa` dumps the merged table; the BGP daemon populates it

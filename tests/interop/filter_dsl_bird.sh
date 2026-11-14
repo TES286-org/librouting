@@ -21,7 +21,7 @@
 #   2. The 203.0.113.0/24 route (Invalid per ROA — covered but
 #      wrong origin AS) is rejected via ROA validation.
 #   3. lr-daemon prints filters: 1 compiled, 1 import / 0 export
-#      bindings and roa: 2 entries, validate=true on startup.
+#      bindings and roa: 2 inline entries, validate=true on startup.
 #
 # Env overrides:
 #   BIRD / BIRDC   paths to the bird / birdc binaries
@@ -147,7 +147,7 @@ reason="timeout waiting for filter DSL interop"
 for i in $(seq 1 80); do
     sleep 0.5
     if grep -qF "filters:     1 compiled, 1 import / 0 export bindings" "$OUT/lr.log" 2>/dev/null \
-       && grep -qF "roa:         2 entries, validate=true" "$OUT/lr.log" 2>/dev/null; then
+       && grep -qF "roa:         2 inline entries, validate=true" "$OUT/lr.log" 2>/dev/null; then
         if grep -qF "route installed 198.51.100.0/24" "$OUT/lr.log" 2>/dev/null; then
             if ! grep -qF "route installed 203.0.113.0/24" "$OUT/lr.log" 2>/dev/null; then
                 ok=0
