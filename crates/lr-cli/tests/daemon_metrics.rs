@@ -134,21 +134,58 @@ fn free_port() -> u16 {
 
 /// One HTTP round trip: send `GET <path> HTTP/1.0`, return the raw
 /// response bytes (status line + headers + body). A 5 s deadline
-/// mirrors `daemon_runtime.rs::api_ask`.
+/// mirrors `daemon_runtime.rs::api_ask`. Retries on
+/// `ConnectionReset` / `ConnectionAborted` (up to 3 attempts with a
+/// 250 ms gap) — the metrics server's hand-rolled HTTP/1.0 listener
+/// runs on a per-connection thread, and on a loaded macOS CI runner
+/// the kernel occasionally resets the connection while the client is
+/// mid-read. The retry absorbs the transient reset without losing
+/// the test's diagnostic on a real failure (the last attempt's
+/// panic message surfaces).
 fn http_get(addr: &str, path: &str) -> String {
-    let mut conn = TcpStream::connect(addr).expect("connect to metrics endpoint");
-    conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    conn.set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    for attempt in 0..3 {
+        match http_get_once(addr, path) {
+            Ok(body) => return body,
+            Err(e) if is_transient_reset(&e) && attempt < 2 => {
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+            Err(e) => panic!("read response: {e}"),
+        }
+    }
+    unreachable!("retry loop exits via return or panic")
+}
+
+/// One attempt at the HTTP round-trip, factored out of [`http_get`]
+/// so the retry loop can call it cleanly.
+fn http_get_once(addr: &str, path: &str) -> std::io::Result<String> {
+    let mut conn = TcpStream::connect(addr)?;
+    conn.set_read_timeout(Some(Duration::from_secs(5)))?;
+    conn.set_write_timeout(Some(Duration::from_secs(5)))?;
     write!(
         conn,
         "GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    conn.flush().unwrap();
+    )?;
+    conn.flush()?;
     let mut buf = Vec::new();
-    conn.read_to_end(&mut buf).expect("read response");
-    String::from_utf8_lossy(&buf).into_owned()
+    conn.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// `ConnectionReset` (errno 54 on macOS, 104 on Linux) and
+/// `ConnectionAborted` (errno 53 on macOS, 103 on Linux) are the
+/// transient TCP errors the hand-rolled HTTP listener can surface
+/// when the per-connection thread closes the socket while the client
+/// is still reading. `UnexpectedEof` covers the case where the
+/// server closed after a partial write (the client got the headers
+/// but not the full body).
+fn is_transient_reset(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 /// Split an HTTP response into (status_line, headers, body).
