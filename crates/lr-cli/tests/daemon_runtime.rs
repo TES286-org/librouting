@@ -316,7 +316,7 @@ fn status_surfaces_toml_deprecation_notice() {
     std::fs::write(
         &conf,
         "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
-         listen_addr = \"127.0.0.1:17984\"\n\nnetworks = [\"203.0.113.0/24\"]\n",
+         listen_addr = \"127.0.0.1:17987\"\n\nnetworks = [\"203.0.113.0/24\"]\n",
     )
     .unwrap();
 
@@ -376,7 +376,7 @@ fn status_dsl_dialect_has_no_deprecation() {
     std::fs::write(
         &conf,
         "bgp {\n    local_as 64512;\n    peer_as 64513;\n    router_id 10.0.0.1;\n    \
-         listen_addr 127.0.0.1:17985;\n    networks [203.0.113.0/24];\n}\n",
+         listen_addr 127.0.0.1:17988;\n    networks [203.0.113.0/24];\n}\n",
     )
     .unwrap();
 
