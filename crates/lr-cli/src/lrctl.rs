@@ -1000,11 +1000,9 @@ mod transport {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            if err == ERROR_FILE_NOT_FOUND {
-                if Instant::now() < not_found_deadline {
-                    thread::sleep(Duration::from_millis(50));
-                    continue;
-                }
+            if err == ERROR_FILE_NOT_FOUND && Instant::now() < not_found_deadline {
+                thread::sleep(Duration::from_millis(50));
+                continue;
             }
             return Err(format!(
                 "connect {pipe_name}: CreateFileW failed (error {err})"
