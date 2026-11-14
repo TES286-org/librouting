@@ -1,267 +1,56 @@
 # Roadmap
 
-This page is the open-work list for librouting. It names the work that has
-not landed and what "done" means for each item. Read it if you are picking
-up a block of work or deciding whether a gap matters for a deployment.
+This page is the open-work list for librouting. It names the work that
+has not landed and what "done" means for each item. Read it if you are
+picking up a block of work or deciding whether a gap matters for a
+deployment.
 
 Work that has landed is not recorded here.
 [`../CHANGELOG.md`](../CHANGELOG.md) and `git log` are the record, and
-[`STATUS.md`](STATUS.md) and [`RFC_MAP.md`](RFC_MAP.md) describe what the
-code does today. Open issues are the canonical task list and live on the
-project's issue tracker. Each item names the crate, module or RFC that
-defines it; the code wins over any sentence here.
+[`STATUS.md`](STATUS.md) and [`RFC_MAP.md`](RFC_MAP.md) describe what
+the code does today. Open issues are the canonical task list and live
+on the project's issue tracker. Each item names the crate, module or
+RFC that defines it; the code wins over any sentence here.
 
 ## Protocol coverage
 
-**BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9514).** Done —
-the wire codec, the OSPF LSDB → BGP-LS projection, the daemon
-wiring (`--bgp-ls` flag + `[bgp_ls]` config block + incremental
-republish driver), the BIRD interop lab, and the BGP-LS
-Attribute TLV codec (RFC 7752 §3.3 + RFC 9514 §7-§8) have all
-landed. The STATUS rows for the codec, projection, egress,
-republish driver and daemon config are all `yes`; the
-`bgpls_bird.sh` lab is the "done" gate from this section. The
-RFC 9552 §3.2 BGP-LS Instance-ID is exposed as
-`--bgp-ls-instance-id` / `[bgp_ls] instance_id` (defaults to 0,
-the RFC's single-instance recommendation).
-
-`lr-bgp::path::bgp_ls` parses and serialises the Node, Link, IPv4
-Prefix and IPv6 Prefix NLRI shapes from RFC 7752 §3.3, the Local
-Node Descriptor / Remote Node Descriptor / Link Descriptor / Prefix
-Descriptor TLVs (§3.2), and the Node Descriptor sub-TLVs (§3.2.1.4:
-AS, BGP-LS Identifier, OSPF Area-ID, IGP Router-ID). Unknown TLVs and
-sub-TLVs are preserved verbatim so the codec round-trips byte-for-byte
-on any well-formed input — the cargo-fuzz target `bgp_ls_decode` ran
-62M iterations without crashes. The SRv6 SID NLRI (RFC 9514 §6,
-NLRI Type 6) is modelled in full at the NLRI level: the inner SRv6
-SID Descriptor TLV stream carries the mandatory SRv6 SID Information
-TLV (§6.1, type 518, 16-byte SID) and any optional Multi-Topology
-ID TLV (§3.2.1.5, type 263), with strict structural enforcement on
-decode.
-
-`lr-bgp::path::bgp_ls_attr` parses and serialises the BGP-LS
-Attribute (path attribute type 29, RFC 7752 §3.3) — the TLV
-stream that rides alongside a BGP-LS NLRI carrying the
-link-state metadata a controller needs. The codec models the
-RFC 9514 §7-§8 SRv6 SID Attribute TLVs the projection will
-attach to a projected SRv6 SID NLRI — the SRv6 Endpoint Behavior
-TLV (§7.1, type 1250), the SRv6 BGP PeerNode SID TLV (§7.2,
-type 1251), and the SRv6 SID Structure TLV (§8, type 1252) —
-plus the RFC 9514 §3.1 SRv6 Capabilities TLV, the §4.1/§4.2
-SRv6 End.X / LAN End.X SID TLVs, and the §5.1 SRv6 Locator TLV,
-and a representative subset of the RFC 7752 §3.3.1-§3.3.3
-Node/Link/Prefix Attribute TLVs (Node Flag Bits, Opaque Node,
-Node Name, IS-IS Area Identifier, IPv4/IPv6 Router-ID, Admin
-Group, Max Link / Max Reservable / Unreserved Bandwidth, TE
-Default Metric, MPLS Metric, Shared Risk Link Group, IGP
-Metric, IGP Flags, IGP Route Tag, Prefix Metric, Forwarding
-Address Prefix, Opaque Prefix Attribute, Prefix Attribute
-Flags). Unknown TLVs are preserved verbatim so any well-formed
-attribute round-trips byte-for-byte. The cargo-fuzz target
-`bgp_ls_attr_decode` covers the same contract. The End.X / LAN
-End.X SID *projection* update (attaching the §7 attribute to
-a projected End.X NLRI through `BgpPeer::advertise_bgpls_with_attr`)
-has landed.
-
-`lr-router::instance::lsdb_to_bgpls` projects one OSPF area's LSDB
-onto the Node / Link / Prefix NLRI set: OSPFv2 emits Node NLRIs
-(Router-LSA, Network-LSA pseudonode), Link NLRIs (transit + P2P)
-with IPv4 Interface/Neighbor Address TLVs, and IPv4 Topology Prefix
-NLRIs (stub links = `IntraArea`, type-3 Summary-LSAs = `InterArea`,
-type-5 AS-External-LSAs = `External1` / `External2` with the OSPF
-Area-ID sub-TLV set to 0 per RFC 7752 §3.2.1.4). OSPFv3 emits the
-IPv6 equivalents and handles RFC 8362 Extended LSAs, and additionally
-walks the OSPFv3 SRv6 database (`lr-ospf::srv6db`, RFC 9513
-reception) to emit one RFC 9514 §6 SRv6 SID NLRI per End SID the
-database holds — the Local Node Descriptor is the advertising
-router's 4-byte IGP Router-ID, and the SRv6 SID Descriptor stream
-carries the mandatory SRv6 SID Information TLV (§6.1, type 518,
-16-byte SID) plus a Multi-Topology ID TLV (type 263, value 0) for
-consistency with the prefix-NLRI projection. End.X / LAN End.X SIDs
-are projected by the sibling function
-`lsdb_to_bgpls::project_v3_srv6_end_x_nlris`: it walks the same
-Srv6Database's per-node `end_x_sids` set (RFC 9513 §9.1 p2p form
-and §9.2 LAN form, gated on §9 locator containment and §9.2 neighbor
-match) and emits one `(BgpLsNlri, BgpLsAttr)` pair per End.X SID.
-The NLRI shape is identical to the End SID projection (RFC 9514 §6
-carries the 16-byte SID value; the End.X behavior lives in the
-attribute, not in the NLRI); the attribute carries the mandatory
-RFC 9514 §7.1 SRv6 Endpoint Behavior TLV (type 1250) and the optional
-§8 SRv6 SID Structure TLV (type 1252) when the OSPFv3 §10 sub-TLV
-provided the SID-structure split. `diff_bgpls_with_attrs` returns
-the added / removed / updated / unchanged pair sets so the daemon
-drives incremental MP-BGP UPDATE messages per pair — one UPDATE
-per End.X NLRI since each carries its own attribute (RFC 7752 §3.3
-does not key the BGP-LS Attribute on individual NLRIs in one
-UPDATE). The projection is a pure function on the LSDB;
-`DefaultRouter::ospf_area_bgpls_nlris` wraps the plain NLRI projection
-with the router's per-area context; `DefaultRouter::bgpls_republish`
-drives the plain NLRI projection's incremental republish and
-`DefaultRouter::bgpls_republish_end_x` drives the End.X pair
-projection's incremental republish. `diff_bgpls` returns the
-added / removed / unchanged NLRI sets so a daemon can drive
-incremental MP-BGP UPDATE messages by canonical wire form.
-
-`lr-bgp::advertise::BgpPeer::advertise_bgpls` and
-`withdraw_bgpls` are the egress primitives: opaque BGP-LS NLRI
-bytes ride MP_REACH_NLRI / MP_UNREACH_NLRI attributes built
-directly from `BgpLsNlri::encode` (the existing IP-prefix
-`MpReach`/`MpUnreach` encoders assume AFI=1/2 — BGP-LS needs the
-opaque path). The next-hop field is set to zero (BGP-LS does not
-define a next-hop; matches BIRD's `bgp_ls` channel and FRR's
-`bgp_bgp_ls.c`). `BgpPeer::advertise_bgpls_with_attr` attaches a
-BGP-LS Attribute (type 29, optional + non-transitive) alongside
-the MP_REACH_NLRI so the receiver learns the link-state
-metadata — the path the End.X projection uses to attach the
-§7 SRv6 Endpoint Behavior TLV to a projected End.X NLRI.
-
-`lr-router::instance::DefaultRouter::bgpls_republish` is the
-republish driver: projects the area LSDB, computes the diff against
-the caller's previous projection, walks every BGP-LS session and
-pushes the added NLRIs via `advertise_bgpls`, the removed via
-`withdraw_bgpls`. The daemon's ticker thread drives it once per
-50 ms tick: `BgplsDriver` (in `lr-cli::daemon`) polls each
-configured OSPF area's `topology_version` and calls
-`bgpls_republish` on change. The daemon flag is `--bgp-ls` and the
-config block is `[bgp_ls]` (with `enabled`, `as_number`,
-`bgp_ls_id`, `areas`); both forms fail closed (typo protection).
-The same `BgplsDriver` also calls `bgpls_republish_end_x` per tick
-to push the End.X / LAN End.X projection's `added` pairs through
-`advertise_bgpls_with_attr`, `removed` NLRIs through `withdraw_bgpls`,
-and `updated` pairs (NLRI unchanged, attribute changed) through
-`advertise_bgpls_with_attr` again — RFC 4271 §9.2.1.2 permits
-attribute updates without MP_UNREACH_NLRI. The per-area cache
-holds the plain NLRI baseline and the End.X pair baseline side by
-side so a topology bump that touches only one projection does not
-double-send the other.
-
-The interop lab `tests/interop/bgpls_bird.sh` starts an
-OSPF+BGP lr-daemon with `--bgp-ls` against a BIRD 2.17+ peer
-configured for the BGP-LS address family. BIRD 2.17+ has the
-`bgp_ls` channel (older BIRD SKIPs cleanly); the lab verifies the
-BIRD peer builds a Node NLRI for the lr-daemon's router-id from
-our BGP-LS session — the same IGP graph the OSPF daemon holds in
-its LSDB. The lab runs inside `unshare -Urn` for CAP_NET_RAW, like
-the other OSPF interop labs.
-
-**BGP SR Policy (RFC 9256) with the SRv6 binding (RFC 9430).** Not started.
-Nothing consumes SR policy. The work is the SR Policy address family and the
-tunnel-encapsulation attribute: parse the candidate and dynamic policies,
-resolve each segment list against `lr-srv6` and the SR databases, and steer
-the matching Loc-RIB entries into `seg6` encap routes through the kernel
-mirror (`lr-osroute::seg6_route`). A policy that will not resolve installs
+**BGP SR Policy (RFC 9256) with the SRv6 binding (RFC 9430).** Not
+started. Nothing consumes SR policy. The work is the SR Policy address
+family and the tunnel-encapsulations attribute: parse the candidate
+and dynamic policies, resolve each segment list against `lr-srv6` and
+the SR databases, and steer the matching Loc-RIB entries into `seg6`
+encap routes through the kernel mirror
+(`lr-osroute::seg6_route`). A policy that will not resolve installs
 nothing. Done when a controller's policy steers traffic through an lr
 daemon, and withdrawal removes both the route and the kernel entry.
 
-**Egress Peer Engineering (RFC 9086).** Partial.
-The BGP-LS codec above is the prerequisite, and the codec half of this
-work has now landed: the BGP-LS Attribute codec in
-`lr-bgp::path::bgp_ls_attr` models the three SR-MPLS BGP Peering SID
-TLVs from RFC 9086 §5 — PeerNode SID (type 1101), PeerAdj SID (type
-1102), PeerSet SID (type 1103) — sharing a single `BgpPeeringSid`
-shape (V/L/B/P flag bits, weight, reserved, and a variable
-SID/Index/Label that carries either a 3-byte local MPLS label with
-the V flag set or a 4-byte SRGB index with the V flag clear). The
-matching Node Descriptor sub-TLVs from RFC 9086 §3.1 / §3.2 — BGP
-Router-ID (TLV 516) and Member-AS Number (TLV 517) — are modelled in
-`lr-bgp::path::bgp_ls::NodeDescriptorSubTlv` so a BGP-LS Link NLRI
-whose Protocol-ID is `Bgp` can round-trip byte-for-byte. The codec
-preserves every byte (including the 2-byte reserved field on the
-Peering SID) so the round-trip is byte-exact even when an originator
-violates the "MUST be zero on originate" constraint; an inconsistent
-V-flag/length combination falls through to `Unknown` and still
-round-trips.
+**Egress Peer Engineering (RFC 9086).** The codec half — the BGP-LS
+Attribute TLVs for the SR-MPLS BGP Peering SID TLVs (PeerNode SID
+type 1101, PeerAdj SID type 1102, PeerSet SID type 1103, RFC 9086 §5)
+and the matching Node Descriptor sub-TLVs (BGP Router-ID TLV 516,
+Member-AS Number TLV 517, §3.1/§3.2) — and the daemon-side EPE
+projection (`lr-router::instance::epe`, `DefaultRouter::bgpls_republish_epe`)
+have landed.
 
-The daemon-side EPE projection has landed alongside the codec: a new
-`lr-router::instance::epe` module walks a snapshot of the daemon's
-BGP peer sessions and emits one BGP-LS Link NLRI per Established
-session, paired with a BGP-LS Attribute carrying the PeerNode SID
-(and any optional PeerAdj / PeerSet SIDs). `DefaultRouter::bgpls_republish_epe`
-mirrors `bgpls_republish_end_x` — projects the live session set,
-diffs against `prev` via `lsdb_to_bgpls::diff_bgpls_with_attrs`,
-and pushes UPDATEs to every BGP-LS session. The `BgplsDriver` ticker
-polls `DefaultRouter::bgp_session_identity_hash` and re-projects
-on change, so the per-tick cost is negligible when the session
-table is stable. The PeerNode SID value the projection emits is a
-deterministic per-session placeholder (V flag clear, 4-byte SRGB
-index derived from the session handle); operator-configurable SID
-values are the next follow-up and do not change the projection
-shape.
-
-What remains is the receiver-side (controller-mode) follow-up the
-codec PR's scope-boundary section also names: a controller-mode
-daemon receives EPE NLRIs from its BGP-LS peers and surfaces them
-through its Loc-RIB. That touches the daemon's Loc-RIB model
-(`RouteKey { prefix, family }` does not fit a BGP-LS NLRI) and is
-independent of this projection. Done when a controller learns those
+What remains is the receiver-side (controller-mode) follow-up: a
+controller-mode daemon receives EPE NLRIs from its BGP-LS peers and
+surfaces them through its Loc-RIB. That touches the daemon's Loc-RIB
+model (`RouteKey { prefix, family }` does not fit a BGP-LS NLRI) and
+is independent of the projection. Done when a controller learns those
 segments from lr, the data plane can push traffic onto them, and a
 controller-mode lr daemon can ingest the same NLRIs another daemon
 advertises.
 
-**LRXP exchange-plane filter DSL surface (issue #81).** Done — the
-scope-1 records a route carries under the private
-`LrExchangePlaneRecords` attribute are now exposed to the filter DSL
-so an operator can adjust `local-pref` / `MED` based on them. The
-surface lives behind the `exchange-plane` feature (off by default);
-`lr-policy` gains an `exchange-plane = ["bgp",
-"lr-bgp/exchange-plane"]` feature so the typed accessors can decode
-the private record store.
-
-`lr-policy::lrxp` is the accessor module — `verified`,
-`partial_transit`, `hint` / `hint_rank` / `hint_damp_fom` /
-`hint_igp_cost`, `policy` / `policy_role` /
-`policy_import_digest_hex` / `policy_export_digest_hex`, `origin` /
-`origin_as` / `origin_max_valid_len` / `origin_expiry`. All read by
-tag from `Route.attributes[LrExchangePlaneRecords]` via the
-`lr-bgp::extensions::exchange_plane` codec — one BTreeMap lookup +
-one TLV decode per route on the hot path. The peephole pass does
-not fuse `bgp.lrxp.*` int comparisons into `BranchFieldIntCmp` (the
-read is not a single `get_u32_be`), so the unfused `LoadField; Push;
-Bin; JumpIf*` sequence runs — acceptable for an advisory attribute
-that rides a minority of routes.
-
-`RouteFieldKind` gains twelve `Lrxp*` variants (always present on
-the enum so downstream `match` exhaustiveness is stable across
-feature configurations); the parser dispatch (`parse_lrxp_field`)
-and the eval dispatch (`field_present`, `read_route_field`) are
-`#[cfg(feature = "exchange-plane")]`-gated, with a `#[cfg(not)] _ =>`
-fallback so a feature-less build rejects `bgp.lrxp.*` at parse time
-with `UnknownBgpField` and the exhaustive matches stay compilable.
-The `FilterContext` trait gains twelve `lrxp_*` methods with default
-implementations that delegate to `lr_policy::lrxp`, so every
-existing embedder — daemon, FFI built-in, FFI callback-table,
-benches, test stubs — inherits the correct behaviour without code
-changes. No FFI ABI change: `lr_filter_context_t` is untouched.
-
-The fallback (issue #81 requirement: a filter that adjusts
-`local-pref` based on `bgp.lrxp.hint.rank` no-ops on a non-LRXP peer)
-is built into the accessors — a route with no
-`LrExchangePlaneRecords` attribute (the peer did not advertise the
-capability) reads every int field as `0`, every bool as `false`,
-every string as empty, so the canonical idiom `if
-bgp.lrxp.hint.rank > 1 then { bgp.local_pref = 50; }` evaluates its
-condition to false and the local-pref write does not fire. The
-session-level vs per-route discrepancy (issue #81 requirement) is
-resolved by reading the route's carried record set: policy-intent
-records are nominally per-session but re-attach to every NLRI the
-session advertises, so the per-route read is the correct granularity
-for a filter that adjusts `local-pref`. Hints and provenance are
-per-route by construction. Done when a filter can deprioritise a
-route based on its sender-reported rank, boost a route with a
-verified origin attestation, and no-op on peers that do not run the
-plane — all pinned by the `lrxp_tests` module in
-`crates/lr-policy/src/filter/eval_tests.rs`.
-
 ## Scaling
 
 The three items below are the daemon-refactoring block of the 2.x
-release plan (issue #101). They are sequenced — async I/O lands
-first because it is the substrate the RIB concurrency work builds
-on; per-AFI RIB sharding lands second because it is the
-interior-concurrency boundary the multi-threaded RIB shards across;
-the multi-threaded RIB and the lock-free event bus land together
-third because the bus is what lets the API thread read without the
-writer's lock.
+release plan (issue #101). They are sequenced — async I/O lands first
+because it is the substrate the RIB concurrency work builds on;
+per-AFI RIB sharding landed second (the storage half — `LocRib`'s
+internal map is sharded by `NlriFamily` with family-aware accessors,
+preserving the frozen public API); the multi-threaded RIB and the
+lock-free event bus land together third because the bus is what lets
+the API thread read without the writer's lock.
 
 The 1.x stability window freezes the public Rust API and the C ABI
 (see [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §4). Each landing must
@@ -272,82 +61,54 @@ methods added alongside the existing cross-family ones (the
 change ships as the 2.0 major bump and lands in one PR after the
 three below have stabilised on a release window.
 
-**Async I/O.** The daemon runs a thread per socket, and its transports poll
-with a short `sleep` between reads (`crates/lr-cli/src/daemon.rs`,
+**Async I/O.** The daemon runs a thread per socket, and its
+transports poll with a short `sleep` between reads
+(`crates/lr-cli/src/daemon.rs`,
 [`lr-osroute::ospf_transport`](../crates/lr-osroute/src/ospf_transport/mod.rs),
 [`lr-osroute::bfd_transport`](../crates/lr-osroute/src/bfd_transport.rs)).
-That costs a wakeup per idle tick and bounds how many sessions one process
-holds. The work is to move the session and transport layer onto an event
-loop — `mio` or `tokio` — with readiness driving the FSM instead of a timer.
-Done when the poll-and-sleep loops are gone, an idle session wakes only on
-an event, and the session, timer and interop tests still pass.
+That costs a wakeup per idle tick and bounds how many sessions one
+process holds. The work is to move the session and transport layer
+onto an event loop — `mio` or `tokio` — with readiness driving the
+FSM instead of a timer. Done when the poll-and-sleep loops are gone,
+an idle session wakes only on an event, and the session, timer and
+interop tests still pass.
 
 The first PR lands the event loop for the BGP session layer only —
 the OSPF and Babel transports stay on their raw sockets for one
 release, because OSPF uses `AF_PACKET` / raw IP and Babel uses a
-UDP-plus-multicast pair that the event loop wraps differently.
-`mio` is the smaller dependency and the daemon already avoids
-`tokio` for the API and metrics threads; `tokio` is the alternative
-if the rest of the daemon's I/O surfaces converge on it.
+UDP-plus-multicast pair that the event loop wraps differently. `mio`
+is the smaller dependency and the daemon already avoids `tokio` for
+the API and metrics threads; `tokio` is the alternative if the rest
+of the daemon's I/O surfaces converge on it.
 
-**Per-AFI RIB sharding.** [`ARCHITECTURE.md`](ARCHITECTURE.md) describes one
-Loc-RIB for every family.
-[`lr-rib::loc_rib::LocRib`](../crates/lr-rib/src/loc_rib.rs) is one map keyed
-by `RouteKey`, so a full IPv6 table contends with IPv4 on one structure and a
-reselect walks it. The work is one RIB per address family behind the
-`RouterInstance` API, with selection, merging and the kernel mirror reading
-the right shard. Done when the family is part of the RIB's identity, an
-update in one family never blocks selection in another, and the selection
-and Add-Path tests still hold.
+**Multi-threaded RIB and a lock-free event bus.** The whole router
+sits behind `Arc<RwLock<DefaultRouter>>`
+(`crates/lr-cli/src/daemon.rs`, `crates/lr-cli/src/api.rs`), so one
+writer at a time is the ceiling and an API read waits behind it. The
+work is interior concurrency in the RIB (per-shard locks or atomic
+structures) plus an event bus that consumers subscribe to in place of
+the shared lock. Done when import, reselection and export proceed
+concurrently, the best-path result is unchanged, and the API reads
+without taking the writer's lock.
 
-`LocRib`'s public API is frozen (it is exposed through the C ABI as
-`lr_loc_rib_t`); the landing keeps every existing method's signature
-and shards the internal storage. New family-aware methods
-(`iter_best_by_family`, `len_by_family`, `diff_since_by_family`)
-land alongside the cross-family ones, and the `RouterInstance`
-implementation routes install / uninstall / reselect to the right
-shard by family. The kernel mirror (`OsRouteTable`) already keys on
-`RouteKey { prefix, family }` so it reads the right shard without an
-API change.
-
-**Multi-threaded RIB and a lock-free event bus.** The whole router sits
-behind `Arc<RwLock<DefaultRouter>>` (`crates/lr-cli/src/daemon.rs`,
-`crates/lr-cli/src/api.rs`), so one writer at a time is the ceiling and an
-API read waits behind it. The work is interior concurrency in the RIB
-(per-shard locks or atomic structures) plus an event bus that consumers
-subscribe to in place of the shared lock. Done when import, reselection and
-export proceed concurrently, the best-path result is unchanged, and the API
-reads without taking the writer's lock.
-
-This lands last because the per-shard locks it depends on come from
-the per-AFI sharding PR, and the event bus is what retires the
-`Arc<RwLock<DefaultRouter>>` the API thread holds today. The bus is
-a new `lr-router::event_bus` module — a bounded MPSC broadcast
-consumers subscribe to in place of the shared lock — and the
-`RouterEvent` enum (`lr-router::event`) becomes the wire format.
-The ticker thread, the API socket, the metrics endpoint, the BMP
-mirror and the kernel mirror all become subscribers; the writer's
-lock goes away. The `abi-freeze` CI job gates the C ABI half.
-
-The event bus data structure itself has landed
+The event bus data structure has landed
 (`lr-router::event_bus::EventBus`): a bounded MPMC broadcast where
-each subscriber gets its own `std::sync::mpsc::Receiver`,
-`publish` writes to every active subscriber in one pass with
-`try_send` (a full subscriber drops the event rather than blocking
-the publisher), and disconnected subscribers are pruned on the next
-publish. Nine unit tests pin the contract (every subscriber gets
-every event in order, full-subscriber drop is isolated, pruning,
-clone shares state, concurrent publish + drain, counters are
-monotonic, capacity clamping, `recv_or_none` timeout/disconnect).
-The wiring — the daemon's read-side consumers subscribing to the
-bus in place of the `Arc<RwLock<DefaultRouter>>` read — is the
-follow-up PR; the data structure's contract is stable across it.
+each subscriber gets its own `std::sync::mpsc::Receiver`, `publish`
+writes to every active subscriber with `try_send` (a full subscriber
+drops the event rather than blocking the publisher), and disconnected
+subscribers are pruned on the next publish. The wiring — the daemon's
+read-side consumers (ticker, API socket, metrics endpoint, BMP mirror,
+kernel mirror) subscribing to the bus in place of the
+`Arc<RwLock<DefaultRouter>>` read, plus per-shard locks on the
+`LocRib` shards — is the remaining work. The `abi-freeze` CI job
+gates the C ABI half.
 
 ## Compatibility
 
 **RISC-V targeted compatibility improvements.** The CI matrix covers
-the RISC-V architecture in two ways as of [issue #65](https://github.com/TES286-org/librouting/issues/65):
-the `cross` matrix job cross-builds `riscv64gc-unknown-linux-gnu` on
+the RISC-V architecture in two ways as of
+[issue #65](https://github.com/TES286-org/librouting/issues/65): the
+`cross` matrix job cross-builds `riscv64gc-unknown-linux-gnu` on
 every push, and a native `riscv-native` job runs `cargo nextest`,
 doctests and per-arch clippy on real RISC-V hardware via the RISE
 Project's `ubuntu-24.04-riscv` runner. The workspace is target-OS-
@@ -362,601 +123,60 @@ without an arch-specific patch landing.
 
 **IBM Power (ppc64le) and IBM Z (s390x) targeted compatibility
 improvements.** The CI matrix covers the IBM Power and IBM Z
-architectures in two ways as of [issue #95](https://github.com/TES286-org/librouting/issues/95):
-the `cross` matrix job cross-builds
+architectures in two ways as of
+[issue #95](https://github.com/TES286-org/librouting/issues/95): the
+`cross` matrix job cross-builds
 `powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu` on
 every push, and a native `s390x-native` job runs `cargo nextest`,
-doctests and per-arch clippy on a self-hosted s390x runner
-registered with the labels `[self-hosted, Linux, s390x]`. The
-IBM-provided `ubuntu-26.04-ppc64le`, `ubuntu-26.04-ppc64le-p10`
-and `ubuntu-26.04-s390x` runners from the IBM Power-Z GitHub App
+doctests and per-arch clippy on a self-hosted s390x runner registered
+with the labels `[self-hosted, Linux, s390x]`. The IBM-provided
+`ubuntu-26.04-ppc64le`, `ubuntu-26.04-ppc64le-p10` and
+`ubuntu-26.04-s390x` runners from the IBM Power-Z GitHub App
 (<https://github.com/marketplace/power-z-gha-runner>) are pending
 review and not yet available; once they clear review, the
-s390x-native job can switch to (or matrix-add) the
-IBM-provided `ubuntu-26.04-s390x` label and ppc64le native jobs
-can land (issue #95 stays open to track that follow-up).
+`s390x-native` job can switch to (or matrix-add) the IBM-provided
+`ubuntu-26.04-s390x` label and ppc64le native jobs can land
+(issue #95 stays open to track that follow-up).
 
-The workspace is target-OS-aware rather than target-arch-aware,
-so the Linux rtnetlink backend, the GTSM/TCP-AO socket constants
-and every protocol codec compile and run on ppc64le and s390x
-unchanged. s390x is the only big-endian target in the matrix, so
-the wire-codec byte-order discipline (`to_be_bytes` /
-`from_be_bytes` everywhere, never native endianness) is
-mechanically verified on every push. What remains is to act on
-what the CI surfaces: if a kernel-gated test regresses on
-ppc64le or s390x (a `setsockopt` constant that varies by arch,
-a struct layout quirk, a byte-order slip on a wire path), file
-the finding against this entry and fix the per-arch path. Done
-when the `s390x-native` job has been green on `main` for a
-release window without an arch-specific patch landing, and the
-ppc64le native job lands once the IBM-provided runner clears
-review or a self-hosted ppc64le runner is registered.
-
-**Per-protocol route attributes and an external conversion corpus.**
-`lr-daemon translate bird|frr` and the native compat loader handle the BGP
-subset; BIRD `protocol babel` interface blocks (RFC 8966 §A.2) and BIRD
-`protocol ospf` area/interface blocks (RFC 2328 §C / RFC 5340 §A.4)
-now carry through to `[[babel.interface]]`, `[[ospf.area]]` and
-`[[ospf.interface]]` tables. FRR `router ospf` area policy and
-`interface IFNAME` `ip ospf …` directives translate the same way
-(`crates/lr-cli/src/translate.rs`). FRR `router ospfv3` area policy
-and the `ospfv3 …` interface directives (RFC 5340 §A.4, FRR `ospf6d`)
-have landed alongside the v2 path: `ospfv3 router-id A.B.C.D` maps
-onto `router_id`, `ospfv3 area N stub|nssa|default-cost M` routes
-through the same handler as the bare v2 `area N …` form,
-`ospfv3 cost|hello-interval|dead-interval|priority|network …|area N`
-inside an `interface IFNAME` block routes through the same
-`apply_frr_ospf_iface` helper as the v2 `ip ospf …` directives, and
-`ospfv3 instance-id N` / `ospfv3 authentication …` /
-`ospfv3 abr-type …` / `ospfv3 log-adjacency-changes` etc. are noted
-as unmapped with the v3 directive stem so the operator sees the
-version-specific gap. FRR `address-family` state inside `router bgp`
-has landed alongside the v3 path: `aggregate-address A.B.C.D/M
-[summary-only] [as-set] [route-map NAME]` (RFC 4271 §9.2.2.2) maps
-onto `[[aggregate]]` rows — `summary-only` and `as-set` carry
-through to the row's `summary_only` / `as_set` keys, while
-`route-map NAME` (the per-aggregate attribute hook) still carries an
-unmapped note (lr's `[[aggregate]]` has no per-aggregate route-map
-surface today); `redistribute <proto> [metric M] [route-map NAME]`
-(inside `router bgp`/`router ospf`/`router ospfv3`) maps onto
-`[[redistribute]]` rows — `bgp`/`ospf`/`ospf3`/`babel`/`static`/
-`connected` sources map (the daemon's injection surface; `static`/
-`connected` ride `install_static`/`install_connected`, BIRD
-`redistribute static` / `redistribute direct` and FRR
-`redistribute static` / `redistribute connected` parity), `kernel`/
-`rip`/`isis` carry unmapped notes (the daemon has no injection
-surface for the kernel RIB or for protocols it does not run), and
-`route-map NAME` is translated onto the pipe's `allow` list when the
-route-map is a pure prefix-list allow (otherwise an unmapped note
-describes what was lost — lr's `[[redistribute]]` per-pipe filter
-hook is the `allow` list, populated by `resolve_redistribute_route_maps`).
-A pipe whose source engine is not `bgp` triggers a top-level
-`protocols = ["bgp", "<engine>", …]` emission so the generated
-config is loadable as-is (the daemon's `finalize` rejects a
-`[[redistribute]]` whose source engine it does not run). `no bgp
-ebgp-requires-policy` is consumed silently (the converter always
-emits `ebgp_policy = "accept-all"`, which is the same intent), and
-`network PREFIX route-map NAME` keeps the prefix while noting the
-route-map (lr's `networks` is a plain prefix list, no per-route
-attribute hook). The
-route-reflector loop-detection attributes the per-route filter
-context rides on have landed: `lr-policy::filter::ast::RouteFieldKind`
-gains `BgpAtomicAggregate` (RFC 4271 §5.1.6), `BgpOriginatorId` and
-`BgpClusterList` (RFC 4456 §8), exposed through the filter DSL as
-`bgp.atomic_aggregate` (Bool), `bgp.originator_id` (IpAddr::V4) and
-`bgp.cluster_list` (Set of IpAddr::V4) — `lr-policy::bgp` carries
-the matching `atomic_aggregate`, `originator_id`, `cluster_list` and
-`has_cluster_list` helpers that read by tag from `Route.attributes`,
-and `lr-bgp::path::PathAttributes` gains `originator_id()` and
-`cluster_list()` typed accessors alongside the existing
-`atomic_aggregate()` and `aggregator()`. The BIRD translator renames
-`bgp_atomic_aggregate` / `bgp_originator_id` / `bgp_cluster_list`
-to the lr dotted spellings, and the corpus case
-`tests/corpus/bird/bgp-rr-loop-filter.conf` exercises all three in
-the canonical RR loop-detection idiom (`defined(bgp.cluster_list) &&
-local_cluster ~ bgp.cluster_list`, `bgp.originator_id == local_id`,
-`bgp.atomic_aggregate`). The OTC leak-detection attribute has landed
-alongside the RR set: `RouteFieldKind::BgpOtc` (RFC 9234 §3.1) exposes
-`bgp.otc` (Int, read-only) through the filter DSL so the canonical
-leak-detection idiom (`if bgp.otc != 0 then reject;`) translates
-faithfully from BIRD's `bgp_otc`; the BIRD translator renames
-`bgp_otc` to `bgp.otc`, `lr-policy::bgp` carries the matching `otc` /
-`has_otc` helpers (the latter distinguishes "absent" from "set to
-zero" via `defined(bgp.otc)`), `lr-bgp::path::PathAttributes` gains
-`otc()` / `has_otc()` typed accessors, the peephole pass fuses
-`bgp.otc` integer comparisons into `BranchFieldIntCmp` (the same fast
-path `bgp.local_pref` and `bgp.med` use), and the corpus case
-`tests/corpus/bird/bgp-otc-leak-filter.conf` exercises both the
-leak-detection idiom and the `defined()` distinction. The AIGP
-accumulated-metric attribute has landed alongside the OTC set:
-`RouteFieldKind::BgpAigp` (RFC 7311) exposes `bgp.aigp` (Int,
-read-only) through the filter DSL so the canonical metric-comparison
-idiom (`if bgp.aigp < 100 then accept;`) translates faithfully from
-BIRD's `bgp_aigp`; the BIRD translator renames `bgp_aigp` to
-`bgp.aigp`, `lr-policy::bgp` carries the matching `aigp` /
-`has_aigp` helpers (the latter distinguishes "absent" from "set to
-zero" via `defined(bgp.aigp)`), `lr-bgp::path::PathAttributes` gains
-`aigp()` / `has_aigp()` typed accessors backed by an `Aigp` TLV-stream
-codec (type-1 TLV = 8-byte accumulated metric, unknown TLVs preserved
-for byte-exact round-trip), and the corpus case
-`tests/corpus/bird/bgp-aigp-metric-filter.conf` exercises both the
-metric-comparison idiom and the `defined()` distinction. AIGP is
-deliberately not fused by the peephole pass's `BranchFieldIntCmp` fast
-path — its read parses the AIGP TLV stream (not a single
-`get_u32_be`), so fusing would not save the allocation the fast path
-exists to avoid; both comparison forms run the unfused
-`read_route_field` path. The AGGREGATOR aggregation-source attribute has
-landed alongside the AIGP set: `RouteFieldKind::BgpAggregatorAsn` and
-`RouteFieldKind::BgpAggregatorSpeaker` (RFC 4271 §5.1.7) expose
-`bgp.aggregator.asn` (Int, read-only) and `bgp.aggregator.speaker` (Ip,
-read-only) through the filter DSL so the canonical aggregation-aware
-idiom (`if defined(bgp.aggregator.asn) && bgp.aggregator.asn == 64512
-then accept;`) translates faithfully from BIRD's `bgp_aggregator`; the
-BIRD translator renames `bgp_aggregator` to `bgp.aggregator.asn` (the
-canonical presence probe — both components are present together or
-absent together), `lr-policy::bgp` carries the matching `aggregator`,
-`aggregator_asn`, `aggregator_speaker` / `has_aggregator` helpers (the
-latter distinguishes "absent" from "set to zero" via
-`defined(bgp.aggregator.asn)`), the typed `aggregator()` accessor on
-`lr-bgp::path::PathAttributes` already existed (it decodes both the
-2-byte and 4-byte-AS wire forms), and the corpus case
-`tests/corpus/bird/bgp-aggregator-filter.conf` exercises both the
-aggregation-aware idiom and the `defined()` distinction. Like AIGP,
-`bgp.aggregator.asn` is deliberately not fused by the peephole pass's
-`BranchFieldIntCmp` fast path — its read decodes the `Aggregator` struct
-(a length check + two fixed-size copies, not a single `get_u32_be`), so
-fusing would not save the allocation the fast path exists to avoid.
-The PMSI Tunnel attribute has landed alongside the AGGREGATOR set:
-`RouteFieldKind::BgpPmsiTunnel` (RFC 6514 §5) exposes `bgp.pmsi_tunnel`
-(read-only `Bool`, `false` when absent, `true` when present,
-mirroring BIRD's `EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY` exposure so the
-canonical presence-probe idiom `if defined(bgp_pmsi_tunnel) then
-reject;` translates faithfully to `if defined(bgp.pmsi_tunnel) then
-reject;`); the BIRD translator renames `bgp_pmsi_tunnel` to
-`bgp.pmsi_tunnel`, `lr-policy::bgp` carries the matching `pmsi_tunnel`
-/ `has_pmsi_tunnel` helpers (the latter distinguishes "absent" from
-"present but malformed" via `defined(bgp.pmsi_tunnel)`), the typed
-`pmsi_tunnel()` / `has_pmsi_tunnel()` accessors on
-`lr-bgp::path::PathAttributes` decode the attribute's value field
-(Flags + Tunnel Type + 3-octet MPLS Label + variable-length Tunnel
-Identifier; Tunnel Type 0 MUST carry no Tunnel Identifier, Tunnel
-Type 6 MUST carry a 4-byte IPv4 or 16-byte IPv6 endpoint — every
-other Tunnel Type is preserved verbatim, mirroring BIRD's
-`bgp_decode_pmsi_tunnel` default arm that sets the Partial bit
-rather than withdraws), the codec stores the raw attribute bytes
-verbatim so a peer-sent attribute with non-zero reserved bits or
-non-zero EXP/S bits round-trips byte-exact, and the corpus case
-`tests/corpus/bird/bgp-pmsi-tunnel-filter.conf` exercises both the
-canonical reject idiom and its negation. Like AGGREGATOR,
-`bgp.pmsi_tunnel` is deliberately not fused by the peephole pass's
-`BranchFieldIntCmp` fast path — the field surfaces as a `Bool`, not
-an `Int`, so the int-comparison shape does not arise in the DSL.
-This closes the last gap in BIRD's filter-attribute surface — every
-`bgp_*` filter attribute the BIRD 2 grammar declares now has a
-faithful lr-DSL spelling.
-The OSPF metric attribute has landed as the first per-protocol
-attribute beyond the BGP subset: `RouteFieldKind::OspfMetric1`
-(RFC 2328 §16 / RFC 5340 §4.1) exposes `ospf.metric1` (read-only
-`int`, `0` when the route is not OSPF, mirroring BIRD's eattr
-default for an unattached `ospf_metric1` reference) so the canonical
-BIRD idiom `if defined(ospf_metric1) && ospf_metric1 > 100 then
-reject;` translates faithfully to `if defined(ospf.metric1) &&
-ospf.metric1 > 100 then reject;`. The BIRD translator renames
-`ospf_metric1` to `ospf.metric1` (and drops `ospf_` from
-`UNMAPPABLE_PREFIXES`, listing the remaining OSPF attributes
-`ospf_metric2` / `ospf_tag` / `ospf_router_id` in
-`UNMAPPABLE_WORDS` instead so a filter that references them is
-marked unfaithful rather than silently dropping the reference);
-`lr-policy::ospf` carries the matching `metric1` / `has_metric1`
-helpers (the latter distinguishes "non-OSPF route" from "OSPF route
-with metric 0" via `defined(ospf.metric1)`), the typed accessors
-read `route.preference.metric` for OSPFv2 / OSPFv3 routes and
-`None` for everything else (one `match` plus one field read — no
-BTreeMap lookup, no allocation, cheaper than any `bgp.*` accessor
-that decodes a path attribute), and the peephole pass's
-`BranchFieldIntCmp` fast path fuses `ospf.metric1 == N` / `> N` /
-etc. comparisons the same way it fuses `bgp.local_pref` / `bgp.med`
-/ `bgp.otc`. The corpus case
-`tests/corpus/bird/ospf-metric-filter.conf` exercises both the
-canonical high-cost reject idiom and the `defined()` gate's
-short-circuit on a non-OSPF route.
-The OSPF type-2 external metric attribute has landed alongside
-the `ospf.metric1` set: `RouteFieldKind::OspfMetric2`
-(RFC 2328 §16.4 / RFC 5340 §4.8.5) exposes `ospf.metric2`
-(read-only `int`, `0` when the route is not a type-2 external —
-i.e. a non-OSPF route, an OSPF intra-area / inter-area route, or
-an OSPF type-1 external route — mirroring BIRD's eattr default
-for an unattached `ospf_metric2` reference) so the canonical
-BIRD idiom `if defined(ospf_metric2) && ospf_metric2 > 100 then
-reject;` translates faithfully to `if defined(ospf.metric2) &&
-ospf.metric2 > 100 then reject;`. The BIRD translator renames
-`ospf_metric2` to `ospf.metric2` (and removes it from
-`UNMAPPABLE_WORDS`; with `ospf_router_id` removed alongside the
-later `ospf.tag` and `ospf.router_id` increments, no OSPF
-per-route attributes remain in `UNMAPPABLE_WORDS` — the remaining
-unmappable per-route attributes are the Babel triplet `babel_metric`
-/ `babel_router_id` / `babel_seqno`, gated by the `babel_` prefix
-in `UNMAPPABLE_PREFIXES`); `lr-policy::ospf` carries the matching
-`metric2` / `has_metric2` helpers (the latter distinguishes "not
-a type-2 external" from "type-2 external with metric 0" via
-`defined(ospf.metric2)`). The type-2 external metric rides the
-private `LrOspfMetric2` path-attribute tag (code point 253 —
-stripped at BGP encode, the same shape `LrMplsLabelStack` at 255
-and `LrExchangePlaneRecords` at 254 use): `lr-bgp::path::AttrType`
-gains the `LrOspfMetric2` variant, `lr-bgp::path::PathAttributes`
-gains the `set_ospf_metric2` / `ospf_metric2` / `has_ospf_metric2`
-accessors (the value layout is a single 4-byte big-endian `u32`
-holding the 24-bit external metric, zero-extended), and
-`lr-router::instance::ospf_ops::ospf_recompute` attaches the
-attribute for type-2 externals (where `OspfKind::External {
-metric_type: ExternalMetricType::Type2, .. }` matches) — only
-for type-2 externals; intra-area, inter-area and type-1
-external OSPF routes carry no `LrOspfMetric2` tag, so its
-absence is the marker `has_metric2` consults. The typed
-accessors in `lr-policy::ospf` read the attribute via one
-BTreeMap lookup plus one 4-byte read on `route.attributes` (no
-allocation, no codec — the value layout is a fixed 4-byte `u32`,
-read in place via `Attributes::get_u32_be`). Cheaper than any
-`bgp.*` accessor that decodes a multi-byte TLV stream, but more
-expensive than `ospf.metric1` (which reads a struct field, no
-lookup). The peephole pass's `BranchFieldIntCmp` fast path fuses
-`ospf.metric2 == N` / `> N` / etc. comparisons the same way it
-fuses `ospf.metric1` / `bgp.local_pref` / `bgp.med` / `bgp.otc`
-— the read is one lookup plus one fixed-width read (no
-allocation), so the fast path avoids the `Value::Int` allocation
-+ push the unfused sequence pays. The corpus case
-`tests/corpus/bird/ospf-metric2-filter.conf` exercises both the
-canonical high-cost type-2-external reject idiom and the
-`defined()` gate's short-circuit on a non-type-2-external route.
-The OSPF external route tag attribute has landed alongside the
-`ospf.metric2` set: `RouteFieldKind::OspfTag` (RFC 2328 §A.4.5
-bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
-External-Prefix sub-TLV 3) exposes `ospf.tag` (read-only `int`,
-`0` when the route carries no tag — a non-OSPF route, an
-intra-area / inter-area OSPF route, or a v3 external without
-the T bit set — mirroring BIRD's eattr default for an
-unattached `ospf_tag` reference) so the canonical BIRD idiom
-`if defined(ospf_tag) && ospf_tag == 3735928559 then accept;`
-translates faithfully to `if defined(ospf.tag) && ospf.tag ==
-3735928559 then accept;`. The BIRD translator renames `ospf_tag`
-to `ospf.tag` (and removes it from `UNMAPPABLE_WORDS`; with
-`ospf_router_id` removed alongside the later `ospf.router_id`
-increment, no OSPF per-route attributes remain in
-`UNMAPPABLE_WORDS` — the remaining unmappable per-route
-attributes are the Babel triplet `babel_metric` /
-`babel_router_id` / `babel_seqno`, gated by the `babel_` prefix
-in `UNMAPPABLE_PREFIXES`); `lr-policy::ospf` carries the
-matching `tag` / `has_tag` helpers (the latter distinguishes "no
-tag" from "tag of zero" via `defined(ospf.tag)` — the v2 LSA
-body always carries a 4-byte tag, zero being well-formed per
-RFC 2328 §A.4.5, so a v2 external surfaces `Some(t)` even when
-the tag is zero; the v3 form's T bit distinguishes "no tag"
-from "tag of zero"). Unlike `ospf.metric2` (whose type-2
-external metric rides the private `LrOspfMetric2` path-attribute
-tag), `ospf.tag` rides the existing `Route::tag` field — the
-same field the `SetTag` policy action writes for the
-operator-side override, and the same field the OSPF
-external-LSA origination path reads when redistributing a
-route into OSPF. The OSPF route computation
-(`lr-router::instance::ospf_ops::ospf_recompute`) populates
-`Route::tag` from the LSA's tag for type-5 / type-7 externals
-only; intra-area, inter-area, and v3 externals without the T
-bit carry no `Route::tag`, so its absence is the marker
-`has_tag` consults. The codec half adds `route_tag: u32` to
-`lr-ospf::external::ExternalRoute` (v2) and `route_tag:
-Option<u32>` to `ExternalRouteV3` (v3), populated from the LSA
-body in `external_routes`, `nssa_routes` and
-`external_routes_v3_mode`. The populate-the-RIB half adds
-`route_tag: Option<u32>` to `OspfTableEntry` (pub(super),
-stays inside `lr-router::instance`) and sets `Route::tag =
-entry.route_tag` in `ospf_recompute` (replacing the previous
-hard-coded `None`). The typed accessors in `lr-policy::ospf`
-read the field via one protocol-kind `match` plus one
-`Option<u32>` field read off `route.tag` (no allocation, no
-codec, no BTreeMap lookup — cheaper than `ospf.metric2`, the
-same shape as `ospf.metric1`). The peephole pass's
-`BranchFieldIntCmp` fast path fuses `ospf.tag == N` / `> N` /
-etc. comparisons the same way it fuses `ospf.metric1` /
-`ospf.metric2` / `bgp.local_pref` / `bgp.med` / `bgp.otc` — the
-read is one `match` plus one `Option<u32>` field read (no
-allocation), so the fast path avoids the `Value::Int` allocation
-+ push the unfused sequence pays. The corpus case
-`tests/corpus/bird/ospf-tag-filter.conf` exercises both the
-canonical tagged-route accept idiom and the zero-tag accept
-idiom. The Python and Go binding tests cover both the "absent"
-path (no tag set) and the "present" path (a tag set via
-`set_tag` / `SetTag`) — the C ABI exposes the existing
-`lr_route_set_tag` setter, so the binding can exercise the
-present path the `ospf.metric2` binding test could not (the
-`LrOspfMetric2` tag has no C ABI setter).
-The OSPF advertising-router ID attribute has landed alongside the
-`ospf.tag` set: `RouteFieldKind::OspfRouterId` (RFC 2328 §A.4
-`Advertising Router` field / RFC 5340 §A.4 the same field on every
-v3 LSA) exposes `ospf.router_id` (read-only `int`, `0` when the
-route carries no OSPF router-id attribute, mirroring BIRD's eattr
-default for an unattached `ospf_router_id` reference) so the
-canonical BIRD idiom `if defined(ospf_router_id) && ospf_router_id
-== 192.0.2.1 then accept;` translates faithfully to `if
-defined(ospf.router_id) && ospf.router_id == 3221225985 then
-accept;` (192.0.2.1 = 0xc000_0201 = 3221225985; the `defined()`
-arm distinguishes "no attribute" from "attribute present but
-zero" — RFC 2328 §3.1.b recommends a non-zero Router-ID but does
-not forbid 0.0.0.0, so an OSPF route with Router-ID 0.0.0.0
-surfaces `Some(0)` and `defined(ospf.router_id)` is true). The
-BIRD translator renames `ospf_router_id` to `ospf.router_id` (and
-removes it from `UNMAPPABLE_WORDS` — with this release every
-OSPF per-route attribute BIRD's filter grammar declares has a
-faithful lr-DSL spelling); `lr-policy::ospf` carries the matching
-`router_id` / `has_router_id` helpers (the latter distinguishes
-"no attribute" from "attribute present but zero" via
-`defined(ospf.router_id)`), `lr-bgp::path::PathAttributes` gains
-the `set_ospf_router_id` / `ospf_router_id` / `has_ospf_router_id`
-typed accessors (the value layout is a single 4-byte big-endian
-`u32` holding the 32-bit OSPF Router-ID — the LSA `Advertising
-Router` field is a 32-bit dotted-quad per RFC 2328 §A.4, no
-masking needed; the high byte is meaningful), the OSPF Router-ID
-rides the new private `LrOspfRouterId` path-attribute tag (code
-point 252 — stripped at BGP encode, the same shape
-`LrOspfMetric2` at 253, `LrExchangePlaneRecords` at 254 and
-`LrMplsLabelStack` at 255 use), and the OSPF route computation
-(`lr-router::instance::ospf_ops::ospf_recompute`) attaches the
-attribute for every OSPFv2 / OSPFv3 route with a known
-originating LSA — intra-area stub routes populate from the
-Router-LSA's advertising router; intra-area transit routes from
-the Network-LSA's advertising router (the DR); inter-area routes
-from the summary-LSA's advertising router (the ABR); external
-routes from the AS-external-LSA's advertising router (the ASBR).
-The codec half adds the `router_id: Option<u32>` field to
-`lr-ospf::spf::SpfRoute` (populated for both v2 and v3 intra-area
-stub / transit routes, v2 / v3 inter-area summary routes and the
-v3 Intra-Area-Prefix-LSA walk — the v2 `network_lsas` BTreeMap
-grows a third tuple slot for the Network-LSA's `Advertising
-Router` header field). The populate-the-RIB half adds
-`router_id: Option<u32>` to `OspfTableEntry` (pub(super), stays
-inside `lr-router::instance`) and the `with_router_id` builder;
-`ospf_area_table` and `ospf_recompute` populate the field. The
-typed accessors in `lr-policy::ospf` read the attribute via one
-protocol-kind `match` plus one BTreeMap lookup plus one 4-byte
-read on `route.attributes` (no allocation, no codec — the value
-layout is a fixed 4-byte `u32`, read in place via
-`Attributes::get_u32_be`). The same shape as `ospf.metric2`
-(which reads a different private tag), more expensive than
-`ospf.metric1` / `ospf.tag` (which read struct fields, no
-lookup). The peephole pass's `BranchFieldIntCmp` fast path fuses
-`ospf.router_id == N` / `> N` / etc. comparisons the same way it
-fuses `ospf.metric1` / `ospf.metric2` / `ospf.tag` /
-`bgp.local_pref` / `bgp.med` / `bgp.otc` — the read is one lookup
-plus one fixed-width read (no allocation), so the fast path
-avoids the `Value::Int` allocation + push the unfused sequence
-pays. The corpus case `tests/corpus/bird/ospf-router-id-filter.conf`
-exercises both the canonical specific-originator accept idiom
-and the zero-router-id accept idiom. The Python and Go binding
-tests cover the "absent" path (no `LrOspfRouterId` attribute set
-— the default for a synthetic test route; the OSPF daemon is the
-only producer and the C ABI does not expose a setter for this
-tag, mirroring the `LrOspfMetric2` shape) — the "present" path
-is exercised by the `lr-policy::ospf::router_id_*` unit tests
-(which synthesize the attribute directly via
-`Attributes::insert`) and the `lr-router::instance::tests`
-integration test (which populates the attribute via the OSPF
-route computation, the only producer). This closes the last gap
-in BIRD's OSPF filter-attribute surface — every `ospf_*` filter
-attribute the BIRD 2 grammar declares now has a faithful lr-DSL
-spelling.
-What remains is the rest of the per-protocol attribute surface —
-BIRD's route attributes that ride the per-route filter context —
-beyond the RR loop-detection, OTC, AIGP, AGGREGATOR, PMSI Tunnel
-(BGP subset, complete), the OSPF `ospf.metric1` /
-`ospf.metric2` / `ospf.tag` / `ospf.router_id` attributes that
-have landed, and the Babel `babel.metric` / `babel.seqno` /
-`babel.router_id` attributes that have landed alongside the
-OSPF set: `RouteFieldKind::BabelMetric` (RFC 8966 §3.2 + §3.4.3)
-exposes `babel.metric` (read-only `int`, `0` when the route is
-not Babel, mirroring BIRD's eattr default for an unattached
-`babel_metric` reference) so the canonical BIRD idiom `if
-babel_metric > 100 then reject;` translates faithfully to `if
-babel.metric > 100 then reject;`; the BIRD translator renames
-`babel_metric` to `babel.metric`, `lr-policy::babel` carries the
-matching `metric` / `has_metric` helpers (the latter
-distinguishes "non-Babel route" from "Babel route with metric 0"
-via `defined(babel.metric)`). The read is one branch on
-`route.protocol` plus one field read (no allocation), so the
-peephole pass's `BranchFieldIntCmp` fast path fuses
-`babel.metric == N` / `> N` / etc. comparisons the same way it
-fuses `ospf.metric1` / `bgp.local_pref` / `bgp.med` / `bgp.otc`.
-The Babel seqno attribute has landed alongside the
-`babel.metric` set: `RouteFieldKind::BabelSeqno` (RFC 8966 §3.2
-+ §4.6.9) exposes `babel.seqno` (read-only `int`, `0` when the
-route is not Babel, mirroring BIRD's eattr default for an
-unattached `babel_seqno` reference) so the canonical BIRD idiom
-`if defined(babel_seqno) && babel_seqno > 100 then reject;`
-translates faithfully to `if defined(babel.seqno) &&
-babel.seqno > 100 then reject;` (the `defined()` arm
-distinguishes "non-Babel route" from "Babel route with seqno 0"
-— RFC 8966 §3.1 treats 0 as a valid sequence number, so the
-wrapping arithmetic ranks against it the same as any other
-value). The BIRD translator renames `babel_seqno` to
-`babel.seqno` (and removes it from `UNMAPPABLE_PREFIXES`),
-`lr-policy::babel` carries the matching `seqno` / `has_seqno`
-helpers, the type-2-external-metric shape: the seqno rides the
-private `LrBabelSeqno` path-attribute tag (code point 249 —
-stripped at BGP encode, the same shape `LrOspfMetric2` at 253
-uses), and the Babel route computation
-(`lr-router::instance::babel::BabelRuntime::best_routes`)
-attaches the attribute for every published Babel route,
-populated from the Update TLV's seqno. The peephole pass's
-`BranchFieldIntCmp` fast path fuses `babel.seqno == N` / `> N` /
-etc. comparisons the same way it fuses `ospf.metric2` /
-`ospf.tag` / `ospf.router_id`. The Babel Router-ID attribute
-has landed alongside the `babel.seqno` set:
-`RouteFieldKind::BabelRouterId` (RFC 8966 §3.2 + §4.6.8)
-exposes `babel.router_id` (read-only `int`, `0` when the route
-is not Babel, mirroring BIRD's eattr default for an unattached
-`babel_router_id` reference — though BIRD stores the value as
-an opaque 8-byte bytestring under `EAF_TYPE_OPAQUE`, lr's DSL
-exposes it as a 64-bit `Int` for the canonical
-`defined(babel.router_id)` idiom and for direct equality
-against the route's i64-form literal; a value with the high
-bit set (>= `0x8000_0000_0000_0000`) reads as a negative i64
-but round-trips losslessly for the comparison operator since
-the lexer parses i64 literals) so the canonical BIRD idiom `if
-defined(babel_router_id) then accept;` translates faithfully
-to `if defined(babel.router_id) then accept;` (the `defined()`
-arm distinguishes "no attribute" from "attribute present but
-zero": RFC 8966 §3.1 does not forbid Router-ID 0, the EUI-64
-form discourages it but the protocol accepts any 64-bit
-value). The BIRD translator renames `babel_router_id` to
-`babel.router_id` (and removes the `babel_` prefix from
-`UNMAPPABLE_PREFIXES`; with this release every BIRD per-route
-filter attribute the BIRD 2 grammar declares under the
-`ospf_*` / `babel_*` prefixes has a faithful lr-DSL spelling),
-`lr-policy::babel` carries the matching `router_id` /
-`has_router_id` helpers, the Router-ID rides the new private
-`LrBabelRouterId` path-attribute tag (code point 250 —
-stripped at BGP encode, the same shape `LrOspfRouterId` at 252
-uses), and the Babel route computation
-(`lr-router::instance::babel::BabelRuntime::best_routes`)
-attaches the attribute for every published Babel route,
-populated from the Router-Id TLV's 64-bit EUI-64-style value.
-The peephole pass's `BranchFieldIntCmp` fast path fuses
-`babel.router_id == N` / `> N` / etc. comparisons the same way
-it fuses `ospf.router_id` / `ospf.metric2` / `ospf.tag`. This
-closes the last gap in BIRD's per-route filter attribute
-surface — every `ospf_*` and `babel_*` filter attribute the
-BIRD 2 grammar declares now has a faithful lr-DSL spelling.
-The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
-every representative BIRD and FRR config with the exact
-`.expected.toml` the converter emits, covering the BGP/Babel/OSPF
-shapes the converter maps today. Two harnesses share the same data
-files — the in-crate `translate::corpus_tests` unit test
-(`crates/lr-cli/src/corpus_tests.rs`, drives the converter functions
-directly, runs on every platform in `cargo test`) and the
-`tests/interop/translate_corpus.sh` end-to-end gate (drives the real
-`lr-daemon translate` CLI binary, runs in the Linux interop CI job).
-Both honour `LR_CORPUS_UPDATE=1` to regenerate the golden files after
-an intentional converter change; every `.expected.toml` round-trips
-through the daemon loader so the "generated TOML is always loadable"
-contract is machine-checked. A new dialect quirk now adds a corpus
-case (input + expected) instead of a bespoke assertion. The three
-BIRD corpus cases `tests/corpus/bird/babel-metric-filter.conf`,
-`tests/corpus/bird/babel-seqno-filter.conf` and
-`tests/corpus/bird/babel-router-id-filter.conf` exercise the
-canonical high-cost reject idioms and the `defined()` gate's
-short-circuit on the new Babel attribute surface; the corpus
-grows as each new shape lands.
+The workspace is target-OS-aware rather than target-arch-aware, so
+the Linux rtnetlink backend, the GTSM/TCP-AO socket constants and
+every protocol codec compile and run on ppc64le and s390x unchanged.
+s390x is the only big-endian target in the matrix, so the wire-codec
+byte-order discipline (`to_be_bytes` / `from_be_bytes` everywhere,
+never native endianness) is mechanically verified on every push. What
+remains is to act on what the CI surfaces: if a kernel-gated test
+regresses on ppc64le or s390x (a `setsockopt` constant that varies by
+arch, a struct layout quirk, a byte-order slip on a wire path), file
+the finding against this entry and fix the per-arch path. Done when
+the `s390x-native` job has been green on `main` for a release window
+without an arch-specific patch landing, and the ppc64le native job
+lands once the IBM-provided runner clears review or a self-hosted
+ppc64le runner is registered.
 
 ## Tooling and supply chain
 
-**Supply-chain follow-ups.** `cargo audit` and `cargo deny check` run
-nightly (`.github/workflows/nightly.yml`, `deny.toml`). The
-CycloneDX SBOM per release has landed: the `generate-sbom` job in
-`.github/workflows/release.yml` runs `cargo cyclonedx --describe
-binaries --all-features --spec-version 1.5` on every `v*` tag push
-and attaches one CycloneDX 1.5 JSON SBOM per shipped binary target
-(`lr`, `lr-daemon`, `lrctl`, `lr-ffi`) plus a combined
-`librouting-sbom-<tag>.tar.gz` to the GitHub release. Each SBOM
-carries the binary's transitive crate closure under
-`--all-features`, so a consumer pairing an archive with its SBOM
-sees the exact dependency set shipped. The workflow stages the
-SBOMs into clean `librouting-<binary>-<tag>.cdx.json` filenames
-and runs an inline JSON validation pass before upload, so a
-malformed SBOM fails the release early instead of shipping
-silently. Cosign keyless signing has landed alongside the SBOM:
-the `sign-artifacts` job in `release.yml` signs every release
-artifact (platform archives, SBOMs, standalone headers) with
-cosign keyless signing via GitHub Actions OIDC, anchored at the
-Sigstore Fulcio certificate authority and recorded in the Rekor
-transparency log. Each artifact gets a single DSSE `.bundle`
-file (cosign 2.x's recommended shape — the signature, the
-Fulcio certificate and the Rekor entry in one file), and the
-job runs an inline `cosign verify-blob` pass against the
-workflow's own OIDC identity before upload, so a broken bundle
-never reaches the GitHub Release. A consumer verifies with
-`cosign verify-blob --bundle <file>.bundle
---certificate-identity-regexp 'https://github.com/TES286-org/librouting/.github/workflows/release.yml@refs/tags/.*'
---certificate-oidc-issuer https://token.actions.githubusercontent.com <file>`;
-no project-held key is needed. The static-analysis scan has
-landed: an `api-surface` job in `.github/workflows/ci.yml` runs
-on every push and every PR, and an `api-surface` job in
-`.github/workflows/nightly.yml` runs on the nightly cron, both
-running `cargo semver-checks --workspace --all-features
---baseline-rev <latest-tag>` (the gate — a violation fails the
-job) and `cargo public-api -p <crate> diff <latest-tag>..HEAD
---simplified` per library crate (the report — the per-crate
-Added/Changed/Removed breakdown is uploaded as an
-`api-surface-diff` artifact for review). The pre-1.0 freeze
-criteria in `docs/RELEASE-PLAN.md` §1 already imply a breaking
-change ships as a minor bump; `cargo semver-checks` catches the
-accidental kind that slips past review. All three gaps in this
-ROADMAP entry are now closed. The `cargo semver-checks` gate
-became blocking at the release cut that cleared the pre-existing
-semver debt the scan first surfaced (a new variant in
-`lr-bgp::path::AttrType` added since the previous release
-without a matching version bump). The workspace version lives
-in `[workspace.package] version` in `Cargo.toml`.
-
-**IDE integration.** The `.lr` configuration DSL and the filter DSL have
-grammar references ([`config_dsl_grammar.md`](config_dsl_grammar.md),
-[`filter_dsl_grammar.md`](filter_dsl_grammar.md)) but no editor support. The
-work is a tree-sitter grammar covering both, plus a language server that
-serves diagnostics from the same parser the daemon runs at startup,
-completion for keys and built-ins, and go-to-definition for policy objects
-and list references. Done when an editor shows the daemon's own diagnostic
-for a broken file before the daemon starts, and the grammar parses
-`templates/daemon.lr`.
-
-**`lrctl roa list`.** Done. The runtime API exposes `show roa` over the
-Unix socket / Windows named pipe; `lrctl roa list` and `lrctl roa count`
-proxy it. The renderer lives in `crates/lr-cli/src/roa_view.rs` and
-walks the live `Arc<RoaStore>` snapshot (the same one the metrics
-endpoint already reads), reporting per-layer counts plus one line per
-entry. Per-entry provenance is exact (`static` / `rtr` / `both`) via
-`RoaStore::provenance_of`, which queries each layer's `HashSet`.
-
-**Advanced ROA loading.** Done (issue #100). The daemon gains
-`[[bgp.roa_source]]` tables: one loader thread per source, fetching
-ROA entries from a file on disk or an HTTP(S) URL and merging them
-with the inline `[[roa]]` tables under the live `RoaStore`. File
-sources are watched via mtime polling (1 s cadence, matching BIRD 2's
-default minimum settle time); URL sources are fetched periodically
-(configurable interval, default 3600 s, clamped to 60 s minimum).
-Both paths preserve the previous snapshot on a parse / fetch
-failure — a truncated fetch must never weaken origin validation.
-
-Two pure parsers and two transform formats are supported: the
-`native` TOML `[[roa]]` subset and the `bird` BIRD 2 `roa table`
-body are read directly; the `jq` and `awk` transform formats pipe
-the fetched bytes through an operator-supplied program (`program`
-inline string or `program_file` path) and parse the program's
-stdout as BIRD-format lines (`roa PREFIX max N as N;`). The pure
-parsers live in
-`crates/lr-bgp/src/roa_loader.rs` (no I/O dependency); the daemon
-integration lives in `crates/lr-cli/src/daemon_roa_loader.rs` (uses
-`ureq` for HTTP fetching, spawns `jq` / `awk` via subprocess for
-the transform formats). SIGHUP reload re-points each live loader
-thread with its fresh spec; removing a block tears its thread down;
-adding a new block requires a daemon restart (same posture as a
-re-added `[bgp.rpki] cache`).
-
-The runtime API `status` command renders one line per loader thread
-(`roa-source: <source> type=<file|url> format=<fmt> entries=<n>
-state=<ok|error> last-load=<age>s`), mirroring the `rpki:` status
-line shape. The feature is internal to `lr-daemon`: there is no C
-ABI entry point and no Go / Python / C++ binding surface for
-feeding bytes directly — embedders put a `[[bgp.roa_source]]`
-block (or a `bgp.roa_source { }` DSL block) in the config, or
-point a source at a file they rewrite out-of-band.
+**IDE integration.** The `.lr` configuration DSL and the filter DSL
+have grammar references
+([`config_dsl_grammar.md`](config_dsl_grammar.md),
+[`filter_dsl_grammar.md`](filter_dsl_grammar.md)) but no editor
+support. The work is a tree-sitter grammar covering both, plus a
+language server that serves diagnostics from the same parser the
+daemon runs at startup, completion for keys and built-ins, and
+go-to-definition for policy objects and list references. Done when an
+editor shows the daemon's own diagnostic for a broken file before the
+daemon starts, and the grammar parses `templates/daemon.lr`.
 
 ## Deployment
 
-**A Helm chart.** Deliberately kept out of this repository. A chart versions
-independently of the image and of the crate releases, so it lives in its own
-repository and references the published container image. Nothing here blocks
-on it; this entry exists so its absence is a decision, not an oversight.
+**A Helm chart.** Deliberately kept out of this repository. A chart
+versions independently of the image and of the crate releases, so it
+lives in its own repository and references the published container
+image. Nothing here blocks on it; this entry exists so its absence is
+a decision, not an oversight.
 
 ## Non-goals
 
 BGPsec, NBMA and point-to-multipoint OSPF interface types, and OSPFv3
 virtual links stay out of scope. They are recorded in
-[`STATUS.md`](STATUS.md) and [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §4.4.
-Reopening one needs a concrete deployment scenario first.
+[`STATUS.md`](STATUS.md) and [`RELEASE-PLAN.md`](RELEASE-PLAN.md)
+§4.4. Reopening one needs a concrete deployment scenario first.
