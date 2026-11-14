@@ -29,10 +29,13 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["TES286-org"]
 repository = "https://github.com/TES286-org/librouting"
-homepage = "https://github.com/TES286-org/librouting"
+# `homepage` removed: it was identical to `repository`, which
+# `cargo::redundant_homepage` flags on every crate that inherits both.
+# `keywords` and `categories` removed from the workspace level: no crate
+# inherits them via `keywords.workspace = true` (each crate that carries
+# them defines its own), so the workspace fields were unused metadata
+# that `cargo::unused_workspace_package_fields` flagged on every build.
 description = "Platform-independent BGP, OSPF and Babel routing protocol library"
-keywords = ["bgp", "ospf", "babel", "routing", "network"]
-categories = ["network-programming", "parser-implementations", "no-std"]
 
 [workspace.dependencies]
 lr-core = { path = "crates/lr-core", version = "1.8.0" }
@@ -51,15 +54,18 @@ lr-osroute = { path = "crates/lr-osroute", version = "1.8.0" }
 lr-mpls = { path = "crates/lr-mpls", version = "1.8.0" }
 lr-srv6 = { path = "crates/lr-srv6", version = "1.8.0" }
 lr-ldp = { path = "crates/lr-ldp", version = "1.8.0" }
-lr-ffi = { path = "crates/lr-ffi", version = "1.8.0" }
+# `lr-ffi` removed from `workspace.dependencies`: no crate in the
+# workspace writes `lr-ffi.workspace = true` (the FFI crate is built as
+# a standalone target that the Go/Python bindings link against by
+# filesystem path, not as a Cargo dependency of another crate). The
+# `lr-ffi` crate itself stays — it is a workspace member under
+# `members`. The entry here was unused metadata that
+# `cargo::unused_workspace_dependencies` flagged on every build.
 
-bytes = "1"
 socket2 = { version = "0.6", features = ["all"] }
 thiserror = "2"
 tracing = "0.1"
 bitflags = "2"
-serde = { version = "1", features = ["derive"] }
-once_cell = "1"
 hmac = "0.13"
 sha1 = "0.11"
 md5 = { version = "0.8", default-features = false }

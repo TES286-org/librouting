@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Cross-crate integration tests for librouting"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -17,12 +16,17 @@ description = "Cross-crate integration tests for librouting"
 [lib]
 bench = false
 
-[dependencies]
+# lr-tests is a test-only crate: `src/lib.rs` is entirely behind
+# `#[cfg(test)]`, and the `tests/*.rs` integration files are the
+# primary surface. Every dependency is therefore a dev-dependency —
+# `cargo build --workspace` (which does not compile test targets)
+# would otherwise flag each one as unused. `lr-rib` was previously
+# declared but never imported by any module; removed.
+[dev-dependencies]
 lr-core = { workspace = true }
 lr-bgp = { workspace = true }
 lr-ospf = { workspace = true }
 lr-babel = { workspace = true }
-lr-rib = { workspace = true }
 lr-policy = { workspace = true, features = ["peer-health"] }
 lr-router = { workspace = true }
 lr-osroute = { workspace = true }

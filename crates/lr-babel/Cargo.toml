@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Babel routing protocol codec, TLVs, neighbor FSM, source-specific routing"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -23,9 +22,7 @@ source_specific = []
 
 [dependencies]
 lr-core = { workspace = true }
-bytes.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 blake2.workspace = true
 hmac.workspace = true
 sha2.workspace = true

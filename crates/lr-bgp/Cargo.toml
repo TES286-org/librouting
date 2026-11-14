@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "BGP-4 protocol codec, peer FSM, path attributes and extensions"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -39,9 +38,7 @@ exchange-plane = ["dep:hmac", "dep:sha2"]
 [dependencies]
 lr-core = { workspace = true }
 lr-mpls = { workspace = true, optional = true }
-bytes.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 hmac = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 
