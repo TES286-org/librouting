@@ -815,7 +815,15 @@ mod tests {
     }
 
     /// Full path: submit a session, the peer closes its end, the
-    /// reactor reports `PeerClosed` through the completion callback.
+    /// reactor reports the peer-gone end through the completion
+    /// callback. The exact shape is kernel-dependent: a clean FIN
+    /// (POSIX `drop`, or a Windows close with no unread data) reads
+    /// back as EOF — `PeerClosed` — while a Windows close that leaves
+    /// the reactor's just-written OPEN unread in the peer's receive
+    /// buffer aborts the connection (RST), which surfaces as a
+    /// `read:` transport error instead. Both are the same session
+    /// event — the peer went away — and both take the error-path
+    /// teardown the old pump used for the same inputs.
     #[test]
     fn peer_close_ends_the_session() {
         let router = Arc::new(RwLock::new(DefaultRouter::new()));
@@ -838,7 +846,12 @@ mod tests {
         // The peer hangs up immediately.
         drop(client);
         let end = recv_end(rx);
-        assert_eq!(end, SessionEnd::PeerClosed);
+        let peer_gone = matches!(end, SessionEnd::PeerClosed)
+            || matches!(&end, SessionEnd::TransportError(m) if m.starts_with("read:"));
+        assert!(
+            peer_gone,
+            "the end must be the peer-gone shape (clean EOF or the              RST-abort read error), got {end:?}"
+        );
         running.store(false, Ordering::Relaxed);
     }
 
