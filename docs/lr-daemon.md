@@ -57,11 +57,11 @@ bgp {
 ./target/release/lr-daemon --config daemon.lr
 ```
 
-[`templates/daemon.lr`](../templates/daemon.lr) is the fully commented
+[`templates/daemon.lr`](../templates/daemon.lr) is the commented
 reference config in the native `.lr` DSL. The `.lr` grammar is
 specified in [config_dsl_grammar.md](config_dsl_grammar.md). The TOML
-subset (`templates/daemon.toml`) is the deprecated twin — fully
-supported through the 1.x series, planned for removal in 2.x; loading
+subset (`templates/daemon.toml`) is the deprecated twin — supported
+through the 1.x series, planned for removal in 2.x; loading
 one prints a `config deprecation:` notice at startup, on reload,
 through `lrctl status` / `show status`, through the structured log,
 and through the `lr_config_dialect_deprecated` metrics gauge. Migrate

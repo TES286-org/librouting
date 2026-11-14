@@ -16,7 +16,7 @@ Design ground rules, in priority order:
    experimental code path may alter standard behavior for a non-participating
    peer, ever.
 2. **Additive, never load-bearing.** The route data plane (NLRI, standard
-   attributes, best path) must remain fully correct if every LRXP record is
+   attributes, best path) must remain correct if every LRXP record is
    dropped, forged, or replayed. Records accelerate or annotate; they never
    decide.
 3. **Bounded growth.** Every propagated record has an explicit scope; nothing
@@ -169,9 +169,10 @@ Add-Path path-id, RFC 7911, when the session negotiates Add-Path):
 
 - `rank`: the sender's local best-path rank of this path among its alternates
   for the prefix (1 = the path the sender itself uses, 2 = its first alternate,
-  ...). A receiver learning that its currently used path is the sender's rank-1,
-  while a newly arrived path is rank-3, can short-circuit the exploration that
-  defect §1 documents: the third-best path of a remote speaker is a poor repair
+  ...). A receiver learning that its selected path is the
+  sender's rank-1, while a newly arrived path is rank-3, can
+  short-circuit the exploration that defect §1 documents: the
+  third-best path of a remote speaker is a poor repair
   candidate.
 - `damp FoM`: the sender's current route-flap figure of merit for the prefix (0
   when damping is off), so a receiver can deprioritize routes its peer itself

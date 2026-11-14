@@ -49,7 +49,7 @@ shape as `riscv-native`.
 IBM Power (`ppc64le`) native jobs are not yet in the matrix: there
 is no self-hosted ppc64le runner registered, and the IBM-provided
 `ubuntu-26.04-ppc64le` / `ubuntu-26.04-ppc64le-p10` labels are pending
-the same review. ppc64le coverage is currently limited to the
+the same review. ppc64le coverage is limited to the
 `cross` matrix (cross-build only, no test). The open work is tracked
 on issue #95.
 
