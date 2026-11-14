@@ -552,19 +552,32 @@ mod imp {
                     }
                 }
                 "shutdown" => {
-                    // `shutdown` is the immediate path: flip `running`
-                    // to false, remove the socket file, return. The
+                    // `shutdown` is the immediate path: write the
+                    // reply, flush it to the kernel, remove the
+                    // socket file, then flip `running` to false. The
                     // daemon's main loop notices on its next poll and
                     // exits. The `shutdown drain` and
                     // `shutdown status` sub-commands are stripped off
                     // the command line first (see the prefix matches
                     // above the `match cmd` block).
-                    deps.running.store(false, Ordering::Relaxed);
+                    //
+                    // The reply is written and flushed BEFORE
+                    // `running` is lowered: once the main loop sees
+                    // `running == false` it may call `process::exit`
+                    // and tear the API thread down before the BufWriter
+                    // drains. Under coverage instrumentation (where
+                    // the test runs slower) the original order lost
+                    // the reply — `lrctl shutdown` saw an empty body
+                    // and the test asserted `stdout.contains("shutting
+                    // down")` failed. Flushing first puts the bytes
+                    // in the kernel's send buffer, which the TCP stack
+                    // delivers even after the process exits.
                     let _ = writeln!(out, "shutting down");
                     let _ = out.flush();
                     if let Some(path) = deps.socket_path {
                         let _ = std::fs::remove_file(path);
                     }
+                    deps.running.store(false, Ordering::Relaxed);
                     return;
                 }
                 other if other.starts_with("shutdown ") => {
