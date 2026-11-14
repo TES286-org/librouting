@@ -148,7 +148,7 @@ macro_rules! log_trace {
 #[allow(unused_imports)]
 pub(crate) use daemon_logger::{ColorMode, Component, LogConfig, LogFormat, Severity};
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -173,6 +173,7 @@ use lr_router::{
 use std::collections::HashMap;
 
 mod api;
+mod bgp_reactor;
 mod compat;
 mod config_check;
 mod config_dsl;
@@ -2359,6 +2360,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         }
     }
 
+    // ---- BGP session reactor (ROADMAP async-I/O, first slice) ----
+    // One event loop drives every established BGP session: the
+    // listener and the connectors submit their connected sockets and
+    // the reactor pumps them with readiness events, replacing the
+    // thread-per-socket model whose 200 ms read timeout was the poll
+    // cadence. See `bgp_reactor.rs` for the design.
+    let reactor =
+        bgp_reactor::BgpReactor::spawn(Arc::clone(&runtime.router), Arc::clone(&runtime.running));
+
     // ---- Outbound connectors: one thread per remote peer. ----
     // Legacy listen precedence: with a single peer and --listen, the
     // historical daemon ignored --peer entirely (listen mode wins).
@@ -2400,7 +2410,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 );
                 continue;
             }
-            spawn_connector(&runtime, entry, cfg, Arc::clone(&live_sessions));
+            spawn_connector(&runtime, &reactor, entry, cfg, Arc::clone(&live_sessions));
         }
     }
 
@@ -2482,30 +2492,43 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         continue;
                     }
                     let handle = entry.handle_in.unwrap_or(entry.handle);
-                    let rt = Arc::clone(&runtime);
+                    let bfd = entry.bfd.clone();
                     let busy = Arc::clone(&entry.busy);
                     let live = Arc::clone(&live_sessions);
-                    let bfd = entry.bfd.clone();
                     live.fetch_add(1, Ordering::Relaxed);
-                    let spawned = thread::Builder::new()
-                        .name(format!("lr-session-{}", handle.0))
-                        .spawn(move || {
-                            if let Err(e) = run_peer_session(rt, s, handle, bfd) {
-                                log_error!(Component::Bgp, "session #{} ended: {}", handle.0, e);
+                    // Submit the accepted socket to the reactor — the
+                    // event loop owns the session pump from here (the
+                    // old model spawned a thread per socket here; see
+                    // `bgp_reactor.rs`). The completion callback runs
+                    // exactly once when the session ends and owns the
+                    // bookkeeping the session thread did: the error
+                    // log, the inbound busy guard for
+                    // non-bidirectional peers, the live-session
+                    // counter the shutdown grace window waits on.
+                    if let Err(e) = reactor.submit(
+                        s,
+                        handle,
+                        bfd,
+                        Box::new(move |end| {
+                            if end.is_err_path() {
+                                log_error!(
+                                    Component::Bgp,
+                                    "session #{} ended: {}",
+                                    handle.0,
+                                    end.message()
+                                );
                             }
-                            // Only clear the inbound guard for
-                            // non-bidirectional peers (bidirectional
-                            // peers never set it above).
                             if !is_bidirectional {
                                 busy.store(false, Ordering::Relaxed);
                             }
                             live.fetch_sub(1, Ordering::Relaxed);
-                        });
-                    if spawned.is_err() {
-                        // Thread spawn failed: undo the live-session
-                        // guard. The `busy` flag was only set for
-                        // non-bidirectional peers; clear it conditionally
-                        // to match the path above.
+                        }),
+                    ) {
+                        // Submission failed — the reactor thread is
+                        // gone (the daemon is exiting). Undo the
+                        // live-session guard exactly like the old
+                        // thread-spawn failure path.
+                        log_error!(Component::Bgp, "session submit: {e}");
                         if !is_bidirectional {
                             entry.busy.store(false, Ordering::Relaxed);
                         }
@@ -3583,6 +3606,7 @@ mod imp {
 /// off, repeat — for the lifetime of the daemon.
 fn spawn_connector(
     rt: &Arc<Runtime>,
+    reactor: &bgp_reactor::BgpReactor,
     entry: &PeerEntry,
     cfg: &DaemonConfig,
     live: Arc<AtomicUsize>,
@@ -3611,6 +3635,9 @@ fn spawn_connector(
     let collision_backoff_ms =
         (entry.spec.hold_time.unwrap_or(cfg.hold_time) as u64).clamp(10, 120) * 1_000;
     let bfd = entry.bfd.clone();
+    // The reactor clone this connector's session submissions ride
+    // on (see `bgp_reactor.rs`).
+    let reactor = reactor.clone();
     // Source the connection from the configured local address when
     // one exists (port 0 = ephemeral).
     let local =
@@ -3780,15 +3807,49 @@ fn spawn_connector(
                             }
                         }
                         live.fetch_add(1, Ordering::Relaxed);
-                        let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
-                        live.fetch_sub(1, Ordering::Relaxed);
-                        let mut collision_lost = false;
-                        if let Err(e) = &result {
-                            if e.contains("collision resolution") {
-                                collision_lost = true;
-                                lost_once.store(true, Ordering::Relaxed);
+                        // Submit the established socket to the session
+                        // reactor and block on the completion channel —
+                        // the connector owns the peer lifecycle (dial,
+                        // backoff ladder), the reactor owns the session
+                        // pump. The old shape called `run_peer_session`
+                        // inline on this thread; blocking on the
+                        // completion is the same lifecycle, minus the
+                        // per-session poll thread.
+                        let (end_tx, end_rx) = std::sync::mpsc::channel::<bgp_reactor::SessionEnd>();
+                        let submitted =
+                            reactor.submit(stream, handle, bfd.clone(), Box::new(move |end| {
+                                // The reactor runs this exactly once,
+                                // after the socket is closed — the send
+                                // cannot block (unbounded channel).
+                                let _ = end_tx.send(end);
+                            }));
+                        let end = match (submitted, end_rx.recv()) {
+                            (Err(e), _) => {
+                                log_error!(
+                                    Component::Bgp,
+                                    "peer {label}: session submit failed: {e}"
+                                );
+                                bgp_reactor::SessionEnd::DaemonShutdown
                             }
-                            log_error!(Component::Bgp, "peer {label}: session ended: {e}");
+                            (_, Err(_)) => {
+                                // The reactor dropped its end without a
+                                // completion (the daemon is exiting).
+                                bgp_reactor::SessionEnd::DaemonShutdown
+                            }
+                            (_, Ok(end)) => end,
+                        };
+                        live.fetch_sub(1, Ordering::Relaxed);
+                        let collision_lost =
+                            end == bgp_reactor::SessionEnd::CollisionLost;
+                        if collision_lost {
+                            lost_once.store(true, Ordering::Relaxed);
+                        }
+                        if end.is_err_path() {
+                            log_error!(
+                                Component::Bgp,
+                                "peer {label}: session ended: {}",
+                                end.message()
+                            );
                         }
                         if !rt.running.load(Ordering::Relaxed) {
                             break;
@@ -3799,10 +3860,12 @@ fn spawn_connector(
                         // (the peer holds a live session we cannot see —
                         // dialing sooner only bounces off its
                         // Established-protection rule, RFC 4271 §6.8);
-                        // every other failure grows the ladder.
+                        // every other failure grows the ladder. The old
+                        // string-match on `"collision resolution"` is the
+                        // enum equality above.
                         if collision_lost {
                             backoff_ms = collision_backoff_ms;
-                        } else if result.is_ok()
+                        } else if !end.is_err_path()
                             || rt.router.read().unwrap().session_was_established(handle)
                         {
                             backoff_ms = 1_000;
@@ -3827,138 +3890,6 @@ fn spawn_connector(
                 }
             }
         });
-}
-
-/// Drive one established TCP connection until it drops or we shut down.
-fn run_peer_session(
-    rt: Arc<Runtime>,
-    mut stream: TcpStream,
-    session: SessionHandle,
-    bfd: Option<BfdFlags>,
-) -> Result<(), String> {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-    {
-        let mut r = rt.router.write().unwrap();
-        r.start_session(session)
-            .map_err(|e| format!("start_session: {}", e))?;
-    }
-    let result = pump_session(&rt, &mut stream, session, bfd);
-    // The transport is going away. When we initiated the close (signal
-    // shutdown, BFD-down, connector restart), RFC 4486 §4.1 wants a
-    // Cease / Administrative Shutdown NOTIFICATION on the wire rather
-    // than a bare FIN; shutdown_session queues it only when the FSM is
-    // still live (a peer-initiated close already left the FSM Idle).
-    // Then drive the FSM to Idle and purge the routes this session
-    // contributed (RFC 4271 §8.2.2). Event consumers (the ticker
-    // thread) observe the resulting events.
-    {
-        let mut r = rt.router.write().unwrap();
-        // `result.is_ok()` is the signal-shutdown exit — the only pump
-        // exit where WE are the ones ending a live session. Everything
-        // else is a transport death (peer closed, reset, read error,
-        // router-closed collision loser): RFC 4486 has nothing to say
-        // there, and closing with shutdown_session would reclassify a
-        // crash as a deliberate goodbye, costing the peer its RFC
-        // 4724/9494 retention window.
-        if result.is_ok() {
-            r.shutdown_session(session);
-        } else {
-            r.close_session(session);
-        }
-        // Drain whatever the close queued (the Cease on an
-        // operator-initiated close) and flush it to the wire before the
-        // socket goes away.
-        let out = r.drain_output(session);
-        if !out.is_empty() {
-            let _ = stream.write_all(&out);
-        }
-    }
-    let _ = stream.shutdown(std::net::Shutdown::Both);
-    result
-}
-
-fn pump_session(
-    rt: &Arc<Runtime>,
-    stream: &mut TcpStream,
-    session: SessionHandle,
-    bfd: Option<BfdFlags>,
-) -> Result<(), String> {
-    let router = &rt.router;
-    let mut buf = [0u8; 8192];
-    // BFD fast-fail: remember the last-seen liveness so only an
-    // Up -> Down *transition* tears the session (a BFD session that
-    // never came up must not kill BGP — BIRD parity).
-    let mut bfd_up_seen = bfd.as_ref().map(|f| f.up.load(Ordering::Relaxed));
-    while rt.running.load(Ordering::Relaxed) {
-        // Signals first: a shutdown must tear the session down cleanly
-        // even while the peer is idle, and a reload can change what we
-        // originate mid-session.
-        dispatch_signals(rt);
-        if !rt.running.load(Ordering::Relaxed) {
-            break;
-        }
-
-        // BFD Up -> Down: the path died; tear the session down now
-        // instead of waiting out the hold timer (RFC 5880 §6.8.4,
-        // the whole point of `--bfd`).
-        if let Some(flags) = &bfd {
-            let up = flags.up.load(Ordering::Relaxed);
-            if bfd_up_seen == Some(true) && !up {
-                return Err("bfd session down".into());
-            }
-            bfd_up_seen = Some(up);
-        }
-
-        // 1. Read peer bytes → feed_input.
-        match stream.read(&mut buf) {
-            Ok(0) => return Err("peer closed connection".into()),
-            Ok(n) => {
-                let mut r = router.write().unwrap();
-                r.feed_input(session, &buf[..n])
-                    .map_err(|e| format!("feed_input: {}", e))?;
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(format!("read: {}", e)),
-        }
-
-        // 2. Drain router output → write to peer.
-        let (out, closed_by_router, lost_collision) = {
-            let mut r = router.write().unwrap();
-            let out = r.drain_output(session);
-            // RFC 4271 §6.8: the router may have just closed this
-            // session while the TCP connection is still alive — either
-            // our resolver picked the sibling transport, or the peer's
-            // resolver closed us with a Cease / Connection Collision
-            // Resolution NOTIFICATION (RFC 4486 subcode 7). Flush the
-            // notification below, then unwind so the socket closes.
-            let closed = r.session_peer_state(session) == Some("Idle");
-            // Consume the loss latch only when the session actually
-            // went Idle — an Idle FSM with the latch set is the
-            // collision-loss signature; every other Idle (pre-start)
-            // must not read as one.
-            let lost = if closed {
-                r.take_collision_lost(session)
-            } else {
-                false
-            };
-            (out, closed, lost)
-        };
-        if !out.is_empty() {
-            stream
-                .write_all(&out)
-                .map_err(|e| format!("write: {}", e))?;
-        }
-        if closed_by_router {
-            return Err(if lost_collision {
-                "connection lost the RFC 4271 §6.8 collision resolution".into()
-            } else {
-                "session closed by the router (FSM Idle)".into()
-            });
-        }
-    }
-    Ok(())
 }
 
 /// BGP-LS projection driver (issue #60 daemon wiring + End.X
