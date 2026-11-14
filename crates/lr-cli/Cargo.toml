@@ -62,6 +62,14 @@ siphasher = { workspace = true, optional = true }
 # daemon's ROA URL fetcher; the library crates stay dep-free.
 ureq = { version = "2", default-features = false, features = ["tls"] }
 
+# Event loop for the BGP session layer (ROADMAP async-I/O item):
+# `bgp_reactor.rs` drives every established BGP session on one thread
+# with readiness events — read bytes → feed the router → drain output
+# → write — instead of one thread per socket polling a 200 ms read
+# timeout. Registered by the listener and the connectors, which used
+# to spawn `run_peer_session` threads.
+mio = { workspace = true }
+
 # Windows named-pipe transport for the runtime API
 # (`CreateNamedPipeW`, `ConnectNamedPipe`, `ReadFile`, `WriteFile`,
 # `DuplicateHandle`). The `windows-sys` crate provides correct,

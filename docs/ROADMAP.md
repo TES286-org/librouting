@@ -61,25 +61,35 @@ methods added alongside the existing cross-family ones (the
 change ships as the 2.0 major bump and lands in one PR after the
 three below have stabilised on a release window.
 
-**Async I/O.** The daemon runs a thread per socket, and its
-transports poll with a short `sleep` between reads
-(`crates/lr-cli/src/daemon.rs`,
-[`lr-osroute::ospf_transport`](../crates/lr-osroute/src/ospf_transport/mod.rs),
-[`lr-osroute::bfd_transport`](../crates/lr-osroute/src/bfd_transport.rs)).
-That costs a wakeup per idle tick and bounds how many sessions one
-process holds. The work is to move the session and transport layer
-onto an event loop — `mio` or `tokio` — with readiness driving the
-FSM instead of a timer. Done when the poll-and-sleep loops are gone,
+**Async I/O.** The BGP session layer has landed on the event loop:
+[`lr-cli::bgp_reactor`](../crates/lr-cli/src/bgp_reactor.rs) drives
+every established BGP session from a single `mio` thread — the
+listener and the connectors submit connected sockets, readable
+events run the exact pump order the per-session threads used
+(read → `feed_input` → `drain_output` → write), a partial write parks
+its remainder in the slot under WRITABLE interest, and a maintenance
+sweep every 50 ms flushes timer-generated output (KEEPALIVEs,
+retransmissions) and watches the BFD and router-side close paths.
+The per-session thread pool — one thread per socket whose 200 ms
+read timeout was the poll cadence — is gone, together with the
+`run_peer_session` / `pump_session` functions and the connector's
+string-matched backoff classification (now the structured
+`bgp_reactor::SessionEnd` enum).
+
+What remains is the rest of the daemon's I/O surfaces: the OSPF raw
+sockets ([`lr-osroute::ospf_transport`](../crates/lr-osroute/src/ospf_transport/mod.rs)),
+Babel's UDP-plus-multicast pair and BFD's datagram loop
+([`lr-osroute::bfd_transport`](../crates/lr-osroute/src/bfd_transport.rs)),
+the BGP listener's accept poll and the runtime API / metrics accept
+loops. Each wraps differently (raw IP, multicast membership,
+connection-less datagrams), so each is its own slice of work.
+`mio` is the smaller dependency and the daemon already avoids
+`tokio` for the API and metrics threads; `tokio` is the alternative
+if the rest of the daemon's I/O surfaces converge on it.
+
+Done when the poll-and-sleep loops are gone across every transport,
 an idle session wakes only on an event, and the session, timer and
 interop tests still pass.
-
-The first PR lands the event loop for the BGP session layer only —
-the OSPF and Babel transports stay on their raw sockets for one
-release, because OSPF uses `AF_PACKET` / raw IP and Babel uses a
-UDP-plus-multicast pair that the event loop wraps differently. `mio`
-is the smaller dependency and the daemon already avoids `tokio` for
-the API and metrics threads; `tokio` is the alternative if the rest
-of the daemon's I/O surfaces converge on it.
 
 **Multi-threaded RIB and a lock-free event bus.** The whole router
 sits behind `Arc<RwLock<DefaultRouter>>`

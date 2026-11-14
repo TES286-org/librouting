@@ -63,6 +63,16 @@ lr-ldp = { path = "crates/lr-ldp", version = "1.8.0" }
 # `cargo::unused_workspace_dependencies` flagged on every build.
 
 socket2 = { version = "0.6", features = ["all"] }
+
+# Event-loop substrate for the daemon's BGP session layer
+# (`crates/lr-cli/src/bgp_reactor.rs`): one reactor thread drives every
+# established BGP session with readiness events instead of one thread
+# per socket polling on a read timeout. `mio` is the poll(2)/WSAPoll
+# wrapper the ROADMAP's async-I/O item names — the smaller dependency
+# the daemon already avoids `tokio` for (the API and metrics threads
+# are hand-rolled for the same reason). OS-polling only, no async
+# runtime, no task spawning.
+mio = { version = "1", features = ["net", "os-ext"] }
 thiserror = "2"
 tracing = "0.1"
 bitflags = "2"
