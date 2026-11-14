@@ -397,6 +397,21 @@ impl BfdSession {
         &self.cfg
     }
 
+    /// The earliest time the session's timer queue will fire, or `None`
+    /// when no timer is armed. An embedder driving the session from an
+    /// event loop uses this to compute the poll timeout: sleeping until
+    /// this instant (or until a readable event, whichever comes first)
+    /// keeps an idle session off the CPU without missing the next TX
+    /// deadline or the detection-time expiry (§6.8.4).
+    ///
+    /// The instant is in the same logical clock `tick` and `feed_bytes`
+    /// consume — the embedder's monotonic milliseconds mapped to
+    /// [`Instant`]. The queue stores absolute fire-at times, so the
+    /// deadline is the queue's head, not `now + interval`.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.timers.next_fire()
+    }
+
     /// Change timer parameters at runtime (§6.8.3). While the session
     /// is Up the change is confirmed with a Poll sequence carried on
     /// the periodic packets (§6.5); an increased TX interval / reduced

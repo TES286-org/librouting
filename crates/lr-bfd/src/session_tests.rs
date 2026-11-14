@@ -819,3 +819,63 @@ fn keyed_auth_accessor_returns_installed_state() {
     assert_eq!(ka.algorithm(), KeyedAuthAlgorithm::KeyedMd5);
     assert_eq!(ka.xmit_seq(), 0);
 }
+
+/// `BfdSession::next_deadline` exposes the timer-queue head so an
+/// event-loop embedder can compute the poll timeout. A freshly-
+/// constructed session (before `start`) has no timer armed, so the
+/// accessor returns `None`; `start` arms the TX timer, so the
+/// accessor returns a deadline strictly greater than the start
+/// instant.
+#[test]
+fn next_deadline_tracks_timer_queue_head() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    // Before start: no timer armed.
+    assert!(s.next_deadline().is_none());
+
+    // start arms the TX timer (§6.8.7). The deadline is in the
+    // future relative to the start instant.
+    let _ = s.start(Instant(0));
+    let d = s.next_deadline().expect("TX timer armed after start");
+    assert!(
+        d.0 > 0,
+        "next_deadline must be in the future relative to Instant(0)"
+    );
+
+    // While Up with a 100 ms interval, the deadline is bounded by
+    // the interval — an embedder polling at `next_deadline` wakes
+    // within one TX interval of the previous fire, not at the
+    // pre-start fallback.
+    let p = make_packet(State::Down, 0x22222222, 0);
+    let _ = s.feed_bytes(Instant(10), &encode_packet(&p));
+    let _ = s.drain_outgoing();
+    let p2 = make_packet(State::Up, 0x22222222, 0x11111111);
+    let _ = s.feed_bytes(Instant(20), &encode_packet(&p2));
+    assert!(s.is_up());
+    let d_up = s.next_deadline().expect("timer armed while Up");
+    // 100 ms interval with 0-25% jitter → next fire within
+    // 75-100 ms of the last TX. Allow 1 ms floor for the
+    // (interval_ms).max(1) clamp.
+    assert!(
+        d_up.0 <= 100,
+        "next_deadline while Up must be within one TX interval ({}ms)",
+        d_up.0
+    );
+}
+
+/// After the timer fires, `next_deadline` reflects the next armed
+/// timer (the queue reschedules the next TX). An embedder can poll
+/// at the returned deadline without missing a fire.
+#[test]
+fn next_deadline_advances_after_tick() {
+    let mut s = make_session();
+    let before = s.next_deadline().expect("TX timer armed after start");
+    // Advance past the deadline; tick fires the TX timer.
+    let _ = s.tick(Instant(before.0 + 1));
+    let after = s.next_deadline().expect("TX timer rescheduled after fire");
+    assert!(
+        after.0 > before.0,
+        "next_deadline must advance after the previous fire (before={}, after={})",
+        before.0,
+        after.0
+    );
+}
