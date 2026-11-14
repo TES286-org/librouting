@@ -631,14 +631,23 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                 }
             }
             "shutdown" => {
-                // `shutdown` is the immediate path: flip `running`
-                // to false and return. The daemon's main loop notices
-                // on its next poll and exits. The `shutdown drain` and
-                // `shutdown status` sub-commands are stripped off the
-                // command line first (see the prefix match arm below).
-                deps.running.store(false, Ordering::Relaxed);
+                // `shutdown` is the immediate path: write the reply,
+                // flush it, then flip `running` to false. The daemon's
+                // main loop notices on its next poll and exits. The
+                // `shutdown drain` and `shutdown status` sub-commands
+                // are stripped off the command line first (see the
+                // prefix match arm below).
+                //
+                // The reply is written and flushed BEFORE `running` is
+                // lowered, mirroring the Unix handler's fix: once the
+                // main loop sees `running == false` it may exit the
+                // process before the BufWriter drains, and the client
+                // would see an empty body. Flushing first puts the
+                // bytes in the kernel's pipe buffer, which the OS
+                // delivers even after the process exits.
                 let _ = writeln!(out, "shutting down");
                 let _ = out.flush();
+                deps.running.store(false, Ordering::Relaxed);
                 return;
             }
             other if other.starts_with("shutdown ") => {

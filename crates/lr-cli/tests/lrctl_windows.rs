@@ -136,7 +136,7 @@ fn lrctl(args: &[&str]) -> (bool, String, String) {
 }
 
 /// Run `lrctl shutdown` against `pipe`, retrying on a transport
-/// error up to 3 times with a 200 ms gap. The shutdown command is
+/// error up to 5 times with a 250 ms gap. The shutdown command is
 /// racy on Windows named pipes: the server's `accept_loop` has a
 /// ~50 ms gap between `ConnectNamedPipe` returning and the next pipe
 /// instance being created (`CreateNamedPipeW`). A client that
@@ -144,14 +144,22 @@ fn lrctl(args: &[&str]) -> (bool, String, String) {
 /// transport already retries internally with a 5 s deadline — but
 /// other transient errors (a server thread that has not finished
 /// dropping its BufWriter, a pipe instance that the kernel has
-/// already torn down on the server side) can still surface as a
-/// transport `Err` and a non-zero `lrctl` exit. The retry
-/// absorbs those without losing the test's diagnostic on a real
-/// failure (the last attempt's stdout / stderr are returned to the
-/// caller, which surfaces them in its own assertion message).
+/// already torn down on the server side, `CreateNamedPipeW` briefly
+/// failing under instance-pressure on a loaded runner) can still
+/// surface as `ERROR_FILE_NOT_FOUND` (CreateFileW error 2) and a
+/// non-zero `lrctl` exit. The retry absorbs those without losing the
+/// test's diagnostic on a real failure (the last attempt's stdout /
+/// stderr are returned to the caller, which surfaces them in its own
+/// assertion message).
 fn lrctl_shutdown_with_retry(pipe: &str) -> (bool, String, String) {
     let mut last = (false, String::new(), String::new());
-    for attempt in 0..3 {
+    // Five attempts with 250 ms gaps gives a ~1.25 s total window for
+    // the server to recycle the pipe instance — enough for a loaded
+    // Windows CI runner where the kernel's pipe teardown is slower
+    // than on a local dev machine. The previous 3-attempt / 200 ms
+    // window (~600 ms) was occasionally too tight under coverage or
+    // parallel CI load.
+    for attempt in 0..5 {
         let (ok, stdout, stderr) = lrctl(&["--socket", pipe, "shutdown"]);
         if ok {
             return (ok, stdout, stderr);
@@ -161,8 +169,8 @@ fn lrctl_shutdown_with_retry(pipe: &str) -> (bool, String, String) {
         // even if the client saw a transport error; further attempts
         // race against the daemon's exit. A short gap keeps the
         // retry effective while the daemon is still draining.
-        if attempt < 2 {
-            thread::sleep(Duration::from_millis(200));
+        if attempt < 4 {
+            thread::sleep(Duration::from_millis(250));
         }
     }
     last
