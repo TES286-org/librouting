@@ -78,14 +78,24 @@ string-matched backoff classification (now the structured
 
 What remains is the rest of the daemon's I/O surfaces: the OSPF raw
 sockets ([`lr-osroute::ospf_transport`](../crates/lr-osroute/src/ospf_transport/mod.rs)),
-Babel's UDP-plus-multicast pair and BFD's datagram loop
-([`lr-osroute::bfd_transport`](../crates/lr-osroute/src/bfd_transport.rs)),
-the BGP listener's accept poll and the runtime API / metrics accept
-loops. Each wraps differently (raw IP, multicast membership,
-connection-less datagrams), so each is its own slice of work.
-`mio` is the smaller dependency and the daemon already avoids
-`tokio` for the API and metrics threads; `tokio` is the alternative
-if the rest of the daemon's I/O surfaces converge on it.
+Babel's UDP-plus-multicast pair, the BGP listener's accept poll and
+the runtime API / metrics accept loops. BFD's datagram loop has
+landed on the event loop
+([`lr-cli::daemon_bfd`](../crates/lr-cli/src/daemon_bfd.rs) drives
+every rx socket from one `mio::Poll` on unix, registered via
+`mio::unix::SourceFd`; the poll timeout is the earliest
+`BfdSession::next_deadline`, so an idle BFD session sleeps until a
+datagram arrives or the next TX/detection timer fires instead of
+waking ten times a second on a fixed 10 ms cadence; a `mio::Waker`
+fires on shutdown so the supervisor exits within the watcher's 50 ms
+cadence instead of waiting out the detection time; Windows keeps the
+poll-and-sleep loop because `mio::unix::SourceFd` has no Windows
+equivalent and the Windows BFD transport has no TTL ancillary data to
+preserve). Each remaining transport wraps differently (raw IP,
+multicast membership, connection-less datagrams), so each is its own
+slice of work. `mio` is the smaller dependency and the daemon already
+avoids `tokio` for the API and metrics threads; `tokio` is the
+alternative if the rest of the daemon's I/O surfaces converge on it.
 
 Done when the poll-and-sleep loops are gone across every transport,
 an idle session wakes only on an event, and the session, timer and
