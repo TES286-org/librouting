@@ -61,6 +61,18 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "0BSD",
+    # CDLA-Permissive-2.0 is the license `webpki-roots` ships its
+    # bundled Mozilla CA root data under (both the 0.26.x and 1.0.x
+    # lines). It is a permissive data license — use, redistribute and
+    # modify with attribution, no copyleft, no further-usage
+    # restrictions — and the data is only *embedded*, never exposed as
+    # a licensing condition on lr's own output. `webpki-roots` is
+    # pulled in by `ureq`, the HTTP client the advanced ROA loading
+    # (issue #100) uses to fetch `roa_source` HTTPS URLs in `lr-cli`.
+    # Not OSI-approved (it is a data license, not software), hence the
+    # explicit entry with the justification rather than a blanket
+    # "OSI-approved" policy.
+    "CDLA-Permissive-2.0",
     # MPL-2.0 is OSI-approved, FSF-libre, file-level copyleft. It
     # only appears on `cbindgen`, a *build-time* dependency of
     # `lr-ffi` (used by `build.rs` to emit `include/lr_ffi.h`).
