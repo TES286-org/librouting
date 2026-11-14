@@ -50,6 +50,18 @@ fn spawn_one_shot_http(body: String, content_type: &str) -> OneShotHttp {
     let ct = content_type.to_string();
     let handle = thread::spawn(move || {
         let (mut s, _) = listener.accept().expect("accept");
+        // The accepted stream inherits the listener's nonblocking
+        // mode on some platforms (macOS in particular). A nonblocking
+        // read before the client has sent any bytes returns
+        // `WouldBlock`, but on macOS it can also surface as `EINVAL`
+        // (`os error 22`) when the TCP stack is in a half-handshake
+        // state — and `ureq` interprets that as a header-read failure.
+        // Set the stream back to blocking with a short read/write
+        // timeout so the one-shot server reliably drains the request
+        // before it writes the response.
+        let _ = s.set_nonblocking(false);
+        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
         let mut buf = [0u8; 1024];
         let _ = s.read(&mut buf);
         let resp = format!(
@@ -109,6 +121,19 @@ fn spawn_reloadable_http(initial_body: String) -> ReloadableHttp {
             }
             match listener.accept() {
                 Ok((mut s, _)) => {
+                    // Same macOS quirk as the one-shot server: the
+                    // accepted stream inherits the listener's
+                    // nonblocking mode, and a read before the client
+                    // has sent bytes can surface as `EINVAL`
+                    // (`os error 22`) on macOS. Flip back to blocking
+                    // with a short timeout so each request is drained
+                    // before the response is written — the reloadable
+                    // server serves multiple requests over the daemon's
+                    // lifetime, so a single failed header read would
+                    // otherwise break the whole SIGHUP reload path.
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
                     let mut buf = [0u8; 1024];
                     let _ = s.read(&mut buf);
                     let body = body_t.lock().unwrap().clone();
