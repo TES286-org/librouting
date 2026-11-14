@@ -347,7 +347,7 @@ because OSPF is area-scoped, not session-scoped:
 | Field | Purpose |
 | --- | --- |
 | `ospf_areas: BTreeMap<u32, OspfAreaState>` | per-area LSDB, type policy, `topology_version` |
-| `ospf_published: BTreeMap<RouteKey, Route>` | routes currently published to Loc-RIB, diffed on every recompute |
+| `ospf_published: BTreeMap<RouteKey, Route>` | routes published to Loc-RIB, diffed on every recompute |
 | `ospf_externals: BTreeMap<u32, ExternalDestination>` | redistributed IPv4 destinations (RFC 2328 §12.4.3), keyed by LS ID |
 | `ospf_v3_externals: BTreeMap<Prefix, V3ExternalDestination>` | redistributed IPv6 destinations (RFC 5340 §4.4.3.6) |
 | `ospf_v3_external_lsids: BTreeMap<Prefix, u32>` | stable 0x4005 LS IDs, one per external prefix |

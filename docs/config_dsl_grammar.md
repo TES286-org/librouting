@@ -7,7 +7,7 @@ This document specifies that grammar, the block vocabulary and the
 before writing a daemon configuration by hand, or before extending
 `crates/lr-cli/src/config_dsl/`.
 
-The fully commented reference file is
+The commented reference file is
 [`templates/daemon.lr`](../templates/daemon.lr); the grammar below is
 derived from `crates/lr-cli/src/config_dsl/` (`lexer.rs`, `parser.rs`,
 `emit.rs`). When the two disagree, the code wins.

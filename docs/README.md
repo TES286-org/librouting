@@ -44,7 +44,7 @@ and [`STYLE.md`](STYLE.md) first.
 | [`lr-daemon-reference.md`](lr-daemon-reference.md) | Every flag and configuration key |
 | [`lr-cli.md`](lr-cli.md) | The `lr` inspection CLI and the `lrctl` operational CLI |
 | [`RUNBOOK.md`](RUNBOOK.md) | Day-2 operations: runtime API, metrics, troubleshooting |
-| `../templates/daemon.lr` | The fully commented reference configuration |
+| `../templates/daemon.lr` | The commented reference configuration |
 | [`COMPAT.md`](COMPAT.md) | Running a BIRD 2 or FRR 10 configuration file unchanged |
 | [`PARITY.md`](PARITY.md) | Where lr behaves differently from BIRD and FRR, and how to change it |
 

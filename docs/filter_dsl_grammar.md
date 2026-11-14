@@ -371,7 +371,7 @@ built-in nor a declared user function. The built-in set is:
 `ext-community-set` or a generic `set`; in the `len` row `community-set`
 covers the large- and extended-community sets too. Arity and argument types
 are checked when the call runs (`EvalError::BadArgCount` / `TypeMismatch`);
-only `defined`/`exists` are arity-checked at parse time. Note that `len` does
+only `defined`/`exists` are arity-checked at parse time. `len` does
 not accept a generic `set`, and `count` does not accept a `string`.
 
 `delete(set, patterns)` returns a copy of `set` with every element matching any
@@ -1037,7 +1037,7 @@ reject;
 
 The `~` operator on an AS-path is a flat set-membership test: the route matches
 if any AS in its AS_PATH is one of the listed values. BIRD-style AS-path regex
-is not implemented in the matcher — see §3.4. Note that a bare `_` inside a set
+is not implemented in the matcher — see §3.4. A bare `_` inside a set
 literal is a parse error; the elements are comma-separated.
 
 ### 7.9 Extended-community tuple

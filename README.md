@@ -44,7 +44,7 @@ The daemon also reads BIRD 2 and FRR 10 configuration files directly
 RPKI-RTR, and multiplexes several protocols in one process
 (`--protocol bgp,ospf`). The native `.lr` configuration DSL carries
 configuration and policy in one file; `templates/daemon.lr` is the
-fully commented reference.
+commented reference.
 
 Next: [`docs/tutorial.md`](docs/tutorial.md) to embed the library,
 [`docs/lr-daemon.md`](docs/lr-daemon.md) to run it.

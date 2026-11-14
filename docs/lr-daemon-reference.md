@@ -64,7 +64,7 @@ commands echo a `config-deprecation` line, and the metrics endpoint
 exposes `lr_config_dialect_deprecated{config_dialect="toml"} 1` so a
 fleet scraper can alert on the migration state. Migrate with
 `lr-daemon config to-dsl daemon.toml > daemon.lr`. The TOML subset
-stays fully supported through the 1.x series and is planned for
+stays supported through the 1.x series and is planned for
 removal in 2.x.
 
 ## Flags

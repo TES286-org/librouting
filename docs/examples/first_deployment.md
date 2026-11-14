@@ -15,7 +15,7 @@ this page is the "I just want it running" path.
 
 The daemon is not a production NOS — BIRD, FRR and OpenBGPD are. It
 exists to exercise every library feature end to end, so the same
-configuration surface that runs in production-grade NOSes runs here.
+configuration surface the reference NOSes expose runs here.
 
 ## Prerequisites
 
@@ -180,7 +180,7 @@ rib-entries 2
 dialect. A daemon started on a TOML config stamps `config-dialect
 toml` and an extra `config-deprecation` line pointing at the
 migration tool, because the TOML subset is in its deprecation window
-(fully supported through the 1.x series, planned for removal in 2.x).
+(supported through the 1.x series, planned for removal in 2.x).
 The same notice rides the startup stderr, the structured `log_warn!`
 record, every reload, and the `lr_config_dialect_deprecated` metrics
 gauge.

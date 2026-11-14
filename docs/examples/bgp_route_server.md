@@ -61,7 +61,7 @@ them now and the daemon's egress path can pick them up later without a
 semver break. The fields are intentionally kept `pub` rather than tagged
 `#[allow(dead_code)]`: the public struct shape is part of the C ABI freeze,
 so removing them would be a major-version bump. Tracked as future work
-under the route-server stanza in `docs/ROADMAP.md`.
+under the route-server stanza in [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Per-client community rewriting
 

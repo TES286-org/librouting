@@ -168,7 +168,7 @@ aspirational features):
 - `docs/bindings/{c,cpp,go,python}.md` — per-language embedding guides
 - `docs/examples/*.md` — per-scenario walkthroughs
 - `docs/research/*.md` — research notes (BGP defects, exchange plane)
-- `templates/daemon.lr` — fully-commented reference configuration (native DSL;
+- `templates/daemon.lr` — commented reference configuration (native DSL;
   `daemon.toml` is the compat twin)
 - `templates/README.md` — scaffolding templates
 - `yang/*.yang` — standards-track YANG models
