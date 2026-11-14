@@ -292,6 +292,30 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
 /// connections to `on_conn`. The first pipe instance is pre-created
 /// by [`spawn`]; subsequent instances are created here after each
 /// accept, so the next client can connect immediately.
+///
+/// ## The pipe name must never vanish while the daemon is up
+///
+/// A client's `CreateFileW` finds the pipe *name*, not a specific
+/// instance; the name exists while any instance handle (listening or
+/// connected) is open. Two recycle paths used to leave a window with
+/// zero open instances, during which a client's `CreateFileW` fails
+/// with `ERROR_FILE_NOT_FOUND` (error 2):
+///
+/// - the error path closed the failed instance, slept 100 ms, and
+///   only then created the replacement — a scanner process that
+///   opens-and-closes a pipe instance leaves `ConnectNamedPipe`
+///   failing with `ERROR_NO_DATA` on every cycle, so the window
+///   reopened every 100 ms and a client connecting in it saw the
+///   name gone;
+/// - the post-accept path dropped the *accepted* stream when the
+///   next instance could not be created, killing the client that had
+///   just connected.
+///
+/// Both are fixed here: the replacement instance is created BEFORE
+/// the failed handle is closed (`PIPE_UNLIMITED_INSTANCES` lets both
+/// coexist, so the name is held continuously), and the accepted
+/// stream is always handed to `on_conn` — a failed next-instance
+/// creation only means the *next* client waits one loop turn.
 fn accept_loop(
     mut first_handle: isize,
     name_wide: &[u16],
@@ -308,11 +332,16 @@ fn accept_loop(
             let err = unsafe { GetLastError() };
             if err != ERROR_PIPE_CONNECTED {
                 // Anything other than the benign "already connected"
-                // race: close the handle, sleep briefly to avoid a
-                // busy loop, and recreate the pipe instance.
-                unsafe { CloseHandle(handle as HANDLE) };
-                thread::sleep(Duration::from_millis(100));
-                first_handle = unsafe {
+                // race: the instance is unusable (ERROR_NO_DATA after
+                // a client connected and disconnected before this
+                // call, a lost handle). Create the replacement FIRST
+                // and close the failed one after, so the pipe name
+                // never has a zero-instance window. A client may still
+                // connect to the replacement during the throttle sleep
+                // below — the kernel completes the connection and the
+                // next ConnectNamedPipe reports ERROR_PIPE_CONNECTED,
+                // which the accept path above handles.
+                let replacement = unsafe {
                     CreateNamedPipeW(
                         name_wide.as_ptr(),
                         PIPE_ACCESS_DUPLEX,
@@ -324,9 +353,17 @@ fn accept_loop(
                         std::ptr::null(),
                     ) as isize
                 };
-                if first_handle == INVALID_HANDLE_VALUE as isize {
-                    thread::sleep(Duration::from_millis(100));
+                if handle != INVALID_HANDLE_VALUE as isize {
+                    unsafe { CloseHandle(handle as HANDLE) };
                 }
+                first_handle = replacement;
+                // Throttle the recycle: a scanner process that
+                // opens-and-closes pipe instances would otherwise
+                // spin this loop hot. 50 ms keeps the recycle window
+                // short (a live client's connect lands on the fresh
+                // instance) while bounding the CPU a persistent
+                // scanner can burn.
+                thread::sleep(Duration::from_millis(50));
                 continue;
             }
         }
@@ -345,15 +382,14 @@ fn accept_loop(
                 std::ptr::null(),
             ) as isize
         };
+        // Even when the fresh instance could not be created, serve the
+        // client we have: the next iteration's error path recreates the
+        // listening instance. Dropping the accepted stream here would
+        // disconnect a client that successfully connected.
         if first_handle == INVALID_HANDLE_VALUE as isize {
-            // No fresh instance — the next iteration's
-            // ConnectNamedPipe would fail. Close the current stream
-            // and sleep until the next round.
-            drop(stream);
             thread::sleep(Duration::from_millis(100));
-        } else {
-            on_conn(stream);
         }
+        on_conn(stream);
     }
 }
 

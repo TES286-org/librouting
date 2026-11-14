@@ -895,9 +895,17 @@ mod transport {
     /// `shutdown` reply the daemon flushed just before closing.
     /// `ERROR_PIPE_BUSY` (231): all pipe instances are in use; the
     /// client retries (see `connect_with_retry`).
+    /// `ERROR_FILE_NOT_FOUND` (2): no pipe instance with the name is
+    /// currently listening — the server's accept loop hands out
+    /// instances one at a time and a transient zero-instance window
+    /// can occur while it recycles a failed instance (the pipe name
+    /// exists only while an instance handle is open). The client
+    /// retries for a short bounded window before failing (see
+    /// `connect_with_retry`).
     const ERROR_BROKEN_PIPE: u32 = 109;
     const ERROR_NO_DATA: u32 = 232;
     const ERROR_PIPE_BUSY: u32 = 231;
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
 
     /// Connect to the daemon's named pipe, send one command, collect
     /// the reply until a short idle silence, return the body as a
@@ -949,12 +957,24 @@ mod transport {
     }
 
     /// Open an existing named pipe via `CreateFileW`. The server hands
-    /// out instances one at a time from its accept loop; a client that
-    /// connects between instances gets `ERROR_PIPE_BUSY` and retries
-    /// (Windows docs recommend `WaitNamedPipe`, but a bounded sleep is
-    /// simpler and adequate for the 1-Hz accept cadence).
+    /// out instances one at a time from its accept loop, so two
+    /// transient errors are retried rather than reported:
+    ///
+    /// - `ERROR_PIPE_BUSY` — all instances are in use; the server will
+    ///   have one free momentarily. Retried against the 5 s deadline.
+    /// - `ERROR_FILE_NOT_FOUND` — no listening instance exists *right
+    ///   now*. The server's accept loop recycles a failed instance
+    ///   within one loop turn, so a name that stays missing longer
+    ///   means the daemon is gone or its accept loop is wedged; retried
+    ///   only for a short bounded window so the daemon-gone case fails
+    ///   fast with the crisp `CreateFileW failed (error 2)` message
+    ///   instead of burning the full 5 s per attempt.
+    ///
+    /// Windows docs recommend `WaitNamedPipe`, but a bounded sleep is
+    /// simpler and adequate for the 1-Hz accept cadence.
     fn connect_with_retry(name_wide: &[u16], pipe_name: &str) -> Result<isize, String> {
         let deadline = Instant::now() + Duration::from_secs(5);
+        let not_found_deadline = Instant::now() + Duration::from_millis(500);
         loop {
             let handle = unsafe {
                 CreateFileW(
@@ -977,6 +997,10 @@ mod transport {
                         "connect {pipe_name}: pipe busy (timed out waiting for server)"
                     ));
                 }
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            if err == ERROR_FILE_NOT_FOUND && Instant::now() < not_found_deadline {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
