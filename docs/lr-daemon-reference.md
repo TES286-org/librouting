@@ -36,8 +36,8 @@ Exit codes differ per subcommand, which matters in scripts:
 
 `yang render` is the odd one out: unlike `config check` and
 `config to-dsl` it uses exit 2 for a config it cannot render, and it
-accepts only the TOML subset — there is no `--dialect` and no `.lr`
-input.
+accepts only the deprecated TOML subset — there is no `--dialect`
+and no `.lr` input.
 
 A daemon that stops because a sibling engine died in a protocol
 combination returns that engine's exit code; an engine aborted *by* a
@@ -45,17 +45,27 @@ sibling returns 0 so the supervisor's code wins.
 
 ## Configuration dialects
 
-`--config PATH` loads one file. The dialect is recognised from the
-content; `--config-dialect` forces one and accepts `bird`, `frr`, `toml`
-and `lr`. The daemon's own usage banner lists only `bird | frr | toml`,
-but `lr` is accepted and is what an unstamped `.lr` file resolves to.
-The resolved dialect is stamped into the config and reused by `SIGHUP`
-and the API `reload`, so a compat-mode daemon keeps re-parsing the same
-way. See [COMPAT.md](COMPAT.md) for the BIRD/FRR mapping surface.
+`--config PATH` loads one file. The native `.lr` DSL is the primary
+authoring dialect; BIRD and FRR files are adoption inputs (a one-way
+translation into the typed IR), and the TOML subset is the deprecated
+authoring dialect. The dialect is recognised from the content;
+`--config-dialect` forces one and accepts `bird`, `frr`, `toml` and
+`lr`. The resolved dialect is stamped into the config and reused by
+`SIGHUP` and the API `reload`, so a compat-mode daemon keeps
+re-parsing the same way. See [COMPAT.md](COMPAT.md) for the BIRD/FRR
+mapping surface.
 
 The TOML subset is deprecated: loading one prints
 `config deprecation: the TOML configuration dialect is deprecated - …`
-to stderr, and the same notice rides every reload.
+to stderr, the same notice rides every reload and the structured
+`log_warn!(Component::Config, …)` record (so a syslog or file
+destination sees it), the runtime API `status` and `show status`
+commands echo a `config-deprecation` line, and the metrics endpoint
+exposes `lr_config_dialect_deprecated{config_dialect="toml"} 1` so a
+fleet scraper can alert on the migration state. Migrate with
+`lr-daemon config to-dsl daemon.toml > daemon.lr`. The TOML subset
+stays fully supported through the 1.x series and is planned for
+removal in 2.x.
 
 ## Flags
 
@@ -383,8 +393,14 @@ engines. The runtime API dispatch is identical on Unix and Windows
 A key with no table above it is top-level. Array tables (`[[name]]`)
 accumulate one entry each; single tables (`[name]`) set globals.
 
-Sections are named below with their TOML spelling. The `.lr` DSL carries
-the same key set but spells the blocks itself, and a few names differ:
+Sections are named below with the deprecated TOML spelling — the
+native `.lr` DSL is the primary authoring dialect (see
+[config_dsl_grammar.md](config_dsl_grammar.md) and
+[`templates/daemon.lr`](../templates/daemon.lr)); the TOML spellings
+stay documented because the deprecated subset still loads and the
+BIRD/FRR compat converter renders into them as its intermediate
+representation. The `.lr` DSL carries the same key set but spells the
+blocks itself, and a few names differ:
 `ospf { area … }`, `ospf { interface … }`, `ospf { prefix-sid … }`,
 `ospf { mapping-server … }`, `ospf { srv6-locator … }`,
 `static { route "…" { … } }`, `babel { key { … } }`,

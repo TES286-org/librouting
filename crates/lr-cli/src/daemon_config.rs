@@ -1,11 +1,22 @@
 //! Configuration model for `lr-daemon`: globals (the historical
-//! single-peer CLI flags / `[bgp]` TOML section) plus explicit
-//! `[[peer]]` tables for multi-peer deployments.
+//! single-peer CLI flags / `bgp { … }` DSL block) plus explicit
+//! `peer "name" { … }` blocks for multi-peer deployments.
 //!
-//! Inheritance rule: every `[[peer]]` field left unset inherits the
+//! Inheritance rule: every `peer` field left unset inherits the
 //! corresponding global. The legacy single-peer keys (`--peer`,
 //! `bgp.peer_addr`) are synthesised into one implicit peer so old
 //! configs behave exactly as before.
+//!
+//! The native `.lr` DSL (parsed by `crate::config_dsl`) is the primary
+//! authoring surface; the TOML subset parsed by
+//! [`parse_toml_subset`] is the deprecated authoring dialect and is
+//! in its deprecation window — fully supported through the 1.x
+//! series, planned for removal in 2.x (issue #101, see
+//! [`deprecation_notice`]). The TOML subset stays the load path for
+//! the BIRD / FRR compat surfaces because the compat converter
+//! (`crate::translate`) renders into it as an intermediate
+//! representation, so the parser cannot be removed before the
+//! converter switches to a different IR.
 
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -3290,7 +3301,18 @@ fn unquote_toml_value(value: &str) -> &str {
 
 /// Minimal TOML subset parser: `key = value` lines, `[section]` headers,
 /// `[[peer]]` array-of-table sections, `#` comments, and quoted strings.
-/// Sufficient for the daemon's config schema (see templates/daemon.toml).
+/// Sufficient for the daemon's config schema (see `templates/daemon.toml`).
+///
+/// **Deprecated authoring dialect.** The native `.lr` DSL
+/// (`crate::config_dsl`) is the primary authoring surface; this TOML
+/// subset is in its deprecation window (fully supported through the
+/// 1.x series, planned for removal in 2.x — see
+/// [`deprecation_notice`] and issue #101). New configurations should
+/// be written in `.lr`; existing TOML files convert with
+/// `lr-daemon config to-dsl daemon.toml > daemon.lr`. The parser
+/// stays the load path for the BIRD and FRR compat surfaces because
+/// the compat converter (`crate::translate`) renders into this TOML
+/// subset as its intermediate representation.
 pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
     let mut section = String::new();
     for (lineno, raw) in text.lines().enumerate() {

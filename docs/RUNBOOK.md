@@ -265,10 +265,13 @@ scrape security is a reverse proxy's job. Creation failure is fatal.
 $ curl -s http://127.0.0.1:9119/metrics
 # HELP lr_info librouting daemon identity (always 1).
 # TYPE lr_info gauge
-lr_info{version="<version>",local_as="64512",router_id="10.0.0.1"} 1
+lr_info{version="<version>",local_as="64512",peer_as="64513",router_id="10.0.0.1",config_path="(none)",config_dialect="lr"} 1
 # HELP lr_uptime_seconds Daemon uptime in seconds.
 # TYPE lr_uptime_seconds gauge
 lr_uptime_seconds 42
+# HELP lr_config_dialect_deprecated 1 when the daemon is running on a config dialect in its deprecation window (the native TOML subset), 0 otherwise.
+# TYPE lr_config_dialect_deprecated gauge
+lr_config_dialect_deprecated{config_dialect="lr"} 0
 # HELP lr_sessions_total Number of configured sessions, by protocol kind and state.
 # TYPE lr_sessions_total gauge
 lr_sessions_total{kind="bgp",state="Idle"} 1
@@ -298,8 +301,9 @@ lr_filter_eval_duration_seconds_count{direction="import",filter="in"} 7
 
 | Metric | Type | Labels |
 | --- | --- | --- |
-| `lr_info` | gauge, always 1 | `version`, `local_as`, `router_id` |
+| `lr_info` | gauge, always 1 | `version`, `local_as`, `peer_as`, `router_id`, `config_path`, `config_dialect` |
 | `lr_uptime_seconds` | gauge | — |
+| `lr_config_dialect_deprecated` | gauge, 0/1 | `config_dialect` — 1 when the daemon runs on the deprecated TOML subset; alert on `== 1` to track the migration off TOML ahead of the 2.x removal |
 | `lr_sessions_total` | gauge | `kind`, `state` |
 | `lr_established_sessions` | gauge | `kind` |
 | `lr_adj_rib_in_entries` | gauge | `kind` |

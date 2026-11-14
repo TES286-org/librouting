@@ -4,10 +4,21 @@
 //! dialect directly and runs the daemon in the *compatible form*: the
 //! source implementation's semantics (accept-all eBGP policy, FRR's
 //! enforce-first-as default, BIRD channel families) apply without the
-//! operator writing lr TOML. Internally the same parse/render pipeline
+//! operator writing lr DSL. Internally the same parse/render pipeline
 //! as `lr-daemon translate` feeds the rendered TOML into the daemon's
 //! regular loader, so compat mode and the converter can never drift
 //! apart — there is exactly one mapping.
+//!
+//! The native `.lr` DSL (ROADMAP-v3 D16 Phase 3) is the primary
+//! authoring dialect; the TOML subset (see
+//! [`crate::daemon_config::parse_toml_subset`]) is the deprecated
+//! authoring dialect and is in its deprecation window — fully
+//! supported through the 1.x series, planned for removal in 2.x (see
+//! [`crate::daemon_config::deprecation_notice`]). BIRD and FRR files
+//! are adoption inputs: a one-way translation into the typed IR, not
+//! an authoring surface. The four dialects share one
+//! [`DaemonConfig`] IR so the loader and the daemon's downstream
+//! consumers cannot drift apart.
 //!
 //! lr-specific extensions ride the `lr:` comment directives (see
 //! `translate::LrDirective`): invisible to real BIRD / FRR, so a
@@ -15,22 +26,31 @@
 //!
 //! Detection: [`detect_dialect`] recognises BIRD 2 (`router id`,
 //! `protocol …` stanzas), FRR (`router bgp`, `hostname`, `!`
-//! comments, `neighbor … remote-as`) and lr TOML (`[bgp]`,
+//! comments, `neighbor … remote-as`), the native `.lr` DSL
+//! (block headers only the DSL uses), and lr TOML (`[bgp]`,
 //! `[[peer]]`, `key = value`). An unrecognised file fails closed —
-//! `--config-dialect bird|frr|toml` forces an interpretation.
+//! `--config-dialect bird|frr|toml|lr` forces an interpretation.
 
 use crate::daemon_config::DaemonConfig;
 
 /// The configuration dialects the daemon loader understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Dialect {
-    /// lr daemon TOML (the native schema).
+    /// The deprecated native TOML subset. Fully supported through the
+    /// 1.x series, planned for removal in 2.x; new configurations
+    /// should use [`Dialect::Lr`] instead. The deprecation notice is
+    /// surfaced through startup, reload, `config check`, the runtime
+    /// API `status` / `show status` commands, and the
+    /// `lr_config_dialect_deprecated` metrics gauge (issue #101).
     Toml,
-    /// The native `.lr` DSL (ROADMAP-v3 D16 Phase 2).
+    /// The native `.lr` DSL (ROADMAP-v3 D16 Phase 3) — the primary
+    /// authoring dialect and the migration target for TOML configs.
     Lr,
-    /// BIRD 2 configuration (BGP control plane).
+    /// BIRD 2 configuration (BGP control plane). Adoption input only;
+    /// a one-way translation into the typed IR.
     Bird,
-    /// FRR (bgpd) configuration (BGP control plane).
+    /// FRR (bgpd) configuration (BGP control plane). Adoption input
+    /// only; a one-way translation into the typed IR.
     Frr,
 }
 
@@ -223,9 +243,13 @@ pub(super) fn load_native(dialect: Dialect, text: &str) -> Result<(String, Vec<S
 
 /// Load `--config` content in whatever dialect it turns out to be:
 /// explicit override first (`--config-dialect`), else detection, else
-/// fail closed. Feeds the rendered TOML through
+/// fail closed. The native `.lr` DSL is the primary authoring
+/// dialect — detection checks DSL block headers first (see
+/// [`lr_block_header`]) so a `.lr` file never falls through to the
+/// TOML heuristic. Feeds the rendered TOML through
 /// `parse_toml_subset` so every compat-mode config follows the same
-/// parse path as a native one.
+/// parse path as a native one; the deprecated TOML dialect (when
+/// detected or forced) loads directly through `parse_toml_subset`.
 ///
 /// `source` carries the file's display name and path when the config
 /// was read from disk — the native `.lr` dialect needs the path to
@@ -239,8 +263,8 @@ pub(super) fn load_config_text(
     let dialect = match forced {
         Some(d) => d,
         None => detect_dialect(text).ok_or_else(|| {
-            "cannot recognise the config dialect (expected lr TOML, the .lr DSL, BIRD 2 or FRR); \
-             force one with --config-dialect lr|toml|bird|frr"
+            "cannot recognise the config dialect (expected the .lr DSL, lr TOML, \
+             BIRD 2 or FRR); force one with --config-dialect lr|toml|bird|frr"
                 .to_string()
         })?,
     };
