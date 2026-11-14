@@ -988,6 +988,22 @@ fn run_transform_with_timeout(
         .spawn()
         .map_err(|e| RoaLoaderError::Io(format!("spawn {bin}: {e}")))?;
 
+    // Windows equivalent of the Unix process-group kill: assign the
+    // child to a kill-on-close Job Object. `Command::kill()` on
+    // Windows calls `TerminateProcess`, which only kills the
+    // immediate child — a `sh -c "sleep 120"` child spawns a `sleep`
+    // grandchild that survives, holding the inherited stdout pipe
+    // open and blocking the reader thread past the deadline. The
+    // Job Object's kill-on-close semantics kill the entire tree when
+    // we close the handle on the timeout path. Created before any
+    // I/O starts so the assignment races no grandchildren.
+    #[cfg(windows)]
+    let mut job = KillOnCloseJob::new();
+    #[cfg(windows)]
+    if let Some(ref j) = job {
+        let _ = j.assign(&child);
+    }
+
     // Move the child's stdio handles into reader / writer threads so
     // the wait loop can poll `try_wait` without the child blocking
     // on a full pipe buffer. The writer thread closes stdin after
@@ -1041,7 +1057,17 @@ fn run_transform_with_timeout(
                     }
                     #[cfg(not(unix))]
                     {
-                        let _ = child.kill();
+                        // Close the Job Object handle so the kernel
+                        // kills the child and any grandchildren
+                        // holding the stdout pipe. Falls back to
+                        // `child.kill()` (the prior, single-process
+                        // kill) if the Job Object APIs were
+                        // unavailable at spawn time.
+                        if let Some(ref mut j) = job {
+                            j.kill_tree();
+                        } else {
+                            let _ = child.kill();
+                        }
                     }
                     let _ = child.wait();
                     let _ = writer.join();
@@ -1124,6 +1150,120 @@ extern "C" {
     // `|pid|`.
     #[link_name = "kill"]
     fn kill_c(pid: i32, sig: i32) -> i32;
+}
+
+/// A Windows Job Object created with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. When the job handle is
+/// closed — either through [`KillOnCloseJob::kill_tree`] or via
+/// `Drop` — every process assigned to the job is killed by the
+/// kernel. This is the Windows equivalent of Unix's
+/// `kill(-PGID, SIGKILL)` for killing a process tree: a
+/// `Command::kill()` on Windows calls `TerminateProcess`, which
+/// only kills the immediate child and leaves any grandchildren
+/// (a `sh -c "sleep 120"` child spawns a `sleep` grandchild)
+/// holding inherited pipe handles open, blocking the reader
+/// thread past the deadline.
+///
+/// The job is created right after the child is spawned and the
+/// child is assigned to it before any I/O starts. On the timeout
+/// path, `kill_tree` closes the handle; the kernel kills the
+/// child and any processes it spawned, releasing the stdout
+/// pipe the reader thread is blocked on so `reader.join()`
+/// unblocks near the deadline instead of after the grandchild's
+/// natural exit.
+///
+/// `new` returns `Option<Self>`: any modern Windows has the Job
+/// Object APIs, but a defensive `None` lets the caller fall back
+/// to `child.kill()` (the prior behaviour) if the APIs are
+/// unavailable.
+#[cfg(windows)]
+struct KillOnCloseJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl KillOnCloseJob {
+    fn new() -> Option<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // SAFETY: `CreateJobObjectW` with null attributes and name
+        // returns a fresh job handle (or NULL on failure, which we
+        // check). `SetInformationJobObject` writes our
+        // extended-limit struct into the job; the struct is
+        // `Copy + Default` and we only set the limit-flags field.
+        // The handle is closed on the error path and on `Drop`.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return None;
+            }
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let rc = SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if rc == 0 {
+                CloseHandle(handle);
+                return None;
+            }
+            Some(Self { handle })
+        }
+    }
+
+    /// Assign a child process to the job. The child and any
+    /// processes it later spawns become members of the job; closing
+    /// the job handle kills them all. Uses the child's raw handle
+    /// (already held by `std::process::Child` on Windows) — no
+    /// `OpenProcess` round-trip needed.
+    fn assign(&self, child: &std::process::Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        // SAFETY: `as_raw_handle` yields the child's process handle
+        // (valid for the child's lifetime). `AssignProcessToJobObject`
+        // takes the job handle (we hold it) and the process handle.
+        // Modern Windows (Vista+) allows a process to be assigned to
+        // a job after it has started running.
+        let proc_handle = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let rc = unsafe { AssignProcessToJobObject(self.handle, proc_handle) };
+        if rc == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Close the job handle. Every process in the job is killed
+    /// immediately by the kernel's kill-on-job-close semantics.
+    /// Idempotent — a second call is a no-op (the handle is already
+    /// NULL).
+    fn kill_tree(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        if !self.handle.is_null() {
+            // SAFETY: we own the handle (created in `new`, not
+            // shared). After `CloseHandle` the handle is invalid;
+            // we null it so a second call or `Drop` is a no-op.
+            unsafe { CloseHandle(self.handle) };
+            self.handle = std::ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        // Defensive: if the caller did not explicitly call
+        // `kill_tree`, close the handle on drop. If the child has
+        // already exited normally, the job is empty and closing the
+        // handle is a no-op; if the caller forgot to kill the tree,
+        // the kernel reaps the orphans now instead of leaking them.
+        self.kill_tree();
+    }
 }
 
 #[cfg(test)]
