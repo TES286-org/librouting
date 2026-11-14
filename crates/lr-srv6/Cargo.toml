@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "SRv6 data-plane primitives — SID, locator and Segment Routing Header codec (RFC 8754 / RFC 8402 / RFC 8986) for librouting"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -23,4 +22,7 @@ std = []
 no_std = []
 
 [dependencies]
-lr-core = { workspace = true }
+# lr-srv6 models SRv6 SID, locator and behavior structures (RFC 8754,
+# RFC 8986) as pure byte / integer types — no lr-core types are
+# referenced, so the `lr-core` dependency previously declared here
+# was never imported.

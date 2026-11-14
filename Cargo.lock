@@ -663,12 +663,10 @@ name = "lr-babel"
 version = "1.8.0"
 dependencies = [
  "blake2",
- "bytes",
  "hmac",
  "lr-core",
  "sha2",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -676,7 +674,6 @@ name = "lr-bfd"
 version = "1.8.0"
 dependencies = [
  "bitflags",
- "hmac",
  "lr-core",
  "md5",
  "sha1",
@@ -686,7 +683,6 @@ dependencies = [
 name = "lr-bgp"
 version = "1.8.0"
 dependencies = [
- "bytes",
  "criterion",
  "hmac",
  "lr-core",
@@ -694,14 +690,12 @@ dependencies = [
  "proptest",
  "sha2",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
 name = "lr-bmp"
 version = "1.8.0"
 dependencies = [
- "lr-bgp",
  "lr-core",
 ]
 
@@ -733,14 +727,6 @@ dependencies = [
 [[package]]
 name = "lr-core"
 version = "1.8.0"
-dependencies = [
- "bitflags",
- "bytes",
- "once_cell",
- "serde",
- "thiserror",
- "tracing",
-]
 
 [[package]]
 name = "lr-damping"
@@ -782,9 +768,6 @@ dependencies = [
 [[package]]
 name = "lr-mpls"
 version = "1.8.0"
-dependencies = [
- "lr-core",
-]
 
 [[package]]
 name = "lr-mrt"
@@ -798,13 +781,10 @@ dependencies = [
 name = "lr-ospf"
 version = "1.8.0"
 dependencies = [
- "bytes",
  "hmac",
  "lr-core",
  "sha1",
  "sha2",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -847,7 +827,6 @@ version = "1.8.0"
 dependencies = [
  "criterion",
  "lr-core",
- "tracing",
 ]
 
 [[package]]
@@ -862,15 +841,11 @@ dependencies = [
  "lr-ospf",
  "lr-policy",
  "lr-rib",
- "tracing",
 ]
 
 [[package]]
 name = "lr-srv6"
 version = "1.8.0"
-dependencies = [
- "lr-core",
-]
 
 [[package]]
 name = "lr-tests"
@@ -887,7 +862,6 @@ dependencies = [
  "lr-osroute",
  "lr-peer-health",
  "lr-policy",
- "lr-rib",
  "lr-router",
  "lr-srv6",
 ]

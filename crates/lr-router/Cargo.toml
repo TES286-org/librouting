@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Layer-3 router instance, sessions, scheduler, event dispatch"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -38,4 +37,3 @@ lr-rib = { workspace = true }
 lr-policy = { workspace = true }
 lr-bmp = { workspace = true }
 lr-mpls = { workspace = true }
-tracing.workspace = true

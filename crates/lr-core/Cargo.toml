@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Core primitives, codec traits, generic FSM and RIB traits for librouting"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -23,9 +22,12 @@ std = []
 no_std = []
 
 [dependencies]
-bytes.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-bitflags.workspace = true
-serde = { workspace = true, optional = true }
-once_cell = { workspace = true, optional = true }
+# lr-core is the protocol-independent foundation: addresses, codec
+# traits, the generic FSM, RIB traits and wire utilities (CRC, Fletcher).
+# It deliberately carries no third-party dependencies on the default
+# feature set — the crate stays `no_std`-friendly and compiles in
+# seconds. The previously-listed `bytes`, `thiserror`, `tracing`,
+# `bitflags`, `serde` and `once_cell` dependencies were never imported
+# by any module in `src/`; removing them shrinks the dependency graph
+# and silences the `cargo::unused_dependencies` warnings a clean
+# `cargo build --workspace` emitted.

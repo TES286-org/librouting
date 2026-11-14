@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "MPLS label and label-stack codec (RFC 3032) for librouting"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -23,4 +22,7 @@ std = []
 no_std = []
 
 [dependencies]
-lr-core = { workspace = true }
+# lr-mpls is a standalone MPLS label / label-stack codec (RFC 3032
+# §2.1, RFC 8277 §3). It uses no lr-core types — the label stack is
+# a pure byte sequence — so the `lr-core` dependency previously
+# declared here was never imported.

@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "CLI tool and daemon scaffolding for librouting"
 keywords = ["bgp", "routing", "cli", "daemon"]
 categories = ["network-programming"]
@@ -51,7 +50,11 @@ lr-osroute = { workspace = true }
 lr-mpls = { workspace = true }
 lr-damping = { workspace = true }
 lr-peer-health = { workspace = true }
-siphasher.workspace = true
+# SipHash-2-4 for the exchange-plane policy digest (feature
+# `exchange-plane`). Optional because the exchange-plane surface is
+# off by default; without this gate `cargo build` warns about an
+# unused `siphasher` dependency on the default feature set.
+siphasher = { workspace = true, optional = true }
 
 # HTTP client for `[[bgp.roa_source]] url = "..."` (issue #100). ureq is
 # the smallest blocking HTTP client with TLS by default (rustls +
@@ -79,5 +82,7 @@ default = ["std"]
 std = []
 # W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md):
 # forwards to lr-router -> lr-bgp. Off by default; the release build
-# carries none of the exchange-plane code until enabled.
-exchange-plane = ["lr-router/exchange-plane"]
+# carries none of the exchange-plane code until enabled. Enables
+# `siphasher` (the SipHash-2-4 impl the policy digest uses) only when
+# the feature is on, so a default build does not pull the crate.
+exchange-plane = ["lr-router/exchange-plane", "dep:siphasher"]

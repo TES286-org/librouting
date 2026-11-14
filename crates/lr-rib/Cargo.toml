@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Routing information base: Adj-RIB-In/Out, Loc-RIB, selection, merging"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to
@@ -19,7 +18,6 @@ bench = false
 
 [dependencies]
 lr-core = { workspace = true }
-tracing.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }

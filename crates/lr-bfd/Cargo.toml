@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description.workspace = true
 keywords = ["bfd", "fault-detection", "routing"]
 categories = ["network-programming", "parser-implementations"]
@@ -25,12 +24,15 @@ std = ["lr-core/std"]
 # RFC 5880 §4.3 / §4.4 Keyed MD5 and Keyed SHA1 authentication
 # (transmit digest computation + receive digest verification +
 # anti-replay tracking). The wire framing for the auth section
-# itself is always available; this feature pulls in the `md5`,
-# `hmac` and `sha1` crypto dependencies the digest computation
-# needs. Off by default would leave the crate without the crypto
-# code; embedders that want the bare wire codec can disable it
-# with `--no-default-features`.
-keyed-auth = ["dep:md5", "dep:hmac", "dep:sha1"]
+# itself is always available; this feature pulls in the `md5` and
+# `sha1` crypto dependencies the digest computation needs. Off by
+# default would leave the crate without the crypto code; embedders
+# that want the bare wire codec can disable it with
+# `--no-default-features`. (`hmac` was previously listed here too,
+# but BFD's keyed MD5/SHA1 are not HMAC constructions — RFC 5880
+# §6.7.3/§6.7.4 place the key in the digest field and hash the
+# whole packet — so the `hmac` crate was never imported.)
+keyed-auth = ["dep:md5", "dep:sha1"]
 
 [dependencies]
 lr-core = { workspace = true }
@@ -40,5 +42,4 @@ bitflags.workspace = true
 # false` at the workspace level so the crate stays `no_std`-friendly
 # when this feature is on.
 md5 = { workspace = true, optional = true }
-hmac = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }

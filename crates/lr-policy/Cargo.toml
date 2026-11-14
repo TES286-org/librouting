@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Routing policy: route maps, prefix lists, AS-path filters, community lists"
 
 # `cargo bench --workspace -- <criterion args>` passes the args to

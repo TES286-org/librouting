@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "LDP - Label Distribution Protocol (RFC 5036) codec and session state machines for librouting"
 
 keywords = ["ldp", "mpls", "label-distribution", "routing"]

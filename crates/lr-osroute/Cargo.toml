@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "OS routing table reference implementation (Linux netlink, BSD route socket, Windows IPHelper)"
 
 keywords = ["routing", "netlink", "rtnetlink", "linux"]
@@ -27,16 +26,16 @@ std = ["lr-core/std"]
 lr-core = { workspace = true }
 lr-mpls = { workspace = true }
 lr-srv6 = { workspace = true }
-socket2.workspace = true
 
-# Windows IP Helper API (`GetAdaptersAddresses`, `GetIpForwardTable2`,
-# route-table backends). The `windows-sys` crate is Microsoft's
-# auto-generated, zero-overhead FFI binding — the struct layouts are
-# machine-generated from the official Windows SDK metadata, so they
-# cannot drift from the SDK the way hand-rolled `#[repr(C)]` structs
-# can (two struct-layout bugs on Windows in this crate's history
-# motivated the migration). Only pulled in on `target_os = "windows"`.
+# Windows-only dependencies. `socket2` is the source-bound TCP connect
+# path (`tcp_bind.rs` needs `Socket::bind` + `connect_timeout`, which
+# std does not expose); `windows-sys` is the IP Helper API
+# (`GetAdaptersAddresses`, `GetIpForwardTable2`, route-table backends).
+# On Unix the std `TcpStream::bind` path and the BSD route socket
+# suffice, so both deps are target-gated to avoid unused-dependency
+# warnings on Linux/macOS/BSD builds.
 [target.'cfg(windows)'.dependencies]
+socket2 = { workspace = true }
 windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
