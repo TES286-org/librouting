@@ -2,8 +2,10 @@
 //!
 //! A minimal HTTP/1.0 responder that serves the Prometheus text
 //! exposition format (version 0.0.4) on a configurable TCP address.
-//! The daemon's router state is read under the same `RwLock` the
-//! runtime API uses; the metrics thread never holds the lock while
+//! The RIB gauges read through the shared Loc-RIB handle (the
+//! per-family shard locks — issue #101, never the router's writer
+//! lock); the session gauges read under the same `RwLock` the runtime
+//! API uses. The metrics thread never holds either lock while
 //! blocking on I/O (same contract as `api.rs`).
 //!
 //! No HTTP dependency is pulled in: the request line is parsed by
@@ -52,6 +54,8 @@
 //! | `lr_bgp_updates_total`      | counter | `session`, `peer`, `direction`  | `SessionSummary::updates_received/sent` per BGP session (legacy; see `lr_bgp_messages_total{type="update"}` for the comprehensive view) |
 //! | `lr_bgp_messages_total`     | counter | `session`, `peer`, `type`, `direction` | `SessionSummary::message_stats` per BGP session (open/update/notification/keepalive/route_refresh) |
 //! | `lr_roa_entries`             | gauge   | —                               | `RoaStore::len()` (when present)        |
+//! | `lr_event_bus_published_total` | counter | —                            | `EventBus::published_total` (issue #101) |
+//! | `lr_event_bus_dropped_total`  | counter | —                              | `EventBus::dropped_total` (issue #101)  |
 //! | `lr_process_resident_bytes` | gauge   | —                               | `/proc/self/status` VmRSS (Linux only) |
 //! | `lr_process_virtual_bytes`  | gauge   | —                               | `/proc/self/status` VmSize (Linux only) |
 //! | `lr_filter_eval_duration_seconds` | histogram | `direction`, `filter`      | `FilterMetricsRegistry` (when present)  |
@@ -276,6 +280,18 @@ impl Default for FilterMetricsRegistry {
 pub struct MetricsContext {
     pub info: MetricsInfo,
     pub router: Arc<RwLock<DefaultRouter>>,
+    /// The shared Loc-RIB handle (issue #101 — the multi-threaded RIB
+    /// read path): `lr_rib_entries` and the per-protocol route counts
+    /// read through the per-family shard locks instead of the
+    /// router's `RwLock`, so a scrape never waits behind the
+    /// writer's tick.
+    pub rib: std::sync::Arc<lr_rib::LocRib>,
+    /// The daemon's event bus (issue #101 — the wiring): the scrape
+    /// surfaces the publisher's lifetime totals
+    /// (`lr_event_bus_published_total`, `lr_event_bus_dropped_total`)
+    /// so an operator can alert on a subscriber that is not keeping
+    /// up (a non-zero drop rate).
+    pub event_bus: lr_router::event_bus::EventBus,
     pub running: Arc<AtomicBool>,
     /// Optional ROA store size reader. `None` → the
     /// `lr_roa_entries` metric is omitted. The closure must be cheap
@@ -334,6 +350,8 @@ mod imp {
     struct ScrapeState {
         info: Arc<MetricsInfo>,
         router: Arc<RwLock<DefaultRouter>>,
+        rib: std::sync::Arc<lr_rib::LocRib>,
+        event_bus: lr_router::event_bus::EventBus,
         has_roa: bool,
         roa_len: Arc<dyn Fn() -> usize + Send + Sync>,
         filter_metrics: Option<Arc<FilterMetricsRegistry>>,
@@ -360,10 +378,13 @@ mod imp {
     }
 
     impl RenderSnapshot {
-        fn collect(r: &DefaultRouter, started: std::time::Instant) -> Self {
-            use lr_router::RouterInstance as _;
+        fn collect(r: &DefaultRouter, rib: &lr_rib::LocRib, started: std::time::Instant) -> Self {
             let summaries = r.session_summaries();
-            let rib_len = r.rib_len();
+            // The RIB reads go through the shared Loc-RIB handle
+            // (issue #101 — the per-family shard locks), not the
+            // router's `RwLock`: `rib_len` and the per-protocol
+            // counts never wait behind the writer's tick.
+            let rib_len = rib.len();
             // Group Loc-RIB best paths by `Route::protocol`'s
             // BIRD-style name (the same one `show routes count`
             // uses — kept in lockstep via the shared
@@ -371,7 +392,7 @@ mod imp {
             // drift).
             let mut by_proto: std::collections::BTreeMap<&'static str, u64> =
                 std::collections::BTreeMap::new();
-            for route in r.rib_snapshot() {
+            for route in rib.iter_best() {
                 let name = route.protocol.bird_name();
                 *by_proto.entry(name).or_insert(0) += 1;
             }
@@ -411,6 +432,8 @@ mod imp {
 
         let info = Arc::new(ctx.info);
         let router = Arc::clone(&ctx.router);
+        let rib = ctx.rib;
+        let event_bus = ctx.event_bus;
         let running = Arc::clone(&ctx.running);
         let has_roa = ctx.roa_len.is_some();
         let roa_len: Arc<dyn Fn() -> usize + Send + Sync> = match ctx.roa_len {
@@ -427,6 +450,8 @@ mod imp {
         let state = Arc::new(ScrapeState {
             info,
             router,
+            rib,
+            event_bus,
             has_roa,
             roa_len,
             filter_metrics,
@@ -539,6 +564,8 @@ mod imp {
         let ScrapeState {
             info,
             router,
+            rib,
+            event_bus,
             has_roa,
             roa_len,
             filter_metrics,
@@ -552,7 +579,7 @@ mod imp {
         // the lock release; the closure is `Send + Sync` and does
         // not need the router lock.
         let snap = match router.read() {
-            Ok(r) => RenderSnapshot::collect(&r, *started),
+            Ok(r) => RenderSnapshot::collect(&r, rib, *started),
             Err(_) => {
                 // Router lock poisoned — emit a minimal body so the
                 // scrape does not hang. Prometheus treats `up=0` as
@@ -944,6 +971,38 @@ mod imp {
         .ok();
         writeln!(out, "# TYPE lr_aggregates_count gauge").ok();
         writeln!(out, "lr_aggregates_count {}", snap.aggregates_count).ok();
+
+        // lr_event_bus_published_total / lr_event_bus_dropped_total —
+        // the daemon's event-bus lifetime totals (issue #101 — the
+        // wiring). A rising `dropped` on a daemon whose kernel mirror
+        // or scraper is subscribed means a subscriber is not keeping
+        // up: the bus drops events on the slow subscriber only (the
+        // publisher never blocks), so the counter is the alert signal
+        // for a stuck consumer.
+        writeln!(
+            out,
+            "# HELP lr_event_bus_published_total Router events the daemon's publishers accepted on the event bus since startup."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_event_bus_published_total counter").ok();
+        writeln!(
+            out,
+            "lr_event_bus_published_total {}",
+            event_bus.published_total()
+        )
+        .ok();
+        writeln!(
+            out,
+            "# HELP lr_event_bus_dropped_total Router events dropped on at least one event-bus subscriber whose queue was full (a stuck consumer)."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_event_bus_dropped_total counter").ok();
+        writeln!(
+            out,
+            "lr_event_bus_dropped_total {}",
+            event_bus.dropped_total()
+        )
+        .ok();
 
         writeln!(
             out,

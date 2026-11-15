@@ -224,6 +224,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
 
     let info = Arc::new(ctx.info);
     let router = Arc::clone(&ctx.router);
+    let rib = ctx.rib;
     let running = Arc::clone(&ctx.running);
     let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
     let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
@@ -259,6 +260,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
             accept_loop(probe, &name_wide, &running, |stream| {
                 let info = Arc::clone(&info);
                 let router = Arc::clone(&router);
+                let rib = Arc::clone(&rib);
                 let running = Arc::clone(&running);
                 let reload = Arc::clone(&reload);
                 let status_lines = Arc::clone(&status_lines);
@@ -271,6 +273,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                         let deps = ConnDeps {
                             info: &info,
                             router: &router,
+                            rib: &rib,
                             running: &running,
                             reload: &reload,
                             status_lines: &status_lines,
@@ -401,6 +404,10 @@ fn accept_loop(
 struct ConnDeps<'a> {
     info: &'a DaemonInfo,
     router: &'a Arc<RwLock<DefaultRouter>>,
+    /// The shared Loc-RIB handle — the RIB-dumping commands read
+    /// through the per-family shard locks (issue #101), never
+    /// through the router's `RwLock` (mirrors the Unix side).
+    rib: &'a Arc<lr_rib::LocRib>,
     running: &'a Arc<AtomicBool>,
     reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
@@ -485,15 +492,12 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             } else {
                 let router_id = core::str::FromStr::from_str(&deps.info.router_id)
                     .unwrap_or(lr_core::addr::RouterId::from_u32(0));
+                // The RIB snapshot reads through the shared Loc-RIB
+                // handle (per-family shard locks, issue #101); the
+                // session summaries stay on the router read lock.
                 let (routes, summaries) = {
-                    let r = deps.router.read().unwrap();
-                    (
-                        r.rib_paths_snapshot()
-                            .into_iter()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        r.session_summaries(),
-                    )
+                    let summaries = deps.router.read().unwrap().session_summaries();
+                    (deps.rib.iter_paths().collect::<Vec<_>>(), summaries)
                 };
                 let records = crate::write_mrt_rib_dump(&routes, &summaries, router_id, path);
                 match records {
@@ -543,6 +547,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             let cx = crate::show::ShowCtx {
                 info: deps.info,
                 router: deps.router,
+                rib: deps.rib,
                 status_lines: deps.status_lines,
                 started: deps.started,
             };
@@ -594,10 +599,11 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                 );
             }
             "status" => {
-                let (sessions, rib) = {
-                    let r = deps.router.read().unwrap();
-                    (r.session_summaries().len(), r.rib_len())
-                };
+                // The RIB count reads through the shared handle's
+                // per-family shard locks; the session count needs the
+                // router (the sessions table is not sharded).
+                let sessions = deps.router.read().unwrap().session_summaries().len();
+                let rib = deps.rib.len();
                 let _ = writeln!(out, "version {}", deps.info.version);
                 let _ = writeln!(out, "local-as {}", deps.info.local_as);
                 let _ = writeln!(out, "peer-as {}", deps.info.peer_as);
@@ -641,8 +647,9 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                 }
             }
             "routes" => {
-                let r = deps.router.read().unwrap();
-                for route in r.rib_paths_snapshot() {
+                // The dump reads through the shared Loc-RIB handle
+                // (per-family shard locks, issue #101).
+                for route in deps.rib.iter_paths() {
                     let _ = writeln!(
                         out,
                         "{} via {} proto={:?} metric={} path-id={}{}",
@@ -654,7 +661,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                         route.protocol,
                         route.preference.metric,
                         route.path_id,
-                        match route_label(route) {
+                        match route_label(&route) {
                             Some(label) => format!(" label={label}"),
                             None => String::new(),
                         }

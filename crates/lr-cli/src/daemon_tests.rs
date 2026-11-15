@@ -1530,3 +1530,136 @@ mod damping_reload_toggle_tests {
         let _ = std::fs::remove_file(&cfg_off);
     }
 }
+
+mod event_bus_wiring_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    /// A `Runtime` with a fresh router, built the way the standalone
+    /// daemon builds it — every wiring test below drives the real
+    /// `spawn_ticker` / `shutdown_event_bus` pair on it.
+    fn wiring_runtime() -> Arc<Runtime> {
+        Arc::new(Runtime {
+            reload: Arc::new(Vec::new),
+            router: Arc::new(RwLock::new(DefaultRouter::new())),
+            event_bus: lr_router::event_bus::EventBus::new(),
+            kernel_mirror: std::sync::OnceLock::new(),
+            running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            status_lines: Arc::new(Vec::new),
+            roa_len: None,
+            roa_store: None,
+            peer_health_table: None,
+            filter_metrics: Mutex::new(None),
+            session_labels: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: None,
+        })
+    }
+
+    /// Bounded wait for the next event on a subscriber's queue; the
+    /// ticker publishes on a 50 ms cadence, so seconds are generous.
+    fn next_event(rx: &std::sync::mpsc::Receiver<RouterEvent>) -> RouterEvent {
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("an event within the deadline")
+    }
+
+    /// The wiring contract, end to end: the ticker publishes every
+    /// event it drains (`originate` → `RouteInstalled`), the
+    /// per-subscriber FIFO preserves order across the install and the
+    /// shutdown withdrawal, and `shutdown_event_bus` returns only after
+    /// the subscriber drained everything it was ever accepted (the
+    /// `Disconnected` handshake).
+    #[test]
+    fn ticker_publishes_and_close_drains_every_subscriber() {
+        let rt = wiring_runtime();
+        // Subscribe BEFORE the first drain: the router holds events in
+        // `pending_events` until `poll_events`, so an early subscriber
+        // sees everything from the first drain on.
+        let rx = rt.event_bus.subscribe();
+        let ticker = spawn_ticker(
+            &rt,
+            false, // no kernel install: the mirror thread runs but no-ops
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+
+        // An originated route queues a RouteInstalled; the ticker's
+        // next pass drains and publishes it.
+        let prefix: Prefix = "203.0.113.0/24".parse().unwrap();
+        {
+            let mut r = rt.router.write().unwrap();
+            r.originate_family(prefix, NlriFamily::IPV4_UNICAST, None);
+        }
+        match next_event(&rx) {
+            RouterEvent::RouteInstalled(route) => {
+                assert_eq!(route.key.prefix, prefix, "the install we caused");
+            }
+            other => panic!("expected RouteInstalled, got {other:?}"),
+        }
+
+        // Shutdown: the ticker's final drain publishes the withdrawal
+        // (flush_rib_for_shutdown), THEN the handshake closes the bus.
+        rt.running.store(false, Ordering::Relaxed);
+        match next_event(&rx) {
+            RouterEvent::RouteWithdrawn(key) => {
+                assert_eq!(key.prefix, prefix, "the shutdown withdrawal");
+            }
+            other => panic!("expected RouteWithdrawn, got {other:?}"),
+        }
+        // The bus was still open when the withdrawal landed: the close
+        // happens after the ticker joined, in the handshake below.
+        assert!(!rt.event_bus.is_closed());
+        let _ = ticker.join();
+        rt.shutdown_event_bus();
+        // Drained and closed: the subscriber observes Disconnected.
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+        // A publish after close is refused.
+        assert_eq!(rt.event_bus.publish(RouterEvent::Log("late".into())), 0);
+    }
+
+    /// The multi-threaded RIB read path: the shared Loc-RIB handle's
+    /// reads (and even installs — the shard locks are independent of
+    /// the router's `RwLock`) proceed while the router's writer lock
+    /// is held by someone else. This is the property that lets the
+    /// API socket and the metrics endpoint dump routes without ever
+    /// waiting behind the writer's tick.
+    #[test]
+    fn rib_handle_reads_proceed_while_the_router_writer_lock_is_held() {
+        let rt = wiring_runtime();
+        let rib = rt.router.read().unwrap().rib_handle();
+        // Hold the router's writer lock for the whole block.
+        let _writer = rt.router.write().unwrap();
+        // Reads through the handle work.
+        assert_eq!(rib.len(), 0);
+        // Installs through the handle work too: the per-family shard
+        // lock is a different lock from the router's `RwLock`.
+        let prefix: Prefix = "198.51.100.0/24".parse().unwrap();
+        let route = lr_core::rib::Route {
+            key: lr_core::rib::RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: lr_core::rib::RouteOrigin { proto: 2, peer: 0 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 0),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        assert!(rib.install(route), "fresh install signals changed");
+        assert_eq!(rib.len(), 1, "the install landed under the writer lock");
+        assert_eq!(
+            rib.best(&lr_core::rib::RouteKey::new(
+                prefix,
+                NlriFamily::IPV4_UNICAST
+            ))
+            .unwrap()
+            .key
+            .prefix,
+            prefix
+        );
+    }
+}

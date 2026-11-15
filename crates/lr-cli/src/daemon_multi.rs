@@ -276,6 +276,8 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     let status = MultiStatus::new();
     let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
     let runtime = Arc::new(crate::Runtime {
+        event_bus: lr_router::event_bus::EventBus::new(),
+        kernel_mirror: std::sync::OnceLock::new(),
         reload: Arc::new({
             let router = Arc::clone(&router);
             let current_networks = Arc::clone(&current_networks);
@@ -454,7 +456,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         for engine in engines {
             let _ = join_engine(engine.handle);
         }
-        join_ticker(ticker);
+        join_ticker(&runtime, ticker);
         log_error!(Component::Daemon, "multi-protocol startup aborted");
         return code;
     }
@@ -528,7 +530,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     for engine in engines {
         let _ = join_engine(engine.handle);
     }
-    join_ticker(ticker);
+    join_ticker(&runtime, ticker);
     log_info!(Component::Daemon, "multi-protocol shutdown complete");
     engine_failure.unwrap_or(ExitCode::SUCCESS)
 }
@@ -544,7 +546,7 @@ fn abort_all(runtime: &crate::Runtime, engines: Vec<Engine>, ticker: JoinHandle<
     for engine in engines {
         let _ = join_engine(engine.handle);
     }
-    join_ticker(ticker);
+    join_ticker(runtime, ticker);
 }
 
 /// Stop the world after an engine spawn failure (used before the
@@ -560,7 +562,7 @@ fn shutdown_after_failure(runtime: &crate::Runtime, engines: Vec<Engine>, ticker
     for engine in engines {
         let _ = join_engine(engine.handle);
     }
-    join_ticker(ticker);
+    join_ticker(runtime, ticker);
 }
 
 /// Join one engine thread, mapping a panic into an error exit code.
@@ -574,9 +576,16 @@ fn join_engine(handle: JoinHandle<ExitCode>) -> ExitCode {
     }
 }
 
-/// Join the shared ticker thread (unit payload; a panic is logged).
-fn join_ticker(handle: JoinHandle<()>) {
+/// Join the shared ticker thread, then run the event-bus shutdown
+/// handshake (unit payload; a panic is logged). The joined ticker
+/// guarantees its final drain (the shutdown withdrawals) was
+/// published; the handshake closes the bus and waits for the
+/// kernel-mirror thread to apply every accepted event before the
+/// supervisor returns — the last engine's exit publishes happen
+/// before this call (engines join first).
+fn join_ticker(runtime: &crate::Runtime, handle: JoinHandle<()>) {
     if handle.join().is_err() {
         log_warn!(Component::Daemon, "ticker thread panicked");
     }
+    runtime.shutdown_event_bus();
 }

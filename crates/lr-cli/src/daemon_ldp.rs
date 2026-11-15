@@ -832,6 +832,8 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let current_binds: Arc<Mutex<BTreeMap<Prefix, GenericLabel>>> =
         Arc::new(Mutex::new(binds.clone()));
     let runtime = Arc::new(crate::Runtime {
+        event_bus: lr_router::event_bus::EventBus::new(),
+        kernel_mirror: std::sync::OnceLock::new(),
         reload: Arc::new({
             let pending_rebinds = Arc::clone(&pending_rebinds);
             let current_binds = Arc::clone(&current_binds);
