@@ -253,13 +253,12 @@ pub unsafe extern "C" fn lr_router_rib_path_at(
             let snap = router.rib_paths_snapshot();
             match snap.get(idx) {
                 Some(route) => {
-                    // `rib_paths_snapshot` returns `Vec<&Route>` so
-                    // `snap.get(idx)` is `Option<&&Route>`; double-deref
-                    // before `clone` so we clone the inner `Route`
-                    // (the clippy `suspicious_double_ref_op` lint
-                    // otherwise catches a `.clone()` that returns
-                    // `&Route` rather than the owned `Route`).
-                    let boxed = Box::new((**route).clone());
+                    // `rib_paths_snapshot` returns `Vec<Route>` (owned
+                    // clones out of the per-family shard locks), so
+                    // `snap.get(idx)` is `Option<&Route>` — a single
+                    // dereference before the clone into the boxed
+                    // handle.
+                    let boxed = Box::new(route.clone());
                     unsafe { *out_route = Box::into_raw(boxed) as lr_route_t };
                     0
                 }

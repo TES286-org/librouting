@@ -41,59 +41,6 @@ segments from lr, the data plane can push traffic onto them, and a
 controller-mode lr daemon can ingest the same NLRIs another daemon
 advertises.
 
-## Scaling
-
-The remaining item below is the last of the daemon-refactoring
-block of the 2.x release plan (issue #101). The block was sequenced:
-async I/O landed first — the substrate the RIB concurrency work
-builds on — and now covers every I/O surface the daemon holds: the
-BGP session reactor with its listener
-([`lr-cli::bgp_reactor`](../crates/lr-cli/src/bgp_reactor.rs)), the
-BFD supervisor
-([`lr-cli::daemon_bfd`](../crates/lr-cli/src/daemon_bfd.rs)), the
-OSPFv2/OSPFv3 engines on the shared loop
-([`lr-cli::ospf_engine_loop`](../crates/lr-cli/src/ospf_engine_loop.rs)),
-Babel's UDP-plus-multicast loop (`run_babel_daemon`, in
-[`lr-cli::daemon.rs`](../crates/lr-cli/src/daemon.rs)), and the
-runtime API / metrics accept reactors
-([`lr-cli::accept_reactor`](../crates/lr-cli/src/accept_reactor.rs)).
-per-AFI RIB sharding landed second (the storage half — `LocRib`'s
-internal map is sharded by `NlriFamily` with family-aware accessors,
-preserving the frozen public API); the multi-threaded RIB and the
-lock-free event bus land together last because the bus is what lets
-the API thread read without the writer's lock.
-
-The 1.x stability window freezes the public Rust API and the C ABI
-(see [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §4). Each landing must
-preserve that surface: `LocRib`'s public methods and the
-`RouterInstance` trait stay shape-compatible, with new family-aware
-methods added alongside the existing cross-family ones (the
-`abi-freeze` CI job enforces the C half mechanically). A breaking
-change ships as the 2.0 major bump and lands in one PR after the
-block has stabilised on a release window.
-
-**Multi-threaded RIB and a lock-free event bus.** The whole router
-sits behind `Arc<RwLock<DefaultRouter>>`
-(`crates/lr-cli/src/daemon.rs`, `crates/lr-cli/src/api.rs`), so one
-writer at a time is the ceiling and an API read waits behind it. The
-work is interior concurrency in the RIB (per-shard locks or atomic
-structures) plus an event bus that consumers subscribe to in place of
-the shared lock. Done when import, reselection and export proceed
-concurrently, the best-path result is unchanged, and the API reads
-without taking the writer's lock.
-
-The event bus data structure has landed
-(`lr-router::event_bus::EventBus`): a bounded MPMC broadcast where
-each subscriber gets its own `std::sync::mpsc::Receiver`, `publish`
-writes to every active subscriber with `try_send` (a full subscriber
-drops the event rather than blocking the publisher), and disconnected
-subscribers are pruned on the next publish. The wiring — the daemon's
-read-side consumers (ticker, API socket, metrics endpoint, BMP mirror,
-kernel mirror) subscribing to the bus in place of the
-`Arc<RwLock<DefaultRouter>>` read, plus per-shard locks on the
-`LocRib` shards — is the remaining work. The `abi-freeze` CI job
-gates the C ABI half.
-
 ## Compatibility
 
 **RISC-V targeted compatibility improvements.** The CI matrix covers

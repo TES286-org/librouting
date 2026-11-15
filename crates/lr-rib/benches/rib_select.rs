@@ -60,7 +60,7 @@ fn bench_rib_install_and_scan(c: &mut Criterion) {
             b.iter_with_setup(
                 || routes.clone(),
                 |routes| {
-                    let mut rib = LocRib::new();
+                    let rib = LocRib::new();
                     for r in routes {
                         rib.install(r);
                     }

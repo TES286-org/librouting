@@ -36,7 +36,7 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 
-use lr_router::{DefaultRouter, RouterInstance, SessionSummary};
+use lr_router::{DefaultRouter, SessionSummary};
 
 use crate::api::DaemonInfo;
 
@@ -45,6 +45,10 @@ use crate::api::DaemonInfo;
 pub struct ShowCtx<'a> {
     pub info: &'a DaemonInfo,
     pub router: &'a Arc<RwLock<DefaultRouter>>,
+    /// The shared Loc-RIB handle (issue #101 — the multi-threaded RIB
+    /// read path): the route-dumping `show` sub-commands read through
+    /// the per-family shard locks instead of the router's `RwLock`.
+    pub rib: &'a Arc<lr_rib::LocRib>,
     pub status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     pub started: std::time::Instant,
 }
@@ -82,10 +86,14 @@ pub fn dispatch(rest: &str, ctx: &ShowCtx<'_>) -> Option<String> {
 /// Adds per-protocol session breakdown (BIRD `show protocols` summary
 /// shape) and the daemon's resident memory.
 fn render_show_status(ctx: &ShowCtx<'_>) -> String {
-    let (summaries, rib_len) = {
+    // The RIB count reads through the shared handle's per-family shard
+    // locks; the session summaries need the router (the sessions table
+    // is not sharded).
+    let summaries = {
         let r = ctx.router.read().unwrap();
-        (r.session_summaries(), r.rib_len())
+        r.session_summaries()
     };
+    let rib_len = ctx.rib.len();
     let sessions = summaries.len() as u64;
     let established = summaries.iter().filter(|s| s.established).count() as u64;
     let mut by_kind: std::collections::BTreeMap<&'static str, (u64, u64)> =
@@ -214,11 +222,13 @@ fn render_show_session(ctx: &ShowCtx<'_>, handle: u64) -> String {
 /// `show routes count` — Loc-RIB size grouped by `Route::protocol`.
 /// Mirrors BIRD `show route count` and FRR `show ip route summary`.
 fn render_show_routes_count(ctx: &ShowCtx<'_>) -> String {
-    let r = ctx.router.read().unwrap();
+    // The walk reads through the shared Loc-RIB handle (per-family
+    // shard locks, issue #101) — no router lock, no wait behind the
+    // writer's tick.
     let mut by_proto: std::collections::BTreeMap<&'static str, u64> =
         std::collections::BTreeMap::new();
     let mut total = 0u64;
-    for route in r.rib_paths_snapshot() {
+    for route in ctx.rib.iter_paths() {
         let name = route.protocol.bird_name();
         *by_proto.entry(name).or_insert(0) += 1;
         total += 1;
@@ -300,7 +310,7 @@ mod tests {
     use super::*;
     use crate::api::DaemonInfo;
     use lr_core::addr::Asn;
-    use lr_router::{DefaultRouter, SessionConfig};
+    use lr_router::{DefaultRouter, RouterInstance as _, SessionConfig};
     use std::sync::{Arc, RwLock};
 
     /// Build a `ShowCtx` from a stack-allocated status-lines closure.
@@ -308,6 +318,7 @@ mod tests {
     /// real `Arc<dyn Fn()…>` like the daemon's runtime API thread.
     fn ctx<'a>(
         router: &'a Arc<RwLock<DefaultRouter>>,
+        rib: &'a Arc<lr_rib::LocRib>,
         info: &'a DaemonInfo,
         status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         started: std::time::Instant,
@@ -315,6 +326,7 @@ mod tests {
         ShowCtx {
             info,
             router,
+            rib,
             status_lines,
             started,
         }
@@ -341,6 +353,7 @@ mod tests {
     #[test]
     fn dispatch_returns_none_for_non_show_command() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -350,7 +363,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         assert!(dispatch("status", &cx).is_none());
         assert!(dispatch("sessions", &cx).is_none());
         assert!(dispatch("routes", &cx).is_none());
@@ -360,6 +379,7 @@ mod tests {
     #[test]
     fn show_status_renders_extended_fields() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -369,7 +389,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show status", &cx).expect("show status matched");
         assert!(body.contains("version test"), "body: {body}");
         assert!(body.contains("sessions 1 established 0"), "body: {body}");
@@ -399,6 +425,7 @@ mod tests {
     #[test]
     fn show_status_surfaces_toml_deprecation() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -408,7 +435,13 @@ mod tests {
             config_dialect: Some("toml".into()),
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show status", &cx).expect("show status matched");
         assert!(
             body.contains("config-dialect toml"),
@@ -429,6 +462,7 @@ mod tests {
     #[test]
     fn show_status_dsl_dialect_has_no_deprecation() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -438,7 +472,13 @@ mod tests {
             config_dialect: Some("lr".into()),
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show status", &cx).expect("show status matched");
         assert!(
             body.contains("config-dialect lr"),
@@ -453,6 +493,7 @@ mod tests {
     #[test]
     fn show_sessions_extends_legacy_output() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -462,7 +503,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show sessions", &cx).expect("show sessions matched");
         // Legacy fields preserved.
         assert!(body.contains("kind=bgp"), "body: {body}");
@@ -479,6 +526,7 @@ mod tests {
     #[test]
     fn show_sessions_detail_appends_stats_block() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -488,7 +536,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show sessions detail", &cx).expect("show sessions detail matched");
         assert!(body.contains("stats: established-at-ms="), "body: {body}");
         assert!(body.contains("last-error: kind="), "body: {body}");
@@ -498,6 +552,7 @@ mod tests {
     #[test]
     fn show_session_handle_renders_deep_dive() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -507,7 +562,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show session 1", &cx).expect("show session matched");
         assert!(body.contains("handle 1"), "body: {body}");
         assert!(body.contains("kind bgp"), "body: {body}");
@@ -519,6 +580,7 @@ mod tests {
     #[test]
     fn show_session_unknown_handle_reports_error() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -528,7 +590,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show session 999", &cx).expect("show session matched");
         assert!(
             body.contains("error: no session with handle 999"),
@@ -539,6 +607,7 @@ mod tests {
     #[test]
     fn show_routes_count_groups_by_protocol() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -548,7 +617,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show routes count", &cx).expect("show routes count matched");
         // The originated route is local — its `protocol` field is
         // whatever `Route::protocol` the router assigns to originated
@@ -561,6 +636,7 @@ mod tests {
     #[test]
     fn show_memory_renders_uptime_and_rss() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -570,7 +646,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show memory", &cx).expect("show memory matched");
         assert!(body.contains("uptime-secs "), "body: {body}");
         assert!(body.contains("rss-bytes "), "body: {body}");
@@ -580,6 +662,7 @@ mod tests {
     #[test]
     fn show_unknown_subcommand_returns_error() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -589,7 +672,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show bogus", &cx).expect("show bogus matched (as error)");
         assert!(
             body.contains("error: unknown show sub-command 'bogus'"),
@@ -600,6 +689,7 @@ mod tests {
     #[test]
     fn show_session_non_numeric_handle_returns_error() {
         let router = make_router_with_session();
+        let rib = router.read().unwrap().rib_handle();
         let info = DaemonInfo {
             version: "test".into(),
             local_as: 64512,
@@ -609,7 +699,13 @@ mod tests {
             config_dialect: None,
         };
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-        let cx = ctx(&router, &info, &status_lines, std::time::Instant::now());
+        let cx = ctx(
+            &router,
+            &rib,
+            &info,
+            &status_lines,
+            std::time::Instant::now(),
+        );
         let body = dispatch("show session not-a-number", &cx).expect("show session matched");
         assert!(
             body.contains("error: invalid session handle"),

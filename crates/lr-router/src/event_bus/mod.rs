@@ -1,15 +1,16 @@
 //! Bounded MPMC broadcast bus for [`RouterEvent`].
 //!
-//! ROADMAP §"Scaling" item #3 (the multi-threaded RIB + lock-free
-//! event bus) names this module as the preparation for retiring
-//! `Arc<RwLock<DefaultRouter>>`: the daemon's read-side consumers
-//! (the ticker, the API socket, the metrics endpoint, the BMP
-//! mirror, the kernel mirror) subscribe to the bus instead of taking
-//! the router's read lock, and a local view kept in sync by the
-//! events replaces the shared lock for those reads. The write side
-//! (import, reselect, export) proceeds concurrently once the RIB
-//! gains per-shard locks; the bus is what lets the API thread read
-//! without waiting for the writer.
+//! ROADMAP §"Scaling" (the multi-threaded RIB + lock-free event bus,
+//! issue #101): the daemon's publisher (the ticker thread that drains
+//! `poll_events`) broadcasts every router event here, and the
+//! read-side consumers subscribe in place of taking the
+//! `Arc<RwLock<DefaultRouter>>` read — the kernel mirror is the
+//! first subscriber, so kernel route I/O runs on its own thread and
+//! never under the router's writer lock. [`EventBus::close`] is the
+//! shutdown handshake: the daemon's exit path closes the bus after
+//! the last publish, every subscriber drains its queue, sees
+//! `Disconnected`, and exits — the join then guarantees no accepted
+//! event went unapplied.
 //!
 //! This module is the data structure: a bounded broadcast channel
 //! where each subscriber gets its own [`Receiver`] and [`publish`]
@@ -82,6 +83,13 @@ struct BusInner {
     /// A non-zero rate here means a subscriber is not keeping up;
     /// the daemon's metrics can flag it.
     dropped: u64,
+    /// Set by [`EventBus::close`]: the senders were dropped, so
+    /// `publish` accepts nothing further. Kept as an explicit flag
+    /// (rather than inferring from `senders.is_empty()`) because a
+    /// bus with zero subscribers is a legal live state — a live
+    /// bus must keep accepting publishes even while nobody
+    /// subscribed.
+    closed: bool,
 }
 
 impl EventBus {
@@ -99,6 +107,7 @@ impl EventBus {
                 senders: Vec::new(),
                 published: 0,
                 dropped: 0,
+                closed: false,
             })),
             capacity: capacity.max(1),
         }
@@ -108,9 +117,19 @@ impl EventBus {
     /// polls for events. The subscriber stays active until the
     /// `Receiver` is dropped; the next [`publish`] after the drop
     /// prunes the sender from the internal list.
+    ///
+    /// After [`EventBus::close`] the bus accepts no subscribers: the
+    /// returned `Receiver` is already disconnected (its sender is
+    /// dropped on return), so a late joiner observes "no more events"
+    /// instead of a channel nobody will ever write to.
     pub fn subscribe(&self) -> Receiver<RouterEvent> {
         let (tx, rx) = sync_channel(self.capacity);
         let mut inner = self.inner.lock().unwrap();
+        if inner.closed {
+            // Drop `tx` on the way out: the receiver sees
+            // `Disconnected` on its first `recv`.
+            return rx;
+        }
         inner.senders.push(tx);
         rx
     }
@@ -121,11 +140,14 @@ impl EventBus {
     /// (route install / withdraw) never waits on a consumer that
     /// might be stuck on I/O.
     ///
-    /// Returns the number of subscribers that accepted the event.
-    /// Disconnected subscribers (the `Receiver` dropped) are pruned
-    /// in the same pass.
+    /// Returns the number of subscribers that accepted the event
+    /// (`0` once the bus has been closed). Disconnected subscribers
+    /// (the `Receiver` dropped) are pruned in the same pass.
     pub fn publish(&self, event: RouterEvent) -> usize {
         let mut inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return 0;
+        }
         inner.published = inner.published.saturating_add(1);
         let mut accepted = 0;
         let mut dropped_any = false;
@@ -147,6 +169,31 @@ impl EventBus {
             inner.dropped = inner.dropped.saturating_add(1);
         }
         accepted
+    }
+
+    /// Close the bus for good. Drops every sender, so each
+    /// subscriber's `Receiver::recv` returns
+    /// [`RecvTimeoutError::Disconnected`] once it has drained the
+    /// events already queued — the deterministic shutdown handshake:
+    /// after `close`, no `publish` is accepted, and a subscriber that
+    /// observes `Disconnected` knows both facts at once.
+    ///
+    /// The daemon's shutdown path calls this after the last
+    /// publisher's final publish, then joins the subscriber threads —
+    /// the drain-then-exit semantics guarantee the subscriber
+    /// applied every event that was ever accepted before it returns.
+    /// Closing is idempotent; `subscribe` after close returns a
+    /// `Receiver` that is immediately disconnected.
+    pub fn close(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.senders.clear();
+        inner.closed = true;
+    }
+
+    /// True after [`EventBus::close`]. A live bus with zero
+    /// subscribers is not closed — `publish` still counts it.
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().unwrap().closed
     }
 
     /// Number of active subscribers (the sender count after the last

@@ -17,10 +17,14 @@
 //!            │       ▲                    ▲        │       │
 //!            │       │ tick(ms)           │        ▼       │
 //!            │  ┌────┴─────┐        poll_events  Loc-RIB   │
-//!            │  │ ticker   │ ─────────────► events ─► log  │
-//!            │  └──────────┘                 + kernel FIB   │
-//!            │                          optionally:   ▼     │
-//!            │                       lr-osroute (netlink)   │
+//!            │  │ ticker   │ ───► event bus ─► log + view  │
+//!            │  └──────────┘          │      (shard locks) │
+//!            │                    subscribe  ▼             │
+//!            │                 ┌──────────────┐            │
+//!            │                 │ kernel mirror│            │
+//!            │                 └───┬──────────┘            │
+//!            │                     ▼ optionally:            │
+//!            │              lr-osroute (netlink)            │
 //!            └──────────────────────────────────────────────┘
 //! ```
 //!
@@ -2190,6 +2194,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             // of the Arc. Returns None in immediate mode.
             let shutdown = build_shutdown(cfg, &router);
             Arc::new(Runtime {
+                event_bus: lr_router::event_bus::EventBus::new(),
+                kernel_mirror: std::sync::OnceLock::new(),
                 reload: Arc::new({
                     let router = Arc::clone(&router);
                     let current_networks = Arc::clone(&current_networks);
@@ -2246,23 +2252,26 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     };
 
     // --- Ticker thread: pump the router clock every 50 ms. It is the
-    // single consumer of router events — logging and (optional) kernel
-    // route installation happen here, never on the I/O threads, so the
-    // Loc-RIB event order cannot be shuffled across sessions. ---
+    // daemon's sole event publisher — it drains `poll_events`, logs
+    // and publishes to the event bus, and the kernel-mirror thread
+    // (subscribed to that bus) does the kernel route I/O off the
+    // router lock — so the Loc-RIB event order cannot be shuffled
+    // across sessions. ---
     // Embedded: the supervisor already spawned one shared ticker (and
     // fed it our live-session counter via the host).
+    let mut ticker: Option<thread::JoinHandle<()>> = None;
     if host.is_none() {
         let bgp_ls_driver = if cfg.bgp_ls.enabled {
             Some(BgplsDriver::new(&cfg.bgp_ls, cfg.local_as))
         } else {
             None
         };
-        spawn_ticker(
+        ticker = Some(spawn_ticker(
             &runtime,
             cfg.install_kernel,
             Arc::clone(&live_sessions),
             bgp_ls_driver,
-        );
+        ));
     }
 
     // ---- Listener (inbound), if configured. ----
@@ -2336,6 +2345,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // same two steps happen in the supervisor — report readiness and
     // block on the startup gate so every engine binds before the drop
     // and no connector dials before the API socket exists.
+    let standalone = host.is_none();
     match host {
         None => {
             if let Err(e) = do_privdrop(cfg) {
@@ -2442,6 +2452,23 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     let deadline = WallClock::now() + Duration::from_secs(3);
     while live_sessions.load(Ordering::Relaxed) > 0 && WallClock::now() < deadline {
         thread::sleep(Duration::from_millis(50));
+    }
+    // Join the ticker before the process exits (the pre-wiring shape
+    // dropped its handle, so the final drain's kernel cleanup raced
+    // the exit). A joined ticker guarantees the flush_rib_for_shutdown
+    // withdrawals were published; the bus handshake then waits for
+    // the kernel-mirror thread to apply them before returning —
+    // bgp_shutdown_cleanup asserts exactly that.
+    // Embedded engines never do either: the supervisor owns the shared
+    // ticker and closes the shared bus after every engine joined.
+    if let Some(t) = ticker.take() {
+        let _ = t.join();
+        runtime.shutdown_event_bus();
+    } else if standalone {
+        // A standalone daemon whose ticker was never spawned (startup
+        // failed after the runtime existed): close the bus anyway so
+        // any subscriber exits rather than waiting on a dead daemon.
+        runtime.shutdown_event_bus();
     }
     log_info!(Component::Daemon, "shutdown complete");
     ExitCode::SUCCESS
@@ -4084,13 +4111,105 @@ impl BgplsDriver {
     }
 }
 
-/// The ticker thread: sole consumer of router events. Drives the router
-/// clock every 50 ms, logs every event, and (when enabled) mirrors the
-/// Loc-RIB into the kernel FIB. Keeping event consumption on one thread
-/// preserves Loc-RIB ordering across concurrently pumped sessions.
-/// During shutdown it keeps draining until the live session threads
-/// have flushed their close NOTIFICATIONs, so withdrawal events (and
-/// their kernel route deletions) are not lost.
+/// The kernel-mirror thread (issue #101 — the event-bus wiring): the
+/// Loc-RIB → kernel FIB path runs on its own thread subscribed to the
+/// daemon's [`EventBus`], so kernel route I/O (netlink writes, the
+/// IP Helper calls) never happens under the router's writer lock —
+/// before the wiring the ticker applied the mirror inline while
+/// holding `router.write()`, and a slow kernel stalled every session
+/// pump.
+///
+/// The thread drains the bus in receive order; a batch the publisher
+/// published between two `recv`s applies in publish order (the bus is
+/// per-subscriber FIFO). The daemon has one publisher — the ticker
+/// that drains `poll_events` — except the OSPF standalone daemons,
+/// whose main loops also drain and publish; there the two publishers
+/// interleave only between their own batches, so per-key
+/// install-then-withdraw order is preserved within a publisher and
+/// keyed installs are idempotent across publishers (the kernel
+/// replace semantics both BIRD and FRR rely on too).
+///
+/// [`EventBus::close`] is the exit signal: after the daemon's exit
+/// path publishes its last events and closes the bus, the mirror
+/// drains its queue, observes `Disconnected`, and exits —
+/// [`KernelMirrorThread::close_and_join`] then returns, so the
+/// daemon's main thread knows every accepted route event was applied
+/// (the shutdown withdrawals included) before the process exits.
+pub(crate) struct KernelMirrorThread {
+    bus: lr_router::event_bus::EventBus,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl KernelMirrorThread {
+    /// Spawn the mirror thread. The subscription happens *before* the
+    /// caller starts publishing (spawn the ticker right after this
+    /// call, before anything that can produce router events) — the
+    /// router accumulates its events in `pending_events` until
+    /// `poll_events` drains them, so a subscriber that exists before
+    /// the first drain misses nothing.
+    fn spawn(bus: lr_router::event_bus::EventBus, install_kernel: bool) -> Arc<Self> {
+        let rx = bus.subscribe();
+        let thread_bus = bus.clone();
+        let handle = thread::Builder::new()
+            .name("lr-kernel-mirror".into())
+            .spawn(move || {
+                let mut mirror = KernelMirror::new(install_kernel);
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(ev) => mirror.apply(std::slice::from_ref(&ev)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if thread_bus.is_closed() {
+                                // Drained and closed: exit. `recv_timeout`
+                                // returns `Disconnected` (not `Timeout`)
+                                // when the queue is empty and the senders
+                                // are gone, so reaching here means the
+                                // queue still held events at the last
+                                // wake — loop once more.
+                                continue;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            // Queue drained and every sender dropped
+                            // (`close`): exit.
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("spawn kernel mirror thread");
+        Arc::new(Self {
+            bus,
+            join: Mutex::new(Some(handle)),
+        })
+    }
+
+    /// Close the bus and wait for the mirror thread to drain its
+    /// queue and exit. Idempotent. The daemon's exit path calls this
+    /// after its last publish; returning means every accepted route
+    /// event has been applied to the kernel.
+    pub(crate) fn close_and_join(&self) {
+        self.bus.close();
+        if let Some(handle) = self.join.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The ticker thread: the daemon's sole publisher of router events.
+/// Drives the router clock every 50 ms, drains `poll_events` under the
+/// write lock, then logs and publishes every event to the
+/// [`EventBus`] *after* releasing it. Keeping event consumption on
+/// one thread preserves Loc-RIB ordering across concurrently pumped
+/// sessions; publishing after the lock keeps the publisher's own
+/// ordering intact while no consumer work (logging, kernel I/O on the
+/// mirror thread) holds the writer lock. During shutdown it keeps
+/// draining until the live session threads have flushed their close
+/// NOTIFICATIONs, so withdrawal events (and their kernel route
+/// deletions) are not lost.
+///
+/// The kernel mirror runs on its own subscribed thread
+/// ([`KernelMirrorThread`]) — see its docs for the ordering and
+/// shutdown contract.
 ///
 /// When `bgp_ls_driver` is `Some`, the ticker additionally polls each
 /// configured OSPF area's `topology_version` once per pass and runs the
@@ -4098,17 +4217,32 @@ impl BgplsDriver {
 /// driver state (per-area `topology_version` cache and the last
 /// projected NLRI set) lives inside the [`BgplsDriver`] — the ticker
 /// owns it for the lifetime of the daemon.
+///
+/// The caller owns the returned join handle and MUST join it at
+/// shutdown before [`Runtime::shutdown_event_bus`] — the handle's
+/// drop detaches the thread (same as before the bus wiring), but a
+/// joined ticker guarantees the final drain (the
+/// `flush_rib_for_shutdown` withdrawals) was published before the bus
+/// closes.
 pub(crate) fn spawn_ticker(
     rt: &Arc<Runtime>,
     install_kernel: bool,
     live: Arc<AtomicUsize>,
     bgp_ls_driver: Option<BgplsDriver>,
 ) -> thread::JoinHandle<()> {
+    // Subscribe the mirror before the loop starts polling: the
+    // router holds events in `pending_events` until the first
+    // `poll_events`, so the mirror sees every event from the first
+    // drain on. Stash the handle on the runtime so the daemon's exit
+    // path can close the bus and join the mirror.
+    let _ = rt.kernel_mirror.set(KernelMirrorThread::spawn(
+        rt.event_bus.clone(),
+        install_kernel,
+    ));
     let rt = Arc::clone(rt);
     thread::Builder::new()
         .name("lr-ticker".into())
         .spawn(move || {
-            let mut mirror = KernelMirror::new(install_kernel);
             let mut bgp_ls_driver = bgp_ls_driver;
             let start = WallClock::now();
             loop {
@@ -4117,14 +4251,10 @@ pub(crate) fn spawn_ticker(
                     break;
                 }
                 let now_ms = start.elapsed().as_millis() as u64;
-                {
+                let events = {
                     let mut r = rt.router.write().unwrap();
                     r.tick(lr_core::time::Instant(now_ms));
                     let events = r.poll_events();
-                    for ev in &events {
-                        log_event(ev);
-                    }
-                    mirror.apply(&events);
                     // RFC 7752 BGP-LS projection driver (issue #60
                     // daemon wiring). After the router's tick has
                     // applied OSPF LSDB changes (the topology_version
@@ -4136,7 +4266,9 @@ pub(crate) fn spawn_ticker(
                     if let Some(driver) = bgp_ls_driver.as_mut() {
                         driver.tick(&mut r);
                     }
-                }
+                    events
+                };
+                publish_and_log(&rt.event_bus, events);
                 if shutting_down {
                     // Bounded shutdown cadence: the main thread exits the
                     // process after its grace period regardless.
@@ -4157,13 +4289,26 @@ pub(crate) fn spawn_ticker(
                 // next restart re-adds only its own set.
                 r.flush_rib_for_shutdown();
                 let events = r.poll_events();
-                for ev in &events {
-                    log_event(ev);
-                }
-                mirror.apply(&events);
+                drop(r);
+                publish_and_log(&rt.event_bus, events);
             }
+            // The bus stays open: the owning daemon mode closes it
+            // (after any final publishes of its own) and joins the
+            // mirror thread — see `Runtime::shutdown_event_bus`.
         })
         .expect("spawn ticker thread")
+}
+
+/// Log one event and hand it to every bus subscriber. Called by the
+/// threads that drain `poll_events` — the ticker (BGP/Babel and the
+/// multi-protocol supervisor) and the OSPF main loops. Logging keeps
+/// its place in the batch order; the publish is a bounded
+/// `try_send` per subscriber, never blocking the publisher.
+pub(crate) fn publish_and_log(bus: &lr_router::event_bus::EventBus, events: Vec<RouterEvent>) {
+    for ev in events {
+        log_event(&ev);
+        bus.publish(ev);
+    }
 }
 
 /// The private `lr-bgp` attribute tag that carries an RFC 8277 label
@@ -4695,6 +4840,8 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let running = Arc::new(AtomicBool::new(true));
     let router = Arc::new(RwLock::new(DefaultRouter::new()));
     let runtime = Arc::new(Runtime {
+        event_bus: lr_router::event_bus::EventBus::new(),
+        kernel_mirror: std::sync::OnceLock::new(),
         reload: Arc::new(|| {
             // BMP collector reload is not supported (the collector is a
             // passive listener that accepts BMP sessions from routers;
@@ -4734,7 +4881,12 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         return ExitCode::from(1);
     }
     let _ = rid;
-    // Ticker: drains the events the originate/unoriginate calls emit.
+    // Ticker: drains the events the originate/unoriginate calls emit,
+    // logging and publishing them to the bus. The collector has no
+    // kernel mirror (a passive receiver installs nothing in the
+    // FIB); publishing keeps every daemon mode's event surface the
+    // same shape, and the bus counters the metrics endpoint reports
+    // reflect the collector's event stream.
     {
         let rt = Arc::clone(&runtime);
         thread::Builder::new()
@@ -4746,13 +4898,12 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                         break;
                     }
                     let now_ms = start.elapsed().as_millis() as u64;
-                    {
+                    let events = {
                         let mut r = rt.router.write().unwrap();
                         r.tick(lr_core::time::Instant(now_ms));
-                        for ev in r.poll_events() {
-                            log_event(&ev);
-                        }
-                    }
+                        r.poll_events()
+                    };
+                    publish_and_log(&rt.event_bus, events);
                     thread::sleep(Duration::from_millis(50));
                 }
             })
@@ -4790,6 +4941,10 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }
     }
     log_info!(Component::Bmp, "collector shutdown complete");
+    // No kernel mirror runs in collector mode; the close still lets a
+    // bus subscriber (a metrics scraper tailing the counters) see the
+    // stream ended instead of waiting on a live channel forever.
+    runtime.shutdown_event_bus();
     ExitCode::SUCCESS
 }
 
@@ -5214,6 +5369,8 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     let runtime = match &host {
         Some(h) => Arc::clone(&h.runtime),
         None => Arc::new(Runtime {
+            event_bus: lr_router::event_bus::EventBus::new(),
+            kernel_mirror: std::sync::OnceLock::new(),
             reload: Arc::new({
                 let router = Arc::clone(&router);
                 let config_path = cfg.config_path.clone();
@@ -5829,6 +5986,11 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     }
     if let Some(ticker) = ticker {
         let _ = ticker.join();
+        // The bus handshake: the ticker's final drain (the babel route
+        // withdrawals) was published; wait for the kernel-mirror thread
+        // to apply them before the process exits. Standalone only — an
+        // embedded engine leaves the shared bus to the supervisor.
+        runtime.shutdown_event_bus();
     }
     log_info!(Component::Babel, "babel shutdown complete");
     ExitCode::SUCCESS
@@ -7441,6 +7603,20 @@ fn originate_next_hop(cfg: &DaemonConfig, family: NlriFamily) -> Option<IpAddr> 
 struct Runtime {
     router: Arc<RwLock<DefaultRouter>>,
     running: Arc<AtomicBool>,
+    /// The daemon's router-event bus (issue #101 — the event-bus
+    /// wiring). The ticker publishes every event it drains from
+    /// `poll_events`; subscribers (the kernel-mirror thread, a
+    /// metrics scraper's bus counters) consume without taking the
+    /// `Arc<RwLock<DefaultRouter>>` read. Clone-cheap (an `Arc`
+    /// inside).
+    event_bus: lr_router::event_bus::EventBus,
+    /// The kernel-mirror thread [`spawn_ticker`] spawned — the bus
+    /// subscriber that owns the Loc-RIB → kernel FIB path. `None`
+    /// until a ticker exists (the BMP collector mode runs without
+    /// one) and never re-set (one mirror per daemon). The exit path
+    /// closes the bus and joins the mirror through
+    /// [`Runtime::shutdown_event_bus`].
+    kernel_mirror: std::sync::OnceLock<Arc<KernelMirrorThread>>,
     /// Re-apply the configuration file (SIGHUP / API `reload`).
     reload: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     /// Protocol-specific extra `status` lines for the runtime API
@@ -7506,6 +7682,23 @@ fn dispatch_signals(rt: &Runtime) {
         return;
     }
     dispatch_pending_signals(rt);
+}
+
+impl Runtime {
+    /// The event-bus shutdown handshake (issue #101 — the wiring):
+    /// close the bus (no further publish is accepted; subscribers
+    /// drain their queues then observe `Disconnected`) and wait for
+    /// the kernel-mirror thread to apply everything it was ever
+    /// accepted. A daemon mode's exit path calls this as its LAST
+    /// router-touching action — after its final publish and after
+    /// joining its ticker — so the shutdown withdrawals reach the
+    /// kernel before the process exits. Idempotent.
+    pub(crate) fn shutdown_event_bus(&self) {
+        match self.kernel_mirror.get() {
+            Some(mirror) => mirror.close_and_join(),
+            None => self.event_bus.close(),
+        }
+    }
 }
 
 /// Consume and act on pending signals unconditionally — the
@@ -7575,6 +7768,12 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             config_dialect: cfg.config_dialect.clone(),
         },
         router: Arc::clone(&rt.router),
+        // The shared Loc-RIB handle (issue #101 — the multi-threaded
+        // RIB read path): the RIB-dumping commands (`routes`, `mrt`,
+        // `show routes count`) read through the per-family shard
+        // locks instead of the router's `RwLock`, so an API client
+        // dumping routes never waits behind the writer's tick.
+        rib: rt.router.read().unwrap().rib_handle(),
         running: Arc::clone(&rt.running),
         reload: Box::new({
             let rt = Arc::clone(rt);
@@ -7661,6 +7860,13 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             config_dialect: cfg.config_dialect.clone().unwrap_or_default(),
         },
         router: Arc::clone(&rt.router),
+        // The shared Loc-RIB handle and the event bus (issue #101):
+        // `lr_rib_entries` / `lr_rib_by_protocol` read through the
+        // per-family shard locks; the bus counters
+        // (`lr_event_bus_published_total` / `lr_event_bus_dropped_total`)
+        // read the publisher's lifetime totals.
+        rib: rt.router.read().unwrap().rib_handle(),
+        event_bus: rt.event_bus.clone(),
         running: Arc::clone(&rt.running),
         roa_len: rt.roa_len.as_ref().map(|f| {
             let f = Arc::clone(f);

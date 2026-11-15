@@ -63,7 +63,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use crate::KernelMirror;
 use lr_core::addr::RouterId;
 use lr_core::error::EncodeError;
 use lr_ospf::codec::OspfCodec;
@@ -362,17 +361,15 @@ struct OspfDaemon {
     /// `status` command (shared with the API thread).
     gr_status: Arc<std::sync::Mutex<Vec<String>>>,
     router_id: RouterId,
-    /// Kernel FIB mirror — the Loc-RIB → kernel route installer.
-    /// The OSPF daemon's main loop drains RouterEvents via
-    /// `router.poll_events()` (in `pump_gr`, the packet-receive path,
-    /// the dead-neighbor path and the shutdown path) before the
-    /// ticker thread's `mirror.apply(&events)` can see them — so the
-    /// ticker's own mirror (created in `spawn_ticker`) never receives
-    /// OSPF events and never installs anything. Storing the mirror
-    /// on the daemon struct lets `handle_router_events` call
-    /// `mirror.apply` on the events the main thread already polled,
-    /// restoring the Loc-RIB → kernel FIB path for OSPF routes.
-    kernel_mirror: KernelMirror,
+    /// The daemon's router-event bus (issue #101 — the event-bus
+    /// wiring). The main loop's `handle_router_events` publishes the
+    /// batches it drains from `poll_events()` (in `pump_gr`, the
+    /// packet-receive path, the dead-neighbor path and the shutdown
+    /// path); the kernel-mirror thread subscribed to this bus applies
+    /// the route events to the kernel FIB on its own thread — the
+    /// Loc-RIB → kernel path for OSPF routes without any mirror state
+    /// on the daemon struct.
+    event_bus: lr_router::event_bus::EventBus,
     /// OSPFv2 authentication state (RFC 2328 §D). The enum carries the
     /// per-strategy runtime state the send and receive paths need:
     ///
@@ -511,8 +508,18 @@ pub(super) fn run_ospf_daemon(
             router
         }
     };
+    // The event bus the daemon's drained events publish to (issue #101
+    // — the wiring). Standalone: the bus is created here and shared
+    // with the Runtime below; embedded: the supervisor's runtime's bus
+    // — every engine publishes to the same bus the supervisor's
+    // kernel-mirror thread subscribes to.
+    let event_bus = match &host {
+        Some(h) => h.runtime.event_bus.clone(),
+        None => lr_router::event_bus::EventBus::new(),
+    };
     let mut daemon = OspfDaemon {
         router,
+        event_bus: event_bus.clone(),
         interfaces,
         neighbors: BTreeMap::new(),
         pending_reorig: BTreeMap::new(),
@@ -591,7 +598,6 @@ pub(super) fn run_ospf_daemon(
         sr_seq: BTreeMap::new(),
         gr_status: Arc::new(std::sync::Mutex::new(Vec::new())),
         router_id: rid,
-        kernel_mirror: KernelMirror::new(cfg.install_kernel),
         auth: build_ospf_auth(cfg),
     };
     // Surface the resolved auth strategy at startup so the operator
@@ -899,6 +905,8 @@ pub(super) fn run_ospf_daemon(
             // contribute). Returns None in immediate mode.
             let shutdown = crate::build_shutdown(cfg, &daemon.router);
             Arc::new(crate::Runtime {
+                event_bus: event_bus.clone(),
+                kernel_mirror: std::sync::OnceLock::new(),
                 reload: Arc::new(|| {
                     // OSPF reload is not wired yet (interface set changes need
                     // LSA re-origination + session moves); report it loudly
@@ -932,6 +940,10 @@ pub(super) fn run_ospf_daemon(
         }
     };
     let running = Arc::clone(&runtime.running);
+    // Standalone ticker handle — joined at shutdown so the final
+    // drain's withdrawals were published before the bus closes; the
+    // supervisor owns the shared ticker in embedded mode.
+    let mut ticker: Option<std::thread::JoinHandle<()>> = None;
     match &host {
         None => {
             // Privileged work is done: every interface's raw OSPF
@@ -955,18 +967,20 @@ pub(super) fn run_ospf_daemon(
                 log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);
             }
-            // The ticker drives tick() (LSA refresh + MaxAge aging) and mirrors
-            // Loc-RIB events into the kernel FIB when asked to. The BGP-LS
-            // driver is not active on an OSPF-only daemon (no BGP session
-            // to push to); the multi-protocol supervisor spawns the ticker
-            // with the driver when both `bgp` and `ospf` are in the protocol
-            // set.
-            crate::spawn_ticker(
+            // The ticker drives tick() (LSA refresh + MaxAge aging) and
+            // publishes the Loc-RIB events it drains to the event bus —
+            // the kernel-mirror thread (subscribed to that bus, spawned
+            // with the ticker) applies them to the kernel FIB off the
+            // router lock. The BGP-LS driver is not active on an
+            // OSPF-only daemon (no BGP session to push to); the
+            // multi-protocol supervisor spawns the ticker with the
+            // driver when both `bgp` and `ospf` are in the protocol set.
+            ticker = Some(crate::spawn_ticker(
                 &runtime,
                 cfg.install_kernel,
                 Arc::new(AtomicUsize::new(0)),
                 None,
-            );
+            ));
         }
         Some(h) => {
             // Embedded: every interface's raw socket is bound; report
@@ -1040,6 +1054,15 @@ pub(super) fn run_ospf_daemon(
             Component::Ospf,
             "ospf graceful shutdown complete (neighbours asked to retain LSAs for {period}s)"
         );
+        // Graceful exit keeps the LSAs (the helpers' retention) but
+        // still owns the bus lifecycle: the ticker's final drain
+        // published the shutdown withdrawals — wait for the kernel
+        // mirror to apply them before the process exits. Standalone
+        // only (the supervisor owns the shared bus in embedded mode).
+        if let Some(t) = ticker.take() {
+            let _ = t.join();
+            runtime.shutdown_event_bus();
+        }
         return ExitCode::SUCCESS;
     }
     {
@@ -1051,12 +1074,20 @@ pub(super) fn run_ospf_daemon(
         for anchor in daemon.anchors.values() {
             router.close_session(*anchor);
         }
-        // Close sessions emit RouteWithdrawn events — mirror them into
-        // the kernel FIB so the routes are removed on shutdown, not
-        // left dangling until the netns is torn down.
+        // Close sessions emit RouteWithdrawn events — publish them on
+        // the bus so the kernel-mirror thread removes the routes on
+        // shutdown, not leaving them dangling until the netns is torn
+        // down.
         let events = router.poll_events();
         drop(router);
         daemon.handle_router_events(events);
+    }
+    // Standalone: the joined ticker guarantees its final drain was
+    // published; the bus handshake waits for the kernel mirror to
+    // apply the shutdown withdrawals before the process exits.
+    if let Some(t) = ticker.take() {
+        let _ = t.join();
+        runtime.shutdown_event_bus();
     }
     log_info!(Component::Daemon, "ospf shutdown complete");
     ExitCode::SUCCESS
@@ -2515,22 +2546,21 @@ impl OspfDaemon {
     // RFC 3623 graceful restart: helper mode + restarting-recovery
     // -----------------------------------------------------------------
 
-    /// Route polled router events to the log + the kernel FIB mirror.
+    /// Route polled router events to the log and the event bus.
     /// Grace-LSA events ride their own channel (`drain_ospf_grace_events`,
     /// drained in pump_gr) so the ticker thread's share of `poll_events()`
     /// can never swallow one.
     ///
-    /// The kernel mirror is called here (not in the ticker thread) because
-    /// the OSPF daemon's main loop drains events via `poll_events()` before
-    /// the ticker can see them — the ticker's own `mirror.apply` gets an
-    /// empty vec. By applying the mirror on the events the main thread
-    /// already polled, OSPF Loc-RIB changes reach the kernel FIB via the
-    /// same `KernelMirror::apply` path BGP/Babel use.
+    /// The OSPF daemon's main loop drains events via `poll_events()`
+    /// (here in pump_gr, the packet-receive path and the dead-neighbor
+    /// path) and publishes each batch on the daemon's event bus — the
+    /// kernel-mirror thread (subscribed to that bus) applies the route
+    /// events to the kernel FIB on its own thread, off the router
+    /// lock. The ticker is a second publisher for the events its own
+    /// `tick()` generates; each drained event is published exactly
+    /// once, by whichever thread drained it.
     fn handle_router_events(&mut self, events: Vec<RouterEvent>) {
-        for ev in &events {
-            log_event(ev);
-        }
-        self.kernel_mirror.apply(&events);
+        crate::publish_and_log(&self.event_bus, events);
     }
 
     /// One received Grace-LSA (the router already decoded + deduped
@@ -3361,32 +3391,6 @@ fn fmt_rid(rid: u32) -> String {
 /// folding into the Opaque Type byte.
 fn link_slot(ifindex: u32) -> u32 {
     ifindex & 0x00ff_ffff
-}
-
-pub(crate) fn log_event(ev: &RouterEvent) {
-    match ev {
-        RouterEvent::PeerStateChange { session, state } => {
-            log_info!(Component::Bgp, "session #{} → {}", session.0, state);
-        }
-        RouterEvent::RouteInstalled(r) => {
-            log_info!(
-                Component::Rib,
-                "route installed {} via {}",
-                r.key.prefix,
-                r.next_hop
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "(none)".into())
-            );
-        }
-        RouterEvent::RouteWithdrawn(k) => {
-            log_info!(Component::Rib, "route withdrawn {}", k.prefix);
-        }
-        RouterEvent::Log(msg) => log_info!(Component::Router, "{msg}"),
-        RouterEvent::ProtocolError { session, message } => {
-            log_error!(Component::Bgp, "session #{} error: {}", session.0, message)
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]

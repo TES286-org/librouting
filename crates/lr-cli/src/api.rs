@@ -59,6 +59,13 @@ pub struct DaemonInfo {
 pub struct ApiContext {
     pub info: DaemonInfo,
     pub router: Arc<RwLock<DefaultRouter>>,
+    /// The shared Loc-RIB handle (issue #101 — the multi-threaded RIB
+    /// read path). The RIB-dumping commands (`routes`, `mrt`, `show
+    /// routes count`, the `rib-entries` status line) read through the
+    /// per-family shard locks instead of the router's `RwLock`, so an
+    /// API client never waits behind the writer's tick. Session reads
+    /// still go through `router` — the sessions table is not sharded.
+    pub rib: std::sync::Arc<lr_rib::LocRib>,
     pub running: Arc<AtomicBool>,
     /// Re-apply configuration (SIGHUP equivalent); returns the log
     /// lines describing what was (not) applied.
@@ -145,6 +152,7 @@ mod imp {
         let path_owned = path.to_string();
         let info = Arc::new(ctx.info);
         let router = Arc::clone(&ctx.router);
+        let rib = ctx.rib;
         let running = Arc::clone(&ctx.running);
         let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
@@ -161,6 +169,7 @@ mod imp {
                     // idle client cannot hold the management socket hostage.
                     let info = Arc::clone(&info);
                     let router = Arc::clone(&router);
+                    let rib = Arc::clone(&rib);
                     let running = Arc::clone(&running);
                     let reload = Arc::clone(&reload);
                     let status_lines = Arc::clone(&status_lines);
@@ -176,6 +185,7 @@ mod imp {
                             let deps = ConnDeps {
                                 info: &info,
                                 router: &router,
+                                rib: &rib,
                                 running: &running,
                                 reload: &reload,
                                 status_lines: &status_lines,
@@ -201,6 +211,10 @@ mod imp {
     struct ConnDeps<'a> {
         info: &'a DaemonInfo,
         router: &'a Arc<RwLock<DefaultRouter>>,
+        /// The shared Loc-RIB handle — the RIB-dumping commands read
+        /// through the per-family shard locks (issue #101), never
+        /// through the router's `RwLock`.
+        rib: &'a Arc<lr_rib::LocRib>,
         running: &'a Arc<AtomicBool>,
         reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
@@ -302,19 +316,15 @@ mod imp {
                 } else {
                     let router_id = core::str::FromStr::from_str(&deps.info.router_id)
                         .unwrap_or(lr_core::addr::RouterId::from_u32(0));
-                    // Copy the RIB snapshot and session summaries under the
-                    // lock, then write the file outside it: disk I/O on a
-                    // hung filesystem must not stall the router (BGP hold
-                    // timers expire).
+                    // Copy the RIB snapshot through the shared Loc-RIB
+                    // handle (the per-family shard locks — never the
+                    // router's writer lock) and the session summaries
+                    // under the read lock, then write the file outside
+                    // both: disk I/O on a hung filesystem must not stall
+                    // the router (BGP hold timers expire).
                     let (routes, summaries) = {
-                        let r = deps.router.read().unwrap();
-                        (
-                            r.rib_paths_snapshot()
-                                .into_iter()
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                            r.session_summaries(),
-                        )
+                        let summaries = deps.router.read().unwrap().session_summaries();
+                        (deps.rib.iter_paths().collect::<Vec<_>>(), summaries)
                     };
                     let records = crate::write_mrt_rib_dump(&routes, &summaries, router_id, path);
                     match records {
@@ -366,6 +376,7 @@ mod imp {
                 let cx = crate::show::ShowCtx {
                     info: deps.info,
                     router: deps.router,
+                    rib: deps.rib,
                     status_lines: deps.status_lines,
                     started: deps.started,
                 };
@@ -421,10 +432,11 @@ mod imp {
                     );
                 }
                 "status" => {
-                    let (sessions, rib) = {
-                        let r = deps.router.read().unwrap();
-                        (r.session_summaries().len(), r.rib_len())
-                    };
+                    // The RIB count reads through the shared handle's
+                    // per-family shard locks; the session count needs
+                    // the router (the sessions table is not sharded).
+                    let sessions = deps.router.read().unwrap().session_summaries().len();
+                    let rib = deps.rib.len();
                     let _ = writeln!(out, "version {}", deps.info.version);
                     let _ = writeln!(out, "local-as {}", deps.info.local_as);
                     let _ = writeln!(out, "peer-as {}", deps.info.peer_as);
@@ -508,8 +520,11 @@ mod imp {
                     // prefix-SIDs) append `label=<top>` — the MPLS
                     // label the kernel mirror installs, what `show
                     // mpls table` on FRR would print.
-                    let r = deps.router.read().unwrap();
-                    for route in r.rib_paths_snapshot() {
+                    // The dump reads through the shared Loc-RIB handle
+                    // (per-family shard locks, issue #101) — an API
+                    // client dumping routes never waits behind the
+                    // writer's tick.
+                    for route in deps.rib.iter_paths() {
                         let _ = writeln!(
                             out,
                             "{} via {} proto={:?} metric={} path-id={}{}",
@@ -521,7 +536,7 @@ mod imp {
                             route.protocol,
                             route.preference.metric,
                             route.path_id,
-                            match route_label(route) {
+                            match route_label(&route) {
                                 Some(label) => format!(" label={label}"),
                                 None => String::new(),
                             }
@@ -739,7 +754,9 @@ mod imp {
         use super::*;
 
         fn test_ctx(router: Arc<RwLock<DefaultRouter>>, running: Arc<AtomicBool>) -> ApiContext {
+            let rib = router.read().unwrap().rib_handle();
             ApiContext {
+                rib,
                 info: DaemonInfo {
                     version: "test".into(),
                     local_as: 64512,

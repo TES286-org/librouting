@@ -164,6 +164,11 @@ fn test_ctx(router: Arc<RwLock<DefaultRouter>>, running: Arc<AtomicBool>) -> Met
             peer_as: 64513,
             config_dialect: String::new(),
         },
+        rib: {
+            let handle = router.read().unwrap().rib_handle();
+            handle
+        },
+        event_bus: lr_router::event_bus::EventBus::new(),
         router,
         running,
         roa_len: None,
@@ -527,5 +532,91 @@ fn deprecation_gauge_reads_zero_for_lr_dialect() {
         body.contains("lr_config_dialect_deprecated{config_dialect=\"lr\"} 0"),
         "DSL dialect should set the deprecated gauge to 0; body:\n{body}"
     );
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The event-bus counters (issue #101 — the wiring): a scrape carries
+/// `lr_event_bus_published_total` and `lr_event_bus_dropped_total`,
+/// and the counters are LIVE — publishing an event between two
+/// scrapes moves the published counter, so a fleet scraper can alert
+/// on the drop-rate of a subscriber that is not keeping up.
+#[test]
+fn scrape_reports_event_bus_counters_and_they_track_publishes() {
+    use lr_router::event_bus::EventBus;
+    use lr_router::RouterEvent;
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+
+    let router = Arc::new(RwLock::new(DefaultRouter::new()));
+    let running = Arc::new(AtomicBool::new(true));
+    // A context whose bus the test publishes to directly.
+    let rib = router.read().unwrap().rib_handle();
+    let bus = EventBus::new();
+    let ctx = {
+        MetricsContext {
+            info: MetricsInfo {
+                version: "test".into(),
+                local_as: 64512,
+                router_id: "10.0.0.1".into(),
+                config_path: "(none)".into(),
+                peer_as: 64513,
+                config_dialect: String::new(),
+            },
+            router,
+            rib,
+            event_bus: bus.clone(),
+            running: Arc::clone(&running),
+            roa_len: None,
+            filter_metrics: None,
+            session_label: Box::new(|_| "?".to_string()),
+        }
+    };
+    let bound = spawn(&addr, ctx).expect("metrics server spawns");
+    assert_eq!(bound, addr);
+
+    let scrape_body = |body_contains: &str| -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let resp = http_get(&addr, "/metrics");
+            if (resp.starts_with("HTTP/1.0 200") && resp.contains(body_contains))
+                || std::time::Instant::now() >= deadline
+            {
+                return resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // Publish one event before the first scrape; the counter must
+    // reflect it.
+    bus.publish(RouterEvent::Log("one".into()));
+    let body = scrape_body("lr_event_bus_published_total");
+    assert!(
+        body.contains("# TYPE lr_event_bus_published_total counter"),
+        "published_total TYPE missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("lr_event_bus_published_total 1"),
+        "published_total should count the pre-scrape publish; body:\n{body}"
+    );
+    assert!(
+        body.contains("# TYPE lr_event_bus_dropped_total counter"),
+        "dropped_total TYPE missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("lr_event_bus_dropped_total 0"),
+        "nothing dropped on an empty bus; body:\n{body}"
+    );
+
+    // Publish two more; the next scrape's counter moves.
+    bus.publish(RouterEvent::Log("two".into()));
+    bus.publish(RouterEvent::Log("three".into()));
+    let body = scrape_body("lr_event_bus_published_total 3");
+    assert!(
+        body.contains("lr_event_bus_published_total 3"),
+        "the counter is live — two publishes moved it to 3; body:\n{body}"
+    );
+
     running.store(false, std::sync::atomic::Ordering::Relaxed);
 }

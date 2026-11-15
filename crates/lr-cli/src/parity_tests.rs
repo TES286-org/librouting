@@ -143,7 +143,7 @@ fn parity_replay_end_to_end() {
         let _ = b.drain_output(hb);
         let _ = b.poll_events();
     }
-    let routes: Vec<lr_core::rib::Route> = b.rib_paths_snapshot().into_iter().cloned().collect();
+    let routes: Vec<lr_core::rib::Route> = b.rib_paths_snapshot();
     assert_eq!(routes.len(), 2, "receiver must hold both routes");
     write_rib_dump(&routes, RouterId::from_u32(0x0a000002), Asn(64512), &dump_b).expect("dump B");
 

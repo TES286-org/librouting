@@ -435,21 +435,43 @@ Ordering rules worth knowing before writing a hook:
 
 ## Thread model and mutability
 
-`DefaultRouter` has no interior mutability: no `Cell`, `RefCell`,
-`Mutex` or atomics among its fields. That is what makes the read/write
-split meaningful.
+`DefaultRouter` has one interior-mutability boundary: the Loc-RIB.
+`loc_rib` is a shared `Arc<LocRib>` whose storage is sharded by
+`NlriFamily` with one `RwLock` per shard and whose generation counter
+and history ring sit under one `Mutex` (`lr-rib::loc_rib`). Every
+`LocRib` method takes `&self`, so the daemon's read-side consumers —
+the runtime API's route dumps, the metrics endpoint's RIB counters —
+read through `DefaultRouter::rib_handle` and take only the shard
+locks of the families they walk, never the router's `RwLock`. A write
+in one family never blocks a read or a write in another. Everything
+else in the router is plain data:
 
-- `&self` methods are genuinely read-only, so any number of threads may
-  hold them at once. `rib_snapshot`, `session_peer_state` and the
-  status views used by the runtime API are in this class.
+- `&self` methods outside the RIB are genuinely read-only (`session_summaries`,
+  `session_peer_state` and the status views), so any number of threads
+  may hold them at once.
 - `&mut self` methods own every state transition: `add_session`,
   `feed_input`, `tick`, `reselect`, `apply_selection`,
   `apply_runtime_delta`, `redistribute_route`, and config reload.
 - The daemon wraps the router in `Arc<RwLock<DefaultRouter>>`
-  (`crates/lr-cli/src/daemon.rs`, `crates/lr-cli/src/api.rs`). Read
-  locks serve API dumps and status; a write lock covers session setup,
-  import, reselection, redistribution and reload. One writer at a time
-  is the ceiling the lock imposes.
+  (`crates/lr-cli/src/daemon.rs`, `crates/lr-cli/src/api.rs`). A write
+  lock covers session setup, import, reselection, redistribution and
+  reload — the decision process itself stays single-writer; the
+  Loc-RIB shard locks are what let the read side stop paying for that
+  ceiling.
+
+The daemon's router events flow through an event bus
+(`lr-router::event_bus::EventBus`, a bounded MPMC broadcast): the
+ticker thread that drains `poll_events` publishes every event, and
+the kernel-mirror thread subscribes, applying `RouteInstalled` /
+`RouteWithdrawn` to the kernel FIB on its own thread — kernel route
+I/O never runs under the router's writer lock. `EventBus::close` is
+the shutdown handshake: after the last publish, the daemon's exit
+path closes the bus and joins the subscriber, so every accepted event
+was applied before the process exits. The BMP egress mirror keeps its
+push shape instead (the router encodes the BMP message at write time
+through the `bmp_sink` closure and the sender thread does the TCP I/O
+— the encode needs the writer's per-session context, and the sink
+itself never blocks the writer).
 
 Hook traits carry `Send + Sync` because the daemon moves the router
 across threads. A hook that needs shared state behind an `Arc` must

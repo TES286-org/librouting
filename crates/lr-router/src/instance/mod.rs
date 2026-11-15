@@ -136,7 +136,12 @@ pub trait RouterInstance {
     /// is one logical drain, so no event is lost. The default no-op
     /// keeps mock implementations source-compatible.
     fn requeue_events(&mut self, _events: Vec<RouterEvent>) {}
-    fn rib_snapshot(&self) -> Vec<&Route>;
+    /// The Loc-RIB best-path snapshot, owned. The multi-threaded RIB
+    /// (issue #101) keeps the Loc-RIB behind per-family shard locks,
+    /// so a snapshot cannot borrow from the router's borrowed
+    /// interior — the routes are cloned out under each family's read
+    /// lock, in `NlriFamily` order.
+    fn rib_snapshot(&self) -> Vec<Route>;
 
     /// Current BGP FSM state name of a session ("Idle", "Connect", …,
     /// "Established"), or `None` for non-BGP / unknown sessions.
@@ -180,9 +185,9 @@ pub trait RouterInstance {
     }
 
     /// Every path of every prefix (the RFC 7911 Add-Path view of the
-    /// Loc-RIB). Defaults to the best-path snapshot for implementors
-    /// without path multiplicity.
-    fn rib_paths_snapshot(&self) -> Vec<&Route> {
+    /// Loc-RIB), owned. Defaults to the best-path snapshot for
+    /// implementors without path multiplicity.
+    fn rib_paths_snapshot(&self) -> Vec<Route> {
         self.rib_snapshot()
     }
 
@@ -496,7 +501,14 @@ pub struct DefaultRouter {
     pre_policy_adj_rib_in: AdjRibIn,
     /// Export bookkeeping (what we advertised to whom).
     adj_rib_out: AdjRibOut,
-    loc_rib: LocRib,
+    /// The Loc-RIB, shared so read-side consumers (the daemon's API
+    /// socket, the metrics endpoint) can read the RIB through the
+    /// per-family shard locks without taking the router's writer
+    /// lock (issue #101, the multi-threaded RIB read path). Writers
+    /// reach it through the same `Arc` — the shard locks serialise
+    /// the per-family write against the reads, and the router's own
+    /// `RwLock` still serialises the decision process itself.
+    loc_rib: std::sync::Arc<LocRib>,
     #[allow(dead_code)]
     rib_mux: RibMux,
     safety: Option<SafetyNet>,
@@ -794,7 +806,7 @@ impl Default for DefaultRouter {
             adj_rib_in: AdjRibIn::new(),
             pre_policy_adj_rib_in: AdjRibIn::new(),
             adj_rib_out: AdjRibOut::new(),
-            loc_rib: LocRib::new(),
+            loc_rib: std::sync::Arc::new(LocRib::new()),
             rib_mux: RibMux::new(),
             safety: None,
             hooks: HookChain::new(),
@@ -1123,11 +1135,7 @@ impl DefaultRouter {
             // of the Adj-RIB-Out). No-op before the session
             // establishes.
             let hooks = std::mem::take(&mut self.hooks);
-            let sets: Vec<(RouteKey, Vec<Route>)> = self
-                .loc_rib
-                .iter_sets()
-                .map(|(k, s)| (k.clone(), s.to_vec()))
-                .collect();
+            let sets: Vec<(RouteKey, Vec<Route>)> = self.loc_rib.iter_sets();
             let mut work: Vec<(RouteKey, Vec<Route>, Vec<u32>)> = Vec::new();
             for (key, ranked) in &sets {
                 let (advertise, withdraw_ids) = self.export_work_for(&hooks, h.0, key, ranked);
@@ -2237,13 +2245,13 @@ impl DefaultRouter {
     fn reflush_summary_only_specifics(&mut self, agg: &lr_core::addr::Prefix) {
         // Collect the affected (key, ranked) pairs first to avoid
         // borrowing self.loc_rib while we mutate it inside
-        // `export_selection`. `iter_sets` returns `(key, &[Route])`
-        // pairs (the ranked path set per key, Add-Path included).
+        // `export_selection`. `iter_sets` returns owned
+        // `(key, ranked set)` pairs (Add-Path included).
         let affected: Vec<(RouteKey, Vec<Route>)> = self
             .loc_rib
             .iter_sets()
+            .into_iter()
             .filter(|(k, _)| agg.contains_prefix(&k.prefix) && k.prefix.prefix_len > agg.prefix_len)
-            .map(|(k, ranked)| (k.clone(), ranked.to_vec()))
             .collect();
         for (key, ranked) in affected {
             self.export_selection(&key, &ranked);
@@ -2492,6 +2500,17 @@ impl DefaultRouter {
     /// Number of routes currently in Loc-RIB.
     pub fn rib_len(&self) -> usize {
         self.loc_rib.len()
+    }
+
+    /// A shared handle to the Loc-RIB (issue #101 — the
+    /// multi-threaded RIB read path). The handle keeps the same RIB
+    /// the router writes: every method on it takes the per-family
+    /// shard locks, so a reader iterating IPv6 never waits for an
+    /// IPv4 writer, and never takes the router's writer lock. The
+    /// daemon hands this handle to the runtime API and the metrics
+    /// endpoint; embedders can share it the same way.
+    pub fn rib_handle(&self) -> std::sync::Arc<LocRib> {
+        std::sync::Arc::clone(&self.loc_rib)
     }
 
     /// Operational summaries of every configured session, ordered by
@@ -3117,7 +3136,7 @@ impl DefaultRouter {
 
     /// Apply a fresh ranking for one prefix to Loc-RIB, events and egress.
     fn apply_selection(&mut self, key: &RouteKey, ranked: Vec<Route>) {
-        let old_best = self.loc_rib.best(key).cloned();
+        let old_best = self.loc_rib.best(key);
         if ranked.is_empty() {
             self.loc_rib.uninstall(key);
             self.pending_events
@@ -3378,6 +3397,7 @@ impl DefaultRouter {
         let snapshot: Vec<Vec<Route>> = self
             .loc_rib
             .iter_sets()
+            .into_iter()
             .filter(|(key, _)| key.family == family)
             .map(|(_key, set)| {
                 if add_path_tx {
@@ -3631,19 +3651,14 @@ impl DefaultRouter {
                     }
                 }
             } else {
-                snapshot.extend(
-                    self.loc_rib
-                        .iter_best()
-                        .filter(|route| {
-                            // Same two gates as the Add-Path branch:
-                            // family + split horizon, and the
-                            // protocol-direct exclusion (see above).
-                            route.key.family == family
-                                && route.origin.peer != h
-                                && route.protocol == Protocol::Bgp
-                        })
-                        .cloned(),
-                );
+                snapshot.extend(self.loc_rib.iter_best().filter(|route| {
+                    // Same two gates as the Add-Path branch:
+                    // family + split horizon, and the
+                    // protocol-direct exclusion (see above).
+                    route.key.family == family
+                        && route.origin.peer != h
+                        && route.protocol == Protocol::Bgp
+                }));
             }
         }
         let hooks = std::mem::take(&mut self.hooks);
@@ -5378,11 +5393,11 @@ impl RouterInstance for DefaultRouter {
         self.pending_events = events;
     }
 
-    fn rib_snapshot(&self) -> Vec<&Route> {
+    fn rib_snapshot(&self) -> Vec<Route> {
         self.loc_rib.iter_best().collect()
     }
 
-    fn rib_paths_snapshot(&self) -> Vec<&Route> {
+    fn rib_paths_snapshot(&self) -> Vec<Route> {
         self.loc_rib.iter_paths().collect()
     }
 
@@ -5702,7 +5717,7 @@ impl DefaultRouter {
     pub fn add_redistribution_pipe(&mut self, pipe: crate::redistribution::RedistributionPipe) {
         self.pipes.push(pipe);
         // Scan existing Loc-RIB for routes that match the new pipe.
-        let routes: Vec<Route> = self.loc_rib.iter_best().cloned().collect();
+        let routes: Vec<Route> = self.loc_rib.iter_best().collect();
         for route in routes {
             self.redistribute_route(&route);
         }

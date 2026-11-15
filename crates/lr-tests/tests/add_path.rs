@@ -103,7 +103,6 @@ fn add_path_carries_two_paths_to_downstream() {
         .rib_paths_snapshot()
         .into_iter()
         .filter(|r| r.key.prefix == prefix)
-        .cloned()
         .collect();
     assert_eq!(b_paths.len(), 2, "B must keep both ranked paths");
     assert_eq!(
@@ -129,7 +128,6 @@ fn add_path_carries_two_paths_to_downstream() {
         .rib_paths_snapshot()
         .into_iter()
         .filter(|r| r.key.prefix == prefix)
-        .cloned()
         .collect();
     assert_eq!(c_paths.len(), 2, "C must receive both paths");
     let ids: std::collections::BTreeSet<u32> = c_paths.iter().map(|r| r.path_id).collect();
@@ -217,7 +215,6 @@ fn add_path_withdraw_leaves_surviving_path() {
         .rib_paths_snapshot()
         .into_iter()
         .filter(|r| r.key.prefix == prefix)
-        .cloned()
         .collect();
     assert_eq!(c_remaining.len(), 1, "exactly one path remains");
     // The survivor is the A1-originated path (next-hop 192.0.2.1 after

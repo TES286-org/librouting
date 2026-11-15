@@ -525,6 +525,14 @@ impl OspfV3AuthState {
 
 struct Ospf3Daemon {
     router: Arc<RwLock<DefaultRouter>>,
+    /// The daemon's router-event bus (issue #101 — the event-bus
+    /// wiring): the drained `poll_events` batches publish here and
+    /// the kernel-mirror thread subscribes (spawned with the ticker),
+    /// applying the route events to the kernel FIB off the router
+    /// lock. The ticker is the other publisher for tick-generated
+    /// events — each drained event is published exactly once, by
+    /// whichever thread drained it.
+    event_bus: lr_router::event_bus::EventBus,
     interfaces: Vec<Ospf3Interface>,
     neighbors: BTreeMap<(u32, u32), Neighbor>,
     /// Router-LSA re-origination due times (area → ms), MinLSArrival
@@ -768,8 +776,16 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             router
         }
     };
+    // The event bus the daemon's drained events publish to (issue #101
+    // — the wiring). Standalone: created here and shared with the
+    // Runtime below; embedded: the supervisor's runtime's bus.
+    let event_bus = match &host {
+        Some(h) => h.runtime.event_bus.clone(),
+        None => lr_router::event_bus::EventBus::new(),
+    };
     let mut daemon = Ospf3Daemon {
         router,
+        event_bus: event_bus.clone(),
         interfaces,
         neighbors: BTreeMap::new(),
         pending_reorig: BTreeMap::new(),
@@ -989,6 +1005,8 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             // queue is the [[static.route]] table.
             let shutdown = crate::build_shutdown(cfg, &daemon.router);
             Arc::new(crate::Runtime {
+                event_bus: event_bus.clone(),
+                kernel_mirror: std::sync::OnceLock::new(),
                 reload: Arc::new(|| {
                     // OSPFv3 reload is not wired yet (same shape as
                     // the v2 standalone daemon: interface set changes
@@ -1021,6 +1039,10 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         }
     };
     let running = Arc::clone(&runtime.running);
+    // Standalone ticker handle — joined at shutdown so the final
+    // drain's withdrawals were published before the bus closes; the
+    // supervisor owns the shared ticker in embedded mode.
+    let mut ticker: Option<std::thread::JoinHandle<()>> = None;
     match &host {
         None => {
             // Privileged work is done: every interface's raw OSPFv3
@@ -1049,13 +1071,16 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             // The BGP-LS driver is not active on an OSPFv3-only daemon
             // (no BGP session to push to); the multi-protocol supervisor
             // spawns the ticker with the driver when both `bgp` and
-            // `ospf` are in the protocol set.
-            crate::spawn_ticker(
+            // `ospf` are in the protocol set. The ticker publishes the
+            // events its own tick generates; the kernel-mirror thread
+            // spawned with it applies the route events off the router
+            // lock.
+            ticker = Some(crate::spawn_ticker(
                 &runtime,
                 cfg.install_kernel,
                 Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 None,
-            );
+            ));
         }
         Some(h) => {
             // Embedded: every interface's raw socket is bound; report
@@ -1129,6 +1154,15 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             Component::Ospfv3,
             "ospf3 graceful shutdown complete (neighbours asked to retain LSAs for {period}s)"
         );
+        // Graceful exit keeps the LSAs (the helpers' retention) but
+        // still owns the bus lifecycle: the ticker's final drain
+        // published the shutdown withdrawals — wait for the kernel
+        // mirror to apply them before the process exits. Standalone
+        // only (the supervisor owns the shared bus in embedded mode).
+        if let Some(t) = ticker.take() {
+            let _ = t.join();
+            runtime.shutdown_event_bus();
+        }
         return ExitCode::SUCCESS;
     }
     {
@@ -1140,9 +1174,20 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         for anchor in daemon.anchors.values() {
             router.close_session(*anchor);
         }
-        for ev in router.poll_events() {
-            crate::daemon_ospf::log_event(&ev);
-        }
+        // Close sessions emit RouteWithdrawn events — publish them on
+        // the bus so the kernel-mirror thread removes the routes on
+        // shutdown, not leaving them dangling until the netns is torn
+        // down.
+        let events = router.poll_events();
+        drop(router);
+        crate::publish_and_log(&daemon.event_bus, events);
+    }
+    // Standalone: the joined ticker guarantees its final drain was
+    // published; the bus handshake waits for the kernel mirror to
+    // apply the shutdown withdrawals before the process exits.
+    if let Some(t) = ticker.take() {
+        let _ = t.join();
+        runtime.shutdown_event_bus();
     }
     log_info!(Component::Daemon, "ospf3 shutdown complete");
     ExitCode::SUCCESS
@@ -2074,9 +2119,13 @@ impl Ospf3Daemon {
                 let router_arc = Arc::clone(&self.router);
                 let mut router = router_arc.write().unwrap();
                 router.close_session(n.handle);
-                for ev in router.poll_events() {
-                    crate::daemon_ospf::log_event(&ev);
-                }
+                // Publish the drained batch (log + bus): the
+                // kernel-mirror thread applies the withdrawals — a
+                // merely-logged drain would leave the kernel route
+                // installed forever (the pre-wiring gap).
+                let events = router.poll_events();
+                drop(router);
+                crate::publish_and_log(&self.event_bus, events);
             }
             for iface in self.interfaces.iter_mut() {
                 if iface.area == area {

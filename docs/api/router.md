@@ -105,13 +105,28 @@ for s in r.session_summaries() {
     println!("#{} {} state={} established={}", s.handle.0, s.kind, s.state, s.established);
 }
 
-let loc_rib: Vec<&lr_core::rib::Route> = r.rib_snapshot();
-let paths: Vec<&lr_core::rib::Route> = r.rib_paths_snapshot(); // Add-Path
+let loc_rib: Vec<lr_core::rib::Route> = r.rib_snapshot();
+let paths: Vec<lr_core::rib::Route> = r.rib_paths_snapshot(); // Add-Path
 ```
 
 `session_summaries` is the data plane behind the daemon's `sessions`
 command and the FFI's `lr_router_sessions_dump`; `rib_snapshot` backs
-the route dumps. Both are read-only views — the router keeps ownership.
+the route dumps. Both are read-only views — the snapshots are owned
+copies cloned out of the Loc-RIB's per-family shard locks, so a caller
+never holds a borrow of router internals. For the same reason the
+router hands out the RIB itself:
+
+```rust
+let rib: std::sync::Arc<lr_rib::LocRib> = r.rib_handle();
+// Reads take the per-family shard locks, never the router's RwLock.
+for route in rib.iter_best() {
+    // …
+}
+```
+
+Embedders running the RIB next to a busy writer share the handle the
+same way the daemon's runtime API and metrics endpoint do — an IPv6
+walk never waits for an IPv4 writer.
 
 ## Configuration
 

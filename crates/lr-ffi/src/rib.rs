@@ -494,7 +494,7 @@ pub unsafe extern "C" fn lr_loc_rib_best(
                     0
                 }
                 Some(route) => {
-                    unsafe { *out = clone_route_handle(route) }
+                    unsafe { *out = clone_route_handle(&route) }
                     0
                 }
             }
@@ -1177,7 +1177,7 @@ pub unsafe extern "C" fn lr_loc_rib_iter_best(
             let mut count: i64 = 0;
             for route in rib.iter_best() {
                 // SAFETY: the caller's cb must not free the handle.
-                let h: lr_route_t = route as *const lr_core::rib::Route as *mut OpaqueRoute;
+                let h: lr_route_t = &route as *const lr_core::rib::Route as *mut OpaqueRoute;
                 unsafe { cb_fn(h, user) };
                 count += 1;
             }
@@ -1260,7 +1260,7 @@ pub unsafe extern "C" fn lr_loc_rib_iter_paths(
             };
             let mut count: i64 = 0;
             for route in rib.iter_paths() {
-                let h: lr_route_t = route as *const Route as *mut OpaqueRoute;
+                let h: lr_route_t = &route as *const Route as *mut OpaqueRoute;
                 unsafe { cb_fn(h, user) };
                 count += 1;
             }
