@@ -55,7 +55,10 @@ const WATCHER_INTERVAL: Duration = Duration::from_millis(100);
 /// caller: the graceful-restart shutdown flood reuses it after the
 /// loop.
 pub(super) fn run_engine_loop(
-    fds: Vec<std::os::fd::RawFd>,
+    // Raw socket fds as plain `i32` (unix `RawFd`'s own type): the
+    // signature must parse on non-unix targets too, where the loop
+    // runs its poll-and-sleep fallback and the vec is empty.
+    fds: Vec<i32>,
     runtime: &crate::Runtime,
     running: &Arc<AtomicBool>,
     start: &Instant,
@@ -107,7 +110,7 @@ struct MioEngineLoop {
 impl MioEngineLoop {
     /// Build and register. `None` falls the caller back to the
     /// poll-and-sleep loop.
-    fn new(fds: Vec<std::os::fd::RawFd>, running: &Arc<AtomicBool>) -> Option<Self> {
+    fn new(fds: Vec<i32>, running: &Arc<AtomicBool>) -> Option<Self> {
         use mio::unix::SourceFd;
 
         let poll = mio::Poll::new().ok()?;

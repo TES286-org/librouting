@@ -230,8 +230,26 @@ impl Drop for Daemon {
 }
 
 /// One round trip on the runtime API socket.
+///
+/// The connect tolerates the startup window: the socket file may not
+/// exist yet on the first ask — the log line the caller waited on
+/// (e.g. the ROA loader's "loaded N entries") can precede the main
+/// thread's bind on a slow runner (coverage under ptrace is the
+/// reproducible case). A bounded retry absorbs the window without
+/// masking a daemon that never binds (the deadline panic names it).
 fn api_ask(socket: &std::path::Path, cmd: &str) -> String {
-    let mut conn = UnixStream::connect(socket).expect("connect to api socket");
+    let bind_deadline = Instant::now() + Duration::from_secs(10);
+    let mut conn = loop {
+        match UnixStream::connect(socket) {
+            Ok(c) => break c,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::NotFound && Instant::now() < bind_deadline =>
+            {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(ref e) => panic!("connect to api socket: {e}"),
+        }
+    };
     conn.write_all(format!("{cmd}\n").as_bytes()).unwrap();
     conn.flush().unwrap();
     conn.set_nonblocking(true).unwrap();

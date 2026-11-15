@@ -41,6 +41,7 @@ use mio::net::TcpListener as MioTcpListener;
 #[cfg(unix)]
 use mio::net::UnixListener as MioUnixListener;
 use mio::{Events, Interest, Poll, Registry, Token, Waker};
+use socket2::SockRef;
 
 /// Reserved token the shutdown waker fires.
 const WAKER_TOKEN: Token = Token(usize::MAX);
@@ -82,7 +83,19 @@ impl AcceptSource for MioTcpListener {
 
     fn accept_std(&mut self) -> io::Result<Option<Self::StdStream>> {
         match self.accept() {
-            Ok((stream, _)) => Ok(Some(std::net::TcpStream::from(stream))),
+            Ok((stream, _)) => {
+                // mio's accept arms the socket non-blocking
+                // (`accept4(SOCK_NONBLOCK)` where available); the
+                // connection threads serve a blocking shape with
+                // read timeouts, so clear the flag through the
+                // borrowed-socket reference before the hand-off. A
+                // left-over non-blocking socket reads as `WouldBlock`
+                // the moment the request line has not landed yet —
+                // the connection thread would close without a
+                // response and the client sees a reset.
+                let _ = SockRef::from(&stream).set_nonblocking(false);
+                Ok(Some(std::net::TcpStream::from(stream)))
+            }
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
             Err(e) => Err(e),
         }
@@ -95,7 +108,12 @@ impl AcceptSource for MioUnixListener {
 
     fn accept_std(&mut self) -> io::Result<Option<Self::StdStream>> {
         match self.accept() {
-            Ok((stream, _)) => Ok(Some(std::os::unix::net::UnixStream::from(stream))),
+            Ok((stream, _)) => {
+                // Same as the TCP side: clear mio's non-blocking flag
+                // before the blocking-shape hand-off.
+                let _ = SockRef::from(&stream).set_nonblocking(false);
+                Ok(Some(std::os::unix::net::UnixStream::from(stream)))
+            }
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
             Err(e) => Err(e),
         }

@@ -1008,11 +1008,16 @@ pub(super) fn run_ospf_daemon(
     // event loop — `ospf_engine_loop`; a readable event on an
     // interface socket wakes the pump immediately instead of up to
     // the old 50 ms sleep later). ----
-    let fds: Vec<std::os::fd::RawFd> = daemon
+    #[cfg(target_family = "unix")]
+    let fds: Vec<i32> = daemon
         .interfaces
         .iter()
         .map(|i| i.transport.raw_fd())
         .collect();
+    // Non-unix targets run the loop's poll-and-sleep fallback; no fd
+    // registration exists there.
+    #[cfg(not(target_family = "unix"))]
+    let fds: Vec<i32> = Vec::new();
     {
         let mut pump_pass = |now_ms: u64| daemon.pump(&mut recv_buf, now_ms);
         crate::ospf_engine_loop::run_engine_loop(fds, &runtime, &running, &start, &mut pump_pass);
