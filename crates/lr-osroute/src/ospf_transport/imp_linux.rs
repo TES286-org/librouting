@@ -692,6 +692,14 @@ impl OspfV2Transport {
         self.ifindex
     }
 
+    /// The raw socket's file descriptor — for event-loop registration
+    /// (`mio::unix::SourceFd` borrows it; the transport keeps
+    /// ownership, so the registration is read-only on the socket
+    /// side). The same shape `BfdRxSocket::raw_fd` has.
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+
     /// The interface MTU (SIOCGIFMTU) — DBD packets must advertise it
     /// (RFC 2328 §10.6; peers reject a larger value).
     pub fn mtu(&self) -> Result<u16, OspfTransportError> {
@@ -994,6 +1002,13 @@ impl OspfV6Transport {
     /// OSPFv3 Interface ID by the daemon's convention (FRR parity).
     pub fn ifindex(&self) -> u32 {
         self.ifindex
+    }
+
+    /// The raw socket's file descriptor — for event-loop registration
+    /// (`mio::unix::SourceFd` borrows it; the transport keeps
+    /// ownership). See `OspfV2Transport::raw_fd`.
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
     }
 
     /// The interface MTU (SIOCGIFMTU) — DBD packets must advertise it

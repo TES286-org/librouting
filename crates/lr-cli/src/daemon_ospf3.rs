@@ -132,9 +132,6 @@ use crate::daemon_ospf::{
     grace_sequence_base, GRACE_FLOOD_INTERVAL_MS, GRACE_FLOOD_REPEATS, GRACE_PUMP_SLICE_MS,
 };
 
-/// Loop cadence: also the dead-timer / hello-timer granularity.
-const LOOP_INTERVAL_MS: u64 = 50;
-
 /// Delay before an adjacency-driven Router-LSA re-origination:
 /// receivers throttle new LSA instances by MinLSArrival (RFC 2328
 /// §14, 1 s) — mirrored from the v2 daemon.
@@ -1094,14 +1091,18 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         "ospf3 main loop started ({} interface(s))",
         daemon.interfaces.len()
     );
-    while running.load(std::sync::atomic::Ordering::Relaxed) {
-        crate::dispatch_signals(&runtime);
-        if !running.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
-        let now_ms = start.elapsed().as_millis() as u64;
-        daemon.pump(&mut recv_buf, now_ms);
-        std::thread::sleep(Duration::from_millis(LOOP_INTERVAL_MS));
+    // ---- Main loop (ROADMAP async-I/O: the engine runs on a mio
+    // event loop — `ospf_engine_loop`; a readable event on an
+    // interface socket wakes the pump immediately instead of up to
+    // the old 50 ms sleep later). ----
+    let fds: Vec<std::os::fd::RawFd> = daemon
+        .interfaces
+        .iter()
+        .map(|i| i.transport.raw_fd())
+        .collect();
+    {
+        let mut pump_pass = |now_ms: u64| daemon.pump(&mut recv_buf, now_ms);
+        crate::ospf_engine_loop::run_engine_loop(fds, &runtime, &running, &start, &mut pump_pass);
     }
     // Graceful shutdown. With graceful restart enabled (RFC 5187 §2.1,
     // inheriting RFC 3623 §2.1) the teardown is replaced: originate a

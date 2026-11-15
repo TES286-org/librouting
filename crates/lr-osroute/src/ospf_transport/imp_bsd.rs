@@ -409,6 +409,13 @@ impl OspfV2Transport {
         0
     }
 
+    /// No socket exists behind the stub — the event loop falls back to
+    /// its poll-and-sleep shape when registration fails (it never gets
+    /// this far: `bind` refuses first).
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        -1
+    }
+
     pub fn mtu(&self) -> Result<u16, super::OspfTransportError> {
         Err(super::OspfTransportError::Unsupported(
             "OSPF raw sockets exist only on Linux in librouting",
@@ -462,6 +469,11 @@ impl OspfV6Transport {
 
     pub fn ifindex(&self) -> u32 {
         0
+    }
+
+    /// No socket exists behind the stub — see the v2 placeholder's.
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        -1
     }
 
     pub fn mtu(&self) -> Result<u16, super::OspfTransportError> {

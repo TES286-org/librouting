@@ -188,6 +188,7 @@ mod daemon_policy;
 mod daemon_roa_loader;
 mod daemon_rpki;
 mod metrics;
+mod ospf_engine_loop;
 mod peer_health_view;
 mod pipe_name;
 mod privdrop;

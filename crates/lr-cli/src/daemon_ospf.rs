@@ -59,7 +59,7 @@ use crate::Component;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -99,9 +99,6 @@ use crate::daemon_multi::{EngineHost, EngineReport};
 /// when `stub_metric` is not configured (matches the interface cost
 /// default).
 const DEFAULT_STUB_METRIC: u32 = 10;
-
-/// Loop cadence: also the dead-timer / hello-timer granularity.
-const LOOP_INTERVAL_MS: u64 = 50;
 
 /// Cached `LR_OSPF_DEBUG` gate for the wire trace (checked per packet;
 /// a raw var_os syscall each time showed up in profiling).
@@ -1007,14 +1004,18 @@ pub(super) fn run_ospf_daemon(
         "ospf main loop started ({} interface(s))",
         daemon.interfaces.len()
     );
-    while running.load(Ordering::Relaxed) {
-        crate::dispatch_signals(&runtime);
-        if !running.load(Ordering::Relaxed) {
-            break;
-        }
-        let now_ms = start.elapsed().as_millis() as u64;
-        daemon.pump(&mut recv_buf, now_ms);
-        std::thread::sleep(Duration::from_millis(LOOP_INTERVAL_MS));
+    // ---- Main loop (ROADMAP async-I/O: the engine runs on a mio
+    // event loop — `ospf_engine_loop`; a readable event on an
+    // interface socket wakes the pump immediately instead of up to
+    // the old 50 ms sleep later). ----
+    let fds: Vec<std::os::fd::RawFd> = daemon
+        .interfaces
+        .iter()
+        .map(|i| i.transport.raw_fd())
+        .collect();
+    {
+        let mut pump_pass = |now_ms: u64| daemon.pump(&mut recv_buf, now_ms);
+        crate::ospf_engine_loop::run_engine_loop(fds, &runtime, &running, &start, &mut pump_pass);
     }
     // Graceful shutdown. With graceful restart enabled (RFC 3623 §2.1)
     // the teardown is replaced: originate a Grace-LSA per interface

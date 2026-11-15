@@ -220,15 +220,22 @@ wait_log "$OUT/r1b.log" "route installed 10.99.3.0/24" 25
 echo "   routes: OK (no route was ever withdrawn through the restart)"
 
 echo "== phase 2: grace-period timeout (RFC 3623 3.2 (2)) =="
-kill -TERM "$DAEMON_A" 2>/dev/null || true
-DAEMON_A=""
 # r1 (grace 15 s) asks for retention again and never returns: after
 # the grace period r2 must exit helper mode on the TIMEOUT (the
 # phase-1 flush exit must not satisfy this — count the entries).
+# Sample the count BEFORE the kill: the event loop picks the
+# Grace-LSA up the moment it lands, so a post-kill sample can already
+# include the new entry and miss the re-entry entirely.
 entries_before=$(grep -cF "helper mode entered" "$OUT/r2.log" || true)
-sleep 1
-wait_log "$OUT/r2.log" "helper mode entered" 10
-entries_after=$(grep -cF "helper mode entered" "$OUT/r2.log" || true)
+kill -TERM "$DAEMON_A" 2>/dev/null || true
+DAEMON_A=""
+# Wait for a NEW entry (the phase-1 line already matches the string);
+# the graceful flood's first round lands within the signal latency.
+for _ in $(seq 1 100); do
+    entries_after=$(grep -cF "helper mode entered" "$OUT/r2.log" || true)
+    [ "$entries_after" -gt "$entries_before" ] && break
+    sleep 0.1
+done
 if [ "$entries_after" -le "$entries_before" ]; then
     echo "FAIL: r2 did not re-enter helper mode for the second shutdown"
     exit 1
