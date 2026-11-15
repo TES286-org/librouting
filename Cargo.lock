@@ -834,6 +834,7 @@ dependencies = [
 name = "lr-router"
 version = "1.8.0"
 dependencies = [
+ "criterion",
  "lr-babel",
  "lr-bgp",
  "lr-bmp",
