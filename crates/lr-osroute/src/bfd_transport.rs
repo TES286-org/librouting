@@ -436,6 +436,34 @@ impl BfdRxSocket {
         self.sock.local_addr().map_err(|_| os_error("getsockname"))
     }
 
+    /// Switch the underlying socket between blocking and non-blocking
+    /// mode. An embedder driving the receive path from an event loop
+    /// (mio / epoll / kqueue) calls `set_nonblocking(true)` before
+    /// registering the socket, so a readable event followed by
+    /// [`recv_from`](Self::recv_from) drains the datagram queue without
+    /// ever blocking the loop thread. The default `UdpSocket` is
+    /// blocking; callers that keep the original poll-and-sleep loop
+    /// need not call this.
+    pub fn set_nonblocking(&self, on: bool) -> Result<(), BfdTransportError> {
+        self.sock
+            .set_nonblocking(on)
+            .map_err(|_| os_error("set_nonblocking"))
+    }
+
+    /// The raw file descriptor of the underlying socket, for
+    /// registration with a unix event loop (`mio::unix::SourceFd`,
+    /// manual `epoll_ctl`, etc.). The descriptor is borrowed — the
+    /// `BfdRxSocket` retains ownership — so the caller must not close
+    /// it. Available on unix only; Windows embedders keep the
+    /// poll-and-sleep loop (the Windows BFD transport does not carry
+    /// TTL ancillary data, so a future slice can move the socket into
+    /// `mio::net::UdpSocket` directly once that path lands).
+    #[cfg(all(feature = "std", target_family = "unix"))]
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.sock.as_raw_fd()
+    }
+
     /// Non-blocking receive of one BFD Control datagram. Returns
     /// `None` when nothing is pending. In single-hop mode a datagram
     /// whose received TTL is known and below 255 is discarded here
