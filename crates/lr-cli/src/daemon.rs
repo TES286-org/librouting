@@ -2414,148 +2414,26 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         }
     }
 
-    // ---- Main thread: run the accept loop, or idle until shutdown. ----
+    // ---- Main thread: supervise; the reactor owns every session
+    // and, when configured, the listener. ----
     if let Some(listener) = listener {
-        let mut poll_idle = Duration::from_millis(100);
-        loop {
-            dispatch_signals(&runtime);
-            if !running.load(Ordering::Relaxed) {
-                break;
-            }
-            match listener.accept() {
-                Ok((s, peer_sockaddr)) => {
-                    let peer = peer_sockaddr.to_string();
-                    log_info!(Component::Bgp, "inbound connection from {peer}");
-                    let _ = s.set_nodelay(true);
-                    let entry = if strict_inbound {
-                        match match_inbound_peer(&entries, peer_sockaddr.ip()) {
-                            Ok(e) => e,
-                            Err(reason) => {
-                                log_warn!(
-                                    Component::Bgp,
-                                    "inbound connection from {peer} rejected: {reason}"
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        // Historical accept-any: session #1.
-                        &entries[0]
-                    };
-                    // FRR `neighbor X shutdown` / BIRD `disabled`:
-                    // `match_inbound_peer` already proved this peer is
-                    // configured for inbound (its `address`/`remote`
-                    // matches the source IP). When the peer is admin-
-                    // down the listener drops the inbound TCP without
-                    // a NOTIFICATION — the operator has explicitly
-                    // asked the daemon not to talk to this peer, so
-                    // half-opening a session only to send a Cease/2
-                    // would defeat the purpose. RFC 4486 §3 says the
-                    // shutdown NOTIFICATION is for an Established
-                    // session being torn down, not for an inbound SYN
-                    // arriving while the peer is already configured
-                    // down.
-                    if entry.admin_down {
-                        log_warn!(
-                            Component::Bgp,
-                            "inbound connection from {peer} rejected: \
-                             peer {} admin-down (shutdown = true)",
-                            entry.label()
-                        );
-                        continue;
-                    }
-                    // RFC 4271 §6.8: a bidirectional peer's inbound
-                    // connections run on the challenger session so they
-                    // can coexist with the outbound transport while the
-                    // router resolves the collision. For bidirectional
-                    // peers (those with a `handle_in`), the `busy` flag
-                    // MUST NOT block the inbound challenger: the previous
-                    // inbound may still be tearing down (collision loser
-                    // dispatch, TCP RST, hold-time sweep) when the remote
-                    // retries, and dropping the new SYN prevents the
-                    // collision resolution from ever converging — both
-                    // sessions die and the outbound connector hammers the
-                    // peer in a 90-second reconnect loop (the production
-                    // "BGP self-connect" symptom). The router's
-                    // `resolve_connection_collision` handles duplicate
-                    // inbounds: an Established sibling closes the new
-                    // challenger immediately per §6.8.
-                    let is_bidirectional = entry.handle_in.is_some();
-                    if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
-                        log_warn!(
-                            Component::Bgp,
-                            "peer {} already has an active session; \
-                             dropping inbound connection from {}",
-                            entry.label(),
-                            peer
-                        );
-                        continue;
-                    }
-                    let handle = entry.handle_in.unwrap_or(entry.handle);
-                    let bfd = entry.bfd.clone();
-                    let busy = Arc::clone(&entry.busy);
-                    let live = Arc::clone(&live_sessions);
-                    live.fetch_add(1, Ordering::Relaxed);
-                    // Submit the accepted socket to the reactor — the
-                    // event loop owns the session pump from here (the
-                    // old model spawned a thread per socket here; see
-                    // `bgp_reactor.rs`). The completion callback runs
-                    // exactly once when the session ends and owns the
-                    // bookkeeping the session thread did: the error
-                    // log, the inbound busy guard for
-                    // non-bidirectional peers, the live-session
-                    // counter the shutdown grace window waits on.
-                    if let Err(e) = reactor.submit(
-                        s,
-                        handle,
-                        bfd,
-                        Box::new(move |end| {
-                            if end.is_err_path() {
-                                log_error!(
-                                    Component::Bgp,
-                                    "session #{} ended: {}",
-                                    handle.0,
-                                    end.message()
-                                );
-                            }
-                            if !is_bidirectional {
-                                busy.store(false, Ordering::Relaxed);
-                            }
-                            live.fetch_sub(1, Ordering::Relaxed);
-                        }),
-                    ) {
-                        // Submission failed — the reactor thread is
-                        // gone (the daemon is exiting). Undo the
-                        // live-session guard exactly like the old
-                        // thread-spawn failure path.
-                        log_error!(Component::Bgp, "session submit: {e}");
-                        if !is_bidirectional {
-                            entry.busy.store(false, Ordering::Relaxed);
-                        }
-                        live_sessions.fetch_sub(1, Ordering::Relaxed);
-                    }
-                    poll_idle = Duration::from_millis(1);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(poll_idle);
-                    poll_idle = (poll_idle * 2).min(Duration::from_millis(100));
-                }
-                Err(e) => {
-                    log_error!(Component::Bgp, "accept failed: {e}");
-                    thread::sleep(Duration::from_millis(100));
-                }
-            }
+        // The inbound gate carries the accept policy the main
+        // thread's accept loop used to run, on the reactor's thread:
+        // the same checks, the same logs, the same submission
+        // completion (see `build_inbound_gate`).
+        let gate = build_inbound_gate(entries, strict_inbound, Arc::clone(&live_sessions));
+        if let Err(e) = reactor.attach_listener(listener, gate) {
+            // The reactor thread is gone — the daemon is exiting
+            // anyway (the connectors' completions see the same).
+            log_error!(Component::Bgp, "listener attach: {e}");
         }
-    } else if entries.iter().any(|e| e.spec.is_outbound()) {
-        // Connectors own the I/O; the main thread just supervises.
-        wait_for_shutdown(&runtime);
-    } else {
+    } else if !entries.iter().any(|e| e.spec.is_outbound()) {
         log_info!(
             Component::Daemon,
             "no --peer/--listen given; idling (tick loop only)"
         );
-        wait_for_shutdown(&runtime);
     }
+    wait_for_shutdown(&runtime);
 
     // Give live session threads a bounded grace period to flush their
     // close NOTIFICATIONs (RFC 4271 §6.4) before the process exits.
@@ -3198,6 +3076,118 @@ fn match_inbound_peer(entries: &[PeerEntry], src: std::net::IpAddr) -> Result<&P
         }
     }
     found.ok_or_else(|| format!("no configured peer matches {}", src))
+}
+
+/// Build the inbound gate the BGP reactor runs per accepted
+/// connection (`BgpReactor::attach_listener`): the accept policy the
+/// main thread's accept loop used to run — source-address peer match,
+/// admin-down refusal, the busy guard, the RFC 4271 §6.8 challenger
+/// rules — ending in the session the reactor registers. The reactor
+/// owns the transport (the accept queue, TCP_NODELAY); the gate owns
+/// the policy, so the decisions and their logs are unchanged from the
+/// main-thread loop.
+fn build_inbound_gate(
+    entries: Vec<PeerEntry>,
+    strict_inbound: bool,
+    live_sessions: Arc<AtomicUsize>,
+) -> bgp_reactor::InboundGate {
+    Box::new(move |peer_sockaddr: &std::net::SocketAddr| {
+        let peer = peer_sockaddr.to_string();
+        log_info!(Component::Bgp, "inbound connection from {peer}");
+        let entry = if strict_inbound {
+            match match_inbound_peer(&entries, peer_sockaddr.ip()) {
+                Ok(e) => e,
+                Err(reason) => {
+                    log_warn!(
+                        Component::Bgp,
+                        "inbound connection from {peer} rejected: {reason}"
+                    );
+                    return bgp_reactor::Inbound::Rejected;
+                }
+            }
+        } else {
+            // Historical accept-any: session #1.
+            &entries[0]
+        };
+        // FRR `neighbor X shutdown` / BIRD `disabled`:
+        // `match_inbound_peer` already proved this peer is
+        // configured for inbound (its `address`/`remote`
+        // matches the source IP). When the peer is admin-
+        // down the listener drops the inbound TCP without
+        // a NOTIFICATION — the operator has explicitly
+        // asked the daemon not to talk to this peer, so
+        // half-opening a session only to send a Cease/2
+        // would defeat the purpose. RFC 4486 §3 says the
+        // shutdown NOTIFICATION is for an Established
+        // session being torn down, not for an inbound SYN
+        // arriving while the peer is already configured
+        // down.
+        if entry.admin_down {
+            log_warn!(
+                Component::Bgp,
+                "inbound connection from {peer} rejected: \
+                 peer {} admin-down (shutdown = true)",
+                entry.label()
+            );
+            return bgp_reactor::Inbound::Rejected;
+        }
+        // RFC 4271 §6.8: a bidirectional peer's inbound
+        // connections run on the challenger session so they
+        // can coexist with the outbound transport while the
+        // router resolves the collision. For bidirectional
+        // peers (those with a `handle_in`), the `busy` flag
+        // MUST NOT block the inbound challenger: the previous
+        // inbound may still be tearing down (collision loser
+        // dispatch, TCP RST, hold-time sweep) when the remote
+        // retries, and dropping the new SYN prevents the
+        // collision resolution from ever converging — both
+        // sessions die and the outbound connector hammers the
+        // peer in a 90-second reconnect loop (the production
+        // "BGP self-connect" symptom). The router's
+        // `resolve_connection_collision` handles duplicate
+        // inbounds: an Established sibling closes the new
+        // challenger immediately per §6.8.
+        let is_bidirectional = entry.handle_in.is_some();
+        if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
+            log_warn!(
+                Component::Bgp,
+                "peer {} already has an active session; \
+                 dropping inbound connection from {}",
+                entry.label(),
+                peer
+            );
+            return bgp_reactor::Inbound::Rejected;
+        }
+        let handle = entry.handle_in.unwrap_or(entry.handle);
+        let bfd = entry.bfd.clone();
+        let busy = Arc::clone(&entry.busy);
+        let live = Arc::clone(&live_sessions);
+        live.fetch_add(1, Ordering::Relaxed);
+        // The session runs on the reactor (the event loop owns the
+        // pump from here). The completion callback runs exactly once
+        // when the session ends and owns the bookkeeping the accept
+        // loop did: the error log, the inbound busy guard for
+        // non-bidirectional peers, the live-session counter the
+        // shutdown grace window waits on.
+        bgp_reactor::Inbound::Session {
+            handle,
+            bfd,
+            on_end: Box::new(move |end| {
+                if end.is_err_path() {
+                    log_error!(
+                        Component::Bgp,
+                        "session #{} ended: {}",
+                        handle.0,
+                        end.message()
+                    );
+                }
+                if !is_bidirectional {
+                    busy.store(false, Ordering::Relaxed);
+                }
+                live.fetch_sub(1, Ordering::Relaxed);
+            }),
+        }
+    })
 }
 
 /// The IP an inbound connection from this peer is expected to carry:
