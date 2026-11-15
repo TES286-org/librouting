@@ -81,7 +81,10 @@ unshare -n sleep 180 &
 R2=$!
 cleanup() {
     kill "${LR_PID:-}" "${LR_PID2:-}" 2>/dev/null || true
-    kill "$(cat "$OUT/bird.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+    # Never `kill 0` when the pid file is missing: pid 0 signals the
+    # whole process group — the script kills itself mid-trap.
+    bird_pid=$(cat "$OUT/bird.pid" 2>/dev/null || true)
+    [ -n "$bird_pid" ] && kill "$bird_pid" 2>/dev/null || true
     kill "$R1" "$R2" 2>/dev/null || true
 }
 trap cleanup EXIT
