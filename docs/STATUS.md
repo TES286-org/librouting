@@ -140,7 +140,8 @@ files of the `lr-cli` binary crate, which is not a library.
 
 | Capability | Status | Module |
 | --- | --- | --- |
-| Adj-RIB-In, Adj-RIB-Out and Loc-RIB | yes | `lr-rib::adj_rib_in`, `lr-rib::adj_rib_out`, `lr-rib::loc_rib` |
+| Adj-RIB-In, Adj-RIB-Out and Loc-RIB | yes | `lr-rib::adj_rib_in`, `lr-rib::adj_rib_out`, `lr-rib::loc_rib` — the Loc-RIB is sharded per `NlriFamily` with one `RwLock` per shard (`&self` methods) |
+| Router event bus (bounded MPMC broadcast) | yes | `lr-router::event_bus` |
 | Per-protocol route selection | yes | `lr-rib::selection` |
 | Cross-protocol merge by administrative distance | yes | `lr-rib::merging` |
 | Router instance: sessions, Loc-RIB, policy, scheduler | yes | `lr-router::instance` |
@@ -240,17 +241,11 @@ entire RFC scope. The major ones:
   tunnel-encapsulations attribute today. See [`ROADMAP.md`](ROADMAP.md)
   §Protocol coverage, `BGP SR Policy (RFC 9256) with the SRv6 binding
   (RFC 9430)`.
-- **Scaling — multi-threaded RIB + lock-free event bus wiring** — not
-  started. Async I/O has landed (every transport, listener and accept
-  loop runs on a `mio` event loop; the engines' poll-and-sleep loops
-  are gone) and per-AFI RIB sharding has landed, but the whole router
-  still sits behind `Arc<RwLock<DefaultRouter>>` — one writer at a
-  time. See [`ROADMAP.md`](ROADMAP.md) §Scaling.
 - **RISC-V CI gate** — pending. The cross-build job is green on
   `main`; the gate closes when the `riscv-native` job has been green
   for a release window without an arch-specific patch landing. See
-  [`ROADMAP.md`](ROADMAP.md) §Scaling, `RISC-V targeted compatibility
-  improvements`.
+  [`ROADMAP.md`](ROADMAP.md) §Compatibility, `RISC-V targeted
+  compatibility improvements`.
 - **IBM Power (ppc64le) and IBM Z (s390x) CI gate** — pending.
   The cross-build job is green on `main` for both
   `powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu`; the
@@ -260,8 +255,9 @@ entire RFC scope. The major ones:
   The ppc64le native gate is blocked on the IBM-provided
   `ubuntu-26.04-ppc64le` / `ubuntu-26.04-ppc64le-p10` runner labels
   clearing review or a self-hosted ppc64le runner being registered
-  (issue #95). See [`ROADMAP.md`](ROADMAP.md) §Scaling, `IBM Power
-  (ppc64le) and IBM Z (s390x) targeted compatibility improvements`.
+  (issue #95). See [`ROADMAP.md`](ROADMAP.md) §Compatibility, `IBM
+  Power (ppc64le) and IBM Z (s390x) targeted compatibility
+  improvements`.
 
 The deliberately out-of-scope protocols (BGPsec, NBMA, p2mp OSPF,
 OSPFv3 virtual links) are listed in [`RELEASE-PLAN.md`](RELEASE-PLAN.md)

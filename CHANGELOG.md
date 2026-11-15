@@ -4276,6 +4276,86 @@ Total test count for the `daemon_roa_loader` module: 29 → 33 unit
 tests; the `roa_loader` parser module: 29 → 31 unit tests; the
 `config_to_dsl` end-to-end suite gains one test.
 
+The daemon-refactoring block of the 2.x plan (issue #101) closes with
+the multi-threaded RIB and the event-bus wiring.
+
+### Multi-threaded RIB (per-family shard locks)
+
+`lr_rib::LocRib` gains interior concurrency: the per-`NlriFamily`
+shards each own their own `RwLock`, the generation counter and the
+16-entry history ring share one `Mutex` (a reader sees a consistent
+`(generation, history)` pair), and every method takes `&self`. A write
+locks only the written family's shard; a read walks the families it
+names. An update in one family never blocks selection, iteration or
+export in another, and a reader sharing the RIB through an `Arc` never
+takes the router's writer lock. `DefaultRouter` shares the RIB as
+`Arc<LocRib>` and hands it out through `rib_handle()`; the daemon's
+runtime API (`routes`, `mrt`, `show routes count`, the `rib-entries`
+status line) and the metrics endpoint (`lr_rib_entries`,
+`lr_rib_entries_by_protocol`) read through that handle — an API client
+dumping routes never waits behind the writer's tick.
+
+BREAKING CHANGE (Rust surface, per the pre-2.0 semver debt the
+`api-surface` job tracks; the C ABI is untouched — the `abi-freeze`
+job still passes): `LocRib`'s public readers return owned values
+instead of borrows because a borrow cannot outlive the lock guard it
+came through — `best()` returns `Option<Route>`, `paths()` returns
+`Vec<Route>`, `iter_best()` / `iter_paths()` yield owned `Route`s,
+`iter_sets()` / `iter_sets_by_family()` yield
+`(RouteKey, Vec<Route>)`. Receivers widen from `&mut self` to `&self`
+(every existing caller compiles unchanged — `&mut` borrows call
+`&self` methods). `RouterInstance::rib_snapshot` and
+`rib_paths_snapshot` return `Vec<Route>` for the same reason; the
+FFI's `lr_router_rib_*` / `lr_loc_rib_*` symbols keep their signatures
+and semantics (they already copied routes out).
+
+### Event-bus wiring (the daemon's read side subscribes)
+
+The daemon's ticker becomes the sole publisher of router events: it
+drains `poll_events` under the write lock, then logs and publishes
+every event to the `lr_router::event_bus::EventBus` *after* releasing
+it. The kernel mirror becomes a bus subscriber on its own thread
+(`KernelMirrorThread`, spawned with the ticker before its first
+drain): kernel route I/O (netlink writes, the IP Helper calls) never
+runs under the router's writer lock — previously the ticker applied
+the mirror inline while holding `router.write()`, so a slow kernel
+stalled every session pump. `EventBus::close` is the new shutdown
+handshake: each daemon mode's exit path joins its ticker (the handle
+was previously dropped, racing the final drain's kernel cleanup with
+process exit — the join fixes that pre-existing race), publishes any
+final events of its own, then closes the bus and joins the mirror, so
+every accepted event was applied before the process exits
+(`bgp_shutdown_cleanup` asserts exactly that).
+
+The OSPFv2 / OSPFv3 daemons publish their drained batches on the same
+bus and drop their per-daemon `KernelMirror` copies (one mirror per
+daemon, whichever thread drained the event); the OSPFv3
+graceful-restart reaper's drained withdrawals now reach the kernel
+(previously a merely-logged drain left the kernel route installed).
+The multi-protocol supervisor closes the shared bus after every
+engine joined and the shared ticker drained. The BMP egress mirror
+keeps its push shape: the router encodes the BMP message at write time
+through the `bmp_sink` closure (the encode needs the writer's
+per-session context) and the sender thread does the TCP I/O off the
+lock.
+
+The metrics endpoint surfaces the bus's lifetime totals
+(`lr_event_bus_published_total`, `lr_event_bus_dropped_total`) — the
+alert signal for a subscriber that is not keeping up: the bus drops
+events on the slow subscriber only and never blocks the publisher.
+
+Tests: `lr-rib` pins the shard-lock contract (concurrent installs
+across families both land; a family read never sees another family's
+writes; generation monotonic under concurrency, history ring capped);
+`lr-router::event_bus` pins `close` (drain-then-disconnect, refused
+late publishes, late subscribers, counters surviving close);
+`lr-cli` pins the wiring end to end (the ticker publishes and the
+close handshake drains every subscriber; RIB-handle reads proceed
+while the router's writer lock is held; a scrape reports the bus
+counters and they track publishes). The daemon E2E suites (runtime
+API, SIGHUP reload, collision resolution, graceful drain/shutdown)
+and the interop labs run unchanged.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

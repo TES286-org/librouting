@@ -81,8 +81,11 @@ the same six steps:
    `router.feed_input(handle, bytes)` and
    `router.drain_output(handle)`.
 5. Run the poll loop at the ticker cadence: `router.poll_events(...)`,
-   process the `RouterEvent`s, and mirror Loc-RIB best routes into the
-   kernel through `lr-osroute` when `--install-kernel-routes` is set.
+   log the `RouterEvent`s and publish them on the daemon's event bus
+   (`lr-router::event_bus`); the kernel-mirror thread subscribed to
+   that bus installs Loc-RIB best routes into the kernel through
+   `lr-osroute` when `--install-kernel-routes` is set — kernel route
+   I/O never runs under the router's writer lock.
 6. Handle signals. `signal::init()` installs the handlers; the poll loop
    calls `signal::take_pending()` and acts on `SIGHUP` (reload the
    `networks` set) or `SIGTERM` / `SIGINT` (graceful shutdown: one
@@ -140,13 +143,25 @@ sender thread; the network I/O never blocks the poll loop.
 ### Kernel mirror
 
 `KernelMirror` in `daemon.rs` mirrors Loc-RIB best routes into the
-kernel FIB through `lr_osroute::SystemRouteTable`. On Linux the mirror
-also drives the MPLS dataplane (`mpls_route::MplsNetlink`) for RFC 8277
-BGP-LU: a locally originated labelled route installs an AF_MPLS pop
-route, the LSP tail, and a peer-advertised labelled route installs an
-encap route pushing the label stack, the LSP head. The classification
-function `lsp_decision` is pure, so off-Linux builds compile and the
-kernel-table half simply has no work to do.
+kernel FIB through `lr_osroute::SystemRouteTable`. The mirror runs on
+its own thread (`KernelMirrorThread`, spawned with the ticker)
+subscribed to the daemon's event bus: the ticker publishes every event
+it drains from `poll_events`, and the mirror applies the
+`RouteInstalled` / `RouteWithdrawn` events — kernel route I/O (netlink
+writes, the IP Helper calls) never runs under the router's writer lock.
+`Runtime::shutdown_event_bus` is the exit handshake: the daemon's exit
+path closes the bus after its last publish and joins the mirror, so the
+shutdown withdrawals reach the kernel before the process exits. On
+Linux the mirror also drives the MPLS dataplane (`mpls_route::MplsNetlink`)
+for RFC 8277 BGP-LU: a locally originated labelled route installs an
+AF_MPLS pop route, the LSP tail, and a peer-advertised labelled route
+installs an encap route pushing the label stack, the LSP head. The
+classification function `lsp_decision` is pure, so off-Linux builds
+compile and the kernel-table half simply has no work to do. The
+runtime API's route dumps and the metrics endpoint's RIB counters read
+through the shared Loc-RIB handle (`DefaultRouter::rib_handle`,
+per-family shard locks) instead of the router's `RwLock` — an API
+client dumping routes never waits behind the writer's tick.
 
 ## The OSPF run paths
 
