@@ -43,13 +43,24 @@ advertises.
 
 ## Scaling
 
-The three items below are the daemon-refactoring block of the 2.x
-release plan (issue #101). They are sequenced — async I/O lands first
-because it is the substrate the RIB concurrency work builds on;
+The remaining item below is the last of the daemon-refactoring
+block of the 2.x release plan (issue #101). The block was sequenced:
+async I/O landed first — the substrate the RIB concurrency work
+builds on — and now covers every I/O surface the daemon holds: the
+BGP session reactor with its listener
+([`lr-cli::bgp_reactor`](../crates/lr-cli/src/bgp_reactor.rs)), the
+BFD supervisor
+([`lr-cli::daemon_bfd`](../crates/lr-cli/src/daemon_bfd.rs)), the
+OSPFv2/OSPFv3 engines on the shared loop
+([`lr-cli::ospf_engine_loop`](../crates/lr-cli/src/ospf_engine_loop.rs)),
+Babel's UDP-plus-multicast loop (`run_babel_daemon`, in
+[`lr-cli::daemon.rs`](../crates/lr-cli/src/daemon.rs)), and the
+runtime API / metrics accept reactors
+([`lr-cli::accept_reactor`](../crates/lr-cli/src/accept_reactor.rs)).
 per-AFI RIB sharding landed second (the storage half — `LocRib`'s
 internal map is sharded by `NlriFamily` with family-aware accessors,
 preserving the frozen public API); the multi-threaded RIB and the
-lock-free event bus land together third because the bus is what lets
+lock-free event bus land together last because the bus is what lets
 the API thread read without the writer's lock.
 
 The 1.x stability window freezes the public Rust API and the C ABI
@@ -59,47 +70,7 @@ preserve that surface: `LocRib`'s public methods and the
 methods added alongside the existing cross-family ones (the
 `abi-freeze` CI job enforces the C half mechanically). A breaking
 change ships as the 2.0 major bump and lands in one PR after the
-three below have stabilised on a release window.
-
-**Async I/O.** The BGP session layer has landed on the event loop:
-[`lr-cli::bgp_reactor`](../crates/lr-cli/src/bgp_reactor.rs) drives
-every established BGP session from a single `mio` thread — the
-listener and the connectors submit connected sockets, readable
-events run the exact pump order the per-session threads used
-(read → `feed_input` → `drain_output` → write), a partial write parks
-its remainder in the slot under WRITABLE interest, and a maintenance
-sweep every 50 ms flushes timer-generated output (KEEPALIVEs,
-retransmissions) and watches the BFD and router-side close paths.
-The per-session thread pool — one thread per socket whose 200 ms
-read timeout was the poll cadence — is gone, together with the
-`run_peer_session` / `pump_session` functions and the connector's
-string-matched backoff classification (now the structured
-`bgp_reactor::SessionEnd` enum).
-
-What remains is the rest of the daemon's I/O surfaces: the OSPF raw
-sockets ([`lr-osroute::ospf_transport`](../crates/lr-osroute/src/ospf_transport/mod.rs)),
-Babel's UDP-plus-multicast pair, the BGP listener's accept poll and
-the runtime API / metrics accept loops. BFD's datagram loop has
-landed on the event loop
-([`lr-cli::daemon_bfd`](../crates/lr-cli/src/daemon_bfd.rs) drives
-every rx socket from one `mio::Poll` on unix, registered via
-`mio::unix::SourceFd`; the poll timeout is the earliest
-`BfdSession::next_deadline`, so an idle BFD session sleeps until a
-datagram arrives or the next TX/detection timer fires instead of
-waking ten times a second on a fixed 10 ms cadence; a `mio::Waker`
-fires on shutdown so the supervisor exits within the watcher's 50 ms
-cadence instead of waiting out the detection time; Windows keeps the
-poll-and-sleep loop because `mio::unix::SourceFd` has no Windows
-equivalent and the Windows BFD transport has no TTL ancillary data to
-preserve). Each remaining transport wraps differently (raw IP,
-multicast membership, connection-less datagrams), so each is its own
-slice of work. `mio` is the smaller dependency and the daemon already
-avoids `tokio` for the API and metrics threads; `tokio` is the
-alternative if the rest of the daemon's I/O surfaces converge on it.
-
-Done when the poll-and-sleep loops are gone across every transport,
-an idle session wakes only on an event, and the session, timer and
-interop tests still pass.
+block has stabilised on a release window.
 
 **Multi-threaded RIB and a lock-free event bus.** The whole router
 sits behind `Arc<RwLock<DefaultRouter>>`

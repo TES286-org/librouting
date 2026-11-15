@@ -378,9 +378,33 @@ fn outbound_dial_log_shows_both_endpoints() {
     let a = Daemon::spawn(&["--config", conf_a.to_str().unwrap()], "a-log");
     let b = Daemon::spawn(&["--config", conf_b.to_str().unwrap()], "b-log");
 
-    // Wait for at least one side to log the outbound dial.
-    wait_log_any(&a.log, &["outbound TCP established", "connect failed"]);
-    wait_log_any(&b.log, &["outbound TCP established", "connect failed"]);
+    // Wait for at least one side to log the outbound dial. Either side
+    // may instead be the §6.8-passive one (see B's comment below), so
+    // both waits accept the established-inbound shape too.
+    wait_log_any(
+        &a.log,
+        &[
+            "outbound TCP established",
+            "connect failed",
+            "session #2 → Established",
+        ],
+    );
+    // B's side may never dial: when A's outbound reaches B first and
+    // B's inbound challenger session (session #2 — the bidirectional
+    // peer's `handle_in`) goes Established before B's connector gets
+    // its first pass, the RFC 4271 §6.8 churn guard keeps B's connector
+    // passive while the winning session lives — the same either/or
+    // convergence shape the tests above accept (collision resolved OR
+    // one transport only). The wording assertions below only apply to
+    // a side that actually dialed.
+    wait_log_any(
+        &b.log,
+        &[
+            "outbound TCP established",
+            "connect failed",
+            "session #2 → Established",
+        ],
+    );
 
     // The old "connected from" wording must NOT appear — it was
     // ambiguous and caused the production "self-connect" misdiagnosis.

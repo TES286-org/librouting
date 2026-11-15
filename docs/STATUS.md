@@ -240,10 +240,12 @@ entire RFC scope. The major ones:
   tunnel-encapsulations attribute today. See [`ROADMAP.md`](ROADMAP.md)
   §Protocol coverage, `BGP SR Policy (RFC 9256) with the SRv6 binding
   (RFC 9430)`.
-- **Scaling — async I/O, per-AFI RIB sharding, multi-threaded RIB +
-  lock-free event bus** — not started. The daemon is single-threaded
-  over a poll-driven ticker today. See [`ROADMAP.md`](ROADMAP.md)
-  §Scaling.
+- **Scaling — multi-threaded RIB + lock-free event bus wiring** — not
+  started. Async I/O has landed (every transport, listener and accept
+  loop runs on a `mio` event loop; the engines' poll-and-sleep loops
+  are gone) and per-AFI RIB sharding has landed, but the whole router
+  still sits behind `Arc<RwLock<DefaultRouter>>` — one writer at a
+  time. See [`ROADMAP.md`](ROADMAP.md) §Scaling.
 - **RISC-V CI gate** — pending. The cross-build job is green on
   `main`; the gate closes when the `riscv-native` job has been green
   for a release window without an arch-specific patch landing. See

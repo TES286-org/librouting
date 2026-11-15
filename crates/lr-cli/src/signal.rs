@@ -77,6 +77,13 @@ mod imp {
         }
     }
 
+    /// Whether a signal is pending, without consuming it — for a
+    /// watcher thread that must wake an event loop without stealing
+    /// the dispatcher's consume (see `take_pending`: one consumer).
+    pub fn peek_pending() -> bool {
+        PENDING.load(Ordering::Relaxed) != 0
+    }
+
     /// Set when the multi-protocol supervisor owns signal dispatch
     /// (rc.3): `take_pending` is a single-consumer swap, so engine
     /// threads (connector loops, session pumps, main loops) must not
@@ -206,6 +213,12 @@ mod imp {
         }
     }
 
+    /// Whether a console control event is pending, without consuming
+    /// it (same contract as the Unix implementation).
+    pub fn peek_pending() -> bool {
+        PENDING.load(Ordering::Relaxed) != 0
+    }
+
     /// Set when the multi-protocol supervisor owns signal dispatch
     /// (same contract as Unix).
     pub fn set_supervised(on: bool) {
@@ -242,6 +255,10 @@ mod imp {
         None
     }
 
+    pub fn peek_pending() -> bool {
+        false
+    }
+
     pub fn set_supervised(_on: bool) {}
 
     pub fn supervised() -> bool {
@@ -252,5 +269,6 @@ mod imp {
 }
 
 pub use imp::{
-    init, mark_shutdown_complete, set_supervised, supervised, take_pending, SIGHUP, SIGINT, SIGTERM,
+    init, mark_shutdown_complete, peek_pending, set_supervised, supervised, take_pending, SIGHUP,
+    SIGINT, SIGTERM,
 };

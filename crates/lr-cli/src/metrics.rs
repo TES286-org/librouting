@@ -13,10 +13,11 @@
 //! `hyper` dependency) and keeps the release-archive binary surface
 //! unchanged.
 //!
-//! The thread model matches `api.rs`'s: one thread polls a
-//! `set_nonblocking(true)` `TcpListener` with a 100 ms sleep, and
-//! each accepted connection is served on its own short-lived thread
-//! so a slow client cannot hold the metrics endpoint hostage.
+//! The thread model matches `api.rs`'s: one thread drives the listener
+//! from a `mio::Poll` (a readable event drains the accept queue; see
+//! `accept_reactor.rs`), and each accepted connection is served on its
+//! own short-lived thread so a slow client cannot hold the metrics
+//! endpoint hostage.
 //!
 //! Unlike `api.rs` (which switches transport per platform — Unix
 //! domain socket on Unix, named pipe on Windows), the metrics
@@ -323,7 +324,6 @@ mod imp {
     use std::fmt::Write as _;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
 
@@ -437,7 +437,7 @@ mod imp {
         thread::Builder::new()
             .name("lr-metrics".into())
             .spawn(move || {
-                accept_loop(&listener, &running, |stream| {
+                crate::accept_reactor::tcp_accept_loop(listener, &running, |stream| {
                     let state = Arc::clone(&state);
                     thread::Builder::new()
                         .name("lr-metrics-conn".into())
@@ -447,26 +447,6 @@ mod imp {
             })
             .map_err(|e| format!("spawn metrics thread: {e}"))?;
         Ok(addr_owned)
-    }
-
-    /// Poll the listener until the daemon stops; hand live
-    /// connections to `on_conn`. Same shape as
-    /// `api.rs::accept_loop` — a 100 ms poll keeps the thread idle
-    /// without burning a core.
-    fn accept_loop(
-        listener: &TcpListener,
-        running: &AtomicBool,
-        mut on_conn: impl FnMut(std::net::TcpStream),
-    ) {
-        while running.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, _)) => on_conn(stream),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(_) => thread::sleep(Duration::from_millis(100)),
-            }
-        }
     }
 
     /// One connection: read the request line, write the response.
@@ -520,6 +500,34 @@ mod imp {
         );
         let _ = (&stream).write_all(response.as_bytes());
         let _ = (&stream).flush();
+        // Drain through the end of the request headers before
+        // closing. A close with bytes still queued in the receive
+        // buffer resets the connection (TCP sends RST instead of
+        // FIN), and a client mid-`read_to_end` sees
+        // `ConnectionReset` instead of the response. The request
+        // line is parsed from the first read; the header block that
+        // follows can land after it — the accept reactor hands the
+        // connection over the moment the handshake completes, so
+        // the first read can race the client's write mid-flight.
+        // Read header lines until the blank-line terminator; the
+        // byte cap and the read timeout bound a hostile one.
+        let mut header_bytes = 0usize;
+        loop {
+            if header_bytes > 64 * 1024 {
+                break;
+            }
+            let mut header = String::new();
+            match reader.read_line(&mut header) {
+                Ok(0) => break,
+                Ok(n) => {
+                    header_bytes += n;
+                    if header.trim_end_matches(['\r', '\n']).is_empty() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     /// Render the Prometheus text exposition format. The body is

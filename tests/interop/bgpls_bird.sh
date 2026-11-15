@@ -85,7 +85,10 @@ R2=$!
 LR_PID=""
 cleanup() {
     [ -n "$LR_PID" ] && kill "$LR_PID" 2>/dev/null || true
-    kill "$(cat "$OUT/bird.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+    # Never `kill 0` when the pid file is missing: pid 0 signals the
+    # whole process group — the script kills itself mid-trap.
+    bird_pid=$(cat "$OUT/bird.pid" 2>/dev/null || true)
+    [ -n "$bird_pid" ] && kill "$bird_pid" 2>/dev/null || true
     kill "$R1" "$R2" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -135,7 +138,10 @@ if ! nsenter -t "$R2" -n "$BIRD" -c "$OUT/bird-probe.conf" -s "$OUT/bird-probe.c
         exit 0
     fi
 fi
-kill "$(cat "$OUT/bird-probe.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+# Never `kill 0` when the pid file is missing: pid 0 signals the
+# whole process group — the script kills itself mid-trap.
+bird_pid=$(cat "$OUT/bird-probe.pid" 2>/dev/null || true)
+[ -n "$bird_pid" ] && kill "$bird_pid" 2>/dev/null || true
 rm -f "$OUT/bird-probe.ctl" "$OUT/bird-probe.pid" "$OUT/bird-probe.err"
 
 echo "== starting BIRD 2.17+ (2.2.2.2 / AS64513, ospf v2 ptp + eBGP-LS on veth1) =="

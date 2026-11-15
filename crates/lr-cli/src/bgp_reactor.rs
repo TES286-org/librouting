@@ -1,5 +1,5 @@
 //! BGP session reactor — one event loop for every established BGP
-//! session (ROADMAP async-I/O item, first slice).
+//! session and the inbound listener (ROADMAP async-I/O item).
 //!
 //! Before the reactor, each established BGP session ran on a *thread
 //! per socket* whose read timeout (200 ms) was the poll cadence: an
@@ -11,10 +11,18 @@
 //! The reactor replaces the per-session threads with a single thread
 //! that owns a `mio::Poll`:
 //!
-//! - the listener and the per-peer connectors submit connected
-//!   sockets through a channel ([`BgpReactor::submit`]); the
-//!   submission wakes the reactor through a `mio::Waker` registered
-//!   to a reserved token;
+//! - the per-peer connectors submit connected sockets through a
+//!   channel ([`BgpReactor::submit`]); the submission wakes the reactor
+//!   through a `mio::Waker` registered to a reserved token;
+//! - the listener is attached the same way
+//!   ([`BgpReactor::attach_listener`]) and registered under its own
+//!   token: a readable event on it drains the accept queue, and each
+//!   accepted connection passes through the daemon's inbound gate
+//!   (source-address match, admin-down, busy guard, RFC 4271 §6.8
+//!   challenger rules) before the session registers — the same order
+//!   the main thread's accept loop ran, on the reactor thread. The
+//!   accept loop's 1-to-100 ms exponential backoff poll is gone; an
+//!   inbound SYN that completes wakes the loop immediately;
 //! - registration starts the session in the router (`start_session` —
 //!   the same call the session threads made), flushes the FSM's
 //!   initial output (the OPEN) and registers the socket READABLE;
@@ -35,8 +43,8 @@
 //!
 //! OSPF and Babel transports stay on their own threads for now (the
 //! ROADMAP's sequencing: their raw-socket and UDP-plus-multicast
-//! shapes wrap differently); the runtime API, the metrics endpoint
-//! and the BFD daemon keep their hand-rolled loops. Nothing in the
+//! shapes wrap differently); the runtime API and the metrics endpoint
+//! keep their hand-rolled loops. Nothing in the
 //! library crates depends on this module — it is an implementation
 //! detail of the `lr-daemon` BGP engine.
 //!
@@ -63,6 +71,7 @@
 //! `"collision resolution"`; the enum makes that an equality test).
 
 use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener as StdTcpListener;
 use std::net::TcpStream as StdTcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -70,8 +79,10 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use mio::net::TcpListener as MioTcpListener;
 use mio::net::TcpStream as MioTcpStream;
 use mio::{Events, Interest, Poll, Registry, Token, Waker};
+use socket2::SockRef;
 
 use lr_router::{DefaultRouter, RouterInstance, SessionHandle};
 
@@ -81,6 +92,10 @@ use crate::daemon_bfd::BfdFlags;
 /// into the slot table from 0 upward, so the waker takes the top of
 /// the usize range.
 const WAKER_TOKEN: Token = Token(usize::MAX);
+
+/// Reserved token the attached listener fires. One listener per
+/// reactor, so a single reserved token below the waker's suffices.
+const LISTENER_TOKEN: Token = Token(usize::MAX - 1);
 
 /// Read buffer per session — the same size the session threads used.
 const READ_BUF: usize = 8192;
@@ -97,6 +112,14 @@ const SWEEP_INTERVAL: Duration = Duration::from_millis(50);
 /// the sweep. Readable data wakes the reactor immediately; this only
 /// bounds the worst case between events.
 const POLL_TIMEOUT: Duration = SWEEP_INTERVAL;
+
+/// How long the reactor pauses accepting after a hard `accept`
+/// error (EMFILE, ENFILE, ENOBUFS): the old accept loop slept
+/// 100 ms in the same case. The listener stays registered and
+/// level-triggered, so its events are skipped until the deadline
+/// passes — without this guard a persistently failing `accept`
+/// would spin the reactor.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Why a session ended — the structured form of the error strings the
 /// old session pump returned. The connector's backoff ladder and the
@@ -215,10 +238,56 @@ impl Slot {
     }
 }
 
-/// A session submission — what the listener and the connectors send
-/// through [`BgpReactor::submit`].
-struct Submission {
-    stream: StdTcpStream,
+/// What the daemon's inbound gate decided for one accepted
+/// connection: run the session on the reactor, or drop the socket
+/// (the gate already logged why).
+pub(crate) enum Inbound {
+    /// Run the accepted connection as a session.
+    Session {
+        handle: SessionHandle,
+        bfd: Option<BfdFlags>,
+        on_end: Box<dyn FnOnce(SessionEnd) + Send>,
+    },
+    /// Refused by the gate; the reactor closes the socket.
+    Rejected,
+}
+
+/// The daemon's accept policy as one closure the reactor calls per
+/// accepted connection, on the reactor thread: the source-address
+/// peer match, the admin-down refusal, the busy guard and the
+/// RFC 4271 §6.8 challenger rules. Keeping the policy in the daemon
+/// keeps the reactor transport-only.
+pub(crate) type InboundGate = Box<dyn Fn(&std::net::SocketAddr) -> Inbound + Send>;
+
+/// A submission — what the connectors send through
+/// [`BgpReactor::submit`] (a connected socket) and what the daemon
+/// sends through [`BgpReactor::attach_listener`] (the listener plus
+/// its gate). Both land in the reactor through the same channel and
+/// waker.
+enum Submission {
+    Session {
+        stream: StdTcpStream,
+        handle: SessionHandle,
+        bfd: Option<BfdFlags>,
+        on_end: Box<dyn FnOnce(SessionEnd) + Send>,
+    },
+    Listener {
+        listener: StdTcpListener,
+        gate: InboundGate,
+    },
+}
+
+/// The attached listener: the mio-registered socket plus the
+/// daemon's accept policy, run per accepted connection.
+struct ListenerSlot {
+    mio: MioTcpListener,
+    gate: InboundGate,
+}
+
+/// One session about to join the reactor — the registration parts
+/// beyond the reactor state itself.
+struct SessionParts {
+    stream: MioTcpStream,
     handle: SessionHandle,
     bfd: Option<BfdFlags>,
     on_end: Box<dyn FnOnce(SessionEnd) + Send>,
@@ -273,12 +342,31 @@ impl BgpReactor {
         on_end: Box<dyn FnOnce(SessionEnd) + Send>,
     ) -> Result<(), String> {
         self.tx
-            .send(Submission {
+            .send(Submission::Session {
                 stream,
                 handle,
                 bfd,
                 on_end,
             })
+            .map_err(|_| "reactor thread is gone".to_string())?;
+        self.waker.wake().map_err(|e| format!("waker: {e}"))
+    }
+
+    /// Attach the daemon's TCP listener for event-driven accepting.
+    /// The listener must already be bound and armed (auth, GTSM);
+    /// the reactor registers it under [`LISTENER_TOKEN`] and calls
+    /// `gate` for every accepted connection. Replaces the main
+    /// thread's non-blocking accept loop, whose 1-to-100 ms
+    /// exponential backoff sleep was the idle wakeup cadence — an
+    /// inbound connection that completes the handshake now wakes
+    /// the loop immediately.
+    pub(crate) fn attach_listener(
+        &self,
+        listener: StdTcpListener,
+        gate: InboundGate,
+    ) -> Result<(), String> {
+        self.tx
+            .send(Submission::Listener { listener, gate })
             .map_err(|_| "reactor thread is gone".to_string())?;
         self.waker.wake().map_err(|e| format!("waker: {e}"))
     }
@@ -299,6 +387,11 @@ fn reactor_main(
     // free list recycles, so tokens stay dense.
     let mut slots: Vec<Option<Slot>> = Vec::new();
     let mut free: Vec<usize> = Vec::new();
+    // The attached listener, once the daemon submits it.
+    let mut listener: Option<ListenerSlot> = None;
+    // Skip accepting until this deadline after a hard accept error
+    // (see [`ACCEPT_ERROR_BACKOFF`]).
+    let mut accept_backoff_until: Option<Instant> = None;
     let mut last_sweep = Instant::now() - SWEEP_INTERVAL;
     let mut read_buf = [0u8; READ_BUF];
 
@@ -309,29 +402,75 @@ fn reactor_main(
         // EINTR-style poll errors simply re-loop.
         let _ = poll.poll(&mut events, Some(POLL_TIMEOUT));
 
-        // Waker first: a listener or connector handed us sockets. The
-        // registrations are processed before the event pass — the
-        // submission is itself the event.
+        // Waker first: a connector handed us a socket, or the daemon
+        // handed us the listener. The registrations are processed
+        // before the event pass — the submission is itself the event.
         for event in events.iter() {
             if event.token() == WAKER_TOKEN {
                 while let Ok(sub) = rx.try_recv() {
-                    register(
-                        &mut slots,
-                        &mut free,
-                        &registry,
-                        &router,
-                        sub,
-                        &mut read_buf,
-                    );
+                    match sub {
+                        Submission::Session {
+                            stream,
+                            handle,
+                            bfd,
+                            on_end,
+                        } => {
+                            // The reactor owns the non-blocking switch
+                            // so a submitter can never forget it.
+                            let _ = stream.set_nonblocking(true);
+                            register_session(
+                                &mut slots,
+                                &mut free,
+                                &registry,
+                                &router,
+                                SessionParts {
+                                    stream: MioTcpStream::from_std(stream),
+                                    handle,
+                                    bfd,
+                                    on_end,
+                                },
+                            );
+                        }
+                        Submission::Listener { listener: l, gate } => {
+                            let _ = l.set_nonblocking(true);
+                            let mut mio = MioTcpListener::from_std(l);
+                            if let Err(e) =
+                                registry.register(&mut mio, LISTENER_TOKEN, Interest::READABLE)
+                            {
+                                log_error!(crate::Component::Bgp, "listener register: {e}");
+                                continue;
+                            }
+                            listener = Some(ListenerSlot { mio, gate });
+                        }
+                    }
                 }
             }
         }
 
-        // Readable / writable events for live sessions, in the pump's
-        // per-iteration order.
+        // Readable / writable events for the listener and the live
+        // sessions, in the pump's per-iteration order.
         for event in events.iter() {
             let token = event.token();
             if token == WAKER_TOKEN {
+                continue;
+            }
+            if token == LISTENER_TOKEN {
+                // The old accept loop checked `running` before each
+                // accept; match it so shutdown does not start fresh
+                // sessions.
+                if running.load(Ordering::Relaxed) {
+                    if let Some(ls) = listener.as_mut() {
+                        accept_batch(
+                            ls,
+                            &mut slots,
+                            &mut free,
+                            &registry,
+                            &router,
+                            &mut read_buf,
+                            &mut accept_backoff_until,
+                        );
+                    }
+                }
                 continue;
             }
             let index = token.0;
@@ -404,6 +543,11 @@ fn reactor_main(
                     );
                 }
             }
+            // Drop the listener before exiting: the deregister stops
+            // its events, the close releases the bound port.
+            if let Some(mut ls) = listener.take() {
+                let _ = registry.deregister(&mut ls.mio);
+            }
             break;
         }
     }
@@ -415,32 +559,26 @@ enum PumpOutcome {
     End(SessionEnd),
 }
 
-/// Register a submitted session: start it in the router, flush the
-/// FSM's initial output (the OPEN), insert the slot and arm READABLE
-/// interest. A `start_session` failure mirrors the old session
-/// thread's early `?` return: the completion runs with the error and
-/// the socket closes without a session.
-fn register(
+/// Register one session: start it in the router, flush the FSM's
+/// initial output (the OPEN), insert the slot and arm READABLE
+/// interest. The stream must already be non-blocking (the submission
+/// arm of [`reactor_main`] and [`accept_batch`] own the switch). A
+/// `start_session` failure mirrors the old session thread's early
+/// `?` return: the completion runs with the error and the socket
+/// closes without a session.
+fn register_session(
     slots: &mut Vec<Option<Slot>>,
     free: &mut Vec<usize>,
     registry: &Registry,
     router: &Arc<RwLock<DefaultRouter>>,
-    sub: Submission,
-    read_buf: &mut [u8],
+    parts: SessionParts,
 ) {
-    let _ = read_buf; // registration reads nothing; kept for shape parity
-    let Submission {
-        stream,
+    let SessionParts {
+        stream: mio_stream,
         handle,
         bfd,
         on_end,
-    } = sub;
-
-    // The reactor owns the non-blocking switch so a submitter can
-    // never forget it.
-    let _ = stream.set_nonblocking(true);
-    let mio_stream = MioTcpStream::from_std(stream);
-
+    } = parts;
     // start_session, then the initial drain — the same order the old
     // session thread ran before its first pump iteration.
     let out = {
@@ -512,6 +650,70 @@ fn register(
         return;
     }
     slots[index] = Some(slot);
+}
+
+/// Drain the listener's accept queue: accept until `WouldBlock`, and
+/// for every accepted connection run the daemon's inbound gate and
+/// register the session it approves. A hard `accept` error backs the
+/// queue off for [`ACCEPT_ERROR_BACKOFF`] — the listener stays
+/// registered and level-triggered, so its events are simply skipped
+/// until the deadline passes, without spinning the reactor.
+fn accept_batch(
+    ls: &mut ListenerSlot,
+    slots: &mut Vec<Option<Slot>>,
+    free: &mut Vec<usize>,
+    registry: &Registry,
+    router: &Arc<RwLock<DefaultRouter>>,
+    read_buf: &mut [u8],
+    accept_backoff_until: &mut Option<Instant>,
+) {
+    let _ = read_buf;
+    if let Some(until) = *accept_backoff_until {
+        if Instant::now() < until {
+            return;
+        }
+        *accept_backoff_until = None;
+    }
+    loop {
+        match ls.mio.accept() {
+            Ok((stream, peer_sockaddr)) => {
+                // The accepted stream is non-blocking — mio's accept
+                // arms it (`accept4(SOCK_NONBLOCK)` where available).
+                // TCP_NODELAY is transport shaping, not policy: set it
+                // here, through the borrowed-socket reference, the
+                // same call the old accept loop made on every inbound.
+                let _ = SockRef::from(&stream).set_tcp_nodelay(true);
+                let decision = (ls.gate)(&peer_sockaddr);
+                match decision {
+                    Inbound::Session {
+                        handle,
+                        bfd,
+                        on_end,
+                    } => register_session(
+                        slots,
+                        free,
+                        registry,
+                        router,
+                        SessionParts {
+                            stream,
+                            handle,
+                            bfd,
+                            on_end,
+                        },
+                    ),
+                    // The gate refused the connection (it logged the
+                    // reason); dropping the stream closes the TCP.
+                    Inbound::Rejected => {}
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(e) => {
+                log_error!(crate::Component::Bgp, "accept failed: {e}");
+                *accept_backoff_until = Some(Instant::now() + ACCEPT_ERROR_BACKOFF);
+                break;
+            }
+        }
+    }
 }
 
 /// Read everything the kernel holds for the session, feed the FSM,
@@ -886,5 +1088,96 @@ mod tests {
     fn recv_end(rx: Receiver<SessionEnd>) -> SessionEnd {
         rx.recv_timeout(Duration::from_secs(10))
             .expect("the completion callback fired")
+    }
+
+    /// Attach a listener whose gate accepts every connection: the
+    /// inbound client dials, the accept queue drains on the readable
+    /// event, the gate approves the session and the reactor registers
+    /// it — proven by the OPEN the client reads back (registration
+    /// flushes the FSM's initial output) and by the FSM leaving Idle.
+    #[test]
+    fn attached_listener_accepts_and_runs_the_session() {
+        let router = Arc::new(RwLock::new(DefaultRouter::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let handle = bgp_session(&mut router.write().unwrap());
+
+        let reactor = BgpReactor::spawn(Arc::clone(&router), Arc::clone(&running));
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        reactor
+            .attach_listener(
+                listener,
+                Box::new(move |_peer| Inbound::Session {
+                    handle,
+                    bfd: None,
+                    on_end: Box::new(|_end| {}),
+                }),
+            )
+            .unwrap();
+
+        // Dial in; the reactor accepts, gates and registers the
+        // session, and the OPEN arrives on the client's socket.
+        let client = StdTcpStream::connect(addr).unwrap();
+        let mut open = [0u8; 64];
+        let n = read_with_timeout(&client, &mut open);
+        assert!(n > 0, "the accepted session's OPEN reached the client");
+
+        // The session is live — `start_session` moved the FSM out of
+        // Idle and queued the OPEN the client just read.
+        let state = router.read().unwrap().session_peer_state(handle);
+        assert_ne!(state, Some("Idle"), "the accepted session is running");
+
+        running.store(false, Ordering::Relaxed);
+    }
+
+    /// The gate's refusal drops the accepted socket without starting
+    /// a session: the client sees the connection close, and the FSM
+    /// never leaves Idle (no OPEN, no NOTIFICATION, just the FIN).
+    #[test]
+    fn rejected_inbound_closes_the_socket_without_a_session() {
+        let router = Arc::new(RwLock::new(DefaultRouter::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let handle = bgp_session(&mut router.write().unwrap());
+
+        let reactor = BgpReactor::spawn(Arc::clone(&router), Arc::clone(&running));
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        reactor
+            .attach_listener(
+                listener,
+                Box::new(|_peer| {
+                    // The gate logged in production; here it refuses.
+                    Inbound::Rejected
+                }),
+            )
+            .unwrap();
+
+        let client = StdTcpStream::connect(addr).unwrap();
+        // Read to EOF with a bound: the refusal must close the socket
+        // without a session — no payload on the wire.
+        let mut buf = [0u8; 8];
+        let n = read_with_timeout(&client, &mut buf);
+        assert_eq!(n, 0, "the refused connection closes without payload");
+        // No session ever started — the FSM stays in Idle.
+        let state = router.read().unwrap().session_peer_state(handle);
+        assert_eq!(state, Some("Idle"), "no session was started");
+
+        running.store(false, Ordering::Relaxed);
+    }
+
+    /// Read once with a bounded wait, returning how many bytes came
+    /// (0 = EOF reached cleanly).
+    fn read_with_timeout(mut stream: &StdTcpStream, buf: &mut [u8]) -> usize {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        match stream.read(buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => 0,
+            Err(e) if e.kind() == ErrorKind::TimedOut => 0,
+            Err(_) => 0,
+        }
     }
 }

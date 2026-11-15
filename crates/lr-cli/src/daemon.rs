@@ -172,6 +172,7 @@ use lr_router::{
 // platform's daemon constructs (the metrics Runtime field).
 use std::collections::HashMap;
 
+mod accept_reactor;
 mod api;
 mod bgp_reactor;
 mod compat;
@@ -187,6 +188,7 @@ mod daemon_policy;
 mod daemon_roa_loader;
 mod daemon_rpki;
 mod metrics;
+mod ospf_engine_loop;
 mod peer_health_view;
 mod pipe_name;
 mod privdrop;
@@ -2414,148 +2416,26 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         }
     }
 
-    // ---- Main thread: run the accept loop, or idle until shutdown. ----
+    // ---- Main thread: supervise; the reactor owns every session
+    // and, when configured, the listener. ----
     if let Some(listener) = listener {
-        let mut poll_idle = Duration::from_millis(100);
-        loop {
-            dispatch_signals(&runtime);
-            if !running.load(Ordering::Relaxed) {
-                break;
-            }
-            match listener.accept() {
-                Ok((s, peer_sockaddr)) => {
-                    let peer = peer_sockaddr.to_string();
-                    log_info!(Component::Bgp, "inbound connection from {peer}");
-                    let _ = s.set_nodelay(true);
-                    let entry = if strict_inbound {
-                        match match_inbound_peer(&entries, peer_sockaddr.ip()) {
-                            Ok(e) => e,
-                            Err(reason) => {
-                                log_warn!(
-                                    Component::Bgp,
-                                    "inbound connection from {peer} rejected: {reason}"
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        // Historical accept-any: session #1.
-                        &entries[0]
-                    };
-                    // FRR `neighbor X shutdown` / BIRD `disabled`:
-                    // `match_inbound_peer` already proved this peer is
-                    // configured for inbound (its `address`/`remote`
-                    // matches the source IP). When the peer is admin-
-                    // down the listener drops the inbound TCP without
-                    // a NOTIFICATION — the operator has explicitly
-                    // asked the daemon not to talk to this peer, so
-                    // half-opening a session only to send a Cease/2
-                    // would defeat the purpose. RFC 4486 §3 says the
-                    // shutdown NOTIFICATION is for an Established
-                    // session being torn down, not for an inbound SYN
-                    // arriving while the peer is already configured
-                    // down.
-                    if entry.admin_down {
-                        log_warn!(
-                            Component::Bgp,
-                            "inbound connection from {peer} rejected: \
-                             peer {} admin-down (shutdown = true)",
-                            entry.label()
-                        );
-                        continue;
-                    }
-                    // RFC 4271 §6.8: a bidirectional peer's inbound
-                    // connections run on the challenger session so they
-                    // can coexist with the outbound transport while the
-                    // router resolves the collision. For bidirectional
-                    // peers (those with a `handle_in`), the `busy` flag
-                    // MUST NOT block the inbound challenger: the previous
-                    // inbound may still be tearing down (collision loser
-                    // dispatch, TCP RST, hold-time sweep) when the remote
-                    // retries, and dropping the new SYN prevents the
-                    // collision resolution from ever converging — both
-                    // sessions die and the outbound connector hammers the
-                    // peer in a 90-second reconnect loop (the production
-                    // "BGP self-connect" symptom). The router's
-                    // `resolve_connection_collision` handles duplicate
-                    // inbounds: an Established sibling closes the new
-                    // challenger immediately per §6.8.
-                    let is_bidirectional = entry.handle_in.is_some();
-                    if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
-                        log_warn!(
-                            Component::Bgp,
-                            "peer {} already has an active session; \
-                             dropping inbound connection from {}",
-                            entry.label(),
-                            peer
-                        );
-                        continue;
-                    }
-                    let handle = entry.handle_in.unwrap_or(entry.handle);
-                    let bfd = entry.bfd.clone();
-                    let busy = Arc::clone(&entry.busy);
-                    let live = Arc::clone(&live_sessions);
-                    live.fetch_add(1, Ordering::Relaxed);
-                    // Submit the accepted socket to the reactor — the
-                    // event loop owns the session pump from here (the
-                    // old model spawned a thread per socket here; see
-                    // `bgp_reactor.rs`). The completion callback runs
-                    // exactly once when the session ends and owns the
-                    // bookkeeping the session thread did: the error
-                    // log, the inbound busy guard for
-                    // non-bidirectional peers, the live-session
-                    // counter the shutdown grace window waits on.
-                    if let Err(e) = reactor.submit(
-                        s,
-                        handle,
-                        bfd,
-                        Box::new(move |end| {
-                            if end.is_err_path() {
-                                log_error!(
-                                    Component::Bgp,
-                                    "session #{} ended: {}",
-                                    handle.0,
-                                    end.message()
-                                );
-                            }
-                            if !is_bidirectional {
-                                busy.store(false, Ordering::Relaxed);
-                            }
-                            live.fetch_sub(1, Ordering::Relaxed);
-                        }),
-                    ) {
-                        // Submission failed — the reactor thread is
-                        // gone (the daemon is exiting). Undo the
-                        // live-session guard exactly like the old
-                        // thread-spawn failure path.
-                        log_error!(Component::Bgp, "session submit: {e}");
-                        if !is_bidirectional {
-                            entry.busy.store(false, Ordering::Relaxed);
-                        }
-                        live_sessions.fetch_sub(1, Ordering::Relaxed);
-                    }
-                    poll_idle = Duration::from_millis(1);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(poll_idle);
-                    poll_idle = (poll_idle * 2).min(Duration::from_millis(100));
-                }
-                Err(e) => {
-                    log_error!(Component::Bgp, "accept failed: {e}");
-                    thread::sleep(Duration::from_millis(100));
-                }
-            }
+        // The inbound gate carries the accept policy the main
+        // thread's accept loop used to run, on the reactor's thread:
+        // the same checks, the same logs, the same submission
+        // completion (see `build_inbound_gate`).
+        let gate = build_inbound_gate(entries, strict_inbound, Arc::clone(&live_sessions));
+        if let Err(e) = reactor.attach_listener(listener, gate) {
+            // The reactor thread is gone — the daemon is exiting
+            // anyway (the connectors' completions see the same).
+            log_error!(Component::Bgp, "listener attach: {e}");
         }
-    } else if entries.iter().any(|e| e.spec.is_outbound()) {
-        // Connectors own the I/O; the main thread just supervises.
-        wait_for_shutdown(&runtime);
-    } else {
+    } else if !entries.iter().any(|e| e.spec.is_outbound()) {
         log_info!(
             Component::Daemon,
             "no --peer/--listen given; idling (tick loop only)"
         );
-        wait_for_shutdown(&runtime);
     }
+    wait_for_shutdown(&runtime);
 
     // Give live session threads a bounded grace period to flush their
     // close NOTIFICATIONs (RFC 4271 §6.4) before the process exits.
@@ -3198,6 +3078,118 @@ fn match_inbound_peer(entries: &[PeerEntry], src: std::net::IpAddr) -> Result<&P
         }
     }
     found.ok_or_else(|| format!("no configured peer matches {}", src))
+}
+
+/// Build the inbound gate the BGP reactor runs per accepted
+/// connection (`BgpReactor::attach_listener`): the accept policy the
+/// main thread's accept loop used to run — source-address peer match,
+/// admin-down refusal, the busy guard, the RFC 4271 §6.8 challenger
+/// rules — ending in the session the reactor registers. The reactor
+/// owns the transport (the accept queue, TCP_NODELAY); the gate owns
+/// the policy, so the decisions and their logs are unchanged from the
+/// main-thread loop.
+fn build_inbound_gate(
+    entries: Vec<PeerEntry>,
+    strict_inbound: bool,
+    live_sessions: Arc<AtomicUsize>,
+) -> bgp_reactor::InboundGate {
+    Box::new(move |peer_sockaddr: &std::net::SocketAddr| {
+        let peer = peer_sockaddr.to_string();
+        log_info!(Component::Bgp, "inbound connection from {peer}");
+        let entry = if strict_inbound {
+            match match_inbound_peer(&entries, peer_sockaddr.ip()) {
+                Ok(e) => e,
+                Err(reason) => {
+                    log_warn!(
+                        Component::Bgp,
+                        "inbound connection from {peer} rejected: {reason}"
+                    );
+                    return bgp_reactor::Inbound::Rejected;
+                }
+            }
+        } else {
+            // Historical accept-any: session #1.
+            &entries[0]
+        };
+        // FRR `neighbor X shutdown` / BIRD `disabled`:
+        // `match_inbound_peer` already proved this peer is
+        // configured for inbound (its `address`/`remote`
+        // matches the source IP). When the peer is admin-
+        // down the listener drops the inbound TCP without
+        // a NOTIFICATION — the operator has explicitly
+        // asked the daemon not to talk to this peer, so
+        // half-opening a session only to send a Cease/2
+        // would defeat the purpose. RFC 4486 §3 says the
+        // shutdown NOTIFICATION is for an Established
+        // session being torn down, not for an inbound SYN
+        // arriving while the peer is already configured
+        // down.
+        if entry.admin_down {
+            log_warn!(
+                Component::Bgp,
+                "inbound connection from {peer} rejected: \
+                 peer {} admin-down (shutdown = true)",
+                entry.label()
+            );
+            return bgp_reactor::Inbound::Rejected;
+        }
+        // RFC 4271 §6.8: a bidirectional peer's inbound
+        // connections run on the challenger session so they
+        // can coexist with the outbound transport while the
+        // router resolves the collision. For bidirectional
+        // peers (those with a `handle_in`), the `busy` flag
+        // MUST NOT block the inbound challenger: the previous
+        // inbound may still be tearing down (collision loser
+        // dispatch, TCP RST, hold-time sweep) when the remote
+        // retries, and dropping the new SYN prevents the
+        // collision resolution from ever converging — both
+        // sessions die and the outbound connector hammers the
+        // peer in a 90-second reconnect loop (the production
+        // "BGP self-connect" symptom). The router's
+        // `resolve_connection_collision` handles duplicate
+        // inbounds: an Established sibling closes the new
+        // challenger immediately per §6.8.
+        let is_bidirectional = entry.handle_in.is_some();
+        if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
+            log_warn!(
+                Component::Bgp,
+                "peer {} already has an active session; \
+                 dropping inbound connection from {}",
+                entry.label(),
+                peer
+            );
+            return bgp_reactor::Inbound::Rejected;
+        }
+        let handle = entry.handle_in.unwrap_or(entry.handle);
+        let bfd = entry.bfd.clone();
+        let busy = Arc::clone(&entry.busy);
+        let live = Arc::clone(&live_sessions);
+        live.fetch_add(1, Ordering::Relaxed);
+        // The session runs on the reactor (the event loop owns the
+        // pump from here). The completion callback runs exactly once
+        // when the session ends and owns the bookkeeping the accept
+        // loop did: the error log, the inbound busy guard for
+        // non-bidirectional peers, the live-session counter the
+        // shutdown grace window waits on.
+        bgp_reactor::Inbound::Session {
+            handle,
+            bfd,
+            on_end: Box::new(move |end| {
+                if end.is_err_path() {
+                    log_error!(
+                        Component::Bgp,
+                        "session #{} ended: {}",
+                        handle.0,
+                        end.message()
+                    );
+                }
+                if !is_bidirectional {
+                    busy.store(false, Ordering::Relaxed);
+                }
+                live.fetch_sub(1, Ordering::Relaxed);
+            }),
+        }
+    })
 }
 
 /// The IP an inbound connection from this peer is expected to carry:
@@ -5292,7 +5284,15 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         }
     };
 
-    // ---- the polling loop ----
+    // ---- the event loop (ROADMAP async-I/O) ----
+    // One `mio::Poll` drives every Babel datagram socket. A readable
+    // event drains that socket's receive queue; the poll timeout is
+    // the earliest periodic deadline (the next announcement, the route
+    // expiry sweep, the link poll, the auth garbage collection), so an
+    // idle daemon sleeps in one `poll` until a datagram or a timer is
+    // due instead of waking a hundred times a second on the old 10 ms
+    // busy-idle cadence — and a datagram burst never spins the pass
+    // loop hot.
     for iface in &ifaces {
         for t in iface.transports() {
             let _ = t.uc.set_nonblocking(true);
@@ -5318,20 +5318,289 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // §A.2.4 differences must stay single-clock; it wraps every ~71.6
     // minutes, which the wrapping arithmetic absorbs).
     let babel_clock = move || (start.elapsed().as_micros() & 0xffff_ffff) as u32;
-    // Busyness for the idle sleep below: receiving a datagram, sending
-    // a periodic announcement or draining router output counts; an
-    // idle pass sleeps 10 ms instead of spinning the core.
-    let mut busy: bool;
+
+    // Readiness registration: one *clone* of every datagram socket.
+    // `try_clone` shares the kernel socket, so an event on the clone is
+    // an event on the original this loop drains — and the send paths
+    // keep their `std::net::UdpSocket`s untouched. Token = index into
+    // `sock_table`; the reserved top token is the waker's.
+    const WAKER_TOKEN: usize = usize::MAX;
+    let mut poll = match mio::Poll::new() {
+        Ok(p) => p,
+        Err(e) => {
+            log_error!(Component::Babel, "mio::Poll::new: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let registry = match poll.registry().try_clone() {
+        Ok(r) => r,
+        Err(e) => {
+            log_error!(Component::Babel, "mio registry clone: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let waker = match mio::Waker::new(&registry, mio::Token(WAKER_TOKEN)) {
+        Ok(w) => Arc::new(w),
+        Err(e) => {
+            log_error!(Component::Babel, "mio::Waker::new: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // (iface index, transport index, multicast?) — the token demux.
+    let mut sock_table: Vec<(usize, usize, bool)> = Vec::new();
+    let mut registered: Vec<mio::net::UdpSocket> = Vec::new();
+    for (ii, iface) in ifaces.iter().enumerate() {
+        for (ti, t) in iface.transports.iter().enumerate() {
+            for (sock, is_mc) in
+                std::iter::once((&t.uc, false)).chain(t.mc.as_ref().map(|s| (s, true)))
+            {
+                let Ok(dup) = sock.try_clone() else {
+                    continue;
+                };
+                let mut mio_sock = mio::net::UdpSocket::from_std(dup);
+                let token = mio::Token(sock_table.len());
+                if let Err(e) = registry.register(&mut mio_sock, token, mio::Interest::READABLE) {
+                    log_error!(Component::Babel, "mio register: {e}");
+                    continue;
+                }
+                registered.push(mio_sock);
+                sock_table.push((ii, ti, is_mc));
+            }
+        }
+    }
+    // Signal and shutdown latency: the old loop dispatched signals on
+    // every pass at its 10 ms cadence. This watcher thread keeps the
+    // same latency class (100 ms — the cadence every other daemon
+    // surface offers) by *peeking*, never taking (`dispatch_signals`
+    // owns the consume), and waking the poll, which dispatches and
+    // acts at its head.
+    {
+        let running = Arc::clone(&running);
+        let waker = Arc::clone(&waker);
+        let _ = thread::Builder::new()
+            .name("lr-babel-waker".into())
+            .spawn(move || {
+                while running.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(100));
+                    if !running.load(Ordering::Relaxed) || signal::peek_pending() {
+                        let _ = waker.wake();
+                    }
+                }
+            });
+    }
+    let mut events = mio::Events::with_capacity(256);
 
     while running.load(Ordering::Relaxed) {
         dispatch_signals(&runtime);
         if !running.load(Ordering::Relaxed) {
             break;
         }
-        busy = false;
+        let now_ms = start.elapsed().as_millis() as u64;
+        // Sleep until the earliest periodic deadline (or a datagram).
+        let timeout = babel_poll_timeout(&ifaces, last_link_poll_ms, last_babel_gc_ms, now_ms);
+        events.clear();
+        let _ = poll.poll(&mut events, Some(timeout));
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+        // A readable event drains exactly that socket's queue; the
+        // level-triggered registration re-reports anything that lands
+        // between the drain and the next poll.
         let now_ms = start.elapsed().as_millis() as u64;
         let now_us = babel_clock();
-
+        for event in events.iter() {
+            if event.token() == mio::Token(WAKER_TOKEN) {
+                // Signals or a spurious wake; the head dispatches.
+                continue;
+            }
+            let Some(&(ii, ti, is_multicast)) = sock_table.get(event.token().0) else {
+                continue;
+            };
+            if !event.is_readable() {
+                continue;
+            }
+            let iface = &mut ifaces[ii];
+            let transport = &mut iface.transports[ti];
+            let sock = if is_multicast {
+                transport.mc.as_ref().unwrap()
+            } else {
+                &transport.uc
+            };
+            // A down interface was flushed and must stay quiescent —
+            // but its queue still drains, discarded: an undrained
+            // readable socket would re-fire every poll (the loop would
+            // spin), and draining into a scratch buffer re-learns
+            // nothing. Babel's periodic re-announcement covers the loss
+            // once the link returns.
+            if !iface.link_up {
+                let mut sink = [0u8; 4096];
+                while sock.recv_from(&mut sink).is_ok() {}
+                continue;
+            }
+            loop {
+                match sock.recv_from(&mut buf) {
+                    Ok((n, peer)) => {
+                        if n == 0 {
+                            continue;
+                        }
+                        // RFC 8966 §4.1: the source port MUST be
+                        // the Babel port; our own datagrams are
+                        // skipped.
+                        if peer.port() != iface.port || locals.contains(&peer.ip()) {
+                            continue;
+                        }
+                        // Register the neighbour's addresses
+                        // against this transport's interface
+                        // index: Babel next hops are the
+                        // announcer's own addresses (RFC 8966
+                        // §3.5.3) or the addresses it advertises
+                        // in NextHop TLVs, and the kernel mirror
+                        // needs the egress interface for either
+                        // (Linux netlink refuses a link-local
+                        // gateway without RTA_OIF; Windows'
+                        // GetBestRoute2 cannot resolve an
+                        // unscoped link-local at all, and its
+                        // longest-prefix resolution of a v4
+                        // over-v6 next hop can land on an
+                        // unrelated adapter that happens to own
+                        // a covering connected route).
+                        match peer.ip() {
+                            std::net::IpAddr::V6(a) if a.segments()[0] & 0xffc0 == 0xfe80 => {
+                                // The v6 scope id is the Ipv6IfIndex
+                                // on Windows (may differ from IfIndex);
+                                // for v6 link-local gateways it is the
+                                // valid egress index in both worlds.
+                                if transport.scope_id != 0 {
+                                    register_nexthop_oif(lr_ip(peer.ip()), transport.scope_id);
+                                }
+                            }
+                            std::net::IpAddr::V4(_) if iface.if_index != 0 => {
+                                register_nexthop_oif(lr_ip(peer.ip()), iface.if_index);
+                            }
+                            _ => {}
+                        }
+                        let dest = if is_multicast {
+                            transport.group
+                        } else {
+                            transport.local
+                        };
+                        let ph = lr_babel::BabelPseudoHeader {
+                            source: lr_ip(peer.ip()),
+                            source_port: peer.port(),
+                            destination: lr_ip(dest),
+                            destination_port: iface.port,
+                        };
+                        let mut r = router.write().unwrap();
+                        // RFC 8966 §3.5.3: the peer's source
+                        // address is the next hop of last resort
+                        // for Updates without a preceding
+                        // NextHop TLV — BIRD's v6 announcements
+                        // rely on exactly this rule.
+                        r.babel_note_peer(iface.session, lr_ip(peer.ip()));
+                        match &mut iface.auth {
+                            Some(auth) => {
+                                let out = auth.verify(&buf[..n], ph, now_ms);
+                                for action in out.actions {
+                                    if let Some(pkt) = build_challenge_packet(
+                                        auth,
+                                        &action,
+                                        transport.local,
+                                        peer.ip(),
+                                        iface.port,
+                                    ) {
+                                        let dst = match peer {
+                                            std::net::SocketAddr::V6(v6) => {
+                                                std::net::SocketAddr::V6(
+                                                    std::net::SocketAddrV6::new(
+                                                        *v6.ip(),
+                                                        iface.port,
+                                                        0,
+                                                        v6.scope_id(),
+                                                    ),
+                                                )
+                                            }
+                                            std::net::SocketAddr::V4(v4) => {
+                                                std::net::SocketAddr::from((*v4.ip(), iface.port))
+                                            }
+                                        };
+                                        let _ = transport.uc.send_to(&pkt, dst);
+                                    }
+                                }
+                                match out.accepted {
+                                    Some(plain) => {
+                                        let _ =
+                                            r.feed_input_at(iface.session, &plain, now_ms, now_us);
+                                    }
+                                    None => dropped += 1,
+                                }
+                            }
+                            None => {
+                                let _ = r.feed_input_at(iface.session, &buf[..n], now_ms, now_us);
+                            }
+                        }
+                        // Egress pinning for the NextHop TLV
+                        // values the peer's Updates carry (RFC
+                        // 8966 §4.6.4): whatever v4/v6 address
+                        // the peer advertises as next hop lives
+                        // on *this* link (babeld installs
+                        // through `neigh->ifp`, BIRD resolves
+                        // through the neighbour's iface — the
+                        // kernel's own next-hop resolution must
+                        // not second-guess that). Refreshed on
+                        // every datagram; the poll is a BTreeMap
+                        // read away from the lock we already
+                        // hold. Link-local v6 keeps the
+                        // scope-id registration above (the
+                        // Windows Ipv6IfIndex domain).
+                        if iface.if_index != 0 {
+                            if let Some((tlv_v4, tlv_v6)) = r.babel_egress_nexthops(iface.session) {
+                                if let Some(nh) = tlv_v4 {
+                                    register_nexthop_oif(nh, iface.if_index);
+                                }
+                                if let Some(nh) = tlv_v6 {
+                                    let is_ll =
+                                        matches!(nh, IpAddr::V6(a) if a[..2] == [0xfe, 0x80]);
+                                    if !is_ll {
+                                        register_nexthop_oif(nh, iface.if_index);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(e) => {
+                        // Unexpected receive error: log it, rate
+                        // limited. A silent `break` here hid real
+                        // Windows receive failures (e.g. the
+                        // WSAECONNRESET an earlier sendto to an
+                        // unreachable destination queues on this
+                        // socket) behind an empty routing table.
+                        static RECV_ERRORS: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let n = RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
+                        if n.is_multiple_of(100) {
+                            log_error!(
+                                Component::Babel,
+                                "recv on {} ({}): {}",
+                                iface.name,
+                                if is_multicast { "mc" } else { "uc" },
+                                e
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        // Fresh clock for the periodic work below — the receive sweep
+        // above may have taken time.
+        let now_ms = start.elapsed().as_millis() as u64;
+        let now_us = babel_clock();
         // ---- check link (RFC 8966 §A.2 / BIRD `check link yes`) ----
         // Poll the interface state once a second; a segment that went
         // down loses its routes (withdrawn from Loc-RIB and from the
@@ -5397,7 +5666,6 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             // §3.4.1: the Hello seqno advances by one with every Hello
             // — receivers count losses from its gaps.
             iface.hello_seqno = iface.hello_seqno.wrapping_add(1);
-            busy = true;
             let rtt_echo = if iface.rtt_cost > 0 {
                 router.read().unwrap().babel_rtt_echo(iface.session, now_ms)
             } else {
@@ -5459,206 +5727,6 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         iface.name,
                         e
                     );
-                }
-            }
-        }
-
-        // ---- receive inbound ----
-        // Two paths per interface in authenticated mode: multicast
-        // (exact group destination) and unicast (exact local
-        // destination).
-        for iface in &mut ifaces {
-            // A down interface was flushed above and must stay quiescent.
-            // Reading buffered multicast here would immediately re-learn the
-            // routes we just withdrew and prevent a clean reconvergence.
-            if !iface.link_up {
-                continue;
-            }
-            for ti in 0..iface.transports.len() {
-                let transport = &mut iface.transports[ti];
-                let uc = &transport.uc;
-                let mc = transport.mc.as_ref();
-                for (sock, is_multicast) in
-                    std::iter::once((uc, false)).chain(mc.map(|s| (s, true)))
-                {
-                    loop {
-                        match sock.recv_from(&mut buf) {
-                            Ok((n, peer)) => {
-                                busy = true;
-                                if n == 0 {
-                                    continue;
-                                }
-                                // RFC 8966 §4.1: the source port MUST be
-                                // the Babel port; our own datagrams are
-                                // skipped.
-                                if peer.port() != iface.port || locals.contains(&peer.ip()) {
-                                    continue;
-                                }
-                                // Register the neighbour's addresses
-                                // against this transport's interface
-                                // index: Babel next hops are the
-                                // announcer's own addresses (RFC 8966
-                                // §3.5.3) or the addresses it advertises
-                                // in NextHop TLVs, and the kernel mirror
-                                // needs the egress interface for either
-                                // (Linux netlink refuses a link-local
-                                // gateway without RTA_OIF; Windows'
-                                // GetBestRoute2 cannot resolve an
-                                // unscoped link-local at all, and its
-                                // longest-prefix resolution of a v4
-                                // over-v6 next hop can land on an
-                                // unrelated adapter that happens to own
-                                // a covering connected route).
-                                match peer.ip() {
-                                    std::net::IpAddr::V6(a)
-                                        if a.segments()[0] & 0xffc0 == 0xfe80 =>
-                                    {
-                                        // The v6 scope id is the Ipv6IfIndex
-                                        // on Windows (may differ from IfIndex);
-                                        // for v6 link-local gateways it is the
-                                        // valid egress index in both worlds.
-                                        if transport.scope_id != 0 {
-                                            register_nexthop_oif(
-                                                lr_ip(peer.ip()),
-                                                transport.scope_id,
-                                            );
-                                        }
-                                    }
-                                    std::net::IpAddr::V4(_) if iface.if_index != 0 => {
-                                        register_nexthop_oif(lr_ip(peer.ip()), iface.if_index);
-                                    }
-                                    _ => {}
-                                }
-                                let dest = if is_multicast {
-                                    transport.group
-                                } else {
-                                    transport.local
-                                };
-                                let ph = lr_babel::BabelPseudoHeader {
-                                    source: lr_ip(peer.ip()),
-                                    source_port: peer.port(),
-                                    destination: lr_ip(dest),
-                                    destination_port: iface.port,
-                                };
-                                let mut r = router.write().unwrap();
-                                // RFC 8966 §3.5.3: the peer's source
-                                // address is the next hop of last resort
-                                // for Updates without a preceding
-                                // NextHop TLV — BIRD's v6 announcements
-                                // rely on exactly this rule.
-                                r.babel_note_peer(iface.session, lr_ip(peer.ip()));
-                                match &mut iface.auth {
-                                    Some(auth) => {
-                                        let out = auth.verify(&buf[..n], ph, now_ms);
-                                        for action in out.actions {
-                                            if let Some(pkt) = build_challenge_packet(
-                                                auth,
-                                                &action,
-                                                transport.local,
-                                                peer.ip(),
-                                                iface.port,
-                                            ) {
-                                                let dst = match peer {
-                                                    std::net::SocketAddr::V6(v6) => {
-                                                        std::net::SocketAddr::V6(
-                                                            std::net::SocketAddrV6::new(
-                                                                *v6.ip(),
-                                                                iface.port,
-                                                                0,
-                                                                v6.scope_id(),
-                                                            ),
-                                                        )
-                                                    }
-                                                    std::net::SocketAddr::V4(v4) => {
-                                                        std::net::SocketAddr::from((
-                                                            *v4.ip(),
-                                                            iface.port,
-                                                        ))
-                                                    }
-                                                };
-                                                let _ = transport.uc.send_to(&pkt, dst);
-                                            }
-                                        }
-                                        match out.accepted {
-                                            Some(plain) => {
-                                                let _ = r.feed_input_at(
-                                                    iface.session,
-                                                    &plain,
-                                                    now_ms,
-                                                    now_us,
-                                                );
-                                            }
-                                            None => dropped += 1,
-                                        }
-                                    }
-                                    None => {
-                                        let _ = r.feed_input_at(
-                                            iface.session,
-                                            &buf[..n],
-                                            now_ms,
-                                            now_us,
-                                        );
-                                    }
-                                }
-                                // Egress pinning for the NextHop TLV
-                                // values the peer's Updates carry (RFC
-                                // 8966 §4.6.4): whatever v4/v6 address
-                                // the peer advertises as next hop lives
-                                // on *this* link (babeld installs
-                                // through `neigh->ifp`, BIRD resolves
-                                // through the neighbour's iface — the
-                                // kernel's own next-hop resolution must
-                                // not second-guess that). Refreshed on
-                                // every datagram; the poll is a BTreeMap
-                                // read away from the lock we already
-                                // hold. Link-local v6 keeps the
-                                // scope-id registration above (the
-                                // Windows Ipv6IfIndex domain).
-                                if iface.if_index != 0 {
-                                    if let Some((tlv_v4, tlv_v6)) =
-                                        r.babel_egress_nexthops(iface.session)
-                                    {
-                                        if let Some(nh) = tlv_v4 {
-                                            register_nexthop_oif(nh, iface.if_index);
-                                        }
-                                        if let Some(nh) = tlv_v6 {
-                                            let is_ll = matches!(nh, IpAddr::V6(a) if a[..2] == [0xfe, 0x80]);
-                                            if !is_ll {
-                                                register_nexthop_oif(nh, iface.if_index);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e)
-                                if e.kind() == std::io::ErrorKind::WouldBlock
-                                    || e.kind() == std::io::ErrorKind::TimedOut =>
-                            {
-                                break;
-                            }
-                            Err(e) => {
-                                // Unexpected receive error: log it, rate
-                                // limited. A silent `break` here hid real
-                                // Windows receive failures (e.g. the
-                                // WSAECONNRESET an earlier sendto to an
-                                // unreachable destination queues on this
-                                // socket) behind an empty routing table.
-                                static RECV_ERRORS: std::sync::atomic::AtomicU64 =
-                                    std::sync::atomic::AtomicU64::new(0);
-                                let n = RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
-                                if n.is_multiple_of(100) {
-                                    log_error!(
-                                        Component::Babel,
-                                        "recv on {} ({}): {}",
-                                        iface.name,
-                                        if is_multicast { "mc" } else { "uc" },
-                                        e
-                                    );
-                                }
-                                break;
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -5728,7 +5796,6 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             if out.is_empty() {
                 continue;
             }
-            busy = true;
             for ti in 0..iface.transports.len() {
                 let transport = &mut iface.transports[ti];
                 let payload = match &mut iface.auth {
@@ -5752,11 +5819,6 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 let _ = transport.uc.send_to(&payload, babel_mcast_dest(transport));
             }
         }
-
-        // Idle pass: sleep instead of spinning (see `busy` above).
-        if !busy {
-            thread::sleep(Duration::from_millis(10));
-        }
     }
     if dropped > 0 {
         log_warn!(
@@ -5770,6 +5832,37 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     }
     log_info!(Component::Babel, "babel shutdown complete");
     ExitCode::SUCCESS
+}
+
+/// The Babel event loop's poll timeout: the earliest periodic deadline
+/// minus `now` — the next announcement (per interface, at its Hello
+/// interval), the route-expiry sweep and the link poll (both 1 s), the
+/// auth garbage collection (5 s) — capped so a lost wake cannot pin
+/// the loop. An idle daemon with the default 1 s Hello interval sleeps
+/// one `poll` per second instead of waking a hundred times a second.
+fn babel_poll_timeout(
+    ifaces: &[BabelIface],
+    last_link_poll_ms: u64,
+    last_babel_gc_ms: u64,
+    now_ms: u64,
+) -> Duration {
+    /// Cap on a single sleep.
+    const CAP_MS: u64 = 1_000;
+    let mut next = now_ms.saturating_add(CAP_MS);
+    if ifaces.iter().any(|i| i.check_link) {
+        next = next.min(last_link_poll_ms + 1_000);
+    }
+    next = next.min(last_babel_gc_ms + 1_000);
+    for i in ifaces {
+        if !i.link_up {
+            continue;
+        }
+        next = next.min(i.last_announce_ms + i.hello_interval_ms);
+        if i.auth.is_some() {
+            next = next.min(i.last_gc_ms + 5_000);
+        }
+    }
+    Duration::from_millis(next.saturating_sub(now_ms))
 }
 
 /// One resolved Babel interface runtime (ROADMAP-v3 D1): transports,
