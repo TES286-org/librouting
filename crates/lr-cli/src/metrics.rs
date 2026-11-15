@@ -13,10 +13,11 @@
 //! `hyper` dependency) and keeps the release-archive binary surface
 //! unchanged.
 //!
-//! The thread model matches `api.rs`'s: one thread polls a
-//! `set_nonblocking(true)` `TcpListener` with a 100 ms sleep, and
-//! each accepted connection is served on its own short-lived thread
-//! so a slow client cannot hold the metrics endpoint hostage.
+//! The thread model matches `api.rs`'s: one thread drives the listener
+//! from a `mio::Poll` (a readable event drains the accept queue; see
+//! `accept_reactor.rs`), and each accepted connection is served on its
+//! own short-lived thread so a slow client cannot hold the metrics
+//! endpoint hostage.
 //!
 //! Unlike `api.rs` (which switches transport per platform — Unix
 //! domain socket on Unix, named pipe on Windows), the metrics
