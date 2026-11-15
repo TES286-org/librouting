@@ -45,6 +45,9 @@ use std::time::{Duration, Instant};
 pub(super) const PUMP_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The cadence the shutdown watcher peeks signals and `running` at.
+/// Unix-only: the watcher belongs to the mio loop; non-unix targets
+/// run the poll-and-sleep fallback and never reference it.
+#[cfg(target_family = "unix")]
 const WATCHER_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Run one OSPF engine's main loop until the daemon stops.

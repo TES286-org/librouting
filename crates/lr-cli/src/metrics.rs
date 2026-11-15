@@ -500,6 +500,34 @@ mod imp {
         );
         let _ = (&stream).write_all(response.as_bytes());
         let _ = (&stream).flush();
+        // Drain through the end of the request headers before
+        // closing. A close with bytes still queued in the receive
+        // buffer resets the connection (TCP sends RST instead of
+        // FIN), and a client mid-`read_to_end` sees
+        // `ConnectionReset` instead of the response. The request
+        // line is parsed from the first read; the header block that
+        // follows can land after it — the accept reactor hands the
+        // connection over the moment the handshake completes, so
+        // the first read can race the client's write mid-flight.
+        // Read header lines until the blank-line terminator; the
+        // byte cap and the read timeout bound a hostile one.
+        let mut header_bytes = 0usize;
+        loop {
+            if header_bytes > 64 * 1024 {
+                break;
+            }
+            let mut header = String::new();
+            match reader.read_line(&mut header) {
+                Ok(0) => break,
+                Ok(n) => {
+                    header_bytes += n;
+                    if header.trim_end_matches(['\r', '\n']).is_empty() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     /// Render the Prometheus text exposition format. The body is
