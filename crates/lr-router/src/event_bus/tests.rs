@@ -299,3 +299,81 @@ fn recv_or_none_handles_timeout_and_disconnect() {
     let result = recv_or_none(&rx, Duration::from_millis(50));
     assert!(result.is_none(), "disconnect returns None");
 }
+
+/// `close` is the shutdown handshake: queued events still drain, the
+/// subscriber then sees `Disconnected`, and later publishes are
+/// refused. A live bus with zero subscribers is NOT closed.
+#[test]
+fn close_drains_then_disconnects_and_refuses_publishes() {
+    use std::sync::mpsc::RecvTimeoutError;
+    let bus = EventBus::with_capacity(8);
+    let rx = bus.subscribe();
+    bus.publish(ev([10, 0, 0, 1], 32));
+    bus.publish(ev([10, 0, 0, 2], 32));
+
+    // Close after the last publish.
+    bus.close();
+    assert!(bus.is_closed(), "bus reports closed");
+
+    // The two queued events still drain, in order.
+    let first = rx.recv_timeout(Duration::from_millis(100)).ok();
+    let second = rx.recv_timeout(Duration::from_millis(100)).ok();
+    assert!(matches!(
+        (first, second),
+        (Some(RouterEvent::PrefixAdvertised(a)), Some(RouterEvent::PrefixAdvertised(b)))
+            if a == Prefix::new_v4([10, 0, 0, 1], 32) && b == Prefix::new_v4([10, 0, 0, 2], 32)
+    ));
+    // Queue empty + every sender dropped → Disconnected.
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_millis(100)),
+        Err(RecvTimeoutError::Disconnected)
+    ));
+
+    // Publishes after close are refused.
+    assert_eq!(bus.publish(ev([10, 0, 0, 3], 32)), 0);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+}
+
+/// `close` is idempotent, and a fresh `subscribe` after close gets a
+/// `Receiver` that is immediately disconnected (no events, no
+/// blocking).
+#[test]
+fn close_is_idempotent_and_late_subscribers_see_disconnected() {
+    let bus = EventBus::with_capacity(4);
+    let rx = bus.subscribe();
+    bus.close();
+    bus.close();
+    assert!(bus.is_closed());
+    assert!(matches!(
+        rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+    let rx_late = bus.subscribe();
+    assert!(
+        matches!(
+            rx_late.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ),
+        "a subscriber that joined after close sees no events"
+    );
+}
+
+/// The counters survive `close`: `published_total` keeps the events
+/// accepted before the close, `dropped_total` keeps its count — a
+/// metrics endpoint scraping after shutdown still reports the
+/// daemon's lifetime totals.
+#[test]
+fn counters_survive_close() {
+    let bus = EventBus::with_capacity(2);
+    let _rx = bus.subscribe();
+    bus.publish(ev([10, 0, 0, 1], 32));
+    bus.publish(ev([10, 0, 0, 2], 32));
+    // Capacity 2 full — the third publish drops on the subscriber.
+    bus.publish(ev([10, 0, 0, 3], 32));
+    bus.close();
+    assert_eq!(bus.published_total(), 3);
+    assert_eq!(bus.dropped_total(), 1);
+}
