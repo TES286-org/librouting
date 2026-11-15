@@ -202,7 +202,7 @@ fn import_pipeline(
     cf: &CompiledFilter,
     ctx: &dyn FilterContext,
     adj_in: &mut AdjRibIn,
-    loc_rib: &mut LocRib,
+    loc_rib: &LocRib,
 ) {
     let mut route = route;
     let verdict = bytecode::execute(cf, &mut route, ctx);
@@ -244,14 +244,14 @@ fn bench_import_pipeline(c: &mut Criterion) {
                 || routes.clone(),
                 |routes| {
                     let mut adj_in = AdjRibIn::new();
-                    let mut loc_rib = LocRib::new();
+                    let loc_rib = LocRib::new();
                     for r in routes {
                         import_pipeline(
                             black_box(r),
                             black_box(&trivial_vm),
                             black_box(&BenchCtx),
                             black_box(&mut adj_in),
-                            black_box(&mut loc_rib),
+                            black_box(&loc_rib),
                         );
                     }
                     let n = black_box(loc_rib.iter_best().count());
@@ -265,14 +265,14 @@ fn bench_import_pipeline(c: &mut Criterion) {
                 || routes.clone(),
                 |routes| {
                     let mut adj_in = AdjRibIn::new();
-                    let mut loc_rib = LocRib::new();
+                    let loc_rib = LocRib::new();
                     for r in routes {
                         import_pipeline(
                             black_box(r),
                             black_box(&realistic_vm),
                             black_box(&BenchCtx),
                             black_box(&mut adj_in),
-                            black_box(&mut loc_rib),
+                            black_box(&loc_rib),
                         );
                     }
                     // Every route has local_pref=150 > 100 and med=30

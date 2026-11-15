@@ -82,7 +82,7 @@ fn ebgp_route_propagates_end_to_end() {
 
     let snapshot = b.rib_snapshot();
     assert_eq!(snapshot.len(), 1, "B must have exactly one route");
-    let r = snapshot[0];
+    let r = &snapshot[0];
     assert_eq!(r.key.prefix, Prefix::new_v4([203, 0, 113, 0], 24));
     assert_eq!(r.next_hop, Some(IpAddr::V4([192, 0, 2, 1])));
 
@@ -517,7 +517,7 @@ fn learned_route_carries_peer_source_address_matching_next_hop() {
 
     let snapshot = b.rib_snapshot();
     assert_eq!(snapshot.len(), 1, "B must have the route");
-    let r = snapshot[0];
+    let r = &snapshot[0];
     assert_eq!(
         r.next_hop,
         Some(IpAddr::V4([192, 0, 2, 1])),
@@ -575,7 +575,7 @@ fn learned_route_without_peer_address_carries_no_tag() {
 
     let snapshot = b.rib_snapshot();
     assert_eq!(snapshot.len(), 1);
-    let r = snapshot[0];
+    let r = &snapshot[0];
     let attrs: lr_bgp::path::PathAttributes = r.attributes.clone().into();
     assert_eq!(
         attrs.peer_source_address(),

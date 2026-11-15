@@ -179,8 +179,7 @@ pub fn run_replay(cfg: &ReplayConfig) -> Result<usize, String> {
         }
     }
 
-    let routes: Vec<lr_core::rib::Route> =
-        router.rib_paths_snapshot().into_iter().cloned().collect();
+    let routes: Vec<lr_core::rib::Route> = router.rib_paths_snapshot();
     let established = router.session_summaries().iter().any(|s| s.established);
     if !established {
         return Err(
