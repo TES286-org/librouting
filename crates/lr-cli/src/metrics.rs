@@ -323,7 +323,6 @@ mod imp {
     use std::fmt::Write as _;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
 
@@ -437,7 +436,7 @@ mod imp {
         thread::Builder::new()
             .name("lr-metrics".into())
             .spawn(move || {
-                accept_loop(&listener, &running, |stream| {
+                crate::accept_reactor::tcp_accept_loop(listener, &running, |stream| {
                     let state = Arc::clone(&state);
                     thread::Builder::new()
                         .name("lr-metrics-conn".into())
@@ -447,26 +446,6 @@ mod imp {
             })
             .map_err(|e| format!("spawn metrics thread: {e}"))?;
         Ok(addr_owned)
-    }
-
-    /// Poll the listener until the daemon stops; hand live
-    /// connections to `on_conn`. Same shape as
-    /// `api.rs::accept_loop` — a 100 ms poll keeps the thread idle
-    /// without burning a core.
-    fn accept_loop(
-        listener: &TcpListener,
-        running: &AtomicBool,
-        mut on_conn: impl FnMut(std::net::TcpStream),
-    ) {
-        while running.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, _)) => on_conn(stream),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(_) => thread::sleep(Duration::from_millis(100)),
-            }
-        }
     }
 
     /// One connection: read the request line, write the response.

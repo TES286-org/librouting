@@ -156,7 +156,7 @@ mod imp {
         thread::Builder::new()
             .name("lr-api".into())
             .spawn(move || {
-                accept_loop(&listener, &running, |stream| {
+                crate::accept_reactor::unix_accept_loop(listener, &running, |stream| {
                     // Serve each connection on its own thread so a slow or
                     // idle client cannot hold the management socket hostage.
                     let info = Arc::clone(&info);
@@ -193,24 +193,6 @@ mod imp {
             })
             .map_err(|e| format!("spawn api thread: {e}"))?;
         Ok(path.to_string())
-    }
-
-    /// Poll the listener until the daemon stops; hand live connections
-    /// to `on_conn`.
-    fn accept_loop(
-        listener: &UnixListener,
-        running: &AtomicBool,
-        mut on_conn: impl FnMut(UnixStream),
-    ) {
-        while running.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, _)) => on_conn(stream),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(_) => thread::sleep(Duration::from_millis(100)),
-            }
-        }
     }
 
     /// Shared state one API connection reads. Bundled so the serve

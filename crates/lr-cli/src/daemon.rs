@@ -172,6 +172,7 @@ use lr_router::{
 // platform's daemon constructs (the metrics Runtime field).
 use std::collections::HashMap;
 
+mod accept_reactor;
 mod api;
 mod bgp_reactor;
 mod compat;
