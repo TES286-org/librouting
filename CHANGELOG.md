@@ -13,7 +13,7 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA
+## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA, event bus
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`
@@ -4355,6 +4355,64 @@ while the router's writer lock is held; a scrape reports the bus
 counters and they track publishes). The daemon E2E suites (runtime
 API, SIGHUP reload, collision resolution, graceful drain/shutdown)
 and the interop labs run unchanged.
+
+### Lock-free event bus (issue #101 — the daemon-refactoring block's
+`lock-free event bus` item)
+
+The per-subscriber queue inside `lr-router::event_bus::EventBus` is
+now a bounded lock-free MPMC ring (Vyukov's bounded queue — the
+same algorithm `crossbeam_queue::ArrayQueue` and the Linux kernel's
+`ptr_ring` implement), in `lr-router::event_bus::ring`. The previous
+implementation stored each subscriber's queue behind a
+`std::sync::mpsc::sync_channel`, whose `try_send` takes a per-send
+mutex; with N subscribers the publisher took N mutexes per publish.
+The ring's `try_push` and `try_pop` coordinate through CAS on the
+head/tail counters and an Acquire/Release pair on each slot's
+sequence number, with no mutex on the push or pop path. The
+subscriber list itself moved from `Mutex<BusInner>` to
+`RwLock<Vec<Arc<SubscriberInner>>>`: `publish` takes a shared read
+lock (concurrent with other publishers, exclusive with
+`subscribe`/`close`), and the per-subscriber push is lock-free —
+the publish hot path no longer serialises on the bus lock or on
+per-subscriber mutexes.
+
+The capacity-1 edge case (Vyukov's `seq == pos` match would let a
+producer overwrite an occupied slot when the buffer is one slot
+deep) is fixed by checking `tail - head >= capacity` before the
+slot-sequence match, so `with_capacity(1)` correctly refuses a
+second push. The ring's `Drop` drains leftover values so their
+destructors run.
+
+BREAKING CHANGE (Rust surface, per the pre-2.0 semver debt the
+`api-surface` job tracks; the C ABI is untouched — the `abi-freeze`
+job still passes): `EventBus::subscribe` returns the new public
+`lr_router::EventSubscriber` type instead of
+`std::sync::mpsc::Receiver<RouterEvent>`. `EventSubscriber` mirrors
+`Receiver`'s `try_recv` and `recv_timeout` API (same error types
+`std::sync::mpsc::{TryRecvError, RecvTimeoutError}`), so the call
+sites and match patterns a `Receiver` consumer used before the
+swap compile unchanged — only the type name moved. The free helper
+`lr_router::event_bus::recv_or_none` widens its parameter from
+`&Receiver<RouterEvent>` to `&EventSubscriber`. The daemon's
+kernel-mirror thread (`crates/lr-cli/src/daemon.rs`) and the
+wiring test (`crates/lr-cli/src/daemon_tests.rs`) follow the
+renamed type; no behaviour change.
+
+Tests: `lr-router::event_bus::ring` pins the ring's contract
+(SPSC round-trip, capacity rounds up to a power of two,
+wrap-around preserves values, a 4-producer × 4-consumer MPMC
+stress with no loss and no duplication, `Drop` drains leftover
+values). The existing `event_bus` test suite (every subscriber
+gets every event in order, full-subscriber drop is isolated,
+pruning, clone shares state, concurrent publish + drain, counters
+monotonic, capacity clamping, `recv_or_none` timeout/disconnect,
+`close` drain-then-disconnect, late subscribers, counters survive
+close) passes unchanged against the lock-free ring. A new
+criterion bench (`cargo bench -p lr-router --bench
+event_bus_publish`) measures the publish-path throughput: the
+single-subscriber full-drain shape (the kernel mirror) and the
+four-subscriber no-drain drop shape (the worst case the daemon
+faces when a subscriber is stuck on I/O).
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 

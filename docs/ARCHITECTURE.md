@@ -464,14 +464,18 @@ The daemon's router events flow through an event bus
 ticker thread that drains `poll_events` publishes every event, and
 the kernel-mirror thread subscribes, applying `RouteInstalled` /
 `RouteWithdrawn` to the kernel FIB on its own thread — kernel route
-I/O never runs under the router's writer lock. `EventBus::close` is
-the shutdown handshake: after the last publish, the daemon's exit
-path closes the bus and joins the subscriber, so every accepted event
-was applied before the process exits. The BMP egress mirror keeps its
-push shape instead (the router encodes the BMP message at write time
-through the `bmp_sink` closure and the sender thread does the TCP I/O
-— the encode needs the writer's per-session context, and the sink
-itself never blocks the writer).
+I/O never runs under the router's writer lock. Each subscriber's
+queue is a lock-free MPMC ring (Vyukov's bounded queue, in
+`lr-router::event_bus::ring`); `publish` walks the subscriber list
+under a shared read lock and pushes to each ring through a CAS
+retry loop with no mutex. `EventBus::close` is the shutdown
+handshake: after the last publish, the daemon's exit path closes
+the bus and joins the subscriber, so every accepted event was
+applied before the process exits. The BMP egress mirror keeps its
+push shape instead (the router encodes the BMP message at write
+time through the `bmp_sink` closure and the sender thread does the
+TCP I/O — the encode needs the writer's per-session context, and
+the sink itself never blocks the writer).
 
 Hook traits carry `Send + Sync` because the daemon moves the router
 across threads. A hook that needs shared state behind an `Arc` must

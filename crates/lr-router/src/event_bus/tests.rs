@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use super::{recv_or_none, EventBus};
+use super::{recv_or_none, EventBus, EventSubscriber};
 use crate::event::RouterEvent;
 use lr_core::addr::Prefix;
 
@@ -29,7 +29,7 @@ fn every_subscriber_gets_every_event_in_order() {
         bus.publish(ev([10, 0, 0, i], 32));
     }
 
-    let drain = |rx: std::sync::mpsc::Receiver<RouterEvent>| {
+    let drain = |rx: EventSubscriber| {
         let mut out = Vec::new();
         while let Ok(e) = rx.try_recv() {
             out.push(e);

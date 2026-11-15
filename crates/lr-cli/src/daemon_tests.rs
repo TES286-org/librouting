@@ -1559,7 +1559,7 @@ mod event_bus_wiring_tests {
 
     /// Bounded wait for the next event on a subscriber's queue; the
     /// ticker publishes on a 50 ms cadence, so seconds are generous.
-    fn next_event(rx: &std::sync::mpsc::Receiver<RouterEvent>) -> RouterEvent {
+    fn next_event(rx: &lr_router::event_bus::EventSubscriber) -> RouterEvent {
         rx.recv_timeout(Duration::from_secs(5))
             .expect("an event within the deadline")
     }
