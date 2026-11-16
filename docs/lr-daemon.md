@@ -162,7 +162,8 @@ stanzas (since 1.4.0); see [COMPAT.md](COMPAT.md) for the mapping
 surface, the `lr:` comment directives and the documented deviations.
 
 `lr-daemon translate bird|frr FILE` performs a best-effort conversion of
-such a file into an lr daemon config instead of loading it. Anything it
+such a file into the native `.lr` DSL instead of loading it — the same
+rendering compat mode runs, through the one shared emitter. Anything it
 cannot map stays behind as an explicit `# UNMAPPED:` comment rather than
 being dropped silently.
 

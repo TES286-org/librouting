@@ -92,6 +92,46 @@ delegate to `lr_policy::bgp` and `lr_policy::ospf`, so every
 existing embedder inherits the correct behaviour without
 recompiling.
 
+### Changed
+
+**BIRD/FRR converter and compat mode render the native `.lr` DSL —
+the TOML subset stops being the intermediate representation**
+(`compat`, [issue #101](https://github.com/TES286-org/librouting/issues/101)).
+`lr-daemon translate bird|frr` and the daemon's compat mode (loading
+a BIRD or FRR file with `--config`) now map the source dialect into
+the typed `DaemonConfig` IR (`to_daemon_config` in
+`crates/lr-cli/src/translate.rs`) and render it through the one
+shared DSL emitter `config_dsl::to_dsl` — the same code
+`lr-daemon config to-dsl` runs — instead of rendering the deprecated
+TOML subset and re-parsing it through `parse_toml_subset`. This is
+the prerequisite the 2.0 plan names for the TOML removal (the TOML
+load path shrinking to an error message): no internal consumer
+depends on the TOML frontend any more, and the converter's output is
+byte-identical to what the migration tool prints for the same IR.
+Compat mode still loads exactly what the converter prints — the
+rendered DSL text feeds the regular `.lr` loader
+(`config_dsl::parse_dsl_text`) — so the two surfaces cannot drift.
+
+The `lr:` comment directives resolve through the shared
+`apply_config_key` dispatch (the same entry both config frontends
+drive) via the new `directive_resolve`/`directive_apply` pair; the
+directive vocabulary and its range checks are unchanged. Unmapped
+source lines now carry their block context in the note (`peer
+uplink: multihop 2`, `route-map 'rm-in' entry 10: …`) both in the
+`# UNMAPPED:` comments of the converted file and in the compat-mode
+startup warnings, so a long conversion's gaps are findable without
+reading the whole file. A hold time past the RFC 4271 §4.2
+65535-second ceiling fails the conversion naming the peer — the
+daemon's loader rejects the equivalent key the same way.
+
+The conversion corpus goldens move from `.expected.toml` to
+`.expected.lr` (regenerated; `LR_CORPUS_UPDATE=1` works as before),
+and a new IR-completeness pin (`bird_kitchen_sink_dsl_is_ir_complete`
+/ `frr_kitchen_sink_dsl_is_ir_complete`) asserts the rendered DSL
+parses back to the exact IR the builder produced — the loader-level
+round-trips only proved "loads and finalizes", which is why the
+emitter field gaps below stayed invisible.
+
 ### Changed (CI)
 
 **s390x native CI switches to a self-hosted runner; ppc64le native
@@ -1682,6 +1722,25 @@ acceptance and rejection) through the real `lr-daemon` binary.
 No public Rust API change, no C ABI change, no version bump.
 
 ### Fixed
+
+**`lr-cli`: `config to-dsl` dropped eight keys the config schema
+accepts** (`config`, [issue #101](https://github.com/TES286-org/librouting/issues/101)).
+The deterministic `DaemonConfig` to `.lr` renderer missed
+`bgp.route_reflector_cluster_id` (RFC 4456 §10), the per-peer
+`route_reflector_client` (RFC 4456 §3) and `shutdown` (RFC 4486 §3)
+keys, `aggregate.summary_only` / `aggregate.as_set` (RFC 4271
+§9.2.2.2), `ospf.interface.rxmt_interval` (RFC 2328 §C.3 — BIRD
+`retransmit`, FRR `ip ospf retransmit-interval`), the per-peer
+`max_prefix_restart_time` and `exchange_plane_policy_role`
+(RFC 9234 §3.1). Every one is a key the shared `apply_config_key`
+dispatch accepts, so a TOML config carrying any of them silently
+lost it through `config to-dsl` — a violation of the emitter's own
+never-silent round-trip contract. The kitchen-sink oracle never
+carried the keys, so the gaps stayed invisible until the BIRD/FRR
+converter started rendering through the same emitter (see the
+converter entry above). All eight are emitted (emit-when-set,
+matching each field's default) and the kitchen-sink fixture now
+carries them, so the round-trip equality pin covers them for good.
 
 **`lr-cli` / `lr-router` / `lr-policy`: FRR `network PREFIX route-map
 NAME` qualifier applied at origination** (`policy`, issue #92 —
