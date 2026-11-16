@@ -246,13 +246,11 @@ fn lrctl_status_round_trips_over_named_pipe() {
     // and needs the log to diagnose.
     let (ok, stdout, stderr) = lrctl_shutdown_with_retry(&pipe);
     let daemon_log = std::fs::read_to_string(&d.log).unwrap_or_default();
-    let daemon_log_tail: String = daemon_log
-        .lines()
-        .rev()
-        .take(25)
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
+    // The last 25 lines (a slice tail — `Lines` is not
+    // `ExactSizeIterator`, so the reverse-take-reverse iterator chain
+    // does not type-check).
+    let daemon_lines: Vec<&str> = daemon_log.lines().collect();
+    let daemon_log_tail: String = daemon_lines[daemon_lines.len().saturating_sub(25)..].join("\n");
     assert!(
         ok,
         "lrctl shutdown failed: stderr={stderr} stdout={stdout}\n--- daemon log tail ---\n{daemon_log_tail}"
