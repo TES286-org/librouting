@@ -968,13 +968,20 @@ mod transport {
     ///   means the daemon is gone or its accept loop is wedged; retried
     ///   only for a short bounded window so the daemon-gone case fails
     ///   fast with the crisp `CreateFileW failed (error 2)` message
-    ///   instead of burning the full 5 s per attempt.
+    ///   instead of burning the full 5 s per attempt. The window is
+    ///   2 s, not a few hundred milliseconds: the accept loop's
+    ///   50–100 ms recycle sleeps stretch well past their nominal
+    ///   duration on a CPU-saturated runner (the windows-latest CI
+    ///   image under nextest parallel load), and a 500 ms window was
+    ///   observed expiring with the daemon alive and healthy —
+    ///   turning a benign instance-handoff stall into a spurious
+    ///   client failure.
     ///
     /// Windows docs recommend `WaitNamedPipe`, but a bounded sleep is
-    /// simpler and adequate for the 1-Hz accept cadence.
+    /// simpler and adequate for the accept cadence.
     fn connect_with_retry(name_wide: &[u16], pipe_name: &str) -> Result<isize, String> {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let not_found_deadline = Instant::now() + Duration::from_millis(500);
+        let not_found_deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let handle = unsafe {
                 CreateFileW(
