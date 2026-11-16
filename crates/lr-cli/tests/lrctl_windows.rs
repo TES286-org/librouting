@@ -238,9 +238,25 @@ fn lrctl_status_round_trips_over_named_pipe() {
     // named-pipe transport (server-side `ConnectNamedPipe` and
     // `CreateNamedPipeW` are not atomic); the retry helper absorbs a
     // transient transport error and the diagnostic assertion
-    // surfaces the real reason on a non-transient failure.
+    // surfaces the real reason on a non-transient failure. The
+    // daemon log rides along: a name-gone failure whose log shows
+    // `creating the next pipe instance failed` is host resource
+    // exhaustion (the accept loop's retry rides it out); a log with
+    // no such line and no accept-loop activity is a different race
+    // and needs the log to diagnose.
     let (ok, stdout, stderr) = lrctl_shutdown_with_retry(&pipe);
-    assert!(ok, "lrctl shutdown failed: stderr={stderr} stdout={stdout}");
+    let daemon_log = std::fs::read_to_string(&d.log).unwrap_or_default();
+    let daemon_log_tail: String = daemon_log
+        .lines()
+        .rev()
+        .take(25)
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        ok,
+        "lrctl shutdown failed: stderr={stderr} stdout={stdout}\n--- daemon log tail ---\n{daemon_log_tail}"
+    );
     assert!(
         stdout.contains("shutting down"),
         "shutdown stdout: {stdout} stderr={stderr}"

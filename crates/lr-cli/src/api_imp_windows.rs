@@ -234,19 +234,10 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let started = std::time::Instant::now();
 
     // Pre-create the first pipe instance so a bind failure shows up
-    // at startup, not on the first client connect.
-    let probe = unsafe {
-        CreateNamedPipeW(
-            name_wide.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
-            65536,
-            65536,
-            0,
-            std::ptr::null(),
-        ) as isize
-    };
+    // at startup, not on the first client connect. No retry here by
+    // design: a name that cannot be created at all is a bind error
+    // the operator must see immediately.
+    let probe = create_pipe_instance(&name_wide);
     if probe == INVALID_HANDLE_VALUE as isize {
         let err = unsafe { GetLastError() };
         return Err(format!(
@@ -291,6 +282,58 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     Ok(path.to_string())
 }
 
+/// Create one listening pipe instance (same arguments at every
+/// call site). Plain creation — the retry policy lives in
+/// [`create_listening_instance`].
+fn create_pipe_instance(name_wide: &[u16]) -> isize {
+    unsafe {
+        CreateNamedPipeW(
+            name_wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            65536,
+            65536,
+            0,
+            std::ptr::null(),
+        ) as isize
+    }
+}
+
+/// Create the next listening pipe instance, retrying while the
+/// daemon runs. A failed `CreateNamedPipeW` (kernel nonpaged-pool
+/// exhaustion on a loaded host, a transient handle-table limit)
+/// must not drop the pipe name until the daemon restarts: with no
+/// open instance the name vanishes and every client's `CreateFileW`
+/// fails with `ERROR_FILE_NOT_FOUND` — the failure the 2 s client
+/// retry window was widened for, which observed stalls longer than
+/// that on the windows-latest CI runner. The retry cadence is
+/// 200 ms with a one-time log naming the error; it exits (returning
+/// `INVALID_HANDLE_VALUE`) as soon as `running` goes false so
+/// daemon shutdown is never blocked.
+fn create_listening_instance(name_wide: &[u16], running: &AtomicBool) -> isize {
+    let mut logged = false;
+    loop {
+        let handle = create_pipe_instance(name_wide);
+        if handle != INVALID_HANDLE_VALUE as isize {
+            return handle;
+        }
+        if !running.load(Ordering::Relaxed) {
+            return handle;
+        }
+        if !logged {
+            logged = true;
+            let err = unsafe { GetLastError() };
+            log_warn!(
+                crate::daemon_logger::Component::Daemon,
+                "runtime API: creating the next pipe instance failed (error {err}) — \
+                 retrying every 200 ms while the daemon runs"
+            );
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Poll the named pipe for new connections. Hands live client
 /// connections to `on_conn`. The first pipe instance is pre-created
 /// by [`spawn`]; subsequent instances are created here after each
@@ -317,8 +360,18 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
 /// Both are fixed here: the replacement instance is created BEFORE
 /// the failed handle is closed (`PIPE_UNLIMITED_INSTANCES` lets both
 /// coexist, so the name is held continuously), and the accepted
-/// stream is always handed to `on_conn` — a failed next-instance
-/// creation only means the *next* client waits one loop turn.
+/// stream is always handed to `on_conn`.
+///
+/// A third gap closed here: a *failed* `CreateNamedPipeW` used to
+/// park the loop on an invalid handle with the name gone until the
+/// daemon restarted — on a host with kernel nonpaged-pool exhaustion
+/// (the windows-latest CI runner under parallel test load) the
+/// creation can fail transiently for seconds at a time. Every
+/// post-startup creation now goes through [`create_listening_instance`],
+/// which retries every 200 ms while the daemon runs (the failed
+/// handle stays open during the retry, so the name never drops), and
+/// the accepted stream is handed to `on_conn` before the next
+/// instance is created (a connected instance holds the name too).
 fn accept_loop(
     mut first_handle: isize,
     name_wide: &[u16],
@@ -337,25 +390,17 @@ fn accept_loop(
                 // Anything other than the benign "already connected"
                 // race: the instance is unusable (ERROR_NO_DATA after
                 // a client connected and disconnected before this
-                // call, a lost handle). Create the replacement FIRST
-                // and close the failed one after, so the pipe name
-                // never has a zero-instance window. A client may still
-                // connect to the replacement during the throttle sleep
-                // below — the kernel completes the connection and the
-                // next ConnectNamedPipe reports ERROR_PIPE_CONNECTED,
-                // which the accept path above handles.
-                let replacement = unsafe {
-                    CreateNamedPipeW(
-                        name_wide.as_ptr(),
-                        PIPE_ACCESS_DUPLEX,
-                        PIPE_TYPE_BYTE | PIPE_WAIT,
-                        PIPE_UNLIMITED_INSTANCES,
-                        65536,
-                        65536,
-                        0,
-                        std::ptr::null(),
-                    ) as isize
-                };
+                // call, a lost handle). Create the replacement with
+                // the retry policy (the failed handle stays open
+                // while the retry runs, so the pipe name is held
+                // continuously) and close the failed one only after
+                // the replacement exists. A client may still
+                // connect to the replacement during the throttle
+                // sleep below — the kernel completes the connection
+                // and the next ConnectNamedPipe reports
+                // ERROR_PIPE_CONNECTED, which the accept path above
+                // handles.
+                let replacement = create_listening_instance(name_wide, running);
                 if handle != INVALID_HANDLE_VALUE as isize {
                     unsafe { CloseHandle(handle as HANDLE) };
                 }
@@ -370,29 +415,16 @@ fn accept_loop(
                 continue;
             }
         }
-        // The client is connected; hand the stream off and create a
-        // fresh pipe instance for the next client.
+        // The client is connected: hand the stream off first — the
+        // connected instance holds the pipe name, so the next
+        // listening instance can be created after the handoff with
+        // no zero-instance window — then create the next instance
+        // with the retry policy. A client that connected between the
+        // accept and the next instance's creation lands on the
+        // connected instance's name and is served by the handler.
         let stream = NamedPipeStream::new(handle);
-        first_handle = unsafe {
-            CreateNamedPipeW(
-                name_wide.as_ptr(),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_WAIT,
-                PIPE_UNLIMITED_INSTANCES,
-                65536,
-                65536,
-                0,
-                std::ptr::null(),
-            ) as isize
-        };
-        // Even when the fresh instance could not be created, serve the
-        // client we have: the next iteration's error path recreates the
-        // listening instance. Dropping the accepted stream here would
-        // disconnect a client that successfully connected.
-        if first_handle == INVALID_HANDLE_VALUE as isize {
-            thread::sleep(Duration::from_millis(100));
-        }
         on_conn(stream);
+        first_handle = create_listening_instance(name_wide, running);
     }
 }
 

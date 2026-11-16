@@ -969,13 +969,14 @@ mod transport {
     ///   only for a short bounded window so the daemon-gone case fails
     ///   fast with the crisp `CreateFileW failed (error 2)` message
     ///   instead of burning the full 5 s per attempt. The window is
-    ///   2 s, not a few hundred milliseconds: the accept loop's
-    ///   50–100 ms recycle sleeps stretch well past their nominal
-    ///   duration on a CPU-saturated runner (the windows-latest CI
-    ///   image under nextest parallel load), and a 500 ms window was
-    ///   observed expiring with the daemon alive and healthy —
-    ///   turning a benign instance-handoff stall into a spurious
-    ///   client failure.
+    ///   2 s: the accept loop's 50–100 ms recycle sleeps stretch on a
+    ///   CPU-saturated runner, and a 500 ms window was observed
+    ///   expiring during such a stall. The durable fix for the longer
+    ///   name-gone windows (a `CreateNamedPipeW` failing for seconds
+    ///   under kernel nonpaged-pool exhaustion) is server-side — the
+    ///   accept loop retries the creation while the daemon runs (see
+    ///   `api_imp_windows.rs::create_listening_instance`); this
+    ///   client window only absorbs the short handoff stalls.
     ///
     /// Windows docs recommend `WaitNamedPipe`, but a bounded sleep is
     /// simpler and adequate for the accept cadence.
