@@ -39,7 +39,11 @@
 //! take a write lock. The daemon has one publisher per bus (the
 //! ticker, or the OSPF main loop in standalone mode), so read-lock
 //! contention does not arise in practice; the design leaves room
-//! for a future second publisher without a re-design.
+//! for a future second publisher without a re-design. A dead
+//! subscriber (every `EventSubscriber` clone dropped) is skipped in
+//! the read-locked walk and pruned in a separate write-locked pass
+//! that runs only when the walk saw one — the common publish (every
+//! subscriber live) never takes the write lock.
 //!
 //! The bus is `Clone` (internals behind an `Arc`) so the publisher
 //! and every subscriber hold their own handle. Disconnected
@@ -255,8 +259,9 @@ impl EventBus {
     ///
     /// Returns the number of subscribers that accepted the event
     /// (`0` once the bus has been closed). Disconnected subscribers
-    /// (the `EventSubscriber` and its clones dropped) are pruned in
-    /// the same pass.
+    /// (the `EventSubscriber` and its clones dropped) are skipped in
+    /// the walk and pruned right after it — the list tracks live
+    /// subscribers without a separate reaper.
     pub fn publish(&self, event: RouterEvent) -> usize {
         if self.inner.closed.load(Ordering::Acquire) {
             return 0;
@@ -269,33 +274,59 @@ impl EventBus {
         self.inner.published.fetch_add(1, Ordering::Relaxed);
         let mut accepted = 0;
         let mut dropped_any = false;
-        // Read-lock the subscriber list: concurrent publishers (the
-        // daemon has at most two, in standalone OSPF mode) share the
-        // lock; subscribe/close take the write lock. The per-sub
-        // push is lock-free, so the lock is held only for the walk.
-        let mut subs = self.inner.subscribers.write().unwrap();
-        subs.retain(|sub| {
-            // A subscriber whose `EventSubscriber` (and all its
-            // clones) was dropped has strong_count == 1 (the bus's
-            // own Arc). Prune it. The prune runs in the same pass as
-            // the publish so the list tracks live subscribers
-            // without a separate reaper.
-            if Arc::strong_count(sub) == 1 {
-                return false;
-            }
-            match sub.ring.try_push(event.clone()) {
-                Ok(()) => {
-                    accepted += 1;
-                    true
+        let mut has_dead = false;
+        {
+            // Read-lock the subscriber list: concurrent publishers
+            // (the daemon has at most two, in standalone OSPF mode)
+            // share the lock; subscribe/close take the write lock.
+            // The per-sub push is lock-free, so the lock is held
+            // only for the walk.
+            let subs = self.inner.subscribers.read().unwrap();
+            // The last live subscriber receives the event itself;
+            // every subscriber before it gets a clone. The daemon's
+            // shape is one subscriber (the kernel mirror), so the
+            // publish hot path moves the event with no deep clone of
+            // its route attributes.
+            let last_live = subs.iter().rposition(|sub| Arc::strong_count(sub) > 1);
+            let mut owned = Some(event);
+            for (i, sub) in subs.iter().enumerate() {
+                // A subscriber whose `EventSubscriber` (and all its
+                // clones) was dropped has strong_count == 1 (the
+                // bus's own Arc). Skip it — pushing would count a
+                // drop on a consumer nobody reads — and prune after
+                // the walk.
+                if Arc::strong_count(sub) == 1 {
+                    has_dead = true;
+                    continue;
                 }
-                Err(_) => {
-                    dropped_any = true;
-                    true
+                let v = if Some(i) == last_live {
+                    owned
+                        .take()
+                        .expect("the event is moved exactly once, at the last live subscriber")
+                } else {
+                    owned
+                        .as_ref()
+                        .expect("the event is present until the last live subscriber")
+                        .clone()
+                };
+                match sub.ring.try_push(v) {
+                    Ok(()) => accepted += 1,
+                    Err(_) => dropped_any = true,
                 }
             }
-        });
+        }
         if dropped_any {
             self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        if has_dead {
+            // Prune under the write lock, only when the walk saw a
+            // dead subscriber. The re-check inside `retain` matters:
+            // between the read walk and this write lock another
+            // publisher may have pruned already, and `subscribe` may
+            // have added an entry — `retain` keeps every subscriber
+            // that is still live and drops the rest.
+            let mut subs = self.inner.subscribers.write().unwrap();
+            subs.retain(|sub| Arc::strong_count(sub) > 1);
         }
         accepted
     }

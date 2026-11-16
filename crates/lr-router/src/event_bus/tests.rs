@@ -127,6 +127,56 @@ fn dropped_subscribers_are_pruned_on_publish() {
     assert_eq!(bus.dropped_total(), 0, "disconnected is not 'dropped'");
 }
 
+/// A publish that sees a mix of live and dead subscribers reaches
+/// the live ones, skips the dead one (no drop counted on a consumer
+/// nobody reads), and prunes the dead one in the same publish —
+/// the lazy-prune path under the write lock runs while a live
+/// subscriber stays in the list.
+#[test]
+fn mixed_live_and_dead_subscribers_publish_and_prune() {
+    let bus = EventBus::with_capacity(8);
+    let rx_live = bus.subscribe();
+    {
+        let _rx_dead = bus.subscribe();
+        assert_eq!(bus.subscriber_count(), 2);
+    }
+    // The dead subscriber is still listed; the live one gets the
+    // event, the dead one is skipped and pruned.
+    assert_eq!(bus.publish(ev([10, 0, 0, 1], 32)), 1, "live accepted");
+    assert_eq!(bus.subscriber_count(), 1, "dead subscriber pruned");
+    assert_eq!(bus.dropped_total(), 0, "a dead subscriber is not a drop");
+    assert!(matches!(
+        rx_live.try_recv(),
+        Ok(RouterEvent::PrefixAdvertised(_))
+    ));
+
+    // Dead subscribers on both sides of a live one (head and tail)
+    // are skipped and pruned; the live subscriber in the middle
+    // still receives the event — the event moves to it even though
+    // it is not the last entry in the list.
+    drop(rx_live);
+    let rx_mid = bus.subscribe();
+    {
+        let _rx_tail = bus.subscribe();
+    }
+    assert_eq!(bus.subscriber_count(), 3, "two dead entries still listed");
+    assert_eq!(
+        bus.publish(ev([10, 0, 0, 2], 32)),
+        1,
+        "only the live one accepts"
+    );
+    assert_eq!(bus.subscriber_count(), 1, "both dead subscribers pruned");
+    assert_eq!(
+        bus.dropped_total(),
+        0,
+        "dead subscribers never count as drops"
+    );
+    assert!(matches!(
+        rx_mid.try_recv(),
+        Ok(RouterEvent::PrefixAdvertised(_))
+    ));
+}
+
 /// The bus is `Clone` and the clone shares the same internal state —
 /// publishing through a clone reaches subscribers on the original.
 #[test]
