@@ -264,6 +264,16 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         if let Some(v) = &agg.prefix {
             e.kv(1, "prefix", &fmt_string(v));
         }
+        // `summary-only` / `as-set` (FRR `aggregate-address`
+        // qualifiers, RFC 4271 §9.2.2.2): both default to `false`, so
+        // they are emitted only when set — an unset row round-trips
+        // to the same defaults.
+        if agg.summary_only {
+            e.kv(1, "summary_only", "true");
+        }
+        if agg.as_set {
+            e.kv(1, "as_set", "true");
+        }
         e.close(0);
     }
     // `[[bgp.network_route_map]]` (issue #92 — defects.txt L75): FRR
@@ -620,6 +630,13 @@ fn bgp_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Result<Vec<(String, Str
     if cfg.enforce_first_as != base.enforce_first_as {
         v.push(("enforce_first_as".into(), cfg.enforce_first_as.to_string()));
     }
+    // RFC 4456 §10: the local speaker's route-reflector cluster id.
+    // `None` is the default (falls back to the BGP identifier), so it
+    // is emitted only when the operator set one — a `None` re-parses
+    // identically because the key is absent.
+    if let Some(x) = &cfg.route_reflector_cluster_id {
+        v.push(("route_reflector_cluster_id".into(), fmt_string(x)));
+    }
     if cfg.bestpath_compare_routerid != base.bestpath_compare_routerid {
         v.push((
             "bestpath_compare_routerid".into(),
@@ -775,6 +792,18 @@ fn peer_block(peer: &crate::daemon_config::PeerSpec) -> Result<Vec<(String, Stri
     }
     if let Some(x) = peer.bfd_multihop {
         v.push(("bfd_multihop".into(), x.to_string()));
+    }
+    // RFC 4456 §3: this peer is a route-reflector client. `None` is
+    // the default and `Some(false)` an explicit unset; both stay
+    // quiet so the emitted file carries only operator-set state.
+    if let Some(x) = peer.route_reflector_client {
+        v.push(("route_reflector_client".into(), x.to_string()));
+    }
+    // RFC 4486 §3 administrative shutdown. Same emit-when-set
+    // posture: `None` (inherit `false`) emits nothing, `Some(false)`
+    // (an explicit `no neighbor X shutdown`) emits `false`.
+    if let Some(x) = peer.shutdown {
+        v.push(("shutdown".into(), x.to_string()));
     }
     if let Some(x) = peer.exchange_plane {
         v.push(("exchange_plane".into(), x.to_string()));
