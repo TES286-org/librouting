@@ -787,15 +787,20 @@ fn peer_block(peer: &crate::daemon_config::PeerSpec) -> Result<Vec<(String, Stri
     if let Some(x) = peer.max_prefix_threshold {
         v.push(("max_prefix_threshold".into(), x.to_string()));
     }
+    // Re-establishment cooldown (seconds) for the `restart`
+    // max-prefix action.
+    if let Some(x) = peer.max_prefix_restart_time {
+        v.push(("max_prefix_restart_time".into(), x.to_string()));
+    }
     if let Some(x) = peer.bfd {
         v.push(("bfd".into(), x.to_string()));
     }
     if let Some(x) = peer.bfd_multihop {
         v.push(("bfd_multihop".into(), x.to_string()));
     }
-    // RFC 4456 §3: this peer is a route-reflector client. `None` is
-    // the default and `Some(false)` an explicit unset; both stay
-    // quiet so the emitted file carries only operator-set state.
+    // RFC 4456 §3: this peer is a route-reflector client. `None` (the
+    // default) emits nothing; `Some(false)` (an explicit unset) emits
+    // `false` so the IR survives the round-trip exactly.
     if let Some(x) = peer.route_reflector_client {
         v.push(("route_reflector_client".into(), x.to_string()));
     }
@@ -807,6 +812,10 @@ fn peer_block(peer: &crate::daemon_config::PeerSpec) -> Result<Vec<(String, Stri
     }
     if let Some(x) = peer.exchange_plane {
         v.push(("exchange_plane".into(), x.to_string()));
+    }
+    // RFC 9234 §3.1 policy role for the exchange-plane session.
+    if let Some(x) = &peer.exchange_plane_policy_role {
+        v.push(("exchange_plane_policy_role".into(), fmt_string(x)));
     }
     if let Some(x) = peer.graceful_shutdown {
         v.push(("graceful_shutdown".into(), x.to_string()));
@@ -924,6 +933,12 @@ fn ospf_sub_blocks(cfg: &DaemonConfig) -> Result<Vec<SubBlock>, String> {
         }
         if let Some(x) = iface.dead_interval {
             body.push(("dead_interval".into(), x.to_string()));
+        }
+        // RFC 2328 §C.3 RxmtInterval — the emitter gap this closed was
+        // found by the converter's DSL round-trip (BIRD `retransmit` /
+        // FRR `ip ospf retransmit-interval`).
+        if let Some(x) = iface.rxmt_interval {
+            body.push(("rxmt_interval".into(), x.to_string()));
         }
         if let Some(x) = iface.priority {
             body.push(("priority".into(), x.to_string()));

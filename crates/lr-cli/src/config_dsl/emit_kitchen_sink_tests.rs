@@ -101,11 +101,13 @@ gtsm = 1
 max_prefixes = 1000
 max_prefix_action = "shutdown"
 max_prefix_threshold = 70
+max_prefix_restart_time = 30
 bfd = true
 bfd_multihop = false
 route_reflector_client = true
 shutdown = false
 exchange_plane = true
+exchange_plane_policy_role = "provider"
 graceful_shutdown = true
 
 [peer-template.rr-client]
@@ -202,6 +204,7 @@ area = 1
 cost = 10
 hello_interval = 10
 dead_interval = 40
+rxmt_interval = 8
 priority = 2
 network_type = "broadcast"
 adj_sid = 100
