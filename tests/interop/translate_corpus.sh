@@ -2,7 +2,7 @@
 # Conversion-corpus gate for `lr-daemon translate bird|frr`.
 #
 # The corpus under tests/corpus/{bird,frr}/ pairs every real-world
-# BIRD or FRR `.conf` with the exact `.expected.toml` the converter
+# BIRD or FRR `.conf` with the exact `.expected.lr` the converter
 # emits. This script is the end-to-end half of the corpus gate: it
 # drives the real `lr-daemon translate` CLI binary (the in-crate
 # `translate::corpus_tests` unit test drives the same converter
@@ -10,7 +10,7 @@
 #
 # A mismatch fails with a unified diff so the regression is obvious.
 # Run `LR_CORPUS_UPDATE=1 ./tests/interop/translate_corpus.sh` to
-# regenerate the `.expected.toml` files after an intentional converter
+# regenerate the `.expected.lr` files after an intentional converter
 # change (the unit test honours the same env var).
 #
 # No reference daemon (BIRD/FRR) is needed — this is a pure converter
@@ -32,7 +32,7 @@ checked=0
 run_case() {
     local dialect="$1" conf="$2"
     local expected
-    expected="${conf%.conf}.expected.toml"
+    expected="${conf%.conf}.expected.lr"
     checked=$((checked + 1))
     local actual
     actual=$("$BIN" translate "$dialect" "$conf" 2>/dev/null || true)
@@ -72,7 +72,7 @@ for dialect in bird frr; do
 done
 
 if [ "$UPDATE" = "1" ]; then
-    echo "corpus: regenerated $checked .expected.toml file(s)"
+    echo "corpus: regenerated $checked .expected.lr file(s)"
     exit 0
 fi
 
@@ -81,4 +81,4 @@ if [ "$fail" -ne 0 ]; then
     echo "corpus gate FAILED ($checked case(s) checked)"
     exit 1
 fi
-echo "corpus gate OK: $checked case(s) match their .expected.toml"
+echo "corpus gate OK: $checked case(s) match their .expected.lr"

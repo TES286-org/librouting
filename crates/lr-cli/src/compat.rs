@@ -5,15 +5,18 @@
 //! source implementation's semantics (accept-all eBGP policy, FRR's
 //! enforce-first-as default, BIRD channel families) apply without the
 //! operator writing lr DSL. Internally the same parse/render pipeline
-//! as `lr-daemon translate` feeds the rendered TOML into the daemon's
-//! regular loader, so compat mode and the converter can never drift
-//! apart — there is exactly one mapping.
+//! as `lr-daemon translate` feeds the rendered `.lr` DSL into the
+//! daemon's regular loader, so compat mode and the converter can
+//! never drift apart — there is exactly one mapping.
 //!
 //! The native `.lr` DSL (ROADMAP-v3 D16 Phase 3) is the primary
-//! authoring dialect; the TOML subset (see
-//! [`crate::daemon_config::parse_toml_subset`]) is the deprecated
-//! authoring dialect and is in its deprecation window — fully
-//! supported through the 1.x series, planned for removal in 2.x (see
+//! authoring dialect and the converter's rendering target (issue
+//! #101 — the converter stopped rendering into the deprecated TOML
+//! subset as its intermediate representation, the prerequisite for
+//! the 2.0 TOML removal). The TOML subset (see
+//! [`crate::daemon_config::parse_toml_subset`]) remains a deprecated
+//! *authoring* dialect, fully supported through the 1.x series and
+//! loaded directly when detected or forced (see
 //! [`crate::daemon_config::deprecation_notice`]). BIRD and FRR files
 //! are adoption inputs: a one-way translation into the typed IR, not
 //! an authoring surface. The four dialects share one
@@ -202,12 +205,12 @@ fn lr_block_header(line: &str) -> bool {
     rest.starts_with('{') || rest.starts_with('"')
 }
 
-/// Load a native BIRD/FRR config: parse the dialect, render daemon
-/// TOML through the shared converter, and return the TOML text plus
-/// the operator-facing warnings (ignored non-BGP protocols, unmapped
-/// constructs). The returned TOML is exactly what
+/// Load a native BIRD/FRR config: parse the dialect, render the
+/// `.lr` DSL through the shared converter, and return the DSL text
+/// plus the operator-facing warnings (ignored non-BGP protocols,
+/// unmapped constructs). The returned DSL is exactly what
 /// `lr-daemon translate <dialect>` prints — feeding it through the
-/// regular TOML loader keeps compat mode on the round-trip-tested
+/// regular `.lr` loader keeps compat mode on the round-trip-tested
 /// path.
 pub(super) fn load_native(dialect: Dialect, text: &str) -> Result<(String, Vec<String>), String> {
     let out = match dialect {
@@ -222,11 +225,11 @@ pub(super) fn load_native(dialect: Dialect, text: &str) -> Result<(String, Vec<S
         .iter()
         .map(|p| format!("{p}: ignored — the compat surface runs the BGP control plane only"))
         .collect();
-    let toml = crate::translate::render_config(out);
+    let dsl = crate::translate::render_config(&out)?;
     // In converter mode the UNMAPPED comments are the report the
-    // operator reviews; in native-run mode there is no TOML file to
+    // operator reviews; in native-run mode there is no DSL file to
     // read, so every note becomes a startup warning instead.
-    for line in toml.lines() {
+    for line in dsl.lines() {
         if let Some(note) = line.trim().strip_prefix("# UNMAPPED: ") {
             warnings.push(format!("unmapped: {note}"));
         }
@@ -238,7 +241,7 @@ pub(super) fn load_native(dialect: Dialect, text: &str) -> Result<(String, Vec<S
     } else {
         warnings.push("bird dialect defaults applied: accept-all eBGP policy".to_string());
     }
-    Ok((toml, warnings))
+    Ok((dsl, warnings))
 }
 
 /// Load `--config` content in whatever dialect it turns out to be:
@@ -246,10 +249,12 @@ pub(super) fn load_native(dialect: Dialect, text: &str) -> Result<(String, Vec<S
 /// fail closed. The native `.lr` DSL is the primary authoring
 /// dialect — detection checks DSL block headers first (see
 /// [`lr_block_header`]) so a `.lr` file never falls through to the
-/// TOML heuristic. Feeds the rendered TOML through
-/// `parse_toml_subset` so every compat-mode config follows the same
-/// parse path as a native one; the deprecated TOML dialect (when
-/// detected or forced) loads directly through `parse_toml_subset`.
+/// TOML heuristic. BIRD and FRR files render through the shared
+/// converter and the rendered `.lr` DSL feeds
+/// `config_dsl::parse_dsl_text`, so every compat-mode config follows
+/// the same parse path as a native one; the deprecated TOML dialect
+/// (when detected or forced) loads directly through
+/// `parse_toml_subset`.
 ///
 /// `source` carries the file's display name and path when the config
 /// was read from disk — the native `.lr` dialect needs the path to
@@ -275,11 +280,13 @@ pub(super) fn load_config_text(
         crate::daemon_config::parse_toml_subset(text, cfg)?;
         return Ok(());
     }
-    let (toml, warnings) = load_native(dialect, text)?;
+    let (dsl, warnings) = load_native(dialect, text)?;
     for w in &warnings {
         cfg.warnings.push(w.clone());
     }
-    crate::daemon_config::parse_toml_subset(&toml, cfg)
+    // The rendered DSL is generated (no `include` directives), so it
+    // parses without a source path.
+    crate::config_dsl::parse_dsl_text(&dsl, None, cfg)
 }
 
 #[cfg(test)]
@@ -460,15 +467,16 @@ protocol bgp uplink {
     }
 
     #[test]
-    fn frr_translate_and_compat_produce_identical_toml() {
+    fn frr_translate_and_compat_produce_identical_dsl() {
         // Compat mode must ride the exact converter output — no
         // second mapping to drift.
         let text = "router bgp 64512\n\
                      bgp router-id 10.0.0.2\n\
                      neighbor 192.0.2.2 remote-as 64513\n\
                      neighbor 192.0.2.2 update-source 10.9.9.9\n";
-        let (toml, _) = load_native(Dialect::Frr, text).expect("load_native");
-        let converted = crate::translate::render_config(crate::translate::parse_frr_config(text));
-        assert_eq!(toml, converted);
+        let (dsl, _) = load_native(Dialect::Frr, text).expect("load_native");
+        let converted = crate::translate::render_config(&crate::translate::parse_frr_config(text))
+            .expect("render_config");
+        assert_eq!(dsl, converted);
     }
 }
