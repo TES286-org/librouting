@@ -43,11 +43,22 @@
 //! - The consumer's `slot.seq.load(Acquire)` pairs with the
 //!   producer's `slot.seq.store(Release)` after the push, so a
 //!   consumer never reads a slot a producer has not finished writing.
-//! - The `head` / `tail` CAS is `Acquire` on the successful store
-//!   and `Relaxed` on the failure reload; the slot sequence carries
-//!   the cross-thread visibility, so the head/tail counters only
-//!   need their own Acquire/Release for the empty/full checks that
-//!   read the other counter.
+//! - The `head` / `tail` CAS uses `AcqRel` on the successful store
+//!   and `Relaxed` on the failure reload. The slot sequence carries
+//!   the value's cross-thread visibility; the `AcqRel` on the head /
+//!   tail CAS exists for the fullness / emptiness pre-checks that
+//!   read the *other* counter — the producer's `head.load(Acquire)`
+//!   pairs with the consumer's `head` CAS (the Release half of
+//!   `AcqRel`) so a pop that frees a slot is visible before the
+//!   producer declares the queue full, and the consumer's
+//!   `tail.load(Acquire)` pairs with the producer's `tail` CAS (the
+//!   Release half of `AcqRel`) so a push that claims a slot is
+//!   visible before the consumer declares the queue empty. With
+//!   `Acquire`-only success the write half would be `Relaxed`, and a
+//!   stale read of the other counter could declare full or empty
+//!   when the slot's own sequence number says otherwise — a real
+//!   loss / latency window on weakly ordered memory (RISC-V RVWMO,
+//!   ARM64) that x86_64's TSO hides.
 //!
 //! # Safety
 //!
@@ -137,9 +148,16 @@ impl<T> MpmcRing<T> {
         loop {
             // Fullness check first: a producer must not advance `tail`
             // past `head + capacity`. Reading `head` with `Acquire`
-            // pairs with the consumer's `head` CAS (Release) so a
-            // pop that frees a slot is visible before we declare
-            // full.
+            // pairs with the consumer's `head` CAS (the Release half
+            // of its `AcqRel` success ordering) so a pop that frees a
+            // slot is visible before we declare full. An
+            // `Acquire`-only success on the consumer's CAS would leave
+            // the write half `Relaxed`, and on weakly ordered memory
+            // (RISC-V RVWMO, ARM64) this load could observe a stale
+            // `head` and falsely declare full — `try_push` returns
+            // `Err(v)` and the publisher drops the event even though a
+            // slot was free. x86_64's TSO hides the window in
+            // practice.
             let head = self.head.load(Ordering::Acquire);
             if pos.wrapping_sub(head) >= self.capacity {
                 return Err(v);
@@ -150,11 +168,20 @@ impl<T> MpmcRing<T> {
                 // Slot is empty and reserved for the producer at
                 // `pos`. Try to claim it by advancing `tail`; the
                 // weak CAS handles contention from other producers
-                // loading the same `pos`.
+                // loading the same `pos`. Success ordering is
+                // `AcqRel`: the `Acquire` half synchronises with any
+                // prior consumer's `head` CAS so the fullness check
+                // above saw an up-to-date `head` (defensive — the
+                // load already established the visibility), and the
+                // `Release` half publishes the `tail` advance to a
+                // consumer's `tail.load(Acquire)` in the empty check
+                // below, so a producer in flight (CAS done, slot.seq
+                // not yet published) is not mistaken for an empty
+                // queue.
                 match self.tail.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
-                    Ordering::Acquire,
+                    Ordering::AcqRel,
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
@@ -196,11 +223,23 @@ impl<T> MpmcRing<T> {
             if seq == target {
                 // Slot holds the value pushed at `pos`. Try to
                 // claim it by advancing `head`; the weak CAS
-                // handles contention from other consumers.
+                // handles contention from other consumers. Success
+                // ordering is `AcqRel`: the `Acquire` half
+                // synchronises with the producer's prior
+                // `slot.seq.store(Release)` (already covered by the
+                // `slot.seq.load(Acquire)` above), and the `Release`
+                // half publishes the `head` advance to a producer's
+                // `head.load(Acquire)` in the fullness check above,
+                // so a pop that frees a slot is visible before the
+                // producer declares full — without it, an
+                // `Acquire`-only success leaves the write half
+                // `Relaxed`, and on weakly ordered memory a producer
+                // could observe a stale `head` and drop an event
+                // even though a slot was free.
                 match self.head.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
-                    Ordering::Acquire,
+                    Ordering::AcqRel,
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
@@ -264,13 +303,30 @@ impl<T> Drop for MpmcRing<T> {
         let tail = *self.tail.get_mut();
         let mut pos = head;
         while pos != tail {
-            let slot = &self.buffer[pos & self.mask];
-            // SAFETY: every slot in `[head, tail)` was pushed and
-            // not yet popped; `assume_init_read` moves the value
-            // out so its `Drop` runs when the binding drops at the
-            // end of this iteration.
-            unsafe {
-                let _ = (*slot.data.get()).assume_init_read();
+            let slot = &mut self.buffer[pos & self.mask];
+            // SAFETY: every slot in `[head, tail)` is initialised
+            // because (a) the producer's path between the `tail` CAS
+            // and the `slot.seq.store(Release)` is a panic-free
+            // `MaybeUninit::new` write plus an atomic store — no
+            // user code runs, so no producer can leave a slot
+            // half-written; and (b) the bus only drops a ring under
+            // the subscriber list's write lock (lazy prune in
+            // `publish`, or `close` clearing the list), which
+            // excludes concurrent `publish` walks — so no producer
+            // is mid-push when `Drop` runs. `assume_init_read` moves
+            // the value out so its `Drop` runs when the binding
+            // drops at the end of this iteration.
+            //
+            // The slot's sequence number is `pos + 1` for a slot a
+            // producer published and a consumer has not yet popped —
+            // verified defensively so a future code path that breaks
+            // assumption (a) surfaces as a skipped slot rather than
+            // `Drop` on uninitialised memory.
+            if *slot.seq.get_mut() == pos.wrapping_add(1) {
+                // SAFETY: as above — the slot is initialised.
+                unsafe {
+                    let _ = (*slot.data.get()).assume_init_read();
+                }
             }
             pos = pos.wrapping_add(1);
         }
