@@ -770,8 +770,12 @@ jobs:
         # stalling the whole suite. s390x hardware is slower than
         # x86_64 for compute-heavy compilation and tests, so the
         # 45 min ceiling gives ~3-6x slack over the x86_64 baseline.
+        # --no-fail-fast, same reasoning as the riscv-native job:
+        # this is a self-hosted runner whose load varies run to run,
+        # and a single timing-sensitive daemon E2E flake must not
+        # cancel the rest of the suite.
         timeout-minutes: 45
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --no-fail-fast
       - name: cargo test --doc (workspace)
         # nextest's doctest support is still unstable; the stable
         # path is cargo test --doc.
