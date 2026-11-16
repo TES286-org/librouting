@@ -1,28 +1,35 @@
 use super::*;
 use crate::daemon_config::DaemonConfig;
 
-fn roundtrip(toml: &str) -> DaemonConfig {
+/// Render through the converter (the same `render_dsl` the CLI and
+/// compat mode call) — panics on a render failure instead of
+/// propagating a Result through every assertion.
+fn render(out: super::ConfigOut) -> String {
+    super::render_dsl(&out).expect("render_dsl")
+}
+
+fn roundtrip(dsl: &str) -> DaemonConfig {
     let mut cfg = DaemonConfig::with_defaults();
     cfg.protocol = "bgp".to_string();
-    crate::daemon_config::parse_toml_subset(toml, &mut cfg).expect("generated TOML must load");
-    cfg.finalize().expect("generated TOML must finalize");
+    crate::config_dsl::parse_dsl_text(dsl, None, &mut cfg).expect("generated DSL must load");
+    cfg.finalize().expect("generated DSL must finalize");
     cfg
 }
 
 /// Round-trip a translation through the daemon loader with the OSPF
 /// protocol flag set, so the OSPF tables are validated by `finalize`
 /// instead of warned about. Mirrors [`roundtrip`] for the OSPF path.
-fn roundtrip_ospf(toml: &str) -> DaemonConfig {
+fn roundtrip_ospf(dsl: &str) -> DaemonConfig {
     let mut cfg = DaemonConfig::with_defaults();
     cfg.protocol = "ospf".to_string();
-    crate::daemon_config::parse_toml_subset(toml, &mut cfg).expect("generated TOML must load");
-    cfg.finalize().expect("generated TOML must finalize");
+    crate::config_dsl::parse_dsl_text(dsl, None, &mut cfg).expect("generated DSL must load");
+    cfg.finalize().expect("generated DSL must finalize");
     cfg
 }
 
 #[test]
 fn bird_single_peer() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -40,7 +47,7 @@ protocol bgp uplink {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.router_id, "10.0.0.1");
     assert_eq!(cfg.local_as, 64512);
     assert_eq!(cfg.peers.len(), 1);
@@ -53,14 +60,14 @@ protocol bgp uplink {
     // `import all / export all` is what the emitted
     // `ebgp_policy = "accept-all"` already means: no maps attached.
     assert!(peer.import.is_none() && peer.export.is_none());
-    assert!(toml.contains("ebgp_policy = \"accept-all\""));
+    assert!(dsl.contains("ebgp_policy accept-all;"));
     // `multihop 2` has no lr equivalent: kept as an UNMAPPED note.
-    assert!(toml.contains("# UNMAPPED: multihop 2"));
+    assert!(dsl.contains("# UNMAPPED: peer uplink: multihop 2;"));
 }
 
 #[test]
 fn bird_import_none_gets_deny_all() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol bgp p1 {
@@ -73,7 +80,7 @@ protocol bgp p1 {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(
         cfg.peers[0].import.as_deref(),
         Some("translate-import-deny")
@@ -92,7 +99,7 @@ protocol bgp p1 {
 
 #[test]
 fn frr_single_peer_with_policy() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         r#"
 frr version 10
 frr defaults traditional
@@ -114,7 +121,7 @@ route-map FILTER-IN permit 10
 !
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.local_as, 64512);
     assert_eq!(cfg.router_id, "10.0.0.1");
     assert_eq!(cfg.peers.len(), 1);
@@ -131,7 +138,9 @@ route-map FILTER-IN permit 10
         cfg.route_maps[0].match_prefix.as_deref(),
         Some("ONLY-DEFAULT")
     );
-    assert!(toml.contains("# UNMAPPED: neighbor 192.168.1.2 ebgp-multihop 2"));
+    assert!(
+        dsl.contains("# UNMAPPED: peer neighbor-192.168.1.2: neighbor 192.168.1.2 ebgp-multihop 2")
+    );
 }
 
 #[test]
@@ -149,17 +158,17 @@ fn frr_no_activate_maps_to_default_off() {
 /// listener refuses inbound SYNs from this peer's address.
 #[test]
 fn frr_neighbor_shutdown_maps_to_peer_shutdown_true() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n bgp router-id 10.0.0.1\n\
          neighbor 10.0.0.2 remote-as 64513\n\
          neighbor 10.0.0.2 shutdown\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers.len(), 1);
     assert_eq!(cfg.peers[0].shutdown, Some(true));
-    assert!(toml.contains("shutdown = true"));
+    assert!(dsl.contains("shutdown true;"));
     // No UNMAPPED note — the line is fully mapped now.
-    assert!(!toml.contains("# UNMAPPED: neighbor 10.0.0.2 shutdown"));
+    assert!(!dsl.contains("# UNMAPPED: neighbor 10.0.0.2 shutdown"));
 }
 
 /// FRR `no neighbor X shutdown` — the explicit un-shutdown form
@@ -170,15 +179,15 @@ fn frr_neighbor_shutdown_maps_to_peer_shutdown_true() {
 /// `true` rather than the implicit `None`).
 #[test]
 fn frr_no_neighbor_shutdown_maps_to_peer_shutdown_false() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n bgp router-id 10.0.0.1\n\
          neighbor 10.0.0.2 remote-as 64513\n\
          no neighbor 10.0.0.2 shutdown\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers.len(), 1);
     assert_eq!(cfg.peers[0].shutdown, Some(false));
-    assert!(toml.contains("shutdown = false"));
+    assert!(dsl.contains("shutdown false;"));
 }
 
 /// FRR `neighbor X shutdown message MSG...` (RFC 8203 §2 shutdown
@@ -214,7 +223,7 @@ fn frr_peer_without_shutdown_defaults_to_none() {
 /// in the rendered TOML.
 #[test]
 fn bird_disabled_bare_maps_to_peer_shutdown_true() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol bgp p1 {
@@ -224,17 +233,17 @@ protocol bgp p1 {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers.len(), 1);
     assert_eq!(cfg.peers[0].shutdown, Some(true));
-    assert!(toml.contains("shutdown = true"));
+    assert!(dsl.contains("shutdown true;"));
 }
 
 /// BIRD `disabled yes;` — the explicit form. Same mapping as the
 /// bare form: `shutdown = true`.
 #[test]
 fn bird_disabled_yes_maps_to_peer_shutdown_true() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol bgp p1 {
@@ -244,7 +253,7 @@ protocol bgp p1 {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers[0].shutdown, Some(true));
 }
 
@@ -253,7 +262,7 @@ protocol bgp p1 {
 /// re-enable survives the round-trip.
 #[test]
 fn bird_disabled_no_maps_to_peer_shutdown_false() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol bgp p1 {
@@ -263,9 +272,9 @@ protocol bgp p1 {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers[0].shutdown, Some(false));
-    assert!(toml.contains("shutdown = false"));
+    assert!(dsl.contains("shutdown false;"));
 }
 
 /// BIRD `disabled "reason string";` (RFC 8203 shutdown
@@ -273,7 +282,7 @@ protocol bgp p1 {
 /// the converter still maps the `shutdown` flag.
 #[test]
 fn bird_disabled_with_reason_string_still_maps() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol bgp p1 {
@@ -283,7 +292,7 @@ protocol bgp p1 {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers[0].shutdown, Some(true));
 }
 
@@ -347,7 +356,7 @@ fn directives_accept_assignment_form() {
 
 #[test]
 fn bird_ipv6_only_channel_disables_v4() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol bgp v6peer {
@@ -360,7 +369,7 @@ protocol bgp v6peer {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     let peer = &cfg.peers[0];
     // BIRD would never exchange IPv4 NLRI with this peer — the
     // implicit v4 activation must be switched off and v6 listed.
@@ -388,7 +397,7 @@ protocol bgp dual {
 
 #[test]
 fn bird_unknown_lines_inside_stanza_become_unmapped() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 protocol bgp p1 {
     local as 64512;
@@ -404,21 +413,21 @@ protocol bgp p1 {
     ));
     // Unmapped content stays visible; brace punctuation does not
     // leak into the notes and the stanza still closes.
-    assert!(toml.contains("# UNMAPPED: description \"uplink to transit\";"));
-    assert!(toml.contains("# UNMAPPED: next hop self;"));
-    assert!(!toml.contains("# UNMAPPED: }"));
-    assert!(!toml.contains("# UNMAPPED: {"));
+    assert!(dsl.contains("# UNMAPPED: peer p1: description \"uplink to transit\";"));
+    assert!(dsl.contains("# UNMAPPED: peer p1: next hop self;"));
+    assert!(!dsl.contains("# UNMAPPED: }"));
+    assert!(!dsl.contains("# UNMAPPED: {"));
 }
 
 #[test]
 fn frr_attributes_before_remote_as_survive() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              neighbor 192.168.1.2 password 0 s3cret\n\
              neighbor 192.168.1.2 update-source 10.99.1.1\n\
              neighbor 192.168.1.2 remote-as 64513\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers.len(), 1);
     let peer = &cfg.peers[0];
     assert_eq!(peer.peer_as, 64513);
@@ -428,14 +437,14 @@ fn frr_attributes_before_remote_as_survive() {
 
 #[test]
 fn frr_ipv6_activate_adds_family() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              neighbor 2001:db8::2 remote-as 64513\n\
              address-family ipv6 unicast\n\
               neighbor 2001:db8::2 activate\n\
              exit-address-family\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(
         cfg.peers[0].mp_families.as_deref(),
         Some(["ipv6-unicast".to_string()].as_slice())
@@ -444,19 +453,19 @@ fn frr_ipv6_activate_adds_family() {
 
 #[test]
 fn frr_stub_without_remote_as_is_dropped_with_note() {
-    let toml = render(translate_frr("router bgp 64512\n neighbor 10.0.0.2 bfd\n"));
+    let dsl = render(translate_frr("router bgp 64512\n neighbor 10.0.0.2 bfd\n"));
     // The peer cannot start without an AS — dropped, with the
     // reason surfaced as a global UNMAPPED comment.
-    assert!(toml.contains("# UNMAPPED: neighbor 10.0.0.2: no `remote-as` line found, peer dropped"));
-    assert!(!toml.contains("[[peer]]"));
-    assert!(toml.contains("ebgp_policy = \"accept-all\""));
+    assert!(dsl.contains("# UNMAPPED: neighbor 10.0.0.2: no `remote-as` line found, peer dropped"));
+    assert!(!dsl.contains("\npeer "));
+    assert!(dsl.contains("ebgp_policy accept-all;"));
 }
 
 // ---- D14.1: BIRD filter translation through the public path ----
 
 #[test]
 fn bird_named_filter_translates_and_attaches() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -479,7 +488,7 @@ protocol bgp uplink {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     // The filter body landed as a [[filter]] table and compiled
     // at finalize time (roundtrip would have failed otherwise).
     assert_eq!(cfg.filters.len(), 1);
@@ -514,7 +523,7 @@ protocol bgp uplink {
 
 #[test]
 fn bird_where_expression_becomes_generated_filter() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol bgp uplink {
@@ -524,15 +533,19 @@ protocol bgp uplink {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     assert_eq!(cfg.filters[0].name.as_deref(), Some("bird-import-uplink"));
-    // `import where EXPR` = accept iff EXPR.
-    assert!(cfg.filters[0]
-        .body
-        .as_deref()
-        .unwrap_or("")
-        .starts_with("if net ~ 10.0.0.0/8 then accept; reject;"));
+    // `import where EXPR` = accept iff EXPR. The body rides the IR
+    // verbatim now (the DSL emitter writes filter bodies between
+    // braces byte-exact), so the accept arm and the reject tail both
+    // appear in the stored body.
+    let body = cfg.filters[0].body.as_deref().unwrap_or("");
+    assert!(
+        body.starts_with("if net ~ 10.0.0.0/8 then accept;"),
+        "body: {body:?}"
+    );
+    assert!(body.contains("reject;"), "body: {body:?}");
     assert_eq!(
         cfg.peers[0].import_filter.as_deref(),
         Some("bird-import-uplink")
@@ -543,7 +556,7 @@ protocol bgp uplink {
 fn bird_unfaithful_filter_is_not_attached() {
     // `proto` compares the BIRD instance name — no faithful lr
     // translation exists, so the filter must NOT attach.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 filter from_customer {
@@ -557,9 +570,9 @@ protocol bgp cust {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert!(cfg.filters.is_empty(), "unfaithful filter must not emit");
-    assert!(toml.contains(
+    assert!(dsl.contains(
         "filter from_customer: filter NOT attached — BIRD route attribute or statement `proto`"
     ));
     assert_eq!(cfg.peers[0].import_filter, None);
@@ -567,7 +580,7 @@ protocol bgp cust {
 
 #[test]
 fn bird_roa_table_and_roa_check_translate() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 roa table roa_v4 {
@@ -586,7 +599,7 @@ protocol bgp uplink {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.roas.len(), 2);
     assert_eq!(cfg.roas[0].prefix.as_deref(), Some("198.51.100.0/24"));
     assert_eq!(cfg.roas[0].max_length, Some(24));
@@ -614,7 +627,7 @@ protocol bgp uplink {
 
 #[test]
 fn bird_defines_substitute_into_filters() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 define MY_AS = 64512;
@@ -633,7 +646,7 @@ protocol bgp uplink {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     assert!(cfg.filters[0]
         .body
@@ -659,7 +672,7 @@ protocol bgp uplink {
 
 #[test]
 fn bird_function_used_by_filter_is_embedded() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 function set_pref(int p) {
@@ -680,7 +693,7 @@ protocol bgp uplink {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     // The function declaration precedes the body and survives
     // compilation (roundtrip finalizes the filter).
@@ -703,7 +716,7 @@ protocol bgp uplink {
 
 #[test]
 fn bird_babel_protocol_maps_interfaces() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol babel babel_core {
@@ -727,7 +740,7 @@ protocol bgp uplink {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     // The BGP peer still converts; the Babel interfaces carry over
     // as [[babel.interface]] tables.
     assert_eq!(cfg.peers.len(), 1);
@@ -752,14 +765,14 @@ protocol bgp uplink {
     assert_eq!(wg.next_hop_ipv4.as_deref(), Some("192.0.2.1"));
     // lr runs one protocol per daemon instance — the converter
     // says so instead of silently switching the protocol key.
-    assert!(toml.contains("lr runs one protocol per daemon instance"));
+    assert!(dsl.contains("lr runs one protocol per daemon instance"));
 }
 
 #[test]
 fn bird_neighbor_and_local_with_ports() {
     // The shape the interop lab actually deploys: non-default
     // ports on both ends of the eBGP session.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.2;
 protocol bgp lr {
@@ -774,7 +787,7 @@ protocol bgp lr {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.local_as, 64513);
     assert_eq!(cfg.peers.len(), 1);
     let peer = &cfg.peers[0];
@@ -782,30 +795,30 @@ protocol bgp lr {
     // listen port has no per-peer lr equivalent (noted instead).
     assert_eq!(peer.remote.as_deref(), Some("127.0.0.1:17990"));
     assert_eq!(peer.peer_as, 64512);
-    assert!(
-        toml.contains("# UNMAPPED: local port 17992 (lr listens on the daemon's global listener)")
-    );
+    assert!(dsl.contains(
+        "# UNMAPPED: peer lr: local port 17992 (lr listens on the daemon's global listener)"
+    ));
     // The filter is referenced but never defined in the source —
     // reported, and nothing attaches.
-    assert!(toml.contains(
-        "# UNMAPPED: export filter export_to_lr: filter NOT attached — filter is not defined"
+    assert!(dsl.contains(
+        "# UNMAPPED: peer lr: export filter export_to_lr: filter NOT attached — filter is not defined"
     ));
 }
 
 #[test]
 fn frr_neighbor_port_merges_into_remote() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              neighbor 127.0.0.1 remote-as 64513\n\
              neighbor 127.0.0.1 port 17990\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers[0].remote.as_deref(), Some("127.0.0.1:17990"));
 }
 
 #[test]
 fn frr_network_and_route_map_set_clauses() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              neighbor 192.168.1.2 remote-as 64513\n\
              address-family ipv4 unicast\n\
@@ -819,7 +832,7 @@ fn frr_network_and_route_map_set_clauses() {
               set community 65000:1 additive\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     // FRR `network` = lr `networks` (locally originated).
     assert_eq!(cfg.networks, vec!["198.51.100.0/24".to_string()]);
     let map = &cfg.route_maps[0];
@@ -832,7 +845,7 @@ fn frr_network_and_route_map_set_clauses() {
 
 #[test]
 fn frr_as_path_and_community_lists_resolve() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              neighbor 192.168.1.2 remote-as 64513\n\
              bgp as-path access-list ONLY-OURS permit ^65001$\n\
@@ -842,7 +855,7 @@ fn frr_as_path_and_community_lists_resolve() {
               match community TRUSTED\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.as_path_lists.len(), 1);
     assert_eq!(cfg.as_path_lists[0].pattern, "^65001$");
     assert_eq!(cfg.community_lists.len(), 1);
@@ -862,7 +875,7 @@ fn frr_as_path_and_community_lists_resolve() {
 
 #[test]
 fn frr_dangling_match_is_noted_and_cleared() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              neighbor 192.168.1.2 remote-as 64513\n\
              route-map POLICY permit 10\n\
@@ -872,13 +885,13 @@ fn frr_dangling_match_is_noted_and_cleared() {
     // The daemon's policy compiler fails startup on unknown list
     // names — the reference is dropped with a visible note so the
     // generated TOML still loads.
-    assert!(toml.contains("no such as-path access-list"));
-    assert!(!toml.contains("match_as_path"));
+    assert!(dsl.contains("no such as-path access-list"));
+    assert!(!dsl.contains("match_as_path"));
 }
 
 #[test]
 fn bird_static_routes_become_networks() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol static static_routes {
@@ -892,7 +905,7 @@ protocol bgp p1 {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(
         cfg.networks,
         vec!["198.51.100.0/24".to_string(), "203.0.113.0/24".to_string()]
@@ -909,7 +922,7 @@ fn bird_ospf_protocol_maps_areas_and_interfaces() {
     // The shape the BIRD-users mailing list actually deploys: an area
     // block with one or more interface blocks inside, each carrying
     // the common RFC 2328 §C.1 parameters.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol ospf my_ospf {
@@ -938,7 +951,7 @@ protocol bgp p1 {
 }
 "#,
     ));
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     // The BGP peer still converts.
     assert_eq!(cfg.peers.len(), 1);
     // Two areas: 0.0.0.0 (backbone) and 0.0.0.1 (stub, no-summary).
@@ -968,7 +981,7 @@ protocol bgp p1 {
     assert_eq!(eth2.area, Some(1));
     // The converter says so instead of silently switching the
     // protocol key — same shape as the Babel note.
-    assert!(toml.contains("lr runs one protocol per daemon instance"));
+    assert!(dsl.contains("lr runs one protocol per daemon instance"));
 }
 
 #[test]
@@ -976,7 +989,7 @@ fn bird_ospf_dead_count_becomes_unmapped_note() {
     // BIRD's legacy `dead count N;` (dead interval = N * hello) has
     // no direct lr equivalent — lr uses an explicit `dead_interval`
     // in seconds. The converter notes the gap instead of dropping it.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol ospf my_ospf {
@@ -989,10 +1002,10 @@ protocol ospf my_ospf {
 }
 "#,
     ));
-    assert!(toml.contains("dead count"));
-    assert!(toml.contains("lr uses dead_interval"));
+    assert!(dsl.contains("dead count"));
+    assert!(dsl.contains("lr uses dead_interval"));
     // The hello parameter still converts.
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     assert_eq!(cfg.ospf_interfaces[0].hello_interval, Some(10));
 }
 
@@ -1005,7 +1018,7 @@ fn bird_ospf_unmapped_interface_parameters_stay_visible() {
     // unmapped note is gone); the rest of the BIRD OSPF interface
     // parameters with no lr equivalent still surface as `# UNMAPPED:`
     // comments so a gap is visible instead of silent.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol ospf my_ospf {
@@ -1021,17 +1034,17 @@ protocol ospf my_ospf {
 }
 "#,
     ));
-    // retransmit 5 now lands in the rendered TOML as a real key, not
+    // retransmit 5 now lands in the rendered DSL as a real key, not
     // as an unmapped note.
     assert!(
-        toml.contains("rxmt_interval = 5"),
-        "expected `rxmt_interval = 5` in rendered TOML; got:\n{toml}"
+        dsl.contains("rxmt_interval 5;"),
+        "expected `rxmt_interval 5;` in rendered DSL; got:\n{dsl}"
     );
-    assert!(!toml.contains("UNMAPPED: retransmit"));
-    assert!(toml.contains("transmit delay"));
-    assert!(toml.contains("wait"));
-    assert!(toml.contains("authentication"));
-    assert!(toml.contains("password"));
+    assert!(!dsl.contains("UNMAPPED: retransmit"));
+    assert!(dsl.contains("transmit delay"));
+    assert!(dsl.contains("wait"));
+    assert!(dsl.contains("authentication"));
+    assert!(dsl.contains("password"));
 }
 
 #[test]
@@ -1065,7 +1078,7 @@ fn bird_ospf_retransmit_zero_carries_unmapped_note() {
     // lr's TOML parser rejects 0 s, so the converter surfaces the gap
     // as an unmapped note instead of silently emitting a config the
     // daemon would reject at parse time.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol ospf my_ospf {
@@ -1078,11 +1091,11 @@ protocol ospf my_ospf {
 "#,
     ));
     assert!(
-        toml.contains("retransmit 0 — lr rejects 0 s; use a positive value"),
-        "expected an unmapped note for `retransmit 0;`; got:\n{toml}"
+        dsl.contains("retransmit 0 — lr rejects 0 s; use a positive value"),
+        "expected an unmapped note for `retransmit 0;`; got:\n{dsl}"
     );
     assert!(
-        !toml.contains("rxmt_interval = 0"),
+        !dsl.contains("rxmt_interval = 0"),
         "no `rxmt_interval = 0` should land in the rendered TOML"
     );
 }
@@ -1091,7 +1104,7 @@ protocol ospf my_ospf {
 fn bird_ospf_retransmit_non_numeric_carries_unmapped_note() {
     // A non-numeric `retransmit` value is a typo; the converter surfaces
     // it as an unmapped note so the operator sees the gap.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol ospf my_ospf {
@@ -1104,8 +1117,8 @@ protocol ospf my_ospf {
 "#,
     ));
     assert!(
-        toml.contains("retransmit oops — not a whole-seconds value"),
-        "expected an unmapped note for the non-numeric retransmit; got:\n{toml}"
+        dsl.contains("retransmit oops — not a whole-seconds value"),
+        "expected an unmapped note for the non-numeric retransmit; got:\n{dsl}"
     );
 }
 
@@ -1137,7 +1150,7 @@ router ospf
 
 #[test]
 fn frr_ospf_retransmit_interval_zero_carries_unmapped_note() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         r#"
 interface eth0
  ip ospf retransmit-interval 0
@@ -1147,15 +1160,15 @@ router ospf
 "#,
     ));
     assert!(
-        toml.contains("retransmit-interval 0 — lr rejects 0 s; use a positive value"),
-        "expected an unmapped note for `ip ospf retransmit-interval 0`; got:\n{toml}"
+        dsl.contains("retransmit-interval 0 — lr rejects 0 s; use a positive value"),
+        "expected an unmapped note for `ip ospf retransmit-interval 0`; got:\n{dsl}"
     );
 }
 
 #[test]
 fn bird_ospf_protocol_level_statement_is_noted() {
     // `rfc1583 yes;` has no lr equivalent — noted at protocol level.
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol ospf my_ospf {
@@ -1164,14 +1177,14 @@ protocol ospf my_ospf {
 }
 "#,
     ));
-    assert!(toml.contains("protocol-level ospf statement `rfc1583`"));
+    assert!(dsl.contains("protocol-level ospf statement `rfc1583`"));
 }
 
 #[test]
 fn frr_ospf_router_block_maps_areas_and_router_id() {
     // FRR `router ospf` with area policy + `router-id`, plus a
     // top-level `interface IFNAME` block with `ip ospf …` directives.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospf\n\
          router-id 1.1.1.1\n\
          area 0.0.0.1 stub no-summary\n\
@@ -1193,7 +1206,7 @@ fn frr_ospf_router_block_maps_areas_and_router_id() {
          router bgp 64512\n\
          neighbor 192.0.2.2 remote-as 64513\n",
     ));
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     // The router-id carries over (FRR form: bare `router-id` inside
     // `router ospf`).
     assert_eq!(cfg.router_id.as_str(), "1.1.1.1");
@@ -1229,28 +1242,28 @@ fn frr_ospf_network_area_is_noted_as_unmapped() {
     // FRR `network PREFIX area N` cannot map mechanically (lr keys
     // interfaces by name); the converter notes the gap with a hint
     // instead of silently dropping.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospf\n\
          network 10.0.0.0/24 area 0\n\
          !\n",
     ));
-    assert!(toml.contains("network 10.0.0.0/24 area 0"));
-    assert!(toml.contains("map the matching interface manually"));
+    assert!(dsl.contains("network 10.0.0.0/24 area 0"));
+    assert!(dsl.contains("map the matching interface manually"));
 }
 
 #[test]
 fn frr_ospf_interface_without_ospf_directives_produces_no_row() {
     // A plain `interface IFNAME` block with only `ip address …` lines
     // should not produce an empty `[[ospf.interface]]` table.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "interface eth0\n\
          ip address 10.0.0.1/24\n\
          no ip ospf\n\
          !\n",
     ));
     assert!(
-        !toml.contains("[[ospf.interface]]"),
-        "plain interface block must not produce an OSPF row: {toml}"
+        !dsl.contains("[[ospf.interface]]"),
+        "plain interface block must not produce an OSPF row: {dsl}"
     );
 }
 
@@ -1258,41 +1271,41 @@ fn frr_ospf_interface_without_ospf_directives_produces_no_row() {
 fn frr_ospf_unmapped_area_options_are_noted() {
     // `area N range PREFIX` and `area N export-list NAME` have no lr
     // equivalent — noted on the area row.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospf\n\
          area 0.0.0.1 range 10.0.0.0/8\n\
          area 0.0.0.1 export-list OUT\n\
          !\n",
     ));
-    assert!(toml.contains("area 1 range 10.0.0.0/8"));
-    assert!(toml.contains("no area-range knob"));
-    assert!(toml.contains("area 1 export-list"));
-    assert!(toml.contains("no area-list knob"));
+    assert!(dsl.contains("area 1 range 10.0.0.0/8"));
+    assert!(dsl.contains("no area-range knob"));
+    assert!(dsl.contains("area 1 export-list"));
+    assert!(dsl.contains("no area-list knob"));
 }
 
 #[test]
 fn frr_ospfv3_router_block_emits_version_note() {
     // `router ospfv3` should produce the v3-specific note telling the
     // operator to set `ospf_version = "v3"`.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospfv3\n\
          router-id 1.1.1.1\n\
          !\n",
     ));
-    assert!(toml.contains("ospf_version"));
-    assert!(toml.contains("v3"));
+    assert!(dsl.contains("ospf_version"));
+    assert!(dsl.contains("v3"));
 }
 
 #[test]
 fn frr_ospfv3_router_id_maps() {
     // `ospfv3 router-id A.B.C.D` inside `router ospfv3` maps onto the
     // same `router_id` field the v2 `ospf router-id` form fills.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospfv3\n\
          ospfv3 router-id 10.0.0.7\n\
          !\n",
     ));
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     assert_eq!(cfg.router_id, "10.0.0.7");
 }
 
@@ -1302,7 +1315,7 @@ fn frr_ospfv3_interface_directives_map() {
     // area N` directives inside an `interface IFNAME` block map onto
     // the same `[[ospf.interface]]` row the v2 `ip ospf …` directives
     // produce (RFC 5340 §A.4, FRR `ospf6d`).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospfv3\n\
          ospfv3 router-id 10.0.0.1\n\
          area 1 stub\n\
@@ -1320,7 +1333,7 @@ fn frr_ospfv3_interface_directives_map() {
          ospfv3 area 1\n\
          !\n",
     ));
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     assert_eq!(cfg.router_id, "10.0.0.1");
     assert_eq!(cfg.ospf_interfaces.len(), 2);
     let eth0 = &cfg.ospf_interfaces[0];
@@ -1343,7 +1356,7 @@ fn frr_ospfv3_instance_id_is_noted() {
     // does not carry a per-interface instance ID); the converter notes
     // the gap on the matching `[[ospf.interface]]` row instead of
     // silently dropping it.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospfv3\n\
          area 1 stub\n\
          !\n\
@@ -1352,8 +1365,8 @@ fn frr_ospfv3_instance_id_is_noted() {
          ospfv3 instance-id 7\n\
          !\n",
     ));
-    assert!(toml.contains("ospfv3 instance-id"));
-    assert!(toml.contains("no lr equivalent"));
+    assert!(dsl.contains("ospfv3 instance-id"));
+    assert!(dsl.contains("no lr equivalent"));
 }
 
 #[test]
@@ -1361,14 +1374,14 @@ fn frr_ospfv3_prefixed_area_policy_maps() {
     // `ospfv3 area N stub|nssa|default-cost M` inside `router ospfv3`
     // — the v3 spelling of the area policy. Same shape as the bare v2
     // `area N …` form; routes through the same handler.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospfv3\n\
          ospfv3 router-id 10.0.0.1\n\
          ospfv3 area 2 stub no-summary\n\
          ospfv3 area 2 default-cost 25\n\
          !\n",
     ));
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     assert_eq!(cfg.router_id, "10.0.0.1");
     assert_eq!(cfg.ospf_areas.len(), 1);
     assert_eq!(cfg.ospf_areas[0].id, Some(2));
@@ -1383,13 +1396,13 @@ fn frr_ospfv3_network_area_is_noted_as_unmapped() {
     // PREFIX area N`) cannot map mechanically — lr keys interfaces by
     // name, not prefix (same gap as v2). The converter notes the gap
     // with a hint instead of silently dropping.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospfv3\n\
          ospfv3 network 2001:db8::/32 area 2\n\
          !\n",
     ));
-    assert!(toml.contains("ospfv3 network 2001:db8::/32 area 2"));
-    assert!(toml.contains("map the matching interface manually"));
+    assert!(dsl.contains("ospfv3 network 2001:db8::/32 area 2"));
+    assert!(dsl.contains("map the matching interface manually"));
 }
 
 #[test]
@@ -1397,14 +1410,14 @@ fn frr_ospfv3_router_level_unknown_directive_is_noted() {
     // `ospfv3 abr-type …`, `ospfv3 log-adjacency-changes`, … have no lr
     // equivalent. The converter surfaces the gap as an UNMAPPED note
     // instead of silently dropping the directive.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospfv3\n\
          ospfv3 abr-type shortcut\n\
          ospfv3 log-adjacency-changes\n\
          !\n",
     ));
-    assert!(toml.contains("ospfv3 abr-type shortcut"));
-    assert!(toml.contains("no lr equivalent (FRR OSPFv3 router-level directive)"));
+    assert!(dsl.contains("ospfv3 abr-type shortcut"));
+    assert!(dsl.contains("no lr equivalent (FRR OSPFv3 router-level directive)"));
 }
 
 #[test]
@@ -1414,19 +1427,19 @@ fn frr_ospfv3_interface_directives_work_outside_router_ospfv3() {
     // ospfv3`. The converter routes these the same way as the nested
     // form (matches the v2 `ip ospf …` behaviour, which also works at
     // top-level interface blocks).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "interface eth0\n\
          ospfv3 cost 5\n\
          !\n",
     ));
-    assert!(toml.contains("[[ospf.interface]]"));
-    assert!(toml.contains("name = \"eth0\""));
-    assert!(toml.contains("cost = 5"));
+    assert!(dsl.contains("\nospf {"));
+    assert!(dsl.contains("interface eth0 {"));
+    assert!(dsl.contains("cost 5;"));
 }
 
 #[test]
 fn bird_ospf_nssa_area_maps_kind() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 protocol ospf my_ospf {
@@ -1438,7 +1451,7 @@ protocol ospf my_ospf {
 }
 "#,
     ));
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     assert_eq!(cfg.ospf_areas[0].id, Some(5));
     assert_eq!(cfg.ospf_areas[0].kind.as_deref(), Some("nssa"));
     assert_eq!(cfg.ospf_areas[0].stub_metric, Some(10));
@@ -1448,7 +1461,7 @@ protocol ospf my_ospf {
 
 #[test]
 fn frr_aggregate_address_maps_to_aggregate_table() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              bgp router-id 10.0.0.1\n\
              address-family ipv4 unicast\n\
@@ -1456,21 +1469,21 @@ fn frr_aggregate_address_maps_to_aggregate_table() {
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.aggregates.len(), 1);
     assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
 }
 
 #[test]
 fn frr_aggregate_address_summary_only_carries_through() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               aggregate-address 192.0.2.0/24 summary-only\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.aggregates.len(), 1);
     assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
     assert!(
@@ -1482,25 +1495,25 @@ fn frr_aggregate_address_summary_only_carries_through() {
         "summary-only alone must not set as_set"
     );
     assert!(
-        toml.contains("summary_only = true"),
-        "rendered TOML must carry summary_only = true"
+        dsl.contains("summary_only true;"),
+        "rendered DSL must carry summary_only true"
     );
     assert!(
-        !toml.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — summary-only"),
+        !dsl.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — summary-only"),
         "summary-only is no longer unmapped"
     );
 }
 
 #[test]
 fn frr_aggregate_address_as_set_carries_through() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               aggregate-address 192.0.2.0/24 as-set\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.aggregates.len(), 1);
     assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
     assert!(
@@ -1512,56 +1525,56 @@ fn frr_aggregate_address_as_set_carries_through() {
         "as-set alone must not set summary_only"
     );
     assert!(
-        toml.contains("as_set = true"),
-        "rendered TOML must carry as_set = true"
+        dsl.contains("as_set true;"),
+        "rendered DSL must carry as_set true"
     );
     assert!(
-        !toml.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — as-set"),
+        !dsl.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — as-set"),
         "as-set is no longer unmapped"
     );
 }
 
 #[test]
 fn frr_aggregate_address_summary_only_and_as_set_combine() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               aggregate-address 192.0.2.0/24 summary-only as-set\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.aggregates.len(), 1);
     assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
     assert!(cfg.aggregates[0].summary_only);
     assert!(cfg.aggregates[0].as_set);
-    assert!(toml.contains("summary_only = true"));
-    assert!(toml.contains("as_set = true"));
+    assert!(dsl.contains("summary_only true;"));
+    assert!(dsl.contains("as_set true;"));
 }
 
 #[test]
 fn frr_aggregate_address_route_map_carries_unmapped_note() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               aggregate-address 192.0.2.0/24 as-set route-map RM-AGG\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.aggregates.len(), 1);
     assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
     assert!(cfg.aggregates[0].as_set);
     // `route-map NAME` carries an unmapped note — lr's [[aggregate]]
     // has no per-aggregate route-map surface today.
     assert!(
-        toml.contains("route-map RM-AGG — lr's [[aggregate]] has no per-aggregate attribute hook"),
+        dsl.contains("route-map RM-AGG — lr's [[aggregate]] has no per-aggregate attribute hook"),
         "route-map NAME must surface its own UNMAPPED note"
     );
     // The summary-only/as-set qualifiers are mapped (no UNMAPPED note
     // for them); only the route-map is unmapped.
     assert!(
-        !toml.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — as-set"),
+        !dsl.contains("# UNMAPPED: aggregate-address 192.0.2.0/24 — as-set"),
         "as-set is no longer unmapped; only route-map is"
     );
 }
@@ -1578,43 +1591,43 @@ fn frr_aggregate_address_outside_router_bgp_is_dropped() {
 
 #[test]
 fn frr_redistribute_ospf_into_bgp_emits_pipe_and_engines() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf metric 100\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     let rd = &cfg.redistributes[0];
     assert_eq!(rd.source.as_deref(), Some("ospf"));
     assert_eq!(rd.target.as_deref(), Some("bgp"));
     assert_eq!(rd.metric, Some(100));
     // The pipe needs the ospf engine running — the converter emits
-    // `protocols = ["bgp", "ospf"]` so finalize accepts the pipe.
+    // `protocol "bgp,ospf"` so finalize accepts the pipe.
     assert!(
-        toml.contains("protocols = [\"bgp\", \"ospf\"]"),
-        "expected protocols line for the ospf engine, got:\n{toml}"
+        dsl.contains("protocol \"bgp,ospf\";"),
+        "expected the protocol key listing the ospf engine, got:\n{dsl}"
     );
 }
 
 #[test]
 fn frr_redistribute_babel_into_bgp_emits_babel_engine() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute babel\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert_eq!(cfg.redistributes[0].source.as_deref(), Some("babel"));
     assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
     assert!(
-        toml.contains("protocols = [\"bgp\", \"babel\"]"),
-        "expected protocols line for the babel engine, got:\n{toml}"
+        dsl.contains("protocol \"bgp,babel\";"),
+        "expected the protocol key listing the babel engine, got:\n{dsl}"
     );
 }
 
@@ -1623,19 +1636,19 @@ fn frr_redistribute_bgp_into_bgp_no_extra_engine() {
     // A bgp→bgp pipe (FRR's `redistribute bgp` inside `router bgp`)
     // re-originates BGP routes as locally-originated — lr supports it
     // without an extra engine, so no `protocols = [...]` line.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute bgp\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert_eq!(cfg.redistributes[0].source.as_deref(), Some("bgp"));
     assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
     assert!(
-        !toml.contains("protocols = "),
+        !dsl.contains("protocols = "),
         "bgp→bgp pipe must not emit a protocols line"
     );
 }
@@ -1650,18 +1663,18 @@ fn frr_redistribute_connected_maps_to_connected_source() {
     // pipe (BIRD `redistribute direct` / FRR `redistribute connected`
     // parity). Previously this was unmapped because the daemon had
     // no `install_connected` surface.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute connected\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(
         cfg.redistributes.len(),
         1,
-        "connected source must produce exactly one [[redistribute]] row, got: {toml}"
+        "connected source must produce exactly one [[redistribute]] row, got: {dsl}"
     );
     assert_eq!(cfg.redistributes[0].source.as_deref(), Some("connected"));
     assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
@@ -1675,18 +1688,18 @@ fn frr_redistribute_static_maps_to_static_source() {
     // operator-configured `[[static.route]]` entries via
     // `install_static` and pushes them through any matching pipe
     // (BIRD `redistribute static` / FRR `redistribute static` parity).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute static\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(
         cfg.redistributes.len(),
         1,
-        "static source must produce exactly one [[redistribute]] row, got: {toml}"
+        "static source must produce exactly one [[redistribute]] row, got: {dsl}"
     );
     assert_eq!(cfg.redistributes[0].source.as_deref(), Some("static"));
     assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
@@ -1700,21 +1713,21 @@ fn frr_redistribute_kernel_is_still_unmapped() {
     // still leaves it as an unmapped note so the operator sees the
     // gap and converts manually (e.g. by adding `[[static.route]]`
     // entries for the routes they would have had the kernel feed in).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute kernel\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert!(
         cfg.redistributes.is_empty(),
         "kernel source must not produce a [[redistribute]] row"
     );
     assert!(
-        toml.contains("no daemon injection surface for source 'kernel'"),
-        "expected unmapped note for kernel, got:\n{toml}"
+        dsl.contains("no daemon injection surface for source 'kernel'"),
+        "expected unmapped note for kernel, got:\n{dsl}"
     );
 }
 
@@ -1725,19 +1738,19 @@ fn frr_redistribute_route_map_is_unmapped() {
     // route-map up, so it carries an unmapped note that says so
     // (and the redistribute row still lands — with an empty allow
     // list, which means "redistribute everything").
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf route-map RM-REDIST\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert_eq!(cfg.redistributes[0].source.as_deref(), Some("ospf"));
     assert!(
-        toml.contains("route-map RM-REDIST not defined"),
-        "expected route-map-not-defined note, got:\n{toml}"
+        dsl.contains("route-map RM-REDIST not defined"),
+        "expected route-map-not-defined note, got:\n{dsl}"
     );
 }
 
@@ -1753,7 +1766,7 @@ fn frr_redistribute_route_map_translates_to_allow_list() {
     // `allow` list. FRR permits the prefix-list to be defined after
     // the `redistribute` line (forward reference) — the resolver
     // runs only after the whole file has been scanned.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute connected route-map RM-REDIST\n\
@@ -1765,7 +1778,7 @@ fn frr_redistribute_route_map_translates_to_allow_list() {
              ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n\
              ip prefix-list PL-ALLOWED permit 192.168.0.0/16 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     let rd = &cfg.redistributes[0];
     assert_eq!(rd.source.as_deref(), Some("connected"));
@@ -1779,13 +1792,13 @@ fn frr_redistribute_route_map_translates_to_allow_list() {
     // path (the route-map definition itself legitimately contains
     // RM-REDIST, but it is not an unmapped note). The header comment
     // about UNMAPPED comments does not count.
-    let unmapped_mentions_rm = toml
+    let unmapped_mentions_rm = dsl
         .lines()
         .filter(|l| l.starts_with("# UNMAPPED:"))
         .any(|l| l.contains("RM-REDIST"));
     assert!(
         !unmapped_mentions_rm,
-        "no unmapped note for RM-REDIST on the happy path, got:\n{toml}"
+        "no unmapped note for RM-REDIST on the happy path, got:\n{dsl}"
     );
 }
 
@@ -1794,7 +1807,7 @@ fn frr_redistribute_route_map_translates_v6_le_128() {
     // IPv6 variant of the happy path: `le 128` is the v6 containment
     // marker (any prefix inside the network). The resolver must pick
     // the family's max plen, not a hard-coded 32.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv6 unicast\n\
               redistribute connected route-map RM-V6\n\
@@ -1805,7 +1818,7 @@ fn frr_redistribute_route_map_translates_v6_le_128() {
              !\n\
              ipv6 prefix-list PL-V6 permit 2001:db8::/32 le 128\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert_eq!(
         cfg.redistributes[0].allow,
@@ -1820,7 +1833,7 @@ fn frr_redistribute_route_map_with_deny_entry_is_unmapped() {
     // pipe's `allow` list (allow is a pure union of permit prefixes,
     // with no exclusion mechanism). The converter emits an unmapped
     // note describing the gap and leaves the allow list empty.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf route-map RM-DENY\n\
@@ -1831,15 +1844,15 @@ fn frr_redistribute_route_map_with_deny_entry_is_unmapped() {
              !\n\
              ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert!(
         cfg.redistributes[0].allow.is_empty(),
         "deny route-map must NOT populate allow list"
     );
     assert!(
-        toml.contains("route-map RM-DENY cannot be translated") && toml.contains("deny entries"),
-        "expected deny-entry unmapped note, got:\n{toml}"
+        dsl.contains("route-map RM-DENY cannot be translated") && dsl.contains("deny entries"),
+        "expected deny-entry unmapped note, got:\n{dsl}"
     );
 }
 
@@ -1848,7 +1861,7 @@ fn frr_redistribute_route_map_with_set_clauses_is_unmapped() {
     // A route-map with set clauses (local-preference, MED, next-hop,
     // prepend, community) carries attribute-rewrite semantics that
     // `allow` cannot express; the converter notes the gap.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf route-map RM-SET\n\
@@ -1860,12 +1873,12 @@ fn frr_redistribute_route_map_with_set_clauses_is_unmapped() {
              !\n\
              ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert!(cfg.redistributes[0].allow.is_empty());
     assert!(
-        toml.contains("route-map RM-SET cannot be translated") && toml.contains("set clauses"),
-        "expected set-clauses unmapped note, got:\n{toml}"
+        dsl.contains("route-map RM-SET cannot be translated") && dsl.contains("set clauses"),
+        "expected set-clauses unmapped note, got:\n{dsl}"
     );
 }
 
@@ -1876,7 +1889,7 @@ fn frr_redistribute_route_map_with_ge_qualifier_is_unmapped() {
     // `allow` (which is pure containment) would silently admit more
     // routes, so the converter refuses the translation and notes the
     // gap.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf route-map RM-GE\n\
@@ -1887,15 +1900,15 @@ fn frr_redistribute_route_map_with_ge_qualifier_is_unmapped() {
              !\n\
              ip prefix-list PL-GE permit 10.0.0.0/8 ge 16 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert!(
         cfg.redistributes[0].allow.is_empty(),
         "ge-qualified prefix-list must NOT populate allow list"
     );
     assert!(
-        toml.contains("prefix-list PL-GE has ge/le qualifier"),
-        "expected ge-qualifier unmapped note, got:\n{toml}"
+        dsl.contains("prefix-list PL-GE has ge/le qualifier"),
+        "expected ge-qualifier unmapped note, got:\n{dsl}"
     );
 }
 
@@ -1905,7 +1918,7 @@ fn frr_redistribute_route_map_with_exact_match_is_unmapped() {
     // le=plen), which is stricter than `allow`'s containment. The
     // converter refuses the translation to avoid silently widening
     // the match.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf route-map RM-EXACT\n\
@@ -1916,15 +1929,15 @@ fn frr_redistribute_route_map_with_exact_match_is_unmapped() {
              !\n\
              ip prefix-list PL-EXACT permit 10.0.0.0/8\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert!(
         cfg.redistributes[0].allow.is_empty(),
         "exact-match prefix-list must NOT populate allow list"
     );
     assert!(
-        toml.contains("prefix-list PL-EXACT has ge/le qualifier"),
-        "expected exact-match unmapped note, got:\n{toml}"
+        dsl.contains("prefix-list PL-EXACT has ge/le qualifier"),
+        "expected exact-match unmapped note, got:\n{dsl}"
     );
 }
 
@@ -1932,7 +1945,7 @@ fn frr_redistribute_route_map_with_exact_match_is_unmapped() {
 fn frr_redistribute_route_map_with_prefix_list_deny_is_unmapped() {
     // A prefix-list with a `deny` entry cannot be flattened onto the
     // pipe's `allow` list (allow has no exclusion mechanism).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf route-map RM-PL-DENY\n\
@@ -1944,15 +1957,15 @@ fn frr_redistribute_route_map_with_prefix_list_deny_is_unmapped() {
              ip prefix-list PL-MIXED permit 10.0.0.0/8 le 32\n\
              ip prefix-list PL-MIXED deny 10.1.0.0/16 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert!(
         cfg.redistributes[0].allow.is_empty(),
         "prefix-list with deny entries must NOT populate allow list"
     );
     assert!(
-        toml.contains("prefix-list PL-MIXED has deny entries"),
-        "expected prefix-list-deny unmapped note, got:\n{toml}"
+        dsl.contains("prefix-list PL-MIXED has deny entries"),
+        "expected prefix-list-deny unmapped note, got:\n{dsl}"
     );
 }
 
@@ -1964,7 +1977,7 @@ fn frr_redistribute_route_map_undefined_prefix_list_is_unmapped() {
     // route-map row), and our resolver then sees the route-map has
     // no `match_prefix` (and an unmapped clause) — both surface as
     // reasons in the redistribute's unmapped note.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute ospf route-map RM-UNDEF\n\
@@ -1973,16 +1986,16 @@ fn frr_redistribute_route_map_undefined_prefix_list_is_unmapped() {
              route-map RM-UNDEF permit 10\n\
               match ip address prefix-list PL-NEVER\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert!(
         cfg.redistributes[0].allow.is_empty(),
         "route-map referencing an undefined prefix-list must NOT populate allow list"
     );
     assert!(
-        toml.contains("route-map RM-UNDEF cannot be translated")
-            && toml.contains("no such prefix-list"),
-        "expected undefined-prefix-list unmapped note, got:\n{toml}"
+        dsl.contains("route-map RM-UNDEF cannot be translated")
+            && dsl.contains("no such prefix-list"),
+        "expected undefined-prefix-list unmapped note, got:\n{dsl}"
     );
 }
 
@@ -1992,7 +2005,7 @@ fn frr_redistribute_route_map_multiple_entries_merge() {
     // different prefix-list, merges all the prefixes onto the pipe's
     // allow list (deduplicated). This mirrors FRR's "any matching
     // permit entry allows the route" semantics.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute connected route-map RM-MULTI\n\
@@ -2006,7 +2019,7 @@ fn frr_redistribute_route_map_multiple_entries_merge() {
              ip prefix-list PL-A permit 10.0.0.0/8 le 32\n\
              ip prefix-list PL-B permit 192.168.0.0/16 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     let mut allow = cfg.redistributes[0].allow.clone();
     allow.sort();
@@ -2024,7 +2037,7 @@ fn frr_redistribute_route_map_deduplicates_prefixes() {
     // route-map. `allow` is a set-membership check, so the dedup
     // keeps the rendered TOML clean and avoids a confusing double
     // entry in the daemon config.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute connected route-map RM-DUP\n\
@@ -2036,7 +2049,7 @@ fn frr_redistribute_route_map_deduplicates_prefixes() {
              ip prefix-list PL-DUP permit 10.0.0.0/8 le 32\n\
              ip prefix-list PL-DUP permit 10.0.0.0/8 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert_eq!(
         cfg.redistributes[0].allow,
@@ -2051,7 +2064,7 @@ fn frr_redistribute_route_map_preserves_metric() {
     // the same `redistribute` line: the metric override carries
     // through unchanged while the route-map is resolved onto the
     // allow list. Round-trip both through the daemon parser.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               redistribute connected metric 100 route-map RM-METRIC\n\
@@ -2062,7 +2075,7 @@ fn frr_redistribute_route_map_preserves_metric() {
              !\n\
              ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     let rd = &cfg.redistributes[0];
     assert_eq!(rd.metric, Some(100), "metric override carries through");
@@ -2078,7 +2091,7 @@ fn frr_redistribute_route_map_into_ospf_target_translates() {
     // The route-map translation works for OSPF targets too — the
     // resolver is target-agnostic (it only inspects the route-map
     // and prefix-list tables).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospf\n\
              redistribute bgp route-map RM-INTO-OSPF\n\
              !\n\
@@ -2087,7 +2100,7 @@ fn frr_redistribute_route_map_into_ospf_target_translates() {
              !\n\
              ip prefix-list PL-ALLOWED permit 10.0.0.0/8 le 32\n",
     ));
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     let rd = &cfg.redistributes[0];
     assert_eq!(rd.source.as_deref(), Some("bgp"));
@@ -2097,7 +2110,7 @@ fn frr_redistribute_route_map_into_ospf_target_translates() {
 
 #[test]
 fn frr_redistribute_into_ospf_targets_ospf() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router ospf\n\
              redistribute bgp metric 50\n\
              !\n",
@@ -2105,54 +2118,53 @@ fn frr_redistribute_into_ospf_targets_ospf() {
     // OSPF target — round-trip with protocol=ospf (per corpus
     // convention) but the converter still emits the bgp engine in
     // the protocols list.
-    let cfg = roundtrip_ospf(&toml);
+    let cfg = roundtrip_ospf(&dsl);
     assert_eq!(cfg.redistributes.len(), 1);
     assert_eq!(cfg.redistributes[0].source.as_deref(), Some("bgp"));
     assert_eq!(cfg.redistributes[0].target.as_deref(), Some("ospf"));
     assert_eq!(cfg.redistributes[0].metric, Some(50));
     // The pipe needs both bgp (source) and ospf (target) engines.
-    // The order is converter-internal; both names must appear.
     assert!(
-        toml.contains("\"bgp\"") && toml.contains("\"ospf\""),
-        "expected protocols line listing both bgp and ospf engines, got:\n{toml}"
+        dsl.contains("protocol \"bgp,ospf\";"),
+        "expected the protocol key listing both engines, got:\n{dsl}"
     );
 }
 
 #[test]
 fn frr_no_redistribute_is_silently_consumed() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               no redistribute ospf\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert!(
         cfg.redistributes.is_empty(),
         "no redistribute must not produce a [[redistribute]] row"
     );
     assert!(
-        !toml.to_lowercase().contains("no redistribute"),
+        !dsl.to_lowercase().contains("no redistribute"),
         "no redistribute line must not appear in the rendered TOML"
     );
 }
 
 #[test]
 fn frr_no_bgp_ebgp_requires_policy_is_silently_consumed() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              no bgp ebgp-requires-policy\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     // lr always emits `ebgp_policy = "accept-all"` (the converter's
     // baseline), which is exactly what `no bgp ebgp-requires-policy`
     // asks for. The FRR directive must not appear as an UNMAPPED
     // note — that would be noise.
     assert!(
-        !toml.to_lowercase().contains("ebgp-requires-policy"),
-        "no bgp ebgp-requires-policy must not appear in rendered TOML, got:\n{toml}"
+        !dsl.to_lowercase().contains("ebgp-requires-policy"),
+        "no bgp ebgp-requires-policy must not appear in rendered TOML, got:\n{dsl}"
     );
     assert_eq!(cfg.local_as, 64512, "router bgp N must still set local_as");
 }
@@ -2165,7 +2177,7 @@ fn frr_network_with_route_map_emits_bgp_network_route_map_table() {
     // origination (RFC 4271 §9.1.2.1). The previous shape noted the
     // route-map as unmapped; the unmapped note is gone. The route-map
     // is defined in the source so the roundtrip's finalize passes.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               network 203.0.113.0/24 route-map RM-NET\n\
@@ -2173,7 +2185,7 @@ fn frr_network_with_route_map_emits_bgp_network_route_map_table() {
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
     assert_eq!(cfg.network_route_maps.len(), 1);
     assert_eq!(
@@ -2185,12 +2197,12 @@ fn frr_network_with_route_map_emits_bgp_network_route_map_table() {
         Some("RM-NET")
     );
     assert!(
-        !toml.contains("# UNMAPPED: network 203.0.113.0/24 route-map RM-NET"),
-        "the route-map is no longer unmapped, got:\n{toml}"
+        !dsl.contains("# UNMAPPED: network 203.0.113.0/24 route-map RM-NET"),
+        "the route-map is no longer unmapped, got:\n{dsl}"
     );
     assert!(
-        toml.contains("[[bgp.network_route_map]]"),
-        "rendered TOML must emit the [[bgp.network_route_map]] table, got:\n{toml}"
+        dsl.contains("bgp.network_route_map {"),
+        "rendered DSL must emit the bgp.network_route_map block, got:\n{dsl}"
     );
 }
 
@@ -2201,22 +2213,22 @@ fn frr_network_with_route_map_missing_name_notes_unmapped() {
     // row whose `route_map` is empty (the daemon's finalize would
     // reject the empty name anyway, but surfacing it at translate time
     // keeps the diagnostic close to the offending line).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               network 203.0.113.0/24 route-map\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
     assert!(
         cfg.network_route_maps.is_empty(),
         "no row emitted for a route-map with no name"
     );
     assert!(
-        toml.contains("network 203.0.113.0/24 route-map — missing name"),
-        "expected unmapped note for the missing name, got:\n{toml}"
+        dsl.contains("network 203.0.113.0/24 route-map — missing name"),
+        "expected unmapped note for the missing name, got:\n{dsl}"
     );
 }
 
@@ -2225,22 +2237,22 @@ fn frr_network_without_route_map_still_emits_just_networks() {
     // A plain `network PREFIX` (no `route-map` qualifier) still
     // joins `networks` and emits no `[[bgp.network_route_map]]` row —
     // the historical behaviour is unchanged.
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               network 203.0.113.0/24\n\
              exit-address-family\n\
              !\n",
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
     assert!(
         cfg.network_route_maps.is_empty(),
         "plain `network PREFIX` must not emit a [[bgp.network_route_map]] row"
     );
     assert!(
-        !toml.contains("[[bgp.network_route_map]]"),
-        "rendered TOML must not emit the [[bgp.network_route_map]] table for a plain network, got:\n{toml}"
+        !dsl.contains("[[bgp.network_route_map]]"),
+        "rendered TOML must not emit the [[bgp.network_route_map]] table for a plain network, got:\n{dsl}"
     );
 }
 
@@ -2250,7 +2262,7 @@ fn frr_network_route_map_with_route_map_definition_round_trips() {
     // itself round-trip into a config that the daemon's finalize
     // accepts (the route-map name resolves, the prefix is in
     // `networks`).
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         "router bgp 64512\n\
              address-family ipv4 unicast\n\
               network 203.0.113.0/24 route-map RM-NET\n\
@@ -2259,7 +2271,7 @@ fn frr_network_route_map_with_route_map_definition_round_trips() {
              exit-address-family\n\
              !\n",
     ));
-    let mut cfg = roundtrip(&toml);
+    let mut cfg = roundtrip(&dsl);
     assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
     assert_eq!(cfg.network_route_maps.len(), 1);
     assert_eq!(
@@ -2284,7 +2296,7 @@ fn frr_network_route_map_with_route_map_definition_round_trips() {
 /// reject ATOMIC_AGGREGATE routes.
 #[test]
 fn bird_filter_renames_rr_loop_attributes() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2305,7 +2317,7 @@ protocol bgp rr_client {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     let body = cfg.filters[0].body.as_deref().unwrap_or("");
     // BIRD spelling is gone.
@@ -2337,7 +2349,7 @@ protocol bgp rr_client {
 /// "absent" from "set to zero".
 #[test]
 fn bird_filter_renames_otc_attribute() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2357,7 +2369,7 @@ protocol bgp customer {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     let body = cfg.filters[0].body.as_deref().unwrap_or("");
     // BIRD spelling is gone.
@@ -2376,7 +2388,7 @@ protocol bgp customer {
 /// and `defined(bgp_aigp)` to distinguish "absent" from "set to zero".
 #[test]
 fn bird_filter_renames_aigp_attribute() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2396,7 +2408,7 @@ protocol bgp customer {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     let body = cfg.filters[0].body.as_deref().unwrap_or("");
     // BIRD spelling is gone.
@@ -2423,7 +2435,7 @@ protocol bgp customer {
 /// the AS-number component.
 #[test]
 fn bird_filter_renames_aggregator_attribute() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2443,7 +2455,7 @@ protocol bgp customer {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     let body = cfg.filters[0].body.as_deref().unwrap_or("");
     // BIRD spelling is gone.
@@ -2469,7 +2481,7 @@ protocol bgp customer {
 /// DSL mirrors that surface as a read-only `Bool` field.
 #[test]
 fn bird_filter_renames_pmsi_tunnel_attribute() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2489,7 +2501,7 @@ protocol bgp customer {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.filters.len(), 1);
     let body = cfg.filters[0].body.as_deref().unwrap_or("");
     // BIRD spelling is gone.
@@ -2511,7 +2523,7 @@ protocol bgp customer {
 /// the directive runs unchanged.
 #[test]
 fn bird_rr_client_maps_to_peer_route_reflector_client() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2535,7 +2547,7 @@ protocol bgp non_client {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     // The first peer (rr_client_a) carries the directive; the
     // second (non_client) does not. Both peers should round-trip.
     assert_eq!(cfg.peers.len(), 2);
@@ -2558,17 +2570,17 @@ protocol bgp non_client {
         non.route_reflector_client, None,
         "no rr client = no route_reflector_client key"
     );
-    // The rendered TOML must carry the key for the RR client peer
+    // The rendered DSL must carry the key for the RR client peer
     // and not carry it for the non-client peer.
     assert!(
-        toml.contains("route_reflector_client = true"),
-        "expected `route_reflector_client = true` in rendered TOML:\n{toml}"
+        dsl.contains("route_reflector_client true;"),
+        "expected `route_reflector_client true;` in rendered DSL:\n{dsl}"
     );
     // The unmapped list must NOT keep the original `rr client;`
     // line as a fallback note — the directive mapped successfully.
     assert!(
-        !toml.contains("# UNMAPPED: rr client"),
-        "rr client should not appear as UNMAPPED:\n{toml}"
+        !dsl.contains("# UNMAPPED: rr client"),
+        "rr client should not appear as UNMAPPED:\n{dsl}"
     );
 }
 
@@ -2582,7 +2594,7 @@ protocol bgp non_client {
 /// it is silently dropped so the generated config stays minimal.
 #[test]
 fn bird_route_reflector_cluster_id_maps_to_global() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2598,21 +2610,21 @@ protocol bgp rr_client_a {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(
         cfg.route_reflector_cluster_id.as_deref(),
         Some("10.0.0.254"),
         "route reflector cluster_id maps to [bgp] route_reflector_cluster_id"
     );
     assert!(
-        toml.contains("route_reflector_cluster_id = \"10.0.0.254\""),
-        "expected `route_reflector_cluster_id = \"10.0.0.254\"` in rendered TOML:\n{toml}"
+        dsl.contains("route_reflector_cluster_id \"10.0.0.254\";"),
+        "expected `route_reflector_cluster_id \"10.0.0.254\";` in rendered DSL:\n{dsl}"
     );
 }
 
 #[test]
 fn bird_route_reflector_cluster_id_zero_drops_silently() {
-    let toml = render(translate_bird(
+    let dsl = render(translate_bird(
         r#"
 router id 10.0.0.1;
 
@@ -2628,7 +2640,7 @@ protocol bgp rr_client_a {
 }
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     // 0.0.0.0 is BIRD's "fall back to the local router id" spelling,
     // which is also lr's default — no key needs to be emitted.
     assert_eq!(
@@ -2636,8 +2648,8 @@ protocol bgp rr_client_a {
         "cluster_id 0.0.0.0 must not be emitted as a TOML key"
     );
     assert!(
-        !toml.contains("route_reflector_cluster_id"),
-        "expected no `route_reflector_cluster_id` key in rendered TOML:\n{toml}"
+        !dsl.contains("route_reflector_cluster_id"),
+        "expected no `route_reflector_cluster_id` key in rendered TOML:\n{dsl}"
     );
 }
 
@@ -2648,7 +2660,7 @@ protocol bgp rr_client_a {
 /// line as `# UNMAPPED:` so the operator can convert it manually.
 #[test]
 fn frr_bgp_cluster_id_maps_to_global() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         r#"
 router bgp 64512
  bgp router-id 10.0.0.1
@@ -2661,21 +2673,21 @@ router bgp 64512
 !
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(
         cfg.route_reflector_cluster_id.as_deref(),
         Some("10.0.0.254"),
         "FRR bgp cluster-id maps to [bgp] route_reflector_cluster_id"
     );
     assert!(
-        toml.contains("route_reflector_cluster_id = \"10.0.0.254\""),
-        "expected `route_reflector_cluster_id = \"10.0.0.254\"` in rendered TOML:\n{toml}"
+        dsl.contains("route_reflector_cluster_id \"10.0.0.254\";"),
+        "expected `route_reflector_cluster_id \"10.0.0.254\";` in rendered DSL:\n{dsl}"
     );
 }
 
 #[test]
 fn frr_bgp_cluster_id_integer_form_is_unmapped() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         r#"
 router bgp 64512
  bgp router-id 10.0.0.1
@@ -2690,12 +2702,12 @@ router bgp 64512
     // of silently producing a config the daemon would refuse to
     // load. The rendered TOML must not carry `route_reflector_cluster_id`.
     assert!(
-        toml.contains("integer cluster-id form not mapped"),
-        "expected an UNMAPPED note for the integer cluster id:\n{toml}"
+        dsl.contains("integer cluster-id form not mapped"),
+        "expected an UNMAPPED note for the integer cluster id:\n{dsl}"
     );
     assert!(
-        !toml.contains("route_reflector_cluster_id"),
-        "expected no `route_reflector_cluster_id` key for integer form:\n{toml}"
+        !dsl.contains("route_reflector_cluster_id"),
+        "expected no `route_reflector_cluster_id` key for integer form:\n{dsl}"
     );
 }
 
@@ -2707,7 +2719,7 @@ router bgp 64512
 /// runs unchanged.
 #[test]
 fn frr_neighbor_route_reflector_client_maps_per_peer() {
-    let toml = render(translate_frr(
+    let dsl = render(translate_frr(
         r#"
 router bgp 64512
  bgp router-id 10.0.0.1
@@ -2721,7 +2733,7 @@ router bgp 64512
 !
 "#,
     ));
-    let cfg = roundtrip(&toml);
+    let cfg = roundtrip(&dsl);
     assert_eq!(cfg.peers.len(), 2);
     let rr = cfg
         .peers
@@ -2742,14 +2754,170 @@ router bgp 64512
         non.route_reflector_client, None,
         "peer without route-reflector-client stays unset"
     );
-    // The rendered TOML must carry the key for the RR client peer
+    // The rendered DSL must carry the key for the RR client peer
     // and not carry an UNMAPPED note for the directive.
     assert!(
-        toml.contains("route_reflector_client = true"),
-        "expected `route_reflector_client = true` in rendered TOML:\n{toml}"
+        dsl.contains("route_reflector_client true;"),
+        "expected `route_reflector_client true;` in rendered DSL:\n{dsl}"
     );
     assert!(
-        !toml.contains("# UNMAPPED: neighbor 192.0.2.2 route-reflector-client"),
-        "route-reflector-client should not appear as UNMAPPED:\n{toml}"
+        !dsl.contains("# UNMAPPED: neighbor 192.0.2.2 route-reflector-client"),
+        "route-reflector-client should not appear as UNMAPPED:\n{dsl}"
     );
+}
+
+// ---- the IR-completeness pin (issue #101) -----------------------------
+
+/// The completeness oracle: the converter's rendered DSL must parse
+/// back to the exact IR [`super::to_daemon_config`] built. `to_dsl`
+/// once dropped five converter-reachable fields
+/// (`route_reflector_cluster_id`, `route_reflector_client`,
+/// `shutdown`, `summary_only`, `as_set`) and the loader-level
+/// round-trips never noticed — they only check "loads and finalizes".
+/// This pins field-level IR equality: a dropped key fails here with
+/// a struct diff, so compat mode can never silently run a degraded
+/// config relative to what `lr translate` prints.
+fn assert_dsl_is_ir_complete(out: &super::ConfigOut) {
+    let (built, notes) = super::to_daemon_config(out).expect("to_daemon_config");
+    let dsl = super::render_dsl(out).expect("render_dsl");
+    let mut parsed = DaemonConfig::default();
+    crate::config_dsl::parse_dsl_text(&dsl, None, &mut parsed)
+        .unwrap_or_else(|e| panic!("generated DSL must parse: {e}\n---\n{dsl}"));
+    assert_eq!(built, parsed, "IR must survive ConfigOut → DSL → IR");
+    // The rendered banner carries every note exactly once.
+    for note in &notes {
+        let needle = format!("# UNMAPPED: {note}");
+        assert!(
+            dsl.contains(&needle),
+            "note missing from the banner: {needle}"
+        );
+    }
+}
+
+#[test]
+fn bird_kitchen_sink_dsl_is_ir_complete() {
+    let out = translate_bird(
+        r#"
+router id 10.0.0.1;
+
+protocol static seed {
+    ipv4;
+    route 203.0.113.0/24 blackhole;
+}
+
+filter customer_in {
+    if net ~ [203.0.113.0/24+] then accept;
+    else reject;
+}
+
+roa table my_roas {
+    roa 203.0.113.0/24 max 24 as 64512;
+}
+
+protocol bgp uplink {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    local address 192.0.2.1;
+    password "s3cret";
+    hold time 45;
+    bfd off;
+    rr client;
+    ipv4 {
+        import filter customer_in;
+        export none;
+    };
+    ipv6 {
+        import all;
+        export all;
+    };
+    # lr: max-prefixes 5000
+    # lr: gtsm 2
+}
+
+protocol ospf my_ospf {
+    area 0 {
+        interface "eth0" {
+            cost 10;
+            hello 5;
+            retransmit 8;
+            priority 3;
+        };
+    };
+}
+
+protocol babel my_babel {
+    interface "eth1" {
+        hello 4;
+        rxcost 96;
+    };
+}
+
+# lr: api-socket /tmp/lr-api.sock
+# lr: install-kernel
+"#,
+    );
+    assert_dsl_is_ir_complete(&out);
+}
+
+#[test]
+fn frr_kitchen_sink_dsl_is_ir_complete() {
+    let out = translate_frr(
+        "frr version 10\n\
+         !\n\
+         router bgp 64512\n\
+          bgp router-id 10.0.0.1\n\
+          bgp cluster-id 10.0.0.254\n\
+          neighbor 192.0.2.2 remote-as 64513\n\
+          neighbor 192.0.2.2 password 0 s3cret\n\
+          neighbor 192.0.2.2 update-source 192.0.2.1\n\
+          neighbor 192.0.2.2 shutdown\n\
+          neighbor 192.0.2.3 remote-as 64514\n\
+          neighbor 192.0.2.3 route-reflector-client\n\
+          address-family ipv4 unicast\n\
+           network 203.0.113.0/24\n\
+           network 198.51.100.0/24 route-map RM-NET\n\
+           aggregate-address 192.0.2.0/24 summary-only as-set\n\
+           redistribute ospf metric 100\n\
+          exit-address-family\n\
+          address-family ipv6 unicast\n\
+           neighbor 192.0.2.2 activate\n\
+          exit-address-family\n\
+         !\n\
+         ip prefix-list CUSTOMERS seq 5 permit 203.0.113.0/24\n\
+         route-map RM-NET permit 10\n\
+          match ip address prefix-list CUSTOMERS\n\
+          set local-preference 200\n\
+         !\n\
+         router ospf\n\
+          interface eth0\n\
+           ip ospf cost 10\n\
+           ip ospf retransmit-interval 8\n\
+          !\n\
+         !\n\
+         # lr: graceful-restart 300\n",
+    );
+    assert_dsl_is_ir_complete(&out);
+}
+
+#[test]
+fn hold_time_past_the_u16_ceiling_fails_the_conversion() {
+    // RFC 4271 §4.2 caps the Hold Time at 65535 seconds; a source
+    // value past the ceiling cannot be honoured, and the daemon's
+    // loader would reject the equivalent key the same way. The
+    // conversion fails loudly naming the peer instead of silently
+    // substituting the default timer.
+    let err = super::render_dsl(&translate_bird(
+        "router id 10.0.0.1;\n\
+         protocol bgp uplink {\n\
+             local as 64512;\n\
+             neighbor 192.0.2.2 as 64513;\n\
+             hold time 70000;\n\
+         }\n",
+    ))
+    .expect_err("hold time 70000 must fail");
+    assert!(
+        err.contains("hold time 70000 exceeds the 65535-second ceiling"),
+        "err: {err}"
+    );
+    assert!(err.contains("uplink"), "err names the peer: {err}");
 }

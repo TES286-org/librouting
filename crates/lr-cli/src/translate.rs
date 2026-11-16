@@ -1,5 +1,5 @@
 //! `lr translate bird|frr <config>` — best-effort conversion of BIRD 2
-//! and FRR BGP configurations into librouting daemon TOML (the
+//! and FRR BGP configurations into the native `.lr` DSL (the
 //! W5.1 compatibility-layer slice).
 //!
 //! The converter is deliberately *line-based and shallow*: it maps the
@@ -8,13 +8,25 @@
 //! (prefix lists, route-map sequences, import/export none|all).
 //! Everything it cannot map faithfully is preserved as an explicit
 //! `# UNMAPPED:` comment instead of being silently dropped, and the
-//! generated TOML is always loadable by `lr-daemon --config` (verified
+//! generated DSL is always loadable by `lr-daemon --config` (verified
 //! by a round-trip test through the real parser).
 //!
-//! Mappings (BIRD 2 / FRR → lr):
-//! - `router id` / `bgp router-id` → `[bgp] router_id`
-//! - `local as` / `router bgp <as>` → `[bgp] local_as`
-//! - `protocol bgp` / `neighbor … remote-as` → `[[peer]]`
+//! The mapping target is the typed [`DaemonConfig`] IR
+//! ([`to_daemon_config`]), rendered through the one shared DSL
+//! emitter (`config_dsl::to_dsl` — the same code
+//! `lr-daemon config to-dsl` runs), so the converter's output and the
+//! migration tool can never drift apart. The TOML subset is no
+//! longer involved: the converter stopped rendering into the
+//! deprecated dialect as its intermediate representation (issue
+//! #101 — the 2.0 TOML-removal prerequisite), and the daemon's
+//! compat mode feeds the rendered DSL through the regular `.lr`
+//! loader (`crate::compat`).
+//!
+//! Mappings (BIRD 2 / FRR → lr, in the dotted IR key spelling both
+//! config frontends share):
+//! - `router id` / `bgp router-id` → `bgp.router_id`
+//! - `local as` / `router bgp <as>` → `bgp.local_as`
+//! - `protocol bgp` / `neighbor … remote-as` → one `peer` block each
 //! - `neighbor … as` (BIRD) → `remote` + `peer_as`
 //! - `password` / `neighbor … password` → `md5_key`
 //! - `local address` / `update-source` → `local_address`
@@ -22,18 +34,18 @@
 //!   UNMAPPED note (lr has no per-peer listen port)
 //! - `hold time` → `hold_time`
 //! - `bfd on|off` / `neighbor … bfd` → `bfd`
-//! - `import|export none` → a generated deny-all `[[route-map]]`
-//! - `import|export all` → nothing: `ebgp_policy = "accept-all"`
+//! - `import|export none` → a generated deny-all `route-map` block
+//! - `import|export all` → nothing: `ebgp_policy "accept-all"`
 //!   already has exactly that meaning (see Policy semantics below)
 //! - `route-map NAME permit|deny SEQ` + `match`/`set` clauses →
-//!   `[[route-map]]` entries (prefix-list, as-path, community matches;
+//!   `route-map` blocks (prefix-list, as-path, community matches;
 //!   next-hop, local-pref, MED, prepend, add-community actions)
-//! - `bgp as-path access-list` → `[[as-path-list]]`,
-//!   `bgp community-list standard` → `[[community-list]]`
+//! - `bgp as-path access-list` → `as-path-list` blocks,
+//!   `bgp community-list standard` → `community-list` blocks
 //! - `network PREFIX` (FRR) / `route PREFIX` inside `protocol static`
 //!   (BIRD) → `networks`
-//! - `ip prefix-list … seq … permit|deny` → `[[prefix-list]]` entries
-//! - BIRD `filter NAME { … }` / `function NAME(…) { … }` → `[[filter]]`
+//! - `ip prefix-list … seq … permit|deny` → `prefix-list` blocks
+//! - BIRD `filter NAME { … }` / `function NAME(…) { … }` → `filter`
 //!   bodies in the lr filter DSL (ROADMAP-v3 D14.1, fail-closed: a
 //!   filter with any unfaithfully-translatable construct is not
 //!   emitted and the offending constructs are reported; see
@@ -42,7 +54,7 @@
 //! - BIRD `import|export filter NAME` / `import where EXPR` →
 //!   `import_filter` / `export_filter` peer wiring (`where` becomes a
 //!   generated `bird-<dir>-<peer>` filter)
-//! - BIRD `roa table NAME { roa …; }` → `[[roa]]` entries; the
+//! - BIRD `roa table NAME { roa …; }` → `roa` blocks; the
 //!   single-table `roa_check(t) = ROA_*` idiom → `roa.state` string
 //!   comparisons
 //! - BIRD `ipv4 { … }` / `ipv6 { … }` channels → `mp_families` (+
@@ -51,12 +63,12 @@
 //!   `mp_families += ipv6-unicast`
 //! - BIRD `rr client;` (RFC 4456 §3) → per-peer
 //!   `route_reflector_client = true`. BIRD `route reflector cluster_id
-//!   A.B.C.D;` (RFC 4456 §10) → `[bgp] route_reflector_cluster_id`
+//!   A.B.C.D;` (RFC 4456 §10) → `bgp.route_reflector_cluster_id`
 //!   (router-wide, last write wins; `cluster_id 0.0.0.0` silently
 //!   dropped as it is lr's default fall-through to the local BGP
 //!   identifier).
 //! - FRR `bgp cluster-id A.B.C.D` (RFC 4456 §10) →
-//!   `[bgp] route_reflector_cluster_id`; FRR
+//!   `bgp.route_reflector_cluster_id`; FRR
 //!   `neighbor … route-reflector-client` (inside `address-family`) →
 //!   per-peer `route_reflector_client = true`.
 //! - FRR `aggregate-address A.B.C.D/M [summary-only] [as-set]
@@ -87,7 +99,7 @@
 //!   `allow` field is the bit-level containment check executed by
 //!   `RedistributionPipe::matches` (see `lr-router::redistribution`).
 //!   A pipe whose source engine is not `bgp` triggers a top-level
-//!   `protocols = ["bgp", "<engine>", …]` emission so the generated
+//!   `protocol "bgp,<engine>,…"` key so the generated
 //!   config is loadable as-is (the daemon's `finalize` rejects a
 //!   `[[redistribute]]` whose source engine it does not run).
 //! - FRR `no bgp ebgp-requires-policy` is consumed silently — the
@@ -103,7 +115,7 @@
 //!
 //! Policy semantics: BIRD and FRR natively accept every route a peer
 //! sends unless a filter says otherwise, which is lr's
-//! `ebgp_policy = "accept-all"` mode (RFC 8212 insecure deviation) —
+//! `ebgp_policy "accept-all"` mode (RFC 8212 insecure deviation) —
 //! the converter always emits it, because the lr daemon's default
 //! (rfc8212 deny-by-default) would silently drop routes the source
 //! config would have accepted. Explicit maps, including the generated
@@ -114,7 +126,7 @@
 //!
 //! lr-specific extensions: `lr:` comment directives ride along in both
 //! dialects (`# lr: …` in BIRD and FRR, `! lr: …` also accepted in
-//! FRR) and map onto the daemon's TOML schema — see `LrDirective`.
+//! FRR) and map onto the daemon's key schema — see `LrDirective`.
 //! Inside a BIRD `protocol bgp` block a directive scopes to that
 //! peer; in FRR the `# lr: neighbor ADDR …` form scopes to a peer.
 //! Directives are invisible to the reference implementations, so a
@@ -134,16 +146,18 @@
 use std::process::ExitCode;
 
 use crate::daemon_config::{
-    AggregateSpec, BabelInterfaceSpec, NetworkRouteMapSpec, OspfAreaSpec, OspfIfSpec,
-    RedistributeSpec,
+    self, AggregateSpec, BabelInterfaceSpec, DaemonConfig, FilterSpec, NetworkRouteMapSpec,
+    OspfAreaSpec, OspfIfSpec, PeerSpec, RedistributeSpec, RoaSpec,
 };
+use crate::daemon_policy::{AsPathListSpec, CommunityListSpec, PrefixListSpec, RouteMapSpec};
 use crate::translate_bird_filter::{self, BirdFilterSource, FilterRow, RoaRow};
 
 /// One lr-specific `lr:` comment directive: `key` (normalised to
 /// snake_case) plus its optional value (the whitespace-joined
-/// remainder, quotes stripped). Resolved against the TOML schema at
-/// render time by [`directive_toml`]; unknown keys or bad values
-/// surface as visible notes instead of being applied.
+/// remainder, quotes stripped). Resolved against the daemon's key
+/// schema at IR-build time by [`directive_resolve`] and applied
+/// through the shared dispatch by [`directive_apply`]; unknown keys
+/// or bad values surface as visible notes instead of being applied.
 #[derive(Debug, Clone)]
 struct LrDirective {
     key: String,
@@ -409,8 +423,16 @@ pub(super) fn translate(args: &[String]) -> ExitCode {
             "translate: note: `{proto}` ignored — the compat surface runs the BGP control plane only"
         );
     }
-    print!("{}", render(out));
-    ExitCode::SUCCESS
+    match render_dsl(&out) {
+        Ok(dsl) => {
+            print!("{dsl}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("translate: cannot render the conversion: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +441,7 @@ pub(super) fn translate(args: &[String]) -> ExitCode {
 
 /// Parse a BIRD 2 config into the intermediate form. `pub(super)` so
 /// `compat` can run the same parse the converter uses, then feed the
-/// rendered TOML straight into the daemon's loader.
+/// rendered `.lr` DSL straight into the daemon's loader.
 pub(super) fn parse_bird_config(text: &str) -> ConfigOut {
     translate_bird(text)
 }
@@ -430,10 +452,12 @@ pub(super) fn parse_frr_config(text: &str) -> ConfigOut {
     translate_frr(text)
 }
 
-/// Render the intermediate form as daemon TOML (see
-/// [`parse_bird_config`]).
-pub(super) fn render_config(out: ConfigOut) -> String {
-    render(out)
+/// Render the intermediate form as the native `.lr` DSL (see
+/// [`parse_bird_config`]). The output is byte-identical to what
+/// `lr translate <dialect>` prints — compat mode and the converter
+/// share this one renderer.
+pub(super) fn render_config(out: &ConfigOut) -> Result<String, String> {
+    render_dsl(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -3178,43 +3202,76 @@ fn resolve_redistribute_route_maps(out: &mut ConfigOut) {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering
+// IR construction and DSL rendering
 // ---------------------------------------------------------------------------
 
-/// Render the converted config as lr daemon TOML.
-fn render(out: ConfigOut) -> String {
-    let mut s = String::new();
-    s.push_str("# Generated by `lr translate` — best-effort conversion.\n");
-    s.push_str("# Lines the converter could not map are kept as UNMAPPED comments.\n");
-    s.push_str("# Review the result before pointing lr-daemon at it.\n");
-    for note in &out.unmapped_global {
-        s.push_str(&format!("# UNMAPPED: {note}\n"));
+/// A peer's reviewable label: the stanza name when BIRD/FRR gave it
+/// one, else the remote address — enough context to find the peer an
+/// unmapped note belongs to.
+fn peer_label(peer: &PeerOut) -> String {
+    peer.name
+        .clone()
+        .or_else(|| peer.remote.clone())
+        .unwrap_or_else(|| "<unnamed>".to_string())
+}
+
+/// Build the daemon IR from a converted config: every mapped source
+/// field lands in one [`DaemonConfig`]. The IR is built on
+/// [`DaemonConfig::default`] — the same base `config_dsl::to_dsl`
+/// diffs against — so the rendered DSL carries exactly the mapping,
+/// nothing inherited.
+///
+/// Returns the IR plus every unmapped note (source lines with no lr
+/// equivalent, failed filter translations, `lr:` directives that do
+/// not resolve). Callers surface the notes instead of applying them:
+/// [`render_dsl`] writes them as `# UNMAPPED:` comments, compat mode
+/// turns them into startup warnings. A note is never a silent drop.
+///
+/// `Err` is the fail-loud path: a source value the daemon's schema
+/// cannot honour (a hold time past the RFC 4271 §4.2 65535-second
+/// ceiling, say) aborts the conversion — the same load failure the
+/// rendered config would have produced under the daemon's loader,
+/// instead of silently running with a substituted default.
+fn to_daemon_config(out: &ConfigOut) -> Result<(DaemonConfig, Vec<String>), String> {
+    let mut cfg = DaemonConfig::default();
+    let mut notes: Vec<String> = Vec::new();
+
+    // Static bgp globals first; `lr:` directives apply after them so a
+    // directive wins the last-write race, exactly as the emitted keys
+    // ordered them before.
+    if let Some(asn) = out.local_as {
+        cfg.local_as = asn;
     }
-    for proto in &out.ignored_protocols {
-        s.push_str(&format!(
-            "# UNMAPPED: {proto} — the lr compat surface runs the BGP control plane only\n"
-        ));
+    if let Some(rid) = &out.router_id {
+        cfg.router_id = rid.clone();
     }
-    // Global `lr:` directives that map onto top-level (bare) TOML keys
-    // must precede the `[bgp]` header — inside it they would parse as
-    // `bgp.api_socket` and be rejected as unknown.
-    let mut bgp_ext: Vec<(String, String)> = Vec::new();
-    for d in &out.ext_global {
-        match directive_toml(d, DirScope::Global) {
-            Ok((k, v)) if matches!(k.as_str(), "api_socket" | "user" | "group") => {
-                s.push_str(&format!("{k} = {v}\n"));
-            }
-            Ok((k, v)) => bgp_ext.push((k, v)),
-            Err(note) => s.push_str(&format!("# UNMAPPED: {note}\n")),
-        }
+    if !out.networks.is_empty() {
+        cfg.networks = out.networks.clone();
     }
-    // A translated `[[redistribute]]` whose source engine is not bgp
-    // needs the daemon to run that engine too — otherwise `finalize`
+    // BIRD and FRR accept every route a peer sends unless a filter
+    // says otherwise — that is lr's `accept-all` mode (the RFC 8212
+    // insecure deviation the lr daemon does NOT default to). Per-peer
+    // maps, explicit or generated, still apply under accept-all, so
+    // `import none` conversions keep their deny-all behaviour.
+    cfg.ebgp_policy = "accept-all".to_string();
+    if out.enforce_first_as == Some(true) {
+        // Dialect default: FRR runs `bgp enforce-first-as` on, BIRD
+        // has no such check. Set only when the source dialect differs
+        // from the lr default (off).
+        cfg.enforce_first_as = true;
+    }
+    if let Some(cidr) = &out.route_reflector_cluster_id {
+        // FRR `bgp cluster-id` / BIRD `route reflector cluster_id` —
+        // already validated to parse as an IPv4 dotted-quad at the
+        // parse site.
+        cfg.route_reflector_cluster_id = Some(cidr.clone());
+    }
+    // A translated redistribute whose source engine is not bgp needs
+    // the daemon to run that engine too — otherwise `finalize`
     // rejects the pipe with "the daemon does not run the <engine>
-    // engine". Emit `protocol = "bgp,ospf"` (or `bgp,babel`) so the
-    // generated config is loadable as-is. The list is de-duplicated
-    // and keeps `bgp` first so a BGP-only config stays at the
-    // converter's default.
+    // engine". Set `protocol` so the generated config is loadable
+    // as-is. The list is de-duplicated and keeps `bgp` first so a
+    // BGP-only config stays at the converter's default.
     if !out.redistribute_engines.is_empty() {
         let mut engines: Vec<&str> = vec!["bgp"];
         for eng in &out.redistribute_engines {
@@ -3222,126 +3279,66 @@ fn render(out: ConfigOut) -> String {
                 engines.push(eng.as_str());
             }
         }
-        let joined = engines
-            .iter()
-            .map(|e| format!("\"{e}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        s.push_str(&format!("protocols = [{joined}]\n"));
+        cfg.protocol = engines.join(",");
     }
-    s.push('\n');
-    s.push_str("[bgp]\n");
-    if let Some(asn) = out.local_as {
-        s.push_str(&format!("local_as = {asn}\n"));
+    // Global `lr:` directives resolve against the shared key dispatch
+    // (top-level keys vs the bgp section, see [`directive_resolve`]);
+    // unknown keys or bad values stay visible as notes.
+    for d in &out.ext_global {
+        if let Err(note) = directive_apply(&mut cfg, d, DirScope::Global) {
+            notes.push(note);
+        }
     }
-    if let Some(rid) = out.router_id {
-        s.push_str(&format!("router_id = {}\n", toml_str(&rid)));
-    }
-    if !out.networks.is_empty() {
-        let list = out
-            .networks
-            .iter()
-            .map(|n| toml_str(n))
-            .collect::<Vec<_>>()
-            .join(", ");
-        s.push_str(&format!("networks = [{list}]\n"));
-    }
-    // BIRD and FRR accept every route a peer sends unless a filter
-    // says otherwise — that is lr's `accept-all` mode (the RFC 8212
-    // insecure deviation the lr daemon does NOT default to). Per-peer
-    // maps, explicit or generated, still apply under accept-all, so
-    // `import none` conversions keep their deny-all behaviour.
-    s.push_str("ebgp_policy = \"accept-all\"\n");
-    if out.enforce_first_as == Some(true) {
-        // Dialect default: FRR runs `bgp enforce-first-as` on, BIRD
-        // has no such check. Emitted only when the source dialect
-        // differs from the lr default (off).
-        s.push_str("enforce_first_as = true\n");
-    }
-    if let Some(cidr) = &out.route_reflector_cluster_id {
-        // FRR `bgp cluster-id` / BIRD `route reflector cluster_id` —
-        // already validated to parse as `ClusterId` (an IPv4
-        // dotted-quad) at the parse site, so the value renders as a
-        // bare TOML string.
-        s.push_str(&format!(
-            "route_reflector_cluster_id = {}\n",
-            toml_str(cidr)
-        ));
-    }
-    // Remaining global `lr:` directives land in the [bgp] section.
-    for (k, v) in &bgp_ext {
-        s.push_str(&format!("{k} = {v}\n"));
-    }
-    s.push('\n');
+    notes.extend(out.unmapped_global.iter().cloned());
 
-    // lr prefix-lists evaluate in document order — emit them sorted
+    // lr prefix-lists evaluate in document order — build them sorted
     // by their source sequence number.
     let mut prefix_lists = out.prefix_lists.clone();
     prefix_lists.sort_by_key(|(_, seq, _, _, _, _)| *seq);
     for (name, _seq, permit, prefix, ge, le) in &prefix_lists {
-        s.push_str("[[prefix-list]]\n");
-        s.push_str(&format!("name = {}\n", toml_str(name)));
-        s.push_str(&format!("permit = {permit}\n"));
-        s.push_str(&format!("prefix = {}\n", toml_str(prefix)));
-        if let Some(ge) = ge {
-            s.push_str(&format!("ge = {ge}\n"));
-        }
-        if let Some(le) = le {
-            s.push_str(&format!("le = {le}\n"));
-        }
-        s.push('\n');
+        cfg.prefix_lists.push(PrefixListSpec {
+            name: name.clone(),
+            prefix: prefix.clone(),
+            permit: Some(*permit),
+            ge: *ge,
+            le: *le,
+        });
     }
     for list in &out.as_path_lists {
-        s.push_str("[[as-path-list]]\n");
-        s.push_str(&format!("name = {}\n", toml_str(&list.name)));
-        s.push_str(&format!("pattern = {}\n", toml_str(&list.pattern)));
-        s.push_str(&format!("permit = {}\n\n", list.permit));
+        cfg.as_path_lists.push(AsPathListSpec {
+            name: list.name.clone(),
+            pattern: list.pattern.clone(),
+            permit: Some(list.permit),
+        });
     }
     for list in &out.community_lists {
-        s.push_str("[[community-list]]\n");
-        s.push_str(&format!("name = {}\n", toml_str(&list.name)));
-        let communities = list
-            .communities
-            .iter()
-            .map(|c| toml_str(c))
-            .collect::<Vec<_>>()
-            .join(", ");
-        s.push_str(&format!("communities = [{communities}]\n"));
-        s.push_str(&format!("permit = {}\n\n", list.permit));
+        cfg.community_lists.push(CommunityListSpec {
+            name: list.name.clone(),
+            communities: list.communities.clone(),
+            permit: Some(list.permit),
+        });
     }
     for row in &out.route_maps {
-        s.push_str("[[route-map]]\n");
-        s.push_str(&format!("name = {}\n", toml_str(&row.name)));
-        s.push_str(&format!("entry = {}\n", row.entry));
-        s.push_str(&format!("permit = {}\n", row.permit));
-        if let Some(mp) = &row.match_prefix {
-            s.push_str(&format!("match_prefix = {}\n", toml_str(mp)));
-        }
-        if let Some(ap) = &row.match_as_path {
-            s.push_str(&format!("match_as_path = {}\n", toml_str(ap)));
-        }
-        if let Some(cm) = &row.match_community {
-            s.push_str(&format!("match_community = {}\n", toml_str(cm)));
-        }
-        if let Some(v) = row.set_local_pref {
-            s.push_str(&format!("set_local_pref = {v}\n"));
-        }
-        if let Some(v) = row.set_med {
-            s.push_str(&format!("set_med = {v}\n"));
-        }
-        if let Some(v) = &row.set_next_hop {
-            s.push_str(&format!("set_next_hop = {}\n", toml_str(v)));
-        }
-        if let Some(v) = &row.prepend {
-            s.push_str(&format!("prepend = {}\n", toml_str(v)));
-        }
-        if let Some(v) = &row.add_community {
-            s.push_str(&format!("add_community = {}\n", toml_str(v)));
-        }
+        cfg.route_maps.push(RouteMapSpec {
+            name: row.name.clone(),
+            entry: row.entry,
+            permit: Some(row.permit),
+            match_prefix: row.match_prefix.clone(),
+            match_as_path: row.match_as_path.clone(),
+            match_community: row.match_community.clone(),
+            set_local_pref: row.set_local_pref,
+            set_med: row.set_med,
+            set_next_hop: row.set_next_hop.clone(),
+            prepend: row.prepend.clone(),
+            add_community: row.add_community.clone(),
+            ..Default::default()
+        });
         for note in &row.unmapped {
-            s.push_str(&format!("# UNMAPPED: {note}\n"));
+            notes.push(format!(
+                "route-map '{}' entry {}: {note}",
+                row.name, row.entry
+            ));
         }
-        s.push('\n');
     }
     // Generated policies: the deny-all route-maps the BIRD
     // `import|export none` mappings reference.
@@ -3354,298 +3351,183 @@ fn render(out: ConfigOut) -> String {
         })
         .collect();
     for tag in generated {
-        s.push_str("[[route-map]]\n");
-        s.push_str(&format!("name = \"{tag}\"\n"));
-        s.push_str("entry = 10\n");
-        s.push_str(&format!("permit = {}\n\n", tag.ends_with("permit")));
+        cfg.route_maps.push(RouteMapSpec {
+            name: tag.to_string(),
+            entry: 10,
+            permit: Some(tag.ends_with("permit")),
+            ..Default::default()
+        });
     }
-    // BIRD `roa table` entries carry over as `[[roa]]` rows — the
+    // BIRD `roa table` entries carry over as `roa` blocks — the
     // translated filters' `roa.state` checks and the daemon's
     // `roa_validate` both read the same store.
     for row in &out.roas {
-        s.push_str("[[roa]]\n");
-        s.push_str(&format!("prefix = {}\n", toml_str(&row.prefix)));
-        if let Some(ml) = row.max_length {
-            s.push_str(&format!("max_length = {ml}\n"));
-        }
-        s.push_str(&format!("asn = {}\n\n", row.asn));
+        cfg.roas.push(RoaSpec {
+            prefix: Some(row.prefix.clone()),
+            max_length: row.max_length,
+            asn: Some(row.asn),
+        });
     }
     // BIRD `protocol babel` interface parameters (D14.2).
-    for (spec, notes) in &out.babel_ifaces {
-        s.push_str("[[babel.interface]]\n");
-        if let Some(n) = &spec.name {
-            s.push_str(&format!("name = {}\n", toml_str(n)));
+    for (spec, spec_notes) in &out.babel_ifaces {
+        cfg.babel_interfaces.push(spec.clone());
+        for n in spec_notes {
+            notes.push(format!(
+                "babel interface {}: {n}",
+                spec.name.as_deref().unwrap_or("<unnamed>")
+            ));
         }
-        if let Some(k) = &spec.kind {
-            s.push_str(&format!("kind = {}\n", toml_str(k)));
-        }
-        if let Some(v) = spec.hello_interval_ms {
-            s.push_str(&format!("hello_interval_ms = {v}\n"));
-        }
-        if let Some(v) = spec.update_interval_ms {
-            s.push_str(&format!("update_interval_ms = {v}\n"));
-        }
-        if let Some(v) = spec.rxcost {
-            s.push_str(&format!("rxcost = {v}\n"));
-        }
-        if let Some(v) = spec.rtt_cost {
-            s.push_str(&format!("rtt_cost = {v}\n"));
-        }
-        if let Some(v) = spec.rtt_min_us {
-            s.push_str(&format!("rtt_min_us = {v}\n"));
-        }
-        if let Some(v) = spec.rtt_max_us {
-            s.push_str(&format!("rtt_max_us = {v}\n"));
-        }
-        if let Some(v) = &spec.next_hop_ipv4 {
-            s.push_str(&format!("next_hop_ipv4 = {}\n", toml_str(v)));
-        }
-        if let Some(v) = &spec.next_hop_ipv6 {
-            s.push_str(&format!("next_hop_ipv6 = {}\n", toml_str(v)));
-        }
-        if let Some(v) = spec.extended_next_hop {
-            s.push_str(&format!("extended_next_hop = {v}\n"));
-        }
-        if let Some(v) = spec.check_link {
-            s.push_str(&format!("check_link = {v}\n"));
-        }
-        if let Some(v) = spec.port {
-            s.push_str(&format!("port = {v}\n"));
-        }
-        for n in notes {
-            s.push_str(&format!("# UNMAPPED: {n}\n"));
-        }
-        s.push('\n');
     }
-    // OSPF areas captured from BIRD `protocol ospf` or FRR
-    // `router ospf` blocks (RFC 2328 §C / RFC 5340 §A.4).
-    for (spec, notes) in &out.ospf_areas {
-        s.push_str("[[ospf.area]]\n");
-        if let Some(id) = spec.id {
-            s.push_str(&format!("id = {id}\n"));
+    // OSPF areas and interfaces captured from BIRD `protocol ospf` or
+    // FRR `router ospf` / `interface IFNAME` blocks (RFC 2328 §C /
+    // RFC 5340 §A.4).
+    for (spec, spec_notes) in &out.ospf_areas {
+        cfg.ospf_areas.push(spec.clone());
+        for n in spec_notes {
+            notes.push(format!(
+                "ospf area {}: {n}",
+                spec.id
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "<unset>".into())
+            ));
         }
-        if let Some(k) = &spec.kind {
-            s.push_str(&format!("type = {}\n", toml_str(k)));
-        }
-        if let Some(v) = spec.no_summary {
-            s.push_str(&format!("no_summary = {v}\n"));
-        }
-        if let Some(v) = spec.stub_metric {
-            s.push_str(&format!("stub_metric = {v}\n"));
-        }
-        for n in notes {
-            s.push_str(&format!("# UNMAPPED: {n}\n"));
-        }
-        s.push('\n');
     }
-    // OSPF interfaces captured from BIRD `protocol ospf` interface
-    // blocks or FRR `interface IFNAME` blocks with `ip ospf …`
-    // directives.
-    for (spec, notes) in &out.ospf_ifaces {
-        s.push_str("[[ospf.interface]]\n");
-        if let Some(n) = &spec.name {
-            s.push_str(&format!("name = {}\n", toml_str(n)));
+    for (spec, spec_notes) in &out.ospf_ifaces {
+        cfg.ospf_interfaces.push(spec.clone());
+        for n in spec_notes {
+            notes.push(format!(
+                "ospf interface {}: {n}",
+                spec.name.as_deref().unwrap_or("<unnamed>")
+            ));
         }
-        if let Some(a) = spec.area {
-            s.push_str(&format!("area = {a}\n"));
-        }
-        if let Some(v) = spec.cost {
-            s.push_str(&format!("cost = {v}\n"));
-        }
-        if let Some(v) = spec.hello_interval {
-            s.push_str(&format!("hello_interval = {v}\n"));
-        }
-        if let Some(v) = spec.dead_interval {
-            s.push_str(&format!("dead_interval = {v}\n"));
-        }
-        if let Some(v) = spec.rxmt_interval {
-            s.push_str(&format!("rxmt_interval = {v}\n"));
-        }
-        if let Some(v) = spec.priority {
-            s.push_str(&format!("priority = {v}\n"));
-        }
-        if let Some(v) = &spec.network_type {
-            s.push_str(&format!("network_type = {}\n", toml_str(v)));
-        }
-        for n in notes {
-            s.push_str(&format!("# UNMAPPED: {n}\n"));
-        }
-        s.push('\n');
     }
-    // Translated BIRD filters. The lr DSL is whitespace-insensitive,
-    // so the multi-line body collapses onto one TOML string line.
+    // Translated BIRD filters — the body rides the IR verbatim (the
+    // DSL emitter writes it between braces byte-exact). Filters that
+    // could not be translated faithfully stay visible: silently
+    // re-filtering a route policy is worse than a gap.
     for f in &out.filters {
-        s.push_str("[[filter]]\n");
-        s.push_str(&format!("name = {}\n", toml_str(&f.name)));
-        let one_line = f.body.replace('\n', " ");
-        s.push_str(&format!("body = {}\n\n", toml_str(&one_line)));
+        cfg.filters.push(FilterSpec {
+            name: Some(f.name.clone()),
+            body: Some(f.body.clone()),
+            description: None,
+        });
     }
-    // Filters that could not be translated faithfully stay visible —
-    // silently re-filtering a route policy is worse than a gap.
-    for (name, notes) in &out.failed_filters {
-        s.push_str(&format!(
-            "# UNMAPPED: filter {name} not translated — {}\n",
-            notes.join("; ")
+    for (name, filter_notes) in &out.failed_filters {
+        notes.push(format!(
+            "filter {name} not translated — {}",
+            filter_notes.join("; ")
         ));
     }
-    // FRR `aggregate-address A.B.C.D/M [summary-only] [as-set]
-    // [route-map NAME]` (RFC 4271 §9.2.2.2). The lr daemon originates
-    // the aggregate while any more-specific route is present and
-    // withdraws it when the last specific disappears. `summary-only`
-    // (suppress the specifics from the Adj-RIB-Out) and `as-set`
-    // (build an `AS_SET` segment in the aggregate's AS_PATH) carry
-    // through to the `summary_only` / `as_set` keys on the
-    // `[[aggregate]]` row. `route-map NAME` was already noted as
-    // unmapped at parse time.
+    // FRR `aggregate-address … [summary-only] [as-set]` (RFC 4271
+    // §9.2.2.2) and `network PREFIX route-map NAME` (RFC 4271
+    // §9.1.2.1 — issue #92, defects.txt L75): the parse side already
+    // built the daemon's own spec shapes — clone them across. The
+    // route-map name is resolved by the daemon's finalize step
+    // (fail-closed on typos).
     for agg in &out.aggregates {
-        s.push_str("[[aggregate]]\n");
-        if let Some(p) = &agg.prefix {
-            s.push_str(&format!("prefix = {}\n", toml_str(p)));
-        }
-        if agg.summary_only {
-            s.push_str("summary_only = true\n");
-        }
-        if agg.as_set {
-            s.push_str("as_set = true\n");
-        }
-        s.push('\n');
+        cfg.aggregates.push(agg.clone());
     }
-    // FRR `network PREFIX route-map NAME` (RFC 4271 §9.1.2.1) — the
-    // per-network route-map qualifier the daemon applies at
-    // origination. Each entry references one prefix in `networks`
-    // and one `[[route-map]]` row; the daemon's finalize step
-    // fails closed when the prefix is not in `networks` or the
-    // route-map name is unknown (issue #92 — defects.txt L75).
     for nr in &out.network_route_maps {
-        s.push_str("[[bgp.network_route_map]]\n");
-        if let Some(p) = &nr.prefix {
-            s.push_str(&format!("prefix = {}\n", toml_str(p)));
-        }
-        if let Some(name) = &nr.route_map {
-            s.push_str(&format!("route_map = {}\n", toml_str(name)));
-        }
-        s.push('\n');
+        cfg.network_route_maps.push(nr.clone());
     }
     // FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
-    // `router bgp` / `router ospf`/`ospfv3`). The daemon's
-    // `[[redistribute]]` schema is `(source, target, metric, tag,
-    // allow)`; `metric` and `route-map NAME` carry through from FRR
-    // (the route-map is resolved onto `allow` by
-    // `resolve_redistribute_route_maps` when its shape is a pure
-    // prefix-list allow). `tag` is not set by the converter today
-    // (FRR's `redistribute <proto>` has no tag qualifier; OSPF
-    // external route tags are an lr-side concept), so it is omitted
-    // to keep the rendered TOML minimal.
+    // `router bgp` / `router ospf`/`ospfv3`): the daemon's
+    // redistribute schema, `allow` already resolved by
+    // `resolve_redistribute_route_maps`.
     for rd in &out.redistributes {
-        s.push_str("[[redistribute]]\n");
-        if let Some(src) = &rd.source {
-            s.push_str(&format!("source = {}\n", toml_str(src)));
-        }
-        if let Some(tgt) = &rd.target {
-            s.push_str(&format!("target = {}\n", toml_str(tgt)));
-        }
-        if let Some(m) = rd.metric {
-            s.push_str(&format!("metric = {m}\n"));
-        }
-        if !rd.allow.is_empty() {
-            // Render as a TOML array of quoted strings, matching
-            // the daemon parser's `parse_str_array` shape.
-            // (`parse_str_array` accepts both inline and multi-line
-            // arrays, so a single-line form is the most diff-friendly.)
-            let items: Vec<String> = rd.allow.iter().map(|p| toml_str(p)).collect();
-            s.push_str(&format!("allow = [{}]\n", items.join(", ")));
-        }
-        s.push('\n');
+        cfg.redistributes.push(rd.clone());
     }
 
     for peer in &out.peers {
-        s.push_str("[[peer]]\n");
-        if let Some(n) = &peer.name {
-            s.push_str(&format!("name = {}\n", toml_str(n)));
-        }
+        let mut spec = PeerSpec {
+            name: peer.name.clone(),
+            peer_as: peer.peer_as.unwrap_or(0),
+            local_address: peer.local_address.clone(),
+            md5_key: peer.md5_key.clone(),
+            bfd: peer.bfd,
+            default_ipv4_unicast: peer.default_ipv4_unicast,
+            import: peer.import.clone(),
+            export: peer.export.clone(),
+            import_filter: peer.import_filter.clone(),
+            export_filter: peer.export_filter.clone(),
+            // BIRD `rr client;` / FRR `neighbor ADDR
+            // route-reflector-client` — already validated at the parse
+            // site.
+            route_reflector_client: peer.route_reflector_client,
+            // FRR `neighbor X shutdown` / BIRD `disabled` (RFC 4486
+            // §3): `Some(false)` is the explicit un-shutdown and
+            // carries through.
+            shutdown: peer.shutdown,
+            ..Default::default()
+        };
         if let Some(r) = &peer.remote {
             // FRR `neighbor … port N` appends the connect port.
-            match &peer.remote_port {
-                Some(p) => s.push_str(&format!("remote = {}\n", toml_str(&format!("{r}:{p}")))),
-                None => s.push_str(&format!("remote = {}\n", toml_str(r))),
-            }
-        }
-        if let Some(asn) = peer.peer_as {
-            s.push_str(&format!("peer_as = {asn}\n"));
-        }
-        if let Some(la) = &peer.local_address {
-            s.push_str(&format!("local_address = {}\n", toml_str(la)));
-        }
-        if let Some(k) = &peer.md5_key {
-            s.push_str(&format!("md5_key = {}\n", toml_str(k)));
+            spec.remote = Some(match &peer.remote_port {
+                Some(p) => format!("{r}:{p}"),
+                None => r.clone(),
+            });
         }
         if let Some(h) = peer.hold_time {
-            s.push_str(&format!("hold_time = {h}\n"));
-        }
-        if let Some(b) = peer.bfd {
-            s.push_str(&format!("bfd = {b}\n"));
-        }
-        if let Some(d) = peer.default_ipv4_unicast {
-            s.push_str(&format!("default_ipv4_unicast = {d}\n"));
+            // The IR stores seconds in a u16 (RFC 4271 §4.2 caps the
+            // Hold Time at 65535). A value past the ceiling fails the
+            // conversion loudly — the daemon's loader would reject it
+            // the same way, and substituting the default timer would
+            // silently change session semantics.
+            spec.hold_time = Some(u16::try_from(h).map_err(|_| {
+                format!(
+                    "peer {}: hold time {h} exceeds the 65535-second ceiling",
+                    peer_label(peer)
+                )
+            })?);
         }
         if !peer.families.is_empty() {
-            let list = peer
-                .families
-                .iter()
-                .map(|f| format!("\"{f}\""))
-                .collect::<Vec<_>>()
-                .join(", ");
-            s.push_str(&format!("mp_families = [{list}]\n"));
+            spec.mp_families = Some(peer.families.clone());
         }
         if !peer.tcp_ao_keys.is_empty() {
-            let list = peer
-                .tcp_ao_keys
-                .iter()
-                .map(|k| toml_str(k))
-                .collect::<Vec<_>>()
-                .join(", ");
-            s.push_str(&format!("tcp_ao_keys = [{list}]\n"));
+            spec.tcp_ao_keys = Some(peer.tcp_ao_keys.clone());
         }
-        // Peer-scoped `lr:` directives resolve against the [[peer]]
-        // schema; unknown keys or bad values stay visible as notes.
+        cfg.peers.push(spec);
+        // Peer-scoped `lr:` directives resolve against the peer key
+        // schema through the shared dispatch; unknown keys or bad
+        // values stay visible as notes.
         for d in &peer.ext {
-            match directive_toml(d, DirScope::Peer) {
-                Ok((k, v)) => s.push_str(&format!("{k} = {v}\n")),
-                Err(note) => s.push_str(&format!("# UNMAPPED: {note}\n")),
+            if let Err(note) = directive_apply(&mut cfg, d, DirScope::Peer) {
+                notes.push(note);
             }
         }
-        if let Some(i) = &peer.import {
-            s.push_str(&format!("import = \"{i}\"\n"));
-        }
-        if let Some(e) = &peer.export {
-            s.push_str(&format!("export = \"{e}\"\n"));
-        }
-        if let Some(i) = &peer.import_filter {
-            s.push_str(&format!("import_filter = {}\n", toml_str(i)));
-        }
-        if let Some(e) = &peer.export_filter {
-            s.push_str(&format!("export_filter = {}\n", toml_str(e)));
-        }
-        if let Some(true) = peer.route_reflector_client {
-            // BIRD `rr client;` / FRR `neighbor ADDR
-            // route-reflector-client` — already validated at the
-            // parse site. Emitted only when set true; `None` (the
-            // default) and `Some(false)` (a future `no rr client`
-            // mapping) both stay quiet to keep the converted config
-            // minimal.
-            s.push_str("route_reflector_client = true\n");
-        }
-        match peer.shutdown {
-            Some(true) => s.push_str("shutdown = true\n"),
-            Some(false) => s.push_str("shutdown = false\n"),
-            None => {}
-        }
         for u in &peer.unmapped {
-            s.push_str(&format!("# UNMAPPED: {u}\n"));
+            notes.push(format!("peer {}: {u}", peer_label(peer)));
         }
-        s.push('\n');
     }
-    s
+    if !out.peers.is_empty() {
+        cfg.explicit_peers = true;
+    }
+    Ok((cfg, notes))
+}
+
+/// Render a converted config as the native `.lr` DSL: the review
+/// banner, one `# UNMAPPED:` comment per unmapped note, then the
+/// deterministic program body from the one shared emitter
+/// (`config_dsl::to_dsl`). The output is exactly what
+/// `lr-daemon translate` prints and what compat mode feeds through
+/// the regular `.lr` loader — one mapping, one renderer.
+fn render_dsl(out: &ConfigOut) -> Result<String, String> {
+    let (cfg, notes) = to_daemon_config(out)?;
+    let mut s = String::new();
+    s.push_str("# Generated by `lr translate` — best-effort conversion.\n");
+    s.push_str("# Lines the converter could not map are kept as UNMAPPED comments.\n");
+    s.push_str("# Review the result before pointing lr-daemon at it.\n");
+    for note in &notes {
+        s.push_str(&format!("# UNMAPPED: {note}\n"));
+    }
+    for proto in &out.ignored_protocols {
+        s.push_str(&format!(
+            "# UNMAPPED: {proto} — the lr compat surface runs the BGP control plane only\n"
+        ));
+    }
+    s.push('\n');
+    s.push_str(&crate::config_dsl::to_dsl(&cfg)?);
+    Ok(s)
 }
 
 /// Drop a trailing `;`, `{` and trailing whitespace.
@@ -3665,12 +3547,6 @@ fn strip_comments(line: &str) -> &str {
 /// Remove surrounding double quotes.
 fn unquote(s: &str) -> String {
     s.trim_matches('"').to_string()
-}
-
-/// Render `s` as a TOML basic string (escaping backslashes and
-/// quotes so passwords and regex patterns cannot break the output).
-fn toml_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 // ---------------------------------------------------------------------------
@@ -3698,7 +3574,7 @@ fn lr_marker_body(raw: &str, comment_chars: &str) -> Option<String> {
 /// Split a directive body into its normalised key (snake_case) and
 /// optional value (whitespace-joined remainder, quotes stripped).
 /// Both `key value` and `key = value` spellings are accepted — the
-/// latter is what operators coming from the TOML schema write
+/// latter is what operators coming from a `key = value` habit write
 /// naturally. A bare `=` separator is stripped, `key=` with no value
 /// keeps the empty value (surfaced as "needs a value" at render).
 fn parse_lr_body(body: &str) -> LrDirective {
@@ -3737,7 +3613,7 @@ fn extract_lr_directive(raw: &str, comment_chars: &str) -> Option<LrDirective> {
 
 /// Attach a peer-scoped directive: list-shaped ones (`mp-family`,
 /// `tcp-ao-key`) fold into the peer's arrays immediately; scalar ones
-/// resolve against the peer TOML schema at render time. Unknown keys
+/// resolve against the peer key schema at IR-build time. Unknown keys
 /// surface as UNMAPPED notes at render — never silently dropped.
 fn attach_peer_directive(peer: &mut PeerOut, d: LrDirective) {
     match fold_peer_list_directive(peer, &d) {
@@ -3746,20 +3622,26 @@ fn attach_peer_directive(peer: &mut PeerOut, d: LrDirective) {
     }
 }
 
-/// Where a directive was found — decides the TOML schema it resolves
-/// against (the `[bgp]`/top-level globals vs the `[[peer]]` table).
+/// Where a directive was found — decides the key schema it resolves
+/// against (the top-level/bgp globals vs the per-peer keys).
 #[derive(Clone, Copy, PartialEq)]
 enum DirScope {
     Global,
     Peer,
 }
 
-/// Resolve one directive to a `(toml key, toml value literal)` pair.
-/// List-shaped directives (`mp-family`, `tcp-ao-key`) are NOT handled
-/// here — the callers fold them into the peer's existing arrays.
-/// `Err` carries a human-readable note that the callers render as an
-/// UNMAPPED comment instead of applying the directive.
-fn directive_toml(d: &LrDirective, scope: DirScope) -> Result<(String, String), String> {
+/// Resolve one directive to a `(section, key, raw value)` triple for
+/// the shared key dispatch ([`daemon_config::apply_config_key`] — the
+/// same entry both config frontends drive, so the directive
+/// vocabulary and the key schemas cannot drift). List-shaped
+/// directives (`mp-family`, `tcp-ao-key`) are NOT handled here — the
+/// parser folds them into the peer's existing arrays. `Err` carries a
+/// human-readable note that the callers render as an UNMAPPED comment
+/// instead of applying the directive.
+fn directive_resolve(
+    d: &LrDirective,
+    scope: DirScope,
+) -> Result<(&'static str, String, String), String> {
     use DirScope::*;
     let val = d.value.as_deref();
     // Bool-shaped: bare directive means true; "true"/"false" accepted.
@@ -3772,7 +3654,7 @@ fn directive_toml(d: &LrDirective, scope: DirScope) -> Result<(String, String), 
         }
     };
     // Number-shaped: parse + range check, so a typo never lands in
-    // the TOML as an unloadable or silently-wrong value.
+    // the IR as an unloadable or silently-wrong value.
     let num_val = |v: Option<&str>, min: i64, max: i64| -> Result<String, String> {
         match v.and_then(|s| s.parse::<i64>().ok()) {
             Some(n) if (min..=max).contains(&n) => Ok(n.to_string()),
@@ -3786,25 +3668,43 @@ fn directive_toml(d: &LrDirective, scope: DirScope) -> Result<(String, String), 
         }
     };
     let str_val = |v: Option<&str>| -> Result<String, String> {
-        v.map(toml_str)
+        v.map(|s| s.to_string())
             .ok_or_else(|| format!("lr: {} needs a value", d.key))
     };
+    // Global keys that live at the top level (not inside `bgp`).
+    let top = |key: &'static str,
+               v: Result<String, String>|
+     -> Result<(&'static str, String, String), String> {
+        Ok(("", key.to_string(), v?))
+    };
+    // Global keys that live in the `bgp` section.
+    let bgp = |key: &'static str,
+               v: Result<String, String>|
+     -> Result<(&'static str, String, String), String> {
+        Ok(("bgp", key.to_string(), v?))
+    };
+    // Peer keys (the dispatch applies them to the peer under
+    // construction).
+    let peer = |key: &'static str,
+                v: Result<String, String>|
+     -> Result<(&'static str, String, String), String> {
+        Ok(("peer", key.to_string(), v?))
+    };
     match (scope, d.key.as_str()) {
-        // ---- globals ----
-        (Global, "install_kernel") => Ok(("install_kernel".into(), bool_val(val)?)),
-        (Global, "api_socket") => Ok(("api_socket".into(), str_val(val)?)),
-        (Global, "user") => Ok(("user".into(), str_val(val)?)),
-        (Global, "group") => Ok(("group".into(), str_val(val)?)),
-        (Global, "listen") => Ok(("listen_addr".into(), str_val(val)?)),
-        (Global, "bmp_target") => Ok(("bmp_target".into(), str_val(val)?)),
-        (Global, "graceful_restart") => {
-            Ok(("graceful_restart_time".into(), num_val(val, 0, 4095)?))
-        }
-        (Global, "llgr") => Ok(("llgr_stale_time".into(), num_val(val, 0, 65535)?)),
-        (Global, "llgr_max_stale") => Ok(("llgr_max_stale_time".into(), num_val(val, 0, 65535)?)),
-        (Global, "add_path") => Ok(("add_path".into(), bool_val(val)?)),
-        (Global, "add_path_max") => Ok(("add_path_max_paths".into(), num_val(val, 1, 255)?)),
-        (Global, "max_prefixes") => Ok(("max_prefixes".into(), num_val(val, 1, u32::MAX as i64)?)),
+        // ---- globals: top-level keys ----
+        (Global, "api_socket") => top("api_socket", str_val(val)),
+        (Global, "user") => top("user", str_val(val)),
+        (Global, "group") => top("group", str_val(val)),
+        // ---- globals: bgp-section keys ----
+        (Global, "install_kernel") => bgp("install_kernel", bool_val(val)),
+        (Global, "listen") => bgp("listen_addr", str_val(val)),
+        (Global, "bmp_target") => bgp("bmp_target", str_val(val)),
+        (Global, "graceful_restart") => bgp("graceful_restart_time", num_val(val, 0, 4095)),
+        (Global, "llgr") => bgp("llgr_stale_time", num_val(val, 0, 65535)),
+        (Global, "llgr_max_stale") => bgp("llgr_max_stale_time", num_val(val, 0, 65535)),
+        (Global, "add_path") => bgp("add_path", bool_val(val)),
+        (Global, "add_path_max") => bgp("add_path_max_paths", num_val(val, 1, 255)),
+        (Global, "max_prefixes") => bgp("max_prefixes", num_val(val, 1, u32::MAX as i64)),
         (Global, "max_prefix_action") => {
             let s = val.ok_or_else(|| format!("lr: {} needs a value", d.key))?;
             if !matches!(s, "warn" | "teardown" | "restart") {
@@ -3812,24 +3712,24 @@ fn directive_toml(d: &LrDirective, scope: DirScope) -> Result<(String, String), 
                     "lr: bad max_prefix_action '{s}' (warn|teardown|restart)"
                 ));
             }
-            Ok(("max_prefix_action".into(), toml_str(s)))
+            bgp("max_prefix_action", Ok(s.to_string()))
         }
         (Global, "gtsm") => match val {
-            None => Ok(("gtsm".into(), "true".into())),
-            Some(n) => Ok(("gtsm".into(), num_val(Some(n), 1, 255)?)),
+            None => bgp("gtsm", Ok("true".into())),
+            Some(n) => bgp("gtsm", num_val(Some(n), 1, 255)),
         },
         (Global, "ebgp_policy") => {
             let s = val.ok_or_else(|| format!("lr: {} needs a value", d.key))?;
             if s != "rfc8212" && s != "accept-all" {
                 return Err(format!("lr: bad ebgp_policy '{s}' (rfc8212|accept-all)"));
             }
-            Ok(("ebgp_policy".into(), toml_str(s)))
+            bgp("ebgp_policy", Ok(s.to_string()))
         }
-        (Global, "soft_reconfig_inbound") => Ok(("soft_reconfig_inbound".into(), bool_val(val)?)),
+        (Global, "soft_reconfig_inbound") => bgp("soft_reconfig_inbound", bool_val(val)),
         // ---- per-peer ----
-        (Peer, "add_path") => Ok(("add_path".into(), bool_val(val)?)),
-        (Peer, "add_path_max") => Ok(("add_path_max_paths".into(), num_val(val, 1, 255)?)),
-        (Peer, "max_prefixes") => Ok(("max_prefixes".into(), num_val(val, 1, u32::MAX as i64)?)),
+        (Peer, "add_path") => peer("add_path", bool_val(val)),
+        (Peer, "add_path_max") => peer("add_path_max_paths", num_val(val, 1, 255)),
+        (Peer, "max_prefixes") => peer("max_prefixes", num_val(val, 1, u32::MAX as i64)),
         (Peer, "max_prefix_action") => {
             let s = val.ok_or_else(|| format!("lr: {} needs a value", d.key))?;
             if !matches!(s, "warn" | "teardown" | "restart") {
@@ -3837,26 +3737,21 @@ fn directive_toml(d: &LrDirective, scope: DirScope) -> Result<(String, String), 
                     "lr: bad max_prefix_action '{s}' (warn|teardown|restart)"
                 ));
             }
-            Ok(("max_prefix_action".into(), toml_str(s)))
+            peer("max_prefix_action", Ok(s.to_string()))
         }
-        (Peer, "max_prefix_threshold") => {
-            Ok(("max_prefix_threshold".into(), num_val(val, 0, 100)?))
-        }
+        (Peer, "max_prefix_threshold") => peer("max_prefix_threshold", num_val(val, 0, 100)),
         (Peer, "gtsm") => match val {
-            None => Ok(("gtsm".into(), "true".into())),
-            Some(n) => Ok(("gtsm".into(), num_val(Some(n), 1, 255)?)),
+            None => peer("gtsm", Ok("true".into())),
+            Some(n) => peer("gtsm", num_val(Some(n), 1, 255)),
         },
-        (Peer, "extended_next_hop") => Ok(("extended_next_hop".into(), bool_val(val)?)),
+        (Peer, "extended_next_hop") => peer("extended_next_hop", bool_val(val)),
         (Peer, "allow_local_as") => match val {
-            None => Ok(("allow_local_as".into(), "1".into())),
-            Some("any") => Ok(("allow_local_as".into(), "\"any\"".into())),
-            Some(n) => Ok((
-                "allow_local_as".into(),
-                num_val(Some(n), 0, u32::MAX as i64)?,
-            )),
+            None => peer("allow_local_as", Ok("1".into())),
+            Some("any") => peer("allow_local_as", Ok("any".into())),
+            Some(n) => peer("allow_local_as", num_val(Some(n), 0, u32::MAX as i64)),
         },
-        (Peer, "local_address") => Ok(("local_address".into(), str_val(val)?)),
-        (Peer, "soft_reconfig_inbound") => Ok(("soft_reconfig_inbound".into(), bool_val(val)?)),
+        (Peer, "local_address") => peer("local_address", str_val(val)),
+        (Peer, "soft_reconfig_inbound") => peer("soft_reconfig_inbound", bool_val(val)),
         _ => Err(format!(
             "lr: unknown {} directive '{}' (see docs/COMPAT.md for the vocabulary)",
             match scope {
@@ -3866,6 +3761,15 @@ fn directive_toml(d: &LrDirective, scope: DirScope) -> Result<(String, String), 
             d.key
         )),
     }
+}
+
+/// Resolve and apply one `lr:` directive to the IR through the shared
+/// key dispatch. `Err` is the reviewable failure (unknown key, bad
+/// value): the caller surfaces it as an UNMAPPED note, never a
+/// silent drop.
+fn directive_apply(cfg: &mut DaemonConfig, d: &LrDirective, scope: DirScope) -> Result<(), String> {
+    let (section, key, value) = directive_resolve(d, scope)?;
+    daemon_config::apply_config_key(cfg, section, &key, &value, 0).map_err(|e| format!("lr: {e}"))
 }
 
 /// Apply the list-shaped peer directives that fold into existing

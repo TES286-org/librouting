@@ -21,10 +21,11 @@ This is the *compatible form* of the daemon: the source
 implementation's semantics apply, so a configuration that ran on BIRD or
 FRR behaves the same way under lr. Everything `lr-daemon translate
 bird|frr <file>` converts is covered, because compat mode and the
-converter share one parse and render pipeline — the rendered TOML goes
-through the daemon's regular loader, so the two surfaces cannot drift
-apart. Run `lr-daemon translate bird bird.conf` when you want to read the
-TOML the daemon will run, review it, and edit from there.
+converter share one parse and render pipeline — the rendered `.lr`
+DSL goes through the daemon's regular loader, so the two surfaces
+cannot drift apart. Run `lr-daemon translate bird bird.conf` when you
+want to read the DSL the daemon will run, review it, and edit from
+there.
 
 ## What is covered
 
@@ -33,10 +34,10 @@ file changes how lr routes.
 
 | Source shape | lr behaviour |
 | --- | --- |
-| `router id` (BIRD) / `bgp router-id` (FRR) | `[bgp] router_id` |
-| `local as` (BIRD) / `router bgp <as>` (FRR) | `[bgp] local_as` |
-| `protocol bgp <name> { … }` (BIRD) | one `[[peer]]` per stanza |
-| `neighbor … as` (BIRD) / `neighbor … remote-as` (FRR) | `[[peer]]` with `remote` and `peer_as` |
+| `router id` (BIRD) / `bgp router-id` (FRR) | `bgp.router_id` |
+| `local as` (BIRD) / `router bgp <as>` (FRR) | `bgp.local_as` |
+| `protocol bgp <name> { … }` (BIRD) | one `peer` block per stanza |
+| `neighbor … as` (BIRD) / `neighbor … remote-as` (FRR) | a `peer` block with `remote` and `peer_as` |
 | `neighbor … port N` (both) | the connect port, merged into `remote` |
 | `password` / `neighbor … password 0` | `md5_key`; FRR type-7 passwords are noted, not mapped |
 | `local address` / `update-source` | `local_address`, the next-hop-self source |
@@ -48,9 +49,9 @@ file changes how lr routes.
 | `network PREFIX` (FRR), BIRD static `route` | `networks`, locally originated |
 | `network PREFIX route-map NAME` (FRR) | `networks` (prefix kept; route-map noted) |
 | BIRD `ipv4`/`ipv6` channels, FRR `address-family` plus `activate` | `mp_families` |
-| FRR `aggregate-address A.B.C.D/M [summary-only] [as-set] [route-map NAME]` | `[[aggregate]]` (`summary-only` / `as-set` carry through to `summary_only` / `as_set`; `route-map NAME` noted) |
-| FRR `redistribute <proto> [metric M] [route-map NAME]` (inside `router bgp`/`router ospf`/`router ospfv3`) | `[[redistribute]]` (`bgp`/`ospf`/`ospf3`/`babel`/`static`/`connected` sources map; `kernel`/`rip`/`isis` noted; `route-map NAME` lands on the pipe's `allow` list when it is a pure prefix-list allow, otherwise noted) |
-| FRR `no bgp ebgp-requires-policy` | consumed silently (`ebgp_policy = "accept-all"` is the converter's default) |
+| FRR `aggregate-address A.B.C.D/M [summary-only] [as-set] [route-map NAME]` | an `aggregate` block (`summary-only` / `as-set` carry through to `summary_only` / `as_set`; `route-map NAME` noted) |
+| FRR `redistribute <proto> [metric M] [route-map NAME]` (inside `router bgp`/`router ospf`/`router ospfv3`) | a `redistribute` block (`bgp`/`ospf`/`ospf3`/`babel`/`static`/`connected` sources map; `kernel`/`rip`/`isis` noted; `route-map NAME` lands on the pipe's `allow` list when it is a pure prefix-list allow, otherwise noted) |
+| FRR `no bgp ebgp-requires-policy` | consumed silently (`ebgp_policy "accept-all"` is the converter's default) |
 | FRR `neighbor X shutdown` / `no neighbor X shutdown`, BIRD `disabled (yes\|no\|"reason")` | per-peer `shutdown` (RFC 4486 §3 + RFC 8203 §2: `true` keeps the connector passive and refuses inbound SYNs; the RFC 8203 message is silently stripped) |
 
 Anything the source file contains that has no lr equivalent is never
@@ -68,7 +69,7 @@ skipped without a note.
 Combining BGP and OSPF (or any other supported pair of protocols) *from
 one BIRD or FRR file* is supported since 1.4.0: the compat surface loads
 every translated stanza into one lr config, and the daemon's
-`--protocol bgp,ospf` (or the equivalent `protocol = "bgp,ospf"` key)
+`--protocol bgp,ospf` (or the equivalent `protocol "bgp,ospf"` key)
 runs them side by side in a single process. Protocols lr does not yet
 translate are still reported as `ignored`.
 
@@ -78,7 +79,7 @@ BIRD and FRR differ from lr's own defaults in ways that would change a
 configuration's behaviour if they were not applied. The compat surface
 restores the source implementation's semantics:
 
-| Knob | BIRD file | FRR file | lr TOML default |
+| Knob | BIRD file | FRR file | lr default |
 | --- | --- | --- | --- |
 | eBGP route policy (RFC 8212) | accept-all | accept-all | rfc8212, deny by default |
 | `bgp enforce-first-as` | off, no such check | on, FRR's default | off |

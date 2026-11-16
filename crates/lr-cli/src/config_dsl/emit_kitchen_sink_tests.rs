@@ -54,6 +54,7 @@ bfd_multiplier = 4
 bmp_target = "127.0.0.1:5000"
 ebgp_policy = "accept-all"
 enforce_first_as = true
+route_reflector_cluster_id = "10.0.0.9"
 bestpath_compare_routerid = true
 default_ipv4_unicast = true
 allow_local_as = 3
@@ -100,9 +101,13 @@ gtsm = 1
 max_prefixes = 1000
 max_prefix_action = "shutdown"
 max_prefix_threshold = 70
+max_prefix_restart_time = 30
 bfd = true
 bfd_multihop = false
+route_reflector_client = true
+shutdown = false
 exchange_plane = true
+exchange_plane_policy_role = "provider"
 graceful_shutdown = true
 
 [peer-template.rr-client]
@@ -163,6 +168,8 @@ allow = ["10.0.0.0/8"]
 
 [[aggregate]]
 prefix = "10.0.0.0/8"
+summary_only = true
+as_set = true
 
 # --- ospf: full schema ---
 [ospf]
@@ -197,6 +204,7 @@ area = 1
 cost = 10
 hello_interval = 10
 dead_interval = 40
+rxmt_interval = 8
 priority = 2
 network_type = "broadcast"
 adj_sid = 100

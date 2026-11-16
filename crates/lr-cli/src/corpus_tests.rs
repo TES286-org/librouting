@@ -2,18 +2,18 @@
 //!
 //! Each `.conf` file under `tests/corpus/{bird,frr}/` is a real-world
 //! BIRD or FRR configuration covering one shape the converter maps
-//! today. The matching `.expected.toml` file is the converter's exact
+//! today. The matching `.expected.lr` file is the converter's exact
 //! output, committed to the repository. A new dialect quirk adds a
 //! corpus case (input + expected) instead of a bespoke assertion —
 //! the corpus is the regression net.
 //!
 //! Run `LR_CORPUS_UPDATE=1 cargo test -p lr-cli --bin lr-daemon
-//! translate::corpus_tests` to regenerate the `.expected.toml` files
+//! translate::corpus_tests` to regenerate the `.expected.lr` files
 //! after an intentional converter change; otherwise the harness
 //! golden-diffs every case and fails on the first mismatch with a
 //! unified diff.
 
-use super::{render, translate_bird, translate_frr};
+use super::{render_dsl, translate_bird, translate_frr};
 use crate::daemon_config::DaemonConfig;
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ fn corpus_root() -> PathBuf {
 }
 
 /// One corpus case: the input config path, the dialect, and the
-/// matching `.expected.toml` path.
+/// matching `.expected.lr` path.
 struct Case {
     input: PathBuf,
     expected: PathBuf,
@@ -44,10 +44,11 @@ enum Dialect {
 
 impl Dialect {
     fn convert(self, text: &str) -> String {
-        match self {
-            Dialect::Bird => render(translate_bird(text)),
-            Dialect::Frr => render(translate_frr(text)),
-        }
+        let out = match self {
+            Dialect::Bird => translate_bird(text),
+            Dialect::Frr => translate_frr(text),
+        };
+        render_dsl(&out).expect("render_dsl")
     }
 
     fn as_str(self) -> &'static str {
@@ -73,7 +74,7 @@ fn collect_cases() -> Vec<Case> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("conf") {
-                let expected = path.with_extension("expected.toml");
+                let expected = path.with_extension("expected.lr");
                 cases.push(Case {
                     input: path,
                     expected,
@@ -88,26 +89,25 @@ fn collect_cases() -> Vec<Case> {
     cases
 }
 
-/// Round-trip the rendered TOML through the daemon loader so the
-/// corpus also locks in the "the generated TOML is always loadable"
-/// contract. OSPF cases load with `protocol = "ospf"` (the OSPF
-/// tables are validated, not warned about); everything else loads as
-/// the default BGP protocol (Babel interface tables are tolerated as
-/// data under any protocol).
-fn roundtrip(toml: &str) {
+/// Round-trip the rendered `.lr` DSL through the daemon loader so
+/// the corpus also locks in the "the generated DSL is always
+/// loadable" contract. OSPF cases load with `protocol "ospf"` (the
+/// OSPF tables are validated, not warned about); everything else
+/// loads as the default BGP protocol (Babel interface tables are
+/// tolerated as data under any protocol).
+fn roundtrip(dsl: &str) {
     let mut cfg = DaemonConfig::with_defaults();
-    cfg.protocol = if toml.contains("[[ospf.") {
+    cfg.protocol = if dsl.contains("\nospf {") {
         "ospf".to_string()
     } else {
         "bgp".to_string()
     };
-    crate::daemon_config::parse_toml_subset(toml, &mut cfg)
-        .expect("corpus: generated TOML must load");
-    cfg.finalize()
-        .expect("corpus: generated TOML must finalize");
+    crate::config_dsl::parse_dsl_text(dsl, None, &mut cfg)
+        .expect("corpus: generated DSL must load");
+    cfg.finalize().expect("corpus: generated DSL must finalize");
 }
 
-/// Normalise line endings to `\n`. The `.expected.toml` files are
+/// Normalise line endings to `\n`. The `.expected.lr` files are
 /// committed with LF endings, but Git for Windows checks them out as
 /// CRLF under the default `core.autocrlf=true` — so a string compare
 /// of the converter's LF output against the file read from disk would
@@ -119,8 +119,9 @@ fn normalize_eol(text: &str) -> String {
 }
 
 /// A minimal unified diff between two texts, built on a longest-common-
-/// subsequence so the failure report stays readable for a multi-section
-/// TOML. Returns the diff text (empty when the inputs are identical).
+/// subsequence so the failure report stays readable for a multi-block
+/// DSL program. Returns the diff text (empty when the inputs are
+/// identical).
 fn unified_diff(expected: &str, actual: &str) -> String {
     let exp: Vec<&str> = expected.lines().collect();
     let act: Vec<&str> = actual.lines().collect();
@@ -180,7 +181,7 @@ fn corpus_translates_without_regression() {
         // Every corpus case must round-trip through the daemon loader.
         if let Err(e) = std::panic::catch_unwind(|| roundtrip(&actual)) {
             failures.push(format!(
-                "{}: generated TOML does not round-trip through the daemon loader\n{e:?}",
+                "{}: generated DSL does not round-trip through the daemon loader\n{e:?}",
                 case.input.display()
             ));
             continue;
@@ -202,7 +203,7 @@ fn corpus_translates_without_regression() {
         }
     }
     if update {
-        eprintln!("corpus: regenerated {} .expected.toml file(s)", cases.len());
+        eprintln!("corpus: regenerated {} .expected.lr file(s)", cases.len());
         return;
     }
     if !failures.is_empty() {
