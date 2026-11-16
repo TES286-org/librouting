@@ -4414,6 +4414,48 @@ single-subscriber full-drain shape (the kernel mirror) and the
 four-subscriber no-drain drop shape (the worst case the daemon
 faces when a subscriber is stuck on I/O).
 
+### Event-bus publish path — the read-locked walk the design names
+(issue #101 follow-up)
+
+The lock-free-ring landing described `publish` as walking the
+subscriber list under a shared read lock; the code took the write
+lock instead (the in-place `retain` prune needs `&mut`), so
+concurrent publishers serialised on the bus lock — the exact
+contention the `RwLock` design exists to avoid. `publish` now takes
+the read lock for the walk: dead subscribers are skipped in the
+walk (still without counting a drop on them) and pruned in a
+separate write-locked pass that runs only when the walk saw one, so
+the common publish — every subscriber live — never takes the write
+lock.
+
+The walk also stops cloning the event for the last live subscriber:
+`publish` moves the event into it and clones only for the
+subscribers before it. The daemon's shape is one subscriber (the
+kernel mirror), so the publish hot path — `RouteInstalled` /
+`RouteWithdrawn` carrying a route's attribute set — no longer pays
+a deep clone of the `BTreeMap`-backed attributes per publish.
+
+Tests: a new `mixed_live_and_dead_subscribers_publish_and_prune`
+pins the lazy-prune path (a dead entry before and after a live one
+is skipped and pruned in the same publish, the live subscriber
+receives the event, no drop is counted on the dead ones); the
+existing event-bus suite passes unchanged.
+
+### `lr-core`: unused `serde` / `once_cell` features removed
+(build-hygiene follow-up)
+
+The workspace hygiene pass removed `lr-core`'s optional `serde` and
+`once_cell` dependencies — both were optional, never enabled by
+any workspace crate, and carried no code behind their feature
+flags. Because an optional dependency is also a cargo feature, a
+downstream manifest enabling `lr-core/serde` or
+`lr-core/once_cell` now fails to resolve; the removal is recorded
+here as breaking because the `api-surface` job's `feature_missing`
+lint flags it against the v1.8.0 baseline (part of the same
+pre-2.0 semver debt the job tracks). Every other dependency the
+hygiene pass removed was a non-optional build input with no
+feature surface, so no other downstream manifest can reference it.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

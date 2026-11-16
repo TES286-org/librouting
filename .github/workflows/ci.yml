@@ -620,8 +620,18 @@ jobs:
         # Mirrors the unit-tests job. nextest + .config/nextest.toml's
         # slow-timeout (5 min of no stdout) bounds any single hung test
         # to ≤5 min instead of stalling the whole suite.
+        # --no-fail-fast: this job runs on shared RISE hardware whose
+        # load varies run to run; a single timing-sensitive daemon E2E
+        # flake (seen on main: both sessions Established in the
+        # collision lab, a daemon slower than a 30 s log deadline)
+        # must not cancel the remaining ~80% of the suite — the whole
+        # point of the native job is per-arch signal for every test,
+        # and a cancelled run says nothing about the arch-specific
+        # paths the RISC-V entry in docs/ROADMAP.md tracks. The
+        # github-hosted runners behind the unit-tests job are fast and
+        # exclusive, so fail-fast stays the default there.
         timeout-minutes: 30
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --no-fail-fast
       - name: cargo test --doc (workspace)
         # nextest's doctest support is still unstable; the stable
         # path is cargo test --doc.
@@ -760,8 +770,12 @@ jobs:
         # stalling the whole suite. s390x hardware is slower than
         # x86_64 for compute-heavy compilation and tests, so the
         # 45 min ceiling gives ~3-6x slack over the x86_64 baseline.
+        # --no-fail-fast, same reasoning as the riscv-native job:
+        # this is a self-hosted runner whose load varies run to run,
+        # and a single timing-sensitive daemon E2E flake must not
+        # cancel the rest of the suite.
         timeout-minutes: 45
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --no-fail-fast
       - name: cargo test --doc (workspace)
         # nextest's doctest support is still unstable; the stable
         # path is cargo test --doc.

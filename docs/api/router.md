@@ -128,6 +128,56 @@ Embedders running the RIB next to a busy writer share the handle the
 same way the daemon's runtime API and metrics endpoint do — an IPv6
 walk never waits for an IPv4 writer.
 
+## Event bus
+
+Read this section if you drain `poll_events` on one thread and apply
+the events somewhere slower — the kernel FIB, a BMP collector, a
+scraper. `lr_router::EventBus` is a bounded broadcast channel for
+`RouterEvent`: the draining thread publishes, every consumer that
+subscribed before the publish receives its own copy on its own
+thread.
+
+```rust
+use lr_router::{EventBus, RouterEvent};
+use std::time::Duration;
+
+let bus = EventBus::new();          // 1024 events per subscriber
+let rx = bus.subscribe();           // one handle per consumer thread
+
+// Publisher side (the thread that owns the router):
+let accepted = bus.publish(RouterEvent::RouteInstalled(route));
+// `accepted` counts the subscribers whose queue had room; a full
+// subscriber drops the event rather than blocking the publisher.
+
+// Consumer side:
+match rx.recv_timeout(Duration::from_millis(50)) {
+    Ok(ev) => apply(ev),            // events arrive in publish order
+    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+}
+```
+
+The contract:
+
+- `EventSubscriber::try_recv` and `recv_timeout` mirror
+  `std::sync::mpsc::Receiver`'s API (the same `TryRecvError` /
+  `RecvTimeoutError` types).
+- `close` is the shutdown handshake: after the last publish, `close`
+  refuses further publishes and every subscriber drains its queue,
+  then observes `Disconnected` — joining the subscriber threads
+  guarantees every accepted event was applied.
+- `dropped_total` counts publishes that dropped on at least one
+  subscriber; a non-zero rate means a consumer is stuck.
+  `published_total` counts every publish call.
+
+Each subscriber's queue is a lock-free MPMC ring
+(`lr_router::event_bus::ring`): the publisher walks the subscriber
+list under a shared read lock and pushes through a CAS retry loop,
+so publishing never blocks on a consumer. The daemon's own wiring —
+the ticker that publishes and the kernel-mirror thread that
+subscribes — is described in
+[`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+
 ## Configuration
 
 | Item | Default | Effect |

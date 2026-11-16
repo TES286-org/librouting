@@ -127,6 +127,56 @@ fn dropped_subscribers_are_pruned_on_publish() {
     assert_eq!(bus.dropped_total(), 0, "disconnected is not 'dropped'");
 }
 
+/// A publish that sees a mix of live and dead subscribers reaches
+/// the live ones, skips the dead one (no drop counted on a consumer
+/// nobody reads), and prunes the dead one in the same publish —
+/// the lazy-prune path under the write lock runs while a live
+/// subscriber stays in the list.
+#[test]
+fn mixed_live_and_dead_subscribers_publish_and_prune() {
+    let bus = EventBus::with_capacity(8);
+    let rx_live = bus.subscribe();
+    {
+        let _rx_dead = bus.subscribe();
+        assert_eq!(bus.subscriber_count(), 2);
+    }
+    // The dead subscriber is still listed; the live one gets the
+    // event, the dead one is skipped and pruned.
+    assert_eq!(bus.publish(ev([10, 0, 0, 1], 32)), 1, "live accepted");
+    assert_eq!(bus.subscriber_count(), 1, "dead subscriber pruned");
+    assert_eq!(bus.dropped_total(), 0, "a dead subscriber is not a drop");
+    assert!(matches!(
+        rx_live.try_recv(),
+        Ok(RouterEvent::PrefixAdvertised(_))
+    ));
+
+    // Dead subscribers on both sides of a live one (head and tail)
+    // are skipped and pruned; the live subscriber in the middle
+    // still receives the event — the event moves to it even though
+    // it is not the last entry in the list.
+    drop(rx_live);
+    let rx_mid = bus.subscribe();
+    {
+        let _rx_tail = bus.subscribe();
+    }
+    assert_eq!(bus.subscriber_count(), 3, "two dead entries still listed");
+    assert_eq!(
+        bus.publish(ev([10, 0, 0, 2], 32)),
+        1,
+        "only the live one accepts"
+    );
+    assert_eq!(bus.subscriber_count(), 1, "both dead subscribers pruned");
+    assert_eq!(
+        bus.dropped_total(),
+        0,
+        "dead subscribers never count as drops"
+    );
+    assert!(matches!(
+        rx_mid.try_recv(),
+        Ok(RouterEvent::PrefixAdvertised(_))
+    ));
+}
+
 /// The bus is `Clone` and the clone shares the same internal state —
 /// publishing through a clone reaches subscribers on the original.
 #[test]
@@ -168,6 +218,20 @@ fn concurrent_publish_and_drain() {
     // the Arc-strong-count race the original design had (each
     // subscriber thread held its own bus clone, so strong_count
     // never dropped to 1).
+    //
+    // Ordering contract: the store is Release and the load is
+    // Acquire. The chain the drain below relies on is: the
+    // publishers' ring pushes happen-before the orchestrator's
+    // store (the join synchronizes), and the store happens-before
+    // the subscriber's post-load ring reads (Release/Acquire
+    // synchronizes). With Relaxed on either side the second edge
+    // disappears, and on a weakly ordered machine (the riscv64 CI
+    // runner, RVWMO) the drain's try_pop can read a stale slot
+    // sequence AND a stale tail — the queue looks empty with one
+    // published event still invisible — and the single-pass drain
+    // exits a subscriber one event short. x86_64's TSO hides the
+    // window in practice; the orderings make it correct by
+    // construction, not by hardware.
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bus_arc = Arc::new(bus);
     let mut sub_threads = Vec::new();
@@ -180,9 +244,13 @@ fn concurrent_publish_and_drain() {
                         count.fetch_add(1, Ordering::Relaxed);
                     }
                     None => {
-                        if shutdown.load(Ordering::Relaxed) {
+                        if shutdown.load(Ordering::Acquire) {
                             // Publishers are done — drain any
-                            // stragglers then exit.
+                            // stragglers then exit. The
+                            // Release/Acquire pair above guarantees
+                            // every completed push is visible to
+                            // these reads, so the single pass is
+                            // complete.
                             while let Ok(_ev) = rx.try_recv() {
                                 count.fetch_add(1, Ordering::Relaxed);
                             }
@@ -209,8 +277,9 @@ fn concurrent_publish_and_drain() {
     for t in pub_threads {
         t.join().unwrap();
     }
-    // Signal subscribers to drain and exit.
-    shutdown.store(true, Ordering::Relaxed);
+    // Signal subscribers to drain and exit. Release pairs with the
+    // subscribers' Acquire load — see the ordering contract above.
+    shutdown.store(true, Ordering::Release);
 
     for t in sub_threads {
         t.join().unwrap();
