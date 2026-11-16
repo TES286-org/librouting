@@ -76,7 +76,12 @@ extern "C" {
 
 /// Read a log file until it contains every needle (bounded wait).
 fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // 60 s: the 30 s this used to allow is a wall-clock budget, and
+    // the slow RISC-V CI runner under nextest parallel load has
+    // expired it with the daemon otherwise healthy (observed on
+    // main's CI history: unmatched_inbound_connection_is_rejected
+    // finished at 30.06 s).
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut text = String::new();
     while Instant::now() < deadline {
         text = std::fs::read_to_string(path).unwrap_or_default();

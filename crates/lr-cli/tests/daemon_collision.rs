@@ -123,19 +123,34 @@ fn wait_log_any(path: &std::path::Path, needles: &[&str]) -> String {
     panic!("log never contained any of {needles:?}; last: {text}");
 }
 
-/// The §6.8 evidence the convergence asserts rely on: EITHER a
-/// wire-level collision occurred and the router resolved it
-/// ("connection collision" logged on either side), OR the dials were
-/// desynchronized enough that only one transport ever existed — the
-/// loser's first dial failed (ECONNREFUSED before the other listener
-/// was up, or a timeout under load) and the churn guard legitimately
-/// keeps the connector passive while the winning session is
-/// Established (BIRD parity: one session per peer; dialing into a
-/// peer that already holds a session would only bounce off its
-/// Established-protection rule with Cease/7). Both shapes converge to
-/// exactly one Established session, which the asserts below pin.
+/// The §6.8 evidence the convergence asserts rely on — one of THREE
+/// legal shapes:
+///
+/// 1. a wire-level collision occurred and the router resolved it
+///    ("connection collision" logged on either side);
+/// 2. the dials were desynchronized enough that only one transport
+///    ever existed — the loser's first dial failed (ECONNREFUSED
+///    before the other listener was up, or a timeout under load) and
+///    the churn guard legitimately keeps the connector passive while
+///    the winning session is Established (BIRD parity: one session
+///    per peer);
+/// 3. the winner's dial completed before the loser's connector even
+///    attempted its first dial — the churn guard then holds the
+///    connector without any dial failure to log ("holding the
+///    outbound connector" logged on the losing side). This is the
+///    shape slow runners surface: on the RISC-V CI hardware the
+///    winning session Established before the loser's connector ran
+///    its first loop iteration, so no "connect failed" ever appears
+///    and — before the daemon logged the guard's engagement — the
+///    convergence was silent.
+///
+/// All three shapes converge to exactly one Established session,
+/// which the asserts below pin.
 fn wait_collision_or_desync(logs: [&std::path::Path; 2]) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // 60 s, matching the file's other bounded waits: this is a
+    // wall-clock budget and the slow RISC-V CI runner under nextest
+    // parallel load needs more than the 30 s it used to allow.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let texts: Vec<String> = logs
             .iter()
@@ -143,12 +158,16 @@ fn wait_collision_or_desync(logs: [&std::path::Path; 2]) {
             .collect();
         let collided = texts.iter().any(|t| t.contains("connection collision"));
         let desynced = texts.iter().any(|t| t.contains("connect failed"));
-        if collided || desynced {
+        let held_off = texts
+            .iter()
+            .any(|t| t.contains("holding the outbound connector"));
+        if collided || desynced || held_off {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "neither a collision resolution nor a benign desync shape; a:\n{}\nb:\n{}",
+            "none of the three §6.8-legal shapes (collision resolution, \
+             benign desync, churn-guard hold-off); a:\n{}\nb:\n{}",
             texts[0],
             texts[1]
         );
