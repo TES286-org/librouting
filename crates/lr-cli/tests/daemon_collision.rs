@@ -135,7 +135,13 @@ fn wait_log_any(path: &std::path::Path, needles: &[&str]) -> String {
 /// Established-protection rule with Cease/7). Both shapes converge to
 /// exactly one Established session, which the asserts below pin.
 fn wait_collision_or_desync(logs: [&std::path::Path; 2]) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // 60 s, matching the file's other bounded waits: the 30 s this
+    // used to allow is a wall-clock budget, and on the slow RISC-V
+    // CI runner under nextest parallel load two daemons can take
+    // longer than that to reach either shape (the observed failures
+    // expired at 30.0-30.4 s with both logs otherwise healthy — see
+    // the main-branch CI history for daemon_collision flakes).
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let texts: Vec<String> = logs
             .iter()
