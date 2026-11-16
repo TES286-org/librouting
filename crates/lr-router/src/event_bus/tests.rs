@@ -218,6 +218,20 @@ fn concurrent_publish_and_drain() {
     // the Arc-strong-count race the original design had (each
     // subscriber thread held its own bus clone, so strong_count
     // never dropped to 1).
+    //
+    // Ordering contract: the store is Release and the load is
+    // Acquire. The chain the drain below relies on is: the
+    // publishers' ring pushes happen-before the orchestrator's
+    // store (the join synchronizes), and the store happens-before
+    // the subscriber's post-load ring reads (Release/Acquire
+    // synchronizes). With Relaxed on either side the second edge
+    // disappears, and on a weakly ordered machine (the riscv64 CI
+    // runner, RVWMO) the drain's try_pop can read a stale slot
+    // sequence AND a stale tail — the queue looks empty with one
+    // published event still invisible — and the single-pass drain
+    // exits a subscriber one event short. x86_64's TSO hides the
+    // window in practice; the orderings make it correct by
+    // construction, not by hardware.
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bus_arc = Arc::new(bus);
     let mut sub_threads = Vec::new();
@@ -230,9 +244,13 @@ fn concurrent_publish_and_drain() {
                         count.fetch_add(1, Ordering::Relaxed);
                     }
                     None => {
-                        if shutdown.load(Ordering::Relaxed) {
+                        if shutdown.load(Ordering::Acquire) {
                             // Publishers are done — drain any
-                            // stragglers then exit.
+                            // stragglers then exit. The
+                            // Release/Acquire pair above guarantees
+                            // every completed push is visible to
+                            // these reads, so the single pass is
+                            // complete.
                             while let Ok(_ev) = rx.try_recv() {
                                 count.fetch_add(1, Ordering::Relaxed);
                             }
@@ -259,8 +277,9 @@ fn concurrent_publish_and_drain() {
     for t in pub_threads {
         t.join().unwrap();
     }
-    // Signal subscribers to drain and exit.
-    shutdown.store(true, Ordering::Relaxed);
+    // Signal subscribers to drain and exit. Release pairs with the
+    // subscribers' Acquire load — see the ordering contract above.
+    shutdown.store(true, Ordering::Release);
 
     for t in sub_threads {
         t.join().unwrap();
