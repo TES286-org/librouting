@@ -3665,6 +3665,13 @@ fn spawn_connector(
         .name(format!("lr-connect-{}", label))
         .spawn(move || {
             let mut backoff_ms: u64 = 1_000;
+            // Logs the churn guard's engagement once per continuous
+            // hold-off (the guard polls every 500 ms; without the flag
+            // the log would repeat at that cadence — and without the
+            // line at all, an operator watching a silent connector
+            // cannot tell “held off by the inbound winner” from a
+            // stuck dial).
+            let mut holding_off_logged = false;
             while rt.running.load(Ordering::Relaxed) {
                 dispatch_signals(&rt);
                 if !rt.running.load(Ordering::Relaxed) {
@@ -3690,9 +3697,19 @@ fn spawn_connector(
                         .map(|s| s == "Established")
                         .unwrap_or(false);
                     if hold_off {
+                        if !holding_off_logged {
+                            holding_off_logged = true;
+                            log_info!(
+                                Component::Bgp,
+                                "peer {label}: inbound session Established — \
+                                 holding the outbound connector (RFC 4271 §6.8: \
+                                 the peer already picked its transport)"
+                            );
+                        }
                         sleep_interruptible(&rt, Duration::from_millis(500));
                         continue;
                     }
+                    holding_off_logged = false;
                 }
                 // Max-prefix Restart cooldown (FRR `bgp maximum-prefix
                 // restart <secs>` / BIRD `restart time`): a peer that
