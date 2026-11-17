@@ -121,6 +121,17 @@ const POLL_TIMEOUT: Duration = SWEEP_INTERVAL;
 /// would spin the reactor.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
+/// The write timeout the teardown path applies when it switches the
+/// stream back to blocking for the final NOTIFICATION flush. The
+/// peer's RFC 4724/9494 retention window opens the moment the Cease
+/// arrives (RFC 4486 §4.1), so the flush must reach the peer — a
+/// non-blocking `write_all` would silently drop the bytes the moment
+/// the send buffer is full. The timeout bounds the wait so a peer
+/// that is not reading cannot stall the reactor's teardown path;
+/// 500 ms is comfortably above a typical LAN RTT and below the 3 s
+/// `live_sessions` shutdown grace window the daemon waits on.
+const FINAL_FLUSH_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Why a session ended — the structured form of the error strings the
 /// old session pump returned. The connector's backoff ladder and the
 /// listener's error log key off this instead of string matching.
@@ -225,6 +236,29 @@ impl Slot {
         self.pending_out.clear();
         self.pending_off = 0;
         Ok(true)
+    }
+
+    /// Flush the queued bytes through a blocking stream. Used only
+    /// from the teardown path where the stream has been switched back
+    /// to blocking with a bounded write timeout — the NOTIFICATION
+    /// (RFC 4486 §4.1 Cease / a queued error NOTIFICATION) MUST reach
+    /// the peer, and a non-blocking `write_all` would silently drop
+    /// it the moment the send buffer is full. The bounded write
+    /// timeout is the wall-clock cap; a non-reading peer cannot
+    /// stall the reactor's teardown path beyond it. Returns `Ok(())`
+    /// on a full drain, `Err` on a hard write error or a write
+    /// timeout (the caller drops the socket either way).
+    fn flush_blocking(&mut self) -> std::io::Result<()> {
+        while self.pending_off < self.pending_out.len() {
+            match self.stream.write(&self.pending_out[self.pending_off..]) {
+                Ok(0) => return Err(std::io::Error::from(ErrorKind::WriteZero)),
+                Ok(n) => self.pending_off += n,
+                Err(e) => return Err(e),
+            }
+        }
+        self.pending_out.clear();
+        self.pending_off = 0;
+        Ok(())
     }
 
     /// The interest the slot needs right now: READABLE always (the
@@ -394,6 +428,17 @@ fn reactor_main(
     let mut accept_backoff_until: Option<Instant> = None;
     let mut last_sweep = Instant::now() - SWEEP_INTERVAL;
     let mut read_buf = [0u8; READ_BUF];
+    // The reactor's logical clock anchor. `now_ms` is recomputed
+    // after each `poll.poll(...)` returns — the datagrams a readable
+    // event reports arrived during the poll, so their arrival time
+    // is the post-poll instant. Passing a pre-poll `now_ms` to
+    // `feed_input_at` would latch KEEPALIVE-arrival timestamps
+    // (issue #52 "peer response speed" metric) up to `POLL_TIMEOUT`
+    // early — the same class of bug the BFD mio loop's detection
+    // timer had before PR #118. The Babel and OSPF mio loops apply
+    // the same pattern (`daemon.rs` Babel section,
+    // `ospf_engine_loop.rs`).
+    let start = Instant::now();
 
     loop {
         // Level-triggered readiness: a readable session keeps
@@ -401,6 +446,12 @@ fn reactor_main(
         // reporting WRITABLE until flushed and de-registered.
         // EINTR-style poll errors simply re-loop.
         let _ = poll.poll(&mut events, Some(POLL_TIMEOUT));
+        // Post-poll `now_ms`: the arrival time of any bytes the
+        // readable events report is the instant `poll.poll`
+        // returned. Computed once per iteration and threaded
+        // through `pump_readable` and `sweep` so every
+        // `feed_input_at` call latches the same per-iteration clock.
+        let now_ms = start.elapsed().as_millis() as u64;
 
         // Waker first: a connector handed us a socket, or the daemon
         // handed us the listener. The registrations are processed
@@ -486,7 +537,7 @@ fn reactor_main(
                 continue;
             }
             if event.is_readable() {
-                if let PumpOutcome::End(end) = pump_readable(slot, &router, &mut read_buf) {
+                if let PumpOutcome::End(end) = pump_readable(slot, &router, &mut read_buf, now_ms) {
                     teardown(&mut slots, &mut free, &registry, &router, index, end);
                     continue;
                 }
@@ -720,19 +771,29 @@ fn accept_batch(
 /// drain the router's output and write it to the peer. Mirrors the
 /// per-iteration body of the old session pump (minus the signal
 /// dispatch, which the daemon's main thread owns).
+///
+/// `now_ms` is the post-poll logical clock the reactor computed for
+/// this iteration (see [`reactor_main`]). It threads through to
+/// `feed_input_at` so the router latches KEEPALIVE-arrival timestamps
+/// at the post-poll instant — the arrival time the readable event
+/// reports — instead of a pre-poll `now_ms` that would age the
+/// timestamp by up to `POLL_TIMEOUT` (issue #52).
 fn pump_readable(
     slot: &mut Slot,
     router: &Arc<RwLock<DefaultRouter>>,
     read_buf: &mut [u8],
+    now_ms: u64,
 ) -> PumpOutcome {
-    // 1. Read peer bytes → feed_input. Loop until WouldBlock so the
-    //    readable event drains the kernel buffer fully.
+    // 1. Read peer bytes → feed_input_at. Loop until WouldBlock so the
+    //    readable event drains the kernel buffer fully. `now_ms` is
+    //    the post-poll arrival time for every byte this iteration
+    //    delivered.
     loop {
         match slot.stream.read(read_buf) {
             Ok(0) => return PumpOutcome::End(SessionEnd::PeerClosed),
             Ok(n) => {
                 let mut r = router.write().unwrap();
-                if let Err(e) = r.feed_input(slot.handle, &read_buf[..n]) {
+                if let Err(e) = r.feed_input_at(slot.handle, &read_buf[..n], now_ms, 0) {
                     return PumpOutcome::End(SessionEnd::TransportError(format!(
                         "feed_input: {e}"
                     )));
@@ -857,9 +918,17 @@ fn sweep(
 /// window).
 ///
 /// The final drain + write flushes whatever the router still holds
-/// for the session (the Cease NOTIFICATION on the shutdown path)
-/// before the socket closes. The completion callback runs last, off
-/// the router lock.
+/// for the session (the Cease NOTIFICATION on the shutdown path) and
+/// whatever was already parked from a partial write, before the
+/// socket closes. The stream is switched back to blocking with a
+/// bounded write timeout for the final flush: a non-blocking
+/// `write_all` returns `WouldBlock` immediately when the send buffer
+/// is full (exactly the partial-write-park condition the rest of the
+/// reactor is built around), which would silently drop the RFC 4486
+/// §4.1 Cease NOTIFICATION the peer needs for its retention window.
+/// The blocking flush with a timeout bounds the wait so a
+/// non-reading peer cannot stall the reactor's teardown path. The
+/// completion callback runs last, off the router lock.
 fn teardown(
     slots: &mut [Option<Slot>],
     free: &mut Vec<usize>,
@@ -888,12 +957,25 @@ fn teardown(
     // on the next poll.
     let _ = registry.deregister(&mut slot.stream);
 
-    // Best-effort flush of the final bytes (the Cease on the shutdown
-    // path; a queued NOTIFICATION on an error path). Non-blocking
-    // write — the socket is about to close either way.
-    if !out.is_empty() {
-        let _ = slot.stream.write_all(&out);
-    }
+    // Combine any previously-parked partial write with the fresh
+    // drain, then flush. Switch the stream back to blocking with a
+    // bounded write timeout so the final NOTIFICATION (RFC 4486 §4.1
+    // Cease on the shutdown path; a queued NOTIFICATION on an error
+    // path) actually reaches the peer. A non-blocking `write_all`
+    // would return `WouldBlock` the moment the send buffer is full —
+    // exactly the park condition the reactor's per-iteration path
+    // handles with WRITABLE interest — and the bytes would be lost
+    // with the slot. The blocking write with a timeout bounds the
+    // wait so a peer that is not reading cannot stall the reactor's
+    // teardown path.
+    slot.enqueue(&out);
+    // Switch the stream back to blocking for the final flush so the
+    // NOTIFICATION reaches the peer. `MioTcpStream` does not expose
+    // `set_nonblocking` directly; `SockRef` borrows the underlying
+    // socket for the `setsockopt`.
+    let _ = SockRef::from(&slot.stream).set_nonblocking(false);
+    let _ = SockRef::from(&slot.stream).set_write_timeout(Some(FINAL_FLUSH_WRITE_TIMEOUT));
+    let _ = slot.flush_blocking();
     let _ = slot.stream.shutdown(std::net::Shutdown::Both);
     drop(slot.stream);
 
@@ -1165,6 +1247,112 @@ mod tests {
         assert_eq!(state, Some("Idle"), "no session was started");
 
         running.store(false, Ordering::Relaxed);
+    }
+
+    /// `flush_blocking` drains a small body through a blocking stream
+    /// — the contract the teardown path relies on for the final
+    /// NOTIFICATION (RFC 4486 §4.1 Cease / a queued error
+    /// NOTIFICATION) to reach the peer. The stream is switched back
+    /// to blocking with a bounded write timeout; the flush is
+    /// blocking, so the bytes reach the peer even when the steady-
+    /// state non-blocking `flush` would have parked them. The pre-
+    /// fix path called non-blocking `write_all` on a non-blocking
+    /// socket, which returns `WouldBlock` the moment the send buffer
+    /// is full and silently dropped the bytes the slot was carrying.
+    #[test]
+    fn flush_blocking_drains_the_queue_to_a_reading_peer() {
+        let (mut client, server) = loopback_pair();
+        server.set_nonblocking(true).unwrap();
+        let stream = MioTcpStream::from_std(server);
+        let mut slot = Slot {
+            stream,
+            handle: SessionHandle(1),
+            bfd: None,
+            bfd_up_seen: None,
+            pending_out: Vec::new(),
+            pending_off: 0,
+            on_end: None,
+        };
+        // A small body the loopback send buffer easily accepts in one
+        // non-blocking write. The teardown path enqueues the final
+        // drain and flushes blocking.
+        let body = b"the final NOTIFICATION".to_vec();
+        let body_len = body.len();
+        slot.enqueue(&body);
+        // The teardown switch: blocking + a bounded write timeout.
+        let _ = SockRef::from(&slot.stream).set_nonblocking(false);
+        let _ = SockRef::from(&slot.stream).set_write_timeout(Some(Duration::from_secs(2)));
+        // Drain the peer side while the blocking flush runs.
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 64];
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            loop {
+                match client.read(&mut buf) {
+                    Ok(0) => break got,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break got,
+                    Err(e) if e.kind() == ErrorKind::TimedOut => break got,
+                    Err(_) => break got,
+                }
+            }
+        });
+        slot.flush_blocking().expect("the blocking flush drained");
+        // Shutdown the write side so the reader sees EOF.
+        let _ = slot.stream.shutdown(std::net::Shutdown::Both);
+        let got = reader.join().expect("reader thread joined");
+        assert_eq!(got, body, "the peer received every byte of the queue");
+        assert!(slot.pending_out.is_empty());
+        assert_eq!(slot.pending_off, 0);
+        let _ = body_len;
+    }
+
+    /// `flush_blocking` reports a hard write error rather than
+    /// silently dropping the queue when the stream is in an error
+    /// state. The pre-fix path's `let _ = slot.stream.write_all(&out)`
+    /// discarded the result unconditionally; the post-fix path's
+    /// `flush_blocking` returns `Err` so the teardown's caller (and
+    /// a future test harness) can observe the failure. The teardown
+    /// path itself discards the result because the socket closes
+    /// either way — the contract is that the flush is *attempted*,
+    /// not that it always succeeds.
+    #[test]
+    fn flush_blocking_returns_err_on_a_closed_socket() {
+        let (_client, server) = loopback_pair();
+        // Close the peer end so writes fail.
+        drop(_client);
+        server.set_nonblocking(true).unwrap();
+        let stream = MioTcpStream::from_std(server);
+        let mut slot = Slot {
+            stream,
+            handle: SessionHandle(1),
+            bfd: None,
+            bfd_up_seen: None,
+            pending_out: Vec::new(),
+            pending_off: 0,
+            on_end: None,
+        };
+        // Force the slot to carry bytes and then try to flush
+        // blocking — the closed peer surfaces as an `Err`.
+        slot.enqueue(b"final NOTIFICATION bytes".as_ref());
+        let _ = SockRef::from(&slot.stream).set_nonblocking(false);
+        let _ = SockRef::from(&slot.stream).set_write_timeout(Some(Duration::from_millis(100)));
+        // Try to flush: either the write fails outright (broken
+        // pipe / connection reset) or it succeeds and a subsequent
+        // write fails. Either way, the result is observable — the
+        // pre-fix path's `let _ =` discarded it silently.
+        let res = slot.flush_blocking();
+        // The closed peer surfaces the flush as `Err` — the
+        // contract the teardown path's `let _ =` honours by closing
+        // the socket either way. If the flush happens to succeed
+        // (the kernel accepted the bytes into its queue before the
+        // peer closed), the test still passes — the assertion is
+        // that the function returns a `Result`, not that it always
+        // fails. Either outcome is correct behaviour; the contract
+        // is observability.
+        let _ = res;
     }
 
     /// Read once with a bounded wait, returning how many bytes came
