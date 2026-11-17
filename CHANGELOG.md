@@ -4599,6 +4599,43 @@ documented `Static` fallback (`LR_ERR_OK` + `LR_ROA_PROVENANCE_STATIC`).
 A release-mode run now exercises the fallback contract instead of
 failing; the test is correct under both profiles.
 
+### BFD mio loop: `now` recomputed after `poll` — detection timer
+anchors to arrival time
+([issue #101](https://github.com/TES286-org/librouting/issues/101),
+"Fixing Identifiable Issues")
+
+`run_mio_loop` in `crates/lr-cli/src/daemon_bfd.rs` computed `now`
+once per iteration before `poll.poll(&mut events, Some(timeout))` and
+passed that same `now` to `drain_rx_socket` after the poll returned.
+The datagrams the readable events report arrived *during* the poll,
+so their arrival time is the post-poll instant. BFD's detection timer
+(RFC 5880 §6.8.4) is anchored to the arrival time of the last packet
+— `BfdSession::feed_bytes(now, ...)` arms `detect_ms` off `now`.
+Passing the pre-poll `now` armed the timer `timeout` ms early (up to
+the poll ceiling, 1 s on an idle session; ~50–300 ms on an active
+one), so a healthy session would time out `timeout` ms before its
+real detection time. With default timers (100 ms tx, 300 ms
+detection) a 50 ms poll delay is a 17% premature timeout — a real
+false-positive window on slow or loaded runners. The OSPF engine
+loop (`ospf_engine_loop::run`) and the Babel loop
+(`daemon.rs`'s Babel section) already computed `now` after the poll;
+the BFD loop was the outlier.
+
+Fix: `now` is recomputed after `poll` returns, before the
+`drain_rx_socket` sweep. The tick pass reuses the same `now` so one
+iteration applies one consistent time across packet processing and
+timer advancement — the previous code recomputed `now` a second time
+before the tick, a harmless but unnecessary divergence.
+
+Tests: a new `detection_timer_anchors_to_arrival_time` in
+`crates/lr-bfd/src/session_tests.rs` pins the session-level contract
+the fix relies on: `feed_bytes(arrival, ...)` arms the DETECT timer
+at `arrival + detect_ms`, a tick one ms before the deadline does not
+fire it, a tick at the deadline does, and re-arming at a later
+arrival time moves the deadline. The existing `bfd_fast_fail_beats_hold_time`
+end-to-end test (BFD detection ~300 ms beats 60 s hold) still passes
+with the fix.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

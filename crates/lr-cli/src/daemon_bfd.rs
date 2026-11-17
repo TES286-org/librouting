@@ -288,8 +288,8 @@ fn run_mio_loop(
     let mut events = Events::with_capacity(64);
     let mut buf = [0u8; 1500];
     loop {
-        let now = Instant(start.elapsed().as_millis() as u64);
-        let timeout = compute_mio_timeout(peers, now);
+        let pre_poll_now = Instant(start.elapsed().as_millis() as u64);
+        let timeout = compute_mio_timeout(peers, pre_poll_now);
         events.clear();
         if let Err(e) = poll.poll(&mut events, Some(timeout)) {
             // EINTR is harmless under poll(2)/epoll_wait; mio surfaces
@@ -300,6 +300,21 @@ fn run_mio_loop(
             log_error!(Component::Bfd, "mio poll: {e}");
             return;
         }
+        // Recompute `now` after the poll returns: the datagrams the
+        // readable events report arrived *during* the poll, so their
+        // arrival time is the post-poll instant. BFD's detection
+        // timer (RFC 5880 §6.8.4) is anchored to the arrival time of
+        // the last packet — `feed_bytes(now, ...)` arms
+        // `detect_ms` off `now`. Passing the pre-poll `now` would arm
+        // the timer `timeout` ms early (up to the poll ceiling), so a
+        // healthy session would time out `timeout` ms before its
+        // real detection time. With default timers (100 ms tx, 300 ms
+        // detection) a 50 ms poll delay is a 17% premature timeout —
+        // a real false-positive window on slow or loaded runners.
+        // The tick pass below reuses the same `now` so one iteration
+        // applies one consistent time across packet processing and
+        // timer advancement.
+        let now = Instant(start.elapsed().as_millis() as u64);
         // Drain every rx socket that reported readable. A socket may
         // have multiple datagrams queued; the inner loop drains until
         // EAGAIN (recv_from returns None).
@@ -326,8 +341,8 @@ fn run_mio_loop(
         // packet-arrival path and the timeout path funnel here: a
         // packet may have armed a timer due now, and the timeout
         // itself means a timer has fired. Ticking every iteration
-        // keeps the FSM and the wire in lockstep.
-        let now = Instant(start.elapsed().as_millis() as u64);
+        // keeps the FSM and the wire in lockstep. `now` is the
+        // post-poll instant — the same time the packet drain used.
         for p in peers.iter_mut() {
             let evs = p.session.tick(now);
             apply_events(p, evs);
