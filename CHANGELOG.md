@@ -92,6 +92,75 @@ delegate to `lr_policy::bgp` and `lr_policy::ospf`, so every
 existing embedder inherits the correct behaviour without
 recompiling.
 
+### Fixed
+
+**BGP reactor threads the post-poll `now_ms` through
+`feed_input_at` — the KEEPALIVE-arrival metric is no longer
+dead** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+`SessionStats::last_keepalive_received_ms` (the "peer response
+speed" health metric [issue
+#52](https://github.com/TES286-org/librouting/issues/52) asks for)
+is latched inside `RouterInstance::feed_input_at` when the
+`PeerMessageStats::keepalive_received` counter advances — the
+arrival time is whatever `now_ms` the caller passes. The BGP
+session reactor (`crates/lr-cli/src/bgp_reactor.rs::reactor_main`)
+called `feed_input` (no `now_ms` argument), which delegates to
+`feed_input_at(h, bytes, 0, 0)`: the metric was latched at 0 for
+every KEEPALIVE under the reactor, so `lr_session_last_keepalive_received_ms`
+(`metrics.rs`) and `ka_rx` (`show sessions`) were unconditionally
+dead for every production BGP session after PR #109 moved every
+session onto the reactor. The Babel mio loop
+(`crates/lr-cli/src/daemon.rs`, Babel section) and the OSPF mio
+loop (`crates/lr-cli/src/ospf_engine_loop.rs`) already computed
+`now_ms` *after* `poll.poll(...)` returned and threaded it through
+`feed_input_at`; the BGP reactor was the outlier. The reactor now
+computes `now_ms = start.elapsed().as_millis() as u64` once per
+iteration after `poll.poll` returns (the arrival time the
+readable events report) and threads it through `pump_readable` →
+`feed_input_at`, so the metric latches the post-poll arrival
+time. This is the same class of fix PR #118 applied to the BFD
+mio loop's detection timer (RFC 5880 §6.8.4): a pre-poll `now_ms`
+would age the timestamp by up to `POLL_TIMEOUT` (50 ms on the BGP
+reactor). The four new `bgp_keepalive_metric` tests
+(`crates/lr-router/tests/bgp_keepalive_metric.rs`) pin the
+router-level contract: `feed_input_at(now_ms = T)` latches `T`,
+a later KEEPALIVE at `T'` moves the latch to `T'`, the legacy
+`feed_input` (no `now_ms`) latches zero (the documented legacy
+default), and the metric is zero before any KEEPALIVE arrives.
+
+**BGP reactor teardown flushes the final NOTIFICATION through a
+blocking stream — RFC 4486 §4.1 / RFC 4271 §6.4 compliance**
+(`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+The teardown path's `write_all(&out)` on a non-blocking socket
+returned `WouldBlock` the moment the send buffer was full —
+exactly the partial-write-park condition the reactor's
+per-iteration path handles with WRITABLE interest — and silently
+dropped the RFC 4486 §4.1 Cease NOTIFICATION (on the shutdown
+path) or a queued error NOTIFICATION (on an error path) the peer
+needs for its RFC 4724/9494 retention window. The teardown also
+dropped any bytes already parked in `slot.pending_out` from a
+previous partial write. The teardown now switches the stream
+back to blocking with a bounded 500 ms write timeout
+(`FINAL_FLUSH_WRITE_TIMEOUT`) and calls a new
+`Slot::flush_blocking` that combines the parked prefix with the
+fresh drain and blocks until the queue empties or the write
+timeout fires — the NOTIFICATION reaches the peer, or the
+teardown drops the socket after a bounded wait. The pre-fix
+path was a regression from the pre-PR-#109 `pump_session`
+(`daemon.rs`), which used a blocking `stream.write_all(&out)` and
+would (eventually) flush the NOTIFICATION; the reactor's
+non-blocking switch left teardown's `write_all` blocking-style
+without the blocking semantics. The 500 ms timeout is
+comfortably above a typical LAN RTT and below the 3 s
+`live_sessions` shutdown grace window the daemon waits on. The
+two new `flush_blocking` tests
+(`crates/lr-cli/src/bgp_reactor::tests`) pin the contract: a
+reading peer receives every byte the slot queued, and the
+`Result` is observable (the pre-fix `let _ =` discarded it
+silently).
+
 ### Changed
 
 **BIRD/FRR converter and compat mode render the native `.lr` DSL —
