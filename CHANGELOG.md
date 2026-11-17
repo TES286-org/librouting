@@ -4636,6 +4636,47 @@ arrival time moves the deadline. The existing `bfd_fast_fail_beats_hold_time`
 end-to-end test (BFD detection ~300 ms beats 60 s hold) still passes
 with the fix.
 
+### Event-bus `subscribe` re-checks `closed` under the write lock —
+a racing subscriber never stays open forever
+([issue #101](https://github.com/TES286-org/librouting/issues/101),
+"Fixing Identifiable Issues")
+
+`EventBus::subscribe` read the bus's `closed` flag outside the
+subscriber-list write lock, then pushed the new subscriber under the
+lock without re-checking. `EventBus::close` takes the same write
+lock, sets the bus's `closed` flag, walks the list setting each
+subscriber's per-handle `closed` flag, and clears the list. A
+subscribe that read `closed == false` and then waited for `close`'s
+write lock pushed to a list `close` had already cleared — the new
+subscriber's `closed` flag never flips, so `recv_timeout` returns
+`Timeout` forever instead of `Disconnected`, breaking the
+late-joiner contract the `close_is_idempotent_and_late_subscribers_see_disconnected`
+test pins for the close-then-subscribe case. The kernel-mirror
+thread (`KernelMirrorThread::spawn` in `crates/lr-cli/src/daemon.rs`)
+checks `thread_bus.is_closed()` on `Timeout` and `continue`s — with
+the race it would loop forever, and `Runtime::shutdown_event_bus`
+joins the mirror with no timeout, so the daemon would hang at
+shutdown.
+
+Fix: `subscribe` keeps the fast-path read outside the lock (the
+common case — subscribe at startup, long before close — stays
+lock-free), and re-checks `closed` under the write lock before
+pushing. The lock either orders the push before `close`'s walk
+(close sets the new subscriber's flag) or `close` before the push
+(we see `closed == true`, mark the new subscriber disconnected and
+skip the push). Either way the subscriber's `closed` flag ends up
+`true` once `close` completes.
+
+Tests: a new `subscribe_concurrent_with_close_always_disconnects`
+stress test in `crates/lr-router/src/event_bus/tests.rs` runs 200
+iterations × 8 subscriber threads against one closer per iteration;
+with the original implementation it surfaces multiple subscribers
+returning `Empty` (queue empty, flag false) instead of
+`Disconnected`, with the fix every subscriber sees `Disconnected`
+after `close` completes. The existing
+`close_is_idempotent_and_late_subscribers_see_disconnected` test
+covers the close-then-subscribe case the docstring names.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
