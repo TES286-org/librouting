@@ -4515,6 +4515,90 @@ pre-2.0 semver debt the job tracks). Every other dependency the
 hygiene pass removed was a non-optional build input with no
 feature surface, so no other downstream manifest can reference it.
 
+### Event-bus ring: `head` / `tail` CAS ordering fixed
+([issue #101](https://github.com/TES286-org/librouting/issues/101),
+"Fixing Identifiable Issues")
+
+`MpmcRing::try_push`'s fullness pre-check reads `head` with
+`Acquire` and declares full when `pos.wrapping_sub(head) >=
+capacity`; `try_pop`'s empty pre-check reads `tail` with `Acquire`
+and declares empty when `pos == tail`. The producer's `tail` CAS
+and the consumer's `head` CAS both used `Acquire` on success — so
+the write half was `Relaxed` (an RMW's success ordering applies to
+the read part only when the ordering is `Acquire`; `Release` is
+what publishes the write). The producer's `head.load(Acquire)`
+therefore had no Release partner: on weakly ordered memory (RISC-V
+RVWMO, ARM64) a producer could read a stale `head` and `try_push`
+would return `Err(v)` — `EventBus::publish` does not retry, so the
+event was dropped — even though the consumer had already freed the
+slot. Symmetrically, a consumer could read a stale `tail` and
+return `None` even though a producer had claimed a slot, adding up
+to one `RECV_POLL_INTERVAL` (1 ms) of latency per false-empty.
+
+The inline comment at `try_push`'s fullness load claimed the
+`Acquire` paired with the consumer's `head` CAS (Release); the code
+used `Acquire`, not `Release` — a documentation / code
+discrepancy.
+
+Fix: the `tail` CAS in `try_push` and the `head` CAS in `try_pop`
+both use `AcqRel` on success. The `Release` half publishes the
+counter advance to the other side's `load(Acquire)`, so the
+fullness / emptiness pre-checks see the latest committed counter
+value. The slot's own sequence number (`slot.seq.load(Acquire)` in
+both paths) already carried the value's cross-thread visibility;
+the fix closes the head/tail visibility gap the pre-checks
+introduced on top of Vyukov's algorithm. x86_64's TSO hid the
+window in practice; the riscv64 and s390x native CI runners do
+not.
+
+The `Drop` walk's SAFETY comment was also tightened: the original
+claimed every slot in `[head, tail)` "was pushed", which is a
+property of the producer's panic-free critical section and the
+bus's write-lock-at-drop guarantee — not a property of the data
+structure alone. The walk now defensively checks `slot.seq ==
+pos + 1` before `assume_init_read`, so a future code path that
+breaks the panic-free invariant surfaces as a skipped slot rather
+than `Drop` on uninitialised memory.
+
+Tests: a new `spsc_stress_no_drops_and_in_order_delivery` in
+`crates/lr-router/src/event_bus/tests.rs` runs a single publisher
+and a single subscriber concurrently on a bus whose capacity
+exceeds the total event count (4 000 events, capacity 4 064). With
+capacity > total events a legitimate full is impossible, so any
+drop is a false full. The subscriber verifies monotonic in-order
+delivery: every event'''s sequence equals the previous sequence plus
+one (mod 256), so a single dropped event surfaces as a gap
+assertion. The capacity buffer keeps the test reliable on slow CI
+runners where the subscriber might briefly fall behind. The false-
+full bug does not depend on the queue being near-full — it depends
+on a stale `head` read, which can happen at any queue depth — so
+the test exercises the ordering contract the fix establishes
+regardless. The existing `concurrent_publish_and_drain` and
+`mpmc_stress_no_loss_no_dup` tests pass unchanged; `cargo fmt`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+both doc lints clean.
+
+### `lr-ffi`: `provenance_of_static_and_orphan` test no longer
+fails in release builds ([issue #101](https://github.com/TES286-org/librouting/issues/101),
+"Fixing Identifiable Issues")
+
+`roa_store::tests::provenance_of_static_and_orphan` asserts that
+the unchecked `lr_roa_store_provenance_of` panics on an orphan
+entry — the `debug_assert!` in `lr_bgp::roa_store::provenance_of`
+fires and the `catch_unwind` barrier in `guarded` returns
+`LR_ERR_PANIC`. The assertion held only in debug builds: in release
+`debug_assert!` is compiled out, so the unchecked API returns
+`LR_ERR_OK` and writes `LR_ROA_PROVENANCE_STATIC` (the historical
+fallback the checked form exists to avoid). A `cargo test --release`
+run therefore failed the assertion — CI runs debug, so the failure
+was invisible, but the test was unsound under both profiles.
+
+Fix: the assertion is now `cfg!(debug_assertions)`-gated. The debug
+path keeps the panic assertion; the release path asserts the
+documented `Static` fallback (`LR_ERR_OK` + `LR_ROA_PROVENANCE_STATIC`).
+A release-mode run now exercises the fallback contract instead of
+failing; the test is correct under both profiles.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

@@ -785,18 +785,34 @@ mod tests {
         let mut tag3 = 99u8;
         let rc = unsafe { lr_roa_store_provenance_of_checked(s, &orphan, &raw mut tag3) };
         assert_eq!(rc, 1, "checked: orphan returns 1 (None)");
-        // Unchecked form fires a debug_assert! on an orphan entry and
-        // the catch_unwind barrier turns the panic into LR_ERR_PANIC
-        // (-4). The historical `Static` fallback only survives in
-        // release builds; the test asserts the panic path so the
-        // embedder's contract (use the checked form for unknown
-        // entries) is enforced.
+        // The unchecked form fires a `debug_assert!` on an orphan
+        // entry, and the `catch_unwind` barrier in `guarded` turns
+        // the panic into `LR_ERR_PANIC` (-4). The historical
+        // `Static` fallback only runs when `debug_assert!` is
+        // compiled out (release builds): there the unchecked API
+        // returns `LR_ERR_OK` and writes `LR_ROA_PROVENANCE_STATIC`
+        // — the mislabeling the checked form exists to avoid. Assert
+        // both paths so the test is correct under both profiles; a
+        // release-mode run that previously failed on the panic
+        // assertion now exercises the fallback contract instead.
         let rc = unsafe { lr_roa_store_provenance_of(s, &orphan, &raw mut tag3) };
-        assert_eq!(
-            rc,
-            LrError::Panic as i32,
-            "unchecked orphan panics in debug"
-        );
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                rc,
+                LrError::Panic as i32,
+                "unchecked orphan panics in debug (catch_unwind -> LR_ERR_PANIC)"
+            );
+        } else {
+            assert_eq!(
+                rc,
+                LrError::Ok as i32,
+                "unchecked orphan falls back to Static in release (no debug_assert!)"
+            );
+            assert_eq!(
+                tag3, LR_ROA_PROVENANCE_STATIC,
+                "the fallback writes the Static tag"
+            );
+        }
 
         unsafe { lr_roa_store_free(s) };
     }
