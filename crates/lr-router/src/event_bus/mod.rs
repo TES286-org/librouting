@@ -234,22 +234,44 @@ impl EventBus {
     /// joiner observes "no more events" (its `try_recv` returns
     /// `Disconnected` and its `recv_timeout` returns `Disconnected`
     /// without waiting) instead of polling a queue nobody will ever
-    /// write to.
+    /// write to. The check is under the same write lock
+    /// [`EventBus::close`] takes, so a subscribe that races with close
+    /// either lands before close's walk (close sets the new
+    /// subscriber's flag) or sees `closed == true` under the lock and
+    /// returns an already-disconnected subscriber — never a subscriber
+    /// whose flag stays false while the bus is closed.
     pub fn subscribe(&self) -> EventSubscriber {
         let inner = Arc::new(SubscriberInner {
             ring: MpmcRing::new(self.capacity),
-            closed: AtomicBool::new(self.inner.closed.load(Ordering::Acquire)),
+            closed: AtomicBool::new(false),
         });
-        // If the bus is already closed, do not add the subscriber to
-        // the list — its `closed` flag is already true, so its first
-        // `recv` returns `Disconnected`. Adding it would only delay
-        // the prune.
-        if !inner.closed.load(Ordering::Relaxed) {
-            self.inner
-                .subscribers
-                .write()
-                .unwrap()
-                .push(Arc::clone(&inner));
+        // Fast path: if the bus is already closed, skip the write
+        // lock entirely — the subscriber is disconnected from
+        // construction.
+        if self.inner.closed.load(Ordering::Acquire) {
+            inner.closed.store(true, Ordering::Release);
+            return EventSubscriber { inner };
+        }
+        // Re-check under the write lock: `close()` takes the same
+        // lock to set the bus's `closed` flag, walk the list setting
+        // each subscriber's flag, and clear the list. Without the
+        // re-check, a subscribe that read `closed == false` outside
+        // the lock and then waited for close's write lock would push
+        // to a list close had already cleared — the subscriber's
+        // `closed` flag never flips, so `recv_timeout` returns
+        // `Timeout` forever instead of `Disconnected`. Observing the
+        // flag under the lock either sees close-before-push (we mark
+        // the new subscriber disconnected and skip the push) or
+        // push-before-close (close will iterate the list and set our
+        // flag when it runs).
+        {
+            let mut subs = self.inner.subscribers.write().unwrap();
+            let bus_closed = self.inner.closed.load(Ordering::Acquire);
+            if bus_closed {
+                inner.closed.store(true, Ordering::Release);
+            } else {
+                subs.push(Arc::clone(&inner));
+            }
         }
         EventSubscriber { inner }
     }
