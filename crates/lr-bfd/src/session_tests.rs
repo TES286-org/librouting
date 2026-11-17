@@ -234,6 +234,72 @@ fn timeout_brings_session_down() {
     assert_eq!(s.local_diag(), Diagnostic::CtrlExpired);
 }
 
+/// §6.8.4: the detection timer is anchored to the packet's arrival
+/// time — the `now` the caller passes to `feed_bytes`. A regression
+/// that armed the timer off a stale `now` (the daemon's mio loop
+/// computed `now` before `poll` and passed it to `drain_rx_socket`
+/// after) would surface here: the deadline would be `stale_now +
+/// detect_ms`, not `arrival_now + detect_ms`, so a tick at
+/// `arrival_now + detect_ms` would still see the timer pending
+/// instead of firing. The daemon loop's fix recomputes `now` after
+/// the poll; this test pins the session-level contract the fix
+/// relies on.
+#[test]
+fn detection_timer_anchors_to_arrival_time() {
+    let mut s = make_session();
+    let _ = s.drain_outgoing();
+    let p = make_packet(State::Down, 0x22222222, 0);
+    let arrival = Instant(1_000);
+    let _ = s.feed_bytes(arrival, &encode_packet(&p));
+    // The state change (Down → Init) fires an immediate TX (the
+    // §6.8.7 "transmit when contents differ" SHOULD), which arms
+    // the TX timer with a 0 ms delay — `next_deadline` returns the
+    // TX timer's `arrival`, not the DETECT timer's. Drain that
+    // immediate TX by ticking one ms past it; the next deadline is
+    // then the DETECT timer alone.
+    let _ = s.tick(Instant(arrival.0 + 1));
+    let _ = s.drain_outgoing();
+    // Detection time = 3 × max(100ms, 100ms) = 300 ms. The packet
+    // arrived at t=1000; the DETECT timer fires at t=1300.
+    let detect_ms = (s.detection_time_us() / 1000).max(1);
+    assert_eq!(detect_ms, 300);
+    let deadline = s.next_deadline().expect("DETECT timer armed");
+    assert_eq!(
+        deadline,
+        Instant(arrival.0 + detect_ms),
+        "detection timer fires at arrival + detect_ms"
+    );
+    // A tick one ms before the deadline must NOT fire the timer.
+    let evs = s.tick(Instant(arrival.0 + detect_ms - 1));
+    assert!(
+        !evs.iter().any(|e| matches!(e, BfdSessionEvent::Timeout)),
+        "no timeout one ms before the deadline"
+    );
+    // A tick at `arrival + detect_ms` fires it.
+    let evs = s.tick(Instant(arrival.0 + detect_ms));
+    assert!(
+        evs.iter().any(|e| matches!(e, BfdSessionEvent::Timeout)),
+        "timeout fires at arrival + detect_ms"
+    );
+    // Re-arm with a later arrival time and verify the deadline moved.
+    // The session is now Down (the timeout transitioned it); feed a
+    // fresh Down packet to re-arm the detection timer at a new
+    // arrival instant.
+    let _ = s.drain_outgoing();
+    let p2 = make_packet(State::Down, 0x22222222, 0);
+    let arrival2 = Instant(5_000);
+    let _ = s.feed_bytes(arrival2, &encode_packet(&p2));
+    // Drain the immediate TX again.
+    let _ = s.tick(Instant(arrival2.0 + 1));
+    let _ = s.drain_outgoing();
+    let deadline2 = s.next_deadline().expect("DETECT re-armed");
+    assert_eq!(
+        deadline2,
+        Instant(arrival2.0 + detect_ms),
+        "re-arm moves the deadline to the new arrival + detect_ms"
+    );
+}
+
 /// §6.8.4: the detection time uses the PEER's detect multiplier,
 /// not a negotiated minimum of the two.
 #[test]
