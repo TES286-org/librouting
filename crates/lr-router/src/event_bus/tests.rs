@@ -582,3 +582,62 @@ fn counters_survive_close() {
     assert_eq!(bus.published_total(), 3);
     assert_eq!(bus.dropped_total(), 1);
 }
+
+/// A `subscribe` that races with `close` must never return a
+/// subscriber whose `closed` flag stays false while the bus is
+/// closed — its `recv_timeout` would return `Timeout` forever
+/// instead of `Disconnected`, breaking the late-joiner contract the
+/// `close_is_idempotent_and_late_subscribers_see_disconnected` test
+/// pins for the close-then-subscribe case. The straightforward
+/// read-then-push pattern (read `closed` outside the write lock,
+/// then push) has a window where the read sees `false`, `close`
+/// runs in between, and the push lands in a list `close` had
+/// already cleared — the new subscriber's `closed` flag never
+/// flips. The re-check under the write lock closes the window.
+///
+/// The test runs many iterations with many concurrent subscriber
+/// threads against one closer per iteration. A buggy implementation
+/// would surface at least one subscriber returning `Empty` (queue
+/// empty, flag false) instead of `Disconnected`; the fixed
+/// implementation returns `Disconnected` for every subscriber once
+/// `close` has completed.
+#[test]
+fn subscribe_concurrent_with_close_always_disconnects() {
+    use std::sync::Barrier;
+
+    const ITERATIONS: usize = 200;
+    const SUBSCRIBERS: usize = 8;
+    let mut failures = 0;
+    for _ in 0..ITERATIONS {
+        let bus = EventBus::with_capacity(4);
+        let barrier = Arc::new(Barrier::new(SUBSCRIBERS + 1));
+        let mut threads = Vec::with_capacity(SUBSCRIBERS);
+        for _ in 0..SUBSCRIBERS {
+            let b = Arc::clone(&barrier);
+            let bus_clone = bus.clone();
+            threads.push(thread::spawn(move || {
+                b.wait();
+                bus_clone.subscribe()
+            }));
+        }
+        // Release every subscriber thread, then close immediately so
+        // each subscribe's outer `closed` check races close's write
+        // lock acquisition.
+        barrier.wait();
+        bus.close();
+        for t in threads {
+            let rx = t.join().unwrap();
+            if !matches!(
+                rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            ) {
+                failures += 1;
+            }
+        }
+    }
+    assert_eq!(
+        failures, 0,
+        "{failures} subscribers did not see Disconnected after close — \
+         the subscribe/close race the re-check under the write lock closes"
+    );
+}
