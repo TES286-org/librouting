@@ -54,6 +54,10 @@ check_layout() {
     local f
     for f in "${FILES[@]}"; do
         awk -v file="$f" -v max="$MAX_COLUMNS" '
+            # A Windows checkout may hand us CRLF; the CR is a line
+            # ending, not content, so it must not count as a column or
+            # hide trailing whitespace.
+            { sub(/\r$/, "") }
             BEGIN { fence = 0; h1 = 0 }
             /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
             fence { next }
@@ -123,7 +127,7 @@ check_links() {
 # not every document writes them with a section sign.
 check_version_stamps() {
     local f ver ver_re
-    ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+    ver=$(tr -d '\r' < Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
     [ -n "$ver" ] || {
         echo "cannot read [workspace.package] version from Cargo.toml" >&2
         exit 1
@@ -141,6 +145,7 @@ check_version_stamps() {
                 return (pre !~ /[0-9.]/) && (post !~ /[0-9.]/)
             }
             {
+                sub(/\r$/, "")
                 line = $0
                 gsub(/§[A-Za-z0-9.]+/, "", line)
                 if (match(line, /-rc\.[0-9]+/)) {
