@@ -50,7 +50,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Best-path selection and the router-id tiebreak | yes | `lr-bgp::best_path` |
 | Standard, extended and large communities | yes | `lr-bgp::path::communities` |
 | Well-known communities and attribute flags | yes | `lr-bgp::path::well_known`, `lr-bgp::path` |
-| ATOMIC_AGGREGATE, AGGREGATOR, ORIGINATOR_ID, CLUSTER_LIST typed accessors (RFC 4271 §5.1.6/§5.1.7, RFC 4456 §8) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::{OriginatorId, ClusterList}` |
+| ATOMIC_AGGREGATE, AGGREGATOR, ORIGINATOR_ID, CLUSTER_LIST typed accessors (RFC 4271 §5.1.6/§5.1.7, RFC 4456 §7/§8) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::{OriginatorId, ClusterList}` |
 | AIGP typed accessor and TLV codec (RFC 7311) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::Aigp` |
 | PMSI Tunnel typed accessor and codec (RFC 6514 §5) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::PmsiTunnel` |
 | Labelled-unicast NLRI and MP helpers (RFC 8277) | yes | `lr-bgp::path::labeled_nlri` |
@@ -59,7 +59,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Per-peer configuration: hold time, families, max-prefix, GTSM | yes | `lr-bgp::peer` |
 | RPKI-RTR PDU codec and client (RFC 8210) | yes | `lr-bgp::rtr::pdu`, `lr-bgp::rtr::client` |
 | ROA table and origin validation (RFC 6811) | yes | `lr-bgp::roa`, `lr-bgp::roa_store`, `lr-bgp::roa_loader` |
-| Advanced ROA loading: URL fetch + file watch, native/bird parsers + jq/awk transform formats (issue #100) | yes | `lr-cli::daemon_roa_loader`, `lr-bgp::roa_loader` |
+| Advanced ROA loading: URL fetch + file watch, native/bird parsers + jq/awk transform formats | yes | `lr-cli::daemon_roa_loader`, `lr-bgp::roa_loader` |
 | BGP-LS Node/Link/Prefix/SRv6 SID NLRI codec (RFC 7752, RFC 9514) | yes | `lr-bgp::path::bgp_ls` |
 | BGP-LS Attribute TLV codec (RFC 7752 §3.3 + RFC 9514 §7-§8) | yes | `lr-bgp::path::bgp_ls_attr` |
 | BGP-LS NLRI egress (`BgpPeer::advertise_bgpls` / `withdraw_bgpls`) | yes | `lr-bgp::advertise` |
@@ -134,7 +134,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | BMP codec, split feed, peer headers (RFC 7854) | yes | `lr-bmp` |
 | MRT TABLE_DUMP_V2 read and write, BGP4MP (RFC 6396) | yes | `lr-mrt` |
 | Route flap damping figure of merit (RFC 2439) | yes | `lr-damping` |
-| Per-peer flap suppression (issue #99) | yes | `lr-peer-health`, `lr-policy::hooks::{PeerHealthImportHook, PeerHealthShadowSelectionHook}`, `lr-router::PeerHealthLookup` (dynamic tiering in `reselect`), `lr-bgp::best_path::BestPath::rank_tiered` (stamp-based fallback), `lr-cli::peer_health_view` (`show peer-health`), SIGHUP live rollout-mode reload |
+| Per-peer flap suppression | yes | `lr-peer-health`, `lr-policy::hooks::{PeerHealthImportHook, PeerHealthShadowSelectionHook}`, `lr-router::PeerHealthLookup` (dynamic tiering in `reselect`), `lr-bgp::best_path::BestPath::rank_tiered` (stamp-based fallback), `lr-cli::peer_health_view` (`show peer-health`), SIGHUP live rollout-mode reload |
 
 ## RIB and router — `lr-rib`, `lr-router`
 
@@ -168,7 +168,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Filter DSL peephole optimisation | yes | `lr-policy::filter::peephole` |
 | Source spans and positioned diagnostics | yes | `lr-policy::filter::span` |
 | Cross-filter reusable function definitions | yes | `lr-cli::daemon_policy::build_filters` |
-| Filter DSL route fields: `bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list` (RFC 4271 §5.1.6, RFC 4456 §8), `bgp.otc` (RFC 9234 §3.1), `bgp.aigp` (RFC 7311), `bgp.aggregator.asn` / `bgp.aggregator.speaker` (RFC 4271 §5.1.7), `bgp.pmsi_tunnel` (RFC 6514 §5), `ospf.metric1` (RFC 2328 §16 / RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340 §4.8.5), `ospf.tag` (RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3), `ospf.router_id` (RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the same field on every v3 LSA), `babel.metric` (RFC 8966 §3.2 + §3.4.3), `babel.seqno` (RFC 8966 §3.2 + §4.6.9), `babel.router_id` (RFC 8966 §3.2 + §4.6.8 — the 64-bit EUI-64-style Router-ID), `bgp.lrxp.*` (issue #81, LRXP exchange-plane records; feature `exchange-plane`) | yes | `lr-policy::filter::ast::RouteFieldKind`, `lr-policy::bgp`, `lr-policy::ospf`, `lr-policy::babel`, `lr-policy::lrxp` |
+| Filter DSL route fields: `bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list` (RFC 4271 §5.1.6, RFC 4456 §7/§8), `bgp.otc` (RFC 9234 §3.1), `bgp.aigp` (RFC 7311), `bgp.aggregator.asn` / `bgp.aggregator.speaker` (RFC 4271 §5.1.7), `bgp.pmsi_tunnel` (RFC 6514 §5), `ospf.metric1` (RFC 2328 §16 / RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340 §4.8.5), `ospf.tag` (RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3), `ospf.router_id` (RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the same field on every v3 LSA), `babel.metric` (RFC 8966 §3.2 + §3.4.3), `babel.seqno` (RFC 8966 §3.2 + §4.6.9), `babel.router_id` (RFC 8966 §3.2 + §4.6.8 — the 64-bit EUI-64-style Router-ID), `bgp.lrxp.*` (LRXP exchange-plane records; feature `exchange-plane`) | yes | `lr-policy::filter::ast::RouteFieldKind`, `lr-policy::bgp`, `lr-policy::ospf`, `lr-policy::babel`, `lr-policy::lrxp` |
 
 ## OS integration and data plane — `lr-osroute`, `lr-mpls`, `lr-srv6`
 
@@ -198,7 +198,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | FFI ROA store and origin validation | yes | `lr-ffi::roa_store`, `lr-ffi::filters` |
 | C++ header-only RAII wrapper | yes | `include/librouting.hpp` |
 | Go and Python bindings | yes | `bindings/lr-go`, `bindings/lr-python` |
-| Daemon for BGP, OSPFv2, OSPFv3, Babel, LDP, BMP and combinations | yes | `crates/lr-cli/src/daemon.rs`, `daemon_multi.rs`, `daemon_bgpls.rs`, `shutdown.rs` |
+| Daemon for BGP, OSPFv2, OSPFv3, Babel, LDP, BMP and combinations | yes | `crates/lr-cli/src/daemon.rs`, `daemon_multi.rs`, `shutdown.rs` |
 | Categorised logging: severity, components, per-component levels, plain/JSON format, file mirror | yes | `crates/lr-cli/src/daemon_logger.rs` |
 | Runtime API socket and `lrctl` client | yes | `crates/lr-cli/src/api.rs`, `crates/lr-cli/src/lrctl.rs` |
 | Prometheus exposition on `/metrics` | yes | `crates/lr-cli/src/metrics.rs` |
@@ -254,8 +254,8 @@ entire RFC scope. The major ones:
   green for a release window without an arch-specific patch landing.
   The ppc64le native gate is blocked on the IBM-provided
   `ubuntu-26.04-ppc64le` / `ubuntu-26.04-ppc64le-p10` runner labels
-  clearing review or a self-hosted ppc64le runner being registered
-  (issue #95). See [`ROADMAP.md`](ROADMAP.md) §Compatibility, `IBM
+  clearing review or a self-hosted ppc64le runner being registered.
+  See [`ROADMAP.md`](ROADMAP.md) §Compatibility, `IBM
   Power (ppc64le) and IBM Z (s390x) targeted compatibility
   improvements`.
 

@@ -1,9 +1,10 @@
 # Tutorial: from bytes to a working router
 
 This tutorial builds a working BGP speaker in four steps, using only the
-public library API. Every snippet is the same code
-`crates/lr-tests/tests/tutorial_snippets.rs` runs, so the tutorial cannot
-drift from the API without breaking CI.
+public library API. The Chapter 1–3 snippets are the same code
+`crates/lr-tests/tests/tutorial_snippets.rs` runs, so those chapters
+cannot drift from the API without breaking CI. The Chapter 4 snippets
+are illustrative fragments that build on the router from Chapter 2.
 
 It is aimed at a Rust developer embedding librouting in their own event
 loop. If you would rather run a router than build one, read
@@ -17,13 +18,14 @@ versions of the crates:
 
 ```toml
 [dependencies]
-lr-core = "1.8"
-lr-bgp = "1.8"
-lr-router = "1.8"
+lr-core = "<version>"
+lr-bgp = "<version>"
+lr-router = "<version>"
 ```
 
-…or depend on a pinned git revision (useful when running an unreleased
-fix):
+Take the version from `[workspace.package]` in
+[`Cargo.toml`](../Cargo.toml). Alternatively, depend on a pinned git
+revision (useful when running an unreleased fix):
 
 ```toml
 [dependencies]
@@ -316,11 +318,10 @@ daemon. Timers — hold time, keepalive, MRAI, OSPF hello and dead
 intervals, Babel hello and IHU — fire from `RouterInstance::tick`:
 
 ```rust
-use std::time::Instant;
-
-// Call this from your event loop, at least as often as your shortest
-// protocol timer.
-router.tick(Instant::now());
+// Illustrative: call this from your event loop at least as often as
+// your shortest protocol timer. `now_ms` comes from your monotonic
+// clock and `a` is the router from Chapter 2.
+a.tick(lr_core::time::Instant::from_millis(now_ms));
 ```
 
 For protocols with sub-millisecond timestamps (Babel RTT, RFC 8966

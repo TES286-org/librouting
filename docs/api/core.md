@@ -23,10 +23,11 @@ assert_eq!(Prefix::new_v4([203, 0, 113, 0], 24), prefix);
 assert_eq!(net.prefix(), prefix);
 ```
 
-`lr_core::prelude` re-exports the common set (`Asn`, `IpAddr`, `IpNet`,
+`lr_core::prelude` re-exports the common set: `Asn`, `IpAddr`, `IpNet`,
 `Prefix`, `RouterId`, `ReadBuf`, `WriteBuf`, `Codec`, `Decoder`,
-`Encoder`, `ParseError`, `EncodeError`, `Route`, `RouteKey`,
-`RouteOrigin`, `Clock`, `Duration`, `Instant`, `TimerQueue`).
+`Encoder`, `Error`, `Result`, `ParseError`, `EncodeError`, `Action`,
+`StateId`, `StateMachine`, `TimerId`, `TimerSpec`, `Route`, `RouteKey`,
+`RouteOrigin`, `Clock`, `Duration`, `Instant`, `TimerQueue`.
 
 The codec traits. The encoder is stateless; the decoder is stateful and
 owns its partial-frame carryover (see

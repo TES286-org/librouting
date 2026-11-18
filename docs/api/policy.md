@@ -175,7 +175,7 @@ external route tag (`ospf.tag`, carried through the Loc-RIB on the
 existing `Route::tag` field the OSPF route computation populates
 from the LSA's tag for type-5 / type-7 externals), and —
 behind the `exchange-plane` feature — the LRXP exchange-plane records
-the route carries (`bgp.lrxp.*`, issue #81).
+the route carries (`bgp.lrxp.*`).
 
 ## RFCs
 

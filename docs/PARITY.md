@@ -192,8 +192,9 @@ Notes:
   warning (the BIRD and FRR convention). `max_prefix_action` also takes
   `teardown`, which reproduces FRR's hard reset: teardown sends a CEASE
   NOTIFICATION and purges the routes the peer installed (RFC 4271
-  §8.2.2). lr's third value, `restart`, behaves like `teardown`; neither
-  implements BIRD's re-establishment cooldown.
+  §8.2.2). `restart` does the same and re-establishes the session after
+  `max_prefix_restart_time` seconds; with a zero cooldown it is an alias
+  for `teardown`.
 - **TCP-AO.** lr's keys are installed on the socket through
   `lr-osroute::tcp_auth`, which needs a kernel built with `CONFIG_TCP_AO`
   (Linux 6.7 and later). On an older kernel the key install fails with
@@ -309,10 +310,12 @@ the routing table.
   `summary-only` and an `as-set` form.
 - **lr** takes `[[aggregate]]` entries, originates the aggregate when at
   least one specific is present, zeroes the AS_PATH and sets
-  ATOMIC_AGGREGATE and AGGREGATOR (RFC 4271 §9.2.2.2). There is no
-  `as-set` form and no per-aggregate filter; use a `[[filter]]` for the
-  policy part. `tests/interop/aggregate_bird.sh` checks the shape against
-  BIRD.
+  ATOMIC_AGGREGATE and AGGREGATOR (RFC 4271 §9.2.2.2). `summary_only`
+  suppresses the more-specific routes from the Adj-RIB-Out, and `as_set`
+  builds an AS_SET segment from the contributing ASes instead of
+  ATOMIC_AGGREGATE. There is no per-aggregate filter; use a `[[filter]]`
+  for the policy part. `tests/interop/aggregate_bird.sh` checks the
+  shape against BIRD.
 
 ## Deliberate non-parities
 
@@ -329,9 +332,3 @@ Recorded so that nobody "fixes" them by accident:
 3. **BIRD needs the IPv4 unicast capability advertised and FRR does
    not**, so the one `default_ipv4_unicast` flag produces per-dialect
    capability lists (§4). This is a wire-level necessity.
-4. **The `restart` maximum-prefix action cooldown** landed in rc.6
-   (`max_prefix_restart_time`, plus the `--max-prefix-restart-time`
-   flag). When the cooldown is 0, `restart` behaves as an alias for
-   `teardown` (no cooldown) — matching the previously-documented
-   deviation. Set a non-zero `max_prefix_restart_time` to get the
-   BIRD-style re-establishment gate.

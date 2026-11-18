@@ -30,8 +30,8 @@ There is no `-c`; the flag is `--config PATH`.
 The dialect is recognised from the content, and a compat-loaded config
 keeps its dialect across reloads. Unmapped constructs and unsupported
 protocol stanzas become `config warning: …` lines at startup (BGP,
-OSPFv2, OSPFv3, Babel and BFD stanzas translate to lr's own stanzas
-since 1.4.0); [COMPAT.md](COMPAT.md) has the surface and the `lr:`
+OSPFv2, OSPFv3, Babel and BFD stanzas translate to lr's own stanzas);
+[COMPAT.md](COMPAT.md) has the surface and the `lr:`
 comment directives. A TOML config adds `config deprecation: …` on every
 load and every reload.
 
@@ -112,6 +112,8 @@ daemon: runtime API on /run/lr-daemon.api
 | `show routes count` | Loc-RIB grouped by protocol |
 | `show memory` | Process RSS and virtual size |
 | `show roa` | ROA table dump (BIRD `show roa` parity) |
+| `show roa count` | ROA table size |
+| `show peer-health` | Per-session peer-health state (rollout tier, flap counters) |
 | `session <handle> soft-in` | `session <handle> soft-in ok re-evaluated=<n>` |
 | `session <handle> refresh-in [family]` | `session <handle> refresh-in ok family=<f>` |
 | `reload` | The reload lines above |
@@ -167,7 +169,7 @@ file and answers `mrt-dump <path> records=<n>`; a write failure answers
 `mrt-dump failed: <error>`. `mrt` with no path answers
 `usage: mrt <path>`.
 
-The `show …` family is the BIRD-style operational surface (issue #52):
+The `show …` family is the BIRD-style operational surface:
 `show status` extends the legacy `status` reply with per-protocol
 session breakdown (`kind=<proto> total=<n> established=<n>`) and a
 `memory rss-bytes=… vsize-bytes=…` line; `show sessions [detail]`
@@ -181,7 +183,7 @@ prints `uptime-secs`, `rss-bytes` and `vsize-bytes`. `lrctl` proxies
 each sub-command verbatim — `lrctl show` (no sub) maps to `show status`,
 matching BIRD's shortcut.
 
-The `session <handle> <op>` family (issue #52 follow-up) is the
+The `session <handle> <op>` family is the
 write-side complement to `show session <handle>`:
 
 - `session <handle> soft-in` — re-evaluate the import policy against
@@ -362,7 +364,7 @@ docker run --rm --network host \
     --api-socket /run/lr-daemon/api.sock \
     --metrics-addr 127.0.0.1:9119
 
-# Production — config file mount (native .lr DSL; TOML works the same).
+# Production — config file mount. Use the native .lr DSL.
 docker run --rm -d \
     --name lr-daemon \
     -p 179:179 -p 9119:9119 \

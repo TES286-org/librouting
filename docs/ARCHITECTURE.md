@@ -427,7 +427,7 @@ Ordering rules worth knowing before writing a hook:
 - `ImportHook::on_withdraw` is a notification, not a filter. Fires
   after the route has left Adj-RIB-In, and the return value is ignored.
   The RFC 2439 damping table is fed from here. The per-origin variant
-  `on_withdraw_with_origin` (issue #99) carries the `RouteOrigin` so
+  `on_withdraw_with_origin` carries the `RouteOrigin` so
   per-`(peer, AFI/SAFI)` hooks like `PeerHealthImportHook` account
   churn at the right session; its default implementation delegates to
   the 2-parameter `on_withdraw`, so existing hooks keep working. The
@@ -831,8 +831,7 @@ operands, and the same `accept`/`reject` short-circuit semantics. Two
 differences are deliberate.
 
 - lr keeps the tree-walking interpreter as the semantic oracle and uses
-  `EvalTree` as the dynamic-subtree fallback. BIRD removed its
-  tree-walker when `f_line` landed; lr kept it so the bytecode VM has a
+  `EvalTree` as the dynamic-subtree fallback, so the bytecode VM has a
   differential oracle.
 - lr does not intern strings or attributes inside the VM. Names
   (`LoadVar`, `AssignVar`, `Call`, `Method`) are still `String` clones.

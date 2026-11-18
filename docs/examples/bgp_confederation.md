@@ -72,7 +72,7 @@ Two behaviours to know before you rely on confederations:
   existing leftmost `AS_CONFED_SEQUENCE` is extended in place so the
   path keeps one confed segment.
 - `BgpPeer::advertise` re-encodes the AS_PATH it was handed and applies
-  the full RFC 5065 §4.1(b)/(c)(1)/(5) rules (landed in rc.6):
+  the full RFC 5065 §4.1(b)/(c)(1)/(5) rules:
   when advertising into a confederation-internal peer the local AS is
   prepended as an `AS_CONFED_SEQUENCE`; when advertising to a peer
   outside the confederation every `AS_CONFED_*` segment is stripped

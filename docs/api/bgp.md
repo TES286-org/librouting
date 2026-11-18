@@ -88,6 +88,7 @@ Add-Path advertises from:
 ```rust
 use lr_bgp::best_path::{BestPath, BestPathConfig};
 
+// Illustrative: `routes` is a `&[lr_core::rib::Route]`.
 let cfg = BestPathConfig { multipath: 8, ..Default::default() };
 let best: Option<&Route> = BestPath::select(&routes, &cfg);
 let paths: Option<Vec<&Route>> = BestPath::multipath(&routes, &cfg);
@@ -95,6 +96,10 @@ let ranked: Vec<&Route> = BestPath::rank(&routes, &cfg);
 ```
 
 ## Session knobs
+
+`SessionConfig` is the type `add_session` accepts. It carries a
+`PeerConfig` in `bgp` for the per-peer protocol knobs, and adds the
+session-level knobs below.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
@@ -104,16 +109,22 @@ let ranked: Vec<&Route> = BestPath::rank(&routes, &cfg);
 | `add_path` | false | RFC 7911 send + receive |
 | `extended_next_hop` | empty | RFC 5549 tuples `(AFI, SAFI, NH-AFI)` |
 | `graceful_restart[_time]` | on, 120 s | RFC 4724 |
-| `long_lived_gr`, `long_lived_stale_time` | off | RFC 9494; needs `long_lived` |
+| `long_lived_gr`, `long_lived_stale_time` | off | RFC 9494; needs `graceful_restart` |
 | `maximum_prefix`, `_action`, `_threshold` | none, `Warn`, 75 | Per-peer prefix ceiling |
 | `default_ipv4_unicast` | true | FRR `bgp default ipv4-unicast` posture |
 | `local_as_tolerance` | 0 | AS-loop tolerance, FRR `allowas-in`, RFC 4271 §9.1.2.15 |
 | `soft_reconfig_inbound` | false | Retain the pre-policy Adj-RIB-In |
 | `collision_group`, `locally_initiated` | `None`, false | RFC 4271 §6.8 collision resolution |
 
-`PeerConfig` and `SessionConfig` carry these under the same names, and
-`SessionConfig` (the type `add_session` accepts) adds `area_id`, the
-OSPF knobs and the session kind. Build it with
+`PeerConfig` carries the per-peer subset under the same names where the
+concept is shared. Three names differ: `enhanced_route_refresh` is
+`PeerConfig::enhanced_rr`, `long_lived_gr` is `PeerConfig::long_lived`,
+and `mrai_ms` has no `PeerConfig` counterpart. `PeerConfig::new` leaves
+`graceful_restart` off, while `SessionConfig::bgp` turns it on with a
+120 s restart time.
+
+`SessionConfig` (the type `add_session` accepts) also carries `area_id`,
+the OSPF knobs and the session kind. Build it with
 `SessionConfig::bgp(local_as, peer_as, local_bgp_id)`, `::ospfv2(rid,
 area)`, `::ospfv3(rid, area)` or `::babel(local_addr)`, then chain
 `with_mp_families`, `with_add_path`, `with_extended_next_hop[_tuple]`,

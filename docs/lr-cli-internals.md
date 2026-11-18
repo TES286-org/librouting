@@ -37,13 +37,19 @@ can run any of them without a parser framework.
 | `daemon.rs` | `lr-daemon` entry point, BGP run path, Babel run path, BMP collector, kernel mirror |
 | `daemon_multi.rs` | Multi-protocol supervisor for `--protocol bgp,ospf,babel` |
 | `daemon_config.rs` | `DaemonConfig` model, argv parser, TOML loader, shared key dispatch, `.lr` DSL loader |
-| `daemon_policy.rs` | TOML policy tables compiled into an `lr_policy::PolicySet` |
+| `daemon_policy.rs` | Configuration policy tables compiled into an `lr_policy::PolicySet` |
+| `daemon_roa_loader.rs` | Periodic URL fetch and file-change ROA reloading |
 | `daemon_ospf.rs` | OSPFv2 run path over raw sockets |
 | `daemon_ospf3.rs` | OSPFv3 run path over raw IPv6 sockets |
 | `daemon_ldp.rs` | LDP run path: UDP discovery plus TCP session |
 | `daemon_bfd.rs` | Per-peer BFD liveness wired into the BGP session |
 | `daemon_rpki.rs` | RPKI-RTR cache client thread |
 | `daemon_logger.rs` | Process-wide console logger |
+| `show.rs` | `show <subsystem>` command dispatcher |
+| `roa_view.rs` | `show roa` renderer |
+| `peer_health_view.rs` | `show peer-health` renderer |
+| `shutdown.rs` | Graceful drain shutdown controller |
+| `sysinfo.rs` | Process memory introspection |
 | `config_dsl/mod.rs` | Native `.lr` configuration DSL |
 | `config_dsl/lexer.rs` | Tokens for the `.lr` grammar |
 | `config_dsl/parser.rs` | `.lr` parser and IR lowering |
@@ -57,7 +63,12 @@ can run any of them without a parser framework.
 | `metrics.rs` | Prometheus `/metrics` HTTP endpoint |
 | `api.rs` | Runtime API command dispatcher |
 | `api_imp_windows.rs` | Windows named-pipe transport for the same API |
+| `pipe_name.rs` | Named-pipe path normalization shared by both Windows ends |
+| `lrctl_json.rs` | Minimal JSON serializer for `lrctl --json` |
 | `signal.rs` | Cross-platform `SIGHUP` / `SIGINT` / `SIGTERM` handling |
+| `bgp_reactor.rs` | BGP session and listener reactor |
+| `accept_reactor.rs` | Accept loops for the runtime API and metrics listeners |
+| `ospf_engine_loop.rs` | Shared OSPFv2 / OSPFv3 engine loop |
 | `privdrop.rs` | Privilege drop after the listening sockets are bound |
 | `lrctl.rs` | `lrctl` entry point and API client |
 
@@ -87,8 +98,10 @@ the same six steps:
    `lr-osroute` when `--install-kernel-routes` is set — kernel route
    I/O never runs under the router's writer lock.
 6. Handle signals. `signal::init()` installs the handlers; the poll loop
-   calls `signal::take_pending()` and acts on `SIGHUP` (reload the
-   `networks` set) or `SIGTERM` / `SIGINT` (graceful shutdown: one
+   calls `signal::take_pending()` and acts on `SIGHUP` (run the reload
+   path: networks, static routes, `[[roa]]`, RPKI, log reopen, LDP
+   bindings — see [`lr-daemon.md`](lr-daemon.md) §Lifecycle and signals)
+   or `SIGTERM` / `SIGINT` (graceful shutdown: one
    NOTIFICATION CEASE per session, teardown, exit 0).
 
 ## The BGP run path
@@ -321,8 +334,9 @@ they run on every desktop OS.
    in both dialects and cannot drift. Register a per-peer override in the
    same match when the key has one.
 4. Consume the value in the right `run_*_daemon` function.
-5. Document the flag in `print_usage()` and in `templates/daemon.lr` and
-   `templates/daemon.toml`, keeping the DSL and TOML twins in step.
+5. Document the flag in `print_usage()` and in `templates/daemon.lr`.
+   Update the deprecated `templates/daemon.toml` twin only when the
+   migration surface changes.
 6. Add a daemon e2e test under `crates/lr-cli/tests/`; one of the
    existing `daemon_*.rs` files is a good template.
 7. Update [`lr-cli.md`](lr-cli.md), and [`STATUS.md`](STATUS.md) when
@@ -355,8 +369,9 @@ they run on every desktop OS.
    (`tests/lint_interop_doc.sh`) requires the script to appear in
    [`INTEROP.md`](INTEROP.md).
 6. Update [`lr-cli.md`](lr-cli.md), [`STATUS.md`](STATUS.md),
-   [`RFC_MAP.md`](RFC_MAP.md), [`ROADMAP.md`](ROADMAP.md) and the
-   `templates/daemon.lr` and `templates/daemon.toml` twins.
+   [`RFC_MAP.md`](RFC_MAP.md), [`ROADMAP.md`](ROADMAP.md) and
+   `templates/daemon.lr`; touch the deprecated TOML twin only when the
+   migration surface changes.
 
 ## Test layers
 

@@ -8,7 +8,6 @@ to know what carries over, what lr adds, and what it refuses.
 ```sh
 lr-daemon --config bird.conf          # BIRD 2 config, runs directly
 lr-daemon --config frr.conf           # FRR config, runs directly
-lr-daemon --config daemon.toml        # the native lr TOML
 lr-daemon --config daemon.lr          # the native lr DSL
 ```
 
@@ -29,8 +28,10 @@ there.
 
 ## What is covered
 
-The compat surface covers the **BGP control plane**. Nothing else in the
-file changes how lr routes.
+The compat surface covers the **BGP control plane**, and translates the
+BIRD and FRR OSPFv2, OSPFv3, Babel and BFD stanzas listed below into lr's
+own protocol blocks. A directive outside that set never changes how lr
+routes.
 
 | Source shape | lr behaviour |
 | --- | --- |
@@ -60,14 +61,14 @@ startup, or a `# UNMAPPED:` comment when you run the converter.
 
 A non-BGP routing protocol in the file — BIRD `protocol ospf …`, FRR
 `router ospf …`, BIRD `protocol babel …`, FRR `router babel …`, and so on
-— is converted to lr's own protocol stanzas since 1.4.0 (BGP, OSPFv2,
+— is converted to lr's own protocol stanzas (BGP, OSPFv2,
 OSPFv3, Babel and BFD are translated; everything else still falls back to
 the `config warning: <stanza>: ignored — no lr equivalent` path).
 BIRD's `protocol device` is housekeeping with no routing meaning and is
 skipped without a note.
 
 Combining BGP and OSPF (or any other supported pair of protocols) *from
-one BIRD or FRR file* is supported since 1.4.0: the compat surface loads
+one BIRD or FRR file* is supported: the compat surface loads
 every translated stanza into one lr config, and the daemon's
 `--protocol bgp,ospf` (or the equivalent `protocol "bgp,ospf"` key)
 runs them side by side in a single process. Protocols lr does not yet
@@ -194,7 +195,7 @@ still need a restart, exactly as with the native configuration. The
 ## Limitations
 
 - BGP, OSPFv2, OSPFv3, Babel and BFD stanzas translate to lr's own
-  stanzas (since 1.4.0); other protocols (RIP, IS-IS, PIM, etc.) are
+  stanzas; other protocols (RIP, IS-IS, PIM, etc.) are
   reported as `ignored`. BFD *settings on a BGP peer* also map.
 - A BIRD or FRR `include` is not expanded: the compat loader takes the
   file it was given, so an include-heavy configuration needs its pieces
@@ -204,5 +205,5 @@ still need a restart, exactly as with the native configuration. The
   noted rather than mapped.
 - One dialect per file. An FRR file containing BIRD stanzas, or the
   reverse, fails to parse; split it.
-- The native TOML schema has no `include` equivalent either, so a split
-  TOML configuration has to be passed as one file.
+- The deprecated TOML subset has no `include` equivalent either, so a
+  split TOML configuration has to be passed as one file.

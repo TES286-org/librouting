@@ -1,11 +1,12 @@
 # `lr-daemon` flag and configuration reference
 
-This is the exhaustive reference for the `lr-daemon` command line and
-its configuration file. Every flag below is a `match` arm in
-`daemon_config::parse_args`; every configuration key is a `match` arm in
-`daemon_config::apply_config_key` or one of the per-section appliers it
-dispatches to. Read it when you need a default, the exact spelling of a
-key, or the name of the config equivalent of a flag.
+This is the reference for the `lr-daemon` command line and its
+configuration file. `--help` and the `match` arms in
+`daemon_config::parse_args` are authoritative for the full flag set;
+`daemon_config::apply_config_key` and the per-section appliers it
+dispatches to are authoritative for the keys. Read this page when you
+need a default, the exact spelling of a key, or the name of the config
+equivalent of a flag.
 
 The narrative guide is [lr-daemon.md](lr-daemon.md); the `.lr` grammar
 is [config_dsl_grammar.md](config_dsl_grammar.md); the commented
@@ -83,6 +84,21 @@ removal in 2.x.
 | `--metrics-addr ADDR` | `metrics_addr` | TCP address for `/metrics` |
 | `-h`, `--help` | — | Usage banner, exit 0 |
 
+### Logging, metrics and BGP-LS
+
+| Flag | Config equivalent | Default | Notes |
+| --- | --- | --- | --- |
+| `--log-level LEVEL` | `[logging] level` | `info` | `error`, `warn`, `info`, `debug`, `trace` |
+| `--log-target SPEC` | `[logging] target` | — | Repeatable `component=level` |
+| `--log-format F` | `[logging] format` | `plain` | `plain` or `json` |
+| `--log-color M` | `[logging] color` | `auto` | `auto`, `on`, `off` |
+| `--log-file PATH` | `[logging] file` | — | Mirror records to a file |
+| `--bgp-ls` | `[bgp_ls] enabled` | off | Advertise AFI 16388 / SAFI 71 |
+| `--bgp-ls-as AS` | `[bgp_ls] as_number` | 0 = local AS | Speaker AS sub-TLV |
+| `--bgp-ls-id ID` | `[bgp_ls] bgp_ls_id` | 0 | Speaker BGP-LS ID |
+| `--bgp-ls-area ID` | `[bgp_ls] areas` | every area | Repeatable |
+| `--bgp-ls-instance-id ID` | `[bgp_ls] instance_id` | 0 | RFC 9552 §3.2 |
+
 ### BGP identity and peers
 
 | Flag | Config equivalent | Default | Notes |
@@ -143,12 +159,12 @@ flag's parser is only the fallback for an unparseable argument.
 | `--max-prefixes N` | `[bgp] max_prefixes` | none | 0 = no limit |
 | `--max-prefix-action A` | `[bgp] max_prefix_action` | `warn` | `warn`, `teardown`, `restart` |
 | `--max-prefix-threshold P` | `[bgp] max_prefix_threshold` | 75 | Percent |
-| `--max-prefix-restart-time S` | `[bgp] max_prefix_restart_time` / `[[peer]] max_prefix_restart_time` | 0 | Cooldown (seconds) before re-establishing after a `restart` action (landed in rc.6). When 0, `restart` behaves as an alias for `teardown` (no cooldown). |
+| `--max-prefix-restart-time S` | `[bgp] max_prefix_restart_time` / `[[peer]] max_prefix_restart_time` | 0 | Cooldown (seconds) before re-establishing after a `restart` action. When 0, `restart` behaves as an alias for `teardown` (no cooldown). |
 
 `warn` only logs; a session is torn down only with `--max-prefix-action
 teardown` or `restart`. The daemon does not validate the action string —
-anything that is not `teardown` or `restart` is treated as `warn`. Since
-rc.6, `restart` carries its own cooldown via `--max-prefix-restart-time`
+anything that is not `teardown` or `restart` is treated as `warn`.
+`restart` carries its own cooldown via `--max-prefix-restart-time`
 (or `max_prefix_restart_time` per-peer); when the cooldown is 0, `restart`
 behaves as an alias for `teardown`.
 
@@ -190,9 +206,9 @@ behaves as an alias for `teardown`.
 | `--ospf-auth-algorithm A` | `[ospf.auth] algorithm` | `hmac-sha256` | `hmac-sha256` (RFC 5709 §2.2) / `hmac-sha1` (§2.1) |
 
 `--ospf-area` sets the default area for interfaces that do not name one.
-The configuration-file counterpart is the `[[ospf.area]]` block (landed
-in rc.6), which declares non-backbone areas and their type (`normal` /
-`stub` / `nssa`, optional `no_summary`, optional `stub_metric`). The
+The configuration-file counterpart is the `[[ospf.area]]` block, which
+declares non-backbone areas and their type (`normal` / `stub` / `nssa`,
+optional `no_summary`, optional `stub_metric`). The
 backbone area (0) is always implicit and always `normal`, so a config
 using only area 0 needs no `[[ospf.area]]` block — but interfaces that
 attach to a non-backbone area must reference an `id` declared by an
@@ -351,7 +367,7 @@ unknown value fails closed at parse / finalize time so a typo'd role
 never reaches the wire. See
 [research/EXCHANGE-PLANE.md](research/EXCHANGE-PLANE.md).
 
-### Shutdown (issue #53)
+### Shutdown
 
 | Flag | Config equivalent | Notes |
 | --- | --- | --- |
@@ -384,22 +400,23 @@ unbounded drain would hang the daemon on a wedged peer).
 
 The drain is wired into every daemon mode: BGP standalone, the
 multi-protocol supervisor, and the standalone OSPF / OSPFv3 / LDP
-engines. The runtime API dispatch is identical on Unix and Windows
-(named pipes mirror the Unix domain socket path verbatim), so
-`lrctl shutdown drain|status|abort` works on both platforms.
+engines. The runtime API dispatch is identical on Unix and Windows (named pipes
+mirror the Unix domain socket path verbatim), so the same
+`shutdown drain|status|abort` commands work on both. The `lrctl` client
+is Unix-only; on Windows drive the pipe directly.
 
 ## Configuration keys
 
 A key with no table above it is top-level. Array tables (`[[name]]`)
 accumulate one entry each; single tables (`[name]`) set globals.
 
-Sections are named below with the deprecated TOML spelling — the
-native `.lr` DSL is the primary authoring dialect (see
+Sections are named below with the deprecated TOML spelling; the `.lr`
+DSL is the supported authoring dialect (see
 [config_dsl_grammar.md](config_dsl_grammar.md) and
-[`templates/daemon.lr`](../templates/daemon.lr)); the TOML spellings
-stay documented because the deprecated subset still loads and the
-BIRD/FRR compat converter renders into them as its intermediate
-representation. The `.lr` DSL carries the same key set but spells the
+[`templates/daemon.lr`](../templates/daemon.lr)). The TOML spellings
+stay documented for the migration window, because the deprecated
+subset still loads and `config to-dsl` reads it. The `.lr` DSL carries
+the same key set but spells the
 blocks itself, and a few names differ:
 `ospf { area … }`, `ospf { interface … }`, `ospf { prefix-sid … }`,
 `ospf { mapping-server … }`, `ospf { srv6-locator … }`,
@@ -678,7 +695,7 @@ authentication on the intended interface.
 
 The first matching pattern in file order wins, mirroring BIRD's
 `interface` directive. `rtt_min_us` must be below `rtt_max_us` when both
-are set. Since rc.3, the daemon resolves one Babel session per matched
+are set. The daemon resolves one Babel session per matched
 interface (see `docs/examples/babel_multi_nic.md` for the multi-NIC
 walkthrough); the matched parameters apply per-session, not to a single
 shared session.
@@ -747,9 +764,42 @@ factor are dimensionless figure-of-merit values, not seconds; only
 | `decay_factor_active` | float | 0.97 | Per interval, active route |
 | `decay_factor_withdrawn` | float | 0.5 | Per interval, withdrawn |
 
+### `[logging]`
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `level` | string | `info` | `error`, `warn`, `info`, `debug`, `trace` |
+| `format` | string | `plain` | `plain` or `json` |
+| `color` | string | `auto` | `auto`, `on`, `off` |
+| `file` | string | — | Mirror every record to this file; `SIGHUP` reopens it |
+| `target`, `targets` | string / array | — | Per-component override, e.g. `bgp=debug` or `["bgp=debug", "ospf=warn"]` |
+
+The `.lr` spelling is `logging { level "info"; target "bgp=debug"; }`.
+Unknown keys are a hard error.
+
+### `[safety]`
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | true | Global kill switch |
+| `reject_as_loop` | bool | true | RFC 4271 §9.1.2 local-AS loop check |
+| `reject_invalid_next_hop` | bool | true | Next-hop sanity |
+| `reject_empty_as_path_ebgp` | bool | false | Reject an empty AS_PATH from an eBGP peer |
+| `reject_invalid_origin` | bool | true | ORIGIN must be 0, 1 or 2 |
+| `reject_excessive_as_loop`, `max_as_path_loops` | bool, int | true, 3 | Repeated local-AS ceiling |
+| `reject_oversized_as_path`, `max_as_path_length` | bool, int | true, 64 | AS_PATH length ceiling |
+| `reject_martian_prefix` | bool | true | Martian prefix check |
+| `reject_martian_v4`, `reject_martian_v6` | bool | true | Per-AFI martian toggle |
+| `reject_oversized_local_pref`, `max_local_pref` | bool, int | false, u32::MAX | LOCAL_PREF ceiling |
+| `as_loop_exception`, `as_loop_exceptions` | string / array | — | ASNs exempt from the loop check |
+| `martian_exception`, `martian_exceptions` | string / array | — | Prefixes exempt from the martian check |
+
+The `.lr` spelling is `safety { enabled true; max_as_path_loops 3; }`.
+A typo'd key, AS number or CIDR is a hard error.
+
 ### `[bgp.peer_health]`
 
-Per-peer BGP flap suppression (issue #99). A softer alternative to
+Per-peer BGP flap suppression. A softer alternative to
 `[damping]`: instead of suppressing unstable prefixes, it temporarily
 lowers a peer's path preference at session + AFI/SAFI granularity.
 The session stays up, the prefixes stay reachable, and the blast
@@ -792,7 +842,7 @@ PeerHealthLookup>>` (set by the daemon when `rollout` is not `off`).
 During `reselect`, when the lookup is present, the router queries the
 **current** per-`(peer, AFI/SAFI)` tier for each BGP candidate and
 restricts the candidate set to the lowest non-empty health tier before
-the standard decision process (issue #99 §Hooks 3). This is a
+the standard decision process. This is a
 **dynamic** lookup — the tier reflects the state machine's current
 view, not a stamp frozen at import time, so a route imported while the
 peer was healthy is correctly deprefed when the peer later escalates.
@@ -810,7 +860,7 @@ all-degraded fallback. A fresh UPDATE for a prefix re-admits it
 fresh advertisement. Stale markers expire after `max_stale_age_s` via
 a rate-limited sweep in the ticker thread.
 
-The EWMA baseline (`ewma_alpha`, default 0.05) is updated only while
+The EWMA baseline is updated only while
 the peer is at L0; it is frozen on escalation so a flap cannot inflate
 its own baseline.
 
@@ -818,8 +868,8 @@ its own baseline.
 flips the live mode via `PeerHealthTable::set_rollout_mode` — session
 state (baselines, counters, tiers, stale sets) is preserved across the
 transition. Window lengths, budgets, and other tuning parameters are
-NOT changed on reload (issue #99: "online parameters should remain
-stable during comparison windows"); a restart is required to re-tune.
+NOT changed on reload (online parameters stay
+stable during comparison windows); a restart is required to re-tune.
 If peer-health was off at startup and the fresh config enables it, the
 reload reports that a restart is required (the import hook and lookup
 are installed once at startup).
@@ -840,6 +890,20 @@ tier, baseline, window counts, stale count, and escalations/recoveries.
 The intervals are the initial RFC 8210 §6 timers; a v1+ cache overrides
 them from every End-of-Data PDU.
 
+### `[bgp_ls]`
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | false | Advertise AFI 16388 / SAFI 71 and run the projection driver |
+| `as_number` | int | 0 | BGP-LS speaker AS; `0` inherits `[bgp] local_as` |
+| `bgp_ls_id` | int | 0 | BGP-LS speaker identity |
+| `instance_id` | int | 0 | RFC 9552 §3.2 IGP-domain identifier |
+| `area`, `areas` | int / array | every area | Areas projected into BGP-LS |
+
+The `.lr` spelling is `bgp-ls { enabled true; as_number 64512; }`.
+The daemon registers the BGP-LS topology NLRIs as it learns them; see
+[`lr-daemon.md`](lr-daemon.md) and `crates/lr-router/src/instance/epe.rs`.
+
 ### `[[roa]]`
 
 | Key | Type | Default | Notes |
@@ -852,13 +916,11 @@ A `(prefix, asn)` pair may appear once. `asn = 0` marks a blackhole ROA.
 
 ### `[[bgp.roa_source]]`
 
-Advanced ROA loading (issue #100): one loader thread per source,
+Advanced ROA loading: one loader thread per source,
 merging file / URL entries with the inline `[[roa]]` tables under the
 live `RoaStore`. The feature is internal to `lr-daemon` — there is no
-C ABI entry point (`lr_roa_store_replace_static_from_text` and the
-matching `LR_ROA_FORMAT_*` constants were removed; embedders feed
-ROAs by writing a config block or by hitting the file / URL a
-`[[bgp.roa_source]]` block points at).
+C ABI entry point; embedders feed ROAs by writing a config block, or by
+pointing a `[[bgp.roa_source]]` block at the file or URL.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -876,8 +938,8 @@ and `bird`.
 
 Formats:
 
-* `native` — TOML `[[roa]]` subset (the same shape as the inline
-  tables). `prefix` is required (RFC 6482 §3.1); a `[[roa]]` block
+* `native` — the inline `[[roa]]` shape. `prefix` is required
+  (RFC 6482 §3.1); a `[[roa]]` block
   that omits `prefix` is rejected at parse time rather than
   defaulting to `0.0.0.0/0` (which would silently authorise the
   entire IPv4 unicast space for the configured ASN).
@@ -899,11 +961,9 @@ Formats:
 BIRD format is the canonical intermediate that both `jq` and `awk`
 programs are expected to emit: it is line-oriented (natural for awk)
 and trivial to produce with jq's string interpolation
-(`"roa \(.prefix) max \(.maxLength) as \(.asn);"`). The earlier
-`json` and `csv` fixed-format parsers that shipped in earlier builds
-were removed in favour of the `jq` / `awk` transform formats: the
-operator now owns the conversion step instead of the daemon shipping
-a hand-rolled JSON scanner.
+(`"roa \(.prefix) max \(.maxLength) as \(.asn);"`). The `jq` and `awk`
+formats let the operator own the conversion step instead of the daemon
+shipping a fixed-format parser.
 
 File sources are watched via mtime polling (1 s cadence). URL sources
 are fetched periodically; a fetch failure keeps the previous snapshot
@@ -911,10 +971,8 @@ are fetched periodically; a fetch failure keeps the previous snapshot
 re-points each live loader with its fresh spec; removing a block tears
 its thread down; adding a new block requires a daemon restart.
 
-The URL fetcher caps the response body at 256 MiB (the global RPKI
-VRP set crossed 1 million entries in late 2024; a Routinator JSON
-dump is ~100 MB and a BIRD-format dump ~50 MB — 256 MiB covers both
-shapes with headroom). The fetch timeout is 30 s.
+The URL fetcher caps the response body at 256 MiB, which covers a full
+RPKI dump with headroom. The fetch timeout is 30 s.
 
 The `jq` / `awk` transform subprocess runs in its own process group
 with a 60 s wall-clock deadline. A hung program is killed (along
@@ -923,6 +981,19 @@ with any helper processes it spawned via `awk`'s `system()` or
 same contract a fetch failure upholds. The transform's stdin /
 stdout / stderr are drained concurrently so a large transform output
 cannot deadlock on a full pipe buffer.
+
+### `[[filter_function]]`
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `name` | string | Required, unique |
+| `param`, `params` | string / array | Argument names |
+| `return_type` | string | Optional return type |
+| `body` | string | Required function body |
+
+The function is prepended to every filter body before compilation, so
+any filter can call it by name (BIRD's top-level `function`). The `.lr`
+spelling is `filter-function "name" { … }`.
 
 ### `[[filter]]`
 
@@ -1046,15 +1117,21 @@ route-map is the origin-wide attribute hook, not a per-peer filter
 (use `[[peer]] import = "…"` / `export = "…"` for per-peer policy).
 
 A `(prefix, route_map)` pair may appear once per config; a duplicate
-fails closed at finalize time. The `.lr` DSL emits these as a flat
-top-level `bgp.network_route_map { prefix = …; route_map = … }`
-block (mirrors the TOML shape — no enclosing `bgp { … }`).
+fails closed at finalize time. The `.lr` DSL spells these as a flat
+top-level block:
+
+```lr
+bgp.network_route_map {
+    prefix "203.0.113.0/24";
+    route_map "set-lp";
+}
+```
 
 ### `[shutdown]`
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `mode` | `"immediate"` \| `"drain"` | `"immediate"` | The new `drain` mode stops accepting new routes, walks the Loc-RIB at `drain_rate_per_sec`, then exits when empty or after `drain_max_wait_secs` |
+| `mode` | `"immediate"` \| `"drain"` | `"immediate"` | The `drain` mode stops accepting new routes, walks the Loc-RIB at `drain_rate_per_sec`, then exits when empty or after `drain_max_wait_secs` |
 | `drain_rate_per_sec` | u32 | `50` | Must be `> 0` in drain mode |
 | `drain_max_wait_secs` | u32 | `600` | Must be `> 0` in drain mode |
 
@@ -1062,7 +1139,7 @@ block (mirrors the TOML shape — no enclosing `bgp { … }`).
 (`shutdown.mode = "drain"` at the top level) also parses. The block
 is fail-closed — a typo'd value or an unsupported `mode` string
 stops the daemon at config load with a clear error message. See
-the [Shutdown (issue #53)](#shutdown-issue-53) flag table for the
+the [Shutdown](#shutdown) flag table for the
 CLI equivalents and the operational semantics.
 
 ## Unknown keys: warnings versus errors
@@ -1123,6 +1200,7 @@ and exits 1:
   spelling for a body-less filter`
 
 A load failure exits 1 with `config to-dsl: <path>: <error>`. Bad usage
-exits 2. `round-trip` is the contract: `parse(TOML) → to-dsl →
-parse(lr)` produces an equal `DaemonConfig`, so a successful conversion
-can be verified with `config check` on the result.
+exits 2. The contract is round-trip equality:
+`parse(TOML)` → `to-dsl` → `parse(lr)` produces an equal `DaemonConfig`,
+so a successful conversion can be verified with `config check` on the
+result.

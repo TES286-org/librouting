@@ -158,7 +158,7 @@ dialect is remembered and reused on `SIGHUP` and on the API `reload`
 command, so a compat-mode daemon does not break on reload. Unmapped
 constructs become startup warnings, in the `config warning: …` voice;
 BGP, OSPFv2, OSPFv3, Babel and BFD stanzas translate to lr's own
-stanzas (since 1.4.0); see [COMPAT.md](COMPAT.md) for the mapping
+stanzas; see [COMPAT.md](COMPAT.md) for the mapping
 surface, the `lr:` comment directives and the documented deviations.
 
 `lr-daemon translate bird|frr FILE` performs a best-effort conversion of
@@ -255,9 +255,11 @@ aggregate {
 }
 ```
 
-Aggregation has no specific-suppression knob. The `[[aggregate]]` schema
-accepts only `prefix`, so any other key is a hard error rather than a
-silently ignored one. Both surfaces print one startup line each:
+Two optional keys mirror the FRR qualifiers: `summary_only` suppresses
+the more-specific routes from the Adj-RIB-Out, and `as_set` builds an
+AS_SET segment from the contributing ASes instead of ATOMIC_AGGREGATE.
+Any other key is a hard error rather than a silently ignored one. Both
+surfaces print one startup line each:
 
 ```text
   redistribute: ospf -> bgp metric=100
@@ -305,8 +307,8 @@ always ends with `reload: note: AS, router-id, peer and auth changes
 require a restart`. Damping is installed for the process lifetime and
 cannot be unset by a reload.
 
-Windows has no `SIGHUP`. Use the runtime API `reload` command, or
-`lrctl reload`, which sends the same thing.
+Windows has no `SIGHUP`. Send the runtime API `reload` command over the
+pipe; `lrctl` is Unix-only.
 
 ## Dropping privileges
 

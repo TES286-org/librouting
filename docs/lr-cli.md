@@ -56,11 +56,11 @@ string is an error and exits 1.
 | `bfd` | `lr_bfd::BfdCodec` | 24-byte header, optional auth section |
 
 A BFD control packet is 24 bytes. When the A flag is set an
-authentication section follows, and the shortest legal one is 3 bytes:
+authentication section follows. The shortest legal section is 3 bytes:
 `Simple Password` is 3 + password length, while the keyed digests are
-24 (MD5) and 28 (SHA1) bytes. The decode minimum in
-`crates/lr-bfd/src/packet.rs` is therefore 26 for an A-flagged packet,
-not a 26-byte frame.
+24 (MD5) and 28 (SHA1) bytes. RFC 5880 §6.8.6 sets the minimum Length
+field of an A-flagged packet at 26, which is the threshold
+`crates/lr-bfd/src/packet.rs` enforces.
 
 ```sh
 # KEEPALIVE: marker + length 19 + type 4.
@@ -155,9 +155,10 @@ domain sockets (not supported here)`.
 | `lrctl routes dump <path>` | `mrt <path>` | Write the Loc-RIB as MRT |
 | `lrctl reload` | `reload` | Re-apply the configuration |
 | `lrctl show status` | `show status` | Daemon status (alias of `status`) |
-| `lrctl show memory` | `show memory` | RSS / virtual-size / peak |
+| `lrctl show memory` | `show memory` | Uptime, RSS and virtual size |
 | `lrctl show routes [count]` | `show routes [count]` | Loc-RIB (alias of `routes show`) |
 | `lrctl show roa` / `lrctl show roa count` | `show roa [count]` | ROA table dump or count |
+| `lrctl show peer-health` | `show peer-health` | Per-session peer-health state |
 | `lrctl roa list` / `lrctl roa count` | `show roa [count]` | Alias of `show roa` |
 | `lrctl memory` | `show memory` | Alias of `show memory` |
 | `lrctl ping` | `ping` | Round-trip the API socket |

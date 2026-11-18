@@ -16,7 +16,7 @@
 # Every [bgp] global below doubles as the default each [[peer]] inherits
 # unless it sets its own value.
 
-# Multi-protocol combinations (rc.3): bgp, ospf and babel can run in one
+# Multi-protocol combinations: bgp, ospf and babel can run in one
 # process sharing one Loc-RIB. Either the string form (mirrors the CLI):
 #   protocol = "bgp,ospf"
 # or the array form:
@@ -105,7 +105,7 @@ hold_time = 90
 # CLI: --soft-reconfig-inbound / --no-soft-reconfig-inbound
 # soft_reconfig_inbound = false
 
-# W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md).
+# Exchange plane (experimental; docs/research/EXCHANGE-PLANE.md).
 # Experimental: the wire format rides IANA experimental code points
 # (capability + path-attribute 251) pending an RFC 7120 early
 # allocation, and the plane only activates between two lr speakers
@@ -147,10 +147,11 @@ graceful_restart_time = 120
 # RFC 5925 TCP-AO session authentication (Linux 6.7+). Keys are
 # "id:secret"; the id is used as both SendID and RecvID, and the first
 # key is Current/RNext. Optionally select the MAC algorithm
-# ("hmac-sha1", the default, or "cmac-aes") and MAC length (default 12).
+# ("hmac-sha1", the default, or "cmac-aes") and MAC length (default 0,
+# which selects the algorithm default).
 # tcp_ao_keys = ["1:alpha"]
 # tcp_ao_algorithm = "hmac-sha1"
-# tcp_ao_maclen = 12
+# tcp_ao_maclen = 0
 
 # RFC 7911 Add-Path: advertise the Add-Path capability (send + receive)
 # so the session can carry multiple paths per prefix. Effective only when
@@ -211,7 +212,7 @@ networks = ["203.0.113.0/24"]
 # a NOTIFICATION); SIGHUP is equivalent to `reload`.
 # api_socket = "/run/lr-daemon.api"
 
-# Prometheus /metrics HTTP endpoint (ROADMAP-v3 D12.2/D12.4). Opt-in:
+# Prometheus /metrics HTTP endpoint. Opt-in:
 # when set, the daemon binds a TCP listener and serves the Prometheus
 # text exposition format on `GET /metrics`. The body carries:
 #   lr_info, lr_uptime_seconds, lr_sessions_total{kind,state},
@@ -361,8 +362,9 @@ permit = false
 # The daemon sends Hellos per hello_interval, discovers neighbors
 # dynamically, originates a Router-LSA per area (stub links from the
 # interface addresses + p2p links per Full adjacency) and runs the dead
-# timer per interface. See docs/ROADMAP.md (W1.5) for the current scope:
-# OSPFv2, no DR election (segments behave p2p).
+# timer per interface. OSPFv2 defaults to point-to-point segments; set
+# `network_type = "broadcast"` per interface to run the RFC 2328 §9.4
+# DR election.
 
 # [ospf]
 # hello_interval = 10        # per-interface default (RFC 2328 default)
@@ -449,8 +451,8 @@ permit = false
 # cost = 10                   # Router-LSA link metric
 # hello_interval = 10         # inherits [ospf]
 # dead_interval = 40          # inherits [ospf]
-# priority = 1                # DR election priority (the daemon runs
-                              # p2p segments only, so this is inert today)
+# priority = 1                # DR priority (used when network_type is
+                              # "broadcast")
 # adj_sid = 24000             # RFC 8665 6: the adjacency segment
                               # advertised for this interface's Full
                               # adjacencies (an absolute SRLB label,
@@ -487,7 +489,7 @@ permit = false
 # UDP port 646 is privileged: run as root, or inside a user/network
 # namespace (`unshare -Urn lr-daemon --protocol ldp ...`), or override
 # the port with --ldp-port / [ldp] port for shared-host labs.
-# Landed scope: RFC 7552 IPv6 discovery, kernel MPLS installation of
+# Scope: RFC 7552 IPv6 discovery, kernel MPLS installation of
 # learned bindings ([ldp] install_kernel), automatic label allocation
 # from a range ([ldp] label_min/label_max) and RFC 5036 §2.8 loop
 # detection ([ldp] loop_detection).
@@ -552,7 +554,7 @@ permit = false
 # asn = 64512
 
 # ---------------------------------------------------------------------------
-# Advanced ROA loading — [[bgp.roa_source]] (issue #100)
+# Advanced ROA loading — [[bgp.roa_source]]
 # ---------------------------------------------------------------------------
 # NOTE: the TOML form below is deprecated; the DSL form (see
 # templates/daemon.lr's `bgp.roa_source { }` block) is preferred for
@@ -683,8 +685,8 @@ permit = false
 # shell-like glob patterns (*, ?, \) so the same parameters can
 # apply to a fleet of similar interfaces (eth*). The daemon
 # enumerates the system interfaces (getifaddrs), matches each
-# name against the patterns in file order, and uses the first
-# match's parameters for the single Babel session. The first
+# name against the patterns in file order, and opens one Babel
+# session per matched interface. The first
 # matching pattern wins (BIRD interface directive parity).
 #
 # When [[babel.interface]] blocks exist, --local-address is

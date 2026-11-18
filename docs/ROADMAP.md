@@ -24,28 +24,21 @@ encap routes through the kernel mirror
 nothing. Done when a controller's policy steers traffic through an lr
 daemon, and withdrawal removes both the route and the kernel entry.
 
-**Egress Peer Engineering (RFC 9086).** The codec half — the BGP-LS
-Attribute TLVs for the SR-MPLS BGP Peering SID TLVs (PeerNode SID
-type 1101, PeerAdj SID type 1102, PeerSet SID type 1103, RFC 9086 §5)
-and the matching Node Descriptor sub-TLVs (BGP Router-ID TLV 516,
-Member-AS Number TLV 517, §3.1/§3.2) — and the daemon-side EPE
-projection (`lr-router::instance::epe`, `DefaultRouter::bgpls_republish_epe`)
-have landed.
-
-What remains is the receiver-side (controller-mode) follow-up: a
-controller-mode daemon receives EPE NLRIs from its BGP-LS peers and
-surfaces them through its Loc-RIB. That touches the daemon's Loc-RIB
-model (`RouteKey { prefix, family }` does not fit a BGP-LS NLRI) and
-is independent of the projection. Done when a controller learns those
-segments from lr, the data plane can push traffic onto them, and a
-controller-mode lr daemon can ingest the same NLRIs another daemon
-advertises.
+**Egress Peer Engineering (RFC 9086), controller mode.** The codec and
+the daemon-side projection (`lr-router::instance::epe`,
+`DefaultRouter::bgpls_republish_epe`) are implemented. What remains is
+the receiver-side follow-up: a controller-mode daemon receives EPE NLRIs
+from its BGP-LS peers and surfaces them through its Loc-RIB. That
+touches the daemon's Loc-RIB model (`RouteKey { prefix, family }` does
+not fit a BGP-LS NLRI) and is independent of the projection. Done when
+a controller learns those segments from lr, the data plane can push
+traffic onto them, and a controller-mode lr daemon can ingest the same
+NLRIs another daemon advertises.
 
 ## Compatibility
 
 **RISC-V targeted compatibility improvements.** The CI matrix covers
-the RISC-V architecture in two ways as of
-[issue #65](https://github.com/TES286-org/librouting/issues/65): the
+the RISC-V architecture in two ways: the
 `cross` matrix job cross-builds `riscv64gc-unknown-linux-gnu` on
 every push, and a native `riscv-native` job runs `cargo nextest`,
 doctests and per-arch clippy on real RISC-V hardware via the RISE
@@ -61,8 +54,7 @@ without an arch-specific patch landing.
 
 **IBM Power (ppc64le) and IBM Z (s390x) targeted compatibility
 improvements.** The CI matrix covers the IBM Power and IBM Z
-architectures in two ways as of
-[issue #95](https://github.com/TES286-org/librouting/issues/95): the
+architectures in two ways: the
 `cross` matrix job cross-builds
 `powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu` on
 every push, and a native `s390x-native` job runs `cargo nextest`,
@@ -73,8 +65,8 @@ with the labels `[self-hosted, Linux, s390x]`. The IBM-provided
 (<https://github.com/marketplace/power-z-gha-runner>) are pending
 review and not yet available; once they clear review, the
 `s390x-native` job can switch to (or matrix-add) the IBM-provided
-`ubuntu-26.04-s390x` label and ppc64le native jobs can land
-(issue #95 stays open to track that follow-up).
+`ubuntu-26.04-s390x` label and ppc64le native jobs can land. The
+follow-up is tracked on the issue tracker.
 
 The workspace is target-OS-aware rather than target-arch-aware, so
 the Linux rtnetlink backend, the GTSM/TCP-AO socket constants and

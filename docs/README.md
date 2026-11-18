@@ -92,7 +92,7 @@ and [`STYLE.md`](STYLE.md) first.
 
 ## Standing rules
 
-1. A landed feature updates [`STATUS.md`](STATUS.md) and
+1. A new feature updates [`STATUS.md`](STATUS.md) and
    [`RFC_MAP.md`](RFC_MAP.md) in the same series of commits. New public
    API also updates [`api/`](api/).
 2. Documents follow [`STYLE.md`](STYLE.md), and `tests/lint_docs.sh`

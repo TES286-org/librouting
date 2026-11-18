@@ -359,8 +359,8 @@ than a list copied here.
 
 The `exchange-plane` feature lives in three crates —
 [`lr-bgp`](../crates/lr-bgp/Cargo.toml) (the wire codec),
-[`lr-policy`](../crates/lr-policy/Cargo.toml) (the filter DSL surface,
-landed in 1.6.0 / issue #81) and
+[`lr-policy`](../crates/lr-policy/Cargo.toml) (the filter DSL surface)
+and
 [`lr-router`](../crates/lr-router/Cargo.toml) (forwards to
 `lr-bgp/exchange-plane`). The daemon's `exchange-plane` feature turns on
 all three. The wire format rides IANA experimental code points, so the
@@ -409,7 +409,7 @@ contract. Two names need care:
 
 - **`-3`** is also the documented code for a malformed argument on many
   entry points, not only for a string that was not valid UTF-8.
-- **`-5`** is `LR_ERR_CODEC` (added in rc.6). It is **not** a general
+- **`-5`** is `LR_ERR_CODEC`. It is **not** a general
   error code: only the two SRv6 codec entry points return it for their
   own encode/decode failures, as their doc comments in the header state
   ([`crates/lr-ffi/src/srv6.rs`](../crates/lr-ffi/src/srv6.rs)).

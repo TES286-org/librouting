@@ -523,17 +523,17 @@ lists fields accepting the append form.
 | `babel.metric`          | `int`                 |    no    |  no  | RFC 8966 §3.2 + §3.4.3; primary Babel metric (the value the Update TLV advertised, folded into `route.preference.metric` after applying the receiver-side link cost — `0` when the route is not Babel). `defined(babel.metric)` distinguishes "non-Babel route" from "Babel route with metric 0". |
 | `babel.seqno`           | `int`                 |    no    |  no  | RFC 8966 §3.2 + §4.6.9; 16-bit unsigned Babel sequence number (the source's sequence number the feasibility machinery ranks against — `0` when the route is not Babel). `defined(babel.seqno)` distinguishes "non-Babel route" from "Babel route with seqno 0" (RFC 8966 §3.1 treats 0 as a valid sequence number). |
 | `babel.router_id`       | `int`                 |    no    |  no  | RFC 8966 §3.2 + §4.6.8; 64-bit Babel Router-ID (the EUI-64-style value the route's source claims, carried in every Update TLV's Router-Id TLV — `0` when the route is not Babel). `defined(babel.router_id)` distinguishes "no attribute" from "attribute present but zero" (RFC 8966 §3.1 does not forbid Router-ID 0; the EUI-64 form discourages it but the protocol accepts any 64-bit value). BIRD stores the value as an opaque 8-byte bytestring under `EAF_TYPE_OPAQUE`; lr's DSL exposes it as a 64-bit `Int` for the canonical `defined(babel.router_id)` idiom and for direct equality against the route's i64-form literal — the lexer parses i64 literals, so values with the high bit set (>= `0x8000_0000_0000_0000`) read as a negative i64 but round-trip losslessly for the comparison operator. |
-| `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
-| `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
-| `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.hint.damp_fom` | `int`                |    no    |  no  | Issue #81 / LRXP §5.1; sender's route-flap figure of merit. `0` when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.hint.igp_cost` | `int`                |    no    |  no  | Issue #81 / LRXP §5.1; sender's IGP cost to next hop. `0` when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.policy.role`  | `int`                 |    no    |  no  | Issue #81 / LRXP §5.2; sender's RFC 9234 role claim. `255` when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.policy.import_digest` | `string`       |    no    |  no  | Issue #81 / LRXP §5.2; import-filter digest (hex). Empty when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.policy.export_digest` | `string`       |    no    |  no  | Issue #81 / LRXP §5.2; export-filter digest (hex). Empty when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.origin.origin_as` | `int`              |    no    |  no  | Issue #81 / LRXP §5.3; origin AS the attestation authorises. `0` when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.origin.max_valid_len` | `int`          |    no    |  no  | Issue #81 / LRXP §5.3; max prefix length the origin authorises. `0` when absent. Feature `exchange-plane`. |
-| `bgp.lrxp.origin.expiry` | `int`                |    no    |  no  | Issue #81 / LRXP §5.3; absolute expiry timestamp. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.verified`     | `bool`                |    no    |  no  | `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
+| `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
+| `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.hint.damp_fom` | `int`                |    no    |  no  | LRXP §5.1; sender's route-flap figure of merit. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.hint.igp_cost` | `int`                |    no    |  no  | LRXP §5.1; sender's IGP cost to next hop. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.policy.role`  | `int`                 |    no    |  no  | LRXP §5.2; sender's RFC 9234 role claim. `255` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.policy.import_digest` | `string`       |    no    |  no  | LRXP §5.2; import-filter digest (hex). Empty when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.policy.export_digest` | `string`       |    no    |  no  | LRXP §5.2; export-filter digest (hex). Empty when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.origin.origin_as` | `int`              |    no    |  no  | LRXP §5.3; origin AS the attestation authorises. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.origin.max_valid_len` | `int`          |    no    |  no  | LRXP §5.3; max prefix length the origin authorises. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.origin.expiry` | `int`                |    no    |  no  | LRXP §5.3; absolute expiry timestamp. `0` when absent. Feature `exchange-plane`. |
 | `roa.state`             | `roa-state`           |    no    |  no  | RFC 6811 outcome: `valid` / `invalid` / `not-found`.   |
 
 `proto` reads a string, not a protocol object: compare it with
@@ -873,7 +873,7 @@ unit tests that synthesize the attribute directly and the
 via the OSPF route computation).
 
 The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
-(issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated
+(design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated
 behind `exchange-plane` and only parse when the feature is on; a feature-less
 build rejects `bgp.lrxp.*` at parse time with `UnknownBgpField`. The surface
 has three shapes:
@@ -900,7 +900,7 @@ has three shapes:
   `expiry` is the absolute timestamp after which the record expires. All read
   as `0` when absent.
 
-The canonical issue #81 idiom is adjusting `local-pref` based on the sender's
+The canonical LRXP idiom is adjusting `local-pref` based on the sender's
 hint rank — a route whose sender reports it as rank > 1 is a poor repair
 candidate (design §5.1) and can be deprioritised:
 
@@ -912,7 +912,7 @@ accept;
 The fallback is built into the accessors: a route from a non-LRXP peer (no
 `LrExchangePlaneRecords` attribute) reads `rank` as `0`, the `rank > 1` test
 is false, the local-pref write does not fire — the filter no-ops on peers that
-do not run the plane, exactly as issue #81 requires. `defined(bgp.lrxp.*)`
+do not run the plane, exactly as the exchange plane requires. `defined(bgp.lrxp.*)`
 distinguishes "absent" from "set to the default value" the same way
 `defined(bgp.otc)` does: the bare predicates are defined iff the route
 carries an LRXP store of any kind; the per-record fields are defined iff the

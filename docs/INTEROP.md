@@ -23,7 +23,7 @@ Seven CI jobs run lab scripts:
 | `macos-interop` | macOS | `two_daemon.sh`, `labeled_unicast.sh`, `bgp_kernel_install.sh` |
 | `windows-bird-interop` | Windows | `bird_wsl.sh` |
 | `riscv-native` | Ubuntu 24.04 on RISC-V (`ubuntu-24.04-riscv`, RISE Project) | `two_daemon.sh`, `labeled_unicast.sh` |
-| `s390x-native` | Self-hosted s390x (`[self-hosted, Linux, s390x]`, issue #95) | `two_daemon.sh`, `labeled_unicast.sh` |
+| `s390x-native` | Self-hosted s390x (`[self-hosted, Linux, s390x]`) | `two_daemon.sh`, `labeled_unicast.sh` |
 
 The `riscv-native` and `s390x-native` jobs run the same two lr-vs-lr
 loopback labs as the Windows and macOS interop jobs — a deliberately
@@ -41,7 +41,7 @@ never native endianness) is mechanically verified on every push on
 that architecture. It runs on a self-hosted s390x runner registered
 with the labels `[self-hosted, Linux, s390x]`; the IBM-provided
 `ubuntu-26.04-s390x` runner from the IBM Power-Z GitHub App is
-pending review and not yet available (issue #95). If no self-hosted
+pending review and not yet available. If no self-hosted
 s390x runner is registered on the repository, GitHub marks the job
 "no runner found" after the timeout — it never blocks merge, same
 shape as `riscv-native`.
@@ -51,7 +51,7 @@ is no self-hosted ppc64le runner registered, and the IBM-provided
 `ubuntu-26.04-ppc64le` / `ubuntu-26.04-ppc64le-p10` labels are pending
 the same review. ppc64le coverage is limited to the
 `cross` matrix (cross-build only, no test). The open work is tracked
-on issue #95.
+on the project's [issue tracker](https://github.com/TES286-org/librouting/issues).
 
 The nightly `vm-kernel-gated` job boots
 [`tests/vm/run_vm.sh`](../tests/vm/run_vm.sh) — a minimal initramfs QEMU
@@ -125,7 +125,7 @@ portable ones.
 | `babel_auth.sh` | two lr babel speakers in one netns | RFC 8967 MAC and PC transport auth: the same key establishes, a restart re-keys with a fresh Index, a wrong key is rejected |
 | `babel_dualstack_bird.sh` | lr and BIRD across two user namespaces | the production dual-stack shape: v4 and v6 routes over one link with BIRD as peer |
 | `babel_multihop.sh` | three speakers in three namespaces | multi-session transit: routes transit the middle speaker, the dead segment's routes withdraw end to end (§3.5.5 retraction plus check link), the link returning reconverges |
-| `babel_manual_check_link.sh` | two manual-path lr speakers in two namespaces | issue #39: the manual single-socket path polls its own interface carrier (BIRD `check link` parity) — a carrier loss withdraws the learned route within 3 s, not the 30 s §3.2.5 hold floor; reconvergence on carrier return |
+| `babel_manual_check_link.sh` | two manual-path lr speakers in two namespaces | the manual single-socket path polls its own interface carrier (BIRD `check link` parity) — a carrier loss withdraws the learned route within 3 s, not the 30 s §3.2.5 hold floor; reconvergence on carrier return |
 | `babel_infeasible_no_displace.sh` | lr speakers over a tunnel shape | regression: an infeasible update never displaces a feasible route |
 | `babel_reinstall_churn.sh` | two lr speakers | regression: a byte-identical re-install does not re-emit `RouteInstalled` or re-touch the kernel mirror |
 | `babel_withdraw_reason.sh` | lr and BIRD | a wildcard retraction (§4.6.9) logs its real reason instead of the best-path-displacement fallback |
@@ -194,9 +194,12 @@ portable ones.
 
 `_lib.sh` (rootless namespace and veth topology harness) and
 `_lr_daemon.sh` (daemon build, spawn and log capture) are infrastructure
-the labs source; they are not labs and have no row. A new shared helper
-must be added to this note, because the guard checks that every file in
-`tests/interop/` is mentioned somewhere on this page.
+the labs source; they are not labs and have no row. The Python helpers
+(`babel_decode.py`, `babel_send.py`, `pcap_icmp_check.py`,
+`pcap_sniff.py`) build and inspect packets for the labs that use them.
+A new shared helper must be added to this note, because the guard checks
+that every `.sh` file in `tests/interop/` is mentioned somewhere on this
+page.
 
 ## Extension notes from running the labs
 

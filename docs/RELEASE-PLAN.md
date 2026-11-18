@@ -6,8 +6,8 @@ flow itself, and the post-1.0 governance rules. It is the source of truth that
 the `.github/workflows/release.yml` workflow and the `STATUS.md` roadmap summary
 both defer to.
 
-The 1.0 cut landed (see `CHANGELOG.md` `[1.0.0]`); the §2 freeze criteria are
-preserved as historical reference, and §4 carries the live post-1.0 rules.
+The §2 freeze criteria are preserved as historical reference, and §4
+carries the live post-1.0 rules.
 
 The current state of the project against these criteria is captured in
 [`STATUS.md`](STATUS.md); this document defines the criteria themselves.
@@ -22,7 +22,7 @@ in the strict form the Rust ecosystem expects of a library:
 
 | Change                                                                            | Bump                                                        |
 | --------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Breaking change to a public Rust API (signature, type, trait, behaviour contract) | **major** (was: **minor** before 1.0; 1.0 cut landed)      |
+| Breaking change to a public Rust API (signature, type, trait, behaviour contract) | **major**                                                   |
 | New public API (function, type, trait)                                            | **minor**                                                   |
 | New feature flag, new protocol crate, new daemon flag                             | **minor**                                                   |
 | Bug fix that does not change a documented public contract                         | **patch**                                                   |
@@ -31,7 +31,7 @@ in the strict form the Rust ecosystem expects of a library:
 
 The workspace `version` lives under `[workspace.package]` in `Cargo.toml`. A
 bump is one PR — every crate shares the version number, every
-`lr-X = { path = …, version = "0.1.0" }` line in `[workspace.dependencies]`
+`lr-X = { path = …, version = "<version>" }` line in `[workspace.dependencies]`
 shares the bump.
 
 ### What is "public API" in librouting
@@ -41,7 +41,7 @@ contract:
 
 | Tier                                 | Surface                                                                                                                                                                                                            | Stability contract                                                                                                                                                                                                                                            |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1 — Rust library API**             | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-ldp`, `lr-bfd`, `lr-rib`, `lr-policy`, `lr-router`, `lr-damping`, `lr-mpls`, `lr-mrt`, `lr-bmp`, `lr-srv6`, `lr-osroute` — `pub` items reached from the crate root | Semver-tracked. Breaking changes are gated by a **major** bump and a release-notes entry (the pre-1.0 "**minor** for breaking" rule sunset when 1.0 cut).                                                                                                      |
+| **1 — Rust library API**             | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-ldp`, `lr-bfd`, `lr-rib`, `lr-policy`, `lr-router`, `lr-damping`, `lr-mpls`, `lr-mrt`, `lr-bmp`, `lr-srv6`, `lr-osroute` — `pub` items reached from the crate root | Semver-tracked. Breaking changes are gated by a **major** bump and a release-notes entry.                                                                                                      |
 | **2 — C ABI** (`lr-ffi`)             | `include/lr_ffi.h`, `include/librouting.hpp` — the `lr_*` symbols exported from `lr-ffi` and the `lr_router_t` / `lr_bytes_t` types                                                                                | **ABI-stable.** A breaking ABI change is a major version bump, because embedders (Go / Python / C / C++) compile against the published header. The `lr_abi_version()` accessor is bumped in lockstep.                                                          |
 | **3 — Daemon flag + config surface** | `lr-daemon` CLI flags, the config schema (native `.lr` DSL in `templates/daemon.lr` + the TOML subset twin), the `lr:` extension directives, the `--api-socket` line protocol                                      | **Documented stability.** A flag can be renamed only across a minor bump and must be supported as a deprecated alias for at least one minor cycle. The `--api-socket` line protocol's existing commands are stable; new commands are additive. |
 
@@ -108,8 +108,8 @@ The CI matrix in `.github/workflows/ci.yml` must cover:
   job cross-builds `riscv64gc-unknown-linux-gnu` on every push (always
   available, no third-party runner required), and the `riscv-native`
   job runs `cargo nextest`, doctests and per-arch clippy on real
-  RISC-V hardware via the RISE Project's `ubuntu-24.04-riscv` runner
-  (issue #65). The cross-build is release-blocking; the native job is
+  RISC-V hardware via the RISE Project's `ubuntu-24.04-riscv` runner.
+  The cross-build is release-blocking; the native job is
   release-blocking only when the RISE GitHub App is installed on the
   repository — otherwise GitHub marks it "no runner found" and the
   cut proceeds.
@@ -119,7 +119,7 @@ The CI matrix in `.github/workflows/ci.yml` must cover:
   every push (always available, no third-party runner required), and
   the `s390x-native` job runs `cargo nextest`, doctests and per-arch
   clippy on a self-hosted s390x runner registered with the labels
-  `[self-hosted, Linux, s390x]` (issue #95). The IBM-provided
+  `[self-hosted, Linux, s390x]`. The IBM-provided
   `ubuntu-26.04-ppc64le`, `ubuntu-26.04-ppc64le-p10` and
   `ubuntu-26.04-s390x` runners from the IBM Power-Z GitHub App are
   pending review; once they clear review, the s390x-native job can
@@ -245,7 +245,7 @@ git push origin vX.Y.Z
 The tag push triggers `.github/workflows/release.yml`:
 
 1. **Build matrix** — Linux x86_64, Linux RISC-V (`riscv64gc`, native
-   build on the RISE Project's `ubuntu-24.04-riscv` runner, issue #65),
+   build on the RISE Project's `ubuntu-24.04-riscv` runner),
    macOS Intel, macOS Apple Silicon, Windows x86_64. Each builds the
    workspace in release mode and stages the platform's shared library,
    the static archive (where the toolchain emits one), the C and C++

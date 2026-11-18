@@ -1,4 +1,4 @@
-# lr-daemon configuration (native .lr DSL, ROADMAP-v3 D16 Phase 3).
+# lr-daemon configuration (native .lr DSL).
 #
 # This is the DSL-first configuration template: the same active
 # configuration as `templates/daemon.toml`, in the dialect the daemon
@@ -26,7 +26,7 @@
 # ---------------------------------------------------------------------
 # Protocol set (top level)
 # ---------------------------------------------------------------------
-# Multi-protocol combinations (rc.3): bgp, ospf and babel can run in
+# Multi-protocol combinations: bgp, ospf and babel can run in
 # one process sharing one Loc-RIB. `protocol bgp,ospf;` (string form,
 # mirrors the CLI) or `protocols [bgp, ospf];` (list form). Cross-
 # protocol advertisement into BGP stays opt-in (redistribute blocks);
@@ -112,7 +112,7 @@ bgp {
     # from the peer. Off by default (the cost is duplicate RIB memory).
     # soft_reconfig_inbound false;
 
-    # W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md).
+    # Exchange plane (experimental; docs/research/EXCHANGE-PLANE.md).
     # Experimental: requires a binary built with
     # `--features exchange-plane`; the plane only activates between two
     # lr speakers sharing a key id — non-lr peers are unaffected.
@@ -212,7 +212,7 @@ bgp {
 # to `reload`.
 # api_socket "/run/lr-daemon.api";
 
-# Prometheus /metrics HTTP endpoint (ROADMAP-v3 D12.2/D12.4). When set,
+# Prometheus /metrics HTTP endpoint. When set,
 # the daemon serves the Prometheus text exposition format on
 # `GET /metrics` (session gauges, RIB sizes, per-peer UPDATE counters,
 # filter latency histograms). Bind to a loopback address for scrape
@@ -377,7 +377,7 @@ route-map "to-customer" {
 # }
 
 # ---------------------------------------------------------------------
-# Advanced ROA loading — bgp.roa_source { } (issue #100)
+# Advanced ROA loading — bgp.roa_source { }
 # ---------------------------------------------------------------------
 # The DSL form of [[bgp.roa_source]]. Each block lowers to one
 # `[[bgp.roa_source]]` array entry and spawns one loader thread at
@@ -388,7 +388,7 @@ route-map "to-customer" {
 # (likewise). The `jq` and `awk` programs must emit BIRD-format
 # lines (`roa PREFIX max N as N;`) on stdout; the daemon parses
 # their stdout with the same `bird` parser used for `.bird` files.
-# See templates/daemon.toml for the full prose.
+# See docs/lr-daemon-reference.md for the full prose.
 #
 # bgp.roa_source {
 #     path "/etc/lr/roas.bird";
@@ -411,7 +411,9 @@ route-map "to-customer" {
 #
 # Raw OSPF sockets (IP protocol 89, multicast 224.0.0.5) need root or a
 # user/network namespace: `unshare -Urn lr-daemon --protocol ospf ...`.
-# OSPFv2 scope (no DR election; segments behave p2p).
+# OSPFv2 defaults to point-to-point segments; set
+# `network_type "broadcast"` per interface to run the RFC 2328 §9.4
+# DR election.
 
 # ospf {
 #     hello_interval 10s;          # per-interface default (RFC 2328)
@@ -457,7 +459,8 @@ route-map "to-customer" {
 #         cost 10;                 # Router-LSA link metric
 #         hello_interval 10s;
 #         dead_interval 40s;
-#         priority 1;              # inert today (p2p segments only)
+#         priority 1;              # DR priority; used when network_type
+#                                  # is "broadcast"
 #         adj_sid 24000;           # RFC 8665 6 adjacency segment
 #                                  # (absolute SRLB label, 16..=1048575)
 #     }
@@ -495,7 +498,7 @@ route-map "to-customer" {
 #             --ldp-interface eth0 --ldp-bind 203.0.113.0/24=24000
 #
 # UDP port 646 is privileged: run as root, inside a namespace, or
-# override the port. Landed scope: RFC 7552 IPv6 discovery, kernel MPLS
+# override the port. Scope: RFC 7552 IPv6 discovery, kernel MPLS
 # installation, automatic label allocation, RFC 5036 2.8 loop detection.
 
 # ldp {
@@ -601,7 +604,7 @@ route-map "to-customer" {
 # }
 
 # ---------------------------------------------------------------------
-# Logging (issue #46)
+# Logging
 # ---------------------------------------------------------------------
 # Categorised diagnostic output: every record carries a severity
 # (error | warn | info | debug | trace) and a component (bgp | ospf |
@@ -623,7 +626,7 @@ route-map "to-customer" {
 # --log-color, --log-file.
 
 # ---------------------------------------------------------------------
-# Safety net (issue #46)
+# Safety net
 # ---------------------------------------------------------------------
 # Protocol-level invariants the router enforces before a route
 # reaches the Loc-RIB. Every rule defaults to on; the granular
@@ -656,7 +659,7 @@ route-map "to-customer" {
 # disabling the check for the rest of the AFI.
 
 # ---------------------------------------------------------------------
-# Reusable filter functions (issue #46)
+# Reusable filter functions
 # ---------------------------------------------------------------------
 # Functions declared here are prepended to every filter body before
 # compilation, so any filter (and any other shared function) can
@@ -675,7 +678,7 @@ route-map "to-customer" {
 # }
 
 # ---------------------------------------------------------------------
-# BGP-LS speaker (issue #60 daemon wiring, RFC 7752)
+# BGP-LS speaker (RFC 7752)
 # ---------------------------------------------------------------------
 # When `enabled`, the daemon advertises the BGP-LS address family
 # (AFI=16388, SAFI=71) on every BGP session and runs the OSPF LSDB →
@@ -691,8 +694,7 @@ route-map "to-customer" {
 # `--bgp-ls-area` (repeatable). Both forms fail closed (typo
 # protection). The interop lab `tests/interop/bgpls_bird.sh` starts
 # an OSPF+BGP `lr-daemon` with `--bgp-ls` against a BIRD 2.17+ peer
-# configured for the `bgp_ls` channel — the "done" gate from
-# `docs/ROADMAP.md` §1.
+# configured for the `bgp_ls` channel.
 #
 # bgp-ls {
 #     enabled true;
