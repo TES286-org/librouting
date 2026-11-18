@@ -57,6 +57,7 @@ librouting/
 │   ├── lr-bmp/             BMP codec and sink
 │   ├── lr-mrt/             MRT dump format
 │   ├── lr-damping/         route flap damping
+│   ├── lr-peer-health/     per-peer flap suppression and dynamic tiering
 │   ├── lr-osroute/         OS route-table backends and transports
 │   ├── lr-ffi/             C ABI; cbindgen writes include/lr_ffi.h
 │   ├── lr-cli/             the lr, lr-daemon and lrctl binaries
