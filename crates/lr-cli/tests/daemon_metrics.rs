@@ -30,11 +30,15 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_lr-daemon");
 
 /// `CREATE_NEW_PROCESS_GROUP` — Windows-only. See the comment on
 /// the same constant in `lrctl_windows.rs` for the full rationale:
-/// the daemon must not receive `CTRL_C` from the test runner's
-/// console. Applied on Windows only; the Unix path relies on the
-/// process group the test runner already sets up.
+/// the daemon must not receive `CTRL_C` or `CTRL_BREAK` from the
+/// test runner's console. `CREATE_NO_WINDOW` (also Windows-only)
+/// detaches the daemon from the console entirely — no console
+/// events reach it. Applied on Windows only; the Unix path relies
+/// on the process group the test runner already sets up.
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// A spawned `lr-daemon` with its log file path so the test can wait
 /// for the "metrics endpoint on" marker before scraping.
@@ -62,7 +66,7 @@ impl Daemon {
             .stdout(Stdio::from(log_file.try_clone().expect("clone stdout")))
             .stderr(Stdio::from(log_file));
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         let child = cmd.spawn().expect("spawn lr-daemon");
         Self { child, log }
     }

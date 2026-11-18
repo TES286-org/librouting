@@ -21,25 +21,24 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_lr-daemon");
 const LRCTL: &str = env!("CARGO_BIN_EXE_lrctl");
 
 /// `CREATE_NEW_PROCESS_GROUP` (win32). The daemon spawns in a new
-/// process group so it does NOT receive `CTRL_C_EVENT` /
-/// `CTRL_BREAK_EVENT` from the test runner's console. `cargo nextest`
-/// runs the `lrctl_windows` tests in parallel inside one console; a
-/// `CTRL_C` from a timing-out peer (or from nextest's own
-/// failure-shortcut path) propagates to every process in the console
-/// group. Without this flag the daemon's `SetConsoleCtrlHandler` maps
-/// `CTRL_C` to `SIGINT`, `wait_for_shutdown` sees the pending signal,
-/// and the daemon tears itself down — the pipe vanishes before
-/// `lrctl shutdown` can connect, and the test fails with
-/// `CreateFileW failed (error 2)`. With the flag the daemon only
-/// reacts to `CTRL_CLOSE` / `CTRL_LOGOFF` / `CTRL_SHUTDOWN` (the
-/// graceful-shutdown events the console sends on session end, which
-/// the test runner never fires) and to the `lrctl shutdown` command
-/// the test drives explicitly. `CTRL_BREAK` is still delivered to
-/// the new group, but `cargo nextest` does not send it. The daemon's
-/// own `SetConsoleCtrlHandler` is still installed (the daemon
-/// installs it at startup), so a real operator's console close still
-/// triggers the graceful path.
+/// process group so it does NOT receive `CTRL_C_EVENT` from the test
+/// runner's console. `CREATE_NEW_PROCESS_GROUP` alone blocks `CTRL_C`
+/// but NOT `CTRL_BREAK` — the console sends `CTRL_BREAK` to every
+/// process group, and the daemon's `SetConsoleCtrlHandler` maps it
+/// to `SIGINT` too. On a loaded CI runner a `CTRL_BREAK` from
+/// nextest's parallel-test coordination still reached the daemon and
+/// tripped the same `wait_for_shutdown` race. `CREATE_NO_WINDOW`
+/// closes that path: the daemon is created without a console, so no
+/// console events (`CTRL_C`, `CTRL_BREAK`, `CTRL_CLOSE`,
+/// `CTRL_LOGOFF`, `CTRL_SHUTDOWN`) reach it at all. With no console
+/// handle the daemon's `SetConsoleCtrlHandler` registration is a
+/// no-op (no events to deliver), and `signal::init()` still succeeds
+/// (the Win32 call accepts a handler even without a console
+/// attached). The daemon's own graceful-shutdown path is still
+/// reachable through the `lrctl shutdown` command the test drives
+/// explicitly, which is the path under test.
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// A unique pipe name for one test. Named pipes live in a flat kernel
 /// namespace, so the name must not collide with a parallel test or a
@@ -78,7 +77,7 @@ impl Daemon {
             .args(args)
             .stdout(Stdio::from(log_file.try_clone().expect("clone stdout")))
             .stderr(Stdio::from(log_file))
-            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
             .spawn()
             .expect("spawn lr-daemon");
         Self { child, log }
