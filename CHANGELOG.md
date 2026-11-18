@@ -316,7 +316,7 @@ to 5 times before the step gives up; a genuinely stuck mirror still
 fails inside 15 minutes rather than 10.
 
 **Windows daemon tests spawn the daemon with
-`CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`** (`lr-cli` test
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`** (`lr-cli` test
 harness). The `lrctl_status_round_trips_over_named_pipe` test (and
 every test in `daemon_metrics.rs` on Windows) spawns `lr-daemon` as a
 subprocess of the test runner. `cargo nextest` runs the tests in
@@ -329,10 +329,12 @@ named pipe (or the metrics TCP listener) vanishes before
 `lrctl shutdown` (or the metrics scrape) can connect, and the test
 fails with `CreateFileW failed (error 2)`. `CREATE_NEW_PROCESS_GROUP`
 alone blocks `CTRL_C` but NOT `CTRL_BREAK` (the console sends
-`CTRL_BREAK` to every process group); `CREATE_NO_WINDOW` closes that
-path too — the daemon is created without a console, so no console
-events reach it at all. The test harness now passes
-`creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)` on
+`CTRL_BREAK` to every process group); `CREATE_NO_WINDOW` does NOT
+close it — the process is still attached to the parent's console
+for signal handling, only the window is hidden. `DETACHED_PROCESS`
+closes that path — the daemon is created without a console, so no
+console events reach it at all. The test harness now passes
+`creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)` on
 the `Command::new(DAEMON)` spawn. The daemon's
 `signal::init()` still succeeds (the Win32 `SetConsoleCtrlHandler`
 call accepts a handler even without a console attached); the
