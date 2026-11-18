@@ -549,9 +549,20 @@ fn lrctl_version_prints_version() {
 
 /// Helper: spawn a daemon configured the way the `show …` tests need
 /// (one BGP session + one originated prefix). Each test passes its
-/// own `port` so parallel `cargo test` execution does not collide
-/// on the listen socket (the existing tests above use distinct ports
-/// 18091..18095 for the same reason).
+/// own `port` so parallel `cargo test` execution does not collide on
+/// the listen socket: two live daemons on one port mean the loser logs
+/// `bind …: Address already in use` and never reaches "runtime API
+/// on", so its test burns the full 60 s wait and fails. The ranges:
+///
+/// - 18091..18095 — the `lrctl_status` / `routes` / `dump` / `reload`
+///   family at the top of the file;
+/// - 18101..18118 — the `show …` family;
+/// - 18121..18123 — the ROA `list` / `count` / `bogus` family;
+/// - 18131..18137 — the session soft-reconfig / refresh-in / bad-op
+///   family.
+///
+/// Adding a test means taking an unused port from one of those ranges
+/// (or starting a new one), never reusing a number a live test holds.
 fn spawn_show_daemon(tag: &str, port: &str) -> (std::path::PathBuf, Daemon) {
     let socket =
         std::env::temp_dir().join(format!("lrctl-test-show-{tag}-{}.sock", std::process::id()));
@@ -1371,7 +1382,7 @@ fn lrctl_roa_unknown_subcommand_exits_nonzero() {
 
 #[test]
 fn lrctl_session_soft_in_reports_zero_for_idle_session() {
-    let (socket, d) = spawn_show_daemon("soft-in", "18111");
+    let (socket, d) = spawn_show_daemon("soft-in", "18131");
     let (ok, stdout, stderr) = lrctl(&[
         "--socket",
         socket.to_str().unwrap(),
@@ -1391,7 +1402,7 @@ fn lrctl_session_soft_in_reports_zero_for_idle_session() {
 
 #[test]
 fn lrctl_session_refresh_in_fails_for_idle_session() {
-    let (socket, d) = spawn_show_daemon("refresh-in", "18112");
+    let (socket, d) = spawn_show_daemon("refresh-in", "18132");
     let (ok, stdout, _stderr) = lrctl(&[
         "--socket",
         socket.to_str().unwrap(),
@@ -1416,7 +1427,7 @@ fn lrctl_session_refresh_in_fails_for_idle_session() {
 
 #[test]
 fn lrctl_session_refresh_in_with_explicit_family() {
-    let (socket, d) = spawn_show_daemon("refresh-in-v6", "18113");
+    let (socket, d) = spawn_show_daemon("refresh-in-v6", "18133");
     // Explicit family — still fails because the session is Idle,
     // but the family parse succeeds (the daemon does not report
     // "unknown family").
@@ -1443,7 +1454,7 @@ fn lrctl_session_refresh_in_with_explicit_family() {
 
 #[test]
 fn lrctl_session_refresh_in_unknown_family_exits_nonzero() {
-    let (socket, d) = spawn_show_daemon("refresh-in-bad", "18114");
+    let (socket, d) = spawn_show_daemon("refresh-in-bad", "18134");
     // Unknown family — the daemon bounces it. `lrctl` exits 1
     // because the reply starts with `error:`.
     let (ok, stdout, _stderr) = lrctl(&[
@@ -1466,7 +1477,7 @@ fn lrctl_session_refresh_in_unknown_family_exits_nonzero() {
 
 #[test]
 fn lrctl_session_unknown_op_exits_nonzero() {
-    let (socket, d) = spawn_show_daemon("bad-op", "18115");
+    let (socket, d) = spawn_show_daemon("bad-op", "18135");
     // Unknown op — client-side rejection, exit 2.
     let (ok, _stdout, stderr) = lrctl(&[
         "--socket",
@@ -1487,7 +1498,7 @@ fn lrctl_session_unknown_op_exits_nonzero() {
 
 #[test]
 fn lrctl_session_non_numeric_handle_exits_nonzero() {
-    let (socket, d) = spawn_show_daemon("bad-handle", "18116");
+    let (socket, d) = spawn_show_daemon("bad-handle", "18136");
     // Non-numeric handle — client-side rejection, exit 2.
     let (ok, _stdout, stderr) = lrctl(&[
         "--socket",
@@ -1511,7 +1522,7 @@ fn lrctl_session_non_numeric_handle_exits_nonzero() {
 
 #[test]
 fn lrctl_session_missing_op_exits_nonzero() {
-    let (socket, d) = spawn_show_daemon("no-op", "18117");
+    let (socket, d) = spawn_show_daemon("no-op", "18137");
     // `lrctl session 1` (no op) — client-side rejection, exit 2.
     let (ok, _stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "session", "1"]);
     assert!(!ok, "lrctl session 1 (no op) should exit non-zero");
