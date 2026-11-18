@@ -805,6 +805,14 @@ impl<'a> Parser<'a> {
             "ldp.bind" => cfg.ldp_binds.push(LdpBindSpec::default()),
             "roa" => cfg.roas.push(RoaSpec::default()),
             "filter" => cfg.filters.push(FilterSpec::default()),
+            // `[[filter_function]]` — the array-table backing the
+            // top-level `filter-function "name" { ... }` block. The
+            // shared dispatch (`apply_filter_function_key`) writes
+            // `name`, `params`/`param`, `return_type` and `body`
+            // into the spec this arm pushes.
+            "filter_function" => cfg
+                .filter_functions
+                .push(crate::daemon_config::FilterFunctionSpec::default()),
             "redistribute" => cfg.redistributes.push(RedistributeSpec::default()),
             "aggregate" => cfg.aggregates.push(AggregateSpec::default()),
             "bgp.network_route_map" => cfg.network_route_maps.push(NetworkRouteMapSpec::default()),
