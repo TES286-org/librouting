@@ -12,12 +12,34 @@
 
 #![cfg(windows)]
 
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_lr-daemon");
 const LRCTL: &str = env!("CARGO_BIN_EXE_lrctl");
+
+/// `CREATE_NEW_PROCESS_GROUP` (win32). The daemon spawns in a new
+/// process group so it does NOT receive `CTRL_C_EVENT` /
+/// `CTRL_BREAK_EVENT` from the test runner's console. `cargo nextest`
+/// runs the `lrctl_windows` tests in parallel inside one console; a
+/// `CTRL_C` from a timing-out peer (or from nextest's own
+/// failure-shortcut path) propagates to every process in the console
+/// group. Without this flag the daemon's `SetConsoleCtrlHandler` maps
+/// `CTRL_C` to `SIGINT`, `wait_for_shutdown` sees the pending signal,
+/// and the daemon tears itself down — the pipe vanishes before
+/// `lrctl shutdown` can connect, and the test fails with
+/// `CreateFileW failed (error 2)`. With the flag the daemon only
+/// reacts to `CTRL_CLOSE` / `CTRL_LOGOFF` / `CTRL_SHUTDOWN` (the
+/// graceful-shutdown events the console sends on session end, which
+/// the test runner never fires) and to the `lrctl shutdown` command
+/// the test drives explicitly. `CTRL_BREAK` is still delivered to
+/// the new group, but `cargo nextest` does not send it. The daemon's
+/// own `SetConsoleCtrlHandler` is still installed (the daemon
+/// installs it at startup), so a real operator's console close still
+/// triggers the graceful path.
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 
 /// A unique pipe name for one test. Named pipes live in a flat kernel
 /// namespace, so the name must not collide with a parallel test or a
@@ -56,6 +78,7 @@ impl Daemon {
             .args(args)
             .stdout(Stdio::from(log_file.try_clone().expect("clone stdout")))
             .stderr(Stdio::from(log_file))
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
             .spawn()
             .expect("spawn lr-daemon");
         Self { child, log }

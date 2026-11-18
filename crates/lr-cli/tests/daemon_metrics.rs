@@ -23,7 +23,18 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const DAEMON: &str = env!("CARGO_BIN_EXE_lr-daemon");
+
+/// `CREATE_NEW_PROCESS_GROUP` — Windows-only. See the comment on
+/// the same constant in `lrctl_windows.rs` for the full rationale:
+/// the daemon must not receive `CTRL_C` from the test runner's
+/// console. Applied on Windows only; the Unix path relies on the
+/// process group the test runner already sets up.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 
 /// A spawned `lr-daemon` with its log file path so the test can wait
 /// for the "metrics endpoint on" marker before scraping.
@@ -46,12 +57,13 @@ impl Daemon {
             .append(true)
             .open(&log)
             .expect("create log file");
-        let child = Command::new(DAEMON)
-            .args(args)
+        let mut cmd = Command::new(DAEMON);
+        cmd.args(args)
             .stdout(Stdio::from(log_file.try_clone().expect("clone stdout")))
-            .stderr(Stdio::from(log_file))
-            .spawn()
-            .expect("spawn lr-daemon");
+            .stderr(Stdio::from(log_file));
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        let child = cmd.spawn().expect("spawn lr-daemon");
         Self { child, log }
     }
 
