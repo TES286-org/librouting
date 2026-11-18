@@ -316,26 +316,29 @@ to 5 times before the step gives up; a genuinely stuck mirror still
 fails inside 15 minutes rather than 10.
 
 **Windows daemon tests spawn the daemon with
-`CREATE_NEW_PROCESS_GROUP`** (`lr-cli` test harness). The
-`lrctl_status_round_trips_over_named_pipe` test (and every test in
-`daemon_metrics.rs` on Windows) spawns `lr-daemon` as a subprocess
-of the test runner. `cargo nextest` runs the tests in parallel
-inside one Windows console; a `CTRL_C` from a timing-out peer (or
-from nextest's own failure-shortcut path) propagates to every
-process in the console group. The daemon's
-`SetConsoleCtrlHandler` maps `CTRL_C` to `SIGINT`,
-`wait_for_shutdown` sees the pending signal, and the daemon tears
-itself down — the named pipe (or the metrics TCP listener) vanishes
-before `lrctl shutdown` (or the metrics scrape) can connect, and
-the test fails with `CreateFileW failed (error 2)`. The test
-harness now passes `creation_flags(CREATE_NEW_PROCESS_GROUP)` on
-the `Command::new(DAEMON)` spawn, so the daemon lands in a new
-process group that does not receive `CTRL_C` from the parent's
-console. The daemon still installs its own
-`SetConsoleCtrlHandler` at startup, so a real operator's
-`CTRL_CLOSE` / `CTRL_LOGOFF` / `CTRL_SHUTDOWN` (the graceful
-session-end events) still trigger the daemon's graceful path —
-only the spurious `CTRL_C` from the test runner is suppressed.
+`CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`** (`lr-cli` test
+harness). The `lrctl_status_round_trips_over_named_pipe` test (and
+every test in `daemon_metrics.rs` on Windows) spawns `lr-daemon` as a
+subprocess of the test runner. `cargo nextest` runs the tests in
+parallel inside one Windows console; a `CTRL_C` or `CTRL_BREAK` from
+a timing-out peer (or from nextest's own failure-shortcut path)
+propagates to every process in the console group. The daemon's
+`SetConsoleCtrlHandler` maps both to `SIGINT`, `wait_for_shutdown`
+sees the pending signal, and the daemon tears itself down — the
+named pipe (or the metrics TCP listener) vanishes before
+`lrctl shutdown` (or the metrics scrape) can connect, and the test
+fails with `CreateFileW failed (error 2)`. `CREATE_NEW_PROCESS_GROUP`
+alone blocks `CTRL_C` but NOT `CTRL_BREAK` (the console sends
+`CTRL_BREAK` to every process group); `CREATE_NO_WINDOW` closes that
+path too — the daemon is created without a console, so no console
+events reach it at all. The test harness now passes
+`creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)` on
+the `Command::new(DAEMON)` spawn. The daemon's
+`signal::init()` still succeeds (the Win32 `SetConsoleCtrlHandler`
+call accepts a handler even without a console attached); the
+handler is simply never called. The daemon's own graceful-shutdown
+path is still reachable through the `lrctl shutdown` command the
+test drives explicitly, which is the path under test.
 
 ### Added
 
