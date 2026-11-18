@@ -163,6 +163,19 @@ through the shared Loc-RIB handle (`DefaultRouter::rib_handle`,
 per-family shard locks) instead of the router's `RwLock` — an API
 client dumping routes never waits behind the writer's tick.
 
+## The management listeners
+
+The runtime API and the metrics endpoint share one accept reactor
+(`crates/lr-cli/src/accept_reactor.rs`). The listener is registered
+READABLE on a `mio::Poll`, and a watcher thread wakes the loop once
+when the daemon stops. Readiness is edge-triggered, so every event
+drains the accept queue until `WouldBlock`. A hard `accept` error
+(EMFILE, ENFILE, ENOBUFS) is backed off 100 ms and the registration is
+re-armed when the window closes: the connection whose accept failed
+already produced its edge, and no second one arrives while it stays
+queued. Accepted streams switch back to blocking and a per-connection
+thread serves them with a read timeout.
+
 ## The OSPF run paths
 
 OSPF needs raw sockets: `IPPROTO_OSPF` for v2 and a raw IPv6 socket for
@@ -213,15 +226,28 @@ without a flag day.
 
 ## The LDP run path
 
-LDP (RFC 5036) uses two transports. The daemon runs both:
+LDP (RFC 5036) uses two transports, and one loop drives both:
 
-1. Per `--ldp-interface` or `[[ldp.interface]]`, a UDP multicast Hello
-   sender and receiver thread.
-2. Per `--ldp-targeted` or `[[ldp.targeted]]`, an extended-discovery
-   targeted-Hello sender and receiver (RFC 5036 §6.2).
-3. When a Hello adjacency comes up, dial or accept a TCP session and
-   hand it to `lr_ldp::LdpEngine`, which runs the session FSM, the label
-   binding advertisements, and the FEC-to-label mapping.
+1. **Discovery.** A UDP socket per address family on the LDP port,
+   joined to the all-routers group on every configured
+   `--ldp-interface` / `[[ldp.interface]]`. The loop sends one link
+   Hello per interface every third of the hold time (§3.5.2.1), and
+   targeted Hellos to each `--ldp-targeted` / `[[ldp.targeted]]`
+   address (extended discovery, §2.4.2).
+2. **Sessions.** When a Hello adjacency comes up, the loop dials the
+   active role or accepts the passive one, and hands the connection to
+   `lr_ldp::LdpEngine`, which runs the session FSM, the label binding
+   advertisements and the FEC-to-label mapping.
+
+The engine hands the loop each session's outbound PDUs as bytes. The
+loop appends them to that session's queue (`Conn` in
+`crates/lr-cli/src/daemon_ldp.rs`) and writes what the socket accepts;
+when the send buffer fills, the unsent tail stays queued and the next
+pass retries it. Dropping that tail would tear a PDU in the middle,
+and §3.1's framing has no resynchronisation point, so the peer would
+reset the session. The graceful shutdown path drains every queue
+blocking with a bounded write timeout, so the Shutdown Notification
+(§3.5.1.2.4) reaches the peer before the socket closes.
 
 On Linux the daemon installs the resulting MPLS LSPs through the same
 `mpls_route::MplsNetlink` the BGP-LU mirror uses. Kernel MPLS needs the
