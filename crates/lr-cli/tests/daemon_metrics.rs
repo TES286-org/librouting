@@ -28,17 +28,17 @@ use std::os::windows::process::CommandExt;
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_lr-daemon");
 
-/// `CREATE_NEW_PROCESS_GROUP` — Windows-only. See the comment on
-/// the same constant in `lrctl_windows.rs` for the full rationale:
-/// the daemon must not receive `CTRL_C` or `CTRL_BREAK` from the
-/// test runner's console. `CREATE_NO_WINDOW` (also Windows-only)
-/// detaches the daemon from the console entirely — no console
-/// events reach it. Applied on Windows only; the Unix path relies
-/// on the process group the test runner already sets up.
+/// `DETACHED_PROCESS` — Windows-only. See the comment on the same
+/// constant in `lrctl_windows.rs` for the full rationale: the daemon
+/// is created without a console so no console events (`CTRL_C`,
+/// `CTRL_BREAK`, `CTRL_CLOSE`, `CTRL_LOGOFF`, `CTRL_SHUTDOWN`) reach
+/// it. `CREATE_NEW_PROCESS_GROUP` is kept as a belt-and-braces
+/// complement. Applied on Windows only; the Unix path relies on the
+/// process group the test runner already sets up.
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x00000008;
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// A spawned `lr-daemon` with its log file path so the test can wait
 /// for the "metrics endpoint on" marker before scraping.
@@ -66,7 +66,7 @@ impl Daemon {
             .stdout(Stdio::from(log_file.try_clone().expect("clone stdout")))
             .stderr(Stdio::from(log_file));
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         let child = cmd.spawn().expect("spawn lr-daemon");
         Self { child, log }
     }
