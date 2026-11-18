@@ -426,3 +426,49 @@ static {
         assert_eq!(cfg.static_routes[1].next_hop, None);
     }
 }
+
+#[cfg(test)]
+mod issue_101_filter_function {
+    use super::parse_dsl_text;
+    use crate::daemon_config::DaemonConfig;
+
+    #[test]
+    fn dsl_filter_function_parses() {
+        let mut cfg = DaemonConfig::default();
+        let src = r#"filter-function "tag_customer" {
+    param "lp";
+    body "bgp.local_pref = lp; return true;";
+}
+"#;
+        parse_dsl_text(src, None, &mut cfg).expect("parse must succeed");
+        assert_eq!(cfg.filter_functions.len(), 1);
+        assert_eq!(
+            cfg.filter_functions[0].name.as_deref(),
+            Some("tag_customer")
+        );
+        assert_eq!(cfg.filter_functions[0].params, vec!["lp".to_string()]);
+        assert_eq!(
+            cfg.filter_functions[0].body.as_deref(),
+            Some("bgp.local_pref = lp; return true;")
+        );
+    }
+
+    #[test]
+    fn dsl_filter_function_end_to_end() {
+        use crate::daemon_policy::build_filters;
+        let mut cfg = DaemonConfig::default();
+        let src = r#"filter-function "tag_customer" {
+    param "lp";
+    body "bgp.local_pref = lp; return true;";
+}
+filter "in" {
+    body = "tag_customer(200); accept;";
+}
+"#;
+        parse_dsl_text(src, None, &mut cfg).expect("parse");
+        let filters = build_filters(&cfg).expect("filters must compile");
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].1.functions.len(), 1);
+        assert_eq!(filters[0].1.functions[0].name, "tag_customer");
+    }
+}

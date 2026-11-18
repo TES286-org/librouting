@@ -317,3 +317,86 @@ fn converts_bgp_roa_source_blocks_to_dsl() {
     assert!(stdout.contains("dialect lr"), "{stdout}");
     assert!(stdout.contains("warnings: 0"), "{stdout}");
 }
+
+// ---- issue #101: `[[filter_function]]` end-to-end round-trip ----
+
+/// A TOML config with `[[filter_function]]` round-trips through
+/// `lr-daemon config to-dsl` and the result checks as `.lr`. The
+/// shared-function path was previously broken in the DSL (the
+/// parser's `enter_array` had no `filter_function` arm), so the
+/// converted file failed `config check`. This test pins the
+/// end-to-end round-trip.
+#[test]
+fn filter_function_round_trips_through_config_to_dsl() {
+    let path = fixture(
+        "filter-function",
+        "[[filter_function]]\n\
+         name = \"tag_customer\"\n\
+         params = [\"lp\"]\n\
+         body = \"bgp.local_pref = lp; return true;\"\n\
+         \n\
+         [[filter]]\n\
+         name = \"in\"\n\
+         body = \"tag_customer(200); accept;\"\n",
+        "toml",
+    );
+    let (code, stdout, stderr) = to_dsl(&["config", "to-dsl", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("filter-function \"tag_customer\" {"),
+        "filter-function block missing: {stdout}"
+    );
+    // `lp` is bare-safe (starts with a letter, only ASCII
+    // alphanumerics), so the emitter renders it without quotes —
+    // `param "lp";` would not round-trip back through the lexer as
+    // a single ident token.
+    assert!(stdout.contains("param lp;"), "param line missing: {stdout}");
+    assert!(
+        stdout.contains("body \"bgp.local_pref = lp; return true;\";"),
+        "body line missing or escaped wrong: {stdout}"
+    );
+    // The converted file checks as the native dialect — a filter
+    // block on its own defaults to the BIRD heuristic, so force the
+    // LR dialect to exercise the `filter-function` block parser.
+    let lr = fixture("filter-function-converted", &stdout, "lr");
+    let (code, stdout, stderr) =
+        check(&["config", "check", "--dialect", "lr", lr.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("dialect lr"), "{stdout}");
+    assert!(stdout.contains("warnings: 0"), "{stdout}");
+}
+
+/// A filter body that uses an IPv6 prefix whose hextets are all
+/// decimal (`2001:1::/32`) round-trips through `config to-dsl` and
+/// the converted file checks as `.lr`. The lexer previously
+/// mis-classified such prefixes as community pairs; this test pins
+/// the end-to-end fix so the regression cannot return.
+#[test]
+fn filter_body_with_decimal_only_ipv6_round_trips() {
+    let path = fixture(
+        "filter-ipv6",
+        "[[filter]]\n\
+         name = \"v6\"\n\
+         body = \"if net ~ [2001:1::/32, 2606:4700:4700::1111/64] then accept; reject;\"\n",
+        "toml",
+    );
+    let (code, stdout, stderr) = to_dsl(&["config", "to-dsl", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("2001:1::/32"),
+        "IPv6 prefix not preserved verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains("2606:4700:4700::1111/64"),
+        "long IPv6 prefix not preserved verbatim: {stdout}"
+    );
+    // A filter-only file defaults to the BIRD heuristic, so force
+    // the LR dialect to exercise the lexer's IPv6 handling through
+    // `config check`.
+    let lr = fixture("filter-ipv6-converted", &stdout, "lr");
+    let (code, stdout, stderr) =
+        check(&["config", "check", "--dialect", "lr", lr.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("dialect lr"), "{stdout}");
+    assert!(stdout.contains("warnings: 0"), "{stdout}");
+}

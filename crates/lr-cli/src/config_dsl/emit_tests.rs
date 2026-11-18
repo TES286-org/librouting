@@ -185,3 +185,73 @@ soft_degraded = 5
     assert_eq!(first.peer_health.config.baseline_window_s, 600);
     assert_eq!(first.peer_health.config.global_budgets.soft_degraded, 5);
 }
+
+// ---- issue #101: `[[filter_function]]` DSL round-trip ----
+
+/// A TOML config with `[[filter_function]]` round-trips through the
+/// `.lr` DSL — the emitter renders a `filter-function "name" { … }`
+/// block and the DSL parser reads it back into the same IR. The
+/// shared-function preamble path was previously broken in the DSL
+/// (the `enter_array` dispatch had no `filter_function` arm), so the
+/// DSL form of this block failed at parse time. This test pins the
+/// round-trip so the regression cannot return.
+#[test]
+fn round_trips_filter_function_table() {
+    let toml = r#"
+[[filter_function]]
+name = "tag_customer"
+params = ["lp"]
+body = "bgp.local_pref = lp; return true;"
+
+[[filter_function]]
+name = "classify"
+param = "lp"
+return_type = "int"
+body = "if lp >= 200 then return 300; return 100;"
+
+[[filter]]
+name = "in"
+body = "tag_customer(classify(200)); accept;"
+"#;
+    let (first, second) = round_trip(toml);
+    assert_eq!(first, second);
+    assert_eq!(first.filter_functions.len(), 2);
+    assert_eq!(
+        first.filter_functions[0].name.as_deref(),
+        Some("tag_customer")
+    );
+    assert_eq!(first.filter_functions[0].params, vec!["lp".to_string()]);
+    assert_eq!(
+        first.filter_functions[0].body.as_deref(),
+        Some("bgp.local_pref = lp; return true;")
+    );
+    assert_eq!(first.filter_functions[1].name.as_deref(), Some("classify"));
+    assert_eq!(first.filter_functions[1].params, vec!["lp".to_string()]);
+    assert_eq!(
+        first.filter_functions[1].return_type.as_deref(),
+        Some("int")
+    );
+}
+
+/// A filter body that uses IPv6 prefixes whose hextets are all
+/// decimal must round-trip too. The DSL lexer previously
+/// mis-classified these as community pairs (see the lexer regression
+/// tests in `crates/lr-policy/src/filter/lexer.rs`); this test pins
+/// the IR-level round-trip so the same defect cannot return through
+/// the config pipeline.
+#[test]
+fn round_trips_filter_body_with_decimal_only_ipv6() {
+    let toml = r#"
+[[filter]]
+name = "v6"
+body = "if net ~ [2001:1::/32, 2606:4700:4700::1111/64] then accept; reject;"
+"#;
+    let (first, second) = round_trip(toml);
+    assert_eq!(first, second);
+    assert_eq!(first.filters.len(), 1);
+    assert_eq!(first.filters[0].name.as_deref(), Some("v6"));
+    assert_eq!(
+        first.filters[0].body.as_deref(),
+        Some("if net ~ [2001:1::/32, 2606:4700:4700::1111/64] then accept; reject;")
+    );
+}
