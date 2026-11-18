@@ -94,6 +94,35 @@ recompiling.
 
 ### Fixed
 
+**OSPF graceful-restart status reports the *remaining* grace, not the
+absolute deadline or the configured period** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+The runtime-API `status` snapshot that `lrctl status` (and the
+BIRD-style `show status`) prints for OSPFv2 and OSPFv3 carries one
+line per active helper — `"helper R (area A, Xs grace left)"`. The
+v2 daemon computed `X` as `n.helper.grace_deadline_ms().saturating_sub(0)
+/ 1_000` — a no-op subtraction that printed the *absolute* deadline in
+seconds (a number on the daemon's monotonic clock, not the remaining
+time). The v3 daemon computed `X` as `n.helper.last_period_secs()` —
+the *advertised* period, a constant the peer set once and never
+updated. Both shapes reported a number that did not move as the grace
+window elapsed: a helper that started at daemon t=0 with a 60 s grace
+period read "60s grace left" forever, even when only 1 s remained.
+The fix threads the main-loop `now_ms` into `refresh_gr_status` and
+computes `X` as `n.helper.grace_deadline_ms().saturating_sub(now_ms)
+/ 1_000` on both daemons — the remaining seconds, clamped at zero
+once the deadline passes (the helper stays active until `poll` fires
+the `GraceTimeout` exit, which is a separate `pump_gr` pass). The
+v2 recovery line `"grace until +Xs"` and the v3 recovery line
+`"grace deadline +Xms"` keep the absolute-decimal-deadline shape —
+the `+X` form is the operator's correlation view against the
+daemon's other `+Xs` / `+Xms` log lines. The four new
+`refresh_gr_status` tests (`crates/lr-cli/src/daemon_ospf_tests.rs`
+and `crates/lr-cli/src/daemon_ospf3_tests.rs`) pin the contract:
+halfway through a 60 s window reads "10s grace left"; at the
+deadline reads "0s"; past the deadline still reads "0s" (saturating);
+and a flushed helper does not appear in the status lines at all.
+
 **BGP reactor threads the post-poll `now_ms` through
 `feed_input_at` — the KEEPALIVE-arrival metric is no longer
 dead** (`lr-cli`,
