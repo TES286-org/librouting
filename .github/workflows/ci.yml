@@ -341,10 +341,10 @@ jobs:
         with:
           shared-key: "ffi-bindings"
       - name: Install system deps
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             libc6-dev gcc g++ cbindgen python3 python3-pip python3-venv \
             golang-go
       - name: Install Python test deps
@@ -499,20 +499,31 @@ jobs:
         with:
           shared-key: "cross-${{ matrix.target }}"
       - name: Install cross linkers
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross \
-            libgcc-11-dev-arm64-cross \
-            gcc-mingw-w64-x86-64 \
-            gcc-riscv64-linux-gnu \
-            libc6-dev-riscv64-cross \
-            gcc-powerpc64le-linux-gnu \
-            libc6-dev-ppc64el-cross \
-            gcc-s390x-linux-gnu \
-            libc6-dev-s390x-cross
+          sudo apt-get -o Acquire::Retries=5 update
+          # Only install the cross-linker for THIS matrix target — the
+          # previous shape installed every target's linker on every job
+          # (~600 MB of packages), which regularly exceeded the 10- or
+          # 15-minute step ceiling on a slow CI runner. The per-target
+          # shape downloads only what this job actually needs.
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                gcc-aarch64-linux-gnu libc6-dev-arm64-cross libgcc-11-dev-arm64-cross ;;
+            x86_64-pc-windows-gnu)
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                gcc-mingw-w64-x86-64 ;;
+            riscv64gc-unknown-linux-gnu)
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                gcc-riscv64-linux-gnu libc6-dev-riscv64-cross ;;
+            powerpc64le-unknown-linux-gnu)
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                gcc-powerpc64le-linux-gnu libc6-dev-ppc64el-cross ;;
+            s390x-unknown-linux-gnu)
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                gcc-s390x-linux-gnu libc6-dev-s390x-cross ;;
+          esac
       - name: cargo build (${{ matrix.target }})
         timeout-minutes: 20
         run: cargo build --workspace --target ${{ matrix.target }} --all-features
@@ -1117,10 +1128,10 @@ jobs:
         with:
           shared-key: "interop"
       - name: Install reference daemons
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bird2 frr iproute2 tcpdump libyang-tools
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends bird2 frr iproute2 tcpdump libyang-tools
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli
@@ -1455,10 +1466,10 @@ jobs:
         with:
           shared-key: "interop-auth"
       - name: Install reference daemons
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bird2 frr iproute2
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends bird2 frr iproute2
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli

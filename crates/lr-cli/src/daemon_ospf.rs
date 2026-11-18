@@ -2858,7 +2858,7 @@ impl OspfDaemon {
         if let Some(outcome) = gr_recovery_done {
             self.exit_gr_recovery(outcome, now_ms);
         }
-        self.refresh_gr_status();
+        self.refresh_gr_status(now_ms);
     }
 
     /// §2.3: leave graceful restart (success or failure): flush the
@@ -3054,12 +3054,23 @@ impl OspfDaemon {
     }
 
     /// Refresh the runtime-API status snapshot (cheap: a small vec).
-    fn refresh_gr_status(&self) {
+    ///
+    /// `now_ms` is the main-loop clock the snapshot is taken against.
+    /// The "grace until +Xs" line carries the absolute deadline in
+    /// seconds since daemon start (the caller-clock view an operator
+    /// correlates against the daemon's other `+Xs` log lines); the
+    /// per-helper "Xs grace left" line is the *remaining* grace, the
+    /// deadline minus `now_ms`. A regression that drops `now_ms` from
+    /// the call (the previous shape left `saturating_sub(0)` as a
+    /// placeholder) would show the absolute deadline where the
+    /// operator expects the remaining seconds — a stuck "60s grace
+    /// left" forever, even when only 1 s actually remains.
+    fn refresh_gr_status(&self, now_ms: u64) {
         let mut lines = Vec::new();
         if let Some((_, tracker)) = self.gr_recovery.first_key_value() {
             lines.push(format!(
                 "ospf graceful restart: recovering (grace until +{}s)",
-                tracker.grace_deadline_ms().saturating_sub(0) / 1_000
+                tracker.grace_deadline_ms() / 1_000
             ));
         }
         let helpers: Vec<String> = self
@@ -3071,7 +3082,7 @@ impl OspfDaemon {
                     "  helper {} (area {}, {}s grace left)",
                     fmt_rid(*rid),
                     area_label(*area),
-                    n.helper.grace_deadline_ms().saturating_sub(0) / 1_000
+                    n.helper.grace_deadline_ms().saturating_sub(now_ms) / 1_000
                 )
             })
             .collect();

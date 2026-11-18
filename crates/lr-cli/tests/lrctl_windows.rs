@@ -12,12 +12,42 @@
 
 #![cfg(windows)]
 
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_lr-daemon");
 const LRCTL: &str = env!("CARGO_BIN_EXE_lrctl");
+
+/// `DETACHED_PROCESS` (win32) — the daemon is created without a
+/// console, so NO console events (`CTRL_C`, `CTRL_BREAK`,
+/// `CTRL_CLOSE`, `CTRL_LOGOFF`, `CTRL_SHUTDOWN`) reach it at all.
+/// `CREATE_NEW_PROCESS_GROUP` alone blocks `CTRL_C` but NOT
+/// `CTRL_BREAK`; `CREATE_NO_WINDOW` blocks the window but NOT the
+/// console events (the process is still attached to the parent's
+/// console for signal-handling purposes). `DETACHED_PROCESS` is the
+/// only flag that truly detaches the process from every console.
+/// On a loaded CI runner `CTRL_C` / `CTRL_BREAK` from nextest's
+/// parallel-test coordination reached the daemon under both
+/// `CREATE_NEW_PROCESS_GROUP` and `CREATE_NO_WINDOW`, tripping the
+/// same `wait_for_shutdown` race (the daemon's
+/// `SetConsoleCtrlHandler` maps both to `SIGINT`, the daemon tears
+/// itself down, the pipe vanishes, and `lrctl shutdown` fails with
+/// `CreateFileW failed (error 2)`). With `DETACHED_PROCESS` the
+/// daemon's `SetConsoleCtrlHandler` registration is a no-op (no
+/// console to deliver events from), and `signal::init()` still
+/// succeeds (the Win32 call accepts a handler even without a
+/// console attached — tested on the windows-2022 CI runner). The
+/// daemon's own graceful-shutdown path is still reachable through
+/// the `lrctl shutdown` command the test drives explicitly, which
+/// is the path under test.
+const DETACHED_PROCESS: u32 = 0x00000008;
+/// `CREATE_NEW_PROCESS_GROUP` (win32) — kept as a belt-and-braces
+/// complement to `DETACHED_PROCESS`: even if a future Windows update
+/// changes `DETACHED_PROCESS`'s console-event suppression, the new
+/// process group still blocks `CTRL_C`.
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 
 /// A unique pipe name for one test. Named pipes live in a flat kernel
 /// namespace, so the name must not collide with a parallel test or a
@@ -56,6 +86,7 @@ impl Daemon {
             .args(args)
             .stdout(Stdio::from(log_file.try_clone().expect("clone stdout")))
             .stderr(Stdio::from(log_file))
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
             .spawn()
             .expect("spawn lr-daemon");
         Self { child, log }

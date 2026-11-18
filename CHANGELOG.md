@@ -94,6 +94,35 @@ recompiling.
 
 ### Fixed
 
+**OSPF graceful-restart status reports the *remaining* grace, not the
+absolute deadline or the configured period** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+The runtime-API `status` snapshot that `lrctl status` (and the
+BIRD-style `show status`) prints for OSPFv2 and OSPFv3 carries one
+line per active helper — `"helper R (area A, Xs grace left)"`. The
+v2 daemon computed `X` as `n.helper.grace_deadline_ms().saturating_sub(0)
+/ 1_000` — a no-op subtraction that printed the *absolute* deadline in
+seconds (a number on the daemon's monotonic clock, not the remaining
+time). The v3 daemon computed `X` as `n.helper.last_period_secs()` —
+the *advertised* period, a constant the peer set once and never
+updated. Both shapes reported a number that did not move as the grace
+window elapsed: a helper that started at daemon t=0 with a 60 s grace
+period read "60s grace left" forever, even when only 1 s remained.
+The fix threads the main-loop `now_ms` into `refresh_gr_status` and
+computes `X` as `n.helper.grace_deadline_ms().saturating_sub(now_ms)
+/ 1_000` on both daemons — the remaining seconds, clamped at zero
+once the deadline passes (the helper stays active until `poll` fires
+the `GraceTimeout` exit, which is a separate `pump_gr` pass). The
+v2 recovery line `"grace until +Xs"` and the v3 recovery line
+`"grace deadline +Xms"` keep the absolute-decimal-deadline shape —
+the `+X` form is the operator's correlation view against the
+daemon's other `+Xs` / `+Xms` log lines. The four new
+`refresh_gr_status` tests (`crates/lr-cli/src/daemon_ospf_tests.rs`
+and `crates/lr-cli/src/daemon_ospf3_tests.rs`) pin the contract:
+halfway through a 60 s window reads "10s grace left"; at the
+deadline reads "0s"; past the deadline still reads "0s" (saturating);
+and a flushed helper does not appear in the status lines at all.
+
 **BGP reactor threads the post-poll `now_ms` through
 `feed_input_at` — the KEEPALIVE-arrival metric is no longer
 dead** (`lr-cli`,
@@ -273,6 +302,45 @@ ppc64le gap. `docs/ROADMAP.md` and `docs/STATUS.md` update the
 self-hosted s390x runner and the ppc64le native follow-up.
 `docs/RELEASE-PLAN.md` §2.4 mirrors the change and §2.8's
 verification table renames `ibm-pz-native` to `s390x-native`.
+
+**apt-get install steps gain `Acquire::Retries=5` and a 15-minute
+ceiling** (`ci`). The cross-build, FFI + bindings, and interop
+install steps ran `sudo apt-get update` + `sudo apt-get install` with
+a 10-minute step ceiling and no retry. On a slow CI runner (or a
+transient apt mirror outage) the install exceeded the ceiling and
+the job failed — a flaky failure unrelated to the code under test.
+Every `apt-get update` / `apt-get install` step in `ci.yml` now
+passes `-o Acquire::Retries=5` (apt's built-in per-mirror retry) and
+the step ceiling is 15 minutes. A transient mirror stall retries up
+to 5 times before the step gives up; a genuinely stuck mirror still
+fails inside 15 minutes rather than 10.
+
+**Windows daemon tests spawn the daemon with
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`** (`lr-cli` test
+harness). The `lrctl_status_round_trips_over_named_pipe` test (and
+every test in `daemon_metrics.rs` on Windows) spawns `lr-daemon` as a
+subprocess of the test runner. `cargo nextest` runs the tests in
+parallel inside one Windows console; a `CTRL_C` or `CTRL_BREAK` from
+a timing-out peer (or from nextest's own failure-shortcut path)
+propagates to every process in the console group. The daemon's
+`SetConsoleCtrlHandler` maps both to `SIGINT`, `wait_for_shutdown`
+sees the pending signal, and the daemon tears itself down — the
+named pipe (or the metrics TCP listener) vanishes before
+`lrctl shutdown` (or the metrics scrape) can connect, and the test
+fails with `CreateFileW failed (error 2)`. `CREATE_NEW_PROCESS_GROUP`
+alone blocks `CTRL_C` but NOT `CTRL_BREAK` (the console sends
+`CTRL_BREAK` to every process group); `CREATE_NO_WINDOW` does NOT
+close it — the process is still attached to the parent's console
+for signal handling, only the window is hidden. `DETACHED_PROCESS`
+closes that path — the daemon is created without a console, so no
+console events reach it at all. The test harness now passes
+`creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)` on
+the `Command::new(DAEMON)` spawn. The daemon's
+`signal::init()` still succeeds (the Win32 `SetConsoleCtrlHandler`
+call accepts a handler even without a console attached); the
+handler is simply never called. The daemon's own graceful-shutdown
+path is still reachable through the `lrctl shutdown` command the
+test drives explicitly, which is the path under test.
 
 ### Added
 
