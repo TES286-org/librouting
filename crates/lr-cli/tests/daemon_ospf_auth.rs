@@ -4,8 +4,8 @@
 //! defects.txt `crates/lr-cli/src/daemon_ospf.rs:L42-L47` recorded
 //! that "OSPFv2 only; authentication is not wired into the daemon
 //! yet." The prior `feat(daemon): OSPFv2 SimplePassword auth wiring
-//! end-to-end (issue #92)` (commit `47a330e`) and `feat(daemon):
-//! OSPFv2 CryptoAuth daemon wiring end-to-end (issue #92)` (commit
+//! end-to-end` (commit `47a330e`) and `feat(daemon):
+//! OSPFv2 CryptoAuth daemon wiring end-to-end` (commit
 //! `52086d7`) landed the apply/verify round-trip in the daemon's
 //! send/receive paths and the `--ospf-auth-type` /
 //! `--ospf-auth-password` / `--ospf-auth-key` / `--ospf-auth-key-id`

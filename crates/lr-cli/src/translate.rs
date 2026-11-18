@@ -46,7 +46,7 @@
 //!   (BIRD) → `networks`
 //! - `ip prefix-list … seq … permit|deny` → `prefix-list` blocks
 //! - BIRD `filter NAME { … }` / `function NAME(…) { … }` → `filter`
-//!   bodies in the lr filter DSL (ROADMAP-v3 D14.1, fail-closed: a
+//!   bodies in the lr filter DSL (, fail-closed: a
 //!   filter with any unfaithfully-translatable construct is not
 //!   emitted and the offending constructs are reported; see
 //!   `translate_bird_filter.rs` for the verified operator/attribute

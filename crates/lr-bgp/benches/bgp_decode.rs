@@ -1,5 +1,5 @@
 //! `cargo bench -p lr-bgp --bench bgp_decode` — measure BGP wire
-//! decode throughput (ROADMAP-v3 D6.2).
+//! decode throughput.
 //!
 //! Three benches cover the hot paths every BGP peer hits per packet:
 //!

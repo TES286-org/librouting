@@ -1,6 +1,6 @@
 //! Loc-RIB — post-policy best routes.
 //!
-//! Per-AFI sharding (issue #101, ROADMAP §"Scaling"). The Loc-RIB is
+//! Per-AFI sharding. The Loc-RIB is
 //! sharded by [`NlriFamily`]: one [`RibShard`] per address family that
 //! has at least one route. The family is part of every [`RouteKey`],
 //! so the shard lookup is one `BTreeMap` descent on the (small) family
@@ -456,7 +456,7 @@ impl LocRib {
         out
     }
 
-    // ---- Family-aware accessors (issue #101 — Per-AFI RIB sharding) ----
+    // ---- Family-aware accessors ----
     //
     // The cross-family methods above are the frozen public API; the
     // methods below are the family-aware surface the multi-threaded
@@ -764,7 +764,7 @@ mod tests {
         );
     }
 
-    // ---- Per-AFI sharding tests (issue #101) ----
+    // ---- Per-AFI sharding tests ----
 
     /// A route installed in one family is invisible to a family-aware
     /// walk of a different family. The shard boundary is the
@@ -954,7 +954,7 @@ mod tests {
         assert!(empty_sets.is_empty());
     }
 
-    // ---- Multi-threaded RIB tests (issue #101 — interior concurrency) ----
+    // ---- Multi-threaded RIB tests ----
 
     /// A write in one family does not exclude a write in another: the
     /// two shards' locks are independent. Two threads install into

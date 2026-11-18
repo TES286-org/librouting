@@ -1,5 +1,5 @@
 //! Peephole optimisation passes for the compiled bytecode
-//! (ROADMAP-v3 D6 follow-up, GitHub #19 P5 + P6).
+//!.
 //!
 //! The bytecode VM runs a flat instruction stream per route; cutting
 //! the instruction count is the cheapest lever for filters that
@@ -89,7 +89,7 @@ pub fn optimize(code: Vec<Instr>) -> Vec<Instr> {
 }
 
 /// Run all peephole passes on a compiled instruction stream *and* its
-/// parallel span table (issue #18 Phase 0). The spans ride along:
+/// parallel span table. The spans ride along:
 /// every instruction the passes keep, fold, fuse or rewrite carries
 /// the span of the AST node it came from, so runtime errors after
 /// optimisation still point at the source. Returns the optimised code

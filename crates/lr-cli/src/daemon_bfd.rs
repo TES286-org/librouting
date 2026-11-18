@@ -1,4 +1,4 @@
-//! Per-peer BFD fast-fail supervision for the BGP daemon (W1.3).
+//! Per-peer BFD fast-fail supervision for the BGP daemon.
 //!
 //! `--bfd` / `bfd = true` on a `[[peer]]` starts one BFD session per
 //! peer (RFC 5880/5881 single-hop, RFC 5883 multihop) and wires its

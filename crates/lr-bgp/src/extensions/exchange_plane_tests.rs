@@ -261,7 +261,7 @@ fn replay_resets_on_new_session_instance() {
     );
 }
 
-// ----- egress record-set construction (W6.3 follow-up) -----
+// ----- egress record-set construction (Exchange-plane) -----
 
 fn session_for(local: &ExchangePlaneConfig, peer_nonce: [u8; 8]) -> ExchangePlaneSession {
     ExchangePlaneSession {
@@ -531,7 +531,7 @@ fn chain_verification_detects_tampering() {
     assert_eq!(broken, Some(0));
 }
 
-// ----- HintRecord igp_cost / damp_fom wiring (issue #92 follow-up) -----
+// ----- HintRecord igp_cost / damp_fom wiring -----
 //
 // defects.txt flagged `build_record_set` for hard-coding the
 // HintRecord's `igp_cost` and `damp_fom` to 0. The IGP cost is now

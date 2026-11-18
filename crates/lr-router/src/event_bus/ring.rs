@@ -1,16 +1,16 @@
 //! Bounded lock-free MPMC ring — the per-subscriber queue the
 //! [`super::EventBus`] pushes to and a subscriber pops from.
 //!
-//! The previous event bus stored each subscriber's queue behind a
-//! `std::sync::mpsc::sync_channel`, whose `try_send` takes a per-send
-//! mutex; with N subscribers the publisher took N mutexes per publish.
-//! This module replaces that with Dmitry Vyukov's bounded MPMC queue
+//! The queue is Dmitry Vyukov's bounded MPMC queue
 //! (the algorithm `crossbeam_queue::ArrayQueue` and the Linux kernel's
 //! `ptr_ring` both implement): one atomic head and tail, each slot
 //! carries its own sequence number, and producers and consumers
 //! coordinate through CAS on the head/tail plus an Acquire/Release
 //! pair on the slot sequence. There are no locks on the push or pop
-//! path; multiple producers and multiple consumers are supported.
+//! path; multiple producers and multiple consumers are supported. A
+//! `sync_channel`-per-subscriber design would take a per-send mutex,
+//! so with N subscribers the publisher would take N mutexes per
+//! publish.
 //!
 //! # Algorithm
 //!

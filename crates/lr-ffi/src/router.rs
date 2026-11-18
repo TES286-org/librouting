@@ -630,7 +630,7 @@ pub extern "C" fn lr_router_set_ebgp_requires_policy(r: lr_router_t, enabled: u8
     )
 }
 
-/// Enable or disable FRR `bgp enforce-first-as` (W2.2).
+/// Enable or disable FRR `bgp enforce-first-as`.
 ///
 /// When on, an UPDATE received from an external BGP peer (eBGP or a
 /// confederation boundary) whose AS_PATH leftmost sequence segment's
@@ -932,7 +932,7 @@ pub unsafe extern "C" fn lr_router_set_local_address(
     )
 }
 
-/// Configure FRR `bgp default ipv4-unicast` (W2.1) for a BGP session.
+/// Configure FRR `bgp default ipv4-unicast` for a BGP session.
 ///
 /// When `enabled` is non-zero (the default), IPv4 unicast is implicitly
 /// active even when `lr_router_set_mp_families` did not list it. When
@@ -966,7 +966,7 @@ pub extern "C" fn lr_router_set_default_ipv4_unicast(
 }
 
 /// Configure FRR `neighbor X allowas-in N` / BIRD `allow local as`
-/// (W2.3) for a BGP session.
+/// for a BGP session.
 ///
 /// `tolerance = 0` (the default) rejects any occurrence of the local
 /// AS in a received AS_PATH (RFC 4271 §9.1.2.15). `N > 0` admits a
@@ -1000,7 +1000,7 @@ pub extern "C" fn lr_router_set_local_as_tolerance(
     )
 }
 
-/// Configure FRR `neighbor X soft-reconfiguration inbound` (W2.4) for
+/// Configure FRR `neighbor X soft-reconfiguration inbound` for
 /// a BGP session.
 ///
 /// When `enabled` is non-zero, the router retains the pre-policy
@@ -1035,7 +1035,7 @@ pub extern "C" fn lr_router_set_soft_reconfig_inbound(
     )
 }
 
-/// FRR `clear ip bgp * soft in` (W2.4): re-evaluate the import policy
+/// FRR `clear ip bgp * soft in`: re-evaluate the import policy
 /// against the pre-policy Adj-RIB-In for `session`, replacing the
 /// session's entries in the post-policy RIB with the re-imported
 /// routes.

@@ -2171,7 +2171,7 @@ fn frr_no_bgp_ebgp_requires_policy_is_silently_consumed() {
 
 #[test]
 fn frr_network_with_route_map_emits_bgp_network_route_map_table() {
-    // Issue #92 (defects.txt L75): FRR `network PREFIX route-map NAME`
+    // (defects.txt L75): FRR `network PREFIX route-map NAME`
     // now maps onto a `[[bgp.network_route_map]]` row + the prefix
     // joining `networks` — the daemon applies the route-map at
     // origination (RFC 4271 §9.1.2.1). The previous shape noted the
@@ -2766,7 +2766,7 @@ router bgp 64512
     );
 }
 
-// ---- the IR-completeness pin (issue #101) -----------------------------
+// ---- the IR-completeness pin -----------------------------
 
 /// The completeness oracle: the converter's rendered DSL must parse
 /// back to the exact IR [`super::to_daemon_config`] built. `to_dsl`

@@ -76,9 +76,11 @@ impl ExtNextHopTuple {
 
 /// Tuples our OPEN advertises for Extended Next-Hop. Returns the
 /// intersection of `cfg.extended_next_hop` with the families this session
-/// actually speaks (IPv4 unicast is always spoken; MP-BGP families come
-/// from `cfg.mp_families`). Tuples for unspoken families are dropped —
-/// advertising them would mislead the peer.
+/// actually speaks (IPv4 unicast is admitted unconditionally here;
+/// `default_ipv4_unicast` gates NLRI processing in the FSM, not this
+/// advertisement helper; MP-BGP families come from `cfg.mp_families`).
+/// Tuples for unspoken families are dropped — advertising them would
+/// mislead the peer.
 pub fn advertised_tuples(cfg: &PeerConfig) -> Vec<ExtNextHopTuple> {
     let mut out = Vec::new();
     for (nlri_afi, nlri_safi, nh_afi) in &cfg.extended_next_hop {

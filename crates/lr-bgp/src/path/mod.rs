@@ -142,7 +142,7 @@ pub enum AttrType {
     ///
     /// 255 is an internal-only code point: it never appears on the wire
     /// (the codec strips it at encode) and it deliberately avoids the
-    /// 244-254 unassigned range that the W6.3 exchange-plane prototype
+    /// 244-254 unassigned range that the Exchange plane
     /// rides on for its wire attribute (type 251).
     LrMplsLabelStack = 255,
     /// librouting-private exchange-plane record store (W6.3 prototype,
@@ -170,7 +170,7 @@ pub enum AttrType {
     ///
     /// 253 is an internal-only code point: it never appears on the wire
     /// (the codec strips it at encode) and it deliberately avoids the
-    /// 244-254 unassigned range that the W6.3 exchange-plane prototype
+    /// 244-254 unassigned range that the Exchange plane
     /// rides on for its wire attribute (type 251).
     ///
     /// Value layout: a single 4-byte big-endian u32 holding the 24-bit
@@ -219,7 +219,7 @@ pub enum AttrType {
     /// 249 is an internal-only code point: it never appears on
     /// the wire (the codec strips it at encode) and it
     /// deliberately avoids the 251 wire code point that the
-    /// W6.3 exchange-plane prototype rides on (the exchange-
+    /// Exchange plane rides on (the exchange-
     /// plane wire attribute is `Other(251)`, not a private
     /// `AttrType` variant — the relay path preserves it), and
     /// the 250 code point that `LrBabelRouterId` rides on.
@@ -246,7 +246,7 @@ pub enum AttrType {
     /// 250 is an internal-only code point: it never appears on
     /// the wire (the codec strips it at encode) and it
     /// deliberately avoids the 251 wire code point that the
-    /// W6.3 exchange-plane prototype rides on (the exchange-
+    /// Exchange plane rides on (the exchange-
     /// plane wire attribute is `Other(251)`, not a private
     /// `AttrType` variant — the relay path preserves it).
     ///
@@ -320,7 +320,7 @@ pub enum AttrType {
     /// discriminator byte; the address family is implied by the
     /// length).
     LrPeerSourceAddress = 245,
-    /// librouting-private peer-health tier (issue #99). Carries the
+    /// librouting-private peer-health tier. Carries the
     /// per-`(peer, AFI/SAFI)` flap-suppression tier the peer-health
     /// import hook computed — `0..=3` (L0 = normal, L3 = severe).
     /// `BestPath::rank_tiered` restricts the candidate set to the
@@ -328,7 +328,7 @@ pub enum AttrType {
     /// *Never* transmitted on the wire; the codec strips it at encode.
     /// Value layout: 1 byte, tier 0..=3. Absent = L0.
     LrPeerHealthTier = 244,
-    /// librouting-private peer-health stale flag (issue #99). A route
+    /// librouting-private peer-health stale flag. A route
     /// learned from a degraded peer is marked stale: it stays
     /// reachable but is excluded from ECMP until re-admitted.
     /// *Never* transmitted on the wire. Value: 1 byte, 0/1.
@@ -337,7 +337,7 @@ pub enum AttrType {
     /// data-carrying variant out of the unit-like variants' implicit
     /// numbering (the private tags above sit at
     /// 243/244/245/246/249/250/252/253/254/255 — code point 251 is
-    /// the W6.3 exchange-plane wire attribute, not a private
+    /// the Exchange plane wire attribute, not a private
     /// `AttrType` variant).
     Other(u8) = 0,
 }
@@ -1073,7 +1073,7 @@ impl PathAttributes {
         self.get(AttrType::LrPeerSourceAddress).is_some()
     }
 
-    /// Attach the peer-health tier (issue #99) under the private
+    /// Attach the peer-health tier under the private
     /// [`AttrType::LrPeerHealthTier`] tag. `tier` is clamped to
     /// `0..=3`; values above 3 clamp to 3 (most-degraded).
     pub fn set_peer_health_tier(&mut self, tier: u8) {
@@ -1099,7 +1099,7 @@ impl PathAttributes {
         self.get(AttrType::LrPeerHealthTier).is_some()
     }
 
-    /// Attach the peer-health stale flag (issue #99).
+    /// Attach the peer-health stale flag.
     pub fn set_peer_health_stale(&mut self, stale: bool) {
         self.insert(PathAttribute::new(
             PathAttrFlags::new().set_optional(true),

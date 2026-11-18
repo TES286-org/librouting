@@ -1,5 +1,5 @@
 //! `cargo bench -p lr-rib --bench rib_select` — measure Loc-RIB
-//! install + best-path throughput (ROADMAP-v3 D6.2, D15).
+//! install + best-path throughput.
 //!
 //! Three scales:
 //!

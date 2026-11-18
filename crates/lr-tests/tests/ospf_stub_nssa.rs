@@ -677,7 +677,7 @@ fn nssa_translator_election_prevents_duplicate_translation() {
     );
 }
 
-/// RFC 3101 §3.1 reachability qualifier (issue #92): when a border
+/// RFC 3101 §3.1 reachability qualifier: when a border
 /// router is visible in the NSSA's LSDB but unreachable across the
 /// local AS's regular areas, the reachability-aware translator
 /// election drops it from the candidate set so it cannot steal the

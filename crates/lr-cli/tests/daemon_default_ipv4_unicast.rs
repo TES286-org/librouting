@@ -1,4 +1,4 @@
-//! End-to-end tests for FRR `bgp default ipv4-unicast` (W2.1) on the
+//! End-to-end tests for FRR `bgp default ipv4-unicast` on the
 //! real `lr-daemon` binary.
 //!
 //! FRR's default is `bgp default ipv4-unicast` (on) — every BGP peer is

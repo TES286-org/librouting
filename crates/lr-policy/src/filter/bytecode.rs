@@ -1,4 +1,4 @@
-//! Bytecode compiler + stack VM for the filter DSL (ROADMAP-v3 D3.7).
+//! Bytecode compiler + stack VM for the filter DSL.
 //!
 //! The tree-walking interpreter re-dispatches on the AST for every
 //! import/export evaluation. BIRD compiles its filters to `f_line`
@@ -413,9 +413,9 @@ pub enum Instr {
     /// Call a built-in function with `argc` stack arguments. The VM
     /// dispatches by name through the built-in table (`eval_call`).
     /// User-function calls are resolved to [`Instr::CallFn`] at
-    /// compile time (GitHub #19 P2).
+    /// compile time.
     Call { name: String, argc: usize },
-    /// Call a user-defined function by index (GitHub #19 P2). The
+    /// Call a user-defined function by index. The
     /// VM indexes directly into `CompiledFilter.functions[idx]` —
     /// no BTreeMap lookup per call. The compiler resolves
     /// `Expr::Call { name, .. }` to `CallFn { idx, argc }` when
@@ -453,7 +453,7 @@ pub enum Instr {
 /// A compiled filter: flat code plus compiled user functions.
 ///
 /// `functions` is a `Vec` indexed by the `CallFn { idx, argc }`
-/// instruction (GitHub #19 P2) — the VM indexes directly into this
+/// instruction — the VM indexes directly into this
 /// vector per call, no BTreeMap lookup. `function_index` maps a
 /// function name to its `Vec` index; the compiler builds this first so
 /// it can resolve `Expr::Call { name, .. }` to `CallFn { idx, argc }`
@@ -470,7 +470,7 @@ pub struct CompiledFilter {
     /// can fill `EvalError::line` / `EvalError::col` without the text.
     pub line_index: crate::filter::span::LineIndex,
     pub functions: Vec<CompiledFunction>,
-    /// Name → index map for `functions` (GitHub #19 P2). Built so the
+    /// Name → index map for `functions`. Built so the
     /// compiler can resolve call names to indices at compile time.
     pub function_index: BTreeMap<String, usize>,
 }
@@ -538,7 +538,7 @@ pub fn compile(filter: &Filter) -> CompiledFilter {
 }
 
 /// The bytecode compiler. Carries a reference to the function table
-/// (GitHub #19 P2) so `Expr::Call { name, .. }` can resolve to
+/// so `Expr::Call { name, .. }` can resolve to
 /// `CallFn { idx, argc }` at compile time.
 struct Compiler<'a> {
     function_index: &'a BTreeMap<String, usize>,

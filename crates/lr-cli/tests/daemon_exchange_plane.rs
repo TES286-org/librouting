@@ -1,4 +1,4 @@
-//! End-to-end tests for the W6.3 exchange-plane prototype on the real
+//! End-to-end tests for the Exchange plane on the real
 //! `lr-daemon` binary (feature `exchange-plane`).
 //!
 //! These tests exercise the design's exit criteria that need a live

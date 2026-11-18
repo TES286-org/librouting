@@ -1,5 +1,5 @@
 //! lr-bgp `PeerConfig` + lr-srv6 `Srh` accessors + lr-rib `AdjRib`
-//! accessors gap closure (issue #92).
+//! accessors gap closure.
 //!
 //! Mirrors the public Rust API of:
 //! - `lr_bgp::peer::PeerConfig` — per-peer configuration, foundational

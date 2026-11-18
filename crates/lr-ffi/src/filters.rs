@@ -1,4 +1,4 @@
-//! Filter DSL over the C ABI (ROADMAP-v3 D5.2).
+//! Filter DSL over the C ABI.
 //!
 //! `lr_filter_compile` parses a BIRD-like filter body and compiles it
 //! to the D3.7 stack VM — the same hot path the daemon executes on

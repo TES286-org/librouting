@@ -204,7 +204,7 @@ fn peer_health_e2e_observe_mode_accounts_without_stamping() {
 
 #[test]
 fn peer_health_e2e_shadow_best_path_does_not_affect_routing() {
-    // Issue #99 §Rollout phase 3: shadow-best-path must NOT affect
+    // §Rollout phase 3: shadow-best-path must NOT affect
     // routing. The import hook must not stamp the tier attribute,
     // and the speaker's BestPath::rank (not rank_tiered) must
     // select the actual best path. A PeerHealthShadowSelectionHook
@@ -364,7 +364,7 @@ fn peer_health_e2e_dynamic_lookup_vs_stamp_based_gap() {
 
 /// E2E: stale state is queryable through the table after escalation.
 /// The router's `reselect` queries `PeerHealthLookup::is_stale()` to
-/// exclude stale paths from ECMP / add-path (issue #99 §Recovery).
+/// exclude stale paths from ECMP / add-path.
 /// This test verifies the table's stale state matches what the lookup
 /// would return.
 ///

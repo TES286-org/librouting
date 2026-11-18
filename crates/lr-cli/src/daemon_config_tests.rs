@@ -30,7 +30,7 @@ fn inline_comment_on_value_line_parses() {
 }
 
 // --------------------------------------------------------------
-// Issue #18 Phase 1 — the IR-equality golden tests. A TOML config
+// Phase 1 — the IR-equality golden tests. A TOML config
 // and its future DSL translation are semantically equivalent iff
 // they parse to equal `DaemonConfig`s; these tests pin the
 // equality contract the DSL migration (Phase 2+) is validated
@@ -460,7 +460,7 @@ fn logging_section_fail_closed_on_typo() {
 #[test]
 fn safety_section_parses_keys() {
     // The `[safety]` section is a recognised first-class block
-    // (issue #46). Its keys land in `cfg.safety`, not in the
+    //. Its keys land in `cfg.safety`, not in the
     // warnings vector.
     let mut cfg = DaemonConfig::with_defaults();
     parse_toml_subset(
@@ -1035,7 +1035,7 @@ fn ospf_interface_area_defaults_to_backbone() {
 
 /// `[ospf] area = N` is the config-file counterpart of `--ospf-area`:
 /// the default area an interface without an explicit one falls back
-/// to (issue #41 §5). It feeds `cfg.ospf_area`, the same field the
+/// to. It feeds `cfg.ospf_area`, the same field the
 /// CLI flag writes, so the two frontends cannot drift.
 #[test]
 fn ospf_section_area_key_sets_default_area() {
@@ -1868,7 +1868,7 @@ fn roa_without_asn_fails() {
 }
 
 // ============================================================
-// [[bgp.roa_source]] — advanced ROA loading (issue #100)
+// [[bgp.roa_source]] — advanced ROA loading
 // ============================================================
 
 #[test]
@@ -2370,7 +2370,7 @@ fn glob_match_matches_bird_semantics() {
     assert!(glob_match("*", ""));
 }
 
-// ==== [damping] table parsing (ROADMAP-v3 D4.3) ====
+// ==== [damping] table parsing ====
 
 #[test]
 fn damping_defaults_to_disabled() {
@@ -2434,7 +2434,7 @@ fn damping_bad_threshold_value_fails() {
     );
 }
 
-// ==== [bgp.rpki] table parsing (ROADMAP-v3 D2.4) ====
+// ==== [bgp.rpki] table parsing ====
 
 #[test]
 fn rpki_defaults_to_disabled() {
@@ -2514,7 +2514,7 @@ fn rpki_unknown_key_fails_closed() {
     );
 }
 
-// ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2) ----
+// ---- [[redistribute]] / [[aggregate]] ----
 
 #[test]
 fn redistribute_table_parses() {

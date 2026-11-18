@@ -1,5 +1,5 @@
 //! Path-compressed (Patricia) prefix trie indexing ROA entries for
-//! RFC 6811 validation (ROADMAP-v3 D8.4).
+//! RFC 6811 validation.
 //!
 //! [`crate::roa::RoaTable`] keeps its entries in a flat, sorted
 //! `Vec<RoaEntry>` (the canonical store used by dumps and equality);

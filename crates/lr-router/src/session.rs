@@ -194,21 +194,21 @@ pub struct SessionConfig {
     /// Zero disables MRAI batching for this session.
     pub mrai_ms: u64,
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
-    /// FRR `bgp default ipv4-unicast` (W2.1): when `true` (the default),
+    /// FRR `bgp default ipv4-unicast`: when `true` (the default),
     /// IPv4 unicast is implicitly active for this peer even when
     /// `mp_families` does not list it. When `false`, IPv4 unicast must
     /// be added explicitly to `mp_families` to be active. The daemon
     /// populates this from the per-peer or router-level config; the
     /// FSM gates legacy-section IPv4 NLRI processing on it.
     pub default_ipv4_unicast: bool,
-    /// FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+    /// FRR `neighbor X allowas-in N` / BIRD `allow local as`:
     /// the maximum number of times the local AS may appear in a
     /// received UPDATE's AS_PATH before the route is rejected. `0`
     /// (the default) rejects any occurrence; `N > 0` admits up to N
     /// occurrences; `u32::MAX` admits any number (FRR `allowas-any`).
     /// iBGP is exempt.
     pub local_as_tolerance: u32,
-    /// FRR `neighbor X soft-reconfiguration inbound` (W2.4): retain
+    /// FRR `neighbor X soft-reconfiguration inbound`: retain
     /// the pre-policy Adj-RIB-In so a policy reconfiguration can be
     /// applied without re-fetching from the peer. Off by default
     /// (FRR's default; the cost is duplicate RIB memory per peer).
@@ -703,7 +703,7 @@ impl SessionConfig {
 }
 
 /// Operational statistics tracked by the router core for one session
-/// (issue #52 — More Comprehensive Internal State Export).
+///.
 ///
 /// Complements [`SessionSummary`] with monotonic counters and
 /// timestamps that the BIRD-style `show session <handle>` surface
@@ -896,11 +896,11 @@ pub struct SessionSummary {
     /// `message_stats.update_sent`, retained so existing callers
     /// that read only those two do not have to be updated.
     ///
-    /// Added in 1.3.0 so the metrics exporter and `show sessions
+    /// Added so the metrics exporter and `show sessions
     /// detail` can surface the full per-PDU breakdown (BIRD `show
     /// protocols all <name>` parity) without a second router query.
     pub message_stats: lr_bgp::PeerMessageStats,
-    /// Per-session operational statistics (issue #52): uptime,
+    /// Per-session operational statistics: uptime,
     /// transition count, last error kind + time.
     pub stats: SessionStats,
 }

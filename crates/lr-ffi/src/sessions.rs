@@ -1,4 +1,4 @@
-//! OSPFv2 / OSPFv3 / Babel session management (ROADMAP-v3 D5.1).
+//! OSPFv2 / OSPFv3 / Babel session management.
 //!
 //! BGP sessions already had dedicated entries (`lr_router_add_bgp_session`
 //! and its `_ext` variant). The link-state and distance-vector engines were

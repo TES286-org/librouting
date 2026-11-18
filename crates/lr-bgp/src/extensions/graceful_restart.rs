@@ -62,14 +62,7 @@
 //! [`crate::extensions::asn4`] / [`crate::extensions::enhanced_rr`]
 //! already use).
 //!
-//! # Backward compatibility
-//!
-//! Before the issue #92 fix, the FSM inlined the OPEN capability
-//! construction (`if cfg.graceful_restart { caps.push(... graceful_restart
-//! (0, cfg.graceful_restart_time, &families) ...) }`) and the peer-capability
-//! walk (`peer_capabilities.iter().find_map(... as_graceful_restart)`).
-//! The orchestration helpers centralise those call sites so a future
-//! change to the negotiation posture lands in one place.
+//! # Capability negotiation
 //!
 //! The RFC 9494 Long-Lived Graceful Restart extension (a second, longer
 //! retention window with `LLGR_STALE` marking) builds on this module — see
@@ -107,7 +100,7 @@ pub fn advertised(cfg: &PeerConfig) -> bool {
 /// uses RFC 4271 encoding only (RFC 9494 §3.1, applied to GR by §3
 /// too — the family list is the same shape).
 ///
-/// FRR `no bgp default ipv4-unicast` (W2.1): when the knob is off and
+/// FRR `no bgp default ipv4-unicast`: when the knob is off and
 /// the peer did not explicitly add IPv4 unicast to `mp_families`, the
 /// capability does NOT list it — the family is not active, so there
 /// is no retention promise to make.
@@ -146,7 +139,7 @@ pub fn peer_offered(peer_caps: &[Capability]) -> bool {
 
 /// The peer's advertised Restart Time (RFC 4724 §3), in seconds.
 /// Returns `None` when the peer did not advertise the capability or
-/// when the value is malformed (length < 2).
+/// when no well-formed GR capability is present (length < 2).
 ///
 /// The Restart Time is the maximum number of seconds the helper
 /// retains the peer's routes after a session reset (§4.2). The FSM
@@ -198,7 +191,7 @@ pub fn negotiated(cfg: &PeerConfig, peer_caps: &[Capability]) -> bool {
 /// The R bit (Restart State, §3) is left clear: the local speaker is
 /// not in the restart state when sending a fresh OPEN. A restarting
 /// speaker that needs to set the R bit can do so by post-processing
-/// the returned capability (the bit lives in the high nibble of the
+/// the returned capability (the bit is bit 3, mask `0x08`, of the
 /// first value byte). The F bit per family is set: the library keeps
 /// Adj-RIB-In across reconnects within the same process (the
 /// reference daemon), so the forwarding state is preserved.
@@ -290,7 +283,7 @@ mod tests {
 
     #[test]
     fn open_capability_omits_implicit_ipv4_when_default_off() {
-        // FRR `no bgp default ipv4-unicast` (W2.1): IPv4 unicast is not
+        // FRR `no bgp default ipv4-unicast`: IPv4 unicast is not
         // listed unless the operator added it explicitly.
         let mut c = cfg(true);
         c.default_ipv4_unicast = false;

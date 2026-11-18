@@ -111,7 +111,7 @@ pub unsafe fn lock_router(r: lr_router_t) -> Option<std::sync::MutexGuard<'stati
     }
 }
 
-// ---- Damping table handle (`lr_damping_t`, ROADMAP-v3 D4.4) ----
+// ---- Damping table handle (`lr_damping_t`,) ----
 
 /// Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
 /// shared with the hook installed on the router.
@@ -122,7 +122,7 @@ pub struct OpaqueDamping {
 
 pub type lr_damping_t = *mut OpaqueDamping;
 
-// ---- ROA store handle (`lr_roa_store_t`, ROADMAP-v3 D2.3) ----
+// ---- ROA store handle (`lr_roa_store_t`,) ----
 
 /// Opaque ROA store handle. C side never touches internals.
 #[repr(C)]
@@ -132,7 +132,7 @@ pub struct OpaqueRoaStore {
 
 pub type lr_roa_store_t = *mut OpaqueRoaStore;
 
-// ---- Policy object handles (ROADMAP-v3 D5.3) ----
+// ---- Policy object handles ----
 
 /// Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
 /// and route-map evaluation run against the same data model the

@@ -1091,7 +1091,7 @@ mod route_reflector_wiring_tests {
     }
 }
 
-/// `reload_config`'s SIGHUP-driven damping toggle (ROADMAP-v3 D4.3
+/// `reload_config`'s SIGHUP-driven damping toggle (
 /// follow-up). The standalone BGP daemon installs a
 /// `DampingImportHook` at startup when `[damping] enabled = true`;
 /// the hook carries a shared `enabled` flag the reload path flips

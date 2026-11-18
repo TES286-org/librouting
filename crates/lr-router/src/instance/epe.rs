@@ -36,7 +36,7 @@
 //! §5.1: "MUST be advertised for every BGP-LS Link NLRI
 //! describing a BGP peer session"), and optionally the PeerAdj SID
 //! (1102, §5.2) and PeerSet SID (1103, §5.3). The codec surface
-//! lives in [`lr_bgp::path::bgp_ls_attr`] (PR #68); this module
+//! lives in [`lr_bgp::path::bgp_ls_attr`] (); this module
 //! only assembles the values the daemon passes in.
 //!
 //! # Scope boundary
@@ -52,9 +52,8 @@
 //! The SID/Index/Label values the projection emits are the values
 //! the daemon passes in via [`EpePeerSession`]; the daemon's
 //! default policy is a deterministic placeholder derived from the
-//! session handle (the local speaker's PeerNode SID allocation
-//! surface is a follow-up — the controller receives a stable
-//! identity per session that can be later bound to a real
+//! session handle (the daemon emits a stable identity per session,
+//! which a later configuration surface can bind to a real
 //! SR-MPLS label or SRGB index without changing the projection
 //! shape).
 //!
@@ -129,15 +128,14 @@ pub struct EpePeerSession {
     /// present.
     pub remote_address_v6: Option<[u8; 16]>,
     /// RFC 9086 §5.1 PeerNode SID — mandatory. The daemon fills in
-    /// a deterministic per-session placeholder when the operator
-    /// has not configured a real value (the local speaker's
-    /// PeerNode SID allocation surface is a follow-up).
+    /// a deterministic per-session placeholder unless the operator
+    /// configures a real value.
     pub peer_node_sid: BgpPeeringSid,
     /// RFC 9086 §5.2 PeerAdj SID — optional. `None` omits the
-    /// TLV. A future per-peer config surface can populate this.
+    /// TLV. A per-peer configuration surface can populate this.
     pub peer_adj_sid: Option<BgpPeeringSid>,
     /// RFC 9086 §5.3 PeerSet SID — optional. `None` omits the
-    /// TLV. A future per-peer config surface can populate this.
+    /// TLV. A per-peer configuration surface can populate this.
     pub peer_set_sid: Option<BgpPeeringSid>,
     /// RFC 9552 §3.2 BGP-LS Instance-ID carried in every emitted
     /// EPE Link NLRI's `identifier` field. Same semantics as

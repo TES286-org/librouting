@@ -81,7 +81,7 @@ impl BgpPeer {
         if !self.is_established() {
             return false;
         }
-        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // FRR `no bgp default ipv4-unicast`: a peer not activated
         // for IPv4 unicast must not receive IPv4 NLRI — neither the
         // legacy section nor the RFC 5549 ENH MP_REACH form. Returning
         // `false` here makes the router skip the Adj-RIB-Out entry, so
@@ -118,7 +118,7 @@ impl BgpPeer {
             return false;
         }
 
-        // W6.3 exchange-plane (feature `exchange-plane`): attach the
+        // Exchange plane (feature `exchange-plane`): attach the
         // record-set attribute (or forward the received type-251
         // forwarding material) after every early-return egress gate —
         // only UPDATEs that actually go out carry records, and
@@ -441,7 +441,7 @@ impl BgpPeer {
         if !self.is_established() {
             return;
         }
-        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // FRR `no bgp default ipv4-unicast`: a peer not activated
         // for IPv4 unicast must not have IPv4 withdrawals sent to it —
         // since the advertise() side already refused to send the routes,
         // a withdrawal would be a no-op anyway. Skip to keep the wire
@@ -510,7 +510,7 @@ impl BgpPeer {
     /// speakers emit it after the initial table dump so the peer can detect
     /// convergence (BIRD and FRR both log and act on it).
     ///
-    /// FRR `no bgp default ipv4-unicast` (W2.1): the empty UPDATE is
+    /// FRR `no bgp default ipv4-unicast`: the empty UPDATE is
     /// conventionally the IPv4 unicast EoR marker. A peer not activated
     /// for IPv4 unicast must not signal convergence for it — silently
     /// skip the send. MP-family EoR (via MP_UNREACH_NLRI with just the
@@ -526,7 +526,7 @@ impl BgpPeer {
         self.send_msg(&BgpMessage::Update(update));
     }
 
-    /// Advertise BGP-LS NLRIs to this peer (RFC 7752 §3, issue #60
+    /// Advertise BGP-LS NLRIs to this peer (RFC 7752 §3
     /// daemon wiring). The BGP-LS address family (AFI=16388, SAFI=71)
     /// carries opaque NLRI bytes — not the IP-prefix NLRIs the standard
     /// `advertise()` path consumes — so this method bypasses the
@@ -561,7 +561,7 @@ impl BgpPeer {
         true
     }
 
-    /// Withdraw BGP-LS NLRIs from this peer (RFC 7752 §3, issue #60
+    /// Withdraw BGP-LS NLRIs from this peer (RFC 7752 §3
     /// daemon wiring). Mirror of [`advertise_bgpls`] for the
     /// MP_UNREACH_NLRI path. Returns `false` (and sends nothing) when
     /// the session is not established or did not negotiate the BGP-LS

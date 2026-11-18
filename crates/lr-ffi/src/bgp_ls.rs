@@ -3,11 +3,11 @@
 //!
 //! Mirrors the public Rust API of `lr_bgp::path::bgp_ls::{Tlv,
 //! decode_tlv_stream, encode_tlv_stream}` and `lr_bgp::path::bgp_ls_attr`
-//! constants. This is the Layer-1 wire codec — a higher-level typed
-//! view (`BgpLsAttr` / `BgpLsAttrTlv`) stays on the Rust side for now;
-//! this FFI exposes the raw TLV-tuple surface so a C embedder can
-//! decode / inspect / re-encode BGP-LS Attribute bytes without going
-//! through the daemon.
+//! constants. This is the Layer-1 wire codec; the typed
+//! `BgpLsAttr` / `BgpLsAttrTlv` view is wrapped next door in
+//! `bgp_ls_attr`. This FFI exposes the raw TLV-tuple surface so a C
+//! embedder can decode / inspect / re-encode BGP-LS Attribute bytes
+//! without going through the daemon.
 
 #![allow(unused_unsafe)]
 #![allow(unused_imports)]

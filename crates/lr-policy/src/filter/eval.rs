@@ -462,7 +462,7 @@ pub trait FilterContext {
     fn babel_has_router_id(&self, route: &Route) -> bool {
         crate::babel::has_router_id(route)
     }
-    /// Issue #81 — LRXP exchange-plane surface. True when the route
+    /// LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
     /// compiled when the `exchange-plane` feature is on.
@@ -470,63 +470,63 @@ pub trait FilterContext {
     fn lrxp_verified(&self, route: &Route) -> bool {
         crate::lrxp::verified(route)
     }
-    /// Issue #81 — true when the route carries partial-transit LRXP
+    /// true when the route carries partial-transit LRXP
     /// forwarding material (the attribute crossed a non-lr hop,
     /// design §7).
     #[cfg(feature = "exchange-plane")]
     fn lrxp_partial_transit(&self, route: &Route) -> bool {
         crate::lrxp::partial_transit(route)
     }
-    /// Issue #81 — the sender's best-path rank for this path among
+    /// the sender's best-path rank for this path among
     /// its alternates (design §5.1: 1 = the path the sender itself
     /// uses). `0` when the route carries no verified hint record.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_hint_rank(&self, route: &Route) -> u8 {
         crate::lrxp::hint_rank(route)
     }
-    /// Issue #81 — the sender's route-flap figure of merit (design
+    /// the sender's route-flap figure of merit (design
     /// §5.1: 0 when damping is off). `0` when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_hint_damp_fom(&self, route: &Route) -> u16 {
         crate::lrxp::hint_damp_fom(route)
     }
-    /// Issue #81 — the sender's IGP cost to this path's next hop
+    /// the sender's IGP cost to this path's next hop
     /// (design §5.1). `0` when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_hint_igp_cost(&self, route: &Route) -> u32 {
         crate::lrxp::hint_igp_cost(route)
     }
-    /// Issue #81 — the sender's RFC 9234 role claim for this session
+    /// the sender's RFC 9234 role claim for this session
     /// (design §5.2: advisory). `255` (unspecified) when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_policy_role(&self, route: &Route) -> u8 {
         crate::lrxp::policy_role(route)
     }
-    /// Issue #81 — the sender's SipHash-2-4 import-filter digest as a
+    /// the sender's SipHash-2-4 import-filter digest as a
     /// lowercase hex string (design §5.2). Empty string when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_policy_import_digest_hex(&self, route: &Route) -> String {
         crate::lrxp::policy_import_digest_hex(route)
     }
-    /// Issue #81 — the sender's SipHash-2-4 export-filter digest as a
+    /// the sender's SipHash-2-4 export-filter digest as a
     /// lowercase hex string (design §5.2). Empty string when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_policy_export_digest_hex(&self, route: &Route) -> String {
         crate::lrxp::policy_export_digest_hex(route)
     }
-    /// Issue #81 — the origin AS the attestation authorises (design
+    /// the origin AS the attestation authorises (design
     /// §5.3). `0` when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_origin_as(&self, route: &Route) -> u32 {
         crate::lrxp::origin_as(route)
     }
-    /// Issue #81 — the maximum prefix length the origin authorises
+    /// the maximum prefix length the origin authorises
     /// (design §5.3). `0` when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_origin_max_valid_len(&self, route: &Route) -> u8 {
         crate::lrxp::origin_max_valid_len(route)
     }
-    /// Issue #81 — the absolute timestamp after which the record
+    /// the absolute timestamp after which the record
     /// expires (design §5.3). `0` when absent.
     #[cfg(feature = "exchange-plane")]
     fn lrxp_origin_expiry(&self, route: &Route) -> u32 {
@@ -1079,7 +1079,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // same shape `ospf.router_id` exposes for the OSPF
             // advertising-router ID presence probe.
             RouteFieldKind::BabelRouterId => self.ctx.babel_has_router_id(route),
-            // Issue #81 — LRXP `defined()` semantics. The two bare
+            // LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
             // per-record fields (`hint.rank`, `policy.role`, etc.)
@@ -1353,7 +1353,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BabelRouterId => Ok(Value::Int(
                 self.ctx.babel_router_id(route).unwrap_or(0) as i64,
             )),
-            // Issue #81 — LRXP exchange-plane surface. The two bare
+            // LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
             // to empty string). The fallback (no LRXP attribute) is
@@ -1417,7 +1417,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 
     /// Read an integer-typed route field directly as an `i64`,
     /// skipping the `Value::Int` construction. Used by the fused
-    /// `Instr::BranchFieldIntCmp` (GitHub #19 P6) to avoid the
+    /// `Instr::BranchFieldIntCmp` to avoid the
     /// 32-byte `Value` allocation + `Vec::push` the unfused
     /// `LoadField; Push; Bin; JumpIf*` sequence pays. Only the
     /// six integer kinds (`Source`, `BgpLocalPref`, `BgpMed`,
@@ -2651,7 +2651,7 @@ fn prefix_set_matches(
     pl >= lo && pl <= hi
 }
 
-/// Execute a compiled filter (ROADMAP-v3 D3.7). Semantically
+/// Execute a compiled filter. Semantically
 /// identical to [`evaluate`] — the two engines share the scope
 /// stack, user-function bookkeeping and matching helpers — but runs
 /// a flat instruction loop with pre-lifted constants instead of
@@ -3129,7 +3129,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 /// VM invariant violation: the stack was empty where a value was
 /// required. Not attributable to user source (well-formed bytecode
 /// from the total compiler never underflows), but the Phase 0
-/// contract (issue #18) still requires every error to carry the span
+/// contract still requires every error to carry the span
 /// of the instruction that produced it — pass the current
 /// instruction's span and the filter's [`LineIndex`] so the diagnostic
 /// points at the offending op.

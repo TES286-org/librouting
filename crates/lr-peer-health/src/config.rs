@@ -1,4 +1,4 @@
-//! Configuration for peer-level flap suppression (issue #99).
+//! Configuration for peer-level flap suppression.
 
 use crate::tier::PeerHealthTier;
 
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn stamps_tier_flags() {
-        // Issue #99 §Rollout: shadow modes must not stamp the tier
+        // §Rollout: shadow modes must not stamp the tier
         // attribute — only `limited` and `full` affect selection.
         assert!(!RolloutMode::Off.stamps_tier());
         assert!(!RolloutMode::Observe.stamps_tier());

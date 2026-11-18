@@ -38,8 +38,8 @@ use lr_router::PeerHealthLookup;
 /// delegating to a shared [`PeerHealthTable`]. Installed on the
 /// `DefaultRouter` via `set_peer_health_lookup` when `[bgp.peer_health]`
 /// rollout is not `off`, so `reselect` can query the **current**
-/// per-`(peer, AFI/SAFI)` tier dynamically (issue #99 §Hooks 3) and
-/// exclude stale paths from ECMP / add-path (issue #99 §Recovery).
+/// per-`(peer, AFI/SAFI)` tier dynamically and
+/// exclude stale paths from ECMP / add-path.
 ///
 /// The table is shared with the import hook, the ticker thread, and
 /// the `lrctl show peer-health` renderer — all reads are `&self`

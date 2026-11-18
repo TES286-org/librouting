@@ -54,8 +54,8 @@ pub enum Event {
     /// router-aware embedders that consume `BgpAction` directly (the
     /// daemon) handle the action through that path and never see this
     /// event. The trait-only adapter maps `BgpAction::RouteRefreshRequested`
-    /// here so a trait-only embedder can react to the request — previously
-    /// it was silently dropped to `Action::None`, masking the signal.
+    /// here so a trait-only embedder can react to the request instead of
+    /// losing it to `Action::None`.
     RouteRefreshRequested { session: u64, family: NlriFamily },
     /// Beginning-of-RIB marker received for an address family (RFC
     /// 7313 §3.2, BGP enhanced route refresh). The peer is about to
@@ -84,8 +84,8 @@ pub enum Event {
     /// embedders that consume `BgpAction` directly (the daemon) handle
     /// the action through that path and never see this event. The
     /// trait-only adapter maps `BgpAction::EndOfRib` here so a
-    /// trait-only embedder can react to the marker — previously it
-    /// was silently dropped to `Action::None`, masking the signal.
+    /// trait-only embedder can react to the marker instead of losing
+    /// it to `Action::None`.
     EndOfRib { session: u64, family: NlriFamily },
     /// An OSPF neighbour was reset by an unrecoverable FSM event
     /// (RFC 2328 §10.6 / §10.9 / §13.7). Surfaced by the OSPF
@@ -98,20 +98,16 @@ pub enum Event {
     /// [`SessionErrorKind::OspfSeqMismatch`] /
     /// [`SessionErrorKind::OspfBadLsa`] variants, so `show
     /// sessions` / `lrctl session <h>` reports the RFC 2328 reason
-    /// rather than the generic `Other` the previous fall-through
-    /// produced. The FSM does not know its session handle; the
+    /// rather than the generic `Other`. The FSM does not know its
+    /// session handle; the
     /// router substitutes the live handle when surfacing the event
     /// (matching `Event::PeerStateChange`).
     ///
-    /// The previous shape of this signal was a free-form
-    /// [`Event::Log`] line whose text varied per reset kind; an
-    /// embedder that wanted to count or classify OSPF resets had to
-    /// parse the log string. The structured variant lets embedders
-    /// (and the daemon's session-stats surface) react to the cause
-    /// directly. The router still synthesises a `RouterEvent::Log`
-    /// line for backwards compatibility with embedders that consumed
-    /// the log message — the operator-visible log stream is
-    /// unchanged.
+    /// The structured variant lets embedders (and the daemon's
+    /// session-stats surface) count and classify OSPF resets without
+    /// parsing a free-form [`Event::Log`] line. The router also
+    /// synthesises a `RouterEvent::Log` line, so the operator-visible
+    /// log stream is unchanged.
     OspfNeighborReset {
         /// The advertising router's OSPF Router ID (the LSA header
         /// field the FSM keys on, RFC 2328 §A.3.1).

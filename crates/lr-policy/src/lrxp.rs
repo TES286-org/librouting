@@ -1,4 +1,4 @@
-//! LRXP exchange-plane record access for policy evaluation (issue #81).
+//! LRXP exchange-plane record access for policy evaluation.
 //!
 //! The filter DSL exposes the scope-1 records a route carries under the
 //! private `LrExchangePlaneRecords` attribute tag (`lr-bgp::path::AttrType`,
@@ -12,7 +12,7 @@
 //! lives in `lr-bgp::extensions::exchange_plane`, gated by the same
 //! feature. The module compiles to nothing on a feature-less build.
 //!
-//! ## Fallback (issue #81 requirement)
+//! ## Fallback
 //!
 //! When the peer does not advertise the LRXP capability, the route
 //! carries no `LrExchangePlaneRecords` attribute and every accessor
@@ -25,7 +25,7 @@
 //! routes; `bgp.lrxp.partial_transit` distinguishes the
 //! forwarding-material case (the attribute crossed a non-lr hop).
 //!
-//! ## Session-level vs per-route (issue #81 requirement)
+//! ## Session-level vs per-route
 //!
 //! Policy-intent records are nominally per-session (one per address
 //! family per session), but the wire shape re-attaches them to every
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn absent_route_reads_as_defaults() {
-        // Issue #81 fallback: a route with no LRXP attribute (the peer
+        // fallback: a route with no LRXP attribute (the peer
         // did not advertise the capability) reads as 0 / false / "".
         let r = route_with(None);
         assert!(!verified(&r));

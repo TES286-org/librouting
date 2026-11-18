@@ -1,5 +1,5 @@
 //! ROA loader — format parsers for Route Origin Authorization sources
-//! (issue #100).
+//!.
 //!
 //! The loader recognises four on-the-wire formats. Two are pure parsers
 //! that run directly on the source bytes:
@@ -98,13 +98,13 @@ pub enum RoaFormat {
     /// transform programs are expected to emit.
     Bird,
     /// Arbitrary JSON transformed by a user-supplied `jq` program
-    /// (issue #100). The program reads the source JSON on stdin and
+    ///. The program reads the source JSON on stdin and
     /// writes BIRD-format lines on stdout. The daemon's loader thread
     /// runs the program; the pure [`parse`] function does not handle
     /// this variant directly.
     Jq,
     /// Arbitrary text transformed by a user-supplied `awk` program
-    /// (issue #100). The program reads the source text on stdin and
+    ///. The program reads the source text on stdin and
     /// writes BIRD-format lines on stdout. The daemon's loader thread
     /// runs the program; the pure [`parse`] function does not handle
     /// this variant directly.

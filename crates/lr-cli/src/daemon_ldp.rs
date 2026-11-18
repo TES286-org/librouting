@@ -896,13 +896,13 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let router = Arc::new(RwLock::new(DefaultRouter::new()));
     let counters = Arc::new(LdpCounters::new());
     let running = Arc::new(AtomicBool::new(true));
-    // Issue #53 daemon-wide drain: install the drain gate on the
+    // daemon-wide drain: install the drain gate on the
     // router's import chain BEFORE the Runtime takes ownership of
     // the Arc. The LDP daemon's queue is its [[static.route]] +
     // LDP label bindings (the latter via the FEC mapping table).
     let shutdown = crate::build_shutdown(cfg, &router);
 
-    // SIGHUP-driven reload (issue #92): the LDP daemon now re-applies
+    // SIGHUP-driven reload: the LDP daemon now re-applies
     // the `[[ldp.bind]]` table at runtime instead of returning the
     // "configuration reload is not supported yet" line. The closure
     // re-parses the config file (the same `load_config_file` startup

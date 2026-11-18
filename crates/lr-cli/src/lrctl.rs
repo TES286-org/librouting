@@ -1,4 +1,4 @@
-//! `lrctl` — the librouting operational CLI (ROADMAP-v3 D12).
+//! `lrctl` — the librouting operational CLI.
 //!
 //! Connects to a running `lr-daemon` over its Unix API socket (the
 //! same line-oriented protocol `socat - UNIX-CONNECT:…` speaks) and
@@ -336,7 +336,7 @@ fn routes(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
     }
 }
 
-/// `lrctl roa <list|count>` — ROADMAP "lrctl roa list", issue #52
+/// `lrctl roa <list|count>` — ROADMAP "lrctl roa list"
 /// follow-up. Both sub-commands are thin proxies to the daemon's
 /// `show roa` runtime API command. The client only validates the
 /// argument shape so a typo is loud locally rather than round-tripped.
@@ -770,7 +770,7 @@ fn filter(rest: &[String]) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    // Issue #18 Phase 0: positioned diagnostic with a
+                    // Phase 0: positioned diagnostic with a
                     // caret snippet under the offending source line.
                     eprintln!(
                         "{}",

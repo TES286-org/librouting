@@ -1,5 +1,5 @@
 //! `show <subsystem>` command family — the BIRD-style operational
-//! visibility surface (issue #52).
+//! visibility surface.
 //!
 //! The runtime API's legacy commands (`status`, `sessions`, `routes`)
 //! stay where they are; this module adds a parallel `show …` family
@@ -122,7 +122,7 @@ fn render_show_status(ctx: &ShowCtx<'_>) -> String {
     );
     if let Some(d) = ctx.info.config_dialect.as_deref() {
         let _ = writeln!(out, "config-dialect {}", d);
-        // Issue #101: keep `show status` in lock-step with `status` —
+        // keep `show status` in lock-step with `status` —
         // both surface the deprecation notice for dialects in their
         // window (the native TOML subset), so an operator's BIRD-style
         // `show status` muscle memory lands on the same warning the
@@ -153,7 +153,7 @@ fn render_show_status(ctx: &ShowCtx<'_>) -> String {
 /// optional multi-line deep dive when `detail` is set. The one-line
 /// shape extends the legacy `sessions` command with the new
 /// `transitions=` / `uptime-ms=` / `last-error=` / `last-error-at-ms=`
-/// fields (issue #52).
+/// fields.
 fn render_show_sessions(ctx: &ShowCtx<'_>, detail: bool) -> String {
     let summaries = ctx.router.read().unwrap().session_summaries();
     let mut out = String::with_capacity(summaries.len() * 128);
@@ -223,7 +223,7 @@ fn render_show_session(ctx: &ShowCtx<'_>, handle: u64) -> String {
 /// Mirrors BIRD `show route count` and FRR `show ip route summary`.
 fn render_show_routes_count(ctx: &ShowCtx<'_>) -> String {
     // The walk reads through the shared Loc-RIB handle (per-family
-    // shard locks, issue #101) — no router lock, no wait behind the
+    // shard locks) — no router lock, no wait behind the
     // writer's tick.
     let mut by_proto: std::collections::BTreeMap<&'static str, u64> =
         std::collections::BTreeMap::new();
@@ -416,7 +416,7 @@ mod tests {
         );
     }
 
-    /// Issue #101: `show status` surfaces the deprecation notice when
+    /// `show status` surfaces the deprecation notice when
     /// the daemon is running on the deprecated TOML dialect, so an
     /// operator's `lrctl show status` does not hide the window the
     /// startup banner already named. The DSL, BIRD and FRR dialects

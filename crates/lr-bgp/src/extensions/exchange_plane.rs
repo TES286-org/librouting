@@ -4,7 +4,7 @@
 //! A capability-negotiated private data plane that lr speakers run
 //! alongside standard BGP to exchange state the base protocol cannot
 //! carry: feasibility hints, policy intent, and provenance proofs.
-//! Design: `docs/research/EXCHANGE-PLANE.md` (W6.2); this module is
+//! Design: `docs/research/EXCHANGE-PLANE.md`; this module is
 //! the prototype slice — the full codec, the OPEN negotiation rule,
 //! the replay tracker, and the FSM advertisement hook. The decision
 //! process is untouched; records are produced and consumed by the

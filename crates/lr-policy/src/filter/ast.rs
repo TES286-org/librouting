@@ -20,7 +20,7 @@ pub struct Filter {
     pub name: String,
     /// Body — the top-level statement list.
     pub body: FilterBody,
-    /// User-defined functions (ROADMAP-v3 D3.1) declared before the
+    /// User-defined functions declared before the
     /// body. BIRD-syntax `function name(params) { ... }`; callable
     /// from anywhere in this filter.
     pub functions: Vec<FunctionDecl>,

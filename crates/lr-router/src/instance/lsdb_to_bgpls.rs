@@ -173,13 +173,10 @@ pub struct OspfAreaBgplsContext {
     /// that project multiple IGP domains from one BGP-LS speaker
     /// must assign the same non-zero Instance-ID to every producer
     /// in a given domain and distinct Instance-IDs across domains.
-    /// The previous comment named a "per-area monotonic counter to
-    /// disambiguate re-advertisements" as a future value for this
-    /// field; that read of the field's purpose was incorrect — RFC
-    /// 9552 §3.2 fixes the semantics as per-IGP-instance, not
-    /// per-area or per-NLRI, and re-advertisement disambiguation is
-    /// the BGP-LS Attribute's job (metric / attribute changes),
-    /// not the NLRI Identifier's.
+    /// RFC 9552 §3.2 fixes the semantics as per-IGP-instance, not
+    /// per-area or per-NLRI; re-advertisement disambiguation is the
+    /// BGP-LS Attribute's job (metric / attribute changes), not the
+    /// NLRI Identifier's.
     pub instance_id: u64,
 }
 
@@ -1091,7 +1088,6 @@ fn project_v3_srv6_sid_nlris(lsdb: &Lsdb, ctx: &OspfAreaBgplsContext, out: &mut 
 /// `BgpPeer::advertise_bgpls_with_attr` (added, updated) and
 /// `BgpPeer::withdraw_bgpls` (removed).
 ///
-/// [issue #60]: https://github.com/TES286-org/librouting/issues/60
 pub fn project_v3_srv6_end_x_nlris(
     lsdb: &Lsdb,
     ctx: &OspfAreaBgplsContext,

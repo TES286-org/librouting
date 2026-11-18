@@ -198,7 +198,7 @@ impl SafetyNet {
     /// Run all enabled checks on the route. Returns `Ok(())` if the route
     /// passes all checks, or `Err(violation)` otherwise.
     pub fn check(&self, route: &Route, is_ebgp: bool) -> Result<(), SafetyViolation> {
-        // Global kill switch (issue #46): lets an operator disable the
+        // Global kill switch: lets an operator disable the
         // whole net without flipping every individual toggle.
         if !self.cfg.enabled {
             return Ok(());
@@ -378,7 +378,7 @@ impl SafetyNet {
     /// ASes listed in `as_loop_exceptions` do not count toward the
     /// local-AS total, so an operator can exempt a transit AS that
     /// legitimately re-appears during a migration or confederation
-    /// merge (issue #46).
+    /// merge.
     #[cfg(feature = "bgp")]
     fn local_as_count(&self, route: &Route) -> u8 {
         let attr = match route.attributes.get(lr_core::attr::AttrTag(17)) {
@@ -422,7 +422,7 @@ impl SafetyNet {
     /// Without the FSM normalization step the tag-2 width is correct.
     ///
     /// ASes listed in `as_loop_exceptions` do not count toward the
-    /// local-AS total (issue #46).
+    /// local-AS total.
     #[cfg(not(feature = "bgp"))]
     fn local_as_count(&self, route: &Route) -> u8 {
         let attr = route.attributes.get(lr_core::attr::AttrTag(17));

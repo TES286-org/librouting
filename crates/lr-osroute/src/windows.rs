@@ -228,7 +228,7 @@ impl IpHelper {
     /// Build a blackhole route row — packets matching `prefix` are
     /// discarded (as host-unreachable) instead of forwarded.
     ///
-    /// Windows has no discard route type, and the historically
+    /// Windows has no discard route type, and the commonly
     /// suggested forms are all unusable from `CreateIpForwardEntry2`:
     ///
     /// * loopback *gateway* (the `route add ... 127.0.0.1` idiom) —

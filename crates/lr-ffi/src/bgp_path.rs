@@ -1035,7 +1035,7 @@ pub unsafe extern "C" fn lr_bgp_path_attrs_insert_community(
     )
 }
 
-// ---- Typed readers for the remaining well-known attributes (issue #92) ----
+// ---- Typed readers for the remaining well-known attributes ----
 //
 // The readers below close the gap between the Rust `PathAttributes`
 // pub API and the C ABI. They mirror the inherent-method set on

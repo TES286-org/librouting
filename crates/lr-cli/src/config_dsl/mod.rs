@@ -1,5 +1,4 @@
-//! The native `.lr` configuration DSL (ROADMAP-v3 D16 Phase 2,
-//! GitHub #18).
+//! The native `.lr` configuration DSL.
 //!
 //! Layout:
 //!

@@ -1,5 +1,5 @@
 //! `cargo bench -p lr-bgp --bench roa_validate` — measure ROA
-//! validation throughput (ROADMAP-v3 D6.2, D8.4).
+//! validation throughput.
 //!
 //! Since D8.4, `RoaTable::validate` walks a path-compressed prefix
 //! trie: the covering ROAs of a route are exactly the trie nodes on

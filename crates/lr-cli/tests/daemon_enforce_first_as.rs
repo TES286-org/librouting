@@ -1,5 +1,5 @@
 //! End-to-end tests for the FRR `bgp enforce-first-as` and
-//! `bgp bestpath compare-routerid` knobs (W2.2) on the real `lr-daemon`
+//! `bgp bestpath compare-routerid` knobs on the real `lr-daemon`
 //! binary.
 //!
 //! The router's egress always prepends the local AS to AS_PATH, so a

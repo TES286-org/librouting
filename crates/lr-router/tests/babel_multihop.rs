@@ -1,4 +1,4 @@
-//! Multi-session Babel semantics at the router level (ROADMAP-v3 D1):
+//! Multi-session Babel semantics at the router level:
 //! per-session split horizon through `babel_reachable`, link-down route
 //! flushing through `babel_flush_session`, the BABEL-RTT round trip
 //! through `feed_input_at` (RFC 8966 §A.2.4) and route expiry through

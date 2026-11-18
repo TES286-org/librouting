@@ -60,14 +60,10 @@ pub(super) struct BabelRuntime {
     /// frame's `apply_update` calls, consumed by `handle_frame`'s
     /// trailing `self.diff()` so the delta can be annotated with a
     /// precise, operator-actionable reason BEFORE it surfaces as a
-    /// `RouterEvent::Log`. Replaces the previous single `String`:
-    /// the string was overwritten on every per-prefix retraction TLV,
-    /// so a 29-route retraction frame logged only the LAST prefix;
-    /// and the wildcard-retraction branch (AE 0, metric 0xFFFF) never
-    /// set it at all, so the misleading fallback "babel best-path
-    /// displacement" fired — the production-report symptom where an
-    /// operator with one upstream saw "best-path displacement" and
-    /// (correctly) concluded the message was wrong.
+    /// `RouterEvent::Log`. One record per withdrawal: a 29-route
+    /// retraction frame names all 29 prefixes, and the wildcard
+    /// branch (AE 0, metric 0xFFFF) records its own reason instead of
+    /// falling back to "babel best-path displacement".
     pub(super) last_withdraw: LastWithdraw,
 }
 
@@ -476,17 +472,17 @@ impl BabelRuntime {
     /// hold time lapsed are dropped, and the diff against `published`
     /// becomes the Loc-RIB withdrawal delta.
     ///
-    /// Unlike the previous implementation, this does NOT drop all routes
-    /// immediately when the neighbour's Hello hold window (4× the Hello
-    /// interval) lapses. On tunnel interfaces (WireGuard, etc.) a 4 s
-    /// Hello gap is common — latency spikes, packet reordering, or
-    /// scheduler hiccups all produce it. Dropping every route on a
-    /// brief blip caused the "flaky Babel" symptom: routes withdrawn,
-    /// then re-installed a second later when the next Hello arrived,
-    /// with a brief outage during the gap. babeld does not have this
-    /// path — it relies on each route's own hold timer (6× the Update
-    /// interval, 15 s minimum) and the neighbour's retraction Updates.
-    /// lr now matches that behaviour: a dead neighbour's routes expire
+    /// The sweep does not drop all routes when the neighbour's Hello
+    /// hold window (4× the Hello interval) lapses. On tunnel interfaces
+    /// (WireGuard, etc.) a 4 s Hello gap is common — latency spikes,
+    /// packet reordering, or scheduler hiccups all produce it. Dropping
+    /// every route on a brief blip causes the "flaky Babel" symptom:
+    /// routes withdrawn, then re-installed a second later when the next
+    /// Hello arrived, with a brief outage during the gap. babeld has no
+    /// such path — it relies on each route's own hold timer (6× the
+    /// Update interval, 15 s minimum) and the neighbour's retraction
+    /// Updates. lr matches that behaviour: a dead neighbour's routes
+    /// expire
     /// through `routes.expire(now_ms)` within 15–18 s, which is fast
     /// enough for production and avoids the flap.
     pub(super) fn gc(&mut self, now_ms: u64) -> RuntimeDelta {

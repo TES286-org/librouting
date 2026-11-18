@@ -1,4 +1,4 @@
-//! Daemon-wide graceful drain shutdown (issue #53).
+//! Daemon-wide graceful drain shutdown.
 //!
 //! `ShutdownController` runs the new "drain" shutdown mode the
 //! `[shutdown] mode = "drain"` knob and the runtime API `shutdown
@@ -134,7 +134,7 @@ fn snapshot_queue(router: &DefaultRouter) -> Vec<WithdrawTarget> {
     v
 }
 
-/// Daemon-wide graceful drain controller (issue #53).
+/// Daemon-wide graceful drain controller.
 ///
 /// Shared across the API thread, the worker thread and the daemon's
 /// main loop. The `gate` is the flag the

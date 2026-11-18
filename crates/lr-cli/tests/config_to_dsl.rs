@@ -200,7 +200,7 @@ fn refuses_configs_with_parse_warnings() {
 
 #[test]
 fn to_dsl_stays_silent_about_the_toml_deprecation() {
-    // Phase 4 decision (issue #18): the deprecation notice fires on
+    // Phase 4 decision: the deprecation notice fires on
     // the surfaces that load a config for a *running* daemon —
     // startup, reload, `config check`. The converter is the
     // migration tool itself, runs on TOML by design, and its stderr
@@ -247,7 +247,7 @@ fn missing_file_exits_one() {
 
 #[test]
 fn converts_bgp_roa_source_blocks_to_dsl() {
-    // The `[[bgp.roa_source]]` advanced ROA loader (issue #100) has
+    // The `[[bgp.roa_source]]` advanced ROA loader has
     // a DSL twin `bgp.roa_source { ... }` that the converter must
     // emit. The round-trip must preserve every key (path / url /
     // format / interval / user_agent / program / program_file) so

@@ -29,7 +29,7 @@ pub struct PeerConfig {
     pub asn4: bool,
     /// Optional: enable MP-BGP for given families.
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
-    /// FRR `bgp default ipv4-unicast` (W2.1): when `true` (the default —
+    /// FRR `bgp default ipv4-unicast`: when `true` (the default —
     /// matches FRR and the RFC 4271 implicit IPv4 unicast family), IPv4
     /// unicast is implicitly active for this peer even when
     /// [`mp_families`](Self::mp_families) does not list it. When `false`,
@@ -85,7 +85,7 @@ pub struct PeerConfig {
     /// preserved, which is correct for iBGP and for shared-medium eBGP.
     pub local_address: Option<lr_core::addr::IpAddr>,
     /// FRR `neighbor X allowas-in N` / BIRD `allow local as`
-    /// (W2.3): the maximum number of times the local AS may appear in
+    ///: the maximum number of times the local AS may appear in
     /// a received UPDATE's AS_PATH before the route is rejected.
     ///
     /// `0` (the default) rejects ANY occurrence — the RFC 4271
@@ -98,7 +98,7 @@ pub struct PeerConfig {
     /// sessions, where the local AS would otherwise always form a
     /// loop; the router applies the same exemption.
     pub local_as_tolerance: u32,
-    /// FRR `neighbor X soft-reconfiguration inbound` (W2.4): when
+    /// FRR `neighbor X soft-reconfiguration inbound`: when
     /// `true`, the router retains the **pre-policy** view of the
     /// peer's Adj-RIB-In — the raw received routes before the import
     /// hook chain runs — so a policy reconfiguration can be applied
@@ -211,7 +211,7 @@ impl PeerConfig {
         !self.peer_role().is_internal()
     }
 
-    /// True when IPv4 unicast is active for this peer (W2.1).
+    /// True when IPv4 unicast is active for this peer.
     ///
     /// IPv4 unicast is active when either:
     /// - [`default_ipv4_unicast`](Self::default_ipv4_unicast) is `true`
@@ -301,7 +301,7 @@ mod tests {
         assert!(cfg.is_ebgp());
     }
 
-    // ===== FRR `bgp default ipv4-unicast` (W2.1) =====
+    // ===== FRR `bgp default ipv4-unicast` =====
 
     #[test]
     fn default_ipv4_unicast_defaults_on() {

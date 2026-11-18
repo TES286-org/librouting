@@ -146,11 +146,9 @@ impl RedistributionPipe {
     /// Matching is bit-level containment, not byte-level: an allow prefix
     /// of `203.0.113.0/25` matches a route for `203.0.113.5/32` because the
     /// route's network address falls inside the /25 (the high 25 bits
-    /// agree). The previous implementation compared only whole bytes
-    /// (`div_ceil(plen / 8)` octets) and silently rejected any route whose
-    /// host bits inside the allow prefix's partial last byte differed from
-    /// the allow prefix's stored address — a regression on every
-    /// non-byte-boundary allow prefix.
+    /// agree). Comparing whole bytes would reject a route whose host bits
+    /// inside the allow prefix's partial last byte differ from the allow
+    /// prefix's stored address.
     pub fn matches(&self, route_prefix: &lr_core::addr::Prefix) -> bool {
         if self.allow_prefixes.is_empty() {
             return true;

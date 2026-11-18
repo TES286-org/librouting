@@ -1,4 +1,4 @@
-//! Standalone PeerHealthTable FFI (issue #99).
+//! Standalone PeerHealthTable FFI.
 //!
 //! Mirrors the public Rust API of `lr_peer_health::PeerHealthTable`
 //! so an embedder can construct, drive and inspect a peer-health

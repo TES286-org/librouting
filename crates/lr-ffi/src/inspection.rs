@@ -5,7 +5,7 @@
 //! so an embedder no longer has to parse the text-form `lr_router_sessions_dump`
 //! / `lr_router_rib_dump` JSON.
 //!
-//! Layer-3 inspection surface (issue #92):
+//! Layer-3 inspection surface:
 //!
 //! - `lr_session_summary_t` — fixed-layout projection of one
 //!   [`lr_router::SessionSummary`] (handle / kind / local_as / peer_as /

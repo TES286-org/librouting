@@ -1,5 +1,5 @@
 //! BIRD 2 filter-language translation to the lr filter DSL
-//! (ROADMAP-v3 D14.1).
+//!.
 //!
 //! # Source of truth
 //!

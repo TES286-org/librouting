@@ -263,7 +263,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
 
     // Shared plumbing.
     let router = Arc::new(RwLock::new(DefaultRouter::new()));
-    // ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2). ----
+    // ---- [[redistribute]] / [[aggregate]]. ----
     // Applied once, here, before any engine spawns: pipes scan the
     // (still empty) Loc-RIB and fire on every later selection; the
     // embedded engines must not re-apply on the shared router.

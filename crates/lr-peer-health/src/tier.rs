@@ -1,4 +1,4 @@
-//! Degradation tier (issue #99 §Layered degradation).
+//! Degradation tier.
 //!
 //! `L0` is normal; `L1`–`L3` are progressively more degraded. The
 //! tier is stamped onto a route by the import hook as a private

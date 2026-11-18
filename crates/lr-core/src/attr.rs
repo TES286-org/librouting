@@ -51,10 +51,9 @@ impl Attributes {
     /// Read a 4-byte big-endian unsigned integer attribute in place
     /// — no `Vec<u8>` clone, no `Attribute` struct dereference beyond
     /// the BTreeMap lookup. Used by the filter DSL's integer fast
-    /// paths (LOCAL_PREF / MED, GitHub #19 P3): the previous path
-    /// (`get(tag).map(|a| a.value.clone()).and_then(...)`) allocated a
-    /// fresh `Vec<u8>` for every attribute read on the hot path; this
-    /// method reads the 4 bytes directly off the stored slice.
+    /// paths (LOCAL_PREF / MED): this method reads the 4 bytes
+    /// directly off the stored slice instead of cloning a `Vec<u8>`
+    /// per attribute read on the hot path.
     ///
     /// Returns `None` when the tag is absent or the value is not
     /// exactly 4 bytes long (the BGP wire format for LOCAL_PREF and
@@ -89,7 +88,7 @@ impl Attributes {
     }
 
     /// Read a 1-byte unsigned integer attribute in place. Used by
-    /// the filter DSL's `bgp.origin` fast path (GitHub #19 P3).
+    /// the filter DSL's `bgp.origin` fast path.
     /// Returns `None` when the tag is absent or the value is not
     /// exactly 1 byte long (the BGP wire format for ORIGIN is always
     /// 1 byte per RFC 4271 §4.2.1).

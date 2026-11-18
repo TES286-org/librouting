@@ -1,9 +1,8 @@
 //! `lr-daemon config check <file>` — validate a configuration file and
-//! report what it resolves to, without starting the daemon
-//! (ROADMAP-v3 D16 Phase 1, GitHub #18). `lr-daemon config to-dsl
-//! <file>` — the D16 Phase 2 TOML→DSL converter — lives here too: both
-//! subcommands share the same load entry, usage conventions and exit
-//! codes.
+//! report what it resolves to, without starting the daemon.
+//! `lr-daemon config to-dsl <file>` — the TOML→DSL converter — lives
+//! here too: both subcommands share the same load entry, usage
+//! conventions and exit codes.
 //!
 //! The checker loads through [`crate::daemon_config::load_config_file`]
 //! — the same entry point startup and reload use — and then runs
@@ -95,7 +94,7 @@ fn config_check_cmd(args: &[String]) -> ExitCode {
         .clone()
         .unwrap_or_else(|| "toml".to_string());
     println!("config check: {path}: OK (dialect {dialect})");
-    // TOML deprecation window (issue #18 Phase 4): the report names
+    // TOML deprecation window: the report names
     // the dialect, so it also carries the deprecation notice for the
     // dialects inside their window. The notice is keyed on the
     // stamped dialect only — an unstamped dialect (an empty file)
@@ -152,8 +151,8 @@ fn config_check_cmd(args: &[String]) -> ExitCode {
 }
 
 /// `lr-daemon config to-dsl [--dialect lr|toml|bird|frr] <file>` —
-/// print the config as an equivalent `.lr` program (ROADMAP-v3 D16
-/// Phase 2). Loads through the same entry as startup and `check`, so
+/// print the config as an equivalent `.lr` program. Loads through the
+/// same entry as startup and `check`, so
 /// anything the daemon accepts converts; conversion is deterministic
 /// and refuses input it cannot represent faithfully (parse warnings,
 /// filter descriptions), never silently dropping semantics. Works on

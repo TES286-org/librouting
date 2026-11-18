@@ -92,7 +92,7 @@ fn area_kind_mapping() {
 }
 
 // ---------------------------------------------------------------------------
-// OSPFv2 SimplePassword auth — RFC 2328 §D wiring (issue #92).
+// OSPFv2 SimplePassword auth — RFC 2328 §D wiring.
 // The daemon signs every outgoing packet with the configured password
 // (au_type = 1 + 8-byte auth_data) and drops received packets whose
 // au_type or auth_data do not match (§D.1 "If the authentication
@@ -588,7 +588,7 @@ fn finalize_ospf_auth_long_password_warns() {
 }
 
 // ---------------------------------------------------------------------------
-// OSPFv2 Crypto auth — RFC 2328 §D.3 + RFC 5709 daemon wiring (issue #92).
+// OSPFv2 Crypto auth — RFC 2328 §D.3 + RFC 5709 daemon wiring.
 // The daemon signs every outgoing packet with au_type = 2 + an RFC 5709
 // authentication trailer (Key ID + Auth Data Len + Crypto Seq + HMAC-SHA
 // digest) and verifies the trailer on every received packet, including

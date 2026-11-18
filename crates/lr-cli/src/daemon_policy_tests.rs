@@ -282,7 +282,7 @@ fn babel_export_filter_accepts_routes() {
 #[test]
 fn shared_filter_function_is_callable_from_filter() {
     // A `[[filter_function]]` is prepended to every filter body,
-    // so a filter can call it by name (issue #46).
+    // so a filter can call it by name.
     let cfg = parse(
         "[[filter_function]]\n\
              name = \"tag_customer\"\n\

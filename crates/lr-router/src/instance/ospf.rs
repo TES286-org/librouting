@@ -74,9 +74,8 @@ pub(super) struct OspfRuntime {
     /// Every LSA we flood to this neighbor is recorded here; the
     /// LS-Acknowledgment handler drains it (§13.7); the poll loop
     /// retransmits any entry that has waited `RxmtInterval` without
-    /// an ack (§13.6). Previously the flood path was fire-and-forget
-    /// — a single dropped LS-Update (or LS-Ack) left the two LSDBs
-    /// permanently out of sync.
+    /// an ack (§13.6). Without this list a single dropped LS-Update
+    /// (or LS-Ack) leaves the two LSDBs permanently out of sync.
     pub(super) retransmit: LinkStateRetransmissionList,
 }
 
@@ -305,8 +304,8 @@ pub(super) struct OspfStep {
     pub(super) outbound: Vec<OspfPacket>,
     /// Neighbor-FSM actions captured while dispatching the packet (the
     /// `handle_packet` Hello/DbDesc paths and the exchange driver both
-    /// step the FSM; the resulting actions used to be discarded). The
-    /// router instance translates `Action::EmitEvent(Event::PeerState
+    /// step the FSM). The router instance translates
+    /// `Action::EmitEvent(Event::PeerState
     /// Change { .. })` into `RouterEvent::PeerStateChange { .. }` (and
     /// the `Event::Log(..)` actions into `RouterEvent::Log(..)`) so
     /// OSPF neighbor transitions are observable to the embedder — the

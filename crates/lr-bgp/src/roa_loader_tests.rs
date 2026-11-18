@@ -1,4 +1,4 @@
-//! Unit tests for the ROA loader format parsers (issue #100).
+//! Unit tests for the ROA loader format parsers.
 //!
 //! The `jq` and `awk` transform formats are exercised end-to-end in
 //! `daemon_roa_loader_tests.rs` (they require the daemon's subprocess

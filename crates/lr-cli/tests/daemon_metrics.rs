@@ -1,5 +1,5 @@
 //! End-to-end tests for the Prometheus `/metrics` HTTP endpoint
-//! (ROADMAP-v3 D12.2).
+//!.
 //!
 //! Each test spawns the real `lr-daemon` binary
 //! (`CARGO_BIN_EXE_lr-daemon`) on a loopback port with
@@ -9,7 +9,7 @@
 //! the difference is the client side is plain `std::net::TcpStream`
 //! (no Unix domain socket), since Prometheus scrapes over TCP.
 //!
-//! The metrics module binds a plain TCP listener (issue #47), so the
+//! The metrics module binds a plain TCP listener, so the
 //! suite is gated on the daemon binary being available — Unix and
 //! Windows. The kernel-gated tests in `crates/lr-osroute/tests/`
 //! stay Linux-only at the file level; this suite has no such
@@ -614,7 +614,7 @@ fn _bufread_used(reader: &mut BufReader<&[u8]>) -> String {
 /// on the subject daemon; a scrape then shows the D12.4 observability:
 /// per-session UPDATE counters that moved in both directions and
 /// filter-eval histograms that recorded the import/export evaluations
-/// (ROADMAP-v3 D12.4).
+///.
 #[test]
 fn metrics_updates_and_filter_histograms() {
     let port = free_port();

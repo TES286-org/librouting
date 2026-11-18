@@ -1,4 +1,4 @@
-//! Event polling FFI (ROADMAP-v3 D5.5): `lr_router_poll_events`.
+//! Event polling FFI: `lr_router_poll_events`.
 //!
 //! Serializes [`RouterEvent`] batches into a fixed-layout C struct
 //! array. Transport-oriented events never appear here: `SendBytes`
@@ -220,7 +220,7 @@ fn max_prefix_action_id(action: lr_bgp::MaxPrefixAction) -> i32 {
     }
 }
 
-/// Poll up to `cap` router events into `out` (ROADMAP-v3 D5.5):
+/// Poll up to `cap` router events into `out`:
 /// peer-state changes, route installs/withdrawals, advertisements and
 /// retractions, logs, protocol errors and the maximum-prefix signals.
 /// Returns the number of events written; 0 means the queue is empty

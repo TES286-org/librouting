@@ -89,8 +89,7 @@ pub const LR_APPLY_SET_ERROR_MED_NO_BGP: u8 = 2;
 pub const LR_APPLY_SET_ERROR_PREPEND_AS_NO_BGP: u8 = 3;
 /// AddCommunity cannot apply when the bgp feature is disabled.
 pub const LR_APPLY_SET_ERROR_ADD_COMMUNITY_NO_BGP: u8 = 4;
-/// The SetAction variant is not yet wired into the route's attribute
-/// set (a future extension).
+/// Reserved ABI code: no `SetAction` variant currently produces it.
 pub const LR_APPLY_SET_ERROR_NOT_WIRED: u8 = 5;
 /// Unknown SetAction variant.
 pub const LR_APPLY_SET_ERROR_UNKNOWN: u8 = 6;

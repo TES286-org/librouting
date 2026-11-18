@@ -1,5 +1,5 @@
 //! End-to-end coverage for the LDP daemon's SIGHUP-driven
-//! `[[ldp.bind]]` reload (issue #92).
+//! `[[ldp.bind]]` reload.
 //!
 //! defects.txt `crates/lr-cli/src/daemon_ldp.rs:L507-L509` recorded
 //! that the LDP daemon's SIGHUP-driven reload was a no-op (only the

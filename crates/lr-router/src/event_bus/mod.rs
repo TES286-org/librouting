@@ -29,12 +29,11 @@
 //! half publishes the counter advance to the other side's
 //! `load(Acquire)` fullness / emptiness pre-check) and an
 //! Acquire/Release pair on each slot's sequence number; no mutex is
-//! taken on the push or pop path. The previous implementation used
-//! `std::sync::mpsc::sync_channel` per subscriber, whose `try_send`
-//! takes a per-send mutex; with N subscribers the publisher took N
-//! mutexes per publish. The per-subscriber ring eliminates that —
-//! the publish hot path is lock-free between the publisher and each
-//! subscriber.
+//! taken on the push or pop path. A `sync_channel`-per-subscriber
+//! design would take a mutex per send, so with N subscribers the
+//! publisher would take N mutexes per publish. The per-subscriber
+//! ring makes the publish hot path lock-free between the publisher
+//! and each subscriber.
 //!
 //! The subscriber list itself is a `RwLock<Vec<Arc<SubscriberInner>>>`:
 //! `publish` takes a read lock (concurrent with other publishers,

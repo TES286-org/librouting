@@ -283,7 +283,7 @@ fn network_lsa_derives_transit_prefix_route() {
 }
 
 // ===========================================================================
-// Neighbor-FSM event surface (issue #92 follow-up)
+// Neighbor-FSM event surface
 // ===========================================================================
 
 /// Drain `PeerStateChange` events into a sorted string vec so the test

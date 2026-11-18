@@ -275,7 +275,7 @@ pub(crate) fn bind_peer_policies(
 /// and return them keyed by name. Returns a startup error on the
 /// first filter that fails to parse or has a duplicate name.
 pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter)>, String> {
-    // Build the shared-function preamble once (issue #46). Each
+    // Build the shared-function preamble once. Each
     // declared function becomes a `function name(params) { body }`
     // declaration; the preamble is prepended to every filter body
     // before compilation so the functions are callable from any
@@ -299,7 +299,7 @@ pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter
             format!("{shared_preamble}\n{body}")
         };
         let filter = dsl::compile(name, &full).map_err(|e| {
-            // Issue #18 Phase 0: render the positioned diagnostic with
+            // Phase 0: render the positioned diagnostic with
             // a source snippet — the body IS the source, so spans are
             // directly displayable to the operator.
             format!(
@@ -358,7 +358,7 @@ fn render_filter_function_preamble(
 /// The ROA half is a shared [`lr_bgp::RoaStore`]: the RTR client
 /// thread swaps snapshots underneath as syncs land, so `roa.state`
 /// in every filter tracks the live cache data without any
-/// recompilation (ROADMAP-v3 D2.3/D2.4).
+/// recompilation.
 #[derive(Debug)]
 pub(crate) struct DaemonFilterContext {
     roa: std::sync::Arc<lr_bgp::RoaStore>,
@@ -493,12 +493,12 @@ impl FilterContext for DaemonFilterContext {
 /// defers to the next hook in the chain.
 pub(crate) struct FilterImportHook {
     pub filter: DslFilter,
-    /// Precompiled bytecode (ROADMAP-v3 D3.7): built once at hook
+    /// Precompiled bytecode: built once at hook
     /// construction, executed per route — the import/export hot path
     /// no longer re-walks the AST.
     pub compiled: lr_policy::filter::bytecode::CompiledFilter,
     pub ctx: std::sync::Arc<DaemonFilterContext>,
-    /// Latency histogram (ROADMAP-v3 D12.4). `None` unless the
+    /// Latency histogram. `None` unless the
     /// metrics endpoint is configured — the per-route timing (two
     /// `Instant::now()` calls) is opt-in so the hot path stays free
     /// of observability cost when nobody is scraping.

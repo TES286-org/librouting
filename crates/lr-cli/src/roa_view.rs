@@ -1,5 +1,5 @@
 //! `show roa` renderer — the runtime API half of `lrctl roa list`
-//! (ROADMAP "lrctl roa list", issue #52 follow-up).
+//! (ROADMAP "lrctl roa list").
 //!
 //! The renderer reads the live [`lr_bgp::RoaStore`] snapshot and
 //! emits one line per ROA entry, mirroring BIRD's `show roa` output:

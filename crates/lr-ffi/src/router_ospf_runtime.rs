@@ -1467,7 +1467,7 @@ mod tests {
         assert_eq!(rc, LR_ERR_INVALID_HANDLE);
     }
 
-    // ----- OspfAreaType value-type ABI tests (issue #92) -----
+    // ----- OspfAreaType value-type ABI tests -----
 
     /// Round-trip every constructor through its kind id and the
     /// is_stub / is_nssa / is_stubby / no_summary / default_metric

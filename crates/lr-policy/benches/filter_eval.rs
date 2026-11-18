@@ -1,5 +1,5 @@
 //! `cargo bench -p lr-policy --bench filter_eval` — measure the
-//! filter DSL evaluator throughput (ROADMAP-v3 D6.2, D3.7, #19 P0, #19 P5).
+//! filter DSL evaluator throughput.
 //!
 //! Seven filter families cover the policy complexity spectrum, sized
 //! to expose the costs that real-world policies actually pay:
@@ -272,7 +272,7 @@ fn user_function_filter() -> String {
 }
 
 /// A filter that exercises the peephole constant-propagation +
-/// literal-folding pass (GitHub #19 P5). `let a = 6; let b = 7; if
+/// literal-folding pass. `let a = 6; let b = 7; if
 /// a * b == 42 then accept; reject;` compiles to 12 instructions
 /// unoptimised (`Push; StoreVar` × 2, `LoadVar; LoadVar; Bin(Mul);
 /// Push; Bin(Eq); JumpIfFalse; Accept; Reject`). The peephole pass

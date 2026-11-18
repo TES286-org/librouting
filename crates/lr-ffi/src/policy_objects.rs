@@ -1,4 +1,4 @@
-//! Policy objects over the C ABI (ROADMAP-v3 D5.3): route handles,
+//! Policy objects over the C ABI: route handles,
 //! prefix-lists, route-maps and the match resolver.
 //!
 //! The route handle ([`lr_route_t`]) boxes a real

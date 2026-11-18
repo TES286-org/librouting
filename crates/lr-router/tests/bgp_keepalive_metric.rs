@@ -10,7 +10,7 @@
 //! reactor computes `now_ms` once per iteration *after* `poll.poll`
 //! returns (matching the Babel and OSPF mio loops) and threads it
 //! through `pump_readable` → `feed_input_at`, so the timestamp is the
-//! post-poll arrival time — the same class of fix PR #118 applied to
+//! post-poll arrival time — the same class of fix applied to
 //! the BFD mio loop's detection timer.
 //!
 //! These tests pin the router-level contract the reactor relies on:

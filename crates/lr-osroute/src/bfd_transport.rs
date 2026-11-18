@@ -309,8 +309,8 @@ mod imp {
     ///
     /// The cmsg data for `IP_TTL` / `IPV6_HOPLIMIT` is a 4-byte `int`
     /// in native byte order (the kernel writes it as a C `int` through
-    /// `setsockopt` / cmsg). Reading only `data[0]` — as this function
-    /// did historically — happens to return the correct TTL value on
+    /// `setsockopt` / cmsg). Reading only `data[0]` happens to return
+    /// the correct TTL value on
     /// **little-endian** targets (x86_64, aarch64, RISC-V) because the
     /// LSB of a small `int` value lives at byte offset 0. On
     /// **big-endian** targets (s390x) the MSB lives at offset 0, so

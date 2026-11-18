@@ -206,27 +206,27 @@ pub struct BgpPeer {
     /// (intersection of our advertised tuples and the peer's). Empty when
     /// the capability was not advertised by either side.
     extended_next_hop: Vec<ExtNextHopTuple>,
-    /// W6.3 exchange-plane prototype (feature `exchange-plane`): the
+    /// Exchange plane (feature `exchange-plane`): the
     /// local configuration advertised in OPEN, when enabled.
     #[cfg(feature = "exchange-plane")]
     exchange_plane: Option<crate::extensions::exchange_plane::ExchangePlaneConfig>,
-    /// W6.3 exchange-plane prototype: the negotiation result — `Some`
+    /// Exchange plane: the negotiation result — `Some`
     /// only when both OPENs carried the capability with the same
     /// version and a non-empty key intersection
     /// (`docs/research/EXCHANGE-PLANE.md` §3).
     #[cfg(feature = "exchange-plane")]
     exchange_plane_session: Option<crate::extensions::exchange_plane::ExchangePlaneSession>,
-    /// W6.3 exchange-plane prototype: the per-sender monotonic record
+    /// Exchange plane: the per-sender monotonic record
     /// sequence (design §6) — strictly increasing across every record
     /// set this session sends.
     #[cfg(feature = "exchange-plane")]
     exchange_plane_sequence: u32,
-    /// W6.3 exchange-plane prototype: inbound replay protection
+    /// Exchange plane: inbound replay protection
     /// (design §6) — highest accepted sequence per key id, bound to
     /// the current session instance's OPEN nonce.
     #[cfg(feature = "exchange-plane")]
     exchange_plane_replay: crate::extensions::exchange_plane::ReplayTracker,
-    /// W6.3 exchange-plane prototype: the OPEN nonce in effect for the
+    /// Exchange plane: the OPEN nonce in effect for the
     /// current session instance — the configured nonce mixed with the
     /// per-OPEN counter. The nonce is a session-instance tag (it
     /// travels in the clear), so uniqueness across instances is what
@@ -234,7 +234,7 @@ pub struct BgpPeer {
     /// that without an RNG in the no-std FSM.
     #[cfg(feature = "exchange-plane")]
     exchange_plane_open_nonce: [u8; 8],
-    /// W6.3 exchange-plane prototype: how many OPENs this FSM sent
+    /// Exchange plane: how many OPENs this FSM sent
     /// (session instances).
     #[cfg(feature = "exchange-plane")]
     exchange_plane_open_count: u32,
@@ -375,7 +375,7 @@ impl BgpPeer {
         )
     }
 
-    /// W6.3 exchange-plane prototype (feature `exchange-plane`):
+    /// Exchange plane (feature `exchange-plane`):
     /// enable the plane for this session. The capability is advertised
     /// in the next OPEN; the plane activates only when the peer
     /// advertises it too (design §3). Off by default.
@@ -387,7 +387,7 @@ impl BgpPeer {
         self.exchange_plane = Some(cfg);
     }
 
-    /// W6.3 exchange-plane prototype: the negotiation result.
+    /// Exchange plane: the negotiation result.
     /// `Some` only after OPEN when both speakers advertised the
     /// capability and the key intersection is non-empty.
     #[cfg(feature = "exchange-plane")]
@@ -639,7 +639,7 @@ impl BgpPeer {
                 .collect();
             caps.push(Capability::extended_next_hop(&raw));
         }
-        // W6.3 exchange-plane prototype: advertise when configured
+        // Exchange plane: advertise when configured
         // (feature-gated; RFC 5492 §3 makes the unknown capability
         // inert for peers without it). Each OPEN bumps the instance
         // counter and mixes it into the advertised nonce — a fresh
@@ -668,7 +668,7 @@ impl BgpPeer {
         }
     }
 
-    /// W6.3 exchange-plane (feature `exchange-plane`): the effective
+    /// Exchange plane (feature `exchange-plane`): the effective
     /// OPEN-time plane configuration — the configured nonce mixed with
     /// the OPEN instance counter. Returns a clone carrying the nonce
     /// this session instance advertises (used for both the capability
@@ -697,7 +697,7 @@ impl BgpPeer {
         Some(cfg)
     }
 
-    /// W6.3 exchange-plane ingress (feature `exchange-plane`): take
+    /// Exchange plane ingress (feature `exchange-plane`): take
     /// over a received type-251 attribute. Returns the private record
     /// store attribute to ride the route bag (`None` = drop the
     /// records; the route's standard content always survives — design
@@ -792,7 +792,7 @@ impl BgpPeer {
         ))
     }
 
-    /// W6.3 exchange-plane egress (feature `exchange-plane`): attach the
+    /// Exchange plane egress (feature `exchange-plane`): attach the
     /// wire record-set attribute to an advertised route, or forward the
     /// route's existing type-251 attribute as-is when it carries
     /// forwarding material this session did not consume. Called after
@@ -972,7 +972,7 @@ impl BgpPeer {
         self.extended_next_hop =
             crate::extensions::extended_next_hop::negotiated_tuples(&self.cfg, &peer_enh);
 
-        // W6.3 exchange-plane prototype: activate only when both sides
+        // Exchange plane: activate only when both sides
         // advertised the capability with the same version and a
         // non-empty key intersection (design §3). Otherwise the plane
         // stays off — the session is unaffected either way. Each new
@@ -1082,13 +1082,6 @@ impl BgpPeer {
                 // advertise the capability must not send BoRR/EoRR,
                 // and a receiver that did not advertise it must
                 // silently ignore them per §3.2).
-                //
-                // Before the issue #92 fix, only the Normal subtype
-                // produced an action; a peer that sent BoRR or EoRR
-                // had its message silently discarded, so an embedder
-                // relying on the demarcation to coordinate a
-                // route-refresh response saw the markers vanish at
-                // the wire boundary.
                 use crate::message::RouteRefreshSubtype;
                 if self.route_refresh_negotiated() {
                     match refresh.subtype {
@@ -1295,7 +1288,7 @@ impl BgpPeer {
                 // RFC 4724 §4: an empty UPDATE is the End-of-RIB marker for
                 // IPv4 unicast (the implicit family). Only emit it when
                 // IPv4 unicast is active for this peer (FRR `bgp default
-                // ipv4-unicast` semantics, W2.1) — a peer that is not
+                // ipv4-unicast` semantics) — a peer that is not
                 // activated for IPv4 unicast must not signal convergence
                 // for it.
                 actions.push(BgpAction::EndOfRib(NlriFamily::IPV4_UNICAST));
@@ -1311,7 +1304,7 @@ impl BgpPeer {
         };
 
         // --- Withdrawals (IPv4 legacy section) ---
-        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // FRR `no bgp default ipv4-unicast`: a peer not activated
         // for IPv4 unicast must not have its legacy-section withdrawals
         // processed — silently drop them (the peer should not be sending
         // them in the first place, but we fail closed).
@@ -1391,7 +1384,7 @@ impl BgpPeer {
         // dropped.
         let mut normalized: PathAttributes = u.attributes.clone();
 
-        // W6.3 exchange-plane ingress (feature `exchange-plane`): take
+        // Exchange plane ingress (feature `exchange-plane`): take
         // over the wire attribute (type 251) before the bag is normalized
         // into route state. When the plane is active on this session the
         // records are verified (nonce echo → sequence → tag, design §6)
@@ -1497,7 +1490,7 @@ impl BgpPeer {
         };
 
         // IPv4 NLRI: NEXT_HOP from the well-known attribute.
-        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // FRR `no bgp default ipv4-unicast`: a peer not activated
         // for IPv4 unicast must not have its legacy-section NLRI installed
         // — silently drop the entries (the peer should not be sending
         // them, but failing closed is the safe posture).
@@ -1609,8 +1602,8 @@ impl StateMachine for BgpPeer {
                 // through `BgpAction` directly (router-aware path) and
                 // re-announces the requested family to the peer; a
                 // trait-only embedder that drives `BgpPeer` through the
-                // `StateMachine` trait previously saw `Action::None`
-                // and silently lost the request. Surface it as a
+                // `StateMachine` trait would otherwise see `Action::None`
+                // and silently lose the request. Surface it as a
                 // structured `Event::RouteRefreshRequested` so the
                 // trait-only embedder can react (log it, fan out to a
                 // controller, etc.). The session id is `cfg.peer_id`,
@@ -1624,8 +1617,8 @@ impl StateMachine for BgpPeer {
                 }
                 // RFC 4724 §4 End-of-RIB: same shape — the daemon
                 // consumes `BgpAction::EndOfRib` directly to advance
-                // retention tracking; a trait-only embedder previously
-                // saw `Action::None`. Surface it as a structured
+                // retention tracking; a trait-only embedder would
+                // otherwise see `Action::None`. Surface it as a structured
                 // `Event::EndOfRib` so the trait-only embedder can
                 // react.
                 BgpAction::EndOfRib(family) => Action::EmitEvent(lr_core::event::Event::EndOfRib {

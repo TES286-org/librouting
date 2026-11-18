@@ -1,6 +1,6 @@
 //! BGP extensions (RFC 4724 graceful restart, RFC 7911 AddPath, RFC 7313
 //! enhanced route refresh, RFC 4893 4-byte AS, RFC 5549 extended next-hop,
-//! RFC 9494 long-lived, and the W6.3 exchange-plane prototype behind the
+//! RFC 9494 long-lived, and the Exchange plane behind the
 //! `exchange-plane` feature).
 //!
 //! Most of the wire encoding for these features lives in the main

@@ -4336,7 +4336,7 @@ mod lrxp_tests {
 
     #[test]
     fn lrxp_verified_reads_as_bool_false_when_absent() {
-        // Issue #81 fallback: a route with no LRXP attribute (the
+        // fallback: a route with no LRXP attribute (the
         // peer did not advertise the capability) reads as false.
         let mut r = route_with("203.0.113.0/24", 100, 0);
         assert_eq!(
@@ -4357,7 +4357,7 @@ mod lrxp_tests {
 
     #[test]
     fn lrxp_hint_rank_reads_as_zero_when_absent() {
-        // Issue #81 fallback: the accessor returns 0 on a non-LRXP
+        // fallback: the accessor returns 0 on a non-LRXP
         // peer's route.
         let mut r = route_with("203.0.113.0/24", 100, 0);
         assert_eq!(
@@ -4540,7 +4540,7 @@ mod lrxp_tests {
         );
     }
 
-    /// Issue #81 canonical idiom: a filter that deprioritises a
+    /// canonical idiom: a filter that deprioritises a
     /// route whose sender reports it as rank > 1 (a poor repair
     /// candidate per design §5.1). On a non-LRXP peer the accessor
     /// returns 0, the `rank > 1` test is false, the local-pref
@@ -4560,7 +4560,7 @@ mod lrxp_tests {
         assert_eq!(local_pref(&r), Some(50));
     }
 
-    /// Issue #81 canonical idiom: the same filter no-ops on a
+    /// canonical idiom: the same filter no-ops on a
     /// non-LRXP peer (rank reads as 0, the `rank > 1` test is
     /// false, local-pref stays at its original value).
     #[test]
@@ -4576,7 +4576,7 @@ mod lrxp_tests {
         assert_eq!(local_pref(&r), original_lp);
     }
 
-    /// Issue #81 — adjust MED based on the sender's IGP cost (design
+    /// adjust MED based on the sender's IGP cost (design
     /// §5.1: the quantity inter-AS receivers otherwise cannot see).
     /// A higher IGP cost on the sender's side means the path is more
     /// expensive end-to-end; the receiver bumps its MED to reflect
@@ -4594,7 +4594,7 @@ mod lrxp_tests {
         assert_eq!(med(&r), Some(200));
     }
 
-    /// Issue #81 — boost local-pref for routes with a verified origin
+    /// boost local-pref for routes with a verified origin
     /// attestation (design §5.3: the defect-§4 mitigation for
     /// deployments that have no RPKI). The `verified` predicate is
     /// the single bool an operator gates on.

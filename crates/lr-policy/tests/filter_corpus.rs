@@ -1,4 +1,4 @@
-//! Corpus-driven parser regression tests (ROADMAP-v3 D6.4).
+//! Corpus-driven parser regression tests.
 //!
 //! The committed fuzz seed corpus under `fuzz/seeds/filter_parser/`
 //! doubles as a deterministic regression suite for the filter DSL

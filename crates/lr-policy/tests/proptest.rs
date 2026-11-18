@@ -1,4 +1,4 @@
-//! Property-based tests for `lr-policy` (ROADMAP-v3 D6).
+//! Property-based tests for `lr-policy`.
 //!
 //! These tests use `proptest` to assert structural invariants that
 //! unit tests can only spot-check one value at a time:

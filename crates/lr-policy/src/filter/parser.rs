@@ -73,7 +73,7 @@ pub enum ParseErrorKind {
         got: usize,
     },
     /// Two user functions share a name, or a user function shadows a
-    /// built-in (ROADMAP-v3 D3.1).
+    /// built-in.
     DuplicateFunction(String),
     /// A call names neither a built-in nor a declared user function.
     /// Caught at compile time so a typo fails at startup instead of
@@ -259,7 +259,7 @@ impl Parser {
                 return Err(self.err(t.span, ParseErrorKind::EmptyFilterBody));
             }
         }
-        // ROADMAP-v3 D3.1: user-defined functions come first, BIRD
+        //: user-defined functions come first, BIRD
         // style (`function name(...) { ... }`), before the filter body.
         let mut functions = Vec::new();
         let mut fn_names = std::collections::BTreeSet::new();
@@ -792,7 +792,7 @@ impl Parser {
                         // the BIRD translator renames it to
                         // `bgp.pmsi_tunnel`.
                         "pmsi_tunnel" => RouteFieldKind::BgpPmsiTunnel,
-                        // Issue #81 — LRXP exchange-plane surface.
+                        // LRXP exchange-plane surface.
                         // `bgp.lrxp` opens a three-segment dotted
                         // path (`bgp.lrxp.<class>.<field>`), plus
                         // two bare predicates (`bgp.lrxp.verified`,
@@ -1087,7 +1087,7 @@ impl Parser {
         Ok(RouteField::new(kind))
     }
 
-    /// Issue #81 — parse the `bgp.lrxp.<class>.<field>` surface (and
+    /// parse the `bgp.lrxp.<class>.<field>` surface (and
     /// the two bare predicates `bgp.lrxp.verified` /
     /// `bgp.lrxp.partial_transit`). The `bgp.lrxp` prefix has already
     /// been consumed by [`try_parse_route_field`]; this method reads
@@ -1698,7 +1698,7 @@ impl Parser {
 }
 
 /// Built-in function names the evaluator resolves in
-/// `eval_call` (ROADMAP-v3 D3.4 + earlier). User functions must not
+/// `eval_call`. User functions must not
 /// shadow these, and call validation accepts either set.
 pub(crate) const BUILTIN_FUNCTIONS: &[&str] =
     &["len", "delete", "filter", "empty", "count", "first", "last"];

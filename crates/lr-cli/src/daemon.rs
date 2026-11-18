@@ -445,7 +445,7 @@ fn daemon_main() -> ExitCode {
         eprintln!("error: {e}");
         return ExitCode::from(2);
     }
-    // Issue #101: the startup `eprintln!` in `parse_args` covers the
+    // the startup `eprintln!` in `parse_args` covers the
     // one-shot stderr channel; re-emit through the structured logger
     // too so an operator's `--log-target config=warn` filter (or a
     // syslog / file destination) sees the same notice. The structured
@@ -619,7 +619,7 @@ impl PeerEntry {
 }
 
 /// Install `[[redistribute]]` pipes and `[[aggregate]]` registrations
-/// (ROADMAP-v3 D4.1 / D4.2) on the shared router. Called once per
+/// on the shared router. Called once per
 /// process — from the multi-protocol supervisor right after it creates
 /// the router, or from the standalone BGP engine (`host = None`). The
 /// config validation already guaranteed the referenced engines are in
@@ -1086,7 +1086,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         None => Arc::new(RwLock::new(DefaultRouter::new())),
     };
 
-    // Apply the operator's `[safety]` overrides (issue #46) before
+    // Apply the operator's `[safety]` overrides before
     // any session is added. The supervisor-created router (multi-
     // protocol mode) gets the same application through
     // `daemon_multi::run_multi_daemon`, so both paths share the
@@ -1117,7 +1117,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         router.write().unwrap().set_safety_net(net);
     }
 
-    // ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2). ----
+    // ---- [[redistribute]] / [[aggregate]]. ----
     // Cross-protocol pipes and BGP aggregates attach to the shared
     // router. The supervisor applies them once on the shared router
     // when it created it; the embedded engines must not re-apply
@@ -1162,11 +1162,11 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // permits (§3 / Appendix A "insecure-mode").
         let rfc8212 = cfg.ebgp_policy != "accept-all";
         r.set_ebgp_requires_policy(rfc8212);
-        // FRR `bgp enforce-first-as` (W2.2): drop eBGP UPDATEs whose
+        // FRR `bgp enforce-first-as`: drop eBGP UPDATEs whose
         // leftmost AS_PATH sequence segment's first AS is not the
         // peer's AS. Off by default (FRR `no bgp enforce-first-as`).
         r.set_enforce_first_as(cfg.enforce_first_as);
-        // FRR `bgp bestpath compare-routerid` (W2.2): the best-path
+        // FRR `bgp bestpath compare-routerid`: the best-path
         // tiebreaker is the lowest BGP IDENTIFIER (RFC 5004
         // deterministic) when on, or oldest-route-wins when off.
         r.best_path_config_mut().deterministic_router_id = cfg.bestpath_compare_routerid;
@@ -1305,7 +1305,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                             log_error!(Component::Bgp, "peer {}: {}", spec.label(), e);
                             return ExitCode::from(1);
                         }
-                        // W6.3 exchange-plane (feature `exchange-plane`):
+                        // Exchange plane (feature `exchange-plane`):
                         // activate the record plane for peers that opted
                         // in. Fail closed on a feature-less binary, on a
                         // missing key block, or on a bad key — never run
@@ -1468,7 +1468,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // ---- ROA / RFC 6811 prefix-origin validation ----
     // Build the table even when `roa_validate` is off so the filter
     // DSL's `roa.state` accessor still works. The table lives in a
-    // shared `RoaStore` (ROADMAP-v3 D2.3): the static [[roa]] entries
+    // shared `RoaStore`: the static [[roa]] entries
     // seed the store's config layer and the RTR client thread (below,
     // D2.4) applies cache syncs on top — the filter contexts see both
     // through one snapshot handle.
@@ -1477,7 +1477,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         Err(e) => return daemon_policy::policy_error(e),
     };
     let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::new());
-    // Advanced ROA loading (issue #100): the inline `[[roa]]` tables
+    // Advanced ROA loading: the inline `[[roa]]` tables
     // and the per-source loader threads share one `RoaLayerRegistry`.
     // The registry recomputes the union (deduplicated, sorted) and
     // swaps it into the live `RoaStore` on every change — both at
@@ -1689,7 +1689,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
 
     // ---- RFC 2439 Route Flap Damping (opt-in via [damping]). ----
     // The damping crate shipped in rc.3 as dead code — wiring it into
-    // the daemon import chain is ROADMAP-v3 D4.3. Off by default:
+    // the daemon import chain is. Off by default:
     // RFC 7196 §3 documents that RFC 2439 defaults are harmful on
     // Internet-facing eBGP, so the operator must explicitly opt in
     // with `[damping] enabled = true`. When enabled, the daemon
@@ -1698,7 +1698,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // `DampingTable::decay_all` so suppressed prefixes re-emerge
     // as the figure-of-merit decays below the reuse threshold.
     //
-    // SIGHUP-driven toggle (ROADMAP-v3 D4.3 follow-up): the hook
+    // SIGHUP-driven toggle: the hook
     // carries a shared `enabled` flag the reload path flips, so a
     // SIGHUP can turn damping *off* mid-run (the hook pass-throughs
     // and the decay thread exits) and *back on* later (the hook
@@ -1741,7 +1741,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         );
     }
 
-    // ---- Peer-level flap suppression (issue #99). ----
+    // ---- Peer-level flap suppression. ----
     // Opt-in via [bgp.peer_health] rollout = "observe" | "shadow" |
     // "shadow-best-path" | "limited" | "full". Installs a
     // PeerHealthImportHook on the import chain and spawns a ticker
@@ -1758,7 +1758,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // via `set_peer_health_lookup` so `reselect` can query the
     // **current** per-(peer, AFI/SAFI) tier dynamically (not a
     // stamp frozen at import time) and exclude stale paths from
-    // ECMP / add-path (issue #99 §Hooks 3 + §Recovery).
+    // ECMP / add-path.
     //
     // The table Arc is captured into `peer_health_table` so the
     // Runtime (and thus the runtime API's `show peer-health`) can
@@ -1775,7 +1775,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             r.hooks_mut().import.push(Box::new(import_hook));
             // Install the dynamic peer-health lookup so `reselect`
             // queries the live table for each candidate's current
-            // tier and stale state (issue #99 §Hooks 3 + §Recovery).
+            // tier and stale state.
             // Shadow modes return L0 from `tier()` so routing is
             // unaffected; the lookup is still installed so
             // `lrctl show peer-health` and the shadow selection hook
@@ -1884,7 +1884,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     println!("  allow-local-as: {}", allowas_label);
     println!("  soft-reconfig-in: {}", cfg.soft_reconfig_inbound);
     {
-        // W6.3 exchange-plane posture at startup (feature `exchange-plane`
+        // Exchange plane posture at startup (feature `exchange-plane`
         // builds only; a feature-less binary fails earlier on the flag).
         let xp = cfg.exchange_plane || cfg.peers.iter().any(|p| p.exchange_plane == Some(true));
         println!(
@@ -1898,7 +1898,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         );
     }
     {
-        // RFC 7752 BGP-LS posture (issue #60 daemon wiring). The
+        // RFC 7752 BGP-LS posture. The
         // banner mirrors the exchange-plane line: shows the master
         // toggle, the speaker identity (AS, BGP-LS ID) and the area
         // subset (or "(all)" when the operator left `areas` empty).
@@ -1946,7 +1946,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 Ok(p) => {
                     let (p, family) = originate_family_for(p);
                     let nh = originate_next_hop(cfg, family);
-                    // Issue #92 (defects.txt L75): FRR `network PREFIX
+                    // (defects.txt L75): FRR `network PREFIX
                     // route-map NAME` qualifier. Look up the per-network
                     // route-map in `[[bgp.network_route_map]]` and apply
                     // it at origination (RFC 4271 §9.1.2.1 — set
@@ -2120,7 +2120,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // router, empty status lines); an embedded engine shares the
     // supervisor's runtime — one running flag, one reload closure, one
     // status registry for the whole combination.
-    // RPKI-RTR cache client ([bgp.rpki], RFC 8210 — ROADMAP-v3 D2.4):
+    // RPKI-RTR cache client ([bgp.rpki], RFC 8210 —):
     // one thread per configured cache, syncing ROA deltas into the
     // shared store. The handle is created before the runtime so the
     // API `status` command can render the live state; the thread uses
@@ -2141,7 +2141,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             Arc::clone(&running),
         )
     });
-    // Advanced ROA loading (issue #100): one thread per configured
+    // Advanced ROA loading: one thread per configured
     // `[[bgp.roa_source]]` entry. Each thread reads / fetches its
     // source on the configured cadence, parses the body with the
     // source's format, and feeds the entries to the shared
@@ -2189,7 +2189,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             Arc::clone(&h.runtime)
         }
         None => {
-            // Issue #53 daemon-wide drain: install the drain gate on the
+            // daemon-wide drain: install the drain gate on the
             // router's import chain BEFORE the Runtime takes ownership
             // of the Arc. Returns None in immediate mode.
             let shutdown = build_shutdown(cfg, &router);
@@ -2487,7 +2487,7 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     // `ipv4-labeled-unicast` (RFC 8277), `ipv6-labeled-unicast`
     // (RFC 8277); unknown names are logged and dropped.
     //
-    // FRR `bgp default ipv4-unicast` (W2.1): when on (the default —
+    // FRR `bgp default ipv4-unicast`: when on (the default —
     // matches FRR and BIRD's MP-BGP capability requirement), ensure
     // IPV4_UNICAST is in the family list so the MP-BGP capability
     // advertises it (BIRD 2 refuses the session without a matching
@@ -2505,7 +2505,7 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
             "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
             "ipv4-labeled-unicast" => families.push(NlriFamily::IPV4_LABELED_UNICAST),
             "ipv6-labeled-unicast" => families.push(NlriFamily::IPV6_LABELED_UNICAST),
-            // RFC 7752 BGP-LS Link-State family (issue #60 daemon wiring).
+            // RFC 7752 BGP-LS Link-State family.
             // When the operator opts in via `--bgp-ls` / `[bgp_ls]` /
             // `--mp-family bgp-ls`, advertise the AFI=16388 / SAFI=71
             // family on this session. The projection driver (running in
@@ -2527,7 +2527,7 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         // listed by the operator stay in their original order.
         families.insert(0, NlriFamily::IPV4_UNICAST);
     }
-    // RFC 7752 BGP-LS (issue #60 daemon wiring). When the daemon's
+    // RFC 7752 BGP-LS. When the daemon's
     // `[bgp_ls] enabled = true` flag is set, every BGP session
     // additionally advertises the BGP-LS family in OPEN — the
     // projection driver (running in the ticker thread) then pushes
@@ -2550,12 +2550,12 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     // so add_session propagates it to PeerConfig — the FSM gates
     // IPv4 NLRI processing on this flag.
     sc.default_ipv4_unicast = effective_default_ipv4;
-    // FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+    // FRR `neighbor X allowas-in N` / BIRD `allow local as`:
     // per-peer override of the router-wide default. add_session
     // propagates it to PeerConfig so the router's per-peer AS-loop
     // tolerance check sees it.
     sc.local_as_tolerance = p.allow_local_as.unwrap_or(g.allow_local_as);
-    // FRR `neighbor X soft-reconfiguration inbound` (W2.4): per-peer
+    // FRR `neighbor X soft-reconfiguration inbound`: per-peer
     // override of the router-wide default. add_session propagates it
     // to PeerConfig so import_route knows to retain the raw received
     // route in the pre-policy RIB.
@@ -2688,7 +2688,7 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     sc
 }
 
-/// W6.3 exchange-plane (feature `exchange-plane`): parse one
+/// Exchange plane (feature `exchange-plane`): parse one
 /// `"id:secret"` key pair. HMAC-SHA256 is the prototype's only
 /// algorithm (design §8); ids share the TCP-AO range (1..=65535).
 #[cfg(feature = "exchange-plane")]
@@ -2708,7 +2708,7 @@ fn parse_exchange_key(
     Ok(ExchangeKey::hmac_sha256(id, secret.as_bytes().to_vec()))
 }
 
-/// W6.3 exchange-plane (feature `exchange-plane`): the canonical
+/// Exchange plane (feature `exchange-plane`): the canonical
 /// description of one route-map's effective filter/action set — the
 /// map's entries plus the definitions of the lists they reference.
 /// The SipHash-2-4 digest over the sorted lines is the policy-intent
@@ -2815,7 +2815,7 @@ fn canonical_policy_lines(cfg: &DaemonConfig, map_name: &str) -> Vec<String> {
     lines
 }
 
-/// W6.3 exchange-plane (feature `exchange-plane`): SipHash-2-4 over the
+/// Exchange plane (feature `exchange-plane`): SipHash-2-4 over the
 /// canonical policy description, keyed with the per-boot nonce (the
 /// design's "keyed per session from the capability nonce" — the nonce
 /// is per boot + per OPEN instance in this prototype, which is enough
@@ -2847,7 +2847,7 @@ fn exchange_plane_policy_digest(
     Some(h.to_be_bytes())
 }
 
-/// W6.3 exchange-plane (feature `exchange-plane`): build the per-session
+/// Exchange plane (feature `exchange-plane`): build the per-session
 /// plane configuration and attach it to the router session. The local
 /// OPEN nonce mixes the per-boot nonce with the FSM's per-instance OPEN
 /// counter (the nonce is a session-instance tag, not a secret).
@@ -4128,7 +4128,7 @@ impl BgplsDriver {
     }
 }
 
-/// The kernel-mirror thread (issue #101 — the event-bus wiring): the
+/// The kernel-mirror thread: the
 /// Loc-RIB → kernel FIB path runs on its own thread subscribed to the
 /// daemon's [`EventBus`], so kernel route I/O (netlink writes, the
 /// IP Helper calls) never happens under the router's writer lock —
@@ -5102,7 +5102,7 @@ fn lr_ip(addr: std::net::IpAddr) -> lr_core::addr::IpAddr {
 
 /// Babel daemon mode: run the Babel protocol over UDP (RFC 8966 §4).
 ///
-/// Two shapes share one loop (ROADMAP-v3 D1):
+/// Two shapes share one loop:
 ///
 /// * **Manual** — no `[[babel.interface]]` blocks: one session bound to
 ///   `--local-address` (IPv6 link-local with `%scope`, or IPv4). The
@@ -5160,7 +5160,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // The manual single-socket path keeps its exact historical log line.
     // The `manual` marker (set by `babel_iface_manual`) distinguishes it
     // from the per-interface spec path even when the device resolved and
-    // `name` is populated (issue #39).
+    // `name` is populated.
     let manual = ifaces.len() == 1 && ifaces[0].manual;
     if manual {
         let t = &ifaces[0].transports[0];
@@ -6044,7 +6044,7 @@ fn babel_poll_timeout(
     Duration::from_millis(next.saturating_sub(now_ms))
 }
 
-/// One resolved Babel interface runtime (ROADMAP-v3 D1): transports,
+/// One resolved Babel interface runtime: transports,
 /// session, authentication state and the per-interface RFC 8966 §A.2
 /// parameters.
 ///
@@ -6160,7 +6160,7 @@ fn babel_mcast_dest(t: &BabelTransport) -> std::net::SocketAddr {
     }
 }
 
-/// Resolve the Babel interface set from the config (ROADMAP-v3 D1).
+/// Resolve the Babel interface set from the config.
 ///
 /// `[[babel.interface]]` blocks: every system interface is matched
 /// against the patterns in file order and takes the first match's
@@ -6300,7 +6300,7 @@ fn manual_iface_link_state(local: std::net::IpAddr) -> (String, bool, u32) {
 /// Build the manual-path interface: one transport on the given local
 /// address, global parameters, unscoped keys. Keeps the historical
 /// single-session daemon bit-for-bit, except the link-state poll now
-/// fires when the device resolves from the local address (issue #39).
+/// fires when the device resolves from the local address.
 fn babel_iface_manual(
     cfg: &DaemonConfig,
     local_str: &str,
@@ -6339,7 +6339,7 @@ fn babel_iface_manual(
     // When the device resolves, `name` lets the per-second check-link
     // poll match this interface and `if_index` seeds the egress-pinning
     // registry; when it does not, the historical fallback (empty name,
-    // no poll, if_index 0) keeps the daemon running (issue #39).
+    // no poll, if_index 0) keeps the daemon running.
     let (name, check_link, if_index) = manual_iface_link_state(local);
     let device: Option<&str> = if name.is_empty() { None } else { Some(&name) };
     let transport = babel_transport_new(local, scope_id, cfg.babel_port, None, "", device)?;
@@ -6745,7 +6745,7 @@ fn babel_transport_new(
 }
 
 /// Build the RFC 8967 authentication interface from the keys applying to
-/// one interface (ROADMAP-v3 D1.3 scoping). Returns the interface and
+/// one interface. Returns the interface and
 /// the startup log line (empty when unsigned).
 fn build_babel_auth_interface_for(
     cfg: &DaemonConfig,
@@ -7639,14 +7639,14 @@ struct Runtime {
     /// Protocol-specific extra `status` lines for the runtime API
     /// (e.g. LDP counters). Empty for the BGP/Babel/OSPF/BMP modes.
     status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
-    /// Daemon-wide graceful drain controller (issue #53). Constructed
+    /// Daemon-wide graceful drain controller. Constructed
     /// by the daemon startup path whenever the `[shutdown]` block is
     /// configured (or `--shutdown-mode` is on the CLI). `None` for
     /// the historical immediate-shutdown posture so the API refuses
     /// `shutdown drain` with a clear "not configured" diagnostic
     /// instead of silently accepting it.
     shutdown: Option<Arc<shutdown::ShutdownController>>,
-    /// Optional ROA store length reader (ROADMAP-v3 D12.2 metrics).
+    /// Optional ROA store length reader.
     /// `None` when the daemon is not running BGP ROA validation
     /// (e.g. OSPF-only, Babel-only, or a BGP daemon with
     /// `roa_validate = false` and no static `[[roa]]` table). When
@@ -7662,13 +7662,13 @@ struct Runtime {
     /// because the renderer needs to enumerate the entries, not just
     /// count them.
     roa_store: Option<Arc<lr_bgp::RoaStore>>,
-    /// Peer-health table (issue #99 — `lrctl show peer-health`).
+    /// Peer-health table.
     /// `Some` when the daemon installed a `PeerHealthImportHook`
     /// (i.e. `[bgp.peer_health]` rollout != `off`); the Arc is shared
     /// with the hook and the ticker thread. `None` when peer-health
     /// is off so the renderer reports `rollout=off sessions=0`.
     peer_health_table: Option<Arc<Mutex<lr_peer_health::PeerHealthTable>>>,
-    /// Filter-eval latency histograms (ROADMAP-v3 D12.4), shared
+    /// Filter-eval latency histograms, shared
     /// between the import/export filter hooks (which record into
     /// them per route) and the metrics endpoint (which renders
     /// them per scrape). `None` for daemon modes without filter
@@ -7702,7 +7702,7 @@ fn dispatch_signals(rt: &Runtime) {
 }
 
 impl Runtime {
-    /// The event-bus shutdown handshake (issue #101 — the wiring):
+    /// The event-bus shutdown handshake:
     /// close the bus (no further publish is accepted; subscribers
     /// drain their queues then observe `Disconnected`) and wait for
     /// the kernel-mirror thread to apply everything it was ever
@@ -7810,7 +7810,7 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
 }
 
 /// Build a [`shutdown::ShutdownController`] from the operator's
-/// `[shutdown]` configuration (issue #53) and install the
+/// `[shutdown]` configuration and install the
 /// [`DrainModeImportHook`] on the router's import chain. Returns
 /// `None` when the daemon is in immediate-shutdown mode (the default)
 /// so the API's `shutdown drain` honestly reports "drain not
@@ -7856,7 +7856,7 @@ fn build_shutdown(
 }
 
 /// Start the Prometheus `/metrics` HTTP endpoint when
-/// `--metrics-addr` is configured (ROADMAP-v3 D12.2). Creation
+/// `--metrics-addr` is configured. Creation
 /// failure is fatal — the operator asked for a metrics endpoint;
 /// running without it silently is not an option (same stance as
 /// [`spawn_api`]).
@@ -7877,7 +7877,7 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             config_dialect: cfg.config_dialect.clone().unwrap_or_default(),
         },
         router: Arc::clone(&rt.router),
-        // The shared Loc-RIB handle and the event bus (issue #101):
+        // The shared Loc-RIB handle and the event bus:
         // `lr_rib_entries` / `lr_rib_by_protocol` read through the
         // per-family shard locks; the bus counters
         // (`lr_event_bus_published_total` / `lr_event_bus_dropped_total`)
@@ -7921,7 +7921,7 @@ fn reload_config(
     current_networks: &Arc<Mutex<Vec<String>>>,
     roa_store: Option<&Arc<lr_bgp::RoaStore>>,
     rpki: Option<&daemon_rpki::RpkiHandle>,
-    // Advanced ROA loading (issue #100): the registry holds the
+    // Advanced ROA loading: the registry holds the
     // inline `[[roa]]` tables and the per-source entry sets. The
     // reload path re-applies the inline layer via the registry
     // (NOT `roa_store.replace_static` directly — that would
@@ -7945,7 +7945,7 @@ fn reload_config(
     // the live rollout mode to the freshly-reloaded `[bgp.peer_health]`
     // block via `PeerHealthTable::set_rollout_mode` — session state
     // (baselines, counters, tiers) is preserved across the transition
-    // (issue #99 §Rollout: SIGHUP live reload). `None` for the Babel
+    //. `None` for the Babel
     // daemon and the multi-protocol supervisor (peer-health is a
     // BGP-only construct owned by the BGP engine).
     peer_health_table: Option<&Arc<Mutex<lr_peer_health::PeerHealthTable>>>,
@@ -7963,7 +7963,7 @@ fn reload_config(
     // and was exactly how the match drifted from the frontend work:
     // the native `.lr` dialect landed in Phase 2 but reload kept
     // reporting "unknown config dialect 'lr'".) `load_config_file` is
-    // the shared entry point (issue #18 Phase 1) — startup, reload
+    // the shared entry point — startup, reload
     // and `config check` cannot drift apart. No stamped dialect (an
     // empty file) keeps the historical TOML-subset fallback shape.
     let forced = match dialect {
@@ -7978,7 +7978,7 @@ fn reload_config(
     if let Err(e) = daemon_config::load_config_file(path, forced, &mut fresh) {
         return vec![format!("reload: {} (keeping current config)", e)];
     }
-    // Finalize exactly like startup (ROADMAP-v3 D2.5): the reload path
+    // Finalize exactly like startup: the reload path
     // consumes the RPKI section, whose intervals and cache address are
     // only validated in `finalize` — without this, a SIGHUP'd config
     // with `retry_interval = 0` would reach the RTR thread and turn
@@ -7992,7 +7992,7 @@ fn reload_config(
         .iter()
         .map(|w| format!("reload: config warning: {}", w))
         .collect();
-    // TOML deprecation window (issue #18 Phase 4): the reload reports
+    // TOML deprecation window: the reload reports
     // the notice through the same channel as its parse warnings, so a
     // daemon kept running on the deprecated dialect keeps showing the
     // window on every SIGHUP / API reload.
@@ -8060,7 +8060,7 @@ fn reload_config(
 
     let old = current_networks.lock().unwrap().clone();
     let new = fresh.networks.clone();
-    // SIGHUP reload of per-network route-maps (issue #92): the fresh
+    // SIGHUP reload of per-network route-maps: the fresh
     // config's `[[bgp.network_route_map]]` table is consulted for each
     // newly-originated network the same way as at startup. A reload
     // that changes only the route-map (e.g. adjusts `set_local_pref`
@@ -8147,7 +8147,7 @@ fn reload_config(
         }
     }
     *current_networks.lock().unwrap() = new;
-    // Static ROA re-application (ROADMAP-v3 D2.5 + issue #100):
+    // Static ROA re-application:
     // the fresh config's `[[roa]]` tables replace the registry's
     // inline layer (NOT `roa_store.replace_static` directly — that
     // would clobber the loader threads' contributions). The
@@ -8185,7 +8185,7 @@ fn reload_config(
             )),
         }
     }
-    // Advanced ROA loader re-pointing (issue #100): diff the fresh
+    // Advanced ROA loader re-pointing: diff the fresh
     // `[[bgp.roa_source]]` list against the live loader threads.
     // * A source present in both (matched by path / URL) is
     //   re-pointed: any change in `format`, `interval` or
@@ -8251,7 +8251,7 @@ fn reload_config(
             ));
         }
     }
-    // RTR cache re-pointing (ROADMAP-v3 D2.5): an address change drops
+    // RTR cache re-pointing: an address change drops
     // the transport, resets the session memory (the old cache's
     // serial is meaningless) and withdraws the old cache's records;
     // a same-address reload forces a fresh incremental query with the
@@ -8368,7 +8368,7 @@ fn reload_config(
             }
         }
     }
-    // RFC 2439 damping toggle (ROADMAP-v3 D4.3 follow-up): the daemon
+    // RFC 2439 damping toggle: the daemon
     // installs the `DampingImportHook` at startup when `[damping]
     // enabled = true`; the hook carries a shared `enabled` flag the
     // SIGHUP path can flip in-place. This block re-syncs the live
@@ -8488,7 +8488,7 @@ fn reload_config(
         }
     }
 
-    // Peer-health rollout-mode reload (issue #99 §Rollout): when the
+    // Peer-health rollout-mode reload: when the
     // daemon installed a `PeerHealthTable` at startup, a SIGHUP that
     // changes `[bgp.peer_health] rollout` flips the live mode via
     // `set_rollout_mode` — session state (baselines, counters, tiers,

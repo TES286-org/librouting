@@ -1,5 +1,5 @@
 //! End-to-end tests for the daemon's RPKI-RTR cache client
-//! (`[bgp.rpki]` / `--rpki-cache`, ROADMAP-v3 D2.4/D2.5): a real
+//! (`[bgp.rpki]` / `--rpki-cache`,): a real
 //! `lr-daemon` process against an in-test mock RTR cache, verified
 //! through the runtime API `status` command and the daemon log.
 //!
@@ -478,7 +478,7 @@ fn rpki_reload_repoints_the_cache_and_roa_table() {
 
 #[test]
 fn rpki_reload_removing_cache_stops_thread_and_withdraws_rtr_roas() {
-    // Issue #92: SIGHUP that *removes* the `[bgp.rpki] cache` block
+    // SIGHUP that *removes* the `[bgp.rpki] cache` block
     // tears the live RTR thread down. Before the fix the daemon
     // only logged "removing the RTR thread live is not supported"
     // and the thread kept running against the stale cache address

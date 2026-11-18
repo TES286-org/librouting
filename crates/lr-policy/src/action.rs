@@ -5,21 +5,14 @@
 //! [`SetAction::SetMed`], [`SetAction::PrependAs`] and
 //! [`SetAction::AddCommunity`]. Without the feature, the typed BGP
 //! path-attribute decoder is unavailable, so the four variants cannot
-//! mutate the route. Past releases silently dropped the action in
-//! that case — an operator who configured `set local-preference`
-//! against a no-`bgp` build saw the route pass through unchanged,
-//! with no signal that the policy had been silently bypassed.
-//!
-//! The fail-closed contract is now exposed through
-//! [`apply_set_checked`], which returns
-//! [`ApplySetError::RequiresBgpFeature`] for the four BGP-specific
-//! variants when the `bgp` feature is off. [`RouteMap::evaluate`]
+//! mutate the route. [`apply_set_checked`] returns
+//! [`ApplySetError::RequiresBgpFeature`] in that case. [`RouteMap::evaluate`]
 //! (see `crate::route_map`) consumes the checked form and denies the
-//! route on `Err` — matching the fail-closed tightening that landed
-//! for `CommunityList` / `AsPathFilter`. The legacy [`apply_set`]
-//! keeps its infallible signature for ABI-stable embedders and now
-//! logs the dropped action through `tracing::warn!` so the silent
-//! failure is at least observable in the daemon's log stream.
+//! route on `Err` — the same fail-closed posture as `CommunityList` and
+//! `AsPathFilter`. The legacy [`apply_set`] keeps its infallible
+//! signature for ABI-stable embedders and logs the dropped action
+//! through `tracing::warn!`, so the bypass is visible in the daemon's
+//! log stream.
 
 use core::fmt;
 use lr_core::addr::Prefix;
@@ -77,9 +70,8 @@ pub enum ApplySetError {
     /// The action requires the `bgp` feature (RFC 4271 §5.1.5
     /// `LOCAL_PREF`, §5.1.4 `MULTI_EXIT_DISC`, §5.1.2 `AS_PATH`
     /// prepend, RFC 1997 community add) but the crate was built
-    /// without it. The set was silently dropped in past releases —
-    /// surfacing the failure lets the embedder reject the route (or
-    /// log it) rather than silently apply a partial policy.
+    /// without it. Surfacing the failure lets the embedder reject the
+    /// route (or log it) rather than silently apply a partial policy.
     RequiresBgpFeature(&'static str),
 }
 
@@ -293,7 +285,7 @@ mod tests {
 // unconditionally — so a future follow-up that lands the no-bgp
 // build will see these tests pin the fail-closed verdict. A
 // regression that re-introduces the permissive silent-no-op stub
-// flagged in defects.txt (issue #92) will fail here.
+// flagged in defects.txt will fail here.
 #[cfg(not(feature = "bgp"))]
 #[cfg(test)]
 mod no_bgp_tests {

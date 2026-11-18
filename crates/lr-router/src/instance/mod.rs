@@ -137,7 +137,7 @@ pub trait RouterInstance {
     /// keeps mock implementations source-compatible.
     fn requeue_events(&mut self, _events: Vec<RouterEvent>) {}
     /// The Loc-RIB best-path snapshot, owned. The multi-threaded RIB
-    /// (issue #101) keeps the Loc-RIB behind per-family shard locks,
+    /// keeps the Loc-RIB behind per-family shard locks,
     /// so a snapshot cannot borrow from the router's borrowed
     /// interior — the routes are cloned out under each family's read
     /// lock, in `NlriFamily` order.
@@ -328,7 +328,7 @@ enum SessionState {
         /// path gates on this instead of the live `established` flag
         /// (which the FSM clears the moment the session drops).
         was_established: bool,
-        /// Operational statistics (issue #52): uptime, state
+        /// Operational statistics: uptime, state
         /// transitions, last error kind + time. Owned here, alongside
         /// the FSM, so the router can update them at the dispatch
         /// sites that already detect transitions and errors.
@@ -347,7 +347,7 @@ enum SessionState {
     Ospf {
         runtime: OspfRuntime,
         conn: MemoryConn,
-        /// Operational statistics (issue #52) — same shape as the BGP
+        /// Operational statistics — same shape as the BGP
         /// variant. OSPF does not have a NOTIFICATION mechanism; the
         /// dedicated `SessionErrorKind::OspfKill` /
         /// `OspfSeqMismatch` / `OspfBadLsa` variants (RFC 2328 §10.6
@@ -355,16 +355,15 @@ enum SessionState {
         /// FSM emits an `Event::OspfNeighborReset` for an
         /// unrecoverable mismatch. The router's OSPF dispatch path
         /// (search this file for `Event::OspfNeighborReset`) records
-        /// the cause into `last_error` and synthesises a
-        /// `RouterEvent::Log` line for backwards compatibility with
-        /// embedders that consumed the previous free-form log
-        /// message.
+        /// the cause into `last_error` and also synthesises a
+        /// `RouterEvent::Log` line, so the operator-visible log
+        /// stream is unchanged.
         stats: SessionStats,
     },
     Babel {
         runtime: BabelRuntime,
         conn: MemoryConn,
-        /// Operational statistics (issue #52) — same shape as the BGP
+        /// Operational statistics — same shape as the BGP
         /// variant.
         stats: SessionStats,
     },
@@ -448,7 +447,7 @@ pub struct AggregateOptions {
 }
 
 /// Live peer-health tier + stale lookup for pre-best-path candidate
-/// tiering (issue #99 §Hooks 3 + §Recovery).
+/// tiering.
 ///
 /// The router holds an `Option<Arc<dyn PeerHealthLookup>>` set by the
 /// daemon when `[bgp.peer_health]` rollout is not `off`. During
@@ -477,7 +476,7 @@ pub trait PeerHealthLookup: Send + Sync {
     /// Whether `prefix` from `(peer, family)` is currently marked
     /// stale. Stale paths are reachable but excluded from ECMP /
     /// add-path until re-admitted by a fresh UPDATE or swept by the
-    /// ticker (issue #99 §Recovery).
+    /// ticker.
     fn is_stale(&self, peer: u64, family: NlriFamily, prefix: &Prefix) -> bool;
 }
 
@@ -504,7 +503,7 @@ pub struct DefaultRouter {
     /// The Loc-RIB, shared so read-side consumers (the daemon's API
     /// socket, the metrics endpoint) can read the RIB through the
     /// per-family shard locks without taking the router's writer
-    /// lock (issue #101, the multi-threaded RIB read path). Writers
+    /// lock. Writers
     /// reach it through the same `Arc` — the shard locks serialise
     /// the per-family write against the reads, and the router's own
     /// `RwLock` still serialises the decision process itself.
@@ -729,13 +728,13 @@ pub struct DefaultRouter {
     /// `set_roa_validate(true)` is idempotent and `set_roa_validate(false)`
     /// can find and remove the hook again.
     roa_validate_enabled: bool,
-    /// W6.3 exchange-plane state per BGP session (feature
+    /// Exchange plane state per BGP session (feature
     /// `exchange-plane`): the last verified record set per prefix and
     /// the partial-transit counter (design §7).
     #[cfg(feature = "exchange-plane")]
     exchange_plane_state: BTreeMap<u64, ExchangePlaneState>,
     /// Live peer-health lookup for pre-best-path candidate tiering
-    /// (issue #99). `Some` when the daemon installed a
+    ///. `Some` when the daemon installed a
     /// `PeerHealthImportHook` (i.e. `[bgp.peer_health]` rollout !=
     /// `off`); the router queries it in `reselect` to restrict
     /// candidates to the lowest non-empty health tier and exclude
@@ -744,7 +743,7 @@ pub struct DefaultRouter {
     peer_health: Option<std::sync::Arc<dyn PeerHealthLookup>>,
 }
 
-/// W6.3 exchange-plane bookkeeping for one BGP session (feature
+/// Exchange plane bookkeeping for one BGP session (feature
 /// `exchange-plane`).
 #[cfg(feature = "exchange-plane")]
 #[derive(Debug, Clone, Default)]
@@ -868,7 +867,7 @@ fn decode_timer(id: TimerId) -> (u64, u8) {
 }
 
 /// Pre-best-path candidate tiering with a **dynamic** peer-health
-/// lookup (issue #99 §Hooks 3).
+/// lookup.
 ///
 /// Queries the lookup for each BGP candidate's current
 /// per-`(peer, AFI/SAFI)` tier, restricts the candidate set to the
@@ -1170,11 +1169,11 @@ impl DefaultRouter {
         self.add_path_max_paths = max_paths.max(1);
     }
 
-    /// Install a live peer-health lookup (issue #99). When set,
+    /// Install a live peer-health lookup. When set,
     /// [`Self::reselect`] queries the lookup for each BGP
     /// candidate's current per-`(peer, AFI/SAFI)` tier and restricts
     /// the candidate set to the lowest non-empty health tier before
-    /// the standard decision process (issue #99 §Hooks 3). Stale
+    /// the standard decision process. Stale
     /// paths are excluded from the ECMP / add-path set (issue #99
     /// §Recovery). Pass `None` to disable dynamic tiering and revert
     /// to the stamp-based `BestPath::rank_tiered` path.
@@ -1464,7 +1463,7 @@ impl DefaultRouter {
         }
     }
 
-    /// Set the FRR `bgp default ipv4-unicast` posture (W2.1) for a
+    /// Set the FRR `bgp default ipv4-unicast` posture for a
     /// single BGP session. When `on` is `true` (the library default —
     /// matches FRR), IPv4 unicast is implicitly active even when
     /// `mp_families` does not list it. When `false`, IPv4 unicast must
@@ -1497,7 +1496,7 @@ impl DefaultRouter {
     }
 
     /// Set the FRR `neighbor X allowas-in N` / BIRD `allow local as`
-    /// tolerance (W2.3) for a single BGP session.
+    /// tolerance for a single BGP session.
     ///
     /// `tolerance = 0` (the default) rejects any occurrence of the
     /// local AS in a received AS_PATH (RFC 4271 §9.1.2.15 AS_PATH loop
@@ -1530,7 +1529,7 @@ impl DefaultRouter {
     }
 
     /// Enable or disable FRR `neighbor X soft-reconfiguration inbound`
-    /// (W2.4) for a BGP session.
+    /// for a BGP session.
     ///
     /// When `on`, the router retains the **pre-policy** view of the
     /// peer's Adj-RIB-In — the raw received routes before the import
@@ -1561,7 +1560,7 @@ impl DefaultRouter {
         }
     }
 
-    /// W6.3 exchange-plane (feature `exchange-plane`): attach the
+    /// Exchange plane (feature `exchange-plane`): attach the
     /// plane configuration to a single BGP session. The config is
     /// advertised in OPEN (capability 251) and — when the peer also
     /// advertises it with a shared key id — activates the record
@@ -1593,7 +1592,7 @@ impl DefaultRouter {
         }
     }
 
-    /// W6.3 exchange-plane (feature `exchange-plane`): the last
+    /// Exchange plane (feature `exchange-plane`): the last
     /// verified record set per prefix the session `h` sent us, most
     /// recent first. Empty when the plane never activated for the
     /// session or nothing was received yet.
@@ -1611,7 +1610,7 @@ impl DefaultRouter {
             .unwrap_or_default()
     }
 
-    /// W6.3 exchange-plane (feature `exchange-plane`): how many record
+    /// Exchange plane (feature `exchange-plane`): how many record
     /// sets arrived with the Partial bit set on session `h` —
     /// provenance that crossed a non-lr transit speaker (design §7).
     #[cfg(feature = "exchange-plane")]
@@ -1622,7 +1621,7 @@ impl DefaultRouter {
             .unwrap_or(0)
     }
 
-    /// FRR `clear ip bgp * soft in` (W2.4): re-evaluate the import
+    /// FRR `clear ip bgp * soft in`: re-evaluate the import
     /// policy against the pre-policy Adj-RIB-In for `h`, replacing the
     /// session's entries in the post-policy `adj_rib_in` with the
     /// re-imported routes, and re-selecting every affected prefix.
@@ -2160,7 +2159,7 @@ impl DefaultRouter {
     /// The keys of every route the daemon originated locally
     /// (`originate` / `originate_family` / `originate_with_attributes`
     /// / `originate_labeled`), in stable [`RouteKey`] order. Intended
-    /// for the daemon-wide graceful drain (issue #53): the worker
+    /// for the daemon-wide graceful drain: the worker
     /// snapshot this returns is the work queue the drain walks at the
     /// configured rate. The returned `Vec` owns the keys so the caller
     /// can drop the router read lock before calling [`Self::unoriginate`].
@@ -2622,7 +2621,7 @@ impl DefaultRouter {
 
     fn import_route(&mut self, route: Route) {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
-        // W6.3 exchange-plane (feature `exchange-plane`): snapshot the
+        // Exchange plane (feature `exchange-plane`): snapshot the
         // private record store off the raw route before the admission
         // gates run — the store is surfaced only if the route is
         // admitted, but the route is consumed by the pipeline.
@@ -2673,7 +2672,7 @@ impl DefaultRouter {
         if let Some(net) = &self.safety {
             if let Err(v) = net.check(&route, is_ebgp) {
                 // FRR `neighbor X allowas-in N` / BIRD `allow local as`
-                // (W2.3): a per-peer tolerance of `N > 0` admits a route
+                //: a per-peer tolerance of `N > 0` admits a route
                 // whose AS_PATH contains the local AS up to N times,
                 // overriding the safety net's strict AS_PATH loop check
                 // (RFC 4271 §9.1.2.15). iBGP is exempt — FRR/BIRD scope
@@ -2771,7 +2770,7 @@ impl DefaultRouter {
         // after the install; if the count crosses the threshold or the
         // hard limit, fire the corresponding event.
         self.check_max_prefix(session);
-        // W6.3 exchange-plane (feature `exchange-plane`): surface the
+        // Exchange plane (feature `exchange-plane`): surface the
         // record set the route carried. Only admitted routes reach this
         // point — records of routes dropped by policy/safety die with
         // them.
@@ -2779,7 +2778,7 @@ impl DefaultRouter {
         self.consume_exchange_plane_store(session, &key, xp_store);
     }
 
-    /// W6.3 exchange-plane (feature `exchange-plane`): expose a record
+    /// Exchange plane (feature `exchange-plane`): expose a record
     /// set from a freshly admitted route — the scope-1 classes go to
     /// the log + the typed accessor, Partial-bit forwarding material
     /// bumps the partial-transit counter (design §7). The store itself
@@ -3026,7 +3025,7 @@ impl DefaultRouter {
         // keep its figure-of-merit accurate. The hook's return is
         // informational only; it cannot "drop" a withdraw.
         //
-        // The per-origin variant (issue #99) carries `origin` so
+        // The per-origin variant carries `origin` so
         // per-(peer, AFI/SAFI) hooks like `PeerHealthImportHook`
         // account the churn at the right session. The legacy
         // 2-parameter `run_import_withdraw` is still available for
@@ -3042,7 +3041,7 @@ impl DefaultRouter {
             }
             self.reselect(key);
         }
-        // W6.3 exchange-plane: the prefix's record set leaves with the
+        // Exchange plane: the prefix's record set leaves with the
         // route that carried it (feature `exchange-plane`).
         #[cfg(feature = "exchange-plane")]
         if let Some(st) = self.exchange_plane_state.get_mut(&origin.peer) {
@@ -3082,7 +3081,7 @@ impl DefaultRouter {
         let ranked: Vec<Route> = if candidates.is_empty() {
             Vec::new()
         } else if candidates.iter().all(|r| r.protocol == Protocol::Bgp) {
-            // Issue #99 §Hooks 3: pre-best-path candidate tiering.
+            // §Hooks 3: pre-best-path candidate tiering.
             // When a live peer-health lookup is installed, query the
             // CURRENT per-(peer, AFI/SAFI) tier for each candidate
             // (not a stamp frozen at import time — a route imported
@@ -3094,7 +3093,7 @@ impl DefaultRouter {
             // degraded"). Then rank the restricted set with the
             // standard comparator.
             //
-            // Issue #99 §Recovery: stale paths are excluded from
+            // §Recovery: stale paths are excluded from
             // the ECMP / add-path set. The best path is always kept
             // (even if stale) so the prefix stays reachable in the
             // all-degraded fallback.
@@ -3738,7 +3737,7 @@ impl DefaultRouter {
             if now_est && !*established {
                 *established = true;
                 transition_up = true;
-                // Issue #52: latch the established timestamp and bump
+                // latch the established timestamp and bump
                 // the monotonic transition counter. `now_ms` is the
                 // logical clock the embedder drives via `tick()`.
                 stats.record_transition(self.now_ms, true);
@@ -3860,7 +3859,7 @@ impl DefaultRouter {
                     // the teardown re-runs idempotently (nothing left
                     // to purge).
                     //
-                    // Issue #52: latch the close reason into the
+                    // latch the close reason into the
                     // session stats. `peer.received_notification()`
                     // is the most precise signal here — it is set
                     // before the FSM emits Close on a NOTIFICATION
@@ -4135,7 +4134,7 @@ impl DefaultRouter {
             state.exceeded = false;
             state.threshold_warned = false;
         }
-        // W6.3 exchange-plane: the record sets a session sent leave with
+        // Exchange plane: the record sets a session sent leave with
         // it; the partial-transit counter resets too (feature
         // `exchange-plane`).
         #[cfg(feature = "exchange-plane")]
@@ -5875,7 +5874,7 @@ impl DefaultRouter {
                     candidates.push(bgp_route);
                     let ranked: Vec<Route> =
                         if candidates.iter().all(|r| r.protocol == Protocol::Bgp) {
-                            // Issue #99: apply dynamic tiering + stale
+                            // apply dynamic tiering + stale
                             // exclusion on the redistribution path too,
                             // so a redistributed BGP route competes
                             // fairly with Adj-RIB-In paths under the
@@ -6573,7 +6572,7 @@ impl DefaultRouter {
     }
 
     /// Snapshot of every OSPF area ID the router currently holds
-    /// (issue #60 daemon wiring). The BGP-LS driver polls this when
+    ///. The BGP-LS driver polls this when
     /// `[bgp_ls] areas = []` (the "every area" default) so a router
     /// that learns areas dynamically does not need them listed up
     /// front. The order is ascending (BTreeMap iteration).
@@ -6602,7 +6601,7 @@ impl DefaultRouter {
     /// graceful-restart restarting router uses this to fetch its own
     /// pre-restart router-LSA — re-received from helping neighbours
     /// through database exchange (RFC 3623 §2.2 (1)) — and walk the
-    /// adjacencies it used to carry. `None` for unknown areas or
+    /// adjacencies listed in that LSA. `None` for unknown areas or
     /// missing LSAs.
     pub fn ospf_area_lsa(&self, area_id: u32, ls_type: u16, ls_id: u32, adv: u32) -> Option<Lsa> {
         let area = self.ospf_areas.get(&area_id)?;
@@ -6641,7 +6640,6 @@ impl DefaultRouter {
     /// `None` for unknown areas. An empty `Vec` for a known area
     /// with an empty LSDB.
     ///
-    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
     pub fn ospf_area_bgpls_nlris(
         &self,
         area_id: u32,
@@ -6681,7 +6679,6 @@ impl DefaultRouter {
     /// when the area is unknown, the projection is unchanged, or no
     /// BGP-LS session is up — in those cases no UPDATEs are sent.
     ///
-    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
     pub fn bgpls_republish(
         &mut self,
         area_id: u32,
@@ -6773,7 +6770,6 @@ impl DefaultRouter {
     /// when the area is unknown, the projection is unchanged, or no
     /// BGP-LS session is up — in those cases no UPDATEs are sent.
     ///
-    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
     pub fn bgpls_republish_end_x(
         &mut self,
         area_id: u32,
@@ -6857,7 +6853,7 @@ impl DefaultRouter {
 
     /// Incremental BGP-LS Egress Peer Engineering (RFC 9086) republish
     /// for the daemon's BGP peer sessions (issue #60 EPE follow-up —
-    /// the daemon-side projection the codec PR #68 explicitly defers).
+    /// the daemon-side projection the codec explicitly defers).
     /// Snapshots the live BGP peer sessions, projects each Established
     /// session onto a BGP-LS Link NLRI (RFC 7752 §3.3 NLRI Type 2,
     /// Protocol-ID = `Bgp`) paired with a BGP-LS Attribute carrying
@@ -6903,7 +6899,6 @@ impl DefaultRouter {
     /// updated, so a BGP-LS session that comes up later triggers a
     /// full resend on its first tick).
     ///
-    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
     pub fn bgpls_republish_epe(
         &mut self,
         as_number: u32,

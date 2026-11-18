@@ -361,8 +361,8 @@ struct OspfDaemon {
     /// `status` command (shared with the API thread).
     gr_status: Arc<std::sync::Mutex<Vec<String>>>,
     router_id: RouterId,
-    /// The daemon's router-event bus (issue #101 — the event-bus
-    /// wiring). The main loop's `handle_router_events` publishes the
+    /// The daemon's router-event bus (the event-bus wiring). The main
+    /// loop's `handle_router_events` publishes the
     /// batches it drains from `poll_events()` (in `pump_gr`, the
     /// packet-receive path, the dead-neighbor path and the shutdown
     /// path); the kernel-mirror thread subscribed to this bus applies
@@ -508,8 +508,8 @@ pub(super) fn run_ospf_daemon(
             router
         }
     };
-    // The event bus the daemon's drained events publish to (issue #101
-    // — the wiring). Standalone: the bus is created here and shared
+    // The event bus the daemon's drained events publish to (the
+    // wiring). Standalone: the bus is created here and shared
     // with the Runtime below; embedded: the supervisor's runtime's bus
     // — every engine publishes to the same bus the supervisor's
     // kernel-mirror thread subscribes to.
@@ -897,7 +897,7 @@ pub(super) fn run_ospf_daemon(
             Arc::clone(&h.runtime)
         }
         None => {
-            // Issue #53 daemon-wide drain: install the drain gate on
+            // daemon-wide drain: install the drain gate on
             // the router's import chain BEFORE the Runtime takes
             // ownership of the Arc. The OSPF daemon's queue is
             // typically the static-routes table (no BGP-originated

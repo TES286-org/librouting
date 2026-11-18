@@ -33,12 +33,12 @@ impl RouteMap {
     /// BGP-specific variant configured against a no-`bgp` build of
     /// `lr-policy`) yields [`crate::action::ApplySetError`], and the
     /// route is denied — `Some(false)` — rather than silently passing
-    /// through with a partial policy applied. This matches the
-    /// fail-closed tightening that landed for `CommunityList` /
-    /// `AsPathFilter`: an operator who configures a BGP-specific
-    /// action against a build that cannot execute it sees the route
-    /// rejected (and a `tracing::warn!` line in the daemon's log
-    /// stream) instead of slipping past the policy.
+    /// through with a partial policy applied. This is the same
+    /// fail-closed posture as `CommunityList` and `AsPathFilter`: an
+    /// operator who configures a BGP-specific action against a build
+    /// that cannot execute it sees the route rejected (and a
+    /// `tracing::warn!` line in the daemon's log stream) instead of
+    /// slipping past the policy.
     pub fn evaluate(&self, route: &mut Route, resolver: &dyn MatchResolver) -> Option<bool> {
         for e in &self.entries {
             let all_match = e.matches.iter().all(|m| evaluate_match(m, route, resolver));
@@ -150,7 +150,7 @@ mod tests {
 // default method bodies reference `crate::bgp::*` unconditionally),
 // so these tests pin the contract: a regression that re-introduces
 // the silent no-op for the four BGP-specific `SetAction` variants
-// (flagged in defects.txt issue #92) will fail here.
+// will fail here.
 #[cfg(not(feature = "bgp"))]
 #[cfg(test)]
 mod no_bgp_tests {

@@ -1,5 +1,5 @@
 //! End-to-end tests for the lr-daemon running on native `.lr`
-//! configurations (ROADMAP-v3 D16 Phase 3, GitHub #18).
+//! configurations.
 //!
 //! Phase 2 wired the DSL frontend into the shared load path; Phase 3
 //! proves the daemon runs *on* it: content detection (no
@@ -271,7 +271,7 @@ fn sighup_reloads_an_lr_config() {
     );
     let text = wait_log_all(&d.log, &["originating 203.0.113.0/24", "listening on"]);
     // The native dialect is the migration target — no deprecation
-    // notice fires on .lr loads (issue #18 Phase 4).
+    // notice fires on .lr loads.
     assert!(!text.contains("deprecation"), "log: {text}");
 
     // Rewrite the config (still `.lr`): drop the old network, add a

@@ -1,4 +1,4 @@
-//! End-to-end tests for the daemon-wide graceful drain (issue #53).
+//! End-to-end tests for the daemon-wide graceful drain.
 //!
 //! The drain is a new shutdown mode: stop accepting new routes, walk
 //! the Loc-RIB at a rate-limited pace, exit when the queue is empty or

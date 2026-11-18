@@ -1047,7 +1047,7 @@ pub unsafe extern "C" fn lr_route_selector_select_bgp(
     )
 }
 
-// ---- LocRib: install_set / paths / iter_best / diff_since (issue #92) ----
+// ---- LocRib: install_set / paths / iter_best / diff_since ----
 //
 // The remaining LocRib pub API: install_set (RFC 7911 multi-path
 // install), paths (read the multipath set for a key), iter_best
@@ -1463,7 +1463,7 @@ pub unsafe extern "C" fn lr_adj_rib_out_iter_for(
     )
 }
 
-// ---- RibMux::iter + RouteSelector::compare (issue #92) ----
+// ---- RibMux::iter + RouteSelector::compare ----
 //
 // The remaining lr-rib pub API: `RibMux::iter` (walk every merged
 // route) and `RouteSelector::compare` (the per-route comparator,

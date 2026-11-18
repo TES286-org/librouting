@@ -85,7 +85,7 @@ pub trait ImportHook: Send + Sync {
     /// matching the units the damping table expects.
     ///
     /// This is the legacy 2-parameter form preserved for semver
-    /// stability (issue #99 follow-up). Implementations that need
+    /// stability. Implementations that need
     /// the `(peer, AFI/SAFI)` origin — issue #99's per-peer flap
     /// suppression — should override [`Self::on_withdraw_with_origin`]
     /// instead; its default implementation delegates here so older
@@ -94,7 +94,7 @@ pub trait ImportHook: Send + Sync {
         // default no-op — most hooks do not care about withdrawals
     }
 
-    /// Per-origin withdraw notification (issue #99).
+    /// Per-origin withdraw notification.
     ///
     /// Same contract as [`Self::on_withdraw`] but carries the
     /// [`RouteOrigin`] so per-`(peer, AFI/SAFI)` accounting works.
@@ -492,7 +492,7 @@ impl ImportHook for DampingImportHook {
     }
 }
 
-/// Peer-level flap suppression import hook (issue #99).
+/// Peer-level flap suppression import hook.
 ///
 /// Wraps a shared [`lr_peer_health::PeerHealthTable`] and installs
 /// it on the import chain. On every accepted UPDATE the hook
@@ -631,7 +631,7 @@ impl ImportHook for PeerHealthImportHook {
     }
 }
 
-/// Shadow-best-path comparison hook (issue #99 §Rollout phase 3).
+/// Shadow-best-path comparison hook.
 ///
 /// Installed **only** when the rollout mode is `shadow-best-path`.
 /// The hook never stamps the `LrPeerHealthTier` attribute, so the
@@ -724,7 +724,7 @@ impl SelectionHook for PeerHealthShadowSelectionHook {
     }
 }
 
-/// Daemon-wide graceful drain (issue #53).
+/// Daemon-wide graceful drain.
 ///
 /// When the daemon is draining — stopping acceptance of new routes
 /// while it gradually withdraws the routes it originated — every
@@ -892,7 +892,7 @@ impl HookChain {
     /// This is the legacy 2-parameter form (no `RouteOrigin`).
     /// Callers that have the withdraw's origin available should
     /// prefer [`Self::run_import_withdraw_with_origin`] so
-    /// per-`(peer, AFI/SAFI)` hooks (issue #99 peer-health) receive
+    /// per-`(peer, AFI/SAFI)` hooks receive
     /// the peer id. This entry point is retained for semver stability
     /// and dispatches through [`ImportHook::on_withdraw`].
     pub fn run_import_withdraw(&self, key: &RouteKey, now_s: u64) {
@@ -901,7 +901,7 @@ impl HookChain {
         }
     }
 
-    /// Per-origin variant of [`Self::run_import_withdraw`] (issue #99).
+    /// Per-origin variant of [`Self::run_import_withdraw`].
     ///
     /// Dispatches to [`ImportHook::on_withdraw_with_origin`] on every
     /// import hook, carrying the [`RouteOrigin`] so per-`(peer,
@@ -1383,7 +1383,7 @@ mod tests {
         );
         // Simulate three withdraws — each adds 1000 to FoM. The
         // router dispatches withdraws through the per-origin variant
-        // (issue #99); the damping hook's default delegation routes
+        //; the damping hook's default delegation routes
         // them to its 2-parameter `on_withdraw` override.
         let origin = RouteOrigin { proto: 0, peer: 1 };
         hook.on_withdraw_with_origin(origin, &key, 0);
@@ -1602,7 +1602,7 @@ mod tests {
         assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
     }
 
-    // ---- PeerHealthImportHook unit tests (issue #99). ----
+    // ---- PeerHealthImportHook unit tests. ----
     //
     // The hook's contract per issue #99 §Rollout + §Recovery:
     //   - off: no accounting, no stamping.
@@ -1765,7 +1765,7 @@ mod tests {
     #[cfg(feature = "peer-health")]
     #[test]
     fn peer_health_shadow_best_path_mode_does_not_stamp() {
-        // Issue #99 §Rollout phase 3: shadow-best-path must NOT
+        // §Rollout phase 3: shadow-best-path must NOT
         // affect routing. The previous implementation stamped the
         // tier attribute in this mode, which made rank_tiered run
         // and actually changed selection — contradicting the
@@ -1902,7 +1902,7 @@ mod tests {
     #[cfg(feature = "peer-health")]
     #[test]
     fn peer_health_on_withdraw_accounts_at_correct_peer() {
-        // Issue #99 §Hooks: "per peer + AFI/SAFI update rate and
+        // §Hooks: "per peer + AFI/SAFI update rate and
         // RIB churn rate". The previous implementation attributed
         // every withdraw to peer 0 because the ImportHook trait
         // did not carry the peer id. This test guards against that

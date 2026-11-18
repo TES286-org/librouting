@@ -61,14 +61,6 @@
 //! reads the peer's 4-byte AS via [`peer_as4`] and falls back to the
 //! OPEN's 2-byte field when the capability is absent — see
 //! `BgpPeer::handle_open_in_opensent`.
-//!
-//! Before the issue #92 fix, the FSM inlined the negotiation logic at
-//! every call site: the OPEN builder inlined `if self.cfg.asn4 {
-//! caps.push(Capability::four_octet_as(...)) }`, the OPEN handler
-//! inlined `peer_offered_as4 = caps.iter().any(|c| c.code ==
-//! FourOctetAs)` and a separate `caps.iter().find(...).as_four_octet()`
-//! chain. The orchestration helpers centralise those call sites so a
-//! future change to the negotiation posture lands in one place.
 
 use crate::capabilities::{Capability, CapabilityCode};
 use crate::peer::PeerConfig;
@@ -96,8 +88,7 @@ pub fn advertised(cfg: &PeerConfig) -> bool {
 /// 4-byte AS_PATH encoding, and the peer's advertised AS value is
 /// read separately via [`peer_as4`] (which validates the length and
 /// falls back to the OPEN's 2-byte field when the value is
-/// malformed). This preserves the historical negotiation posture so
-/// the helper refactor does not change which OPENs the FSM accepts.
+/// malformed).
 pub fn peer_offered_as4(peer_caps: &[Capability]) -> bool {
     peer_caps
         .iter()
@@ -139,9 +130,8 @@ pub fn open_capability(cfg: &PeerConfig) -> Option<Capability> {
 }
 
 /// Extract the 4-byte AS the peer advertised in its OPEN. Returns
-/// `None` when the peer did not advertise the capability, when the
-/// value is malformed (length != 4), or when every advertised
-/// capability is malformed.
+/// `None` when the peer did not advertise the capability, or when the
+/// first advertised capability is malformed (length != 4).
 ///
 /// RFC 6793 §4: when the peer's AS does not fit in 2 bytes, the OPEN's
 /// 2-byte `My Autonomous System` field is set to `AS_TRANS` (23456)

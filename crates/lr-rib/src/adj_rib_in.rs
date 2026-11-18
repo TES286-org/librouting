@@ -217,11 +217,11 @@ mod tests {
         assert_eq!(rib.len(), 2);
     }
 
-    /// Regression (audit C1): `iter_origin` must return every family one
-    /// origin advertised. IPv6, labelled-unicast and source-specific keys
-    /// sort *above* the IPv4-unicast ceiling the old range used, so they
-    /// used to be invisible — breaking session teardown, soft-reconfig
-    /// and GR/LLGR retention for multi-family peers.
+    /// `iter_origin` must return every family one origin advertised.
+    /// IPv6, labelled-unicast and source-specific keys sort *above* the
+    /// IPv4-unicast ceiling, so a range that stops at that ceiling would
+    /// miss them and break session teardown, soft-reconfig and GR/LLGR
+    /// retention for multi-family peers.
     #[test]
     fn iter_origin_covers_every_family_of_the_origin() {
         let mut rib = AdjRibIn::new();

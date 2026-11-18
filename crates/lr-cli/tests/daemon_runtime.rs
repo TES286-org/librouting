@@ -301,7 +301,7 @@ fn api_socket_serves_status_sessions_routes_and_shutdown() {
     );
 }
 
-/// Issue #101: a daemon started on a TOML config must surface the
+/// a daemon started on a TOML config must surface the
 /// deprecation notice through `status` and `show status` too — the
 /// startup stderr line alone is easy to miss on a daemon under
 /// systemd, so the runtime API carries the same warning an operator
@@ -463,7 +463,7 @@ fn sighup_reloads_networks_from_config_file() {
             "originating 203.0.113.0/24",
             "listening on",
             // The deprecated dialect announces its window at startup
-            // (issue #18 Phase 4) — stderr is captured into the log.
+            // — stderr is captured into the log.
             "config deprecation:",
         ],
     );

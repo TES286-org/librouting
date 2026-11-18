@@ -1,5 +1,5 @@
 //! Advanced ROA loading — periodic URL fetching and file change
-//! reloading (issue #100).
+//! reloading.
 //!
 //! Two loading methods sit on top of the format parsers in
 //! [`lr_bgp::roa_loader`]:
@@ -135,7 +135,7 @@ pub(crate) struct RoaSourceSpec {
     /// `lr-daemon/<version>` is sent when unset.
     pub user_agent: Option<String>,
     /// Inline transform program for `jq` / `awk` format sources
-    /// (issue #100). The program is fed to `jq -r PROGRAM` or
+    ///. The program is fed to `jq -r PROGRAM` or
     /// `awk 'PROGRAM'` with the source bytes on stdin; the
     /// program's stdout is parsed as BIRD-format ROA lines.
     /// Mutually exclusive with [`program_file`](Self::program_file);
@@ -901,8 +901,7 @@ fn default_user_agent() -> String {
 /// binary is missing).
 ///
 /// This is an internal daemon helper — it is not exposed through
-/// the C ABI (issue #100 follow-up: the transform feature is a
-/// daemon-internal concern, not a library API).
+/// the C ABI.
 fn run_jq(program: &str, input: &str) -> Result<String, RoaLoaderError> {
     run_transform("jq", &["-r", "--", program], input)
 }

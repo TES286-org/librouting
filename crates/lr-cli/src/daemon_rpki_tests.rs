@@ -82,7 +82,7 @@ fn reconnect_backoff_retains_unexpired_cache_roas() {
 }
 
 // ============================================================
-// Shutdown (issue #92): removing `[bgp.rpki] cache` via SIGHUP
+// Shutdown: removing `[bgp.rpki] cache` via SIGHUP
 // tears down the live RTR thread instead of leaving it running
 // against the stale cache address.
 // ============================================================

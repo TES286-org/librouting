@@ -140,7 +140,7 @@ fn histogram_concurrent_records_all_land() {
 }
 
 // -------------------------------------------------------
-// Portable end-to-end coverage of `spawn` (issue #47).
+// Portable end-to-end coverage of `spawn`.
 // The metrics module binds a plain `TcpListener`, which is
 // available on every Rust target the workspace supports, so the
 // server must start and serve on all of them. The daemon-level
@@ -471,7 +471,7 @@ fn spawn_bind_failure_does_not_mention_unix_sockets() {
     drop(squatter);
 }
 
-/// Issue #101: when the daemon is running on the deprecated TOML
+/// when the daemon is running on the deprecated TOML
 /// dialect, the metrics endpoint surfaces `lr_config_dialect_deprecated
 /// {config_dialect="toml"} 1` so a fleet operator can alert on the
 /// migration state without scraping the daemon's startup stderr. The
@@ -535,7 +535,7 @@ fn deprecation_gauge_reads_zero_for_lr_dialect() {
     running.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The event-bus counters (issue #101 — the wiring): a scrape carries
+/// The event-bus counters: a scrape carries
 /// `lr_event_bus_published_total` and `lr_event_bus_dropped_total`,
 /// and the counters are LIVE — publishing an event between two
 /// scrapes moves the published counter, so a fleet scraper can alert

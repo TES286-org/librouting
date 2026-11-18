@@ -651,7 +651,7 @@ fn non_confederation_speaker_prepends_local_as() {
 }
 
 // ---------------------------------------------------------------------------
-// BGP-LS egress (issue #60 daemon wiring) — RFC 7752 §3.
+// BGP-LS egress — RFC 7752 §3.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "bgp_ls")]
@@ -803,7 +803,7 @@ fn advertise_bgpls_empty_is_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// BGP-LS Attribute egress (RFC 7752 §3.3 + RFC 9514 §7-§8, issue #60).
+// BGP-LS Attribute egress (RFC 7752 §3.3 + RFC 9514 §7-§8).
 // ---------------------------------------------------------------------------
 
 /// `advertise_bgpls_with_attr` emits an UPDATE that carries the BGP-LS

@@ -1,4 +1,4 @@
-//! Stale prefix tracking (issue #99 §Recovery).
+//! Stale prefix tracking.
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;

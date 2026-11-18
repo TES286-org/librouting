@@ -1,5 +1,5 @@
 //! End-to-end coverage for the RFC 9234 §3.1 exchange-plane policy-role
-//! knob on the daemon's CLI surface (issue #92).
+//! knob on the daemon's CLI surface.
 //!
 //! defects.txt `crates/lr-cli/src/daemon.rs:L2245-L2248` recorded that
 //! `wire_exchange_plane` hardcoded `policy_role = Some(ROLE_UNSET)`

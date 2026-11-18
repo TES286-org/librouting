@@ -22,12 +22,12 @@
 //!
 //! The entries live in a flat, sorted `Vec<RoaEntry>` — the canonical
 //! store used by dumps, equality and determinism — while a
-//! path-compressed prefix trie ([`roa_trie::RoaTrie`], ROADMAP-v3
-//! D8.4) indexes them by normalized prefix. `validate` walks the trie
+//! path-compressed prefix trie ([`roa_trie::RoaTrie`]) indexes them by
+//! normalized prefix. `validate` walks the trie
 //! from the root following the route's bits: every trie node on that
 //! path holds exactly the ROAs covering the route, so the lookup
-//! costs `O(prefix_len)` (bounded by 32 / 128) instead of the
-//! previous `O(n)` scan over the whole table.
+//! costs `O(prefix_len)` (bounded by 32 / 128) instead of an
+//! `O(n)` scan over the whole table.
 //!
 //! # Thread safety
 //!

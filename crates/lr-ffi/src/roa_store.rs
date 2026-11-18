@@ -1,5 +1,5 @@
 //! RPKI ROA store FFI — a live, thread-safe ROA database for C
-//! embedders (RFC 6482 / RFC 6811 / RFC 8210; ROADMAP-v3 D2.3/D2.5).
+//! embedders (RFC 6482 / RFC 6811 / RFC 8210;).
 //!
 //! `lr_roa_store_t` wraps `lr_bgp::RoaStore`: two provenance layers
 //! (static configuration entries + RTR cache entries), atomic

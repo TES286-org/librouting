@@ -87,15 +87,11 @@ impl RttState {
     /// The boundary is exclusive: a Hello received exactly
     /// `RTT_ECHO_FRESHNESS_MS` ago is still echoed. The daemon's
     /// periodic announce loop runs at exactly `hello_interval_ms`
-    /// (default 1000 ms), which equals `RTT_ECHO_FRESHNESS_MS`. With
-    /// the previous `>=` comparison, a Hello that landed one tick
-    /// before the announce boundary (e.g. received at T=0, announce
-    /// at T=1000) was dropped exactly when the announce needed it,
-    /// so the next IHU went out without an echo and the peer never
-    /// got a sample to compute RTT from — producing the persistent
-    /// `RTT 0.000 ms` line on BIRD's `show babel neighbors` output
-    /// even when both sides advertised `rtt cost > 0`. Babeld itself
-    /// uses the strict `>` form (`now - t < 1000`); this matches.
+    /// (default 1000 ms), which equals `RTT_ECHO_FRESHNESS_MS`. The
+    /// comparison is strict (`now - t < 1000`), matching babeld, so a
+    /// Hello received one tick before the announce boundary still
+    /// contributes a sample and the peer never reports `RTT 0.000 ms`
+    /// while both sides advertise `rtt cost > 0`.
     pub fn echo_pair(&self, now_ms: u64) -> Option<(u32, u32)> {
         if now_ms.saturating_sub(self.hello_receive_ms) > RTT_ECHO_FRESHNESS_MS {
             return None;

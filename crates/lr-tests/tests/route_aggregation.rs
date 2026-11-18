@@ -276,7 +276,7 @@ fn remove_aggregate_withdraws() {
     assert!(!has_aggregate, "aggregate must be withdrawn after removal");
 }
 
-/// Regression (ROADMAP-v3 D4.2 daemon wiring): the aggregate is
+/// Regression: the aggregate is
 /// originated from `apply_selection` (a specific just arrived) while
 /// the peer session is already Established — the newly originated
 /// route must still be flushed through the export pipeline and reach

@@ -103,13 +103,12 @@ impl NamedPipeStream {
 
     /// Switch the pipe between blocking and non-blocking mode.
     ///
-    /// Kept as a no-op stub for structural parity with the Unix
-    /// side's `set_nonblocking` call sites, but the non-blocking
-    /// behaviour now lives in the `Read` impl: it probes the pipe
-    /// with `PeekNamedPipe` and returns `WouldBlock` when no bytes
-    /// are buffered. The legacy `PIPE_NOWAIT` mode it used to set
-    /// fails with `ERROR_PIPE_BUSY` on some pipe handles, so the mode
-    /// switch is no longer the mechanism — the `Read` impl is.
+    /// Kept as a no-op for structural parity with the Unix side's
+    /// `set_nonblocking` call sites. Non-blocking behaviour lives in
+    /// the `Read` impl: it probes the pipe with `PeekNamedPipe` and
+    /// returns `WouldBlock` when no bytes are buffered. `PIPE_NOWAIT`
+    /// fails with `ERROR_PIPE_BUSY` on some pipe handles, so a mode
+    /// switch is not the mechanism.
     #[allow(dead_code)]
     fn set_nonblocking(&self, _on: bool) -> io::Result<()> {
         Ok(())
@@ -343,35 +342,32 @@ fn create_listening_instance(name_wide: &[u16], running: &AtomicBool) -> isize {
 ///
 /// A client's `CreateFileW` finds the pipe *name*, not a specific
 /// instance; the name exists while any instance handle (listening or
-/// connected) is open. Two recycle paths used to leave a window with
+/// connected) is open. Two recycle paths can leave a window with
 /// zero open instances, during which a client's `CreateFileW` fails
 /// with `ERROR_FILE_NOT_FOUND` (error 2):
 ///
-/// - the error path closed the failed instance, slept 100 ms, and
-///   only then created the replacement — a scanner process that
-///   opens-and-closes a pipe instance leaves `ConnectNamedPipe`
-///   failing with `ERROR_NO_DATA` on every cycle, so the window
-///   reopened every 100 ms and a client connecting in it saw the
-///   name gone;
-/// - the post-accept path dropped the *accepted* stream when the
-///   next instance could not be created, killing the client that had
-///   just connected.
+/// - closing a failed instance, sleeping 100 ms, and only then
+///   creating the replacement reopens the window every cycle when a
+///   scanner process opens-and-closes a pipe instance
+///   (`ConnectNamedPipe` then fails with `ERROR_NO_DATA` every cycle);
+/// - dropping the *accepted* stream when the next instance cannot be
+///   created kills the client that had just connected.
 ///
-/// Both are fixed here: the replacement instance is created BEFORE
+/// The loop therefore creates the replacement instance BEFORE
 /// the failed handle is closed (`PIPE_UNLIMITED_INSTANCES` lets both
-/// coexist, so the name is held continuously), and the accepted
-/// stream is always handed to `on_conn`.
+/// coexist, so the name is held continuously), and always hands the
+/// accepted stream to `on_conn`.
 ///
-/// A third gap closed here: a *failed* `CreateNamedPipeW` used to
-/// park the loop on an invalid handle with the name gone until the
-/// daemon restarted — on a host with kernel nonpaged-pool exhaustion
-/// (the windows-latest CI runner under parallel test load) the
-/// creation can fail transiently for seconds at a time. Every
-/// post-startup creation now goes through [`create_listening_instance`],
-/// which retries every 200 ms while the daemon runs (the failed
-/// handle stays open during the retry, so the name never drops), and
-/// the accepted stream is handed to `on_conn` before the next
-/// instance is created (a connected instance holds the name too).
+/// A failed `CreateNamedPipeW` must not park the loop on an invalid
+/// handle with the name gone until the daemon restarts: on a host with
+/// kernel nonpaged-pool exhaustion (the windows-latest CI runner under
+/// parallel test load) creation can fail transiently for seconds.
+/// Every post-startup creation goes through
+/// [`create_listening_instance`], which retries every 200 ms while the
+/// daemon runs (the failed handle stays open during the retry, so the
+/// name never drops), and the accepted stream is handed to `on_conn`
+/// before the next instance is created (a connected instance holds the
+/// name too).
 fn accept_loop(
     mut first_handle: isize,
     name_wide: &[u16],
@@ -437,22 +433,22 @@ struct ConnDeps<'a> {
     info: &'a DaemonInfo,
     router: &'a Arc<RwLock<DefaultRouter>>,
     /// The shared Loc-RIB handle — the RIB-dumping commands read
-    /// through the per-family shard locks (issue #101), never
+    /// through the per-family shard locks, never
     /// through the router's `RwLock` (mirrors the Unix side).
     rib: &'a Arc<lr_rib::LocRib>,
     running: &'a Arc<AtomicBool>,
     reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
-    /// Daemon-wide graceful drain controller (issue #53). `None`
+    /// Daemon-wide graceful drain controller. `None`
     /// when the daemon was started in immediate mode — the API
     /// refuses `shutdown drain` with a clear "not configured"
     /// diagnostic instead of silently accepting.
     shutdown: Option<&'a Arc<crate::shutdown::ShutdownController>>,
-    /// Live ROA store for `show roa` (issue #52 follow-up). `None`
+    /// Live ROA store for `show roa`. `None`
     /// on daemon modes without a ROA store (OSPF/Babel/BMP) — the
     /// renderer then reports `roa-total 0` instead of refusing.
     roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
-    /// Peer-health table for `show peer-health` (issue #99).
+    /// Peer-health table for `show peer-health`.
     /// `None` when peer-health flap suppression is off.
     peer_health_table: Option<&'a Arc<std::sync::Mutex<lr_peer_health::PeerHealthTable>>>,
     started: std::time::Instant,
@@ -476,9 +472,8 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
         // the `Read` impl returns `WouldBlock` when `PeekNamedPipe`
         // sees no bytes, so `read_line` surfaces it here. Cap the
         // command length so a slow-drip client cannot grow the line
-        // unboundedly. (The legacy `PIPE_NOWAIT` mode switch that
-        // used to bracket this loop is gone — `PeekNamedPipe` is the
-        // modern non-blocking probe and does not need a mode flip.)
+        // unboundedly. (`PeekNamedPipe` is the non-blocking probe;
+        // no `PIPE_NOWAIT` mode flip is needed.)
         const MAX_CMD: usize = 4096;
         let mut idle_rounds = 0;
         let mut n = 0usize;
@@ -525,7 +520,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                 let router_id = core::str::FromStr::from_str(&deps.info.router_id)
                     .unwrap_or(lr_core::addr::RouterId::from_u32(0));
                 // The RIB snapshot reads through the shared Loc-RIB
-                // handle (per-family shard locks, issue #101); the
+                // handle (per-family shard locks); the
                 // session summaries stay on the router read lock.
                 let (routes, summaries) = {
                     let summaries = deps.router.read().unwrap().session_summaries();
@@ -547,7 +542,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             continue;
         }
         // `show roa` — the runtime API half of `lrctl roa list`
-        // (ROADMAP "lrctl roa list", issue #52 follow-up). Rendered
+        // (ROADMAP "lrctl roa list"). Rendered
         // by the shared `roa_view` module so the Unix and Windows
         // paths stay byte-identical. Lives ahead of the `show …`
         // family below so it wins for `show roa` specifically —
@@ -561,7 +556,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             }
             continue;
         }
-        // `show peer-health` (issue #99). Same shape on Windows and
+        // `show peer-health`. Same shape on Windows and
         // Unix — the renderer is shared.
         if cmd == "show peer-health" {
             let body = crate::peer_health_view::render(deps.peer_health_table);
@@ -571,7 +566,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             }
             continue;
         }
-        // Issue #52 BIRD-style `show …` family. Delegated to the
+        // BIRD-style `show …` family. Delegated to the
         // shared `show` module so the Unix and Windows surfaces
         // render identically. `show` (no sub) maps to `show status`,
         // matching BIRD's `show` shortcut.
@@ -592,7 +587,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             }
         }
         // `session <handle> <op>` — write-side fine-grained
-        // operations on one session (issue #52 follow-up). Mirrors
+        // operations on one session. Mirrors
         // the Unix `handle_session_op` verbatim so the two
         // transports stay byte-identical.
         if let Some(rest) = cmd.strip_prefix("session ") {
@@ -680,7 +675,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             }
             "routes" => {
                 // The dump reads through the shared Loc-RIB handle
-                // (per-family shard locks, issue #101).
+                // (per-family shard locks).
                 for route in deps.rib.iter_paths() {
                     let _ = writeln!(
                         out,
@@ -726,7 +721,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                 return;
             }
             other if other.starts_with("shutdown ") => {
-                // Issue #53 daemon-wide graceful drain sub-commands.
+                // daemon-wide graceful drain sub-commands.
                 // Mirrors the Unix serve_connection dispatch verbatim
                 // so a `lrctl shutdown drain` on Windows hits the same
                 // code path as on Unix.
@@ -817,7 +812,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
 }
 
 /// Dispatch `session <handle> <op>` — write-side fine-grained
-/// operations on one session (issue #52 follow-up). Mirrors the Unix
+/// operations on one session. Mirrors the Unix
 /// `handle_session_op` verbatim so the two transports stay
 /// byte-identical.
 ///

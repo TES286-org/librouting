@@ -1,4 +1,4 @@
-//! Per-peer BGP flap suppression (issue #99).
+//! Per-peer BGP flap suppression.
 //!
 //! A *softer* alternative to RFC 2439 prefix damping: instead of
 //! suppressing unstable prefixes (which leaves them unreachable),
@@ -143,7 +143,7 @@ impl SessionState {
     }
 
     fn compute_baseline(&mut self, now_ms: u64, cfg: &PeerHealthConfig) -> f64 {
-        // Issue #99 §Detection: "Maintain an EWMA baseline per
+        // §Detection: "Maintain an EWMA baseline per
         // session; freeze or restrict baseline updates while
         // degraded." The EWMA is updated only while at L0 (frozen
         // on escalation so a flap cannot inflate its own baseline).
@@ -672,7 +672,7 @@ fn apply_transition(
         if new_tier > s.counters.peak_tier {
             s.counters.peak_tier = new_tier;
         }
-        // Issue #99 §Recovery: "Mark affected prefixes stale."
+        // §Recovery: "Mark affected prefixes stale."
         // Every prefix the peer has advertised is now stale so
         // ECMP excludes it (`BestPath::multipath_tiered` skips
         // stale paths). A fresh UPDATE for a prefix re-admits
@@ -920,7 +920,7 @@ mod tests {
 
     #[test]
     fn set_rollout_mode_preserves_state_and_flips_tier() {
-        // Issue #99 §Rollout: SIGHUP live reload flips the rollout
+        // §Rollout: SIGHUP live reload flips the rollout
         // mode in-place without losing session state.
         let mut t = PeerHealthTable::new(cfg_test());
         train_then_burst(&mut t, 1, NlriFamily::IPV4_UNICAST, 10_000, 200, 10);

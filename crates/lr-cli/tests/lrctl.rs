@@ -1,4 +1,4 @@
-//! End-to-end tests for the `lrctl` operational CLI (ROADMAP-v3 D12).
+//! End-to-end tests for the `lrctl` operational CLI.
 //!
 //! Each test spawns the real `lr-daemon` binary (`CARGO_BIN_EXE_lr-daemon`)
 //! on a loopback port with `--api-socket`, then runs the real `lrctl`
@@ -457,7 +457,7 @@ fn lrctl_filter_compile_validates_body() {
         stderr.contains("parse error"),
         "stderr should mention parse error: {stderr}"
     );
-    // Issue #18 Phase 0: the diagnostic is rendered with a caret
+    // Phase 0: the diagnostic is rendered with a caret
     // snippet under the offending source line.
     assert!(
         stderr.contains("1 | if typo_function(net) then accept; reject;"),
@@ -490,13 +490,13 @@ fn lrctl_help_lists_subcommands() {
         "reload",
         "shutdown",
         "filter compile",
-        // Issue #52 BIRD-style `show` family.
+        // BIRD-style `show` family.
         "show status",
         "show sessions [detail]",
         "show session <handle>",
         "show routes count",
         "show memory",
-        // Issue #52 follow-up: write-side `session` ops.
+        // follow-up: write-side `session` ops.
         "session <handle> soft-in",
         "session <handle> refresh-in",
     ] {
@@ -538,7 +538,7 @@ fn lrctl_version_prints_version() {
 
 // ---------------------------------------------------------------------------
 
-// Issue #52 — BIRD-style `lrctl show …` family.
+// BIRD-style `lrctl show …` family.
 //
 // One e2e test per subcommand. Each spawns a real `lr-daemon` on a
 // loopback port with `--api-socket`, then runs the real `lrctl`
@@ -1204,7 +1204,7 @@ fn lrctl_metrics_proxies_prometheus_exposition() {
     let _ = d.wait_exit();
 }
 
-// `lrctl roa list` / `lrctl roa count` — ROADMAP "lrctl roa list", issue #52
+// `lrctl roa list` / `lrctl roa count` — ROADMAP "lrctl roa list"
 // follow-up. The e2e tests load a TOML config with two `[[roa]]` entries
 // so the daemon's ROA store is populated at startup, then exercise the
 // client sub-commands against the running daemon.

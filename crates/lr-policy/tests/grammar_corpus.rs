@@ -1,4 +1,4 @@
-//! Pins every example in [`docs/filter_dsl_grammar.md`] (ROADMAP-v3 D9)
+//! Pins every example in [`docs/filter_dsl_grammar.md`]
 //! through `lr_policy::filter::compile`.
 //!
 //! The grammar document is the canonical filter DSL reference. This

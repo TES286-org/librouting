@@ -161,7 +161,7 @@ impl BestPath {
         Some(out)
     }
 
-    /// Pre-best-path candidate tiering (issue #99). Restrict the
+    /// Pre-best-path candidate tiering. Restrict the
     /// candidate set to the highest non-empty health tier (lowest
     /// `LrPeerHealthTier` value present). Fall back to **all**
     /// candidates if every path is degraded. Routes without a tier
@@ -189,7 +189,7 @@ impl BestPath {
     }
 
     /// Rank every route best-first, after pre-best-path candidate
-    /// tiering (issue #99).
+    /// tiering.
     pub fn rank_tiered<'a>(routes: &'a [Route], cfg: &BestPathConfig) -> Vec<&'a Route> {
         let candidates = Self::tiered_candidates(routes);
         let mut ranked: Vec<&Route> = candidates.into_iter().collect();

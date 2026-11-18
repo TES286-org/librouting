@@ -41,8 +41,8 @@
 //! | BSD/macOS/Windows | no ([`TcpAuthError::Unsupported`]) |
 //!
 //! The BSDs do ship a `TCP_MD5SIG` option, but with a struct layout that
-//! differs from Linux (and no TCP-AO); supporting it means per-OS key
-//! structures, which is left as documented future work. Embedders on those
+//! differs from Linux (and no TCP-AO), so this crate implements neither
+//! there. Embedders on those
 //! systems implement their own socket arming and keep using [`TcpAuth`]
 //! as the configuration model.
 //!

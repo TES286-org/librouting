@@ -11,7 +11,7 @@
 //!   that node (RFC 8754 §3.1).
 //! - [`Srh`] — the IPv6 Segment Routing Header codec (RFC 8754 §2).
 //!   Encodes/decodes the full wire format: Next Header, Hdr Ext Len,
-//!   Routing Type (43), Segments Left, Last Entry, Flags, Tag, the
+//!   Routing Type 4, Segments Left, Last Entry, Flags, Tag, the
 //!   segment list, and optional TLV bytes.
 //! - [`Behavior`] — the RFC 8986 endpoint behavior registry (End,
 //!   End.X, End.DX6, End.DT4, End.B6.Encaps.Red, etc.) with the
@@ -21,19 +21,17 @@
 //! `no_std`-compatible and shares the `lr-core` conventions (mirrors
 //! how `lr-mpls` sits next to the protocol crates).
 //!
-//! ## Slices
+//! ## Control-plane surfaces
 //!
-//! Slice 1 delivered the data-plane codec and the type system (this
-//! crate). Slice 2 landed the OSPFv3 SRv6 control plane (RFC 9513 —
-//! the repo previously miscited RFC 9352, which is the IS-IS SRv6
-//! sibling): `lr-ospf::lsa::srv6` (Locator LSA + End SID codecs),
-//! `lr-ospf::srv6db` (the per-node LSDB projection) and the locator
-//! routes in `lr-ospf::spf::run_spf_v3` all ride on the primitives
-//! here. Slice 3 landed the End.X / LAN End.X SIDs (RFC 9513 §9 on the
-//! RFC 8362 Extended LSAs), the daemon's `[[ospf.srv6_locator]]`
-//! origination, and the kernel `seg6`/`seg6local` route mirror in
-//! `lr-osroute`. Still ahead: BGP-LS SRv6 and BGP SR Policy (RFC 9256 /
-//! RFC 9430).
+//! The OSPFv3 SRv6 control plane builds on these primitives (RFC 9513):
+//! `lr-ospf::lsa::srv6` carries the Locator LSA and End SID codecs,
+//! `lr-ospf::srv6db` holds the per-node LSDB projection, and the locator
+//! routes in `lr-ospf::spf::run_spf_v3` use the types here. End.X and
+//! LAN End.X SIDs (RFC 9513 §9 on the RFC 8362 Extended LSAs) are
+//! originated from `[[ospf.srv6_locator]]` and mirrored into the kernel
+//! `seg6`/`seg6local` routes by `lr-osroute`. BGP-LS carries the SRv6 SID
+//! NLRI and its attributes (`lr-bgp::path::bgp_ls`); BGP SR Policy
+//! (RFC 9256 / RFC 9430) is not implemented.
 //!
 //! ## Wire layout (RFC 8754 §2)
 //!

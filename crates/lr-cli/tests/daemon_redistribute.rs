@@ -1,6 +1,6 @@
 //! End-to-end tests for the daemon-level cross-protocol surfaces:
-//! `[[redistribute]]` (ROADMAP-v3 D4.1) and `[[aggregate]]`
-//! (ROADMAP-v3 D4.2) on the real `lr-daemon` binary.
+//! `[[redistribute]]` and `[[aggregate]]`
+//! on the real `lr-daemon` binary.
 //!
 //! Topology: the same loopback BGP shape the policy tests use — real
 //! TCP sessions between real daemon processes, assertions against the

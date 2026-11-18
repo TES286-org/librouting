@@ -1,5 +1,5 @@
 //! Thread-safe, incrementally updatable ROA database — the live half
-//! of the RPKI-RTR client integration (ROADMAP-v3 D2.3).
+//! of the RPKI-RTR client integration.
 //!
 //! [`RoaTable`] is an immutable, sorted entry list: cheap to share,
 //! but static. The RTR client (RFC 8210) however produces *delta
@@ -189,7 +189,7 @@ impl RoaStore {
     }
 
     /// Per-entry layer membership for one ROA entry. Used by the
-    /// `show roa` renderer (issue #52 follow-up) to report which layer
+    /// `show roa` renderer to report which layer
     /// an entry came from — `static` (config `[[roa]]` table), `rtr`
     /// (RFC 8210 cache), or `both` (present in both layers, deduplicated
     /// into one in the merged snapshot).
@@ -280,7 +280,7 @@ impl RoaStore {
 
 /// Per-entry ROA provenance — which layer an entry came from. Returned
 /// by [`RoaStore::provenance_of`]; rendered by the `show roa` runtime
-/// API command (issue #52 follow-up).
+/// API command.
 ///
 /// The variants are ordered by the priority the operator assigns when
 /// investigating an entry: `Static` first (the layer they can edit),

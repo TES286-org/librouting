@@ -44,14 +44,13 @@ struct RouteTiming {
 /// (4.5× the Update interval) and lets the speaker pick a larger value.
 /// This implementation deliberately uses **6×** the interval — same
 /// multiplier as babeld's own conservative default — with a 30 s floor.
-/// On tunnel interfaces (WireGuard, etc.) the previous 15 s floor was
-/// too tight — a single lost Update packet (latency spike, brief packet
-/// reordering) could cause the route to expire and trigger a batch
-/// withdrawal + re-install cycle (the "flaky Babel" symptom from the
-/// production report).
+/// On tunnel interfaces (WireGuard, etc.) a 15 s floor is too tight: a
+/// single lost Update packet (latency spike, brief packet reordering)
+/// expires the route and triggers a batch withdrawal + re-install cycle,
+/// the "flaky Babel" symptom.
 ///
-/// The 30 s floor gives 2× the previous buffer for packet loss on
-/// tunnel interfaces, while still expiring stale routes in a reasonable
+/// The 30 s floor gives 2× that buffer for packet loss on tunnel
+/// interfaces, while still expiring stale routes in a reasonable
 /// time. The 4.5× RFC minimum is *not* used: babeld also benefits from
 /// the kernel's route cache; lr installs routes into the kernel FIB
 /// directly, so a brief gap between expiry and re-advertisement
@@ -93,16 +92,12 @@ impl BabelRouteTable {
     /// re-announcement is what keeps the route alive).
     ///
     /// Per RFC 8966 §3.5.2, an infeasible update MUST be ignored: it
-    /// must not displace an existing feasible route. The previous
-    /// implementation unconditionally inserted the route (marking it
-    /// `feasible = false` when the feasibility check failed), which
-    /// overwrote the existing feasible route. `best_routes()` then
-    /// skipped the infeasible entry, `diff()` produced a withdrawal,
-    /// and the reason renderer logged the misleading "best-path
-    /// displacement" message — even when the route had a single
-    /// upstream and no competing path existed. babeld's
-    /// `update_route` ignores infeasible updates entirely (and
-    /// optionally sends a unicast seqno request); we mirror that.
+    /// must not displace an existing feasible route. This implementation
+    /// keeps the feasible entry and skips the infeasible one, so
+    /// `best_routes()` and `diff()` never turn a still-reachable prefix
+    /// into a withdrawal. babeld's `update_route` ignores infeasible
+    /// updates entirely (and optionally sends a unicast seqno request);
+    /// this mirrors that.
     pub fn insert_timed(&mut self, route: BabelRoute, interval_cs: u16, now_ms: u64) {
         let timing = RouteTiming {
             interval_cs,

@@ -67,8 +67,8 @@
 //! [`SessionEnd`] — the enum form of the strings the pump returned —
 //! and owns the bookkeeping the session threads did: the inbound
 //! `busy` guard, the live-session counter, and the connector's
-//! backoff classification (which previously string-matched
-//! `"collision resolution"`; the enum makes that an equality test).
+//! backoff classification (an equality test on the `SessionEnd` enum,
+//! not a string match).
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener as StdTcpListener;
@@ -433,9 +433,9 @@ fn reactor_main(
     // event reports arrived during the poll, so their arrival time
     // is the post-poll instant. Passing a pre-poll `now_ms` to
     // `feed_input_at` would latch KEEPALIVE-arrival timestamps
-    // (issue #52 "peer response speed" metric) up to `POLL_TIMEOUT`
-    // early — the same class of bug the BFD mio loop's detection
-    // timer had before PR #118. The Babel and OSPF mio loops apply
+    // up to `POLL_TIMEOUT`
+    // early — the same timing rule the BFD mio loop's detection
+    // timer follows. The Babel and OSPF mio loops apply
     // the same pattern (`daemon.rs` Babel section,
     // `ospf_engine_loop.rs`).
     let start = Instant::now();
@@ -777,7 +777,7 @@ fn accept_batch(
 /// `feed_input_at` so the router latches KEEPALIVE-arrival timestamps
 /// at the post-poll instant — the arrival time the readable event
 /// reports — instead of a pre-poll `now_ms` that would age the
-/// timestamp by up to `POLL_TIMEOUT` (issue #52).
+/// timestamp by up to `POLL_TIMEOUT`.
 fn pump_readable(
     slot: &mut Slot,
     router: &Arc<RwLock<DefaultRouter>>,
@@ -1014,8 +1014,8 @@ mod tests {
     }
 
     /// The pump's exact message strings — the connector's backoff
-    /// classification previously string-matched the collision marker,
-    /// and the log voices must stay unchanged.
+    /// classification matches the collision marker by equality, and
+    /// the log voices must stay unchanged.
     #[test]
     fn session_end_messages_match_the_pump_strings() {
         assert_eq!(SessionEnd::PeerClosed.message(), "peer closed connection");

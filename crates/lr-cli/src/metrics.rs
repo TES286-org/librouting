@@ -1,9 +1,9 @@
-//! Prometheus `/metrics` HTTP endpoint (ROADMAP-v3 D12.2).
+//! Prometheus `/metrics` HTTP endpoint.
 //!
 //! A minimal HTTP/1.0 responder that serves the Prometheus text
 //! exposition format (version 0.0.4) on a configurable TCP address.
 //! The RIB gauges read through the shared Loc-RIB handle (the
-//! per-family shard locks — issue #101, never the router's writer
+//! per-family shard locks, never the router's writer
 //! lock); the session gauges read under the same `RwLock` the runtime
 //! API uses. The metrics thread never holds either lock while
 //! blocking on I/O (same contract as `api.rs`).
@@ -36,7 +36,7 @@
 //! | ---------------------------- | ------- | ------------------------------- | ---------------------------------------- |
 //! | `lr_info`                    | gauge=1 | `version`, `local_as`, `peer_as`, `router_id`, `config_path`, `config_dialect` | daemon identity (for join queries)  |
 //! | `lr_uptime_seconds`          | gauge   | —                               | `Instant::elapsed()` since `spawn`       |
-//! | `lr_config_dialect_deprecated` | gauge=0/1 | `config_dialect`             | 1 when the daemon runs on a deprecated dialect (the native TOML subset) — issue #101 |
+//! | `lr_config_dialect_deprecated` | gauge=0/1 | `config_dialect`             | 1 when the daemon runs on a deprecated dialect (the TOML subset) |
 //! | `lr_sessions_total`          | gauge   | `kind`, `state`                 | `session_summaries()` count per (kind, state) |
 //! | `lr_established_sessions`    | gauge   | `kind`                          | `session_summaries().established` count |
 //! | `lr_session_up`              | gauge=0/1 | `kind`, `session`, `peer`     | per-session established flag            |
@@ -54,8 +54,8 @@
 //! | `lr_bgp_updates_total`      | counter | `session`, `peer`, `direction`  | `SessionSummary::updates_received/sent` per BGP session (legacy; see `lr_bgp_messages_total{type="update"}` for the comprehensive view) |
 //! | `lr_bgp_messages_total`     | counter | `session`, `peer`, `type`, `direction` | `SessionSummary::message_stats` per BGP session (open/update/notification/keepalive/route_refresh) |
 //! | `lr_roa_entries`             | gauge   | —                               | `RoaStore::len()` (when present)        |
-//! | `lr_event_bus_published_total` | counter | —                            | `EventBus::published_total` (issue #101) |
-//! | `lr_event_bus_dropped_total`  | counter | —                              | `EventBus::dropped_total` (issue #101)  |
+//! | `lr_event_bus_published_total` | counter | —                            | `EventBus::published_total` |
+//! | `lr_event_bus_dropped_total`  | counter | —                              | `EventBus::dropped_total`  |
 //! | `lr_process_resident_bytes` | gauge   | —                               | `/proc/self/status` VmRSS (Linux only) |
 //! | `lr_process_virtual_bytes`  | gauge   | —                               | `/proc/self/status` VmSize (Linux only) |
 //! | `lr_filter_eval_duration_seconds` | histogram | `direction`, `filter`      | `FilterMetricsRegistry` (when present)  |
@@ -77,7 +77,7 @@ use lr_router::DefaultRouter;
 /// locks on the recording path (the filter hooks run per route).
 ///
 /// The bucket upper bounds are nanosecond values chosen around the
-/// measured filter-VM hot path (GitHub #19: 60–430 ns per evaluation
+/// measured filter-VM hot path (60–430 ns per evaluation
 /// for the standard shapes, low microseconds for set-heavy filters):
 /// 100 ns … 10 ms plus the implicit `+Inf` bucket. Fixed bounds keep
 /// `DurationHistogram` a single allocation-free struct that can be
@@ -286,7 +286,7 @@ pub struct MetricsContext {
     /// router's `RwLock`, so a scrape never waits behind the
     /// writer's tick.
     pub rib: std::sync::Arc<lr_rib::LocRib>,
-    /// The daemon's event bus (issue #101 — the wiring): the scrape
+    /// The daemon's event bus: the scrape
     /// surfaces the publisher's lifetime totals
     /// (`lr_event_bus_published_total`, `lr_event_bus_dropped_total`)
     /// so an operator can alert on a subscriber that is not keeping
@@ -298,7 +298,7 @@ pub struct MetricsContext {
     /// (a single `Arc<RoaStore>::len()` under no lock — the store is
     /// already `Arc`-swapped atomically, so reads are lock-free).
     pub roa_len: Option<Box<dyn Fn() -> usize + Send + Sync>>,
-    /// Per-filter evaluation histograms (ROADMAP-v3 D12.4). `None` →
+    /// Per-filter evaluation histograms. `None` →
     /// the `lr_filter_eval_duration_seconds` block is omitted. Built
     /// by the BGP daemon when `--metrics-addr` is configured and
     /// shared with the import/export filter hooks, which record into
@@ -329,7 +329,7 @@ pub struct MetricsInfo {
     /// Resolved config dialect (`lr`, `toml`, `bird`, `frr`); empty
     /// string when the daemon was started without a config file.
     /// Surfaced as a label on `lr_info` and drives the
-    /// `lr_config_dialect_deprecated` gauge (issue #101) — a scraper
+    /// `lr_config_dialect_deprecated` gauge — a scraper
     /// alerting on `lr_config_dialect_deprecated == 1` flags every
     /// daemon still running on the deprecated TOML subset.
     pub config_dialect: String,
@@ -381,7 +381,7 @@ mod imp {
         fn collect(r: &DefaultRouter, rib: &lr_rib::LocRib, started: std::time::Instant) -> Self {
             let summaries = r.session_summaries();
             // The RIB reads go through the shared Loc-RIB handle
-            // (issue #101 — the per-family shard locks), not the
+            //, not the
             // router's `RwLock`: `rib_len` and the per-protocol
             // counts never wait behind the writer's tick.
             let rib_len = rib.len();

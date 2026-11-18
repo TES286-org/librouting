@@ -164,10 +164,8 @@ impl AsPathFilterBank {
     /// Stub (no `bgp` feature): **fail-closed** — a configured
     /// AS-path filter cannot be evaluated when the crate is built
     /// without the typed BGP path-attribute decoder, so the safe
-    /// default is to deny the route. The previous shape of this
-    /// stub returned `true` (permit-all), which silently admitted
-    /// every route past a configured-but-unparseable filter — an
-    /// unsafe default for a security-sensitive control plane.
+    /// default is to deny the route. An unparseable filter must not
+    /// silently admit traffic.
     ///
     /// Embedders that build `lr-policy` without `bgp` and want
     /// prefix-only filtering should use [`PrefixList`](crate::PrefixList)

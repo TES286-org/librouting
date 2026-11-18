@@ -1,5 +1,5 @@
 //! lr-core gap closure — `WriteBuf` mutators, `ReadBuf::chunk`,
-//! `RouteKey` / `Preference` constructors (issue #92).
+//! `RouteKey` / `Preference` constructors.
 //!
 //! Mirrors the remaining public Rust API of:
 //! - `lr_core::buf::{ReadBuf, WriteBuf}` (`patch`, `reserve`, `written`,

@@ -1,4 +1,4 @@
-//! Native BIRD / FRR configuration loading — the W5.4 compat surface.
+//! Native BIRD / FRR configuration loading — the compat surface.
 //!
 //! `lr-daemon --config bird.conf` (or an FRR file) parses the source
 //! dialect directly and runs the daemon in the *compatible form*: the
@@ -9,14 +9,11 @@
 //! daemon's regular loader, so compat mode and the converter can
 //! never drift apart — there is exactly one mapping.
 //!
-//! The native `.lr` DSL (ROADMAP-v3 D16 Phase 3) is the primary
-//! authoring dialect and the converter's rendering target (issue
-//! #101 — the converter stopped rendering into the deprecated TOML
-//! subset as its intermediate representation, the prerequisite for
-//! the 2.0 TOML removal). The TOML subset (see
+//! The `.lr` DSL is the supported
+//! authoring dialect and the converter's rendering target. The TOML
+//! subset (see
 //! [`crate::daemon_config::parse_toml_subset`]) remains a deprecated
-//! *authoring* dialect, fully supported through the 1.x series and
-//! loaded directly when detected or forced (see
+//! *authoring* dialect that loads when detected or forced (see
 //! [`crate::daemon_config::deprecation_notice`]). BIRD and FRR files
 //! are adoption inputs: a one-way translation into the typed IR, not
 //! an authoring surface. The four dialects share one
@@ -44,9 +41,9 @@ pub(super) enum Dialect {
     /// should use [`Dialect::Lr`] instead. The deprecation notice is
     /// surfaced through startup, reload, `config check`, the runtime
     /// API `status` / `show status` commands, and the
-    /// `lr_config_dialect_deprecated` metrics gauge (issue #101).
+    /// `lr_config_dialect_deprecated` metrics gauge.
     Toml,
-    /// The native `.lr` DSL (ROADMAP-v3 D16 Phase 3) — the primary
+    /// The native `.lr` DSL — the primary
     /// authoring dialect and the migration target for TOML configs.
     Lr,
     /// BIRD 2 configuration (BGP control plane). Adoption input only;

@@ -525,8 +525,8 @@ impl OspfV3AuthState {
 
 struct Ospf3Daemon {
     router: Arc<RwLock<DefaultRouter>>,
-    /// The daemon's router-event bus (issue #101 — the event-bus
-    /// wiring): the drained `poll_events` batches publish here and
+    /// The daemon's router-event bus (the event-bus wiring): the
+    /// drained `poll_events` batches publish here and
     /// the kernel-mirror thread subscribes (spawned with the ticker),
     /// applying the route events to the kernel FIB off the router
     /// lock. The ticker is the other publisher for tick-generated
@@ -776,8 +776,8 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             router
         }
     };
-    // The event bus the daemon's drained events publish to (issue #101
-    // — the wiring). Standalone: created here and shared with the
+    // The event bus the daemon's drained events publish to (the
+    // wiring). Standalone: created here and shared with the
     // Runtime below; embedded: the supervisor's runtime's bus.
     let event_bus = match &host {
         Some(h) => h.runtime.event_bus.clone(),
@@ -999,7 +999,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             Arc::clone(&h.runtime)
         }
         None => {
-            // Issue #53 daemon-wide drain: install the drain gate on
+            // daemon-wide drain: install the drain gate on
             // the router's import chain BEFORE the Runtime takes
             // ownership of the Arc. Mirrors the OSPFv2 path: the
             // queue is the [[static.route]] table.

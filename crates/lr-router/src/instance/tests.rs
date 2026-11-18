@@ -2325,7 +2325,7 @@ fn rfc8212_unknown_session_rejected() {
     assert!(err.contains("unknown session 99"), "{err}");
 }
 
-// ===== FRR `bgp enforce-first-as` (W2.2) =====
+// ===== FRR `bgp enforce-first-as` =====
 //
 // The check rejects eBGP UPDATEs whose leftmost AS_PATH sequence
 // segment's first AS does not equal the peer's AS (the peer did
@@ -2552,7 +2552,7 @@ fn enforce_first_as_spared_for_ibgp() {
     );
 }
 
-// ===== FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3) =====
+// ===== FRR `neighbor X allowas-in N` / BIRD `allow local as` =====
 
 /// Helper: build an eBGP pair where `b`'s egress AS_PATH is forced
 /// to include `a`'s local AS N times, simulating a route that
@@ -2700,7 +2700,7 @@ fn set_session_local_as_tolerance_after_start_fails() {
     assert!(err.contains("already established"), "{err}");
 }
 
-// ===== FRR `neighbor X soft-reconfiguration inbound` (W2.4) =====
+// ===== FRR `neighbor X soft-reconfiguration inbound` =====
 
 #[test]
 fn soft_reconfig_inbound_retains_pre_policy_view() {
@@ -3225,7 +3225,7 @@ fn remove_session_cleans_up_bookkeeping() {
     assert!(!a.mrai.contains_key(&a_session.0));
 }
 
-// ----- W6.3 exchange-plane (feature `exchange-plane`): router-level
+// ----- Exchange plane (feature `exchange-plane`): router-level
 // record plumbing — exposure, cross-hop re-signing, partial transit.
 
 #[cfg(feature = "exchange-plane")]
@@ -5610,7 +5610,7 @@ fn apply_runtime_delta_withdrawal_after_identical_reinstall() {
 }
 
 // ---------------------------------------------------------------------------
-// BGP-LS projection republish driver (issue #60 daemon wiring).
+// BGP-LS projection republish driver.
 //
 // `bgpls_republish` ties three pieces together: the OSPF LSDB →
 // BGP-LS projection (already tested in `lsdb_to_bgpls_tests`), the
@@ -5721,7 +5721,7 @@ fn bgpls_republish_unknown_area_is_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// BGP-LS End.X projection republish driver (issue #60 follow-up).
+// BGP-LS End.X projection republish driver.
 //
 // `bgpls_republish_end_x` ties the OSPFv3 SRv6 End.X / LAN End.X
 // projection (tested in `lsdb_to_bgpls_tests`), the
@@ -5915,7 +5915,7 @@ fn bgpls_republish_end_x_unknown_area_is_noop() {
 
 // ---------------------------------------------------------------------------
 // BGP-LS Egress Peer Engineering projection (RFC 9086) — daemon wiring
-// (issue #60 EPE follow-up; the codec landed in PR #68, the projection
+// (issue #60 EPE follow-up; the codec landed in, the projection
 // is the natural follow-up the codec PR's scope-boundary section names).
 //
 // `bgpls_republish_epe` ties the BGP peer session → BGP-LS Link NLRI
@@ -6677,7 +6677,7 @@ fn connected_route_flows_through_redistribution_pipe() {
     );
 }
 
-// ---- Peer-health dynamic tiering + stale exclusion (issue #99). ----
+// ---- Peer-health dynamic tiering + stale exclusion. ----
 
 /// A mock `PeerHealthLookup` for unit tests: returns a fixed tier per
 /// `(peer, family)` and a fixed stale set.
@@ -6722,7 +6722,7 @@ fn ph_bgp_route(prefix: [u8; 4], plen: u8, peer: u64) -> Route {
 /// Dynamic tiering deprefs a candidate whose peer escalated AFTER the
 /// route was imported — the route has no stamped tier attribute, but
 /// the live lookup returns L2 for its peer, so `rank_with_dynamic_tier`
-/// excludes it when an L0 candidate exists (issue #99 §Hooks 3).
+/// excludes it when an L0 candidate exists.
 #[test]
 fn dynamic_tier_excludes_degraded_peer_even_without_stamped_attr() {
     let r1 = ph_bgp_route([203, 0, 113, 0], 24, 1); // peer 1 — now at L2
@@ -6754,7 +6754,7 @@ fn dynamic_tier_falls_back_when_all_degraded() {
 }
 
 /// Stale paths are excluded from the ECMP / add-path tail, but the
-/// best path is always kept even if stale (issue #99 §Recovery).
+/// best path is always kept even if stale.
 #[test]
 fn stale_paths_excluded_from_ecmp_tail() {
     let prefix = Prefix::new_v4([203, 0, 113, 0], 24);

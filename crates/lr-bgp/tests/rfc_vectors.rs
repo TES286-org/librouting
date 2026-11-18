@@ -1,4 +1,4 @@
-//! RFC conformance test vectors for the BGP-4 codec (ROADMAP-v3 D6.3).
+//! RFC conformance test vectors for the BGP-4 codec.
 //!
 //! Each test pins a specific byte sequence from an RFC and asserts the
 //! codec decodes it to the exact structure the RFC describes. Round-trip

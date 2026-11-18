@@ -1,4 +1,4 @@
-//! Integration tests for the daemon ROA loader (issue #100).
+//! Integration tests for the daemon ROA loader.
 //!
 //! The format parsers in `lr-bgp::roa_loader_tests` cover the
 //! text→entries conversion. These tests cover the daemon-side

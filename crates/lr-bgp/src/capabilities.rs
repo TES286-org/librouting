@@ -470,7 +470,8 @@ mod tests {
     }
 
     /// A GR capability without family tuples negotiates GR but retains
-    /// nothing (the historical encoding this library used to emit).
+    /// nothing (the encoding the library emits when no family tuples
+    /// are configured).
     #[test]
     fn graceful_restart_empty_family_list_is_empty() {
         let cap = Capability::graceful_restart(0, 90, &[]);

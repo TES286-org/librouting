@@ -16,7 +16,7 @@
 //! - `lr mrt diff <a> <b>` — compare two MRT RIB dumps on route
 //!   content (per prefix: AS path, next hop, local-pref, MED,
 //!   communities); exit 1 when they differ.
-//! - `lr parity-replay …` — wire-level parity harness (W5.3): replay a
+//! - `lr parity-replay …` — wire-level parity harness: replay a
 //!   captured BGP message stream into an offline router and dump the
 //!   resulting Loc-RIB as MRT, ready to diff against the reference
 //!   implementation's own dump.
@@ -434,9 +434,8 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::CRATE_LIST;
 
-    /// The list used to be a literal that named 15 crates while the
-    /// workspace had 18. It now comes from the manifest; this pins the
-    /// members that were missing.
+    /// The list comes from the workspace manifest; these members must
+    /// always be present.
     #[test]
     fn crate_list_covers_every_workspace_member() {
         let names: Vec<&str> = CRATE_LIST.split(", ").collect();

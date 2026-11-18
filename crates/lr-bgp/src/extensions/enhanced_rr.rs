@@ -45,13 +45,6 @@
 //!   the existing [`crate::fsm::BgpAction::EndOfRib`] — the helper
 //!   that consumes that action (the router's `on_end_of_rib`) runs
 //!   the same stale-route purge it runs for the implicit EoR marker.
-//!
-//! Before the issue #92 fix, the FSM receive arm dispatched only the
-//! `Normal` subtype; a peer that sent a BoRR or EoRR had its message
-//! silently discarded, so an embedder relying on the demarcation to
-//! coordinate a route-refresh response (BIRD `route refresh` /
-//! `enhanced route refresh`, FRR `bgp route-refresh` with the
-//! `enhanced` knob) saw the markers vanish at the wire boundary.
 
 use crate::capabilities::{Capability, CapabilityCode};
 use crate::peer::PeerConfig;

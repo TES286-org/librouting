@@ -1,5 +1,5 @@
 //! End-to-end tests for the daemon's advanced ROA loader
-//! (`[[bgp.roa_source]]`, issue #100): a real `lr-daemon` process
+//! (`[[bgp.roa_source]]`): a real `lr-daemon` process
 //! against a local HTTP server (for URL sources) and a temp file
 //! (for file sources), verified through the runtime API `status`
 //! command and the daemon log.

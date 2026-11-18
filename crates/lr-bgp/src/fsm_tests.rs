@@ -391,7 +391,7 @@ fn as4_kept_when_peer_offers_capability() {
     assert!(peer.cfg.asn4, "4-byte encoding must be negotiated up");
 }
 
-/// W6.3 exchange-plane prototype: both speakers configure the plane
+/// Exchange plane: both speakers configure the plane
 /// and exchange OPENs — the negotiation activates with the shared
 /// key and each side's nonces in the right places.
 #[cfg(feature = "exchange-plane")]
@@ -451,7 +451,7 @@ fn exchange_plane_negotiates_when_both_sides_advertise() {
     assert_eq!(session_b.local_nonce, mixed(nonce_b));
 }
 
-/// W6.3 exchange-plane prototype: only one side configures the
+/// Exchange plane: only one side configures the
 /// plane — the capability is advertised (RFC 5492 §3 makes it
 /// inert for the peer) but the negotiation stays off, and the
 /// session establishes normally.
@@ -489,7 +489,7 @@ fn exchange_plane_stays_off_when_peer_lacks_capability() {
     assert!(b.exchange_plane_session().is_none());
 }
 
-// ----- W6.3 follow-up: attach/detach hooks over a live FSM pair -----
+// ----- Exchange-plane: attach/detach hooks over a live FSM pair -----
 
 #[cfg(feature = "exchange-plane")]
 fn establish_pair_with_plane(
@@ -994,7 +994,7 @@ fn route_update_is_not_end_of_rib() {
     assert!(!actions.iter().any(|x| matches!(x, BgpAction::EndOfRib(_))));
 }
 
-// ===== FRR `no bgp default ipv4-unicast` (W2.1) =====
+// ===== FRR `no bgp default ipv4-unicast` =====
 
 /// Build a BGP peer with `default_ipv4_unicast = false` and IPv4
 /// unicast NOT in `mp_families` — the FRR `no bgp default

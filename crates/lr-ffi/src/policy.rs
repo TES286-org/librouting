@@ -1,5 +1,5 @@
 //! FFI surface for the daemon-wired cross-protocol features
-//! (ROADMAP-v3 D4.4): redistribution pipes, BGP aggregates and RFC
+//!: redistribution pipes, BGP aggregates and RFC
 //! 2439 route damping.
 //!
 //! These entry points give C/C++/Go/Python embedders the same

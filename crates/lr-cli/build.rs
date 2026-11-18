@@ -1,9 +1,7 @@
 //! Emits the workspace crate list that `lr version` prints.
 //!
-//! The list used to be a hand-typed literal in `main.rs` and had already
-//! drifted: it named 15 crates while the workspace had 18 members. It is
-//! derived from the workspace manifest instead, so adding a member is
-//! enough to make it appear.
+//! The list is derived from the workspace manifest, so adding a member
+//! is enough to make it appear.
 
 use std::env;
 use std::fs;

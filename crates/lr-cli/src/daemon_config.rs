@@ -7,16 +7,11 @@
 //! `bgp.peer_addr`) are synthesised into one implicit peer so old
 //! configs behave exactly as before.
 //!
-//! The native `.lr` DSL (parsed by `crate::config_dsl`) is the primary
-//! authoring surface; the TOML subset parsed by
-//! [`parse_toml_subset`] is the deprecated authoring dialect and is
-//! in its deprecation window — fully supported through the 1.x
-//! series, planned for removal in 2.x (issue #101, see
-//! [`deprecation_notice`]). The TOML subset stays the load path for
-//! the BIRD / FRR compat surfaces because the compat converter
-//! (`crate::translate`) renders into it as an intermediate
-//! representation, so the parser cannot be removed before the
-//! converter switches to a different IR.
+//! The native `.lr` DSL (parsed by `crate::config_dsl`) is the supported
+//! authoring surface; the TOML subset parsed by [`parse_toml_subset`] is
+//! deprecated and stays only for the migration window (see
+//! [`deprecation_notice`]). The compat converter (`crate::translate`)
+//! renders `.lr`, so the TOML parser is independent of it.
 
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -81,17 +76,17 @@ pub(crate) struct PeerSpec {
     pub add_path_max_paths: Option<u32>,
     /// RFC 4760 MP-BGP families beyond the default IPv4 unicast.
     pub mp_families: Option<Vec<String>>,
-    /// FRR `bgp default ipv4-unicast` (W2.1): per-peer override of the
+    /// FRR `bgp default ipv4-unicast`: per-peer override of the
     /// router-wide default. `None` = inherit the router default.
     pub default_ipv4_unicast: Option<bool>,
-    /// FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+    /// FRR `neighbor X allowas-in N` / BIRD `allow local as`:
     /// per-peer tolerance for the local AS in a received AS_PATH.
     /// `None` = inherit the router default (0 = reject any).
     /// `0` = reject any occurrence; `N > 0` = admit up to N occurrences
     /// (FRR `allowas-in N`); `u32::MAX` = admit any number (FRR
     /// `allowas-any`).
     pub allow_local_as: Option<u32>,
-    /// FRR `neighbor X soft-reconfiguration inbound` (W2.4): per-peer
+    /// FRR `neighbor X soft-reconfiguration inbound`: per-peer
     /// toggle for pre-policy Adj-RIB-In retention. `None` = inherit
     /// the router default (off).
     pub soft_reconfig_inbound: Option<bool>,
@@ -112,7 +107,7 @@ pub(crate) struct PeerSpec {
     /// BFD multihop mode (RFC 5883 — UDP 4784, no TTL check).
     /// `None` inherits the global setting.
     pub bfd_multihop: Option<bool>,
-    /// W6.3 exchange-plane prototype (`exchange_plane = true`): per-peer
+    /// Exchange plane (`exchange_plane = true`): per-peer
     /// override of the router-wide default. `None` inherits the global.
     /// Requires a binary built with the `exchange-plane` feature.
     pub exchange_plane: Option<bool>,
@@ -156,7 +151,7 @@ pub(crate) struct PeerSpec {
     /// down the peer. `None` (the default) inherits `false`; `Some(true)`
     /// keeps the outbound connector passive (no dial) and refuses
     /// inbound SYNs from this peer's address; `Some(false)` explicitly
-    /// brings a previously-shutdown peer back up (FRR `no neighbor X
+    /// brings an administratively down peer back up (FRR `no neighbor X
     /// shutdown`, BIRD `disabled no`). Translated onto
     /// [`SessionConfig::admin_down`] by [`build_session_config`].
     ///
@@ -478,8 +473,8 @@ pub(crate) struct BabelInterfaceSpec {
 // `PeerSpec`, `OspfIfSpec` and `LdpIfSpec` each expose a `label()`
 // helper because the daemon's session-key log path calls them. The
 // Babel interface matcher in `run_babel_daemon` reads `spec.name`
-// directly (the multi-NIC spawning landed in rc.3 and uses the kernel
-// interface name `entry.name`), so no `label()` is needed here.
+// directly (multi-NIC spawning uses the kernel interface name
+// `entry.name`), so no `label()` is needed here.
 
 /// One `[[roa]]` table — a Route Origin Authorization binding
 /// (RFC 6482 §3 / RFC 6811 §2). Loaded at startup into the
@@ -532,7 +527,7 @@ pub(crate) struct StaticRouteSpec {
 }
 
 /// The `[bgp.rpki]` table — the RPKI-RTR cache client configuration
-/// (RFC 8210; ROADMAP-v3 D2.4). When `cache` is set the daemon spawns
+/// (RFC 8210;). When `cache` is set the daemon spawns
 /// an RTR client thread at startup: it connects to the cache, syncs
 /// the ROA database (Serial/Reset Query sequencing, §7 version
 /// negotiation) and applies every completed sync's delta batch to the
@@ -591,7 +586,7 @@ pub(crate) struct FilterSpec {
 /// BIRD top-level `function` analogue; the per-filter `function`
 /// declaration stays available for filter-private helpers.
 ///
-/// Issue #46 asks for "filters to reference functions, enabling the
+/// asks for "filters to reference functions, enabling the
 /// definition of reusable logic that can be invoked by various filters
 /// or functions." This struct is the config carrier; `build_filters`
 /// in `daemon_policy.rs` does the prepending.
@@ -613,7 +608,7 @@ pub(crate) struct FilterFunctionSpec {
     pub body: Option<String>,
 }
 
-/// `[damping]` table — RFC 2439 route flap damping (ROADMAP-v3 D4.3).
+/// `[damping]` table — RFC 2439 route flap damping.
 ///
 /// Off by default. When `enabled = true`, the daemon installs an
 /// [`lr_policy::hooks::DampingImportHook`] on the import chain
@@ -655,7 +650,7 @@ pub(crate) struct DampingSpec {
     pub config: lr_damping::DampingConfig,
 }
 
-/// `[bgp.peer_health]` table — per-peer flap suppression (issue #99).
+/// `[bgp.peer_health]` table — per-peer flap suppression.
 ///
 /// Off by default (`rollout = "off"`). When the rollout mode is
 /// anything other than `off`, the daemon installs a
@@ -688,7 +683,7 @@ impl PeerHealthSpec {
     }
 }
 
-/// One `[[redistribute]]` table (ROADMAP-v3 D4.1): a cross-protocol
+/// One `[[redistribute]]` table: a cross-protocol
 /// redistribution pipe between two protocols the daemon runs.
 ///
 /// Routes from `source` that enter the Loc-RIB are re-originated into
@@ -702,12 +697,9 @@ impl PeerHealthSpec {
 /// and `connected` (kernel interface network prefixes the daemon
 /// enumerates from `getifaddrs`, BIRD `protocol direct`, FRR
 /// `redistribute connected`). The `static` and `connected` injection
-/// surfaces were previously rejected fail-closed even though the
-/// daemon already installs static routes via `install_static`; the
-/// daemon's `install_connected` mirrors it for interface networks so
-/// `[[redistribute]] source = "static"` / `source = "connected"` flow
-/// through the pipe into the target protocol exactly the way BIRD/FRR
-/// operators expect.
+/// surfaces flow through the pipe into the target protocol exactly as
+/// BIRD/FRR operators expect; the daemon's `install_connected` mirrors
+/// `install_static` for interface networks.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RedistributeSpec {
     /// Source protocol name (`"bgp"`, `"ospf"`, `"ospf3"`,
@@ -727,7 +719,7 @@ pub(crate) struct RedistributeSpec {
     pub allow: Vec<String>,
 }
 
-/// One `[[aggregate]]` table (ROADMAP-v3 D4.2): a BGP route aggregate
+/// One `[[aggregate]]` table: a BGP route aggregate
 /// (RFC 4271 §9.2.2.2) originated while at least one more-specific
 /// route is present in the Loc-RIB. Backed by
 /// [`lr_router::RouterInstance::add_aggregate`] — the BIRD
@@ -847,7 +839,7 @@ pub(crate) struct LdpBindSpec {
     pub label: u32,
 }
 
-/// `[bgp_ls]` configuration block (issue #60 daemon-wiring). When
+/// `[bgp_ls]` configuration block. When
 /// `enabled`, the daemon advertises the BGP-LS address family
 /// (AFI=16388, SAFI=71, RFC 7752 §3.1) on every BGP session and runs
 /// the OSPF LSDB → BGP-LS projection's incremental republish driver
@@ -935,16 +927,16 @@ pub(crate) fn v6_prefix_contains(p: &lr_core::addr::Prefix, addr: &[u8; 16]) -> 
     }
 }
 
-/// Daemon configuration (TOML or CLI flags). The historical fields are
-/// the globals every `PeerSpec` inherits from; `peers` carries the
+/// Daemon configuration (TOML or CLI flags). The global fields are
+/// the defaults every `PeerSpec` inherits from; `peers` carries the
 /// explicit per-peer entries.
 ///
-/// This struct doubles as the typed configuration IR (issue #18
-/// Phase 1): every frontend — the TOML subset parser today, the native
-/// DSL once Phase 2 lands — must resolve into exactly one
+/// This struct is the typed configuration IR: every frontend — the
+/// TOML subset parser and the native DSL — resolves into exactly one
 /// `DaemonConfig` value, and two configs are semantically equivalent
 /// iff their IRs compare equal (`PartialEq`). That equality is the
-/// golden property the DSL migration is validated against.
+/// golden property `config check` and `config to-dsl` are validated
+/// against.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct DaemonConfig {
     pub local_as: u32,
@@ -992,7 +984,7 @@ pub(crate) struct DaemonConfig {
     /// `None` → the metrics exporter is disabled (the default). When
     /// set, the daemon binds a TCP listener on the address and serves
     /// the Prometheus text exposition format on `GET /metrics`
-    /// (ROADMAP-v3 D12.2).
+    ///.
     pub metrics_addr: Option<String>,
     /// Configuration file the daemon was started with (reload source).
     pub config_path: Option<String>,
@@ -1096,31 +1088,31 @@ pub(crate) struct DaemonConfig {
     /// `"accept-all"` (the RFC 4271 default the RFC allows as a
     /// deviation, §3 / Appendix A "insecure-mode").
     pub ebgp_policy: String,
-    /// FRR `bgp enforce-first-as` (W2.2): when on, an eBGP UPDATE
+    /// FRR `bgp enforce-first-as`: when on, an eBGP UPDATE
     /// whose AS_PATH leftmost sequence segment's first AS is not the
     /// peer's AS is rejected before Adj-RIB-In. Off by default —
     /// matches FRR `no bgp enforce-first-as`.
     pub enforce_first_as: bool,
-    /// FRR `bgp bestpath compare-routerid` (W2.2): when on (the
+    /// FRR `bgp bestpath compare-routerid`: when on (the
     /// default), the best-path tiebreaker uses the lowest BGP
     /// IDENTIFIER (RFC 5004 deterministic mode). When off, the
     /// oldest-received route wins (FRR's default).
     pub bestpath_compare_routerid: bool,
-    /// FRR `bgp default ipv4-unicast` (W2.1): when on (the default —
+    /// FRR `bgp default ipv4-unicast`: when on (the default —
     /// matches FRR), IPv4 unicast is implicitly active for every BGP
     /// peer even when its `mp_families` does not list it. When off,
     /// IPv4 unicast must be added explicitly to the peer's
     /// `mp_families` (FRR `no bgp default ipv4-unicast` with explicit
     /// `address-family ipv4 unicast` / `neighbor X activate`).
     pub default_ipv4_unicast: bool,
-    /// FRR `bgp allow-local-as [N]` (W2.3): router-wide default for the
+    /// FRR `bgp allow-local-as [N]`: router-wide default for the
     /// per-peer `allow_local_as` knob. `0` (the default) rejects any
     /// occurrence of the local AS in a received AS_PATH (RFC 4271
     /// §9.1.2.15). `N > 0` admits up to N occurrences (FRR
     /// `allowas-in N`); `u32::MAX` admits any number (FRR
     /// `allowas-any`). Per-peer overrides via `[peer] allow_local_as`.
     pub allow_local_as: u32,
-    /// FRR `bgp soft-reconfiguration inbound` (W2.4): router-wide
+    /// FRR `bgp soft-reconfiguration inbound`: router-wide
     /// default for the per-peer `soft_reconfig_inbound` knob. When
     /// on, the router retains the pre-policy Adj-RIB-In for every BGP
     /// peer — the raw received routes before the import hook chain
@@ -1146,7 +1138,7 @@ pub(crate) struct DaemonConfig {
     /// A.B.C.D;` both translate to this key. The lr DSL exposes the
     /// same `route_reflector_cluster_id` key under `[bgp]`.
     pub route_reflector_cluster_id: Option<String>,
-    /// W6.3 exchange-plane prototype (`[bgp] exchange_plane`,
+    /// Exchange plane (`[bgp] exchange_plane`,
     /// `--exchange-plane`): advertise the LRXP capability (code 251) on
     /// every BGP peer and activate the record plane where the peer
     /// negotiates it. Off by default. Requires a binary built with the
@@ -1189,7 +1181,7 @@ pub(crate) struct DaemonConfig {
     /// routes regardless of configuration).
     pub graceful_shutdown: bool,
 
-    /// Daemon-wide graceful drain (issue #53). Default `"immediate"` —
+    /// Daemon-wide graceful drain. Default `"immediate"` —
     /// the historical behaviour: `shutdown` flips the `running` flag and
     /// the daemon exits at the next poll. `"drain"` enters a rate-limited
     /// drain first: stop accepting new routes, walk the Loc-RIB and pull
@@ -1250,14 +1242,14 @@ pub(crate) struct DaemonConfig {
     /// hook chain.
     pub filters: Vec<FilterSpec>,
     /// `[[filter_function]]` tables — reusable function declarations
-    /// prepended to every filter body before compilation (issue #46).
+    /// prepended to every filter body before compilation.
     /// A function declared here is callable from any filter (and from
     /// any other shared function); the per-filter `function` keyword
     /// stays available for filter-private helpers.
     pub filter_functions: Vec<FilterFunctionSpec>,
 
-    /// `[damping]` table — RFC 2439 route flap damping (ROADMAP-v3
-    /// D4.3). Off by default; when `enabled = true` the daemon
+    /// `[damping]` table — RFC 2439 route flap damping. Off by default;
+    /// when `enabled = true` the daemon
     /// installs an `lr_policy::hooks::DampingImportHook` on the
     /// import chain and spawns a decay ticker thread that
     /// periodically calls `DampingTable::decay_all`. The hook
@@ -1267,23 +1259,23 @@ pub(crate) struct DaemonConfig {
     /// the reuse threshold.
     pub damping: DampingSpec,
 
-    /// `[bgp.peer_health]` table — per-peer flap suppression (issue #99).
+    /// `[bgp.peer_health]` table — per-peer flap suppression.
     /// Off by default. When `rollout != "off"`, the daemon installs a
     /// [`lr_policy::hooks::PeerHealthImportHook`] on the import chain
     /// and spawns a ticker thread that periodically calls
     /// [`lr_peer_health::PeerHealthTable::tick`].
     pub peer_health: PeerHealthSpec,
 
-    /// `[[redistribute]]` tables (ROADMAP-v3 D4.1) — cross-protocol
+    /// `[[redistribute]]` tables — cross-protocol
     /// redistribution pipes installed on the shared router at startup
     /// (`lr_router::RedistributionPipe`).
     pub redistributes: Vec<RedistributeSpec>,
 
-    /// `[[aggregate]]` tables (ROADMAP-v3 D4.2) — BGP route aggregates
+    /// `[[aggregate]]` tables — BGP route aggregates
     /// registered on the shared router at startup (RFC 4271 §9.2.2.2).
     pub aggregates: Vec<AggregateSpec>,
 
-    /// `[[bgp.network_route_map]]` tables (issue #92) — per-network
+    /// `[[bgp.network_route_map]]` tables — per-network
     /// route-map qualifiers for `networks` (FRR `network PREFIX
     /// route-map NAME`). Each entry names one prefix in
     /// [`Self::networks`] and one `[[route-map]]`; the daemon applies
@@ -1296,7 +1288,7 @@ pub(crate) struct DaemonConfig {
     /// `[bgp.rpki]` table — the RPKI-RTR cache client (RFC 8210).
     /// Off by default (`cache = None`); set `cache = "host:port"` to
     /// spawn the RTR client thread and sync ROAs from the cache into
-    /// the router-wide [`lr_bgp::RoaStore`] (ROADMAP-v3 D2.4).
+    /// the router-wide [`lr_bgp::RoaStore`].
     pub rpki: RpkiSpec,
 
     /// OSPF protocol version: `"v2"` (default) or `"v3"` (RFC 5340).
@@ -1512,12 +1504,12 @@ pub(crate) struct DaemonConfig {
     /// merge into the same struct. The daemon installs it once at
     /// startup through `daemon_logger::init_logger`.
     pub logging: LogConfigSpec,
-    /// `[safety]` — granular safety-net overrides (issue #46). Parsed
+    /// `[safety]` — granular safety-net overrides. Parsed
     /// from TOML `[safety]` and the DSL `safety { ... }` block. The
     /// daemon applies it to the router's `SafetyNet` at startup.
     pub safety: SafetyConfigSpec,
-    /// `[bgp_ls]` — BGP-LS speaker configuration (issue #60 daemon
-    /// wiring). Parsed from TOML `[bgp_ls]` and the DSL
+    /// `[bgp_ls]` — BGP-LS speaker configuration. Parsed from TOML
+    /// `[bgp_ls]` and the DSL
     /// `bgp-ls { ... }` block. When `enabled`, the daemon advertises
     /// the BGP-LS address family (AFI=16388, SAFI=71) on every BGP
     /// session and runs the OSPF LSDB → BGP-LS projection's
@@ -1602,7 +1594,7 @@ impl LogConfigSpec {
     }
 }
 
-/// Operator-facing safety-net configuration (issue #46). Mirrors the
+/// Operator-facing safety-net configuration. Mirrors the
 /// runtime `lr_policy::SafetyConfig` but owns strings (not enums) so
 /// the TOML and DSL frontends can build it without pulling the policy
 /// types into the config crate. [`SafetyConfigSpec::finalise`]
@@ -1988,7 +1980,7 @@ impl DaemonConfig {
     }
 
     /// Validate and complete the `[[redistribute]]` configuration
-    /// (ROADMAP-v3 D4.1). Cross-checked here — not just at key-parse
+    ///. Cross-checked here — not just at key-parse
     /// time — so the invariants read as one unit:
     ///
     /// * `source` and `target` are both present and parseable;
@@ -2118,7 +2110,7 @@ impl DaemonConfig {
     }
 
     /// Validate and complete the `[[aggregate]]` configuration
-    /// (ROADMAP-v3 D4.2). Every table needs a parseable prefix; the
+    ///. Every table needs a parseable prefix; the
     /// same prefix must not be declared twice.
     fn finalize_aggregates(&mut self) -> Result<(), String> {
         let mut seen: std::collections::BTreeSet<lr_core::addr::Prefix> =
@@ -2138,7 +2130,7 @@ impl DaemonConfig {
         Ok(())
     }
 
-    /// Validate the `[[bgp.network_route_map]]` table (issue #92 — FRR
+    /// Validate the `[[bgp.network_route_map]]` table (FRR
     /// `network PREFIX route-map NAME` qualifier). Each entry's
     /// `prefix` MUST also appear in `networks` (the route-map is a
     /// per-network *qualifier*, not a way to originate a network the
@@ -2230,7 +2222,7 @@ impl DaemonConfig {
     }
 
     /// Validate and complete the `[[bgp.roa_source]]` configuration
-    /// (issue #100). Each source must specify exactly one of `path`
+    ///. Each source must specify exactly one of `path`
     /// or `url`, and `format` (or the inferred extension) must map
     /// onto a known parser. URL sources must specify a non-zero
     /// `interval` (clamped to 60 s by the loader at runtime — the
@@ -3153,7 +3145,7 @@ fn parse_bool(value: &str) -> bool {
 /// bodies verbatim between braces and hands them to
 /// `apply_config_key` through this escape, so `escape ∘ unescape` is
 /// the identity and both frontends store byte-identical bodies
-/// (ROADMAP-v3 D16 Phase 2).
+///.
 pub(crate) fn escape_toml_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -3304,15 +3296,10 @@ fn unquote_toml_value(value: &str) -> &str {
 /// Sufficient for the daemon's config schema (see `templates/daemon.toml`).
 ///
 /// **Deprecated authoring dialect.** The native `.lr` DSL
-/// (`crate::config_dsl`) is the primary authoring surface; this TOML
-/// subset is in its deprecation window (fully supported through the
-/// 1.x series, planned for removal in 2.x — see
-/// [`deprecation_notice`] and issue #101). New configurations should
-/// be written in `.lr`; existing TOML files convert with
-/// `lr-daemon config to-dsl daemon.toml > daemon.lr`. The parser
-/// stays the load path for the BIRD and FRR compat surfaces because
-/// the compat converter (`crate::translate`) renders into this TOML
-/// subset as its intermediate representation.
+/// (`crate::config_dsl`) is the supported authoring surface; this TOML
+/// subset is in its deprecation window (see [`deprecation_notice`]).
+/// New configurations should be written in `.lr`; existing TOML files
+/// convert with `lr-daemon config to-dsl daemon.toml > daemon.lr`.
 pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
     let mut section = String::new();
     for (lineno, raw) in text.lines().enumerate() {
@@ -3499,8 +3486,8 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
 }
 
 /// Apply one `key value` pair to `cfg` within `section` — the single
-/// dispatch both configuration frontends drive (ROADMAP-v3 D16
-/// Phase 2, GitHub #18): the TOML subset parser calls it once per
+/// dispatch both configuration frontends drive: the TOML subset parser
+/// calls it once per
 /// `key = value` line, the native `.lr` DSL lowering once per
 /// `key value;` statement. Sharing the dispatch is what makes the
 /// two frontends unable to drift: the same fail-closed key schemas,
@@ -3581,7 +3568,7 @@ pub(crate) fn apply_config_key(
         return Ok(());
     }
     // `[[filter_function]]` — reusable functions prepended to every
-    // filter body (issue #46). Same fail-closed posture as `[[filter]]`.
+    // filter body. Same fail-closed posture as `[[filter]]`.
     if apply_filter_function_key(cfg, section, key, value)
         .map_err(|e| format!("line {}: {}", lineno + 1, e))?
     {
@@ -3597,7 +3584,7 @@ pub(crate) fn apply_config_key(
     {
         return Ok(());
     }
-    // Redistribution and aggregation tables (ROADMAP-v3 D4.1/D4.2):
+    // Redistribution and aggregation tables:
     // fail-closed — a typo'd protocol name or prefix silently
     // changes which routes cross the pipe or get aggregated.
     if apply_redistribute_key(cfg, section, key, value)
@@ -3610,7 +3597,7 @@ pub(crate) fn apply_config_key(
     {
         return Ok(());
     }
-    // `[[bgp.network_route_map]]` (issue #92 — FRR `network PREFIX
+    // `[[bgp.network_route_map]]` (FRR `network PREFIX
     // route-map NAME` qualifier): fail-closed for the same reason as
     // the aggregate handler above — a typo'd `route_map` name would
     // silently drop the route-map at origination.
@@ -3832,7 +3819,7 @@ pub(crate) fn apply_config_key(
         "labeled_networks" | "bgp.labeled_networks" => {
             cfg.labeled_networks = parse_str_array(value)
         }
-        // Daemon-wide graceful drain (issue #53). `[shutdown]` block
+        // Daemon-wide graceful drain. `[shutdown]` block
         // with three keys: `mode = "immediate"` (default, historical)
         // or `mode = "drain"` (new — stop accepting new routes,
         // withdraw the Loc-RIB's locally-originated routes at
@@ -4182,7 +4169,7 @@ fn apply_roa_key(
 }
 
 /// Apply one `key = value` pair to the advanced ROA loader schema:
-/// the `[[bgp.roa_source]]` tables (issue #100). Fail-closed like
+/// the `[[bgp.roa_source]]` tables. Fail-closed like
 /// every other ROA surface — a typo'd path or URL silently weakens
 /// origin validation. Returns `Ok(true)` when the key was consumed
 /// here, `Ok(false)` to fall through to the next section schema.
@@ -4361,7 +4348,7 @@ fn apply_filter_key(
     Ok(true)
 }
 
-/// Apply one `[[filter_function]]` key (issue #46). Recognised keys:
+/// Apply one `[[filter_function]]` key. Recognised keys:
 /// `name`, `params` (an array of parameter-name strings), `return_type`
 /// (an optional type annotation), and `body` (the function's DSL
 /// statement list, without the surrounding `function name(...) { … }`
@@ -4468,7 +4455,7 @@ fn apply_damping_key(
     Ok(true)
 }
 
-/// Apply one `[bgp.peer_health]` key (issue #99). Mirrors
+/// Apply one `[bgp.peer_health]` key. Mirrors
 /// `apply_damping_key` — the section name is `bgp.peer_health`,
 /// and unknown keys fail closed with a typo-protected error.
 fn apply_peer_health_key(
@@ -4575,7 +4562,7 @@ pub(crate) fn parse_daemon_protocol(name: &str) -> Result<lr_core::rib::Protocol
     }
 }
 
-/// Parse one `[[redistribute]]` table key (ROADMAP-v3 D4.1). Unknown
+/// Parse one `[[redistribute]]` table key. Unknown
 /// keys are hard errors — a typo'd protocol name or a silently
 /// ignored allow entry would change which routes cross the pipe.
 fn apply_redistribute_key(
@@ -4641,7 +4628,7 @@ fn apply_redistribute_key(
     Ok(true)
 }
 
-/// Parse one `[[aggregate]]` table key (ROADMAP-v3 D4.2). Unknown keys
+/// Parse one `[[aggregate]]` table key. Unknown keys
 /// are hard errors — an ignored aggregate silently changes what BGP
 /// originates.
 fn apply_aggregate_key(
@@ -4679,7 +4666,7 @@ fn apply_aggregate_key(
     Ok(true)
 }
 
-/// Parse one `[[bgp.network_route_map]]` table key (issue #92 — FRR
+/// Parse one `[[bgp.network_route_map]]` table key (FRR
 /// `network PREFIX route-map NAME` qualifier). Unknown keys are hard
 /// errors — a typo'd `route_map` name silently drops the route-map
 /// at origination, the same fail-closed posture as the aggregate
@@ -4721,7 +4708,7 @@ fn apply_network_route_map_key(
 }
 
 /// Parse one `[bgp.rpki]` table key into `cfg.rpki` (RFC 8210 RTR
-/// cache client, ROADMAP-v3 D2.4). Unknown keys are hard errors — a
+/// cache client,). Unknown keys are hard errors — a
 /// typo'd cache address or a mis-scaled interval silently changes
 /// which ROA database the origin validation runs against. Mirrors the
 /// fail-closed posture of the `[damping]` section handler above.
@@ -4821,7 +4808,7 @@ fn apply_ospf_key(
             }
             // Default area for interfaces without an explicit one. Mirrors
             // `--ospf-area` so the daemon can be fully configured from a
-            // file instead of only the command line (issue #41 §5).
+            // file instead of only the command line.
             "area" => {
                 let area: u32 = value
                     .parse()
@@ -5566,7 +5553,7 @@ fn apply_logging_key(
     Ok(true)
 }
 
-/// Apply one `[safety]` key (issue #46). Recognised keys: the boolean
+/// Apply one `[safety]` key. Recognised keys: the boolean
 /// per-rule toggles (`reject_as_loop`, `reject_invalid_next_hop`,
 /// `reject_empty_as_path_ebgp`, `reject_invalid_origin`,
 /// `reject_excessive_as_loop`, `reject_oversized_as_path`,
@@ -5830,16 +5817,15 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
     Ok(true)
 }
 
-/// The operator-facing TOML deprecation notice text (issue #18 Phase
-/// 4). One line, log-friendly, and stating the window exactly as the
-/// roadmap and README promise it: fully supported through the 1.x
-/// series, removed in 2.x, `config to-dsl` is the migration path.
+/// The operator-facing TOML deprecation notice text. One line,
+/// log-friendly, and stating the window: fully supported through the
+/// 1.x series, removed in 2.x, `config to-dsl` is the migration path.
 const TOML_DEPRECATION_NOTICE: &str = "the TOML configuration dialect is deprecated - \
     migrate to the native .lr dialect (`lr-daemon config to-dsl daemon.toml > daemon.lr`); \
     TOML stays fully supported through the 1.x series and is planned for removal in 2.0";
 
 /// The deprecation notice for a resolved config dialect, if it is in
-/// its deprecation window (issue #18 Phase 4). Only the native TOML
+/// its deprecation window. Only the native TOML
 /// subset is: the `.lr` DSL is the migration target, and BIRD / FRR
 /// files are adoption inputs, not an lr authoring dialect.
 ///
@@ -5862,7 +5848,7 @@ pub(crate) fn deprecation_notice(dialect: Option<&str>) -> Option<&'static str> 
     }
 }
 
-/// Shared configuration-file entry point (issue #18 Phase 1): daemon
+/// Shared configuration-file entry point: daemon
 /// startup ([`parse_args`]), SIGHUP / API `reload` (`daemon.rs`) and
 /// the `lr-daemon config check` validator all load through this one
 /// function, so the set of configs a daemon accepts is exactly the set
@@ -6085,7 +6071,7 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                     };
                 i += 2;
             }
-            // BGP-LS speaker (RFC 7752, issue #60 daemon wiring). The
+            // BGP-LS speaker (RFC 7752 daemon wiring). The
             // master switch advertises the BGP-LS family on every BGP
             // session; `--bgp-ls-as`, `--bgp-ls-id`, `--bgp-ls-area`
             // configure the speaker identity and the area subset.
@@ -6559,7 +6545,7 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.metrics_addr = Some(args[i + 1].clone());
                 i += 2;
             }
-            // Issue #53: daemon-wide graceful drain. `--shutdown-mode
+            // daemon-wide graceful drain. `--shutdown-mode
             // drain` opts into the new posture (stop accepting new
             // routes, withdraw the Loc-RIB at `--shutdown-drain-rate`
             // per second, exit when empty or
@@ -6589,7 +6575,7 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.shutdown_drain_max_wait_secs = args[i + 1].parse().unwrap_or(600);
                 i += 2;
             }
-            // Logging configuration (issue #46). The CLI flags merge
+            // Logging configuration. The CLI flags merge
             // into the same `LogConfigSpec` the `[logging]` TOML
             // section populates; CLI wins by overwriting the field,
             // matching the precedence of every other CLI/TOML pair.
@@ -6669,7 +6655,7 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
         for w in &cfg.warnings {
             eprintln!("config warning: {}", w);
         }
-        // TOML deprecation window (issue #18 Phase 4): an operator
+        // TOML deprecation window: an operator
         // starting the daemon on the deprecated dialect must see the
         // window on stderr, in the same voice as the parse warnings
         // but a distinct `deprecation` class.

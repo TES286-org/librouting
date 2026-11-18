@@ -48,7 +48,7 @@ pub struct DaemonInfo {
     /// Resolved config dialect (`lr`, `toml`, `bird`, `frr`); `None`
     /// when the daemon was started without a config file. Surfaced so
     /// the runtime API can echo the deprecation notice for dialects in
-    /// their deprecation window (the native TOML subset; issue #101).
+    /// their deprecation window.
     pub config_dialect: Option<String>,
 }
 
@@ -59,8 +59,8 @@ pub struct DaemonInfo {
 pub struct ApiContext {
     pub info: DaemonInfo,
     pub router: Arc<RwLock<DefaultRouter>>,
-    /// The shared Loc-RIB handle (issue #101 — the multi-threaded RIB
-    /// read path). The RIB-dumping commands (`routes`, `mrt`, `show
+    /// The shared Loc-RIB handle. The RIB-dumping commands (`routes`,
+    /// `mrt`, `show
     /// routes count`, the `rib-entries` status line) read through the
     /// per-family shard locks instead of the router's `RwLock`, so an
     /// API client never waits behind the writer's tick. Session reads
@@ -73,15 +73,15 @@ pub struct ApiContext {
     /// Protocol-specific extra `status` lines (e.g. LDP adjacency /
     /// session / binding counters). Returns the lines verbatim.
     pub status_lines: Box<dyn Fn() -> Vec<String> + Send + Sync>,
-    /// Daemon-wide graceful drain controller (issue #53). Wired by
+    /// Daemon-wide graceful drain controller. Wired by
     /// the daemon startup path; the API's `shutdown drain` and
     /// `shutdown status` commands delegate to it. `None` when the
     /// daemon does not expose drain (a library embedder wiring
     /// [`ApiContext`] by hand can leave this out and the API simply
     /// refuses `shutdown drain`).
     pub shutdown: Option<Arc<crate::shutdown::ShutdownController>>,
-    /// Live ROA store (issue #52 follow-up — `lrctl roa list` /
-    /// `show roa`). The BGP daemon populates this with the same
+    /// Live ROA store for `lrctl roa list` / `show roa`. The BGP
+    /// daemon populates this with the same
     /// `Arc<RoaStore>` the metrics endpoint already reads through
     /// [`crate::metrics::MetricsContext::roa_len`]; the RTR client
     /// thread swaps snapshots under it. `None` for daemon modes that
@@ -89,7 +89,7 @@ pub struct ApiContext {
     /// then reports `roa-total 0` rather than a misleading "no
     /// data".
     pub roa_store: Option<Arc<lr_bgp::RoaStore>>,
-    /// Peer-health table for `show peer-health` (issue #99). `None`
+    /// Peer-health table for `show peer-health`. `None`
     /// when peer-health flap suppression is not enabled (rollout =
     /// `off`); `Some` when the daemon installed a
     /// `PeerHealthImportHook`. The Arc is shared with the hook and
@@ -212,23 +212,23 @@ mod imp {
         info: &'a DaemonInfo,
         router: &'a Arc<RwLock<DefaultRouter>>,
         /// The shared Loc-RIB handle — the RIB-dumping commands read
-        /// through the per-family shard locks (issue #101), never
+        /// through the per-family shard locks, never
         /// through the router's `RwLock`.
         rib: &'a Arc<lr_rib::LocRib>,
         running: &'a Arc<AtomicBool>,
         reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
-        /// Daemon-wide graceful drain controller (issue #53). `None`
+        /// Daemon-wide graceful drain controller. `None`
         /// when the daemon was started without a `[shutdown]` block
         /// (immediate mode); the API simply refuses `shutdown drain`
         /// in that case so the operator gets a clear "not configured"
         /// diagnostic instead of silent acceptance.
         shutdown: Option<&'a Arc<crate::shutdown::ShutdownController>>,
-        /// Live ROA store for `show roa` (issue #52 follow-up). `None`
+        /// Live ROA store for `show roa`. `None`
         /// on daemon modes without a ROA store (OSPF/Babel/BMP) — the
         /// renderer then reports `roa-total 0` instead of refusing.
         roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
-        /// Peer-health table for `show peer-health` (issue #99).
+        /// Peer-health table for `show peer-health`.
         /// `None` when peer-health flap suppression is off.
         peer_health_table: Option<&'a Arc<std::sync::Mutex<lr_peer_health::PeerHealthTable>>>,
         started: std::time::Instant,
@@ -342,7 +342,7 @@ mod imp {
                 continue;
             }
             // `show roa` — the runtime API half of `lrctl roa list`
-            // (ROADMAP "lrctl roa list", issue #52 follow-up). Rendered
+            // (ROADMAP "lrctl roa list"). Rendered
             // by the shared `roa_view` module so the Unix and Windows
             // paths stay byte-identical. Lives ahead of the `show …`
             // family below so it wins for `show roa` specifically —
@@ -356,7 +356,7 @@ mod imp {
                 }
                 continue;
             }
-            // `show peer-health` (issue #99). Surfaces per-session
+            // `show peer-health`. Surfaces per-session
             // flap-suppression state: rollout mode, degraded count,
             // peak tier, and one line per session with its tier,
             // baseline, window counts, and stale prefix count.
@@ -368,7 +368,7 @@ mod imp {
                 }
                 continue;
             }
-            // Issue #52 BIRD-style `show …` family. Delegated to the
+            // BIRD-style `show …` family. Delegated to the
             // shared `show` module so the Unix and Windows surfaces
             // render identically. `show` (no sub) maps to `show status`,
             // matching BIRD's `show` shortcut.
@@ -389,9 +389,7 @@ mod imp {
                 }
             }
             // `session <handle> <op>` — write-side fine-grained
-            // operations on one session (issue #52 follow-up: "the
-            // lrctl controller must support fine-grained operations
-            // on the running daemon"). The router core already
+            // operations on one session. The router core already
             // implements `soft_reconfig_inbound(h)` (FRR `clear ip
             // bgp * soft in`) and `request_route_refresh(h, family)`
             // (RFC 2918); this command exposes them through the
@@ -448,7 +446,7 @@ mod imp {
                     );
                     if let Some(d) = deps.info.config_dialect.as_deref() {
                         let _ = writeln!(out, "config-dialect {}", d);
-                        // Issue #101: surface the deprecation notice for
+                        // surface the deprecation notice for
                         // dialects in their window (the native TOML subset)
                         // so an operator inspecting a running daemon via
                         // `lrctl status` sees the same warning that startup
@@ -489,7 +487,7 @@ mod imp {
                             urx = s.updates_received,
                             utx = s.updates_sent,
                         );
-                        // W6.3 exchange-plane (feature `exchange-plane`):
+                        // Exchange plane (feature `exchange-plane`):
                         // per-session record stats — how many prefixes
                         // carry a verified record set from this peer and
                         // how many partial-transit sets arrived (design
@@ -521,7 +519,7 @@ mod imp {
                     // label the kernel mirror installs, what `show
                     // mpls table` on FRR would print.
                     // The dump reads through the shared Loc-RIB handle
-                    // (per-family shard locks, issue #101) — an API
+                    // (per-family shard locks) — an API
                     // client dumping routes never waits behind the
                     // writer's tick.
                     for route in deps.rib.iter_paths() {
@@ -578,7 +576,7 @@ mod imp {
                     return;
                 }
                 other if other.starts_with("shutdown ") => {
-                    // Issue #53 daemon-wide graceful drain sub-commands.
+                    // daemon-wide graceful drain sub-commands.
                     // Strip the `shutdown ` prefix and dispatch the
                     // remainder: `drain` enters the drain state machine;
                     // `status` queries the lifecycle without changing
@@ -672,7 +670,7 @@ mod imp {
     }
 
     /// Dispatch `session <handle> <op>` — write-side fine-grained
-    /// operations on one session (issue #52 follow-up).
+    /// operations on one session.
     ///
     /// Supported ops:
     /// - `soft-in` — re-evaluate the import policy against the
@@ -850,7 +848,7 @@ mod imp {
             let routes = ask(&mut probe, "routes");
             assert!(routes.contains("203.0.113.0/24"), "routes: {routes}");
 
-            // Issue #52 BIRD-style `show` family — covered end-to-end
+            // BIRD-style `show` family — covered end-to-end
             // over the same Unix socket the daemon ships in production.
             let show_status = ask(&mut probe, "show status");
             assert!(
@@ -911,7 +909,7 @@ mod imp {
                 "show bogus: {show_unknown}"
             );
 
-            // Issue #52 follow-up: write-side `session <handle> <op>`
+            // follow-up: write-side `session <handle> <op>`
             // commands. The test session is a BGP peer that never
             // connected (state=Idle), so:
             //  - `soft-in` returns `re-evaluated=0` (the pre-policy
