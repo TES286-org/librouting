@@ -660,3 +660,181 @@ fn finalize_ospf_accepts_simple_under_v2() {
     cfg.ospf_auth.password = Some("secret".to_string());
     cfg.finalize().expect("v2 simple is valid");
 }
+
+/// A minimal `Ospf3Daemon` for the graceful-restart status tests —
+/// only the fields `refresh_gr_status` reads are populated, every
+/// other field is the empty/default shape. The v3 daemon has more
+/// LSA-sequence floors than the v2 daemon; the empty maps mirror a
+/// daemon that has not yet originated any LSA.
+fn gr_status_test_daemon_v3(
+    gr_recovery: BTreeMap<u32, lr_ospf::gr::RestartTracker>,
+    neighbors: BTreeMap<(u32, u32), Neighbor>,
+) -> Ospf3Daemon {
+    Ospf3Daemon {
+        router: Arc::new(RwLock::new(DefaultRouter::new())),
+        event_bus: lr_router::event_bus::EventBus::new(),
+        interfaces: Vec::new(),
+        neighbors,
+        pending_reorig: BTreeMap::new(),
+        anchors: BTreeMap::new(),
+        router_lsa_seq: BTreeMap::new(),
+        e_router_lsa_seq: BTreeMap::new(),
+        link_lsa_seq: BTreeMap::new(),
+        iap_lsa_seq: BTreeMap::new(),
+        ri_lsa_seq: BTreeMap::new(),
+        srv6_lsa_seq: BTreeMap::new(),
+        last_orig_ms: BTreeMap::new(),
+        srv6: None,
+        extended_lsas: false,
+        router_id: RouterId::from_u32(0),
+        status: Arc::new(std::sync::Mutex::new(Vec::new())),
+        gr_helper_enabled: true,
+        gr_helper_cap: 120,
+        gr_grace_period: 60,
+        gr_seq_floor: 0,
+        gr_state_file: None,
+        gr_recovery,
+        gr_topology: BTreeMap::new(),
+        auth: OspfV3AuthState::None,
+    }
+}
+
+/// Build a v3 `Neighbor` whose helper is active with `grace_deadline_ms`.
+/// Mirrors the v2 helper: the `on_grace_lsa` check passes the §3.1
+/// validation, the helper enters active mode, the deadline is the
+/// caller's `deadline_ms`. The v3 neighbour's `handle` and `ifindex`
+/// are irrelevant to `refresh_gr_status`.
+fn gr_status_test_neighbor_v3(deadline_ms: u64) -> Neighbor {
+    let mut helper = lr_ospf::gr::HelperEntry::default();
+    let lsa = lr_ospf::lsa::grace::GraceLsaBody {
+        grace_period: 60,
+        reason: lr_ospf::lsa::grace::GraceReason::SoftwareRestart,
+        ipv4_address: None,
+        ipv6_address: None,
+    };
+    let check = lr_ospf::gr::HelperCheck {
+        neighbor_full: true,
+        helper_enabled: true,
+        supported_grace_cap_secs: 120,
+        self_restarting: false,
+        lsa: &lsa,
+        lsa_age_secs: 0,
+        now_ms: deadline_ms.saturating_sub(u64::from(lsa.grace_period) * 1_000),
+    };
+    let transition = helper.on_grace_lsa(check);
+    assert!(
+        matches!(transition, lr_ospf::gr::HelperTransition::Entered { .. }),
+        "the helper entered active mode"
+    );
+    Neighbor {
+        handle: SessionHandle(0),
+        ifindex: 1,
+        established: true,
+        helper,
+    }
+}
+
+/// `refresh_gr_status` reports the *remaining* grace for each
+/// helper, not the configured period. The pre-fix shape printed
+/// `n.helper.last_period_secs()` — the advertised period — so a
+/// helper that started at daemon t=0 with a 60 s grace period read
+/// "60s grace left" forever, even when only 1 s remained.
+#[test]
+fn refresh_gr_status_reports_remaining_grace_for_helpers() {
+    // Tracker: started at t=0 with a 60 s grace period → deadline
+    // 60_000 ms on the daemon clock.
+    let tracker = lr_ospf::gr::RestartTracker::new(60, 0);
+    assert_eq!(tracker.grace_deadline_ms(), 60_000);
+    let gr_recovery = BTreeMap::from([(0u32, tracker)]);
+    let neighbors = BTreeMap::from([((0u32, 0x0a00_0001u32), gr_status_test_neighbor_v3(60_000))]);
+    let daemon = gr_status_test_daemon_v3(gr_recovery, neighbors);
+
+    // Halfway through the grace window: 10 s left (60_000 - 50_000).
+    daemon.refresh_gr_status(50_000);
+    let lines = daemon.status.lock().unwrap().clone();
+    let helper_line = lines
+        .iter()
+        .find(|l| l.contains("grace left"))
+        .expect("the helper status line is present");
+    assert!(
+        helper_line.contains("10s grace left"),
+        "10 s remaining (50 s into a 60 s window), got: {helper_line}"
+    );
+    // The recovery line carries the absolute deadline in
+    // milliseconds — the operator's `+Xms` correlation view.
+    let recovery_line = lines
+        .iter()
+        .find(|l| l.contains("recovering"))
+        .expect("the recovery status line is present");
+    assert!(
+        recovery_line.contains("grace deadline +60000ms"),
+        "the absolute deadline in milliseconds, got: {recovery_line}"
+    );
+
+    // At the deadline: 0 s left.
+    daemon.refresh_gr_status(60_000);
+    let lines = daemon.status.lock().unwrap().clone();
+    let helper_line = lines
+        .iter()
+        .find(|l| l.contains("grace left"))
+        .expect("the helper status line is present");
+    assert!(
+        helper_line.contains("0s grace left"),
+        "0 s remaining at the deadline, got: {helper_line}"
+    );
+
+    // Past the deadline: still 0 s left (saturating_sub clamps).
+    daemon.refresh_gr_status(70_000);
+    let lines = daemon.status.lock().unwrap().clone();
+    let helper_line = lines
+        .iter()
+        .find(|l| l.contains("grace left"))
+        .expect("the helper status line is present");
+    assert!(
+        helper_line.contains("0s grace left"),
+        "0 s remaining past the deadline (clamped), got: {helper_line}"
+    );
+}
+
+/// A helper that became inactive does not appear in the status lines
+/// at all — `refresh_gr_status` filters via `is_active()` before
+/// formatting, so an inactive entry contributes nothing.
+#[test]
+fn refresh_gr_status_omits_inactive_helpers_v3() {
+    let gr_recovery = BTreeMap::new();
+    let mut helper = lr_ospf::gr::HelperEntry::default();
+    let lsa = lr_ospf::lsa::grace::GraceLsaBody {
+        grace_period: 60,
+        reason: lr_ospf::lsa::grace::GraceReason::SoftwareRestart,
+        ipv4_address: None,
+        ipv6_address: None,
+    };
+    let check = lr_ospf::gr::HelperCheck {
+        neighbor_full: true,
+        helper_enabled: true,
+        supported_grace_cap_secs: 120,
+        self_restarting: false,
+        lsa: &lsa,
+        lsa_age_secs: 0,
+        now_ms: 0,
+    };
+    helper.on_grace_lsa(check);
+    let _ = helper.on_flush();
+    assert!(!helper.is_active());
+    let neighbors = BTreeMap::from([(
+        (0u32, 0x0a00_0001u32),
+        Neighbor {
+            handle: SessionHandle(0),
+            ifindex: 1,
+            established: true,
+            helper,
+        },
+    )]);
+    let daemon = gr_status_test_daemon_v3(gr_recovery, neighbors);
+    daemon.refresh_gr_status(5_000);
+    let lines = daemon.status.lock().unwrap().clone();
+    assert!(
+        !lines.iter().any(|l| l.contains("grace left")),
+        "no helper status line, got: {lines:?}"
+    );
+}
