@@ -16,6 +16,8 @@ use super::*;
 use crate::daemon_config::DaemonConfig;
 use lr_core::addr::Prefix;
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 fn p(octets: [u8; 4], plen: u8) -> Prefix {
@@ -432,4 +434,213 @@ fn reload_ldp_binds_label_change_and_remove() {
             label: lbl(200)
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// Session transport: a partial write parks the tail instead of tearing a PDU
+// ---------------------------------------------------------------------------
+
+/// A loopback connection whose daemon end is non-blocking.
+fn loopback_pair() -> (TcpStream, Conn) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("loopback addr");
+    let peer = TcpStream::connect(addr).expect("connect loopback");
+    let (stream, _) = listener.accept().expect("accept loopback");
+    stream
+        .set_nonblocking(true)
+        .expect("non-blocking daemon end");
+    (peer, Conn::new(stream))
+}
+
+/// A sink that accepts `budget` bytes and then reports `WouldBlock`,
+/// modelling a full send buffer. A real socket is a poor fixture for
+/// this: the kernel's loopback path absorbs far more than `SO_SNDBUF`
+/// suggests, so the write never reports the would-block point the
+/// queue must survive.
+struct FullBuffer {
+    budget: usize,
+    accepted: usize,
+    out: Vec<u8>,
+}
+
+impl std::io::Write for FullBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.accepted == self.budget {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        }
+        let n = buf.len().min(self.budget - self.accepted);
+        self.out.extend_from_slice(&buf[..n]);
+        self.accepted += n;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A sink that reports a zero-byte write forever.
+struct Stalled;
+
+impl std::io::Write for Stalled {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A payload shaped like the byte stream of several PDUs.
+fn stream_bytes(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// Read exactly `want` bytes from `peer` on its own thread, so the
+/// sender's queue drains while the test flushes.
+fn read_exactly(mut peer: TcpStream, want: usize) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        peer.set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        let mut got = Vec::with_capacity(want);
+        let mut buf = [0u8; 16 * 1024];
+        while got.len() < want {
+            match peer.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        got
+    })
+}
+
+/// The contract the pre-fix path broke: when the send buffer fills
+/// mid-payload, the unsent tail stays queued instead of being
+/// discarded, and resuming the flush reproduces the exact byte stream
+/// the engine produced — no gap, no duplicated prefix (RFC 5036 §1.2:
+/// the PDU framing has no resynchronisation point, so a torn PDU costs
+/// the session).
+#[test]
+fn flush_parks_at_the_would_block_point_and_resumes_from_there() {
+    let payload = stream_bytes(1000);
+    let mut conn = Conn::new(FullBuffer {
+        budget: 400,
+        accepted: 0,
+        out: Vec::new(),
+    });
+    conn.enqueue(&payload);
+    assert!(
+        !conn.flush().expect("a full buffer is not an error"),
+        "the send buffer filled mid-payload"
+    );
+    assert_eq!(conn.queued(), 600, "the unsent tail stays queued");
+    assert_eq!(
+        conn.stream.out,
+        payload[..400],
+        "the bytes the buffer took are the payload prefix"
+    );
+    // The peer reads: the buffer accepts everything the queue holds.
+    conn.stream.budget = usize::MAX;
+    assert!(conn.flush().expect("the resumed flush drains"));
+    assert_eq!(conn.queued(), 0);
+    assert_eq!(
+        conn.stream.out, payload,
+        "the peer's byte stream is exactly the engine's output"
+    );
+}
+
+/// A zero-byte write on a non-blocking socket is a stall, not progress:
+/// the queue stays parked instead of spinning the pump.
+#[test]
+fn flush_parks_on_a_zero_byte_write() {
+    let mut conn = Conn::new(Stalled);
+    conn.enqueue(b"a PDU");
+    assert!(!conn.flush().expect("a zero-byte write is not an error"));
+    assert_eq!(conn.queued(), 5);
+}
+
+/// A hard write error surfaces so the pump can drop the connection and
+/// tell the engine, instead of the pre-fix `let _ =` swallowing it.
+#[test]
+fn flush_surfaces_a_hard_error() {
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut conn = Conn::new(Broken);
+    conn.enqueue(b"a PDU");
+    assert!(
+        conn.flush().is_err(),
+        "the transport failure is reported to the caller"
+    );
+}
+
+/// `enqueue` compacts the already-written prefix, so a long sequence of
+/// partial flushes cannot grow the buffer without bound.
+#[test]
+fn enqueue_compacts_the_drained_prefix() {
+    let mut conn = Conn::new(FullBuffer {
+        budget: 0,
+        accepted: 0,
+        out: Vec::new(),
+    });
+    conn.pending = stream_bytes(64);
+    conn.off = 48;
+    conn.enqueue(&stream_bytes(8));
+    assert_eq!(conn.off, 0, "offset reset by compaction");
+    assert_eq!(conn.pending.len(), 16 + 8);
+    assert_eq!(conn.queued(), 16 + 8);
+}
+
+/// A real socket: every queued byte reaches a reading peer through the
+/// blocking drain the shutdown path uses after switching the socket
+/// back to blocking with a bounded write timeout.
+#[test]
+fn flush_blocking_delivers_the_parked_queue() {
+    let (peer, mut conn) = loopback_pair();
+    let payload = stream_bytes(256 * 1024);
+    conn.enqueue(&payload);
+    let reader = read_exactly(peer, payload.len());
+    conn.stream
+        .set_nonblocking(false)
+        .expect("switch to blocking");
+    conn.stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("write timeout");
+    conn.flush_blocking().expect("the blocking flush drained");
+    assert_eq!(conn.queued(), 0);
+    assert_eq!(reader.join().expect("reader thread"), payload);
+}
+
+/// A hard write error is observable rather than folded into a silent
+/// `let _`, so the pump can drop the connection and tell the engine.
+#[test]
+fn flush_blocking_reports_a_closed_peer() {
+    let (peer, mut conn) = loopback_pair();
+    drop(peer);
+    conn.enqueue(b"final Notification bytes");
+    conn.stream
+        .set_nonblocking(false)
+        .expect("switch to blocking");
+    conn.stream
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .expect("write timeout");
+    // The first write after the peer's close may still be accepted by
+    // the kernel, so the loop writes until the failure surfaces.
+    let mut failed = false;
+    for _ in 0..8 {
+        if conn.flush_blocking().is_err() {
+            failed = true;
+            break;
+        }
+        conn.enqueue(&stream_bytes(64 * 1024));
+    }
+    assert!(failed, "the closed peer surfaces as a write error");
 }

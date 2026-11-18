@@ -31,6 +31,11 @@
 //!   support the daemon logs a warning and falls back to the
 //!   historical fail-open receive-side behaviour; the outbound hop
 //!   limit 255 is still set on every IPv6 session socket.
+//!   Outbound PDUs go through a per-session queue ([`Conn`]): a write
+//!   that stops at a full send buffer keeps its unsent tail for the next
+//!   pump pass, because RFC 5036 §1.2 requires reliable, in-order
+//!   delivery and the §3.1 framing cannot resynchronise after a torn
+//!   PDU.
 //! - **Local bindings** — the configured `[[ldp.bind]]` FEC-label
 //!   pairs are advertised downstream-unsolicited to every peer that
 //!   becomes operational (and re-advertised on each new session, since
@@ -111,6 +116,11 @@ const ALL_ROUTERS_V6: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 /// Loopback interface index (pop-to-local-delivery egress).
 #[cfg(target_os = "linux")]
 const LO_IF_INDEX: u32 = 1;
+
+/// Bound on the final blocking flush of a session's queued PDUs at
+/// shutdown. Long enough for a LAN round trip, short enough that a
+/// peer that stopped reading cannot stall daemon exit.
+const FINAL_FLUSH_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Parse an address literal (`A.B.C.D`, `2001:db8::1`, `[::1]`).
 fn parse_addr(s: &str) -> Option<IpAddr> {
@@ -393,6 +403,95 @@ impl LdpCounters {
     }
 }
 
+/// One session transport plus the bytes it has not accepted yet.
+///
+/// LDP runs over TCP and RFC 5036 §1.2 requires reliable, in-order
+/// delivery of every PDU; the PDU framing of §3.1 has no resynchronisation
+/// point, so a torn PDU is unrecoverable — the peer either sees a bad
+/// PDU Length or misparses the next header and resets the session.
+/// `write_all` on a non-blocking socket returns `WouldBlock` at the first
+/// full send buffer and reports how many bytes it wrote, so writing the
+/// engine's drain straight into the socket drops the tail of a PDU
+/// whenever the peer's receive window closes mid-message (a large LIB
+/// announcement against a slow peer).
+///
+/// The queue keeps the tail and [`Conn::flush`] retries it on the next
+/// pump iteration, so the byte stream stays exactly the concatenation of
+/// the PDUs the engine produced.
+struct Conn<S = TcpStream> {
+    stream: S,
+    /// Bytes the socket has not taken yet: the unsent tail of a
+    /// partially written PDU plus every PDU queued behind it.
+    pending: Vec<u8>,
+    /// Next write offset into `pending`.
+    off: usize,
+}
+
+impl<S: Write> Conn<S> {
+    fn new(stream: S) -> Self {
+        Self {
+            stream,
+            pending: Vec::new(),
+            off: 0,
+        }
+    }
+
+    /// Queue bytes for the peer. Compacts the drained prefix first so
+    /// repeated partial flushes cannot grow the buffer without bound.
+    fn enqueue(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        if self.off > 0 {
+            self.pending.drain(..self.off);
+            self.off = 0;
+        }
+        self.pending.extend_from_slice(bytes);
+    }
+
+    /// Push queued bytes into the socket. `Ok(true)` means the queue
+    /// drained, `Ok(false)` means bytes remain parked (the send buffer
+    /// is full — retry on the next pump), `Err` is a hard write error
+    /// (the session is gone).
+    fn flush(&mut self) -> std::io::Result<bool> {
+        while self.off < self.pending.len() {
+            match self.stream.write(&self.pending[self.off..]) {
+                // A zero-byte write on a non-blocking socket is a
+                // stall, not progress — keep the bytes parked.
+                Ok(0) => return Ok(false),
+                Ok(n) => self.off += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+        self.pending.clear();
+        self.off = 0;
+        Ok(true)
+    }
+
+    /// Drain the queue through a blocking stream with a bounded write
+    /// timeout. The shutdown path runs this after switching the socket
+    /// back to blocking so the Shutdown Notification (RFC 5036 §3.5.1.2.4)
+    /// reaches the peer instead of being dropped with the socket.
+    fn flush_blocking(&mut self) -> std::io::Result<()> {
+        while self.off < self.pending.len() {
+            match self.stream.write(&self.pending[self.off..]) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+                Ok(n) => self.off += n,
+                Err(e) => return Err(e),
+            }
+        }
+        self.pending.clear();
+        self.off = 0;
+        Ok(())
+    }
+
+    /// Bytes still queued for the peer.
+    fn queued(&self) -> usize {
+        self.pending.len() - self.off
+    }
+}
+
 /// Daemon-wide transport state (the engine drives everything else).
 struct LdpDaemon {
     engine: LdpEngine,
@@ -406,7 +505,7 @@ struct LdpDaemon {
     udp_rx_v6: Option<UdpSocket>,
     listener: TcpListener,
     interfaces: Vec<LdpInterface>,
-    conns: HashMap<u64, TcpStream>,
+    conns: HashMap<u64, Conn>,
     next_conn: u64,
     /// The configured local bindings (the LIB half the daemon
     /// advertises downstream-unsolicited), keyed by FEC for O(log n)
@@ -1123,7 +1222,7 @@ impl LdpDaemon {
         self.pump_link_hellos(now_ms);
         self.engine.tick(now);
         self.handle_events(now);
-        self.flush_tcp();
+        self.flush_tcp(now);
         self.flush_udp();
     }
 
@@ -1295,7 +1394,7 @@ impl LdpDaemon {
                     .unwrap_or(IpAddr::V4([0, 0, 0, 0]));
                 let conn = self.next_conn;
                 self.next_conn += 1;
-                self.conns.insert(conn, s);
+                self.conns.insert(conn, Conn::new(s));
                 self.engine.on_accepted(conn, local);
                 continue;
             }
@@ -1311,16 +1410,19 @@ impl LdpDaemon {
                 .unwrap_or(IpAddr::V4([0, 0, 0, 0]));
             let conn = self.next_conn;
             self.next_conn += 1;
-            self.conns.insert(conn, stream);
+            self.conns.insert(conn, Conn::new(stream));
             self.engine.on_accepted(conn, local);
         }
         let conns: Vec<u64> = self.conns.keys().copied().collect();
+        // One buffer for the whole sweep: the read scratch space does
+        // not belong to any connection, and a 64 KiB zeroed buffer per
+        // connection per pump iteration is pure overhead.
+        let mut buf = [0u8; 65535];
         for conn in conns {
             let mut dead = false;
-            let mut buf = [0u8; 65535];
-            if let Some(stream) = self.conns.get_mut(&conn) {
+            if let Some(c) = self.conns.get_mut(&conn) {
                 loop {
-                    match stream.read(&mut buf) {
+                    match c.stream.read(&mut buf) {
                         Ok(0) => {
                             dead = true;
                             break;
@@ -1340,8 +1442,8 @@ impl LdpDaemon {
                 }
             }
             if dead {
-                if let Some(stream) = self.conns.remove(&conn) {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                if let Some(c) = self.conns.remove(&conn) {
+                    let _ = c.stream.shutdown(std::net::Shutdown::Both);
                 }
                 self.engine.on_closed(now, conn);
             }
@@ -1560,11 +1662,14 @@ impl LdpDaemon {
                     let _ = graceful;
                 }
                 EngineEvent::CloseConnection(conn) => {
-                    // Deliver any queued bytes (fatal Notification)
-                    // before the FIN.
-                    self.flush_tcp();
-                    if let Some(stream) = self.conns.remove(&conn) {
-                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    // Deliver any queued bytes (a fatal Notification,
+                    // RFC 5036 §3.5.1.2.7) before the FIN. The queue may
+                    // be parked behind a full send buffer, so the final
+                    // step drains it blocking with a bounded timeout.
+                    self.flush_tcp(now);
+                    self.flush_conn_blocking(conn);
+                    if let Some(c) = self.conns.remove(&conn) {
+                        let _ = c.stream.shutdown(std::net::Shutdown::Both);
                     }
                 }
                 EngineEvent::MappingLearned {
@@ -1787,7 +1892,7 @@ impl LdpDaemon {
                     let _ = s.set_nonblocking(true);
                     let conn = self.next_conn;
                     self.next_conn += 1;
-                    self.conns.insert(conn, s);
+                    self.conns.insert(conn, Conn::new(s));
                     self.engine.on_connected(now, conn, peer_id);
                     log_info!(
                         Component::Ldp,
@@ -1799,7 +1904,7 @@ impl LdpDaemon {
                 }
                 let conn = self.next_conn;
                 self.next_conn += 1;
-                self.conns.insert(conn, stream);
+                self.conns.insert(conn, Conn::new(stream));
                 self.engine.on_connected(now, conn, peer_id);
                 log_info!(
                     Component::Ldp,
@@ -1820,12 +1925,84 @@ impl LdpDaemon {
         }
     }
 
-    /// Write every queued TCP payload to its connection.
-    fn flush_tcp(&mut self) {
+    /// Queue the engine's outbound TCP bytes and push every connection's
+    /// queue into its socket.
+    ///
+    /// Queuing and flushing are separate steps: a write that fills the
+    /// send buffer leaves the unsent tail parked in [`Conn::pending`],
+    /// and the next pump retries it. Writing the drain straight to the
+    /// socket (`write_all` on a non-blocking stream) tore a PDU at the
+    /// would-block point and discarded the rest, which RFC 5036 §1.2
+    /// forbids — the peer cannot resynchronise a torn PDU.
+    ///
+    /// A hard write error means the transport is gone; the connection is
+    /// dropped and the engine told, so the session FSM and the kernel
+    /// mirror unwind through the normal `SessionDown` path instead of
+    /// waiting for a read that may never report the closure.
+    fn flush_tcp(&mut self, now: Instant) {
         for (conn, bytes) in self.engine.drain_tcp_all() {
-            if let Some(stream) = self.conns.get_mut(&conn) {
-                let _ = stream.write_all(&bytes);
+            if let Some(c) = self.conns.get_mut(&conn) {
+                c.enqueue(&bytes);
             }
+        }
+        let conns: Vec<u64> = self.conns.keys().copied().collect();
+        for conn in conns {
+            let failed = match self.conns.get_mut(&conn) {
+                Some(c) => c.flush().is_err(),
+                None => false,
+            };
+            if failed {
+                if let Some(c) = self.conns.remove(&conn) {
+                    let _ = c.stream.shutdown(std::net::Shutdown::Both);
+                }
+                self.engine.on_closed(now, conn);
+            }
+        }
+    }
+
+    /// Deliver every parked PDU before the sockets close.
+    ///
+    /// The steady-state flush is non-blocking, so at shutdown a queue
+    /// that the peer's window kept parked would be dropped with the
+    /// socket and the peer would never see the Shutdown Notification
+    /// (RFC 5036 §3.5.1.2.4) that tells it the sessions are going away
+    /// deliberately rather than by failure. Switching each socket to
+    /// blocking with a bounded write timeout delivers the queue, and a
+    /// peer that stopped reading cannot stall exit past that bound.
+    fn flush_tcp_blocking(&mut self) {
+        let conns: Vec<u64> = self.conns.keys().copied().collect();
+        for conn in conns {
+            self.flush_conn_blocking(conn);
+        }
+    }
+
+    /// Blocking drain of one connection's queue, bounded by
+    /// [`FINAL_FLUSH_WRITE_TIMEOUT`].
+    fn flush_conn_blocking(&mut self, conn: u64) {
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        if c.queued() == 0 {
+            return;
+        }
+        if let Err(e) = c.stream.set_nonblocking(false) {
+            log_warn!(
+                Component::Ldp,
+                "ldp final flush: non-blocking switch: {}",
+                e
+            );
+            return;
+        }
+        if let Err(e) = c.stream.set_write_timeout(Some(FINAL_FLUSH_WRITE_TIMEOUT)) {
+            log_warn!(Component::Ldp, "ldp final flush: write timeout: {}", e);
+        }
+        if let Err(e) = c.flush_blocking() {
+            log_warn!(
+                Component::Ldp,
+                "ldp final flush left {} byte(s) queued: {}",
+                c.queued(),
+                e
+            );
         }
     }
 
@@ -1850,7 +2027,11 @@ impl LdpDaemon {
         for peer in peers {
             self.engine.shutdown_peer(now, peer);
         }
-        self.flush_tcp();
+        // Queue the Shutdown Notifications, try one non-blocking pass,
+        // then give every parked queue a bounded blocking drain before
+        // the sockets go away.
+        self.flush_tcp(now);
+        self.flush_tcp_blocking();
         self.conns.clear();
         #[cfg(target_os = "linux")]
         {

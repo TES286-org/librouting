@@ -123,6 +123,58 @@ halfway through a 60 s window reads "10s grace left"; at the
 deadline reads "0s"; past the deadline still reads "0s" (saturating);
 and a flushed helper does not appear in the status lines at all.
 
+**LDP session transport queues the unsent tail of a PDU instead of
+tearing it** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+`LdpDaemon::flush_tcp` wrote each connection's drain with `write_all`
+on a non-blocking socket and discarded the result. `write_all` stops
+at the first `WouldBlock`, so a peer whose receive window closed
+mid-message left a truncated PDU on the wire, and every PDU queued
+behind it was lost with the buffer. RFC 5036 §1.2 requires reliable,
+in-order delivery, and the §3.1 PDU framing carries a length field
+with no resynchronisation point: the peer rejects the length or
+misparses the next header, and the session resets. The same call at
+shutdown could drop the Shutdown Notification (§3.5.1.2.4) the peer
+needs to distinguish a deliberate stop from a failure. Each session
+now owns a `Conn` with a pending queue: `flush_tcp` appends the
+drain, writes what the socket accepts, keeps the unsent tail for the
+next pump pass (compacting the written prefix so repeated partial
+flushes cannot grow the buffer), and surfaces a hard write error by
+dropping the connection and telling the engine, so the session FSM
+and the kernel mirror unwind through the normal `SessionDown` path.
+The shutdown path and the engine's `CloseConnection` event drain the
+queue blocking with a bounded 500 ms write timeout
+(`FINAL_FLUSH_WRITE_TIMEOUT`), so a fatal or shutdown Notification
+reaches the peer before the FIN. The read sweep also allocates its
+64 KiB scratch buffer once per pass instead of once per connection
+per pass. The new `daemon_ldp::tests` cases pin the contract: a
+`WouldBlock` mid-payload keeps the tail and a resumed flush
+reproduces the engine's byte stream exactly (no gap, no duplicated
+prefix), a zero-byte write parks instead of spinning, a hard error is
+reported rather than swallowed, and a real loopback peer receives
+every queued byte through the blocking drain.
+
+**Accept reactor re-arms its listener after a hard `accept` error**
+(`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+mio reports readiness edge-triggered (`EPOLLET` on Linux, `EV_CLEAR`
+on the BSDs, the completion-based equivalent on Windows). The
+management listeners' reactor
+(`crates/lr-cli/src/accept_reactor.rs`) skipped the accept for 100 ms
+after a hard error (EMFILE, ENFILE, ENOBUFS) and then waited for the
+next event — but the connection whose accept failed had already
+produced its edge, and no second edge arrives while it stays queued.
+A transient descriptor shortage therefore left that connection
+unserved until an unrelated connection arrived: up to the next
+metrics scrape on the metrics listener, and indefinitely on the
+runtime API listener, which only sees traffic when an operator runs
+`lrctl`. The loop now drains the queue directly when the backoff
+window closes and re-arms the registration, so anything queued in the
+meantime produces fresh edges. The new
+`accept_retries_a_connection_queued_by_a_failed_accept` test fails
+the first accept against a real listener, then asserts the queued
+connection is served once the backoff expires.
+
 **BGP reactor threads the post-poll `now_ms` through
 `feed_input_at` — the KEEPALIVE-arrival metric is no longer
 dead** (`lr-cli`,

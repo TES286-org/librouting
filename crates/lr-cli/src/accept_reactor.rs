@@ -21,9 +21,10 @@
 //!   racing the registration) — the loop re-checks `running` itself
 //!   each time it wakes;
 //! - a hard `accept` error (EMFILE, ENFILE, ENOBUFS) backs the queue
-//!   off 100 ms — the listener stays registered and level-triggered,
-//!   so its events are skipped until the deadline passes rather than
-//!   spinning the loop.
+//!   off 100 ms and re-arms the registration when the window closes —
+//!   mio reports readiness edge-triggered, so the connection whose
+//!   accept failed produces no further event and would otherwise stay
+//!   queued until an unrelated connection arrived.
 //!
 //! The accepted streams convert back to their blocking `std` shapes
 //! and the per-connection threads keep their read-timeout serving
@@ -55,10 +56,9 @@ const POLL_CEILING: Duration = Duration::from_secs(1);
 
 /// How long the loop pauses accepting after a hard `accept` error
 /// (EMFILE, ENFILE, ENOBUFS): the poll-and-sleep loop slept 100 ms
-/// in the same case. The listener stays registered and
-/// level-triggered, so its events are skipped until the deadline
-/// passes — without this guard a persistently failing `accept` would
-/// spin the loop.
+/// in the same case. Readiness is edge-triggered, so the failed
+/// connection's edge is gone; the loop re-arms the registration at
+/// this deadline instead of spinning on an error that cannot clear.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// The cadence the shutdown watcher polls `running` at — the same
@@ -152,14 +152,46 @@ fn run<L: AcceptSource>(
     spawn_shutdown_watcher(running, waker, watcher_name);
 
     let mut events = Events::with_capacity(64);
-    let mut accept_backoff_until: Option<Instant> = None;
+    let mut retry_after: Option<Instant> = None;
     loop {
-        let _ = poll.poll(&mut events, Some(POLL_CEILING));
+        // Wake at the retry deadline rather than waiting out the poll
+        // ceiling, so the recovery after a hard accept error takes the
+        // backoff window and not a full second.
+        let timeout = match retry_after {
+            Some(deadline) => deadline
+                .saturating_duration_since(Instant::now())
+                .clamp(Duration::from_millis(1), POLL_CEILING),
+            None => POLL_CEILING,
+        };
+        let _ = poll.poll(&mut events, Some(timeout));
         if !running.load(Ordering::Relaxed) {
             // The socket file cleanup (API) and the port release
             // happen on drop, back in the caller.
             let _ = registry.deregister(&mut listener);
             return;
+        }
+        // Readiness is edge-triggered. The connection whose `accept`
+        // failed produced its edge already, so waiting for another one
+        // leaves it queued until an unrelated connection arrives; a
+        // transient EMFILE would wedge the listener. At the deadline the
+        // loop drains the queue directly, then re-arms the registration
+        // so anything queued in the meantime produces fresh edges. The
+        // events of this poll are still processed below: a stale readable
+        // edge only finds an empty queue.
+        if let Some(deadline) = retry_after {
+            if Instant::now() >= deadline {
+                retry_after = None;
+                if let Err(e) = drain_accepts(&mut listener, &mut on_conn) {
+                    log_error!(crate::Component::Daemon, "accept failed: {e}");
+                    retry_after = Some(Instant::now() + ACCEPT_ERROR_BACKOFF);
+                }
+                if registry
+                    .reregister(&mut listener, LISTENER_TOKEN, Interest::READABLE)
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
         for event in events.iter() {
             let token = event.token();
@@ -171,23 +203,31 @@ fn run<L: AcceptSource>(
             if token != LISTENER_TOKEN || !event.is_readable() {
                 continue;
             }
-            if let Some(until) = accept_backoff_until {
-                if Instant::now() < until {
-                    continue;
-                }
-                accept_backoff_until = None;
+            // Still inside the backoff window: drop the edge. The
+            // deadline branch above retries without one.
+            if retry_after.is_some() {
+                continue;
             }
-            loop {
-                match listener.accept_std() {
-                    Ok(Some(stream)) => on_conn(stream),
-                    Ok(None) => break,
-                    Err(e) => {
-                        log_error!(crate::Component::Daemon, "accept failed: {e}");
-                        accept_backoff_until = Some(Instant::now() + ACCEPT_ERROR_BACKOFF);
-                        break;
-                    }
-                }
+            if let Err(e) = drain_accepts(&mut listener, &mut on_conn) {
+                log_error!(crate::Component::Daemon, "accept failed: {e}");
+                retry_after = Some(Instant::now() + ACCEPT_ERROR_BACKOFF);
             }
+        }
+    }
+}
+
+/// Drain the accept queue, handing each connection to `on_conn`. Stops
+/// at the first hard error (`WouldBlock` is the queue emptying, reported
+/// as `Ok(None)` by [`AcceptSource::accept_std`]).
+fn drain_accepts<L: AcceptSource>(
+    listener: &mut L,
+    on_conn: &mut impl FnMut(L::StdStream),
+) -> io::Result<()> {
+    loop {
+        match listener.accept_std() {
+            Ok(Some(stream)) => on_conn(stream),
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(e),
         }
     }
 }
@@ -240,6 +280,102 @@ pub(crate) fn unix_accept_loop(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    use std::sync::atomic::AtomicUsize;
+
+    /// A listener whose first `fail_for` accepts fail. The kernel half
+    /// is a real listener so registration and readiness are genuine;
+    /// only the accept verdict is scripted.
+    struct FailingListener {
+        inner: MioTcpListener,
+        attempts: Arc<AtomicUsize>,
+        fail_for: usize,
+    }
+
+    impl mio::event::Source for FailingListener {
+        fn register(
+            &mut self,
+            registry: &Registry,
+            token: Token,
+            interests: Interest,
+        ) -> io::Result<()> {
+            self.inner.register(registry, token, interests)
+        }
+
+        fn reregister(
+            &mut self,
+            registry: &Registry,
+            token: Token,
+            interests: Interest,
+        ) -> io::Result<()> {
+            self.inner.reregister(registry, token, interests)
+        }
+
+        fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
+            self.inner.deregister(registry)
+        }
+    }
+
+    impl AcceptSource for FailingListener {
+        type StdStream = std::net::TcpStream;
+
+        fn accept_std(&mut self) -> io::Result<Option<Self::StdStream>> {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            if attempt < self.fail_for {
+                return Err(io::Error::from(ErrorKind::Other));
+            }
+            match self.inner.accept() {
+                Ok((stream, _)) => Ok(Some(std::net::TcpStream::from(stream))),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// A hard accept error leaves the connection queued. Readiness is
+    /// edge-triggered, so no further event arrives for it: the loop must
+    /// re-arm the registration at the backoff deadline, or a transient
+    /// EMFILE wedges the listener until an unrelated connection creates
+    /// a new edge.
+    #[test]
+    fn accept_retries_a_connection_queued_by_a_failed_accept() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let served = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicBool::new(true));
+        let std_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let source = FailingListener {
+            inner: MioTcpListener::from_std(std_listener),
+            attempts: Arc::clone(&attempts),
+            fail_for: 1,
+        };
+        let thread = thread::Builder::new()
+            .name("lr-test-accept-retry".into())
+            .spawn({
+                let running = Arc::clone(&running);
+                let served = Arc::clone(&served);
+                move || {
+                    run(source, &running, "lr-test-waker", move |_stream| {
+                        served.fetch_add(1, Ordering::Relaxed);
+                    })
+                }
+            })
+            .unwrap();
+        // Queue one connection; the first accept for it fails.
+        let _client = std::net::TcpStream::connect(addr).unwrap();
+        // Four backoff windows: enough for the re-armed registration to
+        // deliver the same connection again.
+        thread::sleep(Duration::from_millis(450));
+        let served_count = served.load(Ordering::Relaxed);
+        let attempt_count = attempts.load(Ordering::Relaxed);
+        running.store(false, Ordering::Relaxed);
+        thread.join().unwrap();
+        assert!(attempt_count >= 2, "the accept was retried");
+        assert_eq!(
+            served_count, 1,
+            "the connection queued by the failed accept was served once"
+        );
+    }
 
     /// A client connects while the loop idles inside `poll`: the
     /// readable event wakes it immediately and the connection handler
