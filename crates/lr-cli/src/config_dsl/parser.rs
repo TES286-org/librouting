@@ -1,5 +1,5 @@
 //! Parser and IR lowering for the native `.lr` configuration DSL
-//! (ROADMAP-v3 D16 Phase 2, GitHub #18).
+//!.
 //!
 //! The parser is a single recursive descent over the token stream of
 //! [`crate::config_dsl::lexer`]; there is no intermediate AST. Every
@@ -68,9 +68,15 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
     match (parent, name) {
         ("", "bgp") => Some(single("bgp")),
         ("bgp", "rpki") => Some(single("bgp.rpki")),
+        // Per-peer BGP flap suppression. Same single-section shape as
+        // `rpki`; keys dispatch through `apply_peer_health_key`.
+        ("bgp", "peer-health") => Some(single("bgp.peer_health")),
         ("", "logging") => Some(single("logging")),
         ("", "safety") => Some(single("safety")),
-        // RFC 7752 BGP-LS speaker block (issue #60 daemon wiring). A
+        // Graceful-shutdown drain (CLI mirror: `--shutdown-mode`,
+        // `--shutdown-drain-rate`, `--shutdown-drain-max-wait`).
+        ("", "shutdown") => Some(single("shutdown")),
+        // RFC 7752 BGP-LS speaker block. A
         // single section — keys merge in file order like `[safety]` /
         // `[logging]`. The CLI mirror is `--bgp-ls` + `--bgp-ls-as` /
         // `--bgp-ls-id` / `--bgp-ls-area`.
@@ -114,21 +120,21 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
             entry: Entry::Filter,
         }),
         // `filter-function` — reusable functions prepended to every
-        // filter body (issue #46). Same array-table shape as `[[filter]]`
+        // filter body. Same array-table shape as `[[filter]]`
         // but without the verbatim-body carve-out: the body is a normal
         // string key.
         ("", "filter-function") => Some(array("filter_function", Some("name"))),
         ("", "roa") => Some(array("roa", None)),
         ("", "redistribute") => Some(array("redistribute", None)),
         ("", "aggregate") => Some(array("aggregate", None)),
-        // `bgp.roa_source` (issue #100 — advanced ROA loading). The
+        // `bgp.roa_source`. The
         // DSL form is a top-level flat block (no enclosing `bgp { … }`),
         // mirroring `bgp.network_route_map` above and the TOML
         // `[[bgp.roa_source]]` table. Keys dispatch through the shared
         // `apply_roa_source_key` so both frontends share the fail-closed
         // schema and the `RoaSourceSpec` struct.
         ("", "bgp.roa_source") => Some(array("bgp.roa_source", None)),
-        // `[[bgp.network_route_map]]` (issue #92 — defects.txt L75):
+        // `[[bgp.network_route_map]]`:
         // FRR `network PREFIX route-map NAME` qualifier applied at
         // origination. The DSL emits these as a top-level
         // `bgp.network_route_map { prefix = "..."; route_map = "..." }`

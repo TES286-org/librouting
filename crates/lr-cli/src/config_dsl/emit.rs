@@ -1,6 +1,5 @@
 //! `lr-daemon config to-dsl <file>` — the deterministic
-//! [`DaemonConfig`] → `.lr` renderer (ROADMAP-v3 D16 Phase 2,
-//! GitHub #18).
+//! [`DaemonConfig`] → `.lr` renderer.
 //!
 //! Contract (see `docs/config_dsl_grammar.md`):
 //!
@@ -83,10 +82,11 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         );
     }
 
-    // --- bgp (with the nested rpki block) -------------------------------
+    // --- bgp (with the nested rpki and peer-health blocks) -----------------
     let bgp_fields = bgp_block(cfg, &base)?;
     let rpki = rpki_block(cfg);
-    if !bgp_fields.is_empty() || !rpki.is_empty() {
+    let peer_health = peer_health_block(cfg);
+    if !bgp_fields.is_empty() || !rpki.is_empty() || !peer_health.is_empty() {
         e.open(0, "bgp", None);
         for (key, value) in &bgp_fields {
             e.kv(1, key, value);
@@ -94,6 +94,13 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         if !rpki.is_empty() {
             e.open(1, "rpki", None);
             for (key, value) in &rpki {
+                e.kv(2, key, value);
+            }
+            e.close(1);
+        }
+        if !peer_health.is_empty() {
+            e.open(1, "peer-health", None);
+            for (key, value) in &peer_health {
                 e.kv(2, key, value);
             }
             e.close(1);
@@ -204,7 +211,7 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.filter_block(filter.name.as_deref().map(fmt_string).as_deref(), body);
     }
 
-    // --- filter functions (issue #46) -------------------------------------
+    // --- filter functions -------------------------------------
     // Shared functions are emitted as `filter-function "name" { … }`
     // blocks. The body is a quoted string (with `\"` and `\\` escapes)
     // matching the TOML form, so the DSL parser's string lexer reads
@@ -276,7 +283,7 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         }
         e.close(0);
     }
-    // `[[bgp.network_route_map]]` (issue #92 — defects.txt L75): FRR
+    // `[[bgp.network_route_map]]`: FRR
     // `network PREFIX route-map NAME` qualifier. Emitted as a flat
     // top-level `bgp.network_route_map { prefix = …; route_map = … }`
     // block — mirrors the TOML shape (no enclosing `bgp { … }`).
@@ -290,7 +297,7 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         }
         e.close(0);
     }
-    // `[[bgp.roa_source]]` (issue #100 — advanced ROA loading). Emitted
+    // `[[bgp.roa_source]]`. Emitted
     // as a flat top-level `bgp.roa_source { … }` block, mirroring the
     // `bgp.network_route_map` shape. The `program` / `program_file`
     // keys appear only when the source's format is a transform format
@@ -481,7 +488,7 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.close(0);
     }
 
-    // --- bgp-ls (issue #60 daemon wiring) ------------------------------------
+    // --- bgp-ls ------------------------------------
     // Emitted only when `enabled` is set OR the operator configured any
     // of the speaker identity / area subset — matches the `safety`
     // block's "emit when set" posture so a daemon that explicitly
@@ -503,6 +510,34 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         if !cfg.bgp_ls.areas.is_empty() {
             let areas: Vec<String> = cfg.bgp_ls.areas.iter().map(|a| a.to_string()).collect();
             e.kv(1, "areas", &format!("[{}]", areas.join(", ")));
+        }
+        e.close(0);
+    }
+
+    // --- shutdown ---------------------------------------------------------
+    // Emitted only when the operator configured a drain; the defaults
+    // (immediate, 50/s, 600 s) need no block.
+    if cfg.shutdown_mode != base.shutdown_mode
+        || cfg.shutdown_drain_rate_per_sec != base.shutdown_drain_rate_per_sec
+        || cfg.shutdown_drain_max_wait_secs != base.shutdown_drain_max_wait_secs
+    {
+        e.open(0, "shutdown", None);
+        if cfg.shutdown_mode != base.shutdown_mode {
+            e.kv(1, "mode", &fmt_string(&cfg.shutdown_mode));
+        }
+        if cfg.shutdown_drain_rate_per_sec != base.shutdown_drain_rate_per_sec {
+            e.kv(
+                1,
+                "drain_rate_per_sec",
+                &cfg.shutdown_drain_rate_per_sec.to_string(),
+            );
+        }
+        if cfg.shutdown_drain_max_wait_secs != base.shutdown_drain_max_wait_secs {
+            e.kv(
+                1,
+                "drain_max_wait_secs",
+                &cfg.shutdown_drain_max_wait_secs.to_string(),
+            );
         }
         e.close(0);
     }
@@ -689,6 +724,65 @@ fn rpki_block(cfg: &DaemonConfig) -> Vec<(String, String)> {
     }
     if let Some(x) = cfg.rpki.expire_interval {
         v.push(("expire_interval".into(), x.to_string()));
+    }
+    v
+}
+
+/// `bgp { peer-health { … } }` body. Emitted only when accounting is on
+/// or a tuning key moved off the default; `rollout` is then always
+/// present so an explicit `off` round-trips.
+fn peer_health_block(cfg: &DaemonConfig) -> Vec<(String, String)> {
+    let ph = &cfg.peer_health;
+    let base = lr_peer_health::PeerHealthConfig::default();
+    if !ph.is_enabled() && ph.config == base {
+        return Vec::new();
+    }
+    let c = &ph.config;
+    let mut v: Vec<(String, String)> = Vec::new();
+    if !ph.rollout.is_empty() {
+        v.push(("rollout".into(), fmt_string(&ph.rollout)));
+    }
+    if c.short_window.window_s != base.short_window.window_s {
+        v.push(("short_window_s".into(), c.short_window.window_s.to_string()));
+    }
+    if c.mid_window.window_s != base.mid_window.window_s {
+        v.push(("mid_window_s".into(), c.mid_window.window_s.to_string()));
+    }
+    if c.long_window.window_s != base.long_window.window_s {
+        v.push(("long_window_s".into(), c.long_window.window_s.to_string()));
+    }
+    if c.baseline_window_s != base.baseline_window_s {
+        v.push(("baseline_window_s".into(), c.baseline_window_s.to_string()));
+    }
+    if c.min_transition_interval_s != base.min_transition_interval_s {
+        v.push((
+            "min_transition_interval_s".into(),
+            c.min_transition_interval_s.to_string(),
+        ));
+    }
+    if c.min_recovery_interval_s != base.min_recovery_interval_s {
+        v.push((
+            "min_recovery_interval_s".into(),
+            c.min_recovery_interval_s.to_string(),
+        ));
+    }
+    if c.max_stale_age_s != base.max_stale_age_s {
+        v.push(("max_stale_age_s".into(), c.max_stale_age_s.to_string()));
+    }
+    if c.tick_interval_s != base.tick_interval_s {
+        v.push(("tick_interval_s".into(), c.tick_interval_s.to_string()));
+    }
+    if c.global_budgets.soft_degraded != base.global_budgets.soft_degraded {
+        v.push((
+            "soft_degraded".into(),
+            c.global_budgets.soft_degraded.to_string(),
+        ));
+    }
+    if c.global_budgets.hard_degraded != base.global_budgets.hard_degraded {
+        v.push((
+            "hard_degraded".into(),
+            c.global_budgets.hard_degraded.to_string(),
+        ));
     }
     v
 }

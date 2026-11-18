@@ -142,3 +142,46 @@ route_map = "mark2"
     assert_eq!(first, second);
     assert_eq!(first.network_route_maps.len(), 2);
 }
+
+// ---- [shutdown] and [bgp.peer_health] have a DSL spelling ----
+
+/// A drain configuration survives `to-dsl` instead of being dropped:
+/// the emitted `shutdown { … }` block re-parses to the same IR.
+#[test]
+fn round_trips_shutdown_drain() {
+    let toml = r#"
+[shutdown]
+mode = "drain"
+drain_rate_per_sec = 25
+drain_max_wait_secs = 120
+"#;
+    let (first, second) = round_trip(toml);
+    assert_eq!(first, second);
+    assert_eq!(first.shutdown_mode, "drain");
+    assert_eq!(first.shutdown_drain_rate_per_sec, 25);
+    assert_eq!(first.shutdown_drain_max_wait_secs, 120);
+}
+
+/// `[bgp.peer_health]` lowers to a nested `bgp { peer-health { … } }`
+/// block and round-trips, including the tuning keys.
+#[test]
+fn round_trips_peer_health_table() {
+    let toml = r#"
+[bgp]
+local_as = 64512
+router_id = "10.0.0.1"
+
+[bgp.peer_health]
+rollout = "limited"
+short_window_s = 10
+baseline_window_s = 600
+soft_degraded = 5
+"#;
+    let (first, second) = round_trip(toml);
+    assert_eq!(first, second);
+    assert!(first.peer_health.is_enabled());
+    assert_eq!(first.peer_health.rollout, "limited");
+    assert_eq!(first.peer_health.config.short_window.window_s, 10);
+    assert_eq!(first.peer_health.config.baseline_window_s, 600);
+    assert_eq!(first.peer_health.config.global_budgets.soft_degraded, 5);
+}

@@ -14,6 +14,7 @@ derived from `crates/lr-cli/src/config_dsl/` (`lexer.rs`, `parser.rs`,
 
 The TOML dialect is the legacy input. It is deprecated and planned for
 removal; `lr-daemon config to-dsl` converts a TOML file into the DSL.
+`toml` in a `--dialect` list selects that deprecated dialect.
 
 Design ground rules:
 
@@ -103,7 +104,12 @@ lowers to:
 | ------------------------------- | ------------------ | ------------------------- |
 | `bgp { }`                       | —                  | `[bgp]`                   |
 | `bgp { rpki { } }`              | —                  | `[bgp.rpki]`              |
+| `bgp { peer-health { } }`       | —                  | `[bgp.peer_health]`       |
+| `logging { }`                   | —                  | `[logging]`               |
+| `safety { }`                    | —                  | `[safety]`                |
+| `shutdown { }`                  | —                  | `[shutdown]`              |
 | `ospf { }`                      | —                  | `[ospf]`                  |
+| `ospf_auth { }`                 | —                  | `[ospf.auth]`             |
 | `ospf { area ID { } }`          | `id`               | `[[ospf.area]]`           |
 | `ospf { interface NAME { } }`   | `name`             | `[[ospf.interface]]`      |
 | `ospf { prefix-sid P { } }`     | `prefix`           | `[[ospf.prefix_sid]]`     |
@@ -127,8 +133,10 @@ lowers to:
 | `community-list NAME { }`       | `name`             | `[[community-list]]`      |
 | `route-map NAME { }`            | `name`             | `[[route-map]]`           |
 | `filter NAME { }`               | `name`             | `[[filter]]`              |
+| `filter-function NAME { }`      | `name`             | `[[filter_function]]`     |
 | `roa { }`                       | —                  | `[[roa]]`                 |
 | `bgp.roa_source { }`            | —                  | `[[bgp.roa_source]]`      |
+| `bgp.network_route_map { }`     | —                  | `[[bgp.network_route_map]]` |
 | `redistribute { }`              | —                  | `[[redistribute]]`        |
 | `aggregate { }`                 | —                  | `[[aggregate]]`           |
 
@@ -140,7 +148,8 @@ lowers to:
   TOML spelling (`hello_interval_ms`, `origin_as`, `match_prefix`, …).
   This is what makes one shared dispatch possible.
 - Every block may appear more than once. A single-section block
-  (`bgp`, `ospf`, `babel`, `ldp`, `damping`, `bgp.rpki`, `bgp-ls`) merges its keys
+  (`bgp`, `ospf`, `babel`, `ldp`, `damping`, `bgp.rpki`, `bgp-ls`,
+  `logging`, `safety`, `shutdown`, `bgp.peer-health`) merges its keys
   in file order, exactly like repeated TOML tables; an array block
   (`peer`, `roa`, `route-map`, …) appends a new entry each time, so two
   `route-map "x"` blocks are two entries of one map.
