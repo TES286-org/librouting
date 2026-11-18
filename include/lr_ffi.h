@@ -1787,8 +1787,7 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_APPLY_SET_ERROR_ADD_COMMUNITY_NO_BGP 4
 
 /**
- * The SetAction variant is not yet wired into the route's attribute
- * set (a future extension).
+ * Reserved ABI code: no `SetAction` variant currently produces it.
  */
 #define LR_APPLY_SET_ERROR_NOT_WIRED 5
 
@@ -9564,7 +9563,7 @@ int32_t lr_bgp_decode(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out
 int32_t lr_bgp_encode_keepalive(struct lr_bytes_t *out);
 
 /**
- * Encode an OPEN message (RFC 4271 §4.2, ROADMAP-v3 D5.4): version 4,
+ * Encode an OPEN message (RFC 4271 §4.2): version 4,
  * the given AS, hold time and BGP identifier. When `as4` is non-zero
  * the RFC 6793 four-octet-AS capability (code 65) is appended with the
  * full 32-bit AS — an AS above 65535 then travels as AS_TRANS (23456)
@@ -10976,7 +10975,7 @@ const char *lr_last_error(void);
 uint32_t lr_abi_version(void);
 
 /**
- * Poll up to `cap` router events into `out` (ROADMAP-v3 D5.5):
+ * Poll up to `cap` router events into `out`:
  * peer-state changes, route installs/withdrawals, advertisements and
  * retractions, logs, protocol errors and the maximum-prefix signals.
  * Returns the number of events written; 0 means the queue is empty
@@ -18691,7 +18690,7 @@ int32_t lr_router_set_add_path_max_paths(lr_router_t r, uint32_t max_paths);
 int32_t lr_router_set_ebgp_requires_policy(lr_router_t r, uint8_t enabled);
 
 /**
- * Enable or disable FRR `bgp enforce-first-as` (W2.2).
+ * Enable or disable FRR `bgp enforce-first-as`.
  *
  * When on, an UPDATE received from an external BGP peer (eBGP or a
  * confederation boundary) whose AS_PATH leftmost sequence segment's
@@ -18812,7 +18811,7 @@ int32_t lr_router_set_local_address(lr_router_t r,
                                     uintptr_t addr_len);
 
 /**
- * Configure FRR `bgp default ipv4-unicast` (W2.1) for a BGP session.
+ * Configure FRR `bgp default ipv4-unicast` for a BGP session.
  *
  * When `enabled` is non-zero (the default), IPv4 unicast is implicitly
  * active even when `lr_router_set_mp_families` did not list it. When
@@ -18826,7 +18825,7 @@ int32_t lr_router_set_default_ipv4_unicast(lr_router_t r, uint64_t session, uint
 
 /**
  * Configure FRR `neighbor X allowas-in N` / BIRD `allow local as`
- * (W2.3) for a BGP session.
+ * for a BGP session.
  *
  * `tolerance = 0` (the default) rejects any occurrence of the local
  * AS in a received AS_PATH (RFC 4271 §9.1.2.15). `N > 0` admits a
@@ -18840,7 +18839,7 @@ int32_t lr_router_set_default_ipv4_unicast(lr_router_t r, uint64_t session, uint
 int32_t lr_router_set_local_as_tolerance(lr_router_t r, uint64_t session, uint32_t tolerance);
 
 /**
- * Configure FRR `neighbor X soft-reconfiguration inbound` (W2.4) for
+ * Configure FRR `neighbor X soft-reconfiguration inbound` for
  * a BGP session.
  *
  * When `enabled` is non-zero, the router retains the pre-policy
@@ -18855,7 +18854,7 @@ int32_t lr_router_set_local_as_tolerance(lr_router_t r, uint64_t session, uint32
 int32_t lr_router_set_soft_reconfig_inbound(lr_router_t r, uint64_t session, uint8_t enabled);
 
 /**
- * FRR `clear ip bgp * soft in` (W2.4): re-evaluate the import policy
+ * FRR `clear ip bgp * soft in`: re-evaluate the import policy
  * against the pre-policy Adj-RIB-In for `session`, replacing the
  * session's entries in the post-policy RIB with the re-imported
  * routes.

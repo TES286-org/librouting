@@ -111,7 +111,7 @@ pub unsafe fn lock_router(r: lr_router_t) -> Option<std::sync::MutexGuard<'stati
     }
 }
 
-// ---- Damping table handle (`lr_damping_t`,) ----
+// ---- Damping table handle (`lr_damping_t`) ----
 
 /// Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
 /// shared with the hook installed on the router.
@@ -122,7 +122,7 @@ pub struct OpaqueDamping {
 
 pub type lr_damping_t = *mut OpaqueDamping;
 
-// ---- ROA store handle (`lr_roa_store_t`,) ----
+// ---- ROA store handle (`lr_roa_store_t`) ----
 
 /// Opaque ROA store handle. C side never touches internals.
 #[repr(C)]

@@ -1,5 +1,5 @@
 //! End-to-end tests for the daemon's RPKI-RTR cache client
-//! (`[bgp.rpki]` / `--rpki-cache`,): a real
+//! (`[bgp.rpki]` / `--rpki-cache`): a real
 //! `lr-daemon` process against an in-test mock RTR cache, verified
 //! through the runtime API `status` command and the daemon log.
 //!

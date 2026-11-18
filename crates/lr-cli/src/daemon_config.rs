@@ -4708,7 +4708,7 @@ fn apply_network_route_map_key(
 }
 
 /// Parse one `[bgp.rpki]` table key into `cfg.rpki` (RFC 8210 RTR
-/// cache client,). Unknown keys are hard errors — a
+/// cache client). Unknown keys are hard errors — a
 /// typo'd cache address or a mis-scaled interval silently changes
 /// which ROA database the origin validation runs against. Mirrors the
 /// fail-closed posture of the `[damping]` section handler above.

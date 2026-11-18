@@ -2088,7 +2088,7 @@ impl LdpDaemon {
     /// Head half: encap route pushing the peer's label toward the
     /// prefix. The gateway is the peer's *data-plane* address (see
     /// [`Self::peer_reach`]): for a Link adjacency the Hello source —
-    /// the directly connected neighbor —, not the TCP transport
+    /// the directly connected neighbor — not the TCP transport
     /// address, which is frequently a loopback (the FRR `mpls ldp
     /// router-id lo` convention) and is rejected by the kernel as an
     /// IPv4 encap gateway when it is not on-link.

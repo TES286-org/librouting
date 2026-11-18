@@ -1,5 +1,5 @@
 //! RPKI-RTR cache client thread — `lr-daemon`'s transport layer for
-//! `lr_bgp::rtr::client::RtrClient` (RFC 8210,).
+//! `lr_bgp::rtr::client::RtrClient` (RFC 8210).
 //!
 //! The library side is transport-agnostic: `RtrClient` owns the
 //! protocol and emits `ClientStep`s; this module is the "embedder"

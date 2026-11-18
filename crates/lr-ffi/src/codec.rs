@@ -111,7 +111,7 @@ pub extern "C" fn lr_bgp_encode_keepalive(out: *mut lr_bytes_t) -> i32 {
     )
 }
 
-/// Encode an OPEN message (RFC 4271 §4.2,): version 4,
+/// Encode an OPEN message (RFC 4271 §4.2): version 4,
 /// the given AS, hold time and BGP identifier. When `as4` is non-zero
 /// the RFC 6793 four-octet-AS capability (code 65) is appended with the
 /// full 32-bit AS — an AS above 65535 then travels as AS_TRANS (23456)
