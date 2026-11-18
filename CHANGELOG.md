@@ -303,6 +303,40 @@ self-hosted s390x runner and the ppc64le native follow-up.
 `docs/RELEASE-PLAN.md` §2.4 mirrors the change and §2.8's
 verification table renames `ibm-pz-native` to `s390x-native`.
 
+**apt-get install steps gain `Acquire::Retries=5` and a 15-minute
+ceiling** (`ci`). The cross-build, FFI + bindings, and interop
+install steps ran `sudo apt-get update` + `sudo apt-get install` with
+a 10-minute step ceiling and no retry. On a slow CI runner (or a
+transient apt mirror outage) the install exceeded the ceiling and
+the job failed — a flaky failure unrelated to the code under test.
+Every `apt-get update` / `apt-get install` step in `ci.yml` now
+passes `-o Acquire::Retries=5` (apt's built-in per-mirror retry) and
+the step ceiling is 15 minutes. A transient mirror stall retries up
+to 5 times before the step gives up; a genuinely stuck mirror still
+fails inside 15 minutes rather than 10.
+
+**Windows daemon tests spawn the daemon with
+`CREATE_NEW_PROCESS_GROUP`** (`lr-cli` test harness). The
+`lrctl_status_round_trips_over_named_pipe` test (and every test in
+`daemon_metrics.rs` on Windows) spawns `lr-daemon` as a subprocess
+of the test runner. `cargo nextest` runs the tests in parallel
+inside one Windows console; a `CTRL_C` from a timing-out peer (or
+from nextest's own failure-shortcut path) propagates to every
+process in the console group. The daemon's
+`SetConsoleCtrlHandler` maps `CTRL_C` to `SIGINT`,
+`wait_for_shutdown` sees the pending signal, and the daemon tears
+itself down — the named pipe (or the metrics TCP listener) vanishes
+before `lrctl shutdown` (or the metrics scrape) can connect, and
+the test fails with `CreateFileW failed (error 2)`. The test
+harness now passes `creation_flags(CREATE_NEW_PROCESS_GROUP)` on
+the `Command::new(DAEMON)` spawn, so the daemon lands in a new
+process group that does not receive `CTRL_C` from the parent's
+console. The daemon still installs its own
+`SetConsoleCtrlHandler` at startup, so a real operator's
+`CTRL_CLOSE` / `CTRL_LOGOFF` / `CTRL_SHUTDOWN` (the graceful
+session-end events) still trigger the daemon's graceful path —
+only the spurious `CTRL_C` from the test runner is suppressed.
+
 ### Added
 
 **IBM Power (ppc64le) and IBM Z (s390x) CI matrix** (`ci`,
