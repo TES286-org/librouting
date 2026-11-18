@@ -4620,3 +4620,80 @@ mod lrxp_tests {
         (STORE_VERIFIED, STORE_PARTIAL_RAW)
     }
 }
+
+/// Regression: an IPv6 prefix whose hextets are all decimal must
+/// match the same prefix in a set. The lexer previously
+/// mis-classified `2001:1::/32` as `Int(2001) Colon Ip(1::/32)`,
+/// which the parser rejected. With the structured-peek fix the
+/// prefix lexes as one `Prefix` token and matches as expected.
+#[test]
+fn ipv6_prefix_with_decimal_hextets_matches() {
+    let mut r = Route {
+        key: RouteKey::new("2001:1::5/128".parse().unwrap(), NlriFamily::IPV6_UNICAST),
+        origin: RouteOrigin { proto: 1, peer: 0 },
+        protocol: Protocol::Bgp,
+        preference: Preference::new(20, 100),
+        next_hop: None,
+        attributes: Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    };
+    assert_eq!(
+        run(
+            "if net ~ [2001:1::/32, 2606:4700:4700::1111/64] then accept; reject;",
+            &mut r,
+        ),
+        EvalResult::Accept,
+        "2001:1::5/128 should match 2001:1::/32"
+    );
+    r.key.prefix = "2606:4700:4700::1111/128".parse().unwrap();
+    assert_eq!(
+        run(
+            "if net ~ [2001:1::/32, 2606:4700:4700::1111/64] then accept; reject;",
+            &mut r,
+        ),
+        EvalResult::Accept,
+        "2606:4700:4700::1111/128 should match 2606:4700:4700::1111/64"
+    );
+    r.key.prefix = "2001:db8::1/128".parse().unwrap();
+    assert_eq!(
+        run(
+            "if net ~ [2001:1::/32, 2606:4700:4700::1111/64] then accept; reject;",
+            &mut r,
+        ),
+        EvalResult::Reject(None),
+        "2001:db8::1/128 should not match either prefix"
+    );
+}
+
+/// A bare IPv6 address (`::1`, `2001:1::1`) is a valid `Ip` literal
+/// in a filter body. This exercises the lexer's `::`-prefix path and
+/// the structured-peek path for digit-prefixed IPv6 addresses.
+#[test]
+fn bare_ipv6_address_literal_in_filter_body() {
+    let mut r = Route {
+        key: RouteKey::new("2001:db8::/32".parse().unwrap(), NlriFamily::IPV6_UNICAST),
+        origin: RouteOrigin { proto: 1, peer: 0 },
+        protocol: Protocol::Bgp,
+        preference: Preference::new(20, 100),
+        next_hop: None,
+        attributes: Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    };
+    // A bare Ip literal evaluates to its own value (truthy by
+    // presence). This is the same shape BIRD accepts.
+    assert_eq!(
+        run("if 2001:1::1 then accept; reject;", &mut r),
+        EvalResult::Accept,
+        "bare IPv6 literal must be truthy"
+    );
+    // The `::1` form must also lex as one Ip token.
+    assert_eq!(
+        run("if ::1 then accept; reject;", &mut r),
+        EvalResult::Accept,
+        "::1 must lex as a single Ip token"
+    );
+}

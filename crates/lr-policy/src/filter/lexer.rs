@@ -249,6 +249,19 @@ impl<'a> Lexer<'a> {
             return self.lex_numeric_or_address(start, line, col);
         }
 
+        // `::`-prefixed IPv6 literals (RFC 4291 §2.2): `::`, `::1`,
+        // `::ffff:192.0.2.1`. A leading `:` cannot be a community
+        // pattern (those always start with an `Int` or `*`), and the
+        // grammar uses `::` only inside IPv6 text. Peek the run; if
+        // it parses as an IPv6 address or prefix, take it as one
+        // token. Otherwise fall through to `Colon` punctuation so
+        // community-pattern dispatch (`int : int`) keeps working.
+        if b == b':' {
+            if let Some(tok) = self.try_lex_leading_colon_ipv6(start, line, col)? {
+                return Ok(tok);
+            }
+        }
+
         // String literals.
         if b == b'"' {
             return self.lex_string(start, line, col);
@@ -256,6 +269,69 @@ impl<'a> Lexer<'a> {
 
         // Multi-char operators and single-char punctuation.
         self.lex_punctuation(start, line, col)
+    }
+
+    /// Peek a run starting with `:` and try to parse it as an IPv6
+    /// address or prefix. Returns `Ok(Some(token))` when the run
+    /// parses (the cursor advances past the run), `Ok(None)` when
+    /// the run does not parse (the cursor stays at the `:` so
+    /// `lex_punctuation` produces a `Colon`).
+    ///
+    /// The run only starts here when `next_token` saw `:` followed
+    /// by another `:` (e.g. `::1`) or by a hex digit (e.g. `:1` is
+    /// not standard IPv6 text, so this path only fires for `::`
+    /// shapes); the caller has not consumed the `:` yet.
+    fn try_lex_leading_colon_ipv6(
+        &mut self,
+        start: usize,
+        line: u32,
+        col: u32,
+    ) -> Result<Option<Token>, LexerError> {
+        // Only `::` is unambiguously an IPv6 prefix — a lone `:`
+        // followed by a hex digit is not valid IPv6 text on its own
+        // (an IPv6 address must have eight hextets or `::`).
+        if self.src.get(self.pos) != Some(&b':') || self.src.get(self.pos + 1) != Some(&b':') {
+            return Ok(None);
+        }
+        // Peek the full run that could be an IPv6 address or prefix
+        // (hex digits, `.`, `:`, `/`).
+        let mut peek_end = start;
+        while let Some(&b) = self.src.get(peek_end) {
+            if b.is_ascii_hexdigit() || b == b'.' || b == b':' || b == b'/' {
+                peek_end += 1;
+            } else {
+                break;
+            }
+        }
+        if peek_end == start {
+            return Ok(None);
+        }
+        // SAFETY: the run is ASCII (hex digits and `.`/`:`/`/`), so
+        // it is valid UTF-8.
+        let raw = std::str::from_utf8(&self.src[start..peek_end]).unwrap_or("");
+        if let Ok(prefix) = Prefix::from_str(raw) {
+            while self.pos < peek_end {
+                self.advance();
+            }
+            return Ok(Some(self.token(
+                TokenKind::Prefix(prefix),
+                self.span_since(start),
+                line,
+                col,
+            )));
+        }
+        if let Ok(ip) = IpAddr::from_str(raw) {
+            while self.pos < peek_end {
+                self.advance();
+            }
+            return Ok(Some(self.token(
+                TokenKind::Ip(ip),
+                self.span_since(start),
+                line,
+                col,
+            )));
+        }
+        Ok(None)
     }
 
     fn token(&self, kind: TokenKind, span: Span, line: u32, col: u32) -> Token {
@@ -313,12 +389,64 @@ impl<'a> Lexer<'a> {
         line: u32,
         col: u32,
     ) -> Result<Token, LexerError> {
-        // Collect the run that could be a number, an IPv4 address,
-        // an IPv6 address (with `:`), or a prefix (`/`).
+        // Priority disambiguation: peek the full run of characters a
+        // numeric / IPv4 / IPv6 / prefix literal can span (digits, hex
+        // letters, `.`, `:`, `/`) and try the structured parses first.
+        // This lets `2001:1::1`, `2606:4700:4700::1111`,
+        // `1:2:3:4:5:6:7:8` and `0:0:0:0:0:0:0:0` lex as a single
+        // `Ip` token even though every hextet is purely decimal — the
+        // community-pair fallback below only fires when the run does
+        // NOT parse as an IPv6 address or prefix. The grammar's
+        // `int:int` community shape and `int:int:int` large-community
+        // shape are still produced as separate `Int` / `Colon` tokens
+        // by the fallback, so the parser's set-item dispatch is
+        // unchanged.
+        let mut peek_end = start;
+        while let Some(&b) = self.src.get(peek_end) {
+            if b.is_ascii_hexdigit() || b == b'.' || b == b':' || b == b'/' {
+                peek_end += 1;
+            } else {
+                break;
+            }
+        }
+        if peek_end > start {
+            // SAFETY: the run is ASCII (hex digits and `.`/`:`/`/`),
+            // so it is valid UTF-8.
+            let raw_peek = std::str::from_utf8(&self.src[start..peek_end]).unwrap_or("");
+            if !raw_peek.is_empty() {
+                if let Ok(prefix) = Prefix::from_str(raw_peek) {
+                    while self.pos < peek_end {
+                        self.advance();
+                    }
+                    return Ok(self.token(
+                        TokenKind::Prefix(prefix),
+                        self.span_since(start),
+                        line,
+                        col,
+                    ));
+                }
+                if let Ok(ip) = IpAddr::from_str(raw_peek) {
+                    while self.pos < peek_end {
+                        self.advance();
+                    }
+                    return Ok(self.token(TokenKind::Ip(ip), self.span_since(start), line, col));
+                }
+            }
+        }
+
+        // Community-pair / large-community fallback. Scan the run with
+        // the original `:`-break heuristic so `64512:100` stays two
+        // tokens (`Int(64512)`, `Colon`, `Int(100)`) and `64512:*`
+        // stays three (`Int(64512)`, `Colon`, `Star`). The structured
+        // peek above already consumed any run that parses as a single
+        // IPv6 address, IPv4 address or prefix, so this path only
+        // reaches input the structured parses rejected.
+        //
         // The run stops at the FIRST `:` when no `.` has been seen
         // yet AND the segment after the `:` is purely decimal — that
         // distinguishes a community pair `64512:100` from an IPv6
-        // address `2001:db8::1`.
+        // address whose second hextet happens to be decimal (handled
+        // by the structured peek above).
         let mut saw_dot = false;
         let mut saw_colon = false;
         while let Some(b) = self.peek() {
@@ -724,6 +852,153 @@ mod tests {
         let toks = kinds("2001:db8::1");
         match toks.as_slice() {
             [TokenKind::Ip(_), TokenKind::Eof] => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Regression: every hextet of an IPv6 address can be purely
+    /// decimal. The community-pair break heuristic used to fire at
+    /// the first `:` for these inputs (because the segment after
+    /// `:` was all decimal digits), mis-lexing `2001:1::1` as
+    /// `Int(2001) Colon Ip(1::1)`. The structured peek tries the
+    /// full run as an IPv6 address first, so any run that parses as
+    /// one wins over the community fallback.
+    #[test]
+    fn ipv6_with_decimal_hextets_is_one_ip_token() {
+        for src in [
+            "2001:1::1",
+            "2001:0:0:0:0:0:0:1",
+            "2606:4700:4700::1111",
+            "1:2:3:4:5:6:7:8",
+            "0:0:0:0:0:0:0:0",
+            // Mixed IPv4-embedded form: a dotted quad in the last
+            // hextet (RFC 4291 §2.2.3).
+            "::ffff:192.0.2.1",
+            "::1",
+            "::",
+        ] {
+            let toks = kinds(src);
+            assert!(
+                matches!(
+                    toks.as_slice(),
+                    [TokenKind::Ip(_) | TokenKind::Prefix(_), TokenKind::Eof]
+                ),
+                "input {src:?} lexed as {toks:?} (expected a single Ip/Prefix)"
+            );
+        }
+    }
+
+    /// IPv6 prefixes with decimal-only hextets likewise round-trip
+    /// as a single `Prefix` token.
+    #[test]
+    fn ipv6_prefix_with_decimal_hextets_is_one_prefix_token() {
+        for src in [
+            "2001:1::/32",
+            "2606:4700:4700::1111/64",
+            "0:0:0:0:0:0:0:0/0",
+            "::/0",
+        ] {
+            let toks = kinds(src);
+            assert!(
+                matches!(toks.as_slice(), [TokenKind::Prefix(_), TokenKind::Eof]),
+                "input {src:?} lexed as {toks:?} (expected a single Prefix)"
+            );
+        }
+    }
+
+    /// Community pairs and large communities must continue to lex as
+    /// separate `Int` / `Colon` tokens so the parser's set-item
+    /// dispatch can build `Value::CommPattern` and
+    /// `Value::LargeCommunities` from the token shape.
+    #[test]
+    fn community_pairs_stay_split_after_ipv6_fix() {
+        // `asn:value` — two Int tokens separated by a Colon.
+        let toks = kinds("64512:100");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Int(64512),
+                TokenKind::Colon,
+                TokenKind::Int(100),
+                TokenKind::Eof,
+            ]
+        );
+        // `g:d1:d2` — three Int tokens separated by two Colons.
+        let toks = kinds("64512:100:200");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Int(64512),
+                TokenKind::Colon,
+                TokenKind::Int(100),
+                TokenKind::Colon,
+                TokenKind::Int(200),
+                TokenKind::Eof,
+            ]
+        );
+        // `asn:*` — the `*` is a wildcard value component.
+        let toks = kinds("64512:*");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Int(64512),
+                TokenKind::Colon,
+                TokenKind::Star,
+                TokenKind::Eof,
+            ]
+        );
+        // `*:value` — the `*` is a wildcard ASN component. The `*`
+        // is not part of the numeric run, so the lexer emits Star
+        // first, then `:` as Colon, then the value.
+        let toks = kinds("*:100");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Star,
+                TokenKind::Colon,
+                TokenKind::Int(100),
+                TokenKind::Eof,
+            ]
+        );
+        // Zeroes — `0:0` is a community pair, not a partial IPv6.
+        let toks = kinds("0:0");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Int(0),
+                TokenKind::Colon,
+                TokenKind::Int(0),
+                TokenKind::Eof,
+            ]
+        );
+        // `0:0:0` is a large community triple.
+        let toks = kinds("0:0:0");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Int(0),
+                TokenKind::Colon,
+                TokenKind::Int(0),
+                TokenKind::Colon,
+                TokenKind::Int(0),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    /// The lexer honours the longest-match rule: a trailing `,` or
+    /// `]` ends the numeric run so the community pair inside a set
+    /// literal is parsed cleanly.
+    #[test]
+    fn ipv6_address_does_not_eat_trailing_punctuation() {
+        let toks = kinds("2001:1::1,");
+        match toks.as_slice() {
+            [TokenKind::Ip(_), TokenKind::Comma, TokenKind::Eof] => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+        let toks = kinds("2001:1::1]");
+        match toks.as_slice() {
+            [TokenKind::Ip(_), TokenKind::RBracket, TokenKind::Eof] => {}
             other => panic!("unexpected: {other:?}"),
         }
     }

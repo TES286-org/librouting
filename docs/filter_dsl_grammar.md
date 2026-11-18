@@ -112,9 +112,14 @@ Notes:
 - The lexer is greedy on numeric input: it collects the whole run of digits,
   `.`, `:`, hex digits and `/` and then disambiguates the result as `Prefix`
   (when `from_str` succeeds), bare `Ip`, or `Int`. A run that parses as none of
-  the three is a fatal `InvalidNumber` lexer error. Community patterns
+  the three is a fatal `InvalidNumber` lexer error. The lexer prefers the
+  structured parses (`Prefix`, then `Ip`) over the community-pattern split, so
+  an IPv6 address whose hextets are all decimal (`2001:1::1`,
+  `1:2:3:4:5:6:7:8`, `::1`) lexes as one `Ip` token. Community patterns
   `asn:value` are detected contextually — see §2.3 — and the lexer stops the
-  run at the `:` so a pattern stays two tokens.
+  run at the `:` only when the run does not parse as a single `Ip` or `Prefix`,
+  so a pattern stays two tokens (`64512:100` → `Int Colon Int`). `::`-prefixed
+  IPv6 literals are also recognised when `:` starts a token.
 - A raw newline is allowed inside a string literal (only `"` and `\` end it).
 - String literals do not accept `\xHH` hex escapes. Unknown escapes are fatal
   `UnknownEscape` lexer errors, and an unterminated string is a fatal
