@@ -341,10 +341,10 @@ jobs:
         with:
           shared-key: "ffi-bindings"
       - name: Install system deps
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             libc6-dev gcc g++ cbindgen python3 python3-pip python3-venv \
             golang-go
       - name: Install Python test deps
@@ -499,10 +499,10 @@ jobs:
         with:
           shared-key: "cross-${{ matrix.target }}"
       - name: Install cross linkers
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             libgcc-11-dev-arm64-cross \
@@ -1117,10 +1117,10 @@ jobs:
         with:
           shared-key: "interop"
       - name: Install reference daemons
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bird2 frr iproute2 tcpdump libyang-tools
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends bird2 frr iproute2 tcpdump libyang-tools
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli
@@ -1455,10 +1455,10 @@ jobs:
         with:
           shared-key: "interop-auth"
       - name: Install reference daemons
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bird2 frr iproute2
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends bird2 frr iproute2
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli
