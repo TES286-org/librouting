@@ -338,6 +338,83 @@ fn prefix_set_with_range_rejects_too_specific() {
 }
 
 #[test]
+fn prefix_set_matches_ipv6_with_letter_first_hextet() {
+    // Regression: the lexer used to split `fd00:1234:56ab::/48`
+    // into `Ident("fd00") Colon Prefix(1234:56ab::/48)` — a prefix
+    // set carrying it could not parse back.
+    let mut inside = route_with("fd00:1234:56ab::1/64", 100, 0);
+    let mut outside = route_with("fd00:1234:56ac::1/64", 100, 0);
+    let src = "if net ~ [ fd00:1234:56ab::/48 ] then accept; reject;";
+    assert_eq!(run(src, &mut inside), EvalResult::Accept);
+    assert_eq!(run(src, &mut outside), EvalResult::Reject(None));
+}
+
+/// Robustness: the parser, both engines (the tree-walking
+/// interpreter and the bytecode VM) must handle a broad battery of
+/// valid and malformed filter sources without panicking — malformed
+/// ones are compile errors, not panics.
+#[test]
+fn parser_eval_vm_handle_diverse_inputs_without_panicking() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let battery: &[&str] = &[
+        // Valid shapes.
+        "accept;",
+        "reject;",
+        "reject with \"bad route\";",
+        "if net ~ 203.0.113.0/24 then accept; reject;",
+        "if net ~ [ 10.0.0.0/8, 203.0.113.0/24 ] then accept; reject;",
+        "if net ~ [ 10.0.0.0/8{16,24}, 10.1.0.0/16 ] then accept; reject;",
+        "if net ~ [ fd00:1234:56ab::/48{48,128} ] then accept; reject;",
+        "if net ~ [ dead:beef::/48, feed::/32 ] then accept; reject;",
+        "if net ~ [ 2001:db8::/32{32,48} ] then accept; reject;",
+        "if net ~ [ 64512:100, 64512:100:200 ] then accept; reject;",
+        "if net ~ [ 0:0, 0:0:0, 1:2:3:4:5:6:7:8/128 ] then accept; reject;",
+        "if net ~ [] then accept; reject;",
+        "if net ~ 10.0.0.0/8 && net !~ 203.0.113.0/24 then accept; reject;",
+        "if bgp.local_pref > 100 || bgp.med == 0 then accept; else reject;",
+        "if (bgp.local_pref >= 0 && bgp.local_pref < 10) then accept;",
+        "let x = 5 + 3 * 2 - 1 / 2 % 3; x = x + 1; accept;",
+        "if bgp.local_pref + bgp.med * 2 - 1 / 3 % 5 > 0 then accept;",
+        "bgp.communities += [ 64512:100 ]; accept;",
+        "case proto { \"ospfv2\" => accept; default => reject; }",
+        "if true then accept;",
+        "if false then reject; else accept;",
+        // Malformed / adversarial shapes — errors, not panics.
+        "",
+        "((((((((",
+        "::::",
+        "fd00:",
+        ":fd00",
+        "fd00::/",
+        "10.0.0.0/",
+        "10.0.0.0/8{}",
+        "64512:100:200:300",
+        "let = 5;",
+        "if then accept;",
+        "case net { } then",
+        "if net ~ [ 10.0.0.0/8{,8} ] then accept; reject;",
+        "accept accept",
+        "let x = 5;;",
+        "if net ~ 10.0.0.0/8 then accept",
+        "if net ~ [ 10.0.0.0/8, ] then accept; reject;",
+    ];
+    for src in battery {
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            if let Ok(f) = compile("probe", src) {
+                let cf = crate::filter::bytecode::compile(&f);
+                let mut r1 = route_with("203.0.113.0/24", 100, 0);
+                let mut r2 = route_with("fd00:1234:56ab::1/64", 100, 0);
+                let _ = crate::filter::evaluate(&f, &mut r1, &StubCtx);
+                let _ = crate::filter::evaluate(&f, &mut r2, &StubCtx);
+                let _ = crate::filter::bytecode::execute(&cf, &mut r1, &StubCtx);
+                let _ = crate::filter::bytecode::execute(&cf, &mut r2, &StubCtx);
+            }
+        }));
+        assert!(outcome.is_ok(), "panic on filter input: {src:?}");
+    }
+}
+
+#[test]
 fn boolean_short_circuit_and() {
     let mut r = route_with("203.0.113.0/24", 100, 0);
     let src = "if net ~ 203.0.113.0/24 && bgp.local_pref >= 100 then accept; reject;";

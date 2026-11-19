@@ -235,8 +235,18 @@ impl<'a> Lexer<'a> {
             return Ok(self.token(TokenKind::Eof, self.span_since(start), line, col));
         };
 
-        // Identifiers / keywords (start with letter or underscore).
+        // Identifiers / keywords (start with letter or underscore),
+        // plus the structured-literal peek: an IPv6 literal whose
+        // first hextet starts with a letter (a–f) — `fd00:1234:56ab::/48`,
+        // `dead::/64` — is recognized by the whole-run parse before the
+        // identifier path runs, so the address is one token and not an
+        // `Ident` + `Colon` + … split. A run that does not parse leaves
+        // the cursor untouched and falls through to `lex_ident` as
+        // before.
         if b == b'_' || b.is_ascii_alphabetic() {
+            if let Some(tok) = self.try_lex_structured_literal(start, line, col)? {
+                return Ok(tok);
+            }
             return self.lex_ident(start, line, col);
         }
 
@@ -383,24 +393,27 @@ impl<'a> Lexer<'a> {
         Ok(self.token(kind, self.span_since(start), line, col))
     }
 
-    fn lex_numeric_or_address(
+    /// Peek the run of characters a numeric / IPv4 / IPv6 / prefix
+    /// literal can span starting at `start` (`[0-9a-fA-F.:/]*`). When
+    /// the run parses as a single `Prefix` or `IpAddr` token, advance
+    /// the cursor past the run and return the token; otherwise return
+    /// `Ok(None)` with the cursor unchanged so the caller can fall
+    /// back to the community-pair heuristic or the identifier path.
+    ///
+    /// The structured parses let `2001:1::1`, `2606:4700:4700::1111`,
+    /// `1:2:3:4:5:6:7:8`, `0:0:0:0:0:0:0:0` and `fd00:1234:56ab::/48`
+    /// lex as one token even though every hextet may be purely
+    /// decimal — the fallbacks only fire when the run does NOT parse
+    /// as an IPv6 address or prefix. The grammar's `int:int`
+    /// community shape and `int:int:int` large-community shape are
+    /// still produced as separate `Int` / `Colon` tokens by the
+    /// fallbacks, so the parser's set-item dispatch is unchanged.
+    fn try_lex_structured_literal(
         &mut self,
         start: usize,
         line: u32,
         col: u32,
-    ) -> Result<Token, LexerError> {
-        // Priority disambiguation: peek the full run of characters a
-        // numeric / IPv4 / IPv6 / prefix literal can span (digits, hex
-        // letters, `.`, `:`, `/`) and try the structured parses first.
-        // This lets `2001:1::1`, `2606:4700:4700::1111`,
-        // `1:2:3:4:5:6:7:8` and `0:0:0:0:0:0:0:0` lex as a single
-        // `Ip` token even though every hextet is purely decimal — the
-        // community-pair fallback below only fires when the run does
-        // NOT parse as an IPv6 address or prefix. The grammar's
-        // `int:int` community shape and `int:int:int` large-community
-        // shape are still produced as separate `Int` / `Colon` tokens
-        // by the fallback, so the parser's set-item dispatch is
-        // unchanged.
+    ) -> Result<Option<Token>, LexerError> {
         let mut peek_end = start;
         while let Some(&b) = self.src.get(peek_end) {
             if b.is_ascii_hexdigit() || b == b'.' || b == b':' || b == b'/' {
@@ -409,29 +422,50 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        if peek_end > start {
-            // SAFETY: the run is ASCII (hex digits and `.`/`:`/`/`),
-            // so it is valid UTF-8.
-            let raw_peek = std::str::from_utf8(&self.src[start..peek_end]).unwrap_or("");
-            if !raw_peek.is_empty() {
-                if let Ok(prefix) = Prefix::from_str(raw_peek) {
-                    while self.pos < peek_end {
-                        self.advance();
-                    }
-                    return Ok(self.token(
-                        TokenKind::Prefix(prefix),
-                        self.span_since(start),
-                        line,
-                        col,
-                    ));
+        if peek_end == start {
+            return Ok(None);
+        }
+        // SAFETY: the run is ASCII (hex digits and `.`/`:`/`/`), so
+        // it is valid UTF-8.
+        let raw_peek = std::str::from_utf8(&self.src[start..peek_end]).unwrap_or("");
+        if !raw_peek.is_empty() {
+            if let Ok(prefix) = Prefix::from_str(raw_peek) {
+                while self.pos < peek_end {
+                    self.advance();
                 }
-                if let Ok(ip) = IpAddr::from_str(raw_peek) {
-                    while self.pos < peek_end {
-                        self.advance();
-                    }
-                    return Ok(self.token(TokenKind::Ip(ip), self.span_since(start), line, col));
-                }
+                return Ok(Some(self.token(
+                    TokenKind::Prefix(prefix),
+                    self.span_since(start),
+                    line,
+                    col,
+                )));
             }
+            if let Ok(ip) = IpAddr::from_str(raw_peek) {
+                while self.pos < peek_end {
+                    self.advance();
+                }
+                return Ok(Some(self.token(
+                    TokenKind::Ip(ip),
+                    self.span_since(start),
+                    line,
+                    col,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    fn lex_numeric_or_address(
+        &mut self,
+        start: usize,
+        line: u32,
+        col: u32,
+    ) -> Result<Token, LexerError> {
+        // The structured peek runs before the community-pair
+        // heuristic; any run that parses as a single IPv6 address,
+        // IPv4 address or prefix has already consumed here.
+        if let Some(tok) = self.try_lex_structured_literal(start, line, col)? {
+            return Ok(tok);
         }
 
         // Community-pair / large-community fallback. Scan the run with
@@ -984,6 +1018,69 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    /// Regression: an IPv6 literal whose FIRST hextet starts with a
+    /// letter used to lex as `Ident` + `Colon` + … — the letter path
+    /// dispatched on the first byte before any address parse ran.
+    /// The structured peek now runs on the letter path too, so the
+    /// whole address/prefix is one token. The user-reported shape is
+    /// `fd00:1234:56ab::/48{48,128}`.
+    #[test]
+    fn ipv6_with_letter_first_hextet_is_one_token() {
+        for src in [
+            "fd00:1234:56ab::/48",
+            "fd00:1234::/64",
+            "fd00::/32",
+            "dead::/64",
+            "dead:beef::/48",
+            "abcd::/48",
+            "cafe:1234::/32",
+            "feed:face::1",
+        ] {
+            let toks = kinds(src);
+            assert!(
+                matches!(
+                    toks.as_slice(),
+                    [TokenKind::Ip(_) | TokenKind::Prefix(_), TokenKind::Eof]
+                ),
+                "input {src:?} lexed as {toks:?} (expected a single Ip/Prefix)"
+            );
+        }
+    }
+
+    /// The user-reported shape: the prefix-set range rides the
+    /// `prefix_set := prefix [ "{" range "}" ]` grammar after the
+    /// single Prefix token.
+    #[test]
+    fn user_example_prefix_set_range_after_letter_first_prefix() {
+        let toks = kinds("fd00:1234:56ab::/48{48,128}");
+        match toks.as_slice() {
+            [TokenKind::Prefix(p), TokenKind::LBrace, TokenKind::Int(48), TokenKind::Comma, TokenKind::Int(128), TokenKind::RBrace, TokenKind::Eof] =>
+            {
+                assert_eq!(p.prefix_len, 48)
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Guard the flip side of the fix: identifiers whose spelling is
+    /// hex-letter-shaped must still lex as identifiers — the
+    /// `IpAddr` / `Prefix` parses of them fail on hextet-count or
+    /// `/` grounds, so the identifier path is unchanged for them.
+    #[test]
+    fn identifier_shaped_like_hex_letters_stays_an_ident() {
+        for word in ["dead", "face", "cafe", "feed", "add", "beef", "d"] {
+            assert_eq!(
+                kinds(word),
+                vec![TokenKind::Ident(word.into()), TokenKind::Eof],
+                "{word}"
+            );
+        }
+        // `bgp` is the keyword — the peek must not swallow it as an
+        // address (`IpAddr::from_str("bgp")` fails on hextet count;
+        // this pins the dispatch order).
+        assert_eq!(kinds("bgp"), vec![TokenKind::Bgp, TokenKind::Eof]);
     }
 
     /// The lexer honours the longest-match rule: a trailing `,` or
