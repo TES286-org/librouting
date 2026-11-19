@@ -59,6 +59,14 @@ const RTA_DST: u16 = 1;
 const RTA_GATEWAY: u16 = 5;
 const RTA_OIF: u16 = 4;
 const RTA_PRIORITY: u16 = 6;
+/// Gateway whose address family differs from the route's `rtm_family`.
+/// Payload is `struct rtvia` (`uapi/linux/rtnetlink.h`): a 2-byte
+/// host-order family followed by the raw address. The IPv4 FIB accepts
+/// an IPv6 next hop only in this attribute (`ip route add PREFIX via
+/// inet6 GW ...`, the RFC 5549 shape); a 16-byte `RTA_GATEWAY` on an
+/// IPv4 route is read as a 4-byte IPv4 gateway and fails with
+/// `ENETUNREACH` when those four bytes are not a reachable IPv4 host.
+const RTA_VIA: u16 = 18;
 
 // Route types (RTN_* in `uapi/linux/rtnetlink.h`).
 const RTN_UNICAST: u8 = 1;
@@ -381,6 +389,39 @@ impl RtNetlink {
         buf[4..4 + data.len()].copy_from_slice(data);
         buf
     }
+
+    /// Build the gateway attribute for a route in `route_family`
+    /// (`AF_INET` / `AF_INET6`) whose next hop is `next_hop`.
+    ///
+    /// Linux types `RTA_GATEWAY` by the route's `rtm_family`: the IPv4
+    /// FIB reads it with `nla_get_in_addr()` (4 bytes), so a 16-byte
+    /// IPv6 next hop placed there is interpreted as the first four
+    /// bytes of the IPv6 address — ordinarily an unreachable IPv4
+    /// address, and `RTM_NEWROUTE` fails with `ENETUNREACH`. A next hop
+    /// in the other family travels as `RTA_VIA` (`struct rtvia`), which
+    /// is exactly what iproute2 emits for `ip route add PREFIX via
+    /// inet6 GW ...` and what the IPv4 FIB's `rtm_to_fib_config()`
+    /// expects (Linux commit d1566268, "ipv4: Allow ipv6 gateway with
+    /// ipv4 routes"). The same rule applies in the mirror direction: an
+    /// IPv6 route with an IPv4 next hop carries `RTA_VIA` with
+    /// `AF_INET`.
+    fn build_gateway_attribute(route_family: u8, next_hop: IpAddr) -> Vec<u8> {
+        let (next_hop_family, addr) = match next_hop {
+            IpAddr::V4(b) => (AF_INET, b.to_vec()),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        };
+        if next_hop_family == route_family {
+            return Self::build_rta_attribute(RTA_GATEWAY, &addr);
+        }
+        // `struct rtvia`: 2-byte `sa_family_t` in host byte order, then
+        // the raw address. `nla_put_via()` / `nla_get_via()` assign and
+        // compare the family directly — no `ntohs()` on either side —
+        // and iproute2 encodes it the same way.
+        let mut via = Vec::with_capacity(2 + addr.len());
+        via.extend_from_slice(&u16::from(next_hop_family).to_ne_bytes());
+        via.extend_from_slice(&addr);
+        Self::build_rta_attribute(RTA_VIA, &via)
+    }
 }
 
 impl Drop for RtNetlink {
@@ -414,7 +455,7 @@ impl OsRouteTable for RtNetlink {
         };
         let mut attrs = Vec::new();
         attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
-        attrs.extend(Self::build_rta_attribute(RTA_GATEWAY, next_hop.octets()));
+        attrs.extend(Self::build_gateway_attribute(family, next_hop));
         // With no explicit output interface the kernel resolves the gateway
         // against the existing table (`ip route add ... via GW` semantics).
         // Passing RTA_OIF=0 would be rejected with EINVAL, so omit it.
@@ -679,6 +720,23 @@ fn parse_route_message(buf: &[u8]) -> Option<KernelRoute> {
         match rta_type {
             RTA_DST => prefix_addr = Some(data.to_vec()),
             RTA_GATEWAY => gateway = Some(data.to_vec()),
+            RTA_VIA if data.len() >= 2 => {
+                // `struct rtvia`: 2-byte host-order family + address.
+                // The kernel dumps an IPv4 route's IPv6 gateway here
+                // (fib_nexthop_info()), never as RTA_GATEWAY, so a dump
+                // without this arm loses the next hop of every RFC 5549
+                // route.
+                let family = u16::from_ne_bytes([data[0], data[1]]);
+                let addr = &data[2..];
+                let expected = match family {
+                    f if f == u16::from(AF_INET) => 4,
+                    f if f == u16::from(AF_INET6) => 16,
+                    _ => 0,
+                };
+                if expected != 0 && addr.len() == expected {
+                    gateway = Some(addr.to_vec());
+                }
+            }
             RTA_OIF => {
                 if data.len() == 4 {
                     if_index = Some(u32::from_ne_bytes([data[0], data[1], data[2], data[3]]));
@@ -833,6 +891,71 @@ mod tests {
         assert_eq!(u16::from_ne_bytes([enc[0], enc[1]]), 8);
         assert_eq!(u16::from_ne_bytes([enc[2], enc[3]]), RTA_DST);
         assert_eq!(&enc[4..8], &addr);
+    }
+
+    /// Same-family gateways stay in RTA_GATEWAY, sized by rtm_family.
+    #[test]
+    fn gateway_uses_rta_gateway_when_families_match() {
+        let v4 = IpAddr::V4([192, 0, 2, 1]);
+        let enc = RtNetlink::build_gateway_attribute(AF_INET, v4);
+        assert_eq!(u16::from_ne_bytes([enc[0], enc[1]]), 8);
+        assert_eq!(u16::from_ne_bytes([enc[2], enc[3]]), RTA_GATEWAY);
+        assert_eq!(&enc[4..8], &[192, 0, 2, 1]);
+
+        let v6 = IpAddr::V6([0xfd, 0, 0, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let enc = RtNetlink::build_gateway_attribute(AF_INET6, v6);
+        assert_eq!(u16::from_ne_bytes([enc[0], enc[1]]), 20);
+        assert_eq!(u16::from_ne_bytes([enc[2], enc[3]]), RTA_GATEWAY);
+        assert_eq!(&enc[4..20], v6.octets());
+    }
+
+    /// RFC 5549 shape: an IPv4 destination with an IPv6 next hop must use
+    /// `RTA_VIA` (`struct rtvia`). Encoding it as `RTA_GATEWAY` made the
+    /// kernel read the first four bytes of the IPv6 address as an IPv4
+    /// gateway and reject the install with ENETUNREACH.
+    #[test]
+    fn gateway_uses_rta_via_for_v4_route_over_v6_next_hop() {
+        let nh = IpAddr::V6([0xfd, 0, 0, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        let enc = RtNetlink::build_gateway_attribute(AF_INET, nh);
+        // The rta_len field excludes the alignment padding after the
+        // 18-byte rtvia payload: 4 + 2 + 16 = 22.
+        assert_eq!(u16::from_ne_bytes([enc[0], enc[1]]), 22);
+        assert_eq!(u16::from_ne_bytes([enc[2], enc[3]]), RTA_VIA);
+        assert_eq!(&enc[4..6], &u16::from(AF_INET6).to_ne_bytes());
+        assert_eq!(&enc[6..22], nh.octets());
+    }
+
+    /// The mirror direction: an IPv6 route with an IPv4 next hop also
+    /// travels as `RTA_VIA`, with AF_INET in the rtvia header.
+    #[test]
+    fn gateway_uses_rta_via_for_v6_route_over_v4_next_hop() {
+        let nh = IpAddr::V4([192, 0, 2, 1]);
+        let enc = RtNetlink::build_gateway_attribute(AF_INET6, nh);
+        assert_eq!(u16::from_ne_bytes([enc[0], enc[1]]), 10);
+        assert_eq!(u16::from_ne_bytes([enc[2], enc[3]]), RTA_VIA);
+        assert_eq!(&enc[4..6], &u16::from(AF_INET).to_ne_bytes());
+        assert_eq!(&enc[6..10], nh.octets());
+    }
+
+    /// A dump carries an IPv4 route's IPv6 gateway as `RTA_VIA`
+    /// (`fib_nexthop_info()`), never as `RTA_GATEWAY`; the parser must
+    /// surface it as the route's next hop.
+    #[test]
+    fn parse_dump_reads_rta_via_gateway() {
+        let nh = IpAddr::V6([0xfd, 0, 0, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        let mut payload = vec![0u8; 12];
+        payload[0] = AF_INET;
+        payload[1] = 24;
+        payload[5] = RTPROT_BABEL;
+        payload[7] = RTN_UNICAST;
+        payload.extend_from_slice(&RtNetlink::build_rta_attribute(RTA_DST, &[198, 51, 100, 0]));
+        payload.extend_from_slice(&RtNetlink::build_gateway_attribute(AF_INET, nh));
+        let mut buf = nlmsg(RTM_NEWROUTE, &payload);
+        buf.extend_from_slice(&nlmsg(NLMSG_DONE, &[]));
+        let routes = parse_dump_response(&buf).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, Some(nh));
+        assert_eq!(routes[0].protocol, Protocol::Other(u16::from(RTPROT_BABEL)));
     }
 
     #[test]

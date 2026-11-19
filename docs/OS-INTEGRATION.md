@@ -53,16 +53,28 @@ let routes = rt.list_routes()?;
 
 A `NETLINK_ROUTE` socket speaks the rtnetlink message set (RFC 3549):
 an add is `RTM_NEWROUTE` carrying a `struct rtmsg` header plus the
-`RTA_DST`, `RTA_GATEWAY`, `RTA_OIF` and `RTA_PRIORITY` attributes, and a
-dump is `RTM_GETROUTE` with `NLM_F_DUMP`. The backend declares the five C
-entry points it needs (`socket`, `bind`, `sendmsg`, `recv`, `close`)
-instead of taking a dependency on a netlink crate.
+`RTA_DST`, `RTA_GATEWAY`, `RTA_VIA`, `RTA_OIF` and `RTA_PRIORITY`
+attributes, and a dump is `RTM_GETROUTE` with `NLM_F_DUMP`. The backend
+declares the five C entry points it needs (`socket`, `bind`, `sendmsg`,
+`recv`, `close`) instead of taking a dependency on a netlink crate.
 
 Adds carry `NLM_F_CREATE | NLM_F_REPLACE`, so a missing route is created
 and an existing best route for the prefix is replaced atomically. When
 `if_index` is zero the backend omits `RTA_OIF` (the kernel rejects a
 zero index with `EINVAL`) and the kernel resolves the egress interface
-from the gateway, the way `ip route add ... via GW` does. A blackhole add
+from the gateway, the way `ip route add ... via GW` does.
+
+The gateway attribute follows the address families. A next hop in the
+route's family travels as `RTA_GATEWAY`. A next hop in the other family
+— an IPv4 route over an IPv6 gateway is the RFC 5549 shape — travels as
+`RTA_VIA`, a `struct rtvia` holding the 2-byte host-order address
+family and the raw address, which is the encoding
+`ip route add PREFIX via inet6 GW` uses. A 16-byte IPv6 gateway in
+`RTA_GATEWAY` on an IPv4 route is read as a 4-byte IPv4 address, and the
+install fails with `ENETUNREACH`. Dumps decode both attributes. The
+IPv4 FIB accepts a cross-family gateway on Linux 5.2 and later.
+
+A blackhole add
 sends `RTN_BLACKHOLE` with neither gateway nor output interface; the
 delete path sends `RTN_UNSPEC`, because a delete naming `RTN_UNICAST`
 never matches a blackhole row.

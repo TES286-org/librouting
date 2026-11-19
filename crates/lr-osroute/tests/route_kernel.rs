@@ -12,6 +12,11 @@
 //! `RTN_UNSPEC` wildcard, which is exactly what iproute2's plain
 //! `ip route del PREFIX` relies on.
 //!
+//! The RFC 5549 case belongs here for the same reason: the IPv4 FIB
+//! accepts an IPv6 next hop only when the gateway travels as `RTA_VIA`,
+//! so an assertion on the attribute bytes cannot prove that the kernel
+//! takes the route.
+//!
 //! - Skips when the process lacks `CAP_NET_ADMIN` (run as root or in a
 //!   rootless netns: `unshare -Urn cargo test -p lr-osroute --test
 //!   route_kernel -- --ignored --nocapture`).
@@ -29,11 +34,22 @@ const V6: Prefix = Prefix::new_v6(
     [0xfd, 0x00, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     64,
 );
+/// RFC 5549 case: an IPv4 destination reached through an IPv6 next hop.
+/// TEST-NET-3 keeps it distinct from `V4`.
+const V4_VIA_V6: Prefix = Prefix::new_v4([203, 0, 113, 0], 24);
 
 fn table_has(t: &mut RtNetlink, prefix: Prefix) -> bool {
     t.list_routes()
         .map(|routes| routes.iter().any(|r| r.prefix == prefix))
         .unwrap_or(false)
+}
+
+fn next_hop_of(t: &mut RtNetlink, prefix: Prefix) -> Option<IpAddr> {
+    t.list_routes()
+        .ok()?
+        .into_iter()
+        .find(|r| r.prefix == prefix)?
+        .next_hop
 }
 
 /// Bring the netns's loopback up — a fresh netns has it DOWN, and a
@@ -60,19 +76,17 @@ fn loopback_up() -> bool {
 /// mirrors that: `via fe80::42 dev dummy0`. Returns None (skip) when
 /// the link cannot be created.
 fn dummy_link() -> Option<u32> {
-    let ok = |args: &[&str]| {
-        std::process::Command::new("ip")
-            .args(args)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    if !ok(&["link", "add", "dummy0", "type", "dummy"]) {
+    dummy_link_named("dummy0")
+}
+
+/// Create a dummy link called `name` and return its ifindex.
+fn dummy_link_named(name: &str) -> Option<u32> {
+    if !ip_ok(&["link", "add", name, "type", "dummy"]) {
         return None;
     }
-    let _ = ok(&["link", "set", "dummy0", "up"]);
+    let _ = ip_ok(&["link", "set", name, "up"]);
     let out = std::process::Command::new("ip")
-        .args(["-o", "link", "show", "dummy0"])
+        .args(["-o", "link", "show", name])
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
@@ -80,6 +94,14 @@ fn dummy_link() -> Option<u32> {
     s.split(':')
         .next()
         .and_then(|idx| idx.trim().parse::<u32>().ok())
+}
+
+fn ip_ok(args: &[&str]) -> bool {
+    std::process::Command::new("ip")
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// True when the error is a privilege error — the process lacks
@@ -90,11 +112,16 @@ fn dummy_link() -> Option<u32> {
 /// tests in linux.rs.
 fn is_privilege_error(e: &lr_osroute::OsRouteError) -> bool {
     let s = &e.0;
-    s.contains("EPERM")
+    if s.contains("EPERM")
         || s.contains("Operation not permitted")
-        || s.contains("os error 1")
-        || s.contains("rtnetlink: error -1")
         || s.contains("insufficient privileges")
+    {
+        return true;
+    }
+    // Match the errno at the end of the message, not as a substring: a
+    // `contains("error -1")` test also matches `error -113`
+    // (EHOSTUNREACH) and would skip a real failure.
+    s.ends_with("os error 1") || s.ends_with("rtnetlink: error -1")
 }
 
 #[test]
@@ -209,4 +236,92 @@ fn unicast_install_and_delete_round_trip() {
             "unicast {prefix} must be gone from the kernel after delete_route"
         );
     }
+}
+
+/// RFC 5549: an IPv4 route whose next hop is IPv6, over an interface
+/// that carries no IPv4 address at all.
+///
+/// The regression: `add_route_tagged` put the 16-byte IPv6 next hop in
+/// `RTA_GATEWAY` on an `AF_INET` rtmsg. The IPv4 FIB reads that
+/// attribute with `nla_get_in_addr()` (4 bytes), so it saw the first
+/// four bytes of the IPv6 address as an IPv4 gateway — unreachable, and
+/// the install failed with `ENETUNREACH`. The same next hop as
+/// `RTA_VIA` (`struct rtvia`) is accepted, which is the form iproute2
+/// emits for `ip route add PREFIX via inet6 GW dev IFACE`.
+///
+/// The dump assertion also pins the read side: the kernel returns such
+/// a gateway as `RTA_VIA` (`fib_nexthop_info()`), never `RTA_GATEWAY`,
+/// so `list_routes()` must decode it back to the original next hop.
+#[test]
+#[ignore = "kernel-gated: requires CAP_NET_ADMIN (run as root or in a rootless netns)"]
+fn rfc5549_v4_route_over_v6_next_hop_on_v6_only_interface() {
+    const LINK: &str = "dummy-rfc5549";
+    const GATEWAY: IpAddr = IpAddr::V6([
+        0xfd, 0x00, 0x00, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
+    ]);
+
+    if !ip_ok(&["link", "set", "lo", "up"]) {
+        eprintln!("SKIP: cannot bring lo up (iproute2 missing)");
+        return;
+    }
+    let Some(dummy) = dummy_link_named(LINK) else {
+        eprintln!("SKIP: cannot create the {LINK} dummy link");
+        return;
+    };
+    // IPv6-only: no IPv4 address is assigned to the link. The gateway
+    // is on-link through this connected IPv6 prefix, exactly the
+    // production v6-only tunnel shape.
+    let prefix = "fd00:99::1/64";
+    if !ip_ok(&["-6", "addr", "add", prefix, "dev", LINK, "nodad"])
+        && !ip_ok(&["-6", "addr", "add", prefix, "dev", LINK])
+    {
+        let _ = ip_ok(&["link", "del", LINK]);
+        eprintln!("SKIP: cannot assign {prefix} to {LINK}");
+        return;
+    }
+
+    let mut t = match RtNetlink::connect() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = ip_ok(&["link", "del", LINK]);
+            if is_privilege_error(&e) {
+                eprintln!(
+                    "SKIP: RtNetlink::connect returned EPERM (run as root or in a rootless netns)"
+                );
+                return;
+            }
+            panic!("RtNetlink::connect failed unexpectedly: {}", e);
+        }
+    };
+
+    let _ = t.delete_route(V4_VIA_V6);
+    match t.add_route_tagged(V4_VIA_V6, GATEWAY, dummy, lr_core::rib::Protocol::Babel) {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = ip_ok(&["link", "del", LINK]);
+            if is_privilege_error(&e) {
+                eprintln!("SKIP: add_route_tagged returned EPERM");
+                return;
+            }
+            panic!("RFC 5549 add_route_tagged({V4_VIA_V6} via {GATEWAY}) failed: {e}");
+        }
+    }
+    assert!(
+        table_has(&mut t, V4_VIA_V6),
+        "RFC 5549 route {V4_VIA_V6} must be in the kernel FIB"
+    );
+    assert_eq!(
+        next_hop_of(&mut t, V4_VIA_V6),
+        Some(GATEWAY),
+        "the dump must decode RTA_VIA back to the IPv6 next hop"
+    );
+
+    t.delete_route(V4_VIA_V6)
+        .unwrap_or_else(|e| panic!("delete_route({V4_VIA_V6}) failed: {e}"));
+    assert!(
+        !table_has(&mut t, V4_VIA_V6),
+        "RFC 5549 route {V4_VIA_V6} must be gone after delete_route"
+    );
+
+    let _ = ip_ok(&["link", "del", LINK]);
 }

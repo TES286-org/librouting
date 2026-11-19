@@ -94,6 +94,27 @@ recompiling.
 
 ### Fixed
 
+**Linux kernel mirror installs IPv4 routes over IPv6 next hops**
+(`lr-osroute`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+`RtNetlink::add_route_tagged` encoded every gateway as `RTA_GATEWAY`,
+including a next hop whose family differed from the route's. The IPv4
+FIB reads that attribute with `nla_get_in_addr()` (four bytes), so an
+RFC 5549 route — an IPv4 prefix whose Babel or BGP next hop is IPv6 —
+carried the first four bytes of the IPv6 address as its gateway, and
+the install failed with `ENETUNREACH` on an interface that has no IPv4
+address. Cross-family next hops now travel as `RTA_VIA` (`struct
+rtvia`: host-order family plus the raw address), the form iproute2
+emits for `ip route add PREFIX via inet6 GW`. `list_routes()` decodes
+`RTA_VIA` back to the next hop, because the kernel reports an RFC 5549
+route's gateway in that attribute and never in `RTA_GATEWAY`.
+Same-family gateways keep `RTA_GATEWAY`. The new
+`rfc5549_v4_route_over_v6_next_hop_on_v6_only_interface` kernel-gated
+test builds a dummy link with only an IPv6 address, installs an IPv4
+prefix through a gateway on that link, checks the dump round trip and
+deletes the route; the same test fails with `ENETUNREACH` against the
+old encoding.
+
 **OSPF graceful-restart status reports the *remaining* grace, not the
 absolute deadline or the configured period** (`lr-cli`,
 [issue #101](https://github.com/TES286-org/librouting/issues/101)).
