@@ -35,6 +35,29 @@ a controller learns those segments from lr, the data plane can push
 traffic onto them, and a controller-mode lr daemon can ingest the same
 NLRIs another daemon advertises.
 
+## Daemon and kernel
+
+**Kernel-protocol route filtering.** The daemon's kernel mirror installs
+every selected Loc-RIB route that the protocol's export policy permits.
+BIRD and FRR separate that decision: their `kernel` protocols carry
+their own `import` / `export` filters, so an operator can keep a prefix
+in the routing table while denying it from the FIB, or learn a kernel
+route without redistributing it. The work is a `kernel` block in the
+`.lr` configuration with import and export filter references, applied
+inside `KernelMirror::apply` before the `OsRouteTable` call, and a
+status view of the routes the filter dropped. Done when an operator can
+deny a prefix from the FIB while the Loc-RIB keeps it and `lrctl`
+reports which filter dropped it.
+
+**Filter DSL syntax sugar.** The filter grammar spells every clause as
+`if <expr> then <action>;`. BIRD and route-map configurations offer
+shorthand that operators expect to type — set literals, membership
+operators and block actions among them. The work is parser-level
+desugaring into the existing AST, so the bytecode VM and the safety net
+keep their semantics. Done when the grammar reference lists each
+shorthand and a differential test compiles the shorthand and its
+expanded form to identical bytecode.
+
 ## Compatibility
 
 **RISC-V targeted compatibility improvements.** The CI matrix covers
