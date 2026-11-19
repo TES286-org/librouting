@@ -1,4 +1,4 @@
-//! TOML policy objects for `lr-daemon`: `[[prefix-list]]`,
+//! Policy objects for `lr-daemon`: `[[prefix-list]]`,
 //! `[[as-path-list]]`, `[[community-list]]` and `[[route-map]]`
 //! tables plus per-peer `import = "<route-map>"` / `export =
 //! "<route-map>"` attachment, compiled into an
@@ -343,8 +343,12 @@ fn render_filter_function_preamble(
             return Err(format!("filter function '{name}' declared twice"));
         }
         let params = func.params.join(", ");
+        // The DSL spells the return-type annotation `=> type`
+        // (TokenKind::Arrow — the lexer's `=` + `>` form); `->`
+        // lexes as `Minus` + `Gt` and fails to parse, so the
+        // preamble must render the arrow the grammar expects.
         let ret = match &func.return_type {
-            Some(t) => format!(" -> {t}"),
+            Some(t) => format!(" => {t}"),
             None => String::new(),
         };
         let body = func.body.as_deref().unwrap_or("");

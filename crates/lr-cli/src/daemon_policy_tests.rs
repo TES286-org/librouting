@@ -301,6 +301,26 @@ fn shared_filter_function_is_callable_from_filter() {
 }
 
 #[test]
+fn shared_filter_function_with_return_type_compiles() {
+    // The preamble renders the `=> type` annotation the DSL
+    // grammar expects (TokenKind::Arrow — the lexer's `=` + `>`
+    // form); a `->` rendering lexes as `Minus` + `Gt` and failed
+    // to parse.
+    let cfg = parse(
+        "[[filter_function]]\n\
+             name = \"is_big\"\n\
+             params = [\"lp\"]\n\
+             return_type = \"int\"\n\
+             body = \"return lp;\"\n\
+             [[filter]]\n\
+             name = \"in\"\n\
+             body = \"is_big(200); accept;\"\n",
+    );
+    let filters = build_filters(&cfg).expect("filter must compile");
+    assert_eq!(filters[0].1.functions.len(), 1);
+}
+
+#[test]
 fn shared_filter_function_detects_duplicate_names() {
     // Two `[[filter_function]]` blocks with the same name fail at
     // preamble render time, before the DSL parser sees them.
