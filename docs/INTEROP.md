@@ -71,6 +71,14 @@ Every lab auto-detects its reference daemon and prints `SKIP: …` with
 exit status 0 when it is absent, so the suite degrades on a restricted
 runner.
 
+On Ubuntu 26.04 the `apparmor` package ships enforcing profiles for
+`/usr/lib/frr/*` that permit only FRR's packaged `/run/frr` and
+`/var/tmp/frr` paths. The labs start the daemons unprivileged with pid
+and log files under `/tmp`, which those profiles deny, so bgpd exits
+before its vty answers. The `interop` and `interop-auth` jobs run
+[`_unconfine_frr.sh`](../tests/interop/_unconfine_frr.sh) first; on such
+an image run it yourself with `sudo` before a lab.
+
 ## Baseline labs (librouting against itself)
 
 These need no reference daemon and no root, which is why they are the
@@ -192,9 +200,11 @@ portable ones.
 
 ## Shared helpers
 
-`_lib.sh` (rootless namespace and veth topology harness) and
-`_lr_daemon.sh` (daemon build, spawn and log capture) are infrastructure
-the labs source; they are not labs and have no row. The Python helpers
+`_lib.sh` (rootless namespace and veth topology harness),
+`_lr_daemon.sh` (daemon build, spawn and log capture) and
+`_unconfine_frr.sh` (unloads the Ubuntu 26.04 AppArmor profiles for the
+FRR daemons) are infrastructure the labs source or the CI jobs run; they
+are not labs and have no row. The Python helpers
 (`babel_decode.py`, `babel_send.py`, `pcap_icmp_check.py`,
 `pcap_sniff.py`) build and inspect packets for the labs that use them.
 A new shared helper must be added to this note, because the guard checks

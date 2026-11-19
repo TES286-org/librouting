@@ -1131,7 +1131,26 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends bird2 frr iproute2 tcpdump libyang-tools
+          # Ubuntu 26.04 renamed libyang-tools to libyang3-tools. yanglint
+          # is optional (tests/interop/yang.sh SKIPs without it), so do not
+          # fail the install when neither name exists on a future image.
+          yang_pkg=
+          for candidate in libyang-tools libyang3-tools; do
+              if apt-cache show "$candidate" 2>/dev/null | grep -q "^Package: $candidate$"; then
+                  yang_pkg=$candidate
+                  break
+              fi
+          done
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+              bird2 frr iproute2 tcpdump ${yang_pkg:+"$yang_pkg"}
+      - name: Unload the FRR AppArmor confinement (Ubuntu 26.04)
+        # The apparmor 5.0 package ships enforcing profiles for
+        # /usr/lib/frr/* that allow only FRR's packaged /run/frr and
+        # /var/tmp/frr paths. The labs start the daemons unprivileged with
+        # pid and log files under /tmp, which those profiles deny, so bgpd
+        # exits before its vty answers (EACCES on the pid lock file). The
+        # helper is a no-op on images without the profiles.
+        run: sudo ./tests/interop/_unconfine_frr.sh
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli
@@ -1470,6 +1489,10 @@ jobs:
         run: |
           sudo apt-get -o Acquire::Retries=5 update
           sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends bird2 frr iproute2
+      - name: Unload the FRR AppArmor confinement (Ubuntu 26.04)
+        # Same distro profiles as the `interop` job: md5.sh phase 4 starts
+        # bgpd with its pid file under /tmp, which the profile denies.
+        run: sudo ./tests/interop/_unconfine_frr.sh
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli
