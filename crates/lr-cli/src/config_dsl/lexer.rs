@@ -7,7 +7,7 @@
 //! - whitespace and `#` line comments are insignificant;
 //! - strings are double-quoted, escapes `\"` `\\` `\n` `\t` `\r`
 //!   (unknown escapes are preserved verbatim — the same relaxation
-//!   `daemon_config::unescape_toml_string` applies, so the escape
+//!   `daemon_config::unescape_string` applies, so the escape
 //!   channel round-trips);
 //! - bare words lex as [`TokKind::Ident`]; the character set covers
 //!   names (`customer-space`), addresses (`10.0.0.1`), prefixes
@@ -326,7 +326,7 @@ fn lex_string(
                     't' => out.push('\t'),
                     'r' => out.push('\r'),
                     // Unknown escapes are preserved verbatim, matching
-                    // daemon_config::unescape_toml_string, so
+                    // daemon_config::unescape_string, so
                     // escape ∘ lex = identity for any content.
                     other => {
                         out.push('\\');

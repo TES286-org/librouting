@@ -3133,20 +3133,19 @@ fn parse_bool(value: &str) -> bool {
     matches!(value, "true" | "1" | "yes")
 }
 
-/// Process TOML `\\`, `\"`, `\n`, `\t`, `\r` escapes in a string
-/// value. Used by the filter DSL `body` field (which carries a
-/// multi-line DSL program with embedded `\"` for the DSL's own
-/// string literals, e.g. `if proto == \"bgp\"`). The caller has
-/// already stripped the outer `"` quotes via `trim_matches('"')` —
-/// this function only walks the interior, replacing escape sequences.
-/// The inverse of [`unescape_toml_string`]: escape a raw string into
-/// the TOML string channel the shared key dispatch receives filter
-/// bodies through. The native `.lr` DSL (config_dsl) captures filter
-/// bodies verbatim between braces and hands them to
-/// `apply_config_key` through this escape, so `escape ∘ unescape` is
-/// the identity and both frontends store byte-identical bodies
-///.
-pub(crate) fn escape_toml_string(value: &str) -> String {
+/// Process `\\`, `\"`, `\n`, `\t`, `\r` escapes in a string value.
+/// Used by the filter DSL `body` field (which carries a multi-line
+/// DSL program with embedded `\"` for the DSL's own string literals,
+/// e.g. `if proto == \"bgp\"`). The caller has already stripped the
+/// outer `"` quotes via `trim_matches('"')` — this function only
+/// walks the interior, replacing escape sequences. The inverse of
+/// [`unescape_string`]: escape a raw string into the string channel
+/// the shared key dispatch receives filter bodies through. The
+/// native `.lr` DSL (config_dsl) captures filter bodies verbatim
+/// between braces and hands them to `apply_config_key` through this
+/// escape, so `escape ∘ unescape` is the identity and both frontends
+/// store byte-identical bodies.
+pub(crate) fn escape_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
@@ -3161,7 +3160,7 @@ pub(crate) fn escape_toml_string(value: &str) -> String {
     out
 }
 
-fn unescape_toml_string(value: &str) -> String {
+fn unescape_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(c) = chars.next() {
@@ -3174,8 +3173,7 @@ fn unescape_toml_string(value: &str) -> String {
                 Some('r') => out.push('\r'),
                 Some(other) => {
                     // Unknown escape — preserve verbatim (forward
-                    // compatibility, like TOML's "unknown escapes are
-                    // an error" rule relaxed to "preserve").
+                    // compatibility).
                     out.push('\\');
                     out.push(other);
                 }
@@ -3277,8 +3275,8 @@ fn strip_inline_comment(line: &str) -> &str {
 ///
 /// The caller is still responsible for unescaping basic-string escapes
 /// (`\"`, `\\`, `\n`, …) on the returned interior; that step happens
-/// only for fields whose values carry TOML escape sequences (filter
-/// DSL bodies and the like), via [`unescape_toml_string`].
+/// only for fields whose values carry string escapes (filter DSL
+/// bodies and the like), via [`unescape_string`].
 fn unquote_toml_value(value: &str) -> &str {
     let value = value.trim();
     let bytes = value.as_bytes();
@@ -4333,11 +4331,11 @@ fn apply_filter_key(
     };
     match key {
         "name" => filter.name = Some(value.to_string()),
-        // The body is a TOML string with `\"` escapes that the DSL
-        // parser expects to see unescaped. unescape_toml_string
-        // converts `\"` back to `"` so `if proto == \"bgp\"` reaches
-        // the DSL parser as `if proto == "bgp"`.
-        "body" => filter.body = Some(unescape_toml_string(value)),
+        // The body is a string value with `\"` escapes that the DSL
+        // parser expects to see unescaped. `unescape_string` converts
+        // `\"` back to `"` so `if proto == \"bgp\"` reaches the DSL
+        // parser as `if proto == "bgp"`.
+        "body" => filter.body = Some(unescape_string(value)),
         "description" | "desc" => filter.description = Some(value.to_string()),
         _ => {
             return Err(format!(
@@ -4373,7 +4371,7 @@ fn apply_filter_function_key(
         // Single-param convenience: `param = "lp"` adds one param.
         "param" => func.params.push(value.to_string()),
         "return_type" => func.return_type = Some(value.to_string()),
-        "body" => func.body = Some(unescape_toml_string(value)),
+        "body" => func.body = Some(unescape_string(value)),
         _ => {
             return Err(format!(
                 "unknown [[filter_function]] key '{key}' (typo protection; filter function config fails closed)"

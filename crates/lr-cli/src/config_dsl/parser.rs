@@ -4,20 +4,21 @@
 //! The parser is a single recursive descent over the token stream of
 //! [`crate::config_dsl::lexer`]; there is no intermediate AST. Every
 //! `key value;` statement lowers *immediately* into
-//! [`crate::daemon_config::apply_config_key`] — the exact dispatch the
-//! TOML subset parser drives — so both frontends share one fail-closed
-//! key schema and cannot drift. The block table below is the only new
-//! vocabulary: DSL block names (kebab-case, optionally nested) map to
-//! the dotted section paths the dispatch already knows.
+//! [`crate::daemon_config::apply_config_key`] — the dispatch the
+//! deprecated TOML subset parser also drives, so both frontends
+//! share one fail-closed key schema and cannot drift. The block
+//! table below is the only new vocabulary: DSL block names (kebab-case,
+//! optionally nested) map to the dotted section paths the dispatch
+//! already knows.
 
 use std::path::{Path, PathBuf};
 
 use super::lexer::{lex, Tok, TokKind, Unit};
 use crate::daemon_config::{
-    apply_config_key, escape_toml_string, AggregateSpec, BabelInterfaceSpec, BabelKeySpec,
-    DaemonConfig, FilterSpec, LdpBindSpec, LdpIfSpec, LdpTargetedSpec, NetworkRouteMapSpec,
-    OspfAreaSpec, OspfIfSpec, OspfMappingServerSpec, OspfPrefixSidSpec, OspfSrv6LocatorSpec,
-    PeerSpec, RedistributeSpec, RoaSpec, StaticRouteSpec,
+    apply_config_key, escape_string, AggregateSpec, BabelInterfaceSpec, BabelKeySpec, DaemonConfig,
+    FilterSpec, LdpBindSpec, LdpIfSpec, LdpTargetedSpec, NetworkRouteMapSpec, OspfAreaSpec,
+    OspfIfSpec, OspfMappingServerSpec, OspfPrefixSidSpec, OspfSrv6LocatorSpec, PeerSpec,
+    RedistributeSpec, RoaSpec, StaticRouteSpec,
 };
 use crate::daemon_policy::{AsPathListSpec, CommunityListSpec, PrefixListSpec, RouteMapSpec};
 
@@ -727,8 +728,8 @@ impl<'a> Parser<'a> {
     /// (string- and comment-aware because the lexer already folded
     /// both into their tokens), so filter syntax such as `case`
     /// blocks, prefix ranges, `#` comments and quoted strings needs no
-    /// escaping. The body lowers through the same `body` key the TOML
-    /// frontend uses, escaped into the TOML string channel that
+    /// escaping. The body lowers through the same `body` key the
+    /// shared dispatch knows, escaped into the string channel that
     /// `apply_config_key` unescapes — escape ∘ unescape is identity,
     /// so the stored body is byte-identical to the source slice.
     fn parse_filter_block(&mut self, open: Tok, identity: Option<String>) -> Result<(), String> {
@@ -775,7 +776,7 @@ impl<'a> Parser<'a> {
         if let Some(name) = identity {
             self.apply("filter", "name", &name)?;
         }
-        self.apply("filter", "body", &escape_toml_string(&body))?;
+        self.apply("filter", "body", &escape_string(&body))?;
         Ok(())
     }
 
@@ -919,9 +920,7 @@ fn value_text(value: &Value) -> String {
 }
 
 /// Render a lowered value into the exact string form the shared
-/// dispatch expects (the same shape the TOML subset parser produces
-/// after stripping quotes: raw inner text, arrays as TOML array
-/// text).
+/// dispatch expects (raw inner text, arrays as bracketed text).
 fn render_value(value: &Value) -> Option<String> {
     match value {
         Value::Str(s) => Some(s.clone()),

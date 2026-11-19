@@ -5,14 +5,16 @@
 //! - [`lexer`] — tokens for the grammar specified in
 //!   `docs/config_dsl_grammar.md`;
 //! - [`parser`] — recursive descent that lowers every statement into
-//!   [`crate::daemon_config::apply_config_key`], the dispatch the TOML
-//!   subset parser also drives, so both frontends share one fail-closed
-//!   key schema and one typed IR ([`DaemonConfig`]).
+//!   [`crate::daemon_config::apply_config_key`], the dispatch the
+//!   deprecated TOML subset parser also drives, so both frontends
+//!   share one fail-closed key schema and one typed IR
+//!   ([`DaemonConfig`]).
 //!
-//! The frontend is strict where TOML is tolerant: unknown block names
-//! are errors (a brand-new dialect has no legacy files to keep
-//! loadable), while the per-key schema — including its fail-closed
-//! typo protection — is literally the same code for both frontends.
+//! The frontend is strict where the deprecated TOML subset is
+//! tolerant: unknown block names are errors (a brand-new dialect has
+//! no legacy files to keep loadable), while the per-key schema —
+//! including its fail-closed typo protection — is literally the same
+//! code for both frontends.
 
 mod emit;
 mod lexer;
@@ -470,5 +472,49 @@ filter "in" {
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].1.functions.len(), 1);
         assert_eq!(filters[0].1.functions[0].name, "tag_customer");
+    }
+}
+
+#[cfg(test)]
+mod robustness_probe {
+    use super::parse_dsl_text;
+    use crate::daemon_config::DaemonConfig;
+
+    /// The `.lr` frontend must not panic on any input: unknown or
+    /// malformed shapes are hard errors from the parser, never
+    /// panics from the hand-rolled lexer/parser.
+    #[test]
+    fn config_parser_handles_diverse_inputs_without_panicking() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let battery: &[&str] = &[
+            // Valid shapes.
+            "bgp { hold_time 90s; }",
+            "protocol bgp;\nbgp { local_as 64512; peer_as 64513; hold_time 90s; }",
+            "peer \"192.0.2.2\" { remote_as 64513; peer_as 64513; }",
+            "filter-function \"tag_customer\" { param \"lp\"; body \"bgp.local_pref = lp; return true;\"; }",
+            "filter \"in\" { body = \"if net ~ [ fd00:1234:56ab::/48{48,128} ] then accept; reject;\"; }",
+            "filter \"f2\" { body \"accept;\"; description \"d\"; }",
+            "ospf { dr-timer 5s; }",
+            "roa { prefix 10.0.0.0/8; max_len 16; origin_as 64512; }",
+            "static.route { prefix 203.0.113.0/24; }",
+            // Malformed / adversarial shapes — errors, not panics.
+            "",
+            "bgp { local_as ; }",
+            "peer \"x\" {",
+            "filter \"x\" { body \"accept;\";",
+            "filter-function \"x\" { body }",
+            "protocol",
+            "bgp bgp bgp { }",
+            "\"unterminated",
+            "filter \"a\" { body \"if net ~ [ fd00:1234:56ab::/48{48,128} ] then accept; reject;\"; } trailing",
+            "bgp { hold_time 90s; hold_time 1h; }",
+        ];
+        for src in battery {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let mut cfg = DaemonConfig::default();
+                let _ = parse_dsl_text(src, None, &mut cfg);
+            }));
+            assert!(outcome.is_ok(), "panic on config input: {src:?}");
+        }
     }
 }
