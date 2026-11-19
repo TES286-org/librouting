@@ -85,7 +85,7 @@ comment      = "#" { ? any character except newline ? } ;
   not a suffix at all. The suffix is *not* expanded by the lexer.
 - Strings are double-quoted. `\"`, `\\`, `\n`, `\t` and `\r` are
   translated; any other escape is kept verbatim (backslash included),
-  matching `daemon_config::unescape_toml_string` so the escape channel
+  matching `daemon_config::unescape_string` so the escape channel
   round-trips. A newline inside a string is kept. An unterminated
   string, or a backslash at the end of the file, is an error.
 - A list element is a string or a bare word only: booleans and

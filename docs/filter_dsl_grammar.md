@@ -120,6 +120,13 @@ Notes:
   run at the `:` only when the run does not parse as a single `Ip` or `Prefix`,
   so a pattern stays two tokens (`64512:100` → `Int Colon Int`). `::`-prefixed
   IPv6 literals are also recognised when `:` starts a token.
+- The same structured-parse priority runs when a token starts with a
+  letter: an IPv6 literal whose first hextet begins with a hex letter
+  (`fd00:1234:56ab::/48`, `dead:beef::/48`) is recognized as one `Prefix`
+  or `Ip` token before the identifier path runs. The identifier path is
+  unchanged for anything that does not parse — `dead`, `bgp`,
+  `local_pref` still lex as identifiers (and keywords), because the
+  parses of those runs fail on hextet count or missing `/`.
 - A raw newline is allowed inside a string literal (only `"` and `\` end it).
 - String literals do not accept `\xHH` hex escapes. Unknown escapes are fatal
   `UnknownEscape` lexer errors, and an unterminated string is a fatal

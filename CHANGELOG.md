@@ -242,6 +242,40 @@ reading peer receives every byte the slot queued, and the
 `Result` is observable (the pre-fix `let _ =` discarded it
 silently).
 
+**`lr-policy`: filter lexer keeps IPv6 literals whose first hextet
+starts with a letter as one token** (`lr-policy`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+The filter-DSL lexer dispatches on the first byte of a token: an IPv6
+literal whose first hextet begins with a hex letter — `fd00`, `dead`,
+`beef`, `feed` — started an identifier, so `fd00:1234:56ab::/48` lexed
+as `Ident("fd00") Colon Prefix(1234:56ab::/48)`: the address was split
+and a prefix set carrying the literal (for example
+`net ~ [ fd00:1234:56ab::/48{48,128} ]`) could not parse back. The
+structured peek (`Prefix::from_str`, then `IpAddr::from_str`) now also
+runs when a token starts with a letter, before the identifier path; a
+run that parses as an address or prefix is one `Prefix`/`Ip` token,
+and a run that parses as none falls back to the identifier path
+unchanged. Community pairs and large communities (`64512:100`,
+`64512:100:200`) lex as before. New regressions:
+`ipv6_with_letter_first_hextet_is_one_token`,
+`user_example_prefix_set_range_after_letter_first_prefix` and
+`identifier_shaped_like_hex_letters_stays_an_ident` (lexer),
+`prefix_set_matches_ipv6_with_letter_first_hextet` (filter eval), and
+`parser_eval_vm_handle_diverse_inputs_without_panicking` plus the new
+`config_parser_handles_diverse_inputs_without_panicking` probe — the
+parser, the tree-walking evaluator and the bytecode VM stay panic-free
+on a battery of valid and malformed inputs.
+
+**`lr-cli`: `[[filter_function]]` `return_type` renders the DSL's
+`=>` arrow** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+`render_filter_function_preamble` spelled the return-type annotation of
+the generated `function name(params) { … }` preamble as `-> type`, but
+the filter-DSL lexer's `Arrow` token is `=>` — `->` lexes as
+`Minus` + `Gt`, so a `[[filter_function]]` with a `return_type` failed
+to compile. The preamble now renders `=> type`. New regression:
+`shared_filter_function_with_return_type_compiles`.
+
 ### Changed
 
 **BIRD/FRR converter and compat mode render the native `.lr` DSL —
