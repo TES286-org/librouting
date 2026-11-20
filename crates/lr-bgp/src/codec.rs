@@ -36,6 +36,13 @@ use lr_core::nlri::NlriFamily;
 /// families whose outbound NLRI carries 4-octet path identifiers and
 /// `add_path_rx` the families whose inbound NLRI does. Both default to
 /// empty (plain single-path framing).
+///
+/// Extended Message (RFC 8654) raises the per-message length ceiling
+/// from the RFC 4271 §4.1 4096-octet limit to 65535 octets once both
+/// speakers advertise the capability. The codec accepts the larger
+/// inbound length only when `extended_message` is `true` — set after
+/// OPEN negotiation completes; the encoder allocates a buffer large
+/// enough for the negotiated ceiling.
 #[derive(Default)]
 pub struct BgpCodec {
     /// Carryover buffer for partial frames.
@@ -48,6 +55,12 @@ pub struct BgpCodec {
     /// Address families whose inbound NLRI entries carry RFC 7911 path
     /// identifiers (the peer advertises multiple paths to us).
     add_path_rx: Vec<NlriFamily>,
+    /// RFC 8654 Extended Message support negotiated for this session.
+    /// When `true`, the decoder accepts messages up to 65535 octets
+    /// and the encoder allocates a buffer large enough for the
+    /// negotiated ceiling. Defaults to `false` (the RFC 4271 §4.1
+    /// 4096-octet ceiling).
+    extended_message: bool,
 }
 
 impl BgpCodec {
@@ -77,6 +90,33 @@ impl BgpCodec {
         self.add_path_rx = rx;
     }
 
+    /// Set whether RFC 8654 Extended Message support is negotiated
+    /// for this session (call after OPEN negotiation). When `true`,
+    /// the decoder accepts messages up to 65535 octets and the
+    /// encoder allocates a buffer large enough for the negotiated
+    /// ceiling.
+    pub fn set_extended_message(&mut self, v: bool) {
+        self.extended_message = v;
+    }
+
+    /// Whether the codec currently accepts the RFC 8654 65535-octet
+    /// message ceiling (the negotiated posture, which may differ
+    /// from the configured capability).
+    pub fn extended_message_active(&self) -> bool {
+        self.extended_message
+    }
+
+    /// The maximum BGP message length the codec currently accepts
+    /// (RFC 4271 §4.1 4096 by default; RFC 8654 65535 when
+    /// [`set_extended_message`] has been called with `true`).
+    fn max_len(&self) -> u16 {
+        if self.extended_message {
+            MAX_LEN_EXTENDED
+        } else {
+            MAX_LEN
+        }
+    }
+
     fn tx_add_path(&self, family: NlriFamily) -> bool {
         self.add_path_tx.contains(&family)
     }
@@ -91,7 +131,7 @@ impl BgpCodec {
         // Append incoming bytes to the carryover, then attempt decode.
         self.carryover.extend_from_slice(buf);
         let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
-        match try_decode_frame(&self.carryover, rx_v4)? {
+        match try_decode_frame(&self.carryover, rx_v4, self.max_len())? {
             Some((n, msg)) => {
                 // Drain the consumed prefix.
                 self.carryover.drain(0..n);
@@ -111,7 +151,7 @@ impl BgpCodec {
         let all = src.remaining();
         src.advance(all);
         let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
-        match try_decode_frame(&self.carryover, rx_v4)? {
+        match try_decode_frame(&self.carryover, rx_v4, self.max_len())? {
             Some((n, msg)) => {
                 self.carryover.drain(0..n);
                 Ok(Some(msg))
@@ -122,7 +162,11 @@ impl BgpCodec {
 
     /// Direct encode of a message to a fresh Vec.
     pub fn encode_vec(&self, msg: &BgpMessage) -> Result<Vec<u8>, EncodeError> {
-        let mut buf = vec![0u8; 4096];
+        // Allocate for the negotiated message ceiling so an
+        // Extended Message-sized UPDATE (RFC 8654 §3) does not
+        // overflow the buffer. The default 4096-octet ceiling
+        // covers every non-extended message.
+        let mut buf = vec![0u8; self.max_len() as usize];
         let mut w = WriteBuf::new(&mut buf);
         let n = self.encode(msg, &mut w)?;
         buf.truncate(n);
@@ -133,7 +177,11 @@ impl BgpCodec {
 const MARKER: [u8; 16] = [0xff; 16];
 
 const MIN_LEN: u16 = 19;
+/// RFC 4271 §4.1 maximum message length.
 const MAX_LEN: u16 = 4096;
+/// RFC 8654 §3 maximum message length when the Extended Message
+/// capability is negotiated.
+const MAX_LEN_EXTENDED: u16 = 65535;
 
 /// Attempt to decode one frame from `buf`. Returns `Ok(Some((consumed, msg)))`
 /// on success, `Ok(None)` when the buffer doesn't yet contain a full frame,
@@ -141,9 +189,13 @@ const MAX_LEN: u16 = 4096;
 ///
 /// `rx_v4_add_path` selects the RFC 7911 framing (4-octet path identifier
 /// ahead of each prefix) for the plain IPv4 NLRI/withdrawn sections.
+/// `max_len` is the per-session message length ceiling (RFC 4271 §4.1
+/// 4096 by default; RFC 8654 §3 65535 when Extended Message is
+/// negotiated).
 fn try_decode_frame(
     buf: &[u8],
     rx_v4_add_path: bool,
+    max_len: u16,
 ) -> Result<Option<(usize, BgpMessage)>, BgpError> {
     if buf.len() < BgpHeader::LEN {
         return Ok(None);
@@ -156,7 +208,7 @@ fn try_decode_frame(
         )));
     }
     let len = u16::from_be_bytes([buf[16], buf[17]]);
-    if !(MIN_LEN..=MAX_LEN).contains(&len) {
+    if !(MIN_LEN..=max_len).contains(&len) {
         return Err(BgpError::Notification(BgpNotification::new(
             crate::error::BgpErrorCode::Header as u8,
             crate::error::BgpHeaderErrorSubcode::BadMessageLength as u8,
@@ -213,16 +265,17 @@ impl Decoder<BgpMessage> for BgpCodec {
         let all = src.remaining();
         src.advance(all);
         let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
-        let result = try_decode_frame(&self.carryover, rx_v4).map_err(|e| match e {
-            BgpError::Notification(n) => {
-                lr_core::error::ParseError::invalid(BgpHeader::LEN, "bgp.body.notification")
-                    .with_detail(format!("code={} sub={}", n.error_code, n.error_subcode))
-            }
-            BgpError::Truncated => lr_core::error::ParseError::truncated("bgp.body"),
-            BgpError::Codec(s) => {
-                lr_core::error::ParseError::invalid(BgpHeader::LEN, "bgp.body").with_detail(s)
-            }
-        })?;
+        let result =
+            try_decode_frame(&self.carryover, rx_v4, self.max_len()).map_err(|e| match e {
+                BgpError::Notification(n) => {
+                    lr_core::error::ParseError::invalid(BgpHeader::LEN, "bgp.body.notification")
+                        .with_detail(format!("code={} sub={}", n.error_code, n.error_subcode))
+                }
+                BgpError::Truncated => lr_core::error::ParseError::truncated("bgp.body"),
+                BgpError::Codec(s) => {
+                    lr_core::error::ParseError::invalid(BgpHeader::LEN, "bgp.body").with_detail(s)
+                }
+            })?;
         match result {
             Some((n, msg)) => {
                 self.carryover.drain(0..n);

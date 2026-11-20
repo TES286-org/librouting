@@ -87,6 +87,7 @@ portable ones.
 | Script | Peers | What it proves |
 | --- | --- | --- |
 | `two_daemon.sh` | two lr-daemons over TCP | the session FSM and codec work in both roles: route propagation and session-loss withdrawal |
+| `bgp_capabilities_smoke.sh` | two lr-daemons over TCP | the 2.x capability block (RFC 5291 ORF, RFC 8654 Extended Message, RFC 9234 BGP Role, FQDN, BFD Strict-Mode, Software Version, PATHS-LIMIT, Link-Local Next Hop) is advertised on a real OPEN and the session establishes |
 | `labeled_unicast.sh` | two lr-daemons over TCP | RFC 8277 BGP-LU: an AFI=1/SAFI=4 UPDATE carries label 100 and the stack arrives at the peer |
 | `addpath.sh` | two lr-daemons over TCP | RFC 7911 Add-Path: the capability negotiates and the NLRI carries the transmitter's path identifier |
 | `bmp.sh` | lr-daemon `--bmp-target` to an lr-daemon collector | RFC 7854: station connect, Peer Up ordering, Route Monitoring carrying the full UPDATE |

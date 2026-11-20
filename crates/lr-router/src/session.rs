@@ -322,6 +322,52 @@ pub struct SessionConfig {
     /// Propagated to [`lr_bgp::PeerConfig::admin_down`] by
     /// [`crate::DefaultRouter::add_session`]. Default `false`.
     pub admin_down: bool,
+    /// RFC 8654 Extended Message capability. Propagated to
+    /// [`lr_bgp::PeerConfig::extended_message`] by
+    /// [`crate::DefaultRouter::add_session`]; the codec raises the
+    /// per-message length ceiling to 65535 octets when negotiated.
+    /// Default `false` (the codec stays at the RFC 4271 §4.1 4096
+    /// ceiling).
+    pub extended_message: bool,
+    /// RFC 9234 BGP Role capability. Propagated to
+    /// [`lr_bgp::PeerConfig::bgp_role`] by
+    /// [`crate::DefaultRouter::add_session`]; the OTC attribute path
+    /// keeps running under [`Self::otc_role`] (set by the daemon at
+    /// finalize time from the same config). `None` does not
+    /// advertise the capability.
+    pub bgp_role: Option<(lr_bgp::role::OtcRole, bool)>,
+    /// FQDN capability (draft-walton-bgp-hostname-capability-01).
+    /// Propagated to [`lr_bgp::PeerConfig::fqdn`].
+    pub fqdn: Option<(String, String)>,
+    /// BFD Strict-Mode capability
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-13). Propagated to
+    /// [`lr_bgp::PeerConfig::bfd_strict_mode`].
+    pub bfd_strict_mode: bool,
+    /// Software Version capability
+    /// (draft-abraitis-bgp-version-capability-11). Propagated to
+    /// [`lr_bgp::PeerConfig::software_version`].
+    pub software_version: Option<String>,
+    /// PATHS-LIMIT capability
+    /// (draft-abraitis-idr-addpath-paths-limit-00). Propagated to
+    /// [`lr_bgp::PeerConfig::paths_limit`].
+    pub paths_limit: Vec<(u16, u8, u16)>,
+    /// Link-Local Next Hop capability
+    /// (draft-white-linklocal-capability-04). Propagated to
+    /// [`lr_bgp::PeerConfig::link_local_next_hop`].
+    pub link_local_next_hop: bool,
+    /// RFC 5291 ORF capability. Propagated to
+    /// [`lr_bgp::PeerConfig::orf`].
+    pub orf: Vec<lr_bgp::capabilities_extra::OrfEntry>,
+    /// RFC 9234 OTC role override. When `Some(role)`, propagated to
+    /// [`lr_bgp::PeerConfig::otc_role`] by
+    /// [`crate::DefaultRouter::add_session`]; the OTC attribute path
+    /// (RFC 9234 §5) uses this role for ingress/egress decisions. The
+    /// daemon sets this from the same `[bgp] bgp_role` / `peer.bgp_role`
+    /// config that drives the BGP Role capability (code 9), so the
+    /// two stay in sync; an explicit FFI-set `PeerConfig::otc_role`
+    /// still takes precedence for embedders that want to drive them
+    /// independently.
+    pub otc_role: Option<lr_bgp::role::OtcRole>,
 }
 
 impl SessionConfig {
@@ -376,6 +422,15 @@ impl SessionConfig {
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
             peer_address: None,
             admin_down: false,
+            extended_message: false,
+            bgp_role: None,
+            fqdn: None,
+            bfd_strict_mode: false,
+            software_version: None,
+            paths_limit: Vec::new(),
+            link_local_next_hop: false,
+            orf: Vec::new(),
+            otc_role: None,
         }
     }
 
@@ -642,6 +697,15 @@ impl SessionConfig {
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
             peer_address: None,
             admin_down: false,
+            extended_message: false,
+            bgp_role: None,
+            fqdn: None,
+            bfd_strict_mode: false,
+            software_version: None,
+            paths_limit: Vec::new(),
+            link_local_next_hop: false,
+            orf: Vec::new(),
+            otc_role: None,
         }
     }
 
@@ -698,6 +762,15 @@ impl SessionConfig {
             route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
             peer_address: None,
             admin_down: false,
+            extended_message: false,
+            bgp_role: None,
+            fqdn: None,
+            bfd_strict_mode: false,
+            software_version: None,
+            paths_limit: Vec::new(),
+            link_local_next_hop: false,
+            orf: Vec::new(),
+            otc_role: None,
         }
     }
 }

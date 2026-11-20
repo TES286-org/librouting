@@ -4592,6 +4592,28 @@ impl RouterInstance for DefaultRouter {
                 // outbound transport and before handing an accepted
                 // inbound TCP connection to `run_peer_session`.
                 p_cfg.admin_down = cfg.admin_down;
+                // 2.x capability block (issue #101): propagate each
+                // new capability field to PeerConfig so the FSM's OPEN
+                // builder advertises them.
+                p_cfg.extended_message = cfg.extended_message;
+                p_cfg.bgp_role = cfg.bgp_role;
+                p_cfg.fqdn = cfg.fqdn.clone();
+                p_cfg.bfd_strict_mode = cfg.bfd_strict_mode;
+                p_cfg.software_version = cfg.software_version.clone();
+                p_cfg.paths_limit = cfg.paths_limit.clone();
+                p_cfg.link_local_next_hop = cfg.link_local_next_hop;
+                p_cfg.orf = cfg.orf.clone();
+                // RFC 9234: when the daemon resolved a BGP Role
+                // capability role, the OTC attribute path uses the
+                // same role. An explicit FFI-set `PeerConfig::otc_role`
+                // (still `OtcRole::Unset` at this point in the daemon
+                // path) keeps precedence — embedders that drive the
+                // two independently leave `cfg.otc_role` as `None`.
+                if let Some(role) = cfg.otc_role {
+                    if p_cfg.otc_role == lr_bgp::role::OtcRole::Unset {
+                        p_cfg.otc_role = role;
+                    }
+                }
                 let peer = BgpPeer::new(p_cfg);
                 if let Some(group) = cfg.collision_group {
                     self.collision_meta

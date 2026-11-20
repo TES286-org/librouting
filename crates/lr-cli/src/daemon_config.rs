@@ -147,6 +147,33 @@ pub(crate) struct PeerSpec {
     ///
     /// [`SessionConfig`]: lr_router::SessionConfig
     pub route_reflector_client: Option<bool>,
+    /// RFC 8654 Extended Message capability — per-peer override of
+    /// the router-wide `[bgp] extended_message`. `None` inherits.
+    pub extended_message: Option<bool>,
+    /// RFC 9234 BGP Role capability — per-peer override of the
+    /// router-wide `[bgp] bgp_role`. `None` inherits. The string is
+    /// one of `"provider"`, `"rs"`, `"rs-client"`, `"customer"`,
+    /// `"peer"` (mapped to [`lr_bgp::role::OtcRole`] at finalize
+    /// time); the boolean is the strict bit.
+    pub bgp_role: Option<(String, bool)>,
+    /// FQDN capability — per-peer override of the router-wide
+    /// `[bgp] hostname` / `[bgp] domain_name`. `None` inherits.
+    pub fqdn: Option<(String, String)>,
+    /// BFD Strict-Mode capability — per-peer override of the
+    /// router-wide `[bgp] bfd_strict_mode`. `None` inherits.
+    pub bfd_strict_mode: Option<bool>,
+    /// Software Version capability — per-peer override of the
+    /// router-wide `[bgp] software_version`. `None` inherits.
+    pub software_version: Option<String>,
+    /// PATHS-LIMIT capability — per-peer override of the router-wide
+    /// `[bgp] paths_limit`. `None` inherits.
+    pub paths_limit: Option<Vec<(u16, u8, u16)>>,
+    /// Link-Local Next Hop capability — per-peer override of the
+    /// router-wide `[bgp] link_local_next_hop`. `None` inherits.
+    pub link_local_next_hop: Option<bool>,
+    /// RFC 5291 ORF capability — per-peer override of the
+    /// router-wide `[bgp] orf`. `None` inherits.
+    pub orf: Option<Vec<OrfEntrySpec>>,
     /// FRR `neighbor X shutdown` / BIRD `disabled`: administratively
     /// down the peer. `None` (the default) inherits `false`; `Some(true)`
     /// keeps the outbound connector passive (no dial) and refuses
@@ -410,6 +437,38 @@ pub(crate) struct BabelKeySpec {
     /// BIRD mirrors this as per-interface `authentication` blocks in
     /// `protocol babel`.
     pub interface: Option<String>,
+}
+
+/// One RFC 5291 §3 ORF entry, parsed from the operator-facing
+/// config into the same shape [`lr_bgp::capabilities_extra::OrfEntry`]
+/// carries. The `mode` string is `"receive"`, `"send"` or `"both"`
+/// (mapped to the wire values 1, 2, 3 at finalize time).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OrfEntrySpec {
+    /// Address family identifier (1 = IPv4, 2 = IPv6).
+    pub afi: u16,
+    /// Subsequent address family identifier (1 = unicast).
+    pub safi: u8,
+    /// ORF type (64 = prefix-ORF, the only type RFC 5291 / RFC 5292
+    /// define today; the field is open for future types).
+    pub orf_type: u8,
+    /// `"receive"` (willing to receive ORF entries from peer),
+    /// `"send"` (wants to send), `"both"`.
+    pub mode: String,
+}
+
+impl OrfEntrySpec {
+    /// Resolve the mode string to its RFC 5291 §3 wire value. Returns
+    /// `None` for unknown strings so the caller can fail-closed at
+    /// finalize time.
+    pub fn mode_value(&self) -> Option<u8> {
+        match self.mode.as_str() {
+            "receive" => Some(1),
+            "send" => Some(2),
+            "both" => Some(3),
+            _ => None,
+        }
+    }
 }
 
 /// One `[[babel.interface]]` table — per-interface Babel parameters
@@ -1012,6 +1071,52 @@ pub(crate) struct DaemonConfig {
     pub mp_families: Vec<String>,
     /// RFC 5549 Extended Next-Hop.
     pub extended_next_hop: bool,
+    /// RFC 8654 Extended Message capability — the per-message length
+    /// ceiling rises from 4096 to 65535 octets when negotiated. The
+    /// per-peer override (`PeerSpec::extended_message`) inherits this
+    /// when unset. Default off (the codec stays at the RFC 4271 §4.1
+    /// ceiling).
+    pub extended_message: bool,
+    /// RFC 9234 BGP Role capability — advertised as `(role, strict)`
+    /// from the peer-level `bgp_role` field. The router-wide
+    /// `[bgp] bgp_role` key sets the default role peers inherit; the
+    /// strict bit defaults to `false`. `None` (the default) does not
+    /// advertise the capability. The OTC attribute path keeps its
+    /// own `otc_role` field — when only `otc_role` is set the
+    /// capability is not advertised but the OTC attribute path
+    /// still runs.
+    pub bgp_role: Option<(String, bool)>,
+    /// FQDN capability (draft-walton-bgp-hostname-capability-01) —
+    /// advertised as `(hostname, domain)` from the peer-level
+    /// `fqdn` field. The router-wide `[bgp] hostname` /
+    /// `[bgp] domain_name` keys set the defaults peers inherit.
+    pub hostname: Option<String>,
+    /// Domain name component of the FQDN capability. See
+    /// [`Self::hostname`].
+    pub domain_name: Option<String>,
+    /// draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode capability.
+    /// Per-peer override (`PeerSpec::bfd_strict_mode`) inherits this
+    /// when unset. Default off. Requires `bfd_enabled` for the
+    /// strict-mode gate to fire.
+    pub bfd_strict_mode: bool,
+    /// draft-abraitis-bgp-version-capability-11 Software Version
+    /// capability — advertised as a UTF-8 string from the
+    /// peer-level `software_version` field. The router-wide
+    /// `[bgp] software_version` key sets the default peers inherit.
+    pub software_version: Option<String>,
+    /// draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT
+    /// capability — the router-wide default `(afi, safi, limit)`
+    /// triples peers inherit. Empty (the default) does not
+    /// advertise the capability.
+    pub paths_limit: Vec<(u16, u8, u16)>,
+    /// draft-white-linklocal-capability-04 Link-Local Next Hop
+    /// capability. Per-peer override (`PeerSpec::link_local_next_hop`)
+    /// inherits this when unset. Default off.
+    pub link_local_next_hop: bool,
+    /// RFC 5291 ORF capability — the router-wide default
+    /// `(afi, safi, [(orf_type, mode)])` entries peers inherit.
+    /// Empty (the default) does not advertise the capability.
+    pub orf: Vec<OrfEntrySpec>,
     /// Local IPv6 source address for next-hop-self egress.
     pub local_address_v6: Option<String>,
     /// RFC 5082 GTSM: `None` = disabled; `Some(hops)` = multihop.
@@ -1748,6 +1853,11 @@ impl DaemonConfig {
             max_prefix_action: "warn".to_string(),
             max_prefix_threshold: 75,
             max_prefix_restart_time: 0,
+            extended_message: false,
+            bfd_strict_mode: false,
+            paths_limit: Vec::new(),
+            link_local_next_hop: false,
+            orf: Vec::new(),
             bfd_min_tx_ms: 100,
             bfd_min_rx_ms: 100,
             bfd_multiplier: 3,
@@ -3258,6 +3368,139 @@ fn parse_exchange_plane_policy_role(value: &str) -> Result<String, String> {
     }
 }
 
+/// Parse a BGP Role capability value (RFC 9234 §3) for the
+/// `[bgp] bgp_role` and `peer.bgp_role` keys. The accepted shapes
+/// are:
+///
+/// - `"provider"` / `"customer"` / `"rs"` / `"rs-client"` / `"peer"`
+///   — the role, with the strict bit defaulting to `false`.
+/// - `"provider strict"` / `"customer strict"` / etc. — the role
+///   followed by the optional strict flag (FRR/BIRD extension).
+///
+/// Returns the `(role_string, strict)` pair; the role string is the
+/// canonical lowercase spelling, which the daemon maps onto
+/// [`lr_bgp::role::OtcRole`] at finalize time (the same vocabulary
+/// `parse_exchange_plane_policy_role` accepts, so the operator's
+/// role-typed fields share one spelling set).
+fn parse_bgp_role_value(value: &str) -> Result<(String, bool), String> {
+    let trimmed = value.trim();
+    let (role_str, strict_str) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
+    let canonical = role_str.to_ascii_lowercase();
+    match canonical.as_str() {
+        "provider" | "customer" | "rs" | "rs-client" | "peer" => {}
+        _ => {
+            return Err(format!(
+                "bad bgp_role '{value}' (expected one of: provider | customer | rs | rs-client | peer, optionally followed by 'strict')"
+            ));
+        }
+    }
+    let strict = match strict_str.trim() {
+        "" => false,
+        "strict" => true,
+        other => {
+            return Err(format!(
+                "bad bgp_role strict flag '{other}' (expected 'strict' or empty)"
+            ));
+        }
+    };
+    Ok((canonical, strict))
+}
+
+/// Parse a PATHS-LIMIT capability value
+/// (draft-abraitis-idr-addpath-paths-limit-00) for the `[bgp]
+/// paths_limit` and `peer.paths_limit` keys. The accepted shape is a
+/// comma-separated list of `afi:safi:limit` triples (e.g.
+/// `"1:1:16,2:1:32"`). Returns the parsed triples; an empty string
+/// returns an empty vector (no advertisement).
+fn parse_paths_limit(value: &str) -> Result<Vec<(u16, u8, u16)>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for triple in trimmed.split(',') {
+        let triple = triple.trim();
+        if triple.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = triple.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!(
+                "bad paths_limit triple '{triple}' (expected 'afi:safi:limit')"
+            ));
+        }
+        let afi: u16 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad paths_limit afi '{}'", parts[0]))?;
+        let safi: u8 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad paths_limit safi '{}'", parts[1]))?;
+        let limit: u16 = parts[2]
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad paths_limit value '{}'", parts[2]))?;
+        out.push((afi, safi, limit));
+    }
+    Ok(out)
+}
+
+/// Parse an RFC 5291 §3 ORF capability value for the `[bgp] orf` and
+/// `peer.orf` keys. The accepted shape is a comma-separated list of
+/// `afi:safi:type:mode` quadruples (e.g. `"1:1:64:both,2:1:64:receive"`).
+/// `mode` is `receive`, `send`, or `both`; the wire values 1, 2, 3
+/// are resolved by [`OrfEntrySpec::mode_value`] at finalize time.
+fn parse_orf_entries(value: &str) -> Result<Vec<OrfEntrySpec>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in trimmed.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = entry.split(':').collect();
+        if parts.len() != 4 {
+            return Err(format!(
+                "bad orf entry '{entry}' (expected 'afi:safi:type:mode')"
+            ));
+        }
+        let afi: u16 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad orf afi '{}'", parts[0]))?;
+        let safi: u8 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad orf safi '{}'", parts[1]))?;
+        let orf_type: u8 = parts[2]
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad orf type '{}'", parts[2]))?;
+        let mode = parts[3].trim().to_ascii_lowercase();
+        match mode.as_str() {
+            "receive" | "send" | "both" => {}
+            _ => {
+                return Err(format!(
+                    "bad orf mode '{mode}' (expected receive | send | both)"
+                ));
+            }
+        }
+        out.push(OrfEntrySpec {
+            afi,
+            safi,
+            orf_type,
+            mode,
+        });
+    }
+    Ok(out)
+}
+
 /// Strip a `#`-to-end-of-line comment from a TOML line, respecting
 /// both basic (`"..."`) and literal (`'...'`) string forms so a `#`
 /// inside a quoted value is preserved (e.g. `md5_key = "a#b"` keeps
@@ -3731,6 +3974,17 @@ pub(crate) fn apply_config_key(
         "bgp.add_path" => cfg.add_path = parse_bool(value),
         "bgp.add_path_max_paths" => cfg.add_path_max_paths = value.parse().unwrap_or(6),
         "bgp.extended_next_hop" => cfg.extended_next_hop = parse_bool(value),
+        "bgp.extended_message" => cfg.extended_message = parse_bool(value),
+        "bgp.bgp_role" => {
+            cfg.bgp_role = Some(parse_bgp_role_value(value)?);
+        }
+        "bgp.hostname" => cfg.hostname = Some(value.to_string()),
+        "bgp.domain_name" => cfg.domain_name = Some(value.to_string()),
+        "bgp.bfd_strict_mode" => cfg.bfd_strict_mode = parse_bool(value),
+        "bgp.software_version" => cfg.software_version = Some(value.to_string()),
+        "bgp.paths_limit" => cfg.paths_limit = parse_paths_limit(value)?,
+        "bgp.link_local_next_hop" => cfg.link_local_next_hop = parse_bool(value),
+        "bgp.orf" => cfg.orf = parse_orf_entries(value)?,
         "bgp.local_address_v6" => cfg.local_address_v6 = Some(value.to_string()),
         "bgp.gtsm" => cfg.gtsm_hops = parse_gtsm(value),
         "bgp.max_prefixes" => {
@@ -5855,6 +6109,42 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         }
         "graceful_shutdown" => peer.graceful_shutdown = Some(parse_bool(value)),
         "extended_next_hop" => peer.extended_next_hop = Some(parse_bool(value)),
+        "extended_message" => peer.extended_message = Some(parse_bool(value)),
+        "bgp_role" => peer.bgp_role = Some(parse_bgp_role_value(value)?),
+        "hostname" => {
+            peer.fqdn = Some((
+                value.to_string(),
+                peer.fqdn
+                    .as_ref()
+                    .map(|(_, d)| d.clone())
+                    .unwrap_or_default(),
+            ));
+        }
+        "domain_name" => {
+            peer.fqdn = Some((
+                peer.fqdn
+                    .as_ref()
+                    .map(|(h, _)| h.clone())
+                    .unwrap_or_default(),
+                value.to_string(),
+            ));
+        }
+        "fqdn" => {
+            // Accept `"hostname,domain"` as a single value for the
+            // DSL, which does not have a natural pair syntax. A peer
+            // that needs independent control uses `hostname` and
+            // `domain_name` separately.
+            let (h, d) = value
+                .split_once(',')
+                .map(|(h, d)| (h.trim().to_string(), d.trim().to_string()))
+                .unwrap_or((value.to_string(), String::new()));
+            peer.fqdn = Some((h, d));
+        }
+        "bfd_strict_mode" => peer.bfd_strict_mode = Some(parse_bool(value)),
+        "software_version" => peer.software_version = Some(value.to_string()),
+        "paths_limit" => peer.paths_limit = Some(parse_paths_limit(value)?),
+        "link_local_next_hop" => peer.link_local_next_hop = Some(parse_bool(value)),
+        "orf" => peer.orf = Some(parse_orf_entries(value)?),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
         "max_prefixes" => {
             peer.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);

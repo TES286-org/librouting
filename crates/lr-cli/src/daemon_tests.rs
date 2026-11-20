@@ -1066,6 +1066,7 @@ mod source_diagnostic_tests {
             busy: Arc::new(AtomicBool::new(false)),
             outbound_lost_collision: Arc::new(AtomicBool::new(false)),
             admin_down: false,
+            bfd_strict_mode: false,
         };
         // The function returns (); the test is that it does not panic.
         diagnose_source_address(&cfg, &entry);

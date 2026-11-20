@@ -46,7 +46,14 @@ files of the `lr-cli` binary crate, which is not a library.
 | Route reflection, ORIGINATOR_ID and CLUSTER_LIST (RFC 4456) | yes | `lr-bgp::role::cluster` |
 | Confederation segments (RFC 5065) | yes | `lr-bgp::role::confederation` |
 | Route server egress (RFC 7947) | yes | `lr-bgp::role::route_server` |
-| OTC attribute and role negotiation (RFC 9234) | yes | `lr-bgp::role::otc` |
+| OTC attribute and role negotiation (RFC 9234) | yes | `lr-bgp::role::otc`, `lr-bgp::extensions::bgp_role` |
+| Extended Message capability and codec gate (RFC 8654) | yes | `lr-bgp::extensions::extended_message`, `lr-bgp::codec::BgpCodec::set_extended_message` |
+| Outbound Route Filtering capability (RFC 5291) | yes | `lr-bgp::extensions::orf`, `lr-bgp::capabilities::Capability::orf` |
+| FQDN/Hostname capability (draft-walton-bgp-hostname-capability-01) | yes | `lr-bgp::extensions::fqdn`, `lr-bgp::capabilities::Capability::fqdn` |
+| BFD Strict-Mode capability and establishment gate (draft-ietf-idr-bgp-bfd-strict-mode-13) | yes | `lr-bgp::extensions::bfd_strict_mode`, `lr-cli::daemon` connector hold-off |
+| Software Version capability (draft-abraitis-bgp-version-capability-11) | yes | `lr-bgp::extensions::software_version`, `lr-bgp::capabilities::Capability::software_version` |
+| PATHS-LIMIT capability (draft-abraitis-idr-addpath-paths-limit-00) | yes | `lr-bgp::extensions::paths_limit`, `lr-bgp::capabilities::Capability::paths_limit` |
+| Link-Local Next Hop capability (draft-white-linklocal-capability-04) | yes | `lr-bgp::extensions::link_local_next_hop`, `lr-bgp::capabilities::Capability::link_local_next_hop` |
 | Best-path selection and the router-id tiebreak | yes | `lr-bgp::best_path` |
 | Standard, extended and large communities | yes | `lr-bgp::path::communities` |
 | Well-known communities and attribute flags | yes | `lr-bgp::path::well_known`, `lr-bgp::path` |

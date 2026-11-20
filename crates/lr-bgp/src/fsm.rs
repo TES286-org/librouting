@@ -639,6 +639,35 @@ impl BgpPeer {
                 .collect();
             caps.push(Capability::extended_next_hop(&raw));
         }
+        // 2.x capability block (issue #101): advertise each capability
+        // the local config opted the session into. Each helper
+        // returns `None` when the knob is off, so the OPEN only
+        // carries capabilities the operator enabled — peers that do
+        // not understand a code treat it as inert per RFC 5492 §3.
+        if let Some(cap) = crate::extensions::extended_message::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
+        if let Some(cap) = crate::extensions::bgp_role::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
+        if let Some(cap) = crate::extensions::fqdn::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
+        if let Some(cap) = crate::extensions::bfd_strict_mode::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
+        if let Some(cap) = crate::extensions::software_version::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
+        if let Some(cap) = crate::extensions::paths_limit::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
+        if let Some(cap) = crate::extensions::link_local_next_hop::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
+        if let Some(cap) = crate::extensions::orf::open_capability(&self.cfg) {
+            caps.push(cap);
+        }
         // Exchange plane: advertise when configured
         // (feature-gated; RFC 5492 §3 makes the unknown capability
         // inert for peers without it). Each OPEN bumps the instance
@@ -958,6 +987,16 @@ impl BgpPeer {
         self.add_path_rx = rx;
         self.codec
             .set_add_path(self.add_path_tx.clone(), self.add_path_rx.clone());
+
+        // RFC 8654 §3: when both speakers advertised the Extended
+        // Message capability, raise the codec's per-message length
+        // ceiling from the RFC 4271 §4.1 4096-octet limit to 65535
+        // octets. The negotiation helper is the established
+        // `advertised` / `peer_offered` / `negotiated` triple shape
+        // — the codec gate is the consumer.
+        let extended_message_negotiated =
+            crate::extensions::extended_message::negotiated(&self.cfg, &self.peer_capabilities);
+        self.codec.set_extended_message(extended_message_negotiated);
 
         // RFC 5549 §4: Extended Next-Hop is usable only for tuples both
         // speakers advertised. Store the intersection; the egress path

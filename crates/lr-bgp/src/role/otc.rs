@@ -79,6 +79,40 @@ impl OtcRole {
             _ => return None,
         })
     }
+
+    /// Encode the role as the wire value the BGP Role capability
+    /// (RFC 9234 §3, capability code 9) carries. The capability's
+    /// wire values differ from the OTC attribute's enum indices
+    /// (`to_u8`): the capability uses 0 = Provider, 1 = RS,
+    /// 2 = RS-Client, 3 = Customer, 4 = Peer, matching the IANA
+    /// BGP Role registry; the OTC attribute path uses the enum
+    /// indices for its own internal encoding. The two are
+    /// reconciled here so the OPEN builder can advertise the role
+    /// the operator configured.
+    pub fn to_bgp_role_value(self) -> u8 {
+        match self {
+            OtcRole::Provider => 0,
+            OtcRole::RouteServer => 1,
+            OtcRole::RsClient => 2,
+            OtcRole::Customer => 3,
+            OtcRole::Peer => 4,
+            OtcRole::Unset => 0xff, // sentinel: the capability must not be advertised
+        }
+    }
+
+    /// Decode the BGP Role capability's wire value back into the
+    /// enum. Returns `None` for unknown values (5-254) and the
+    /// `Unset` sentinel (255). Mirrors [`to_bgp_role_value`].
+    pub fn from_bgp_role_value(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => Self::Provider,
+            1 => Self::RouteServer,
+            2 => Self::RsClient,
+            3 => Self::Customer,
+            4 => Self::Peer,
+            _ => return None,
+        })
+    }
 }
 
 /// The OTC attribute value. Wraps the 4-byte integer so the policy engine can
@@ -86,6 +120,27 @@ impl OtcRole {
 /// for filtering but identical on the wire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct Otc(pub u32);
+
+impl core::str::FromStr for OtcRole {
+    type Err = ();
+
+    /// Parse the operator-facing role vocabulary (the same set
+    /// `parse_exchange_plane_policy_role` accepts in `daemon_config`):
+    /// `"provider"`, `"customer"`, `"rs"`, `"rs-client"`, `"peer"`.
+    /// The `"unset"` spelling is rejected here — it is the explicit
+    /// "no claim" form, not a role the BGP Role capability carries;
+    /// the daemon uses `Option<OtcRole>` for the absence case.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "provider" => Ok(OtcRole::Provider),
+            "customer" => Ok(OtcRole::Customer),
+            "rs" => Ok(OtcRole::RouteServer),
+            "rs-client" => Ok(OtcRole::RsClient),
+            "peer" => Ok(OtcRole::Peer),
+            _ => Err(()),
+        }
+    }
+}
 
 impl Otc {
     pub const fn new(asn: u32) -> Self {
