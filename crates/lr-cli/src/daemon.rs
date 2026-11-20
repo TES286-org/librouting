@@ -618,6 +618,22 @@ impl PeerEntry {
     }
 }
 
+/// The daemon-wide connected-route import gate ([`install_connected_routes`]).
+///
+/// Babel distributions cover everything the Loc-RIB selects except
+/// Babel-learned routes (`build_babel_announcement` snapshots the
+/// Loc-RIB, RFC 8966 §3.7): a connected route the daemon imported
+/// from the system would ride every Babel announcement to a peer as
+/// an ordinary route — the operator asked for the config-originated
+/// routes (`[networks]`, `[[static.route]]`, …) to be the announced
+/// set, not the kernel's. A daemon that runs the Babel engine
+/// (`babel_engine` is true) therefore imports the kernel's connected
+/// routes only when `[babel] import_kernel_routes` is set; every
+/// other daemon keeps the BIRD parity import-on.
+fn import_connected_routes_enabled(cfg: &DaemonConfig, babel_engine: bool) -> bool {
+    !(babel_engine && !cfg.babel_import_kernel_routes)
+}
+
 /// Install `[[redistribute]]` pipes and `[[aggregate]]` registrations
 /// on the shared router. Called once per
 /// process — from the multi-protocol supervisor right after it creates
@@ -626,11 +642,15 @@ impl PeerEntry {
 /// the protocol set (`finalize_redistribution`), so any error here is
 /// a programming bug and surfaces as one.
 ///
+/// `import_connected` gates the kernel connected-route import — see
+/// [`import_connected_routes_enabled`].
+///
 /// Returns the number of pipes, aggregates and static routes installed
 /// (for the startup banner).
 fn apply_cross_protocol_config(
     cfg: &DaemonConfig,
     r: &mut DefaultRouter,
+    import_connected: bool,
 ) -> Result<(usize, usize, usize), String> {
     for spec in &cfg.redistributes {
         let source = spec
@@ -750,13 +770,22 @@ fn apply_cross_protocol_config(
     // `[[redistribute]] connected -> …` pipe (BIRD `redistribute direct`
     // / FRR `redistribute connected` parity).
     //
+    // Gated by the caller: [`import_connected_routes_enabled`] — a
+    // Babel-engine daemon passes false unless `[babel]
+    // import_kernel_routes` is set, so a Babel daemon does not
+    // re-announce the system's routes to its peers by default.
+    //
     // On a platform whose `list_interfaces` returns Unsupported (the
     // non-Linux/BSD/Windows fallback), the helper logs a single
     // warning and skips connected-route installation — the daemon
     // still starts and serves its other configured surfaces, but
     // `[[redistribute]] source = "connected"` is a no-op pipe (the
     // Loc-RIB has no Connected routes to push through it).
-    let installed = install_connected_routes(r);
+    let installed = if import_connected {
+        install_connected_routes(r)
+    } else {
+        0
+    };
     if installed > 0 {
         log_info!(
             Component::Router,
@@ -958,6 +987,52 @@ mod connected_route_tests {
     }
 }
 
+/// The `[babel] import_kernel_routes` gate — pure logic, no I/O.
+#[cfg(test)]
+mod babel_import_gate_tests {
+    use super::*;
+
+    /// A daemon running the Babel engine imports the kernel's
+    /// connected routes only when `[babel] import_kernel_routes` is
+    /// set — default off, per the requirement that a Babel engine
+    /// announce only what the config file originates plus what peers
+    /// announce over the wire.
+    #[test]
+    fn babel_engine_import_is_opt_in() {
+        let cfg = DaemonConfig::with_defaults();
+        assert!(!cfg.babel_import_kernel_routes, "default is off");
+        assert!(!import_connected_routes_enabled(&cfg, true));
+        let mut cfg = cfg;
+        cfg.babel_import_kernel_routes = true;
+        assert!(import_connected_routes_enabled(&cfg, true));
+    }
+
+    /// Every other daemon keeps the BIRD parity (connected import
+    /// on): standalone BGP (`babel_engine` false), OSPF, and the
+    /// multi-protocol supervisor when "babel" is not in the set.
+    #[test]
+    fn non_babel_daemons_import_connected_by_default() {
+        let cfg = DaemonConfig::with_defaults();
+        assert!(import_connected_routes_enabled(&cfg, false));
+        // Even with the key set, a non-Babel daemon keeps the gate open.
+        let mut cfg = cfg;
+        cfg.babel_import_kernel_routes = true;
+        assert!(import_connected_routes_enabled(&cfg, false));
+    }
+
+    /// Multi-protocol: the supervisor passes "babel is in the set" —
+    /// with it in the set the gate is off unless the opt-in key is
+    /// set; without it the daemon behaves like a non-Babel one.
+    #[test]
+    fn multi_daemon_gate_follows_the_babel_engine_flag() {
+        let mut cfg = DaemonConfig::with_defaults();
+        assert!(!import_connected_routes_enabled(&cfg, true));
+        assert!(import_connected_routes_enabled(&cfg, false));
+        cfg.babel_import_kernel_routes = true;
+        assert!(import_connected_routes_enabled(&cfg, true));
+    }
+}
+
 /// Shared damping state for the daemon: the import-hook enabled flag
 /// (so a SIGHUP-driven reload can flip damping off without
 /// reinstalling the hook on the import chain), the decay-ticker stop
@@ -1131,7 +1206,11 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // (duplicate pipes would double-re-originate every route).
     if host.is_none() {
         let mut r = router.write().unwrap();
-        if let Err(e) = apply_cross_protocol_config(cfg, &mut r) {
+        if let Err(e) = apply_cross_protocol_config(
+            cfg,
+            &mut r,
+            import_connected_routes_enabled(cfg, false),
+        ) {
             log_error!(Component::Bgp, "error: {e}");
             return ExitCode::from(2);
         }
@@ -5481,7 +5560,15 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // the routes by hand.
     if host.is_none() {
         let mut r = router.write().unwrap();
-        if let Err(e) = apply_cross_protocol_config(cfg, &mut r) {
+        if let Err(e) = apply_cross_protocol_config(
+            cfg,
+            &mut r,
+            // The standalone Babel engine does not import the
+            // kernel's connected routes unless the operator opted in
+            // with `[babel] import_kernel_routes` — see
+            // [`import_connected_routes_enabled`].
+            import_connected_routes_enabled(cfg, true),
+        ) {
             log_error!(Component::Bgp, "error: {e}");
             return ExitCode::from(2);
         }

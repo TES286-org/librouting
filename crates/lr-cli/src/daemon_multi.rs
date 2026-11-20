@@ -267,7 +267,15 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     // Applied once, here, before any engine spawns: pipes scan the
     // (still empty) Loc-RIB and fire on every later selection; the
     // embedded engines must not re-apply on the shared router.
-    if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap()) {
+    // `babel` in the protocol set makes the connected-route import
+    // opt-in ([`crate::import_connected_routes_enabled`]) — without
+    // `[babel] import_kernel_routes` the Babel engine must not
+    // re-announce the system's routes.
+    let import_connected =
+        crate::import_connected_routes_enabled(cfg, set.iter().any(|e| e == "babel"));
+    if let Err(e) =
+        crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap(), import_connected)
+    {
         log_error!(Component::Daemon, "error: {e}");
         return ExitCode::from(2);
     }

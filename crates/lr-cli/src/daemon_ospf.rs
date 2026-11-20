@@ -501,7 +501,11 @@ pub(super) fn run_ospf_daemon(
         Some(h) => Arc::clone(&h.runtime.router),
         None => {
             let router = Arc::new(RwLock::new(DefaultRouter::new()));
-            if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap()) {
+            if let Err(e) = crate::apply_cross_protocol_config(
+                cfg,
+                &mut router.write().unwrap(),
+                crate::import_connected_routes_enabled(cfg, false),
+            ) {
                 log_error!(Component::Ospf, "error: {e}");
                 return ExitCode::from(2);
             }
