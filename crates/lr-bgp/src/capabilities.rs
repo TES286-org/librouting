@@ -1,6 +1,16 @@
 //! BGP capabilities (RFC 5492 + RFC 4760 MP-BGP + RFC 4893 4-byte AS +
 //! RFC 7911 AddPath + RFC 4724 Graceful Restart + RFC 7313 Enhanced RR +
-//! RFC 5549 Extended Next-Hop + RFC 9494 Long-Lived Graceful Restart).
+//! RFC 5549 Extended Next-Hop + RFC 9494 Long-Lived Graceful Restart +
+//! the 2.x capability block: RFC 5291 ORF, RFC 8654 Extended Message,
+//! RFC 9234 BGP Role, draft-walton-bgp-hostname-capability-01 FQDN,
+//! draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode,
+//! draft-abraitis-bgp-version-capability-11 Software Version,
+//! draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT and
+//! draft-white-linklocal-capability-04 Link-Local Next Hop).
+//!
+//! Codec methods for the 2.x capability block live in
+//! [`crate::capabilities_extra`] (`impl Capability` blocks; the type
+//! is the same one this module declares).
 
 use core::fmt;
 
@@ -12,20 +22,34 @@ pub enum CapabilityCode {
     MultiprotocolExtensions = 1,
     /// RFC 2918: Route refresh
     RouteRefresh = 2,
-    /// RFC 5492: Extended message support
-    ExtendedMessage = 6,
+    /// RFC 5291: Outbound Route Filtering (ORF)
+    Orf = 3,
     /// RFC 5549: Extended Next-Hop for IPv4 NLRI over IPv6 transport
     ExtendedNextHop = 5,
+    /// RFC 5492: Extended message support
+    ExtendedMessage = 6,
+    /// RFC 9234: BGP Role capability
+    BgpRole = 9,
     /// RFC 4724: Graceful restart
     GracefulRestart = 64,
     /// RFC 4893: 4-byte AS number
     FourOctetAs = 65,
-    /// RFC 7313: Enhanced route refresh
-    EnhancedRouteRefresh = 70,
     /// RFC 7911: AddPath
     AddPath = 69,
+    /// RFC 7313: Enhanced route refresh
+    EnhancedRouteRefresh = 70,
     /// RFC 9494: Long-Lived Graceful Restart
     LongLivedGracefulRestart = 71,
+    /// draft-walton-bgp-hostname-capability-01: FQDN/Hostname
+    Fqdn = 73,
+    /// draft-ietf-idr-bgp-bfd-strict-mode-13: BFD Strict-Mode
+    BfdStrictMode = 74,
+    /// draft-abraitis-bgp-version-capability-11: Software Version
+    SoftwareVersion = 75,
+    /// draft-abraitis-idr-addpath-paths-limit-00: PATHS-LIMIT
+    PathsLimit = 76,
+    /// draft-white-linklocal-capability-04: Link-Local Next Hop
+    LinkLocalNextHop = 77,
     /// Unknown
     Other(u8),
 }
@@ -35,13 +59,20 @@ impl CapabilityCode {
         match v {
             1 => Self::MultiprotocolExtensions,
             2 => Self::RouteRefresh,
+            3 => Self::Orf,
             5 => Self::ExtendedNextHop,
             6 => Self::ExtendedMessage,
+            9 => Self::BgpRole,
             64 => Self::GracefulRestart,
             65 => Self::FourOctetAs,
-            70 => Self::EnhancedRouteRefresh,
             69 => Self::AddPath,
+            70 => Self::EnhancedRouteRefresh,
             71 => Self::LongLivedGracefulRestart,
+            73 => Self::Fqdn,
+            74 => Self::BfdStrictMode,
+            75 => Self::SoftwareVersion,
+            76 => Self::PathsLimit,
+            77 => Self::LinkLocalNextHop,
             _ => Self::Other(v),
         }
     }
@@ -58,13 +89,20 @@ impl CapabilityCode {
         match self {
             Self::MultiprotocolExtensions => 1,
             Self::RouteRefresh => 2,
+            Self::Orf => 3,
             Self::ExtendedNextHop => 5,
             Self::ExtendedMessage => 6,
+            Self::BgpRole => 9,
             Self::GracefulRestart => 64,
             Self::FourOctetAs => 65,
-            Self::EnhancedRouteRefresh => 70,
             Self::AddPath => 69,
+            Self::EnhancedRouteRefresh => 70,
             Self::LongLivedGracefulRestart => 71,
+            Self::Fqdn => 73,
+            Self::BfdStrictMode => 74,
+            Self::SoftwareVersion => 75,
+            Self::PathsLimit => 76,
+            Self::LinkLocalNextHop => 77,
             Self::Other(v) => v,
         }
     }
