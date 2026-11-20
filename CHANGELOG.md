@@ -13,7 +13,55 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA, event bus
+## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA,
+event bus, 2.x capability block
+
+### Added — BGP capability block (issue #101)
+
+Eight BGP capabilities land on the OPEN advertisement surface, each
+with a typed codec, an extension module following the established
+`advertised` / `peer_offered` / `negotiated` / `open_capability`
+triple shape, a `PeerConfig` / `SessionConfig` field and a
+daemon-config + DSL key:
+
+- **RFC 5291 ORF** (capability code 3) — per-family
+  `(afi, safi, [(orf_type, mode)])` triples. The daemon's config
+  accepts `orf = "1:1:64:both,2:1:64:receive"` (per-peer override
+  inherits the router-wide default).
+- **RFC 8654 Extended Message** (capability code 6) — the codec's
+  per-message length ceiling rises from the RFC 4271 §4.1
+  4096-octet limit to 65535 octets when both speakers advertise
+  the capability. `BgpCodec::set_extended_message` is the runtime
+  gate; the FSM flips it after OPEN negotiation.
+- **RFC 9234 BGP Role** (capability code 9) — advertises the
+  speaker's role (Provider / RS / RS-Client / Customer / Peer)
+  plus the FRR/BIRD strict bit. The role is reconciled with the
+  existing `otc_role` field at finalize time so the OTC attribute
+  path and the capability share one source of truth.
+- **draft-walton-bgp-hostname-capability-01 FQDN** (capability
+  code 73) — two length-prefixed UTF-8 strings; the daemon's
+  config accepts `hostname = "..."` and `domain_name = "..."`.
+- **draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode**
+  (capability code 74) — when negotiated, the daemon's connector
+  blocks session establishment until BFD reports Up (no
+  hold-timer fallback).
+- **draft-abraitis-bgp-version-capability-11 Software Version**
+  (capability code 75) — length-prefixed UTF-8 string; the
+  daemon's config accepts `software_version = "lr/2.0"`.
+- **draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT**
+  (capability code 76) — per-family 5-byte
+  `<AFI, SAFI, Paths-Limit>` tuples; the negotiation helper
+  enforces the draft's mandatory AddPath gating.
+- **draft-white-linklocal-capability-04 Link-Local Next Hop**
+  (capability code 77) — presence alone signals that the speaker
+  can accept a link-local IPv6 next-hop in MP_REACH_NLRI.
+
+No public Rust API change beyond the new `CapabilityCode`
+variants, `Capability` constructors, `PeerConfig` fields and
+extension module surfaces — pre-2.0 semver debt the `api-surface`
+CI job already tracks. C ABI untouched.
+
+### Added — filter DSL surface, event bus
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`

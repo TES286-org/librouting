@@ -178,6 +178,16 @@ bgp {
     mp_families [ipv4-unicast, ipv6-unicast];
     install_kernel true;
     networks [203.0.113.0/24, 198.51.100.0/24];
+    # 2.x capability block (issue #101):
+    extended_message true;              # RFC 8654
+    bgp_role "provider strict";         # RFC 9234 (role + optional strict)
+    hostname "border-r1";               # draft-walton-bgp-hostname-capability-01
+    domain_name "example.net";
+    bfd_strict_mode true;               # draft-ietf-idr-bgp-bfd-strict-mode-13
+    software_version "lr/2.0";          # draft-abraitis-bgp-version-capability-11
+    paths_limit "1:1:16,2:1:32";        # draft-abraitis-idr-addpath-paths-limit-00
+    link_local_next_hop true;           # draft-white-linklocal-capability-04
+    orf "1:1:64:both,2:1:64:receive";   # RFC 5291
 }
 ```
 
