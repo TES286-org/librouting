@@ -971,10 +971,7 @@ fn babel_filters_attach_at_startup_and_unknown_name_fails() {
 /// functional and only distributes what the config asked for.
 #[test]
 fn babel_daemon_does_not_import_kernel_routes_by_default() {
-    let dir = std::env::temp_dir().join(format!(
-        "lr-daemon-test-bnokernel-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("lr-daemon-test-bnokernel-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let conf = dir.join("daemon.toml");
     let socket = dir.join("daemon.api");
@@ -1029,10 +1026,7 @@ fn babel_daemon_does_not_import_kernel_routes_by_default() {
 /// functional with the opt-in.
 #[test]
 fn babel_daemon_imports_kernel_routes_with_the_opt_in() {
-    let dir = std::env::temp_dir().join(format!(
-        "lr-daemon-test-bkern-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("lr-daemon-test-bkern-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let conf = dir.join("daemon.toml");
     let socket = dir.join("daemon.api");

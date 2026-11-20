@@ -1206,11 +1206,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // (duplicate pipes would double-re-originate every route).
     if host.is_none() {
         let mut r = router.write().unwrap();
-        if let Err(e) = apply_cross_protocol_config(
-            cfg,
-            &mut r,
-            import_connected_routes_enabled(cfg, false),
-        ) {
+        if let Err(e) =
+            apply_cross_protocol_config(cfg, &mut r, import_connected_routes_enabled(cfg, false))
+        {
             log_error!(Component::Bgp, "error: {e}");
             return ExitCode::from(2);
         }
