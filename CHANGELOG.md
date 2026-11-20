@@ -155,6 +155,50 @@ like `install_kernel`); BGP/OSPF daemons keep the connected import on.
 
 ### Fixed
 
+**Babel announces that exceed the 1496-octet datagram cap are now
+split across multiple UDP datagrams** (`lr-babel`, `lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+RFC 8966 §4 caps a Babel datagram body at 1500 − 4 = 1496 octets.
+The daemon built one `BabelFrame` per announcement cycle and encoded
+it with `BabelCodec::encode_vec`, whose fixed 1500-byte buffer
+returned `Err(BufferFull)` when the body overflowed;
+`build_babel_announcement`'s `unwrap_or_default()` then produced an
+empty `Vec`, which the daemon sent as a zero-byte UDP datagram.
+tcpdump rendered the empty payload as `babel [|babel]`; the peer
+(BIRD, babeld) saw no Hello/IHU, declared the neighbour dead,
+re-flooded every route on the next cycle, and the best-path
+selection churned — the production multi-NIC symptom where "babel
+is very jittery, routes flipping between interfaces, all routes
+lost periodically, peer receives ~1 Hello, rtt 0".
+
+`BabelCodec::pack_frames` (new, `lr-babel`) splits one logical
+announcement into packet-sized frames, re-emitting the most recent
+`RouterId` and `NextHop` TLVs at the start of each trailing frame so
+every `Update` carries its source and next-hop context. `Hello` and
+`Ihu` stay in the first frame, matching BIRD and babeld cadence.
+`build_babel_announcement` now returns `Vec<Vec<u8>>` (one encoded
+payload per packet); the daemon send loop iterates them. A related
+timing fix: `iface.last_announce_ms` is committed only after at
+least one transport accepts the announcement, so a fully failed
+send (ENETUNREACH during a link flap) retries within the 1 s poll
+cap instead of waiting a full Hello interval with no Hello on the
+wire.
+
+**Babel `rtt_send` config separates timestamp send from metric
+penalty** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+BIRD's `rtt send yes` and FRR's `babel enable-timestamps` control
+whether an interface attaches BABEL-RTT timestamp sub-TLVs to its
+Hellos and echoes them in its IHUs (RFC 8966 §A.2.4). Both default
+OFF. The daemon previously conflated "send timestamps" with "apply
+an RTT metric penalty" under a single `rtt_cost > 0` gate; an
+operator who set `rtt_cost = 0` (the default — wanting no penalty)
+got no timestamps even when the peer (BIRD with `rtt send yes`) was
+sending them. The peer had nothing to echo, so RTT stayed at
+0.000 ms on its side. The split introduces `rtt_send` (bool,
+default off; implicit when `rtt_cost > 0`), so an operator can
+`rtt_send true` to measure RTT without influencing route selection.
+
 **Babel selects routes per neighbour instead of letting the last
 announcement win** (`lr-babel`, `lr-router`). One Babel session serves
 one interface, which has many neighbours, but the runtime kept a single
