@@ -439,7 +439,7 @@ mod tests {
     /// and the first frame still carries the Hello and IHU.
     #[test]
     fn pack_frames_large_announcement_splits() {
-        use crate::message::{Ihu, NextHop, RouterId as RouterIdTlv, Update};
+        use crate::message::{Ihu, NextHop, RouterId as RouterIdTlv};
         let mut frame = BabelFrame::empty();
         // Hello + IHU + NextHop + Router-Id preamble (~40 bytes body).
         frame
