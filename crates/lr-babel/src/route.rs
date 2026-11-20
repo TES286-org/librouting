@@ -60,7 +60,7 @@ struct RouteTiming {
 /// Returns: `max(interval_cs × 60, 30_000)` milliseconds — i.e. the
 /// 6× hold with a 30 s floor. `interval_cs` is the Babel Update
 /// Interval TLV's value (centiseconds).
-fn hold_ms(interval_cs: u16) -> u64 {
+pub(crate) fn hold_ms(interval_cs: u16) -> u64 {
     (u64::from(interval_cs) * 60).max(30_000)
 }
 

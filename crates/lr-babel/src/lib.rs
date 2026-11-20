@@ -30,6 +30,7 @@ pub mod message;
 pub mod metric;
 pub mod neighbor;
 pub mod route;
+pub mod route_cache;
 pub mod source;
 pub mod tlv;
 
@@ -43,6 +44,7 @@ pub use codec::BabelCodec;
 pub use message::*;
 pub use neighbor::BabelNeighbor;
 pub use route::{BabelRoute, BabelRouteTable, RouteKey};
+pub use route_cache::{dest_of, BabelRouteCache, PeerRoute, RouteDest};
 pub use source::SourcePrefix;
 pub use tlv::{Tlv, TlvType};
 

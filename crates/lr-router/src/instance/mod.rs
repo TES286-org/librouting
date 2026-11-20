@@ -5447,7 +5447,7 @@ impl RouterInstance for DefaultRouter {
             let SessionState::Babel { runtime, .. } = state else {
                 continue;
             };
-            for r in runtime.routes.best_routes() {
+            for r in runtime.reachable_routes() {
                 match best.get(&r.key) {
                     Some(prev) if prev.metric <= r.metric => {}
                     _ => {
@@ -5466,7 +5466,8 @@ impl RouterInstance for DefaultRouter {
         // Drop the learned table; the diff against `published` emits the
         // withdrawal delta, and the session stays alive for the link's
         // return (routes re-learn from the peer's Updates).
-        runtime.routes = lr_babel::BabelRouteTable::new();
+        runtime.routes = lr_babel::BabelRouteCache::new();
+        runtime.selected.clear();
         let mut delta = runtime.diff();
         if !delta.withdrawn.is_empty() {
             delta.withdraw_reason = format!(
@@ -5529,8 +5530,9 @@ impl RouterInstance for DefaultRouter {
         if let Some(SessionState::Babel { runtime, .. }) = self.sessions.get_mut(&h.0) {
             // The transport already filters our own looped-back
             // multicasts (the `locals` set); every datagram that reaches
-            // here is a genuine peer source.
-            runtime.neighbor.address = peer;
+            // here is a genuine peer source. The runtime keeps per-source
+            // link costs and next hops so one interface can serve a mesh.
+            runtime.note_peer(peer);
         }
     }
 
@@ -5541,22 +5543,11 @@ impl RouterInstance for DefaultRouter {
         let SessionState::Babel { runtime, .. } = self.sessions.get(&h.0)? else {
             return None;
         };
-        // The next hop of last resort per family is the peer's own
+        // The next hop of last resort per family is the current peer's own
         // source address (RFC 8966 §3.5.3) — once traffic has been seen
         // both that and any TLV-advertised address egress the session's
         // interface, so both are useful to an egress-pinning embedder.
-        let peer_v4 = match runtime.neighbor.address {
-            IpAddr::V4(_) => Some(runtime.neighbor.address),
-            IpAddr::V6(_) => None,
-        };
-        let peer_v6 = match runtime.neighbor.address {
-            IpAddr::V6(_) => Some(runtime.neighbor.address),
-            IpAddr::V4(_) => None,
-        };
-        Some((
-            runtime.next_hop_v4.or(peer_v4),
-            runtime.next_hop_v6.or(peer_v6),
-        ))
+        Some(runtime.egress_nexthops())
     }
 
     fn flush_rib_for_shutdown(&mut self) {

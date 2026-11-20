@@ -106,6 +106,31 @@ fn babel_session() -> (Box<dyn RouterInstance>, lr_router::SessionHandle) {
     (r, h)
 }
 
+/// A frame with an explicit Hello seqno and IHU rxcost, for meshes where
+/// each neighbour advertises a different link cost.
+fn mesh_frame(hello_seqno: u16, rxcost: u16, tlvs: Vec<Tlv>) -> Vec<u8> {
+    let mut f = lr_babel::BabelFrame::empty();
+    f.body.push(Tlv::new(
+        TlvType::Hello,
+        Hello::new(hello_seqno, 100).encode(),
+    ));
+    f.body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(rxcost, 300).encode()));
+    f.body.extend(tlvs);
+    lr_babel::BabelCodec::new().encode_vec(&f).unwrap()
+}
+
+fn link_local(last: u8) -> IpAddr {
+    IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, last])
+}
+
+fn rib_route(r: &dyn RouterInstance, prefix: Prefix) -> lr_core::rib::Route {
+    r.rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.key.prefix == prefix)
+        .unwrap_or_else(|| panic!("no route for {prefix}"))
+}
+
 fn snapshot_has(r: &dyn RouterInstance, prefix: Prefix, protocol: Protocol) -> bool {
     r.rib_snapshot()
         .iter()
@@ -859,4 +884,172 @@ fn infeasible_update_does_not_displace_feasible_route() {
         !withdrawn,
         "infeasible update must not withdraw the feasible route"
     );
+}
+
+/// A Babel interface has many neighbours, but one speaker. The receiver
+/// must fold each neighbour's own IHU cost into that neighbour's routes
+/// and select the lowest total metric per prefix — BIRD's
+/// `babel_select_route` and FRR's `find_best_route`. A single shared link
+/// cost made the last datagram heard win, which pointed every prefix at
+/// one next hop with the same metric.
+#[test]
+fn multiple_neighbours_select_the_lowest_cost_route() {
+    let (mut r, h) = babel_session();
+    let peer_a = link_local(0x0a);
+    let peer_b = link_local(0x0b);
+    let dest_bytes = [0xfd, 0, 0, 0, 0, 0, 0, 1];
+    let dest = Prefix::new_v6([0xfd, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], 64);
+
+    // Neighbour A: its IHU reports rxcost 200, so A's route costs 200.
+    r.babel_note_peer(h, peer_a);
+    let from_a = mesh_frame(
+        1,
+        200,
+        vec![
+            router_id_tlv([0, 0, 0, 0, 0, 0, 0, 1]),
+            Tlv::new(
+                TlvType::NextHop,
+                NextHop {
+                    ae: 2,
+                    address: peer_a,
+                }
+                .encode(),
+            ),
+            update_tlv(2, 64, 0, 0, &dest_bytes, 1, 0),
+        ],
+    );
+    r.feed_input(h, &from_a).unwrap();
+    let selected = rib_route(r.as_ref(), dest);
+    assert_eq!(selected.next_hop, Some(peer_a));
+    assert_eq!(selected.preference.metric, 200);
+
+    // Neighbour B: a better link (rxcost 96) on the SAME interface.
+    r.babel_note_peer(h, peer_b);
+    let from_b = mesh_frame(
+        1,
+        96,
+        vec![
+            router_id_tlv([0, 0, 0, 0, 0, 0, 0, 2]),
+            Tlv::new(
+                TlvType::NextHop,
+                NextHop {
+                    ae: 2,
+                    address: peer_b,
+                }
+                .encode(),
+            ),
+            update_tlv(2, 64, 0, 0, &dest_bytes, 1, 0),
+        ],
+    );
+    r.feed_input(h, &from_b).unwrap();
+    let selected = rib_route(r.as_ref(), dest);
+    assert_eq!(
+        selected.next_hop,
+        Some(peer_b),
+        "the cheaper neighbour must win the election"
+    );
+    assert_eq!(selected.preference.metric, 96);
+
+    // Re-hearing both neighbours' identical claims must not churn the
+    // selected route. This is the batch withdraw/re-install flap.
+    let _ = r.poll_events();
+    for _ in 0..5 {
+        r.babel_note_peer(h, peer_a);
+        r.feed_input(h, &from_a).unwrap();
+        r.babel_note_peer(h, peer_b);
+        r.feed_input(h, &from_b).unwrap();
+    }
+    let events = r.poll_events();
+    assert!(
+        events.iter().all(|e| {
+            !matches!(
+                e,
+                lr_router::RouterEvent::RouteInstalled(_)
+                    | lr_router::RouterEvent::RouteWithdrawn(_)
+            )
+        }),
+        "identical re-announcements must not churn the route: {events:?}"
+    );
+    assert_eq!(rib_route(r.as_ref(), dest).next_hop, Some(peer_b));
+
+    // B retracts only its own claim; A's route must take over instead of
+    // the prefix disappearing.
+    let b_retract = mesh_frame(
+        1,
+        96,
+        vec![
+            router_id_tlv([0, 0, 0, 0, 0, 0, 0, 2]),
+            Tlv::new(
+                TlvType::NextHop,
+                NextHop {
+                    ae: 2,
+                    address: peer_b,
+                }
+                .encode(),
+            ),
+            update_tlv(2, 64, 0, 0, &dest_bytes, 1, 0xFFFF),
+        ],
+    );
+    r.babel_note_peer(h, peer_b);
+    r.feed_input(h, &b_retract).unwrap();
+    let selected = rib_route(r.as_ref(), dest);
+    assert_eq!(
+        selected.next_hop,
+        Some(peer_a),
+        "the surviving neighbour's route must be selected"
+    );
+    assert_eq!(selected.preference.metric, 200);
+
+    // A's wildcard retraction flushes only A's routes.
+    let a_retract = mesh_frame(
+        1,
+        200,
+        vec![
+            router_id_tlv([0, 0, 0, 0, 0, 0, 0, 1]),
+            update_tlv(0, 0, 0, 0, &[], 0, 0xFFFF),
+        ],
+    );
+    r.babel_note_peer(h, peer_a);
+    r.feed_input(h, &a_retract).unwrap();
+    assert!(
+        !snapshot_has(r.as_ref(), dest, Protocol::Babel),
+        "the last neighbour's retraction must withdraw the prefix"
+    );
+}
+
+/// In a mesh, several neighbours re-advertise the same origin's claim
+/// with the same (seqno, metric). RFC 8966 §3.2.6 keys routes by neighbour,
+/// so each copy stays in the cache and the cheapest link is selected.
+#[test]
+fn same_origin_claim_via_two_neighbours_is_an_alternate() {
+    let (mut r, h) = babel_session();
+    let peer_a = link_local(0x0a);
+    let peer_b = link_local(0x0b);
+    let dest_bytes = [0xfd, 0, 0, 0, 0, 0, 0, 2];
+    let dest = Prefix::new_v6([0xfd, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0], 64);
+
+    for (peer, rxcost) in [(peer_a, 200u16), (peer_b, 96u16)] {
+        r.babel_note_peer(h, peer);
+        let frame = mesh_frame(
+            1,
+            rxcost,
+            vec![
+                router_id_tlv([0, 0, 0, 0, 0, 0, 0, 9]),
+                Tlv::new(
+                    TlvType::NextHop,
+                    NextHop {
+                        ae: 2,
+                        address: peer,
+                    }
+                    .encode(),
+                ),
+                update_tlv(2, 64, 0, 0, &dest_bytes, 42, 0),
+            ],
+        );
+        r.feed_input(h, &frame).unwrap();
+    }
+
+    let selected = rib_route(r.as_ref(), dest);
+    assert_eq!(selected.next_hop, Some(peer_b));
+    assert_eq!(selected.preference.metric, 96);
 }
