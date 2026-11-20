@@ -988,6 +988,16 @@ impl BgpPeer {
         self.codec
             .set_add_path(self.add_path_tx.clone(), self.add_path_rx.clone());
 
+        // RFC 8654 §3: when both speakers advertised the Extended
+        // Message capability, raise the codec's per-message length
+        // ceiling from the RFC 4271 §4.1 4096-octet limit to 65535
+        // octets. The negotiation helper is the established
+        // `advertised` / `peer_offered` / `negotiated` triple shape
+        // — the codec gate is the consumer.
+        let extended_message_negotiated =
+            crate::extensions::extended_message::negotiated(&self.cfg, &self.peer_capabilities);
+        self.codec.set_extended_message(extended_message_negotiated);
+
         // RFC 5549 §4: Extended Next-Hop is usable only for tuples both
         // speakers advertised. Store the intersection; the egress path
         // consults it before rewriting an IPv4 NEXT_HOP to IPv6.

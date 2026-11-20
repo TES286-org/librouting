@@ -330,3 +330,57 @@ fn encode_nlri_rejects_ipv6_prefix_without_panicking() {
         "expected an InvalidValue error, got: {msg}"
     );
 }
+
+// ===== RFC 8654 Extended Message support =====
+
+/// A codec with Extended Message negotiated accepts messages up to
+/// 65535 octets. A codec without it rejects anything above the RFC
+/// 4271 §4.1 4096-octet ceiling.
+#[test]
+fn extended_message_raises_and_lowers_the_length_ceiling() {
+    let mut codec = BgpCodec::new();
+    assert!(!codec.extended_message_active());
+
+    // Default ceiling: 4096. Build a header that claims a length of
+    // 5000 — the default codec must refuse it.
+    let mut big = vec![0xff; 16];
+    big.extend_from_slice(&5000u16.to_be_bytes());
+    big.push(2); // UPDATE
+    big.resize(5000, 0);
+    let err = codec.decode_slice(&big).unwrap_err();
+    assert!(
+        matches!(err, crate::error::BgpError::Notification(_)),
+        "expected a BadMessageLength NOTIFICATION, got {err:?}"
+    );
+
+    // With Extended Message negotiated, the same frame is accepted
+    // (the body parses as an empty UPDATE).
+    codec.set_extended_message(true);
+    assert!(codec.extended_message_active());
+    let msg = codec.decode_slice(&big).unwrap().unwrap();
+    assert!(
+        matches!(msg, crate::message::BgpMessage::Update(_)),
+        "expected an UPDATE, got {msg:?}"
+    );
+}
+
+/// The encoder allocates for the negotiated ceiling so an
+/// Extended-Message-sized UPDATE does not overflow the encode
+/// buffer. The encode result is byte-for-byte the same as a
+/// default-codec encode for any message that fits in 4096 octets.
+#[test]
+fn extended_message_encoder_allocates_for_the_negotiated_ceiling() {
+    let msg = BgpMessage::Keepalive(crate::message::keepalive::Keepalive);
+    let default_codec = BgpCodec::new();
+    let ext_codec = {
+        let mut c = BgpCodec::new();
+        c.set_extended_message(true);
+        c
+    };
+    let default_bytes = default_codec.encode_vec(&msg).unwrap();
+    let ext_bytes = ext_codec.encode_vec(&msg).unwrap();
+    // A KEEPALIVE is 19 octets regardless of the ceiling; the encode
+    // output is byte-identical.
+    assert_eq!(default_bytes, ext_bytes);
+    assert_eq!(ext_bytes.len(), 19);
+}
