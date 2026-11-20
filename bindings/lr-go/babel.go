@@ -408,6 +408,85 @@ func (c *BabelCodec) EncodeVec(f *BabelFrame) ([]byte, error) {
 	return copyBytes(&b), nil
 }
 
+// PackFrames splits one logical announcement into packet-sized
+// frames, each whose encoded body fits in maxBodyLen octets (RFC
+// 8966 §4 caps a Babel datagram body at 1500 − 4 = 1496). The Hello
+// and IHU stay in the first frame; every trailing frame whose first
+// payload TLV is an Update re-emits the most recent Router-Id and
+// family-matching NextHop so the receiver applies the Update with
+// the right source and next hop.
+//
+// Returns one *BabelFrame per packed datagram. The caller owns each
+// frame and must call Free on it.
+func (c *BabelCodec) PackFramesSplit(f *BabelFrame, maxBodyLen int) ([]*BabelFrame, error) {
+	var array C.lr_babel_frame_array_t
+	rc := C.lr_babel_codec_pack_frames(c.ptr, f.ptr, C.uintptr_t(maxBodyLen), &array)
+	if rc != 0 {
+		return nil, babelErr("lr_babel_codec_pack_frames", rc)
+	}
+	defer C.lr_babel_frame_array_free(array)
+	n := uintptr(C.lr_babel_frame_array_len(array))
+	out := make([]*BabelFrame, 0, n)
+	for i := uintptr(0); i < n; i++ {
+		p := C.lr_babel_frame_array_at(array, C.uintptr_t(i))
+		if p == nil {
+			// Should not happen — but if it does, free what we
+			// have collected so far and surface the error.
+			for _, fr := range out {
+				fr.Free()
+			}
+			return nil, fmt.Errorf("lr_babel_frame_array_at(%d): NULL", i)
+		}
+		// The array owns the element memory; the array's Free
+		// above drops the element handles too. Detach by cloning
+		// the frame body into a fresh independently-owned handle.
+		fr, err := cloneBabelFrame(p)
+		if err != nil {
+			for _, f2 := range out {
+				f2.Free()
+			}
+			return nil, err
+		}
+		out = append(out, fr)
+	}
+	return out, nil
+}
+
+// cloneBabelFrame reads the TLVs of `src` and pushes them into a new
+// BabelFrame handle. The clone is independently owned and must be
+// Freed by the caller.
+func cloneBabelFrame(src C.lr_babel_frame_t) (*BabelFrame, error) {
+	n := int(C.lr_babel_frame_tlv_count(src))
+	clone := NewBabelFrame()
+	for i := 0; i < n; i++ {
+		kind := uint8(C.lr_babel_frame_tlv_type_at(src, C.uintptr_t(i)))
+		vlen := int(C.lr_babel_frame_tlv_value_len_at(src, C.uintptr_t(i)))
+		buf := make([]byte, vlen)
+		if vlen > 0 {
+			C.lr_babel_frame_tlv_value_at(src, C.uintptr_t(i), (*C.uint8_t)(unsafePtr(&buf[0])), C.uintptr_t(vlen))
+		}
+		tlv, err := NewBabelTlv(kind, buf)
+		if err != nil {
+			clone.Free()
+			return nil, err
+		}
+		if err := clone.PushTlv(tlv); err != nil {
+			clone.Free()
+			tlv.Free()
+			return nil, err
+		}
+		tlv.Free()
+	}
+	return clone, nil
+}
+
+// unsafePtr returns a *C.uint8_t view of the first byte of a Go
+// byte slice. The view is valid only while the Go slice is alive
+// and not moved; the caller must not retain it.
+func unsafePtr(b *byte) *C.uint8_t {
+	return (*C.uint8_t)(unsafe.Pointer(b))
+}
+
 // Free releases the underlying handle. Safe to call multiple times.
 func (c *BabelCodec) Free() { c.destroy() }
 

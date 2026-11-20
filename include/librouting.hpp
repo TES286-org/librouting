@@ -8393,6 +8393,11 @@ struct BabelCodecDeleter {
 };
 using BabelCodecHandle = std::unique_ptr<OpaqueBabelCodec, BabelCodecDeleter>;
 
+struct BabelFrameArrayDeleter {
+    void operator()(lr_babel_frame_array_t h) const noexcept { if (h) lr_babel_frame_array_free(h); }
+};
+using BabelFrameArrayHandle = std::unique_ptr<OpaqueBabelFrameArray, BabelFrameArrayDeleter>;
+
 struct BabelFrameDeleter {
     void operator()(lr_babel_frame_t h) const noexcept { if (h) lr_babel_frame_free(h); }
 };
@@ -11532,6 +11537,20 @@ inline std::int32_t decode_authenticated_slice(BabelCodecHandle const& h, const 
     std::int32_t rc = lr_babel_codec_decode_authenticated_slice(h.get(), packet, len, pseudo_header, keys, keys_count, replay, out);
     if (rc < 0) throw Error(std::string("lr_babel_codec_decode_authenticated_slice failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
     return rc;
+}
+
+inline std::int32_t pack_frames(BabelCodecHandle const& h, lr_babel_frame_t frame, std::uintptr_t max_body_len, lr_babel_frame_array_t* out_array) {
+    std::int32_t rc = lr_babel_codec_pack_frames(h.get(), frame, max_body_len, out_array);
+    if (rc < 0) throw Error(std::string("lr_babel_codec_pack_frames failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::uintptr_t len(BabelFrameArrayHandle const& h) {
+    return lr_babel_frame_array_len(h.get());
+}
+
+inline lr_babel_frame_t at(BabelFrameArrayHandle const& h, std::uintptr_t index) {
+    return lr_babel_frame_array_at(h.get(), index);
 }
 
 inline std::int32_t address(BabelIhuHandle const& h, std::uint8_t* octets_out, std::uint8_t* present_out) {

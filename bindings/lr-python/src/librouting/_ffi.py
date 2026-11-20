@@ -4954,6 +4954,23 @@ int32_t lr_peer_health_table_session_snapshot(
     struct lr_peer_health_session_t * out
 );
 
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+
+typedef struct OpaqueBabelFrameArray OpaqueBabelFrameArray;
+typedef struct OpaqueBabelFrameArray *lr_babel_frame_array_t;
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+int32_t lr_babel_codec_pack_frames(
+    lr_babel_codec_t c,
+    lr_babel_frame_t frame,
+    uintptr_t max_body_len,
+    lr_babel_frame_array_t * out_array
+);
+uintptr_t lr_babel_frame_array_len(lr_babel_frame_array_t array);
+lr_babel_frame_t lr_babel_frame_array_at(lr_babel_frame_array_t array, uintptr_t index);
+void lr_babel_frame_array_free(lr_babel_frame_array_t array);
+
 /* GENERATED ADDITIONS - do not edit by hand.
    Source: scripts/gen_python.py + scripts/abi.json
    Re-run: python3 scripts/gen_python.py */

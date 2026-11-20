@@ -160,6 +160,45 @@ def test_frame_index_out_of_range():
     f.close()
 
 
+def test_codec_pack_frames_splits_oversized_announcement():
+    """BabelCodec.pack_frames splits an announcement whose body
+    would overflow max_body_len into multiple frames. Regression for
+    the production bug where build_babel_announcement produced an
+    empty Vec when the body exceeded 1496 bytes (the daemon then sent
+    a zero-byte UDP datagram that tcpdump rendered as 'babel
+    [|babel]')."""
+    codec = BabelCodec.new()
+    try:
+        frame = BabelFrame.empty()
+        # Router-Id + 50 v6 Updates — at a 64-byte body budget the
+        # splitter must produce several frames, each re-emitting the
+        # Router-Id before its Updates.
+        rid_tlv = Tlv.new(tlv_type_from_u8(6), b"\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08")
+        frame.push_tlv(rid_tlv)
+        rid_tlv.close()
+        for i in range(50):
+            body = bytes([2, 0, 64, 0, 0x01, 0x2C, 0, i + 1, 0, 0xC0,
+                          0x20, 0x01, 0x0D, 0xB8, 0, i])
+            tlv = Tlv.new(tlv_type_from_u8(8), body)
+            frame.push_tlv(tlv)
+            tlv.close()
+        split = codec.pack_frames(frame, max_body_len=64)
+        assert len(split) >= 2, f"expected >= 2 split frames, got {len(split)}"
+        # Each split frame must be independently decodable and carry
+        # a valid babel header on encode.
+        for i, f2 in enumerate(split):
+            wire = f2.encode()
+            assert len(wire) >= 4, f"frame {i} wire too short: {wire!r}"
+            assert wire[0] == 0x2A, f"frame {i} bad magic: {wire[0]:#x}"
+            assert wire[1] == 0x02, f"frame {i} bad version: {wire[1]:#x}"
+            body_len = int.from_bytes(wire[2:4], "big")
+            assert body_len + 4 == len(wire), f"frame {i} body_len mismatch"
+            f2.close()
+        frame.close()
+    finally:
+        codec.close()
+
+
 # ---- TLV type enum helpers -----------------------------------------------
 
 

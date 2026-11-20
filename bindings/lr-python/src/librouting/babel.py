@@ -369,6 +369,52 @@ class BabelCodec:
         get_lib().lr_bytes_free(b)
         return out
 
+    def pack_frames(self, frame: BabelFrame, max_body_len: int = 1496) -> list:
+        """Split one logical announcement into packet-sized frames
+        (RFC 8966 §4 caps a Babel datagram body at 1500 − 4 = 1496
+        octets). The Hello and IHU stay in the first frame; every
+        trailing frame whose first payload TLV is an Update re-emits
+        the most recent Router-Id and family-matching NextHop so the
+        receiver applies the Update with the right source and next
+        hop.
+
+        Returns a list of ``BabelFrame`` handles; the caller owns
+        each and must ``close()`` it.
+        """
+        array = ffi.new("lr_babel_frame_array_t*")
+        rc = get_lib().lr_babel_codec_pack_frames(
+            self._c, frame._f, int(max_body_len), array
+        )
+        _check_rc(rc, "BabelCodec.pack_frames")
+        n = int(get_lib().lr_babel_frame_array_len(array[0]))
+        out = []
+        for i in range(n):
+            p = get_lib().lr_babel_frame_array_at(array[0], i)
+            if p == ffi.NULL:
+                for f in out:
+                    f.close()
+                raise RuntimeError(f"lr_babel_frame_array_at({i}) returned NULL")
+            # The array owns the element memory; clone the TLVs into a
+            # fresh independently-owned handle so the array's free below
+            # does not dangle the caller's frames.
+            clone = BabelFrame.empty()
+            n_tlvs = int(get_lib().lr_babel_frame_tlv_count(p))
+            for j in range(n_tlvs):
+                kind = int(get_lib().lr_babel_frame_tlv_type_at(p, j))
+                vlen = int(get_lib().lr_babel_frame_tlv_value_len_at(p, j))
+                if vlen > 0:
+                    buf = ffi.new("uint8_t[]", vlen)
+                    get_lib().lr_babel_frame_tlv_value_at(p, j, buf, vlen)
+                    value = ffi.buffer(buf, vlen)[:]
+                else:
+                    value = b""
+                tlv = Tlv.new(tlv_type_from_u8(kind), value)
+                clone.push_tlv(tlv)
+                tlv.close()
+            out.append(clone)
+        get_lib().lr_babel_frame_array_free(array[0])
+        return out
+
     def decode_authenticated_slice(self, data: bytes, pseudo_header: "PseudoHeader") -> bytes:
         """Decode an authenticated Babel frame slice (RFC 8967 §3).
         Returns the inner (de-encapsulated) frame bytes."""

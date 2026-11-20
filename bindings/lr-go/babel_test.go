@@ -765,3 +765,54 @@ func TestBabelFeasibleStrictlyBetter(t *testing.T) {
 		t.Error("Feasible(seq=0, fs=1) = true, want false (seq lower)")
 	}
 }
+
+// PackFramesSplit splits an oversized announcement into packet-sized
+// frames. Regression for the production bug where build_babel_announcement
+// produced an empty Vec when the body exceeded 1496 bytes.
+func TestBabelCodecPackFramesSplit(t *testing.T) {
+	codec := NewBabelCodec()
+	defer codec.Free()
+	frame := NewBabelFrame()
+	defer frame.Free()
+	// Push a Router-Id + 50 v6 Updates — at a 64-byte body budget
+	// the splitter must produce several frames.
+	rid := []byte{0, 0, 1, 2, 3, 4, 5, 6, 7, 8}
+	ridTlv, err := NewBabelTlv(BabelTlvTypeRouterID, rid)
+	if err != nil {
+		t.Fatalf("NewBabelTlv(RouterID): %v", err)
+	}
+	if err := frame.PushTlv(ridTlv); err != nil {
+		t.Fatalf("PushTlv(RouterID): %v", err)
+	}
+	ridTlv.Free()
+	for i := 0; i < 50; i++ {
+		body := []byte{2, 0, 64, 0, 0x01, 0x2c, 0, byte(i + 1), 0, 0xc0, 0x20, 0x01, 0x0d, 0xb8, 0, byte(i)}
+		tlv, err := NewBabelTlv(BabelTlvTypeUpdate, body)
+		if err != nil {
+			t.Fatalf("NewBabelTlv(Update %d): %v", i, err)
+		}
+		if err := frame.PushTlv(tlv); err != nil {
+			t.Fatalf("PushTlv(Update %d): %v", i, err)
+		}
+		tlv.Free()
+	}
+	split, err := codec.PackFramesSplit(frame, 64)
+	if err != nil {
+		t.Fatalf("PackFramesSplit: %v", err)
+	}
+	if len(split) < 2 {
+		t.Errorf("PackFramesSplit returned %d frames, want >= 2", len(split))
+	}
+	// Each split frame must be independently decodable.
+	for i, f := range split {
+		wire, err := f.Encode()
+		if err != nil {
+			t.Errorf("frame %d Encode: %v", i, err)
+			continue
+		}
+		if len(wire) < 4 || wire[0] != 0x2A || wire[1] != 0x02 {
+			t.Errorf("frame %d wire = %v, want a valid babel header", i, wire)
+		}
+		f.Free()
+	}
+}
