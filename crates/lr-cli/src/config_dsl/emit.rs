@@ -630,6 +630,50 @@ fn bgp_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Result<Vec<(String, Str
             cfg.extended_next_hop.to_string(),
         ));
     }
+    if cfg.extended_message != base.extended_message {
+        v.push(("extended_message".into(), cfg.extended_message.to_string()));
+    }
+    if let Some((role, strict)) = &cfg.bgp_role {
+        v.push((
+            "bgp_role".into(),
+            if *strict {
+                // Quoted so the DSL parser accepts the space
+                // between the role and the strict flag.
+                fmt_string(&format!("{} strict", role))
+            } else {
+                role.clone()
+            },
+        ));
+    }
+    if let Some(x) = &cfg.hostname {
+        v.push(("hostname".into(), fmt_string(x)));
+    }
+    if let Some(x) = &cfg.domain_name {
+        v.push(("domain_name".into(), fmt_string(x)));
+    }
+    if cfg.bfd_strict_mode != base.bfd_strict_mode {
+        v.push(("bfd_strict_mode".into(), cfg.bfd_strict_mode.to_string()));
+    }
+    if let Some(x) = &cfg.software_version {
+        v.push(("software_version".into(), fmt_string(x)));
+    }
+    if !cfg.paths_limit.is_empty() {
+        // Quoted so commas inside the `afi:safi:limit,...` list
+        // survive the DSL parser's value tokeniser.
+        v.push((
+            "paths_limit".into(),
+            fmt_string(&paths_limit_value(&cfg.paths_limit)),
+        ));
+    }
+    if cfg.link_local_next_hop != base.link_local_next_hop {
+        v.push((
+            "link_local_next_hop".into(),
+            cfg.link_local_next_hop.to_string(),
+        ));
+    }
+    if !cfg.orf.is_empty() {
+        v.push(("orf".into(), fmt_string(&orf_entries_value(&cfg.orf))));
+    }
     if let Some(x) = &cfg.local_address_v6 {
         v.push(("local_address_v6".into(), fmt_string(x)));
     }
@@ -878,6 +922,44 @@ fn peer_block(peer: &crate::daemon_config::PeerSpec) -> Result<Vec<(String, Stri
     }
     if let Some(x) = peer.extended_next_hop {
         v.push(("extended_next_hop".into(), x.to_string()));
+    }
+    if let Some(x) = peer.extended_message {
+        v.push(("extended_message".into(), x.to_string()));
+    }
+    if let Some((role, strict)) = &peer.bgp_role {
+        v.push((
+            "bgp_role".into(),
+            if *strict {
+                fmt_string(&format!("{} strict", role))
+            } else {
+                role.clone()
+            },
+        ));
+    }
+    if let Some((h, d)) = &peer.fqdn {
+        // Round-trip the pair as `"hostname,domain"` — the form
+        // `parse_peer_key`'s `"fqdn"` arm decodes. Either side may
+        // be empty.
+        v.push(("fqdn".into(), fmt_string(&format!("{h},{d}"))));
+    }
+    if let Some(x) = peer.bfd_strict_mode {
+        v.push(("bfd_strict_mode".into(), x.to_string()));
+    }
+    if let Some(x) = &peer.software_version {
+        v.push(("software_version".into(), fmt_string(x)));
+    }
+    if let Some(x) = &peer.paths_limit {
+        if !x.is_empty() {
+            v.push(("paths_limit".into(), fmt_string(&paths_limit_value(x))));
+        }
+    }
+    if let Some(x) = peer.link_local_next_hop {
+        v.push(("link_local_next_hop".into(), x.to_string()));
+    }
+    if let Some(x) = &peer.orf {
+        if !x.is_empty() {
+            v.push(("orf".into(), fmt_string(&orf_entries_value(x))));
+        }
     }
     if let Some(x) = peer.gtsm_hops {
         v.push(("gtsm".into(), x.to_string()));
@@ -1517,6 +1599,28 @@ fn list_value(items: &[String]) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join(",")
     ))
+}
+
+/// Render a PATHS-LIMIT capability value as the comma-separated
+/// `afi:safi:limit` form `parse_paths_limit` accepts. The render is
+/// the inverse of the parser for every triple the daemon can carry.
+fn paths_limit_value(triples: &[(u16, u8, u16)]) -> String {
+    triples
+        .iter()
+        .map(|(afi, safi, limit)| format!("{afi}:{safi}:{limit}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Render an ORF capability value as the comma-separated
+/// `afi:safi:type:mode` form `parse_orf_entries` accepts. The render
+/// is the inverse of the parser for every entry the daemon carries.
+fn orf_entries_value(entries: &[crate::daemon_config::OrfEntrySpec]) -> String {
+    entries
+        .iter()
+        .map(|e| format!("{}:{}:{}:{}", e.afi, e.safi, e.orf_type, e.mode))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 // ---------------------------------------------------------------------------

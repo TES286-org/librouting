@@ -2650,6 +2650,84 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     if p.extended_next_hop.unwrap_or(g.extended_next_hop) {
         sc = sc.with_extended_next_hop();
     }
+    // 2.x capability block (issue #101): propagate each new
+    // capability field to SessionConfig. The per-peer override
+    // inherits the router-wide default when unset, mirroring the
+    // `add_path` / `extended_next_hop` pattern above.
+    sc.extended_message = p.extended_message.unwrap_or(g.extended_message);
+    if let Some((role_str, strict)) = p.bgp_role.as_ref().or(g.bgp_role.as_ref()) {
+        if let Ok(role) = role_str.parse::<lr_bgp::role::OtcRole>() {
+            sc.bgp_role = Some((role, *strict));
+            // Reconcile with the OTC attribute path: when the
+            // capability advertises a role, the OTC attribute path
+            // uses the same role. An explicit `peer.otc_role`
+            // (currently FFI-only) still takes precedence — the
+            // daemon does not have a TOML key for `otc_role` yet.
+            sc.otc_role = Some(role);
+        } else {
+            log_warn!(
+                Component::Bgp,
+                "peer {}: ignoring malformed bgp_role '{}' (expected one of: \
+                 provider | customer | rs | rs-client | peer)",
+                p.label(),
+                role_str
+            );
+        }
+    }
+    // FQDN: per-peer override falls back to the router-wide
+    // hostname/domain_name pair. Either side may be unset.
+    let hostname = p
+        .fqdn
+        .as_ref()
+        .map(|(h, _)| h.clone())
+        .or_else(|| g.hostname.clone());
+    let domain = p
+        .fqdn
+        .as_ref()
+        .map(|(_, d)| d.clone())
+        .or_else(|| g.domain_name.clone());
+    if hostname.is_some() || domain.is_some() {
+        sc.fqdn = Some((hostname.unwrap_or_default(), domain.unwrap_or_default()));
+    }
+    sc.bfd_strict_mode = p.bfd_strict_mode.unwrap_or(g.bfd_strict_mode);
+    sc.software_version = p
+        .software_version
+        .clone()
+        .or_else(|| g.software_version.clone());
+    sc.paths_limit = p
+        .paths_limit
+        .clone()
+        .unwrap_or_else(|| g.paths_limit.clone());
+    sc.link_local_next_hop = p.link_local_next_hop.unwrap_or(g.link_local_next_hop);
+    // ORF: resolve each OrfEntrySpec to its wire form. A malformed
+    // mode string is dropped with a warning rather than refusing the
+    // session — the capability is opt-in and a single bad entry does
+    // not invalidate the rest.
+    let orf_spec = p.orf.clone().unwrap_or_else(|| g.orf.clone());
+    let mut orf_resolved: Vec<lr_bgp::capabilities_extra::OrfEntry> = Vec::new();
+    for entry in &orf_spec {
+        match entry.mode_value() {
+            Some(mode) => {
+                let family_entry = orf_resolved
+                    .iter_mut()
+                    .find(|(a, s, _)| *a == entry.afi && *s == entry.safi);
+                if let Some((_, _, types)) = family_entry {
+                    if !types.contains(&(entry.orf_type, mode)) {
+                        types.push((entry.orf_type, mode));
+                    }
+                } else {
+                    orf_resolved.push((entry.afi, entry.safi, vec![(entry.orf_type, mode)]));
+                }
+            }
+            None => log_warn!(
+                Component::Bgp,
+                "peer {}: ignoring orf entry with bad mode '{}'",
+                p.label(),
+                entry.mode
+            ),
+        }
+    }
+    sc.orf = orf_resolved;
     // Per-peer maximum-prefix (BIRD `maximum prefix`, FRR
     // `maximum-prefix`).
     if let Some(limit) = p.max_prefixes.or(g.max_prefixes) {

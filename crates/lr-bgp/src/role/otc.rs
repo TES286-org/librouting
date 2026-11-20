@@ -121,6 +121,27 @@ impl OtcRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct Otc(pub u32);
 
+impl core::str::FromStr for OtcRole {
+    type Err = ();
+
+    /// Parse the operator-facing role vocabulary (the same set
+    /// `parse_exchange_plane_policy_role` accepts in `daemon_config`):
+    /// `"provider"`, `"customer"`, `"rs"`, `"rs-client"`, `"peer"`.
+    /// The `"unset"` spelling is rejected here — it is the explicit
+    /// "no claim" form, not a role the BGP Role capability carries;
+    /// the daemon uses `Option<OtcRole>` for the absence case.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "provider" => Ok(OtcRole::Provider),
+            "customer" => Ok(OtcRole::Customer),
+            "rs" => Ok(OtcRole::RouteServer),
+            "rs-client" => Ok(OtcRole::RsClient),
+            "peer" => Ok(OtcRole::Peer),
+            _ => Err(()),
+        }
+    }
+}
+
 impl Otc {
     pub const fn new(asn: u32) -> Self {
         Self(asn)
