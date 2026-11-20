@@ -610,6 +610,12 @@ struct PeerEntry {
     /// the daemon to flip the flag (the connector and listener read it
     /// at startup).
     admin_down: bool,
+    /// draft-ietf-idr-bgp-bfd-strict-mode-13: when `true` and the peer
+    /// has `bfd` enabled, the connector blocks session establishment
+    /// until BFD reports Up — not just re-establishment after a BFD
+    /// Down-to-Up-to-Down cycle. Resolved from
+    /// `spec.bfd_strict_mode.unwrap_or(cfg.bfd_strict_mode)` at startup.
+    bfd_strict_mode: bool,
 }
 
 impl PeerEntry {
@@ -1462,6 +1468,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         busy: Arc::new(AtomicBool::new(false)),
                         outbound_lost_collision: Arc::new(AtomicBool::new(false)),
                         admin_down: spec.shutdown.unwrap_or(false),
+                        bfd_strict_mode: spec.bfd_strict_mode.unwrap_or(cfg.bfd_strict_mode),
                     })
                 }
                 Err(e) => {
@@ -3901,6 +3908,11 @@ fn spawn_connector(
     let collision_backoff_ms =
         (entry.spec.hold_time.unwrap_or(cfg.hold_time) as u64).clamp(10, 120) * 1_000;
     let bfd = entry.bfd.clone();
+    // draft-ietf-idr-bgp-bfd-strict-mode-13: captured into the
+    // connector's closure so the BFD hold-off check can apply the
+    // strict-mode gate (block establishment whenever BFD is down,
+    // not just after the first Up-to-Down transition).
+    let entry_bfd_strict_mode = entry.bfd_strict_mode;
     // The reactor clone this connector's session submissions ride
     // on (see `bgp_reactor.rs`).
     let reactor = reactor.clone();
@@ -3929,11 +3941,23 @@ fn spawn_connector(
                 if !rt.running.load(Ordering::Relaxed) {
                     break;
                 }
-                // BFD hold-off (after the session has been Up at least
-                // once): don't connect into a path BFD has declared
-                // dead — and don't grow the backoff while waiting.
+                // BFD hold-off. The default `bfd = true` behaviour
+                // blocks re-establishment after the session has been
+                // Up at least once (the typical fast-fail gate).
+                // draft-ietf-idr-bgp-bfd-strict-mode-13: when the
+                // peer advertises strict-mode, the gate also blocks
+                // the first establishment — the session does not come
+                // up until BFD reports Up, with no hold-timer
+                // fallback.
                 if let Some(bfd) = &bfd {
-                    if bfd.ever_up.load(Ordering::Relaxed) && !bfd.up.load(Ordering::Relaxed) {
+                    let ever_up = bfd.ever_up.load(Ordering::Relaxed);
+                    let up = bfd.up.load(Ordering::Relaxed);
+                    let block = if entry_bfd_strict_mode {
+                        !up
+                    } else {
+                        ever_up && !up
+                    };
+                    if block {
                         sleep_interruptible(&rt, Duration::from_millis(200));
                         continue;
                     }
