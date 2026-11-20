@@ -684,6 +684,14 @@ error. Duplicate locator prefixes are rejected.
 | `pc_window` | int | 0 | RFC 9467 §3.2; 0 = off |
 | `import_filter` | string | — | `[[filter]]` name |
 | `export_filter` | string | — | `[[filter]]` name |
+| `import_kernel_routes` | bool | false | Babel engines only; see the note below |
+
+A Babel engine distributes every non-Babel Loc-RIB route (RFC 8966
+§3.7 announcements). The system's connected routes are in the Loc-RIB
+only when `import_kernel_routes` is set — the BIRD `protocol direct`
+parity other daemon modes keep by default. Other daemon modes (BGP,
+OSPF, OSPFv3) import the connected routes by default and do not read
+this key. Startup-only, like `install_kernel`.
 
 ### `[[babel.key]]`
 

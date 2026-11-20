@@ -92,6 +92,19 @@ delegate to `lr_policy::bgp` and `lr_policy::ospf`, so every
 existing embedder inherits the correct behaviour without
 recompiling.
 
+### Changed
+
+**A Babel engine no longer imports the kernel's connected routes by
+default** (`lr-cli`). A standalone `--protocol babel` daemon, or a
+multi-protocol daemon with `babel` in the set, imported the system's
+connected routes (the kernel interface table, BIRD `protocol direct`
+parity) into the Loc-RIB, and because a Babel daemon distributes every
+non-Babel Loc-RIB route (RFC 8966 §3.7), those system routes were
+re-announced to peers as ordinary Babel routes — an import no config
+line asked for. The import is now opt-in for the Babel engine through
+the new `[babel] import_kernel_routes` key (default off, startup-only
+like `install_kernel`); BGP/OSPF daemons keep the connected import on.
+
 ### Fixed
 
 **Connected routes never reach the kernel mirror, and IPv6 connected
