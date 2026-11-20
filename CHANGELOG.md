@@ -107,6 +107,21 @@ like `install_kernel`); BGP/OSPF daemons keep the connected import on.
 
 ### Fixed
 
+**Babel selects routes per neighbour instead of letting the last
+announcement win** (`lr-babel`, `lr-router`). One Babel session serves
+one interface, which has many neighbours, but the runtime kept a single
+link cost, Router-Id and next hop for the whole interface. Every learned
+route inherited the last datagram's cost and next hop, and refreshes
+keyed by a changing Router-Id aged out together — the
+install/withdraw/reinstall cycle in the production report. The router
+now keeps one `BabelNeighbor` per peer source address and uses
+`BabelRouteCache`, which stores one route per (destination, neighbour),
+a feasibility source table per (destination, router-id) and picks the
+lowest-metric feasible route per destination (RFC 8966 §3.2.6, §3.5.1,
+§3.6). Retraction and expiry are scoped to the announcing neighbour,
+and equal-metric alternates stay available. `BabelRouteTable` and the C
+ABI are unchanged.
+
 **Connected routes never reach the kernel mirror, and IPv6 connected
 prefixes carry their network address** (`lr-cli` / `lr-osroute`,
 [issue #101](https://github.com/TES286-org/librouting/issues/101)).

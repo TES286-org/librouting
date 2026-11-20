@@ -134,6 +134,18 @@ IPv6 session is on-link only on that session's interface, and
 longest-prefix resolution can otherwise land the route on an unrelated
 adapter.
 
+## Route selection on an interface
+
+One Babel session represents one interface, which has many neighbours.
+`BabelRouteCache` keeps one `PeerRoute` per (destination, neighbour) and a
+feasibility source table per (destination, router-id), as RFC 8966
+§3.2.6 and §3.5.1 describe. `best_routes` picks the lowest-metric
+feasible route for each destination and keeps the incumbent on a tie,
+matching BIRD's `babel_select_route`. A neighbour's IHU changes only that
+neighbour's routes, and a retraction removes only that neighbour's copy.
+`BabelRouteTable` stays available for single-neighbour embedders and the
+C ABI.
+
 ## RFCs
 
 - RFC 8967 — MAC authentication: the stateful interface, the

@@ -228,7 +228,10 @@ Babel is UDP on RFC 8966 port 6696. The daemon binds the well-known
 multicast groups (`ff02::1:6` for v6, `224.0.0.111` for v4) and runs a
 per-interface send and receive loop. MAC authentication (RFC 8967) and
 the PC window (RFC 9467) live in `lr-babel`; the daemon wires the
-configured keys to the `BabelNeighbor` instances.
+configured keys to the per-interface `BabelAuthInterface`. The router
+keeps one `BabelNeighbor` per peer source address, so a mesh on one
+interface selects each prefix's cheapest neighbour (RFC 8966 §3.2.6,
+§3.6).
 
 The daemon-specific piece is the §5 incremental deployment toggle,
 `--babel-accept-unauthenticated`: the daemon signs outgoing packets
