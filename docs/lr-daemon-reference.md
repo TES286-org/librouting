@@ -494,6 +494,21 @@ warning, not a value.
 | `roa_validate` | bool | false | |
 | `roa_invalid_action` | enum | `reject` | `warn`, `accept` |
 
+### `[kernel]`
+
+The FIB export policy of the kernel mirror (BIRD
+`protocol kernel { export filter ...; }`). Consulted only with
+`[bgp] install_kernel` (or the equivalent `--install-kernel-routes`);
+the route stays in the Loc-RIB for BGP/Babel export either way.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `export_filter` | string | — | `[[filter]]` name; an explicit reject skips the FIB install |
+
+The `.lr` form is `kernel { export_filter "name"; }`. Connected
+prefixes are never offered to the filter — the kernel owns those rows
+and the mirror skips them before evaluation.
+
 ### `[[peer]]` and `[peer-template.<name>]`
 
 Both tables share one schema through `apply_peer_key`, with one
