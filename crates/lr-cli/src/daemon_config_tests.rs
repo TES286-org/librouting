@@ -1621,7 +1621,8 @@ fn babel_toml_globals_parse() {
     parse_toml_subset(
         "[babel]\ngroup = \"224.0.0.111\"\nport = 7696\n\
              accept_unauthenticated = true\nsplit_unicast_multicast = false\n\
-             pc_window = 128\n",
+             pc_window = 128\n\
+             import_kernel_routes = true\n",
         &mut cfg,
     )
     .unwrap();
@@ -1630,6 +1631,18 @@ fn babel_toml_globals_parse() {
     assert!(cfg.babel_accept_unauthenticated);
     assert!(!cfg.babel_split_unicast_multicast);
     assert_eq!(cfg.babel_pc_window, 128);
+    assert!(cfg.babel_import_kernel_routes);
+}
+
+/// `[babel] import_kernel_routes` is the opt-in for the kernel
+/// connected-route import a Babel engine does not get by default —
+/// the flag is `false` without the key (fail-closed default-off).
+#[test]
+fn babel_import_kernel_routes_default_off() {
+    assert!(!DaemonConfig::with_defaults().babel_import_kernel_routes);
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset("[babel]\nimport_kernel_routes = false\n", &mut cfg).unwrap();
+    assert!(!cfg.babel_import_kernel_routes);
 }
 
 #[test]

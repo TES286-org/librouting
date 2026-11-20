@@ -1078,6 +1078,20 @@ pub(crate) struct DaemonConfig {
     /// route the Loc-RIB holds that is not itself a Babel-learned
     /// route (the §3.7.5 split-horizon carve-out). Reloadable.
     pub babel_export_filter: Option<String>,
+    /// Import the kernel's connected routes (BIRD `protocol direct`,
+    /// FRR `redistribute connected` parity) into the Loc-RIB —
+    /// enumerated from the system interface table by
+    /// `install_connected_routes`. **Default off for a daemon running
+    /// the Babel engine**: the operator asked for only the config file
+    /// to be announced (`[networks]`, `[[static.route]]`,
+    /// `[[aggregate]]` and the `[[redistribute]]` pipes) plus what
+    /// peers announce over the wire — a connected route the daemon
+    /// imported from the system would ride every Babel announcement
+    /// to a peer as an ordinary route, which no config line asked for.
+    /// For BGP/OSPF daemons the connected import stays on (BIRD
+    /// parity). Startup-only, like `install_kernel` — toggling it
+    /// needs a daemon restart.
+    pub babel_import_kernel_routes: bool,
     /// `[[babel.interface]]` blocks — per-interface Babel parameters
     /// with shell-like name wildcards (RFC 8966 §A.2). When empty
     /// the daemon runs the legacy single-socket path bound to
@@ -4051,6 +4065,9 @@ fn apply_babel_key(
             }
             "export_filter" => {
                 cfg.babel_export_filter = Some(unquote_toml_value(value).to_string());
+            }
+            "import_kernel_routes" => {
+                cfg.babel_import_kernel_routes = parse_bool(value);
             }
             _ => {
                 return Err(format!(

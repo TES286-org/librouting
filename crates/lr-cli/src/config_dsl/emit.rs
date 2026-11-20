@@ -1213,6 +1213,12 @@ fn babel_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Vec<(String, String)>
     if let Some(x) = &cfg.babel_export_filter {
         v.push(("export_filter".into(), fmt_string(x)));
     }
+    if cfg.babel_import_kernel_routes != base.babel_import_kernel_routes {
+        v.push((
+            "import_kernel_routes".into(),
+            cfg.babel_import_kernel_routes.to_string(),
+        ));
+    }
     v
 }
 

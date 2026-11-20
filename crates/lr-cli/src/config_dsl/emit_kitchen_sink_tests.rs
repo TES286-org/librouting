@@ -242,6 +242,7 @@ port = 6696
 accept_unauthenticated = true
 split_unicast_multicast = true
 pc_window = 120
+import_kernel_routes = true
 
 [[babel.key]]
 secret = "babel-secret"
