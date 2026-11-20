@@ -4266,13 +4266,14 @@ impl KernelMirrorThread {
         bus: lr_router::event_bus::EventBus,
         install_kernel: bool,
         kernel_filter: Option<crate::daemon_policy::KernelFilter>,
+        prefsrc: KernelPrefsrc,
     ) -> Arc<Self> {
         let rx = bus.subscribe();
         let thread_bus = bus.clone();
         let handle = thread::Builder::new()
             .name("lr-kernel-mirror".into())
             .spawn(move || {
-                let mut mirror = KernelMirror::new(install_kernel, kernel_filter);
+                let mut mirror = KernelMirror::new(install_kernel, kernel_filter, prefsrc);
                 loop {
                     match rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(ev) => mirror.apply(std::slice::from_ref(&ev)),
@@ -4369,10 +4370,15 @@ pub(crate) fn spawn_ticker(
     // `poll_events`, so the mirror sees every event from the first
     // drain on. Stash the handle on the runtime so the daemon's exit
     // path can close the bus and join the mirror.
+    // The preferred source (BIRD `krt_prefsrc`) the mirror stamps on
+    // mirrored FIB rows: the daemon config's `local_address` /
+    // `local_address_v6` — see [`KernelPrefsrc`].
+    let prefsrc = KernelPrefsrc::from_config(cfg);
     let _ = rt.kernel_mirror.set(KernelMirrorThread::spawn(
         rt.event_bus.clone(),
         cfg.install_kernel,
         kernel_filter,
+        prefsrc,
     ));
     let rt = Arc::clone(rt);
     Ok(thread::Builder::new()
@@ -4587,6 +4593,11 @@ struct KernelMirror {
     /// export filter ...; }`. Connected routes bypass it: they are the
     /// kernel's own rows and are skipped before this check.
     kernel_filter: Option<crate::daemon_policy::KernelFilter>,
+    /// Preferred source (BIRD `krt_prefsrc`) stamped on the mirrored
+    /// FIB rows — the per-family `local_address` / `local_address_v6`
+    /// pair (see [`KernelPrefsrc`]). The mirror picks the entry by the
+    /// FIB row's family.
+    prefsrc: KernelPrefsrc,
     /// Plain IP prefixes this mirror actually installed. `RouteWithdrawn`
     /// carries only the key, and some Loc-RIB entries never reach the
     /// kernel on purpose (connected prefixes, filtered routes,
@@ -4604,10 +4615,58 @@ struct KernelMirror {
     mpls: Option<lr_osroute::mpls_route::MplsNetlink>,
 }
 
+/// The per-family preferred source (BIRD `krt_prefsrc`) the kernel
+/// mirror stamps on the FIB rows it installs — the Linux `RTA_PREFSRC`
+/// counterpart of the daemon config's `[bgp] local_address` and
+/// `local_address_v6`. BIRD's `protocol kernel` sets
+/// `krt_prefsrc = MAIN_V4` / `MAIN_V6` on every FIB-exported route via
+/// its export filter; lr has no filter DSL for FIB attributes, so the
+/// daemon applies its configured local addresses directly
+/// ([`KernelPrefsrc::from_config`]).
+///
+/// `v4` is used for IPv4 rows (including the RFC 5549 shape — an IPv4
+/// prefix over an IPv6 next hop), `v6` for IPv6 rows; an unset family
+/// installs no preferred source and the kernel picks one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct KernelPrefsrc {
+    pub v4: Option<IpAddr>,
+    pub v6: Option<IpAddr>,
+}
+
+impl KernelPrefsrc {
+    /// Parse the daemon config's `local_address` (v4 rows) and
+    /// `local_address_v6` (v6 rows), dropping a value whose address
+    /// family does not match its slot: the kernel requires the
+    /// preferred source to be same-family as the FIB row, so a v4
+    /// `local_address` is not one for a v6 row. `local_address` falls
+    /// back to a v6 value when `local_address_v6` is unset — the same
+    /// family-matching order [`originate_next_hop`] uses.
+    fn from_config(cfg: &DaemonConfig) -> Self {
+        fn parse(s: Option<&str>, want_v6: bool) -> Option<IpAddr> {
+            let ip = IpAddr::from_str(s?).ok()?;
+            (ip.is_ipv6() == want_v6).then_some(ip)
+        }
+        Self {
+            v4: parse(cfg.local_address.as_deref(), false),
+            v6: parse(cfg.local_address_v6.as_deref(), true)
+                .or_else(|| parse(cfg.local_address.as_deref(), true)),
+        }
+    }
+
+    /// The preferred source of a FIB row of the given prefix.
+    fn for_prefix(&self, prefix: &Prefix) -> Option<IpAddr> {
+        match prefix.addr {
+            IpAddr::V4(_) => self.v4,
+            IpAddr::V6(_) => self.v6,
+        }
+    }
+}
+
 impl KernelMirror {
     fn new(
         install_kernel: bool,
         kernel_filter: Option<crate::daemon_policy::KernelFilter>,
+        prefsrc: KernelPrefsrc,
     ) -> Self {
         let mut ip_table = None;
         let mut connected = std::collections::HashSet::new();
@@ -4692,6 +4751,7 @@ impl KernelMirror {
             ip_table,
             connected,
             kernel_filter,
+            prefsrc,
             installed: std::collections::HashSet::new(),
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
@@ -4707,6 +4767,17 @@ impl KernelMirror {
         Self::with_ip_table_and_filter(ip_table, None)
     }
 
+    /// Test helper with a mirror that stamps `prefsrc` on installs.
+    #[cfg(test)]
+    fn with_ip_table_and_prefsrc(
+        ip_table: Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>,
+        prefsrc: KernelPrefsrc,
+    ) -> Self {
+        let mut mirror = Self::with_ip_table(ip_table);
+        mirror.prefsrc = prefsrc;
+        mirror
+    }
+
     #[cfg(test)]
     fn with_ip_table_and_filter(
         ip_table: Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>,
@@ -4716,6 +4787,7 @@ impl KernelMirror {
             ip_table: Some(ip_table),
             connected: std::collections::HashSet::new(),
             kernel_filter,
+            prefsrc: KernelPrefsrc::default(),
             installed: std::collections::HashSet::new(),
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
@@ -4892,7 +4964,8 @@ impl KernelMirror {
                                     r.key.prefix
                                 );
                             } else if let Some(table) = self.ip_table.as_mut() {
-                                match table.add_blackhole_route(r.key.prefix) {
+                                let prefsrc = self.prefsrc.for_prefix(&r.key.prefix);
+                                match table.add_blackhole_route_prefsrc(r.key.prefix, prefsrc) {
                                     Ok(()) => {
                                         self.installed.insert(r.key.prefix);
                                         log_info!(
@@ -4918,6 +4991,12 @@ impl KernelMirror {
                             // 0 leaves the choice to the kernel, which is
                             // right for ordinary recursive gateways.
                             let oif = nexthop_oif(&nh);
+                            // BIRD `krt_prefsrc` (BIRD `protocol kernel`'s
+                            // export filter sets `krt_prefsrc = MAIN_V4/
+                            // MAIN_V6` on every FIB row) — the daemon
+                            // stamps its configured local address instead;
+                            // see [`KernelPrefsrc`].
+                            let prefsrc = self.prefsrc.for_prefix(&r.key.prefix);
                             // The kernel-owned guard: a learned route for
                             // a prefix the kernel holds as *connected*
                             // must not replace the on-link row — see
@@ -4929,15 +5008,25 @@ impl KernelMirror {
                                     r.key.prefix, nh
                                 );
                             } else if let Some(table) = self.ip_table.as_mut() {
-                                match table.add_route_tagged(r.key.prefix, nh, oif, r.protocol) {
+                                match table.add_route_tagged_prefsrc(
+                                    r.key.prefix,
+                                    nh,
+                                    oif,
+                                    r.protocol,
+                                    prefsrc,
+                                ) {
                                     Ok(()) => {
                                         self.installed.insert(r.key.prefix);
+                                        let src = prefsrc
+                                            .map(|a| a.to_string())
+                                            .unwrap_or_else(|| "(none)".into());
                                         log_info!(
                                             Component::Osroute,
-                                            "mirror: route installed {} via {} oif {} ({})",
+                                            "mirror: route installed {} via {} oif {} src {} ({})",
                                             r.key.prefix,
                                             nh,
                                             oif,
+                                            src,
                                             r.protocol.bird_name()
                                         )
                                     }

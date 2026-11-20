@@ -531,8 +531,8 @@ mod kernel_mirror_tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Operation {
-        Add(Prefix, IpAddr, u32),
-        AddBlackhole(Prefix),
+        Add(Prefix, IpAddr, u32, Option<IpAddr>),
+        AddBlackhole(Prefix, Option<IpAddr>),
         Delete(Prefix),
     }
 
@@ -552,15 +552,39 @@ mod kernel_mirror_tests {
             self.operations
                 .lock()
                 .unwrap()
-                .push(Operation::Add(prefix, next_hop, if_index));
+                .push(Operation::Add(prefix, next_hop, if_index, None));
+            Ok(())
+        }
+
+        fn add_route_tagged_prefsrc(
+            &mut self,
+            prefix: Prefix,
+            next_hop: IpAddr,
+            if_index: u32,
+            protocol: Protocol,
+            prefsrc: Option<IpAddr>,
+        ) -> Result<(), Self::Error> {
+            let _ = protocol;
+            self.operations
+                .lock()
+                .unwrap()
+                .push(Operation::Add(prefix, next_hop, if_index, prefsrc));
             Ok(())
         }
 
         fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
+            self.add_blackhole_route_prefsrc(prefix, None)
+        }
+
+        fn add_blackhole_route_prefsrc(
+            &mut self,
+            prefix: Prefix,
+            prefsrc: Option<IpAddr>,
+        ) -> Result<(), Self::Error> {
             self.operations
                 .lock()
                 .unwrap()
-                .push(Operation::AddBlackhole(prefix));
+                .push(Operation::AddBlackhole(prefix, prefsrc));
             Ok(())
         }
 
@@ -625,7 +649,7 @@ mod kernel_mirror_tests {
         for (index, route) in routes.iter().enumerate() {
             assert_eq!(
                 operations[index],
-                Operation::Add(route.key.prefix, route.next_hop.unwrap(), 0)
+                Operation::Add(route.key.prefix, route.next_hop.unwrap(), 0, None)
             );
             assert_eq!(
                 operations[index + routes.len()],
@@ -660,7 +684,7 @@ mod kernel_mirror_tests {
         mirror.apply(&[RouterEvent::RouteInstalled(route)]);
         let ops = operations.lock().unwrap();
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], Operation::AddBlackhole(prefix));
+        assert_eq!(ops[0], Operation::AddBlackhole(prefix, None));
     }
 
     /// A connected route (next_hop = None, protocol = Connected) must
@@ -772,7 +796,7 @@ mod kernel_mirror_tests {
         assert_eq!(ops.len(), 1, "got: {ops:?}");
         assert_eq!(
             ops[0],
-            Operation::Add(bgp_route.key.prefix, bgp_route.next_hop.unwrap(), 0)
+            Operation::Add(bgp_route.key.prefix, bgp_route.next_hop.unwrap(), 0, None)
         );
     }
 
@@ -844,7 +868,7 @@ mod kernel_mirror_tests {
         assert_eq!(ops.len(), 1, "got: {ops:?}");
         assert_eq!(
             ops[0],
-            Operation::Add(prefix, next_hop, 58),
+            Operation::Add(prefix, next_hop, 58, None),
             "the install must carry the session's egress interface, not oif 0"
         );
         // Cleanup: the registry is process-global.
@@ -875,7 +899,123 @@ mod kernel_mirror_tests {
         mirror.apply(&[RouterEvent::RouteInstalled(route)]);
         let ops = operations.lock().unwrap();
         assert_eq!(ops.len(), 1, "got: {ops:?}");
-        assert_eq!(ops[0], Operation::Add(prefix, next_hop, 0));
+        assert_eq!(ops[0], Operation::Add(prefix, next_hop, 0, None));
+    }
+
+    // ---- Preferred-source (BIRD `krt_prefsrc`) plumbing ------------------
+
+    /// The mirror stamps the configured local address as the preferred
+    /// source of every FIB row, family-matched: `local_address` for the
+    /// v4 rows (including Babel's v4-over-v6 next-hop shape),
+    /// `local_address_v6` for the v6 rows.
+    #[test]
+    fn mirror_stamps_per_family_prefsrc_on_installs() {
+        let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table_and_prefsrc(
+            Box::new(RecordingTable {
+                operations: Arc::clone(&operations),
+            }),
+            KernelPrefsrc {
+                v4: Some(IpAddr::V4([172, 23, 10, 115])),
+                v6: Some(IpAddr::V6([
+                    0xfd, 0, 0, 0x11, 0x9e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x19,
+                ])),
+            },
+        );
+        let v4_prefix = Prefix::new_v4([10, 9, 0, 0], 16);
+        let v6_prefix: Prefix = "fd00:286:11e:19::/64".parse().unwrap();
+        let v4_nh = IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8]);
+        let v6_nh = IpAddr::V6([0xfd, 0, 0, 0x11, 0x9e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
+        let route_for = |prefix: Prefix, nh: IpAddr| Route {
+            key: RouteKey::new(
+                prefix,
+                if prefix.is_ipv6() {
+                    NlriFamily::IPV6_UNICAST
+                } else {
+                    NlriFamily::IPV4_UNICAST
+                },
+            ),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: Some(nh),
+            attributes: Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        mirror.apply(&[
+            RouterEvent::RouteInstalled(route_for(v4_prefix, v4_nh)),
+            RouterEvent::RouteInstalled(route_for(v6_prefix, v6_nh)),
+        ]);
+        let ops = operations.lock().unwrap();
+        assert_eq!(
+            ops.as_slice(),
+            &[
+                Operation::Add(v4_prefix, v4_nh, 0, Some(IpAddr::V4([172, 23, 10, 115])),),
+                Operation::Add(
+                    v6_prefix,
+                    v6_nh,
+                    0,
+                    Some(IpAddr::V6([
+                        0xfd, 0, 0, 0x11, 0x9e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x19,
+                    ])),
+                ),
+            ],
+            "the v4 row carries local_address, the v6 row carries local_address_v6"
+        );
+    }
+
+    /// With no configured `local_address` a FIB row installs with no
+    /// preferred source — the kernel picks one, as BIRD does when the
+    /// export filter leaves `krt_prefsrc` unset.
+    #[test]
+    fn mirror_installs_without_prefsrc_when_unconfigured() {
+        let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table_and_prefsrc(
+            Box::new(RecordingTable {
+                operations: Arc::clone(&operations),
+            }),
+            KernelPrefsrc::default(),
+        );
+        let r = route(Protocol::Bgp, 1);
+        mirror.apply(&[RouterEvent::RouteInstalled(r.clone())]);
+        let ops = operations.lock().unwrap();
+        assert_eq!(
+            ops.as_slice(),
+            &[Operation::Add(r.key.prefix, r.next_hop.unwrap(), 0, None)]
+        );
+    }
+
+    /// `KernelPrefsrc::from_config` keeps the value family-matched: the
+    /// kernel requires the preferred source to be same-family as the
+    /// FIB row, so a v4 `local_address` configured for v6-only rows is
+    /// dropped rather than stamped on a v6 row.
+    #[test]
+    fn kernel_prefsrc_from_config_is_family_matched() {
+        let v4 = "172.23.10.115";
+        let v6 = "fd00:286:11e:19::";
+        let cases = [
+            // (local_address, local_address_v6, expected v4, expected v6)
+            (Some(v4), Some(v6), Some(v4), Some(v6)),
+            (None, Some(v6), None, Some(v6)),
+            (Some(v4), None, Some(v4), None),
+            // A v6 `local_address` is the fallback for v6 rows when
+            // `local_address_v6` is unset, but not for v4 rows.
+            (Some(v6), None, None, Some(v6)),
+            (None, None, None, None),
+        ];
+        for (addr, addr_v6, want_v4, want_v6) in cases {
+            let cfg = DaemonConfig {
+                local_address: addr.map(str::to_string),
+                local_address_v6: addr_v6.map(str::to_string),
+                ..DaemonConfig::default()
+            };
+            let got = KernelPrefsrc::from_config(&cfg);
+            let parse = |a: Option<&str>| a.and_then(|s| s.parse::<IpAddr>().ok());
+            assert_eq!(got.v4, parse(want_v4), "local_address = {addr:?}");
+            assert_eq!(got.v6, parse(want_v6), "local_address_v6 = {addr_v6:?}");
+        }
     }
 
     /// The registry API never pins a zero interface (the "unresolved"
