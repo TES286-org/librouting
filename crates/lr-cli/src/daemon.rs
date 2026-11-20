@@ -5716,7 +5716,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         if !manual {
             log_info!(
                 Component::Babel,
-                "interface {} session {} — {} hello {}ms update {}ms rxcost {} router-id {}{}{}",
+                "interface {} session {} — {} hello {}ms update {}ms rxcost {} router-id {}{}{}{}",
                 iface.name,
                 h.0,
                 match iface.transports[0].local {
@@ -5732,6 +5732,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 } else {
                     String::new()
                 },
+                if iface.rtt_send { " rtt-send" } else { "" },
                 if iface.check_link { " check-link" } else { "" },
             );
             // Diagnostic: list every transport bound to this interface
@@ -6319,7 +6320,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             // next iteration retries within the 1 s poll cap instead
             // of waiting out a full Hello interval.
             iface.hello_seqno = iface.hello_seqno.wrapping_add(1);
-            let rtt_echo = if iface.rtt_cost > 0 {
+            let rtt_echo = if iface.rtt_send {
                 router.read().unwrap().babel_rtt_echo(iface.session, now_ms)
             } else {
                 None
@@ -6592,8 +6593,16 @@ struct BabelIface {
     /// the base of every advertised metric. Default 96 (babeld wired).
     rxcost: u16,
     /// RFC 8966 §A.2.4: the maximum RTT penalty (0 disables the
-    /// measurement; tunnels default to 96, babeld parity).
+    /// metric penalty; tunnels default to 96, babeld parity). Does
+    /// NOT control whether the interface sends BABEL-RTT timestamp
+    /// sub-TLVs — see [`rtt_send`](Self::rtt_send).
     rtt_cost: u16,
+    /// RFC 8966 §A.2.4 / BIRD `rtt send yes` / FRR `babel
+    /// enable-timestamps`: send BABEL-RTT timestamp sub-TLVs in
+    /// Hellos and echo them in IHUs so the peer can measure
+    /// round-trip time. Defaults to off, matching both reference
+    /// implementations. Implicitly enabled when `rtt_cost > 0`.
+    rtt_send: bool,
     rtt_min_us: u32,
     rtt_max_us: u32,
     /// BIRD `check link yes` (default on): poll the interface state and
@@ -6869,6 +6878,7 @@ fn babel_iface_manual(
         update_interval_ms: 3_000, // 3 × hello
         rxcost: 96,                // babeld wired default
         rtt_cost: 0,               // off on manual interfaces
+        rtt_send: false,           // off on manual interfaces (BIRD `rtt send no`)
         rtt_min_us: 10_000,        // §A.2.4 defaults
         rtt_max_us: 120_000,
         check_link,
@@ -6912,6 +6922,13 @@ fn babel_iface_from_spec(
     let rxcost = spec.rxcost.unwrap_or(96);
     let is_tunnel = spec.kind.as_deref() == Some("tunnel");
     let rtt_cost = spec.rtt_cost.unwrap_or(if is_tunnel { 96 } else { 0 });
+    // BIRD `rtt send yes` / FRR `babel enable-timestamps`: the
+    // operator opts into BABEL-RTT timestamp sub-TLVs explicitly,
+    // matching both reference implementations' default-off stance.
+    // `rtt_cost > 0` implies `rtt_send` — a config that only sets
+    // the penalty must not also need to set the send flag to get
+    // measurements.
+    let rtt_send = spec.rtt_send.unwrap_or(rtt_cost > 0);
     let rtt_min = spec.rtt_min_us.unwrap_or(10_000);
     let rtt_max = spec.rtt_max_us.unwrap_or(120_000);
     let check_link = spec.check_link.unwrap_or(true);
@@ -7086,6 +7103,7 @@ fn babel_iface_from_spec(
         update_interval_ms: update,
         rxcost,
         rtt_cost,
+        rtt_send,
         rtt_min_us: rtt_min,
         rtt_max_us: rtt_max,
         check_link,
@@ -7499,10 +7517,10 @@ fn build_babel_announcement(
 
     // §3.4 Hello with the advertised interval in centiseconds; the
     // BABEL-RTT timestamp rides as a sub-TLV when the interface
-    // measures delay (RFC 8966 §A.2.4).
+    // measures delay (RFC 8966 §A.2.4 / BIRD `rtt send yes`).
     let hello_cs = u16::try_from(iface.hello_interval_ms / 10).unwrap_or(u16::MAX);
     let mut hello = Hello::new(iface.hello_seqno, hello_cs);
-    if iface.rtt_cost > 0 {
+    if iface.rtt_send {
         hello = hello.with_timestamp(now_us);
     }
     frame.body.push(Tlv::new(TlvType::Hello, hello.encode()));
@@ -7515,7 +7533,7 @@ fn build_babel_announcement(
     // advertised interval is always legal.
     let ihu_cs = u16::try_from((iface.hello_interval_ms * 3) / 10).unwrap_or(u16::MAX);
     let mut ihu = Ihu::new(iface.rxcost, ihu_cs);
-    if iface.rtt_cost > 0 {
+    if iface.rtt_send {
         if let Some((send, recv)) = rtt_echo {
             ihu = ihu.with_timestamp_echo(send, recv);
         }

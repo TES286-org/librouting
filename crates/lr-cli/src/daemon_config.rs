@@ -505,6 +505,13 @@ pub(crate) struct BabelInterfaceSpec {
     /// RTT-based cost (RFC 8966 §A.2.4): when RTT exceeds
     /// `rtt_min`, an additional `rtt_cost` is added. Off when 0.
     pub rtt_cost: Option<u16>,
+    /// Send BABEL-RTT timestamp sub-TLVs in Hellos and echo them in
+    /// IHUs (RFC 8966 §A.2.4 / BIRD `rtt send yes`, FRR `babel
+    /// enable-timestamps`). Defaults to off, matching both reference
+    /// implementations. Setting `rtt_cost > 0` implicitly enables
+    /// sending timestamps as well, so a config that only sets
+    /// `rtt_cost` keeps working.
+    pub rtt_send: Option<bool>,
     /// Lower RTT bound (microseconds) below which no RTT cost is
     /// added (RFC 8966 §A.2.4; BIRD default 10 ms).
     pub rtt_min_us: Option<u32>,
@@ -4400,6 +4407,9 @@ fn apply_babel_key(
                             .parse()
                             .map_err(|_| format!("bad rtt_cost '{value}'"))?,
                     );
+                }
+                "rtt_send" => {
+                    iface.rtt_send = Some(parse_bool(value));
                 }
                 "rtt_min_us" | "rtt_min" => {
                     iface.rtt_min_us = Some(
