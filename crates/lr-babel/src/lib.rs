@@ -56,7 +56,7 @@ pub const VERSION: u8 = 2;
 pub const BODY_OFFSET: usize = 4;
 
 /// One Babel frame = one datagram body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BabelFrame {
     pub body: Vec<Tlv>,
 }
