@@ -1165,20 +1165,28 @@ mod babel_retraction_tests {
         }
     }
 
-    /// Updates and retractions in one decoded frame, as
+    /// Updates and retractions across one or more encoded packets, as
     /// `(metric, prefix-octets)` pairs in wire order.
-    fn update_metrics(frame: &[u8]) -> Vec<(u16, Vec<u8>)> {
-        let decoded = lr_babel::BabelCodec::new()
-            .decode_slice(frame)
-            .unwrap()
-            .expect("a whole frame");
+    ///
+    /// `build_babel_announcement` returns `Vec<Vec<u8>>` since the
+    /// multi-packet split landed: one logical announcement may span
+    /// several UDP datagrams (RFC 8966 §4 caps each at 1496 body
+    /// octets). This helper walks every packet so a retraction that
+    /// landed in a trailing frame is still counted.
+    fn update_metrics(packets: &[Vec<u8>]) -> Vec<(u16, Vec<u8>)> {
         let mut out = Vec::new();
-        for tlv in &decoded.body {
-            if tlv.kind == TlvType::Update && tlv.value.len() >= 10 {
-                let metric = u16::from_be_bytes([tlv.value[8], tlv.value[9]]);
-                let plen = tlv.value[2] as usize;
-                let pl = plen.div_ceil(8);
-                out.push((metric, tlv.value[10..10 + pl].to_vec()));
+        for pkt in packets {
+            let decoded = match lr_babel::BabelCodec::new().decode_slice(pkt) {
+                Ok(Some(f)) => f,
+                _ => continue,
+            };
+            for tlv in &decoded.body {
+                if tlv.kind == TlvType::Update && tlv.value.len() >= 10 {
+                    let metric = u16::from_be_bytes([tlv.value[8], tlv.value[9]]);
+                    let plen = tlv.value[2] as usize;
+                    let pl = plen.div_ceil(8);
+                    out.push((metric, tlv.value[10..10 + pl].to_vec()));
+                }
             }
         }
         out

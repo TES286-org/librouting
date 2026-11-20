@@ -55,6 +55,13 @@ pub const MAGIC: u8 = 0x2A;
 pub const VERSION: u8 = 2;
 pub const BODY_OFFSET: usize = 4;
 
+/// RFC 8966 §4: a Babel datagram's UDP payload MUST NOT exceed 1500
+/// octets. The body (everything after the 4-octet header) is therefore
+/// capped at 1496 octets. Embedders building an announcement that
+/// exceeds this cap must split it across multiple datagrams — see
+/// [`codec::BabelCodec::pack_frames`].
+pub const MAX_BODY_LENGTH: usize = 1500 - BODY_OFFSET;
+
 /// One Babel frame = one datagram body.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BabelFrame {

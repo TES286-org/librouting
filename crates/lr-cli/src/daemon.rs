@@ -6311,9 +6311,13 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             if now_ms < iface.last_announce_ms + iface.hello_interval_ms {
                 continue;
             }
-            iface.last_announce_ms = now_ms;
             // §3.4.1: the Hello seqno advances by one with every Hello
-            // — receivers count losses from its gaps.
+            // — receivers count losses from its gaps. Bump now so the
+            // Hello TLV carries the new value; if every send below
+            // fails (a down interface whose check-link poll has not
+            // caught up yet), `last_announce_ms` stays unset and the
+            // next iteration retries within the 1 s poll cap instead
+            // of waiting out a full Hello interval.
             iface.hello_seqno = iface.hello_seqno.wrapping_add(1);
             let rtt_echo = if iface.rtt_cost > 0 {
                 router.read().unwrap().babel_rtt_echo(iface.session, now_ms)
@@ -6334,9 +6338,24 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     iface.last_sig = sig;
                 }
             }
+            // Track whether at least one transport accepted the
+            // announcement. `last_announce_ms` is committed only on
+            // success — a fully failed send (ENETUNREACH on every
+            // transport) leaves the deadline untouched so the next
+            // loop iteration retries within the 1 s poll cap instead
+            // of waiting out a full Hello interval with no Hello on
+            // the wire (the production symptom where BIRD saw a Hello
+            // seqno gap of 2+ after a transient send failure).
+            let mut any_sent = false;
             for ti in 0..iface.transports.len() {
                 let transport_local = iface.transports[ti].local;
-                let announce = {
+                // `build_babel_announcement` now returns one or more
+                // packet-sized encoded payloads (RFC 8966 §4 caps a
+                // datagram body at 1496 octets; the Loc-RIB plus
+                // re-advertised routes routinely exceed that on a
+                // multi-NIC router). Each payload is sent in its own
+                // UDP datagram; the Hello and IHU ride the first.
+                let packets = {
                     let r = router.read().unwrap();
                     build_babel_announcement(
                         &r,
@@ -6347,36 +6366,57 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         babel_export_filter.as_ref(),
                     )
                 };
+                if packets.is_empty() {
+                    continue;
+                }
                 let transport = &mut iface.transports[ti];
-                let payload = match &mut iface.auth {
-                    Some(auth) => {
-                        let ph = lr_babel::BabelPseudoHeader {
-                            source: lr_ip(transport.local),
-                            source_port: iface.port,
-                            destination: lr_ip(transport.group),
-                            destination_port: iface.port,
-                        };
-                        match auth.authenticate_packet(&announce, ph) {
-                            Ok(signed) => signed,
-                            Err(e) => {
-                                log_error!(Component::Babel, "babel authenticate failed: {}", e);
-                                continue;
+                let mut sent_here = false;
+                for announce in packets {
+                    let payload = match &mut iface.auth {
+                        Some(auth) => {
+                            let ph = lr_babel::BabelPseudoHeader {
+                                source: lr_ip(transport.local),
+                                source_port: iface.port,
+                                destination: lr_ip(transport.group),
+                                destination_port: iface.port,
+                            };
+                            match auth.authenticate_packet(&announce, ph) {
+                                Ok(signed) => signed,
+                                Err(e) => {
+                                    log_error!(
+                                        Component::Babel,
+                                        "babel authenticate failed: {}",
+                                        e
+                                    );
+                                    break;
+                                }
                             }
                         }
+                        None => announce,
+                    };
+                    match transport.uc.send_to(&payload, babel_mcast_dest(transport)) {
+                        Ok(_) => sent_here = true,
+                        Err(e) => {
+                            // Routine during a link flap (ENETUNREACH
+                            // until the 1 s check-link poll gates the
+                            // interface): one line per failed
+                            // announcement at most.
+                            log_error!(
+                                Component::Babel,
+                                "babel send on {} failed: {}",
+                                iface.name,
+                                e
+                            );
+                            break;
+                        }
                     }
-                    None => announce,
-                };
-                if let Err(e) = transport.uc.send_to(&payload, babel_mcast_dest(transport)) {
-                    // Routine during a link flap (ENETUNREACH until the
-                    // 1 s check-link poll gates the interface): one line
-                    // per failed announcement at most.
-                    log_error!(
-                        Component::Babel,
-                        "babel send on {} failed: {}",
-                        iface.name,
-                        e
-                    );
                 }
+                if sent_here {
+                    any_sent = true;
+                }
+            }
+            if any_sent {
+                iface.last_announce_ms = now_ms;
             }
         }
 
@@ -7442,8 +7482,8 @@ fn babel_announcement_signature(router: &DefaultRouter, iface: &BabelIface) -> S
 /// lr-originated routes (192 in the announcement + 192 re-added on
 /// reception) while every BIRD peer's route showed just its link cost.
 ///
-/// The frame is returned WITHOUT the MAC trailer; the caller authenticates
-/// it when keys are configured.
+/// The packets are returned WITHOUT the MAC trailer; the caller
+/// authenticates each one when keys are configured.
 fn build_babel_announcement(
     router: &DefaultRouter,
     iface: &mut BabelIface,
@@ -7451,7 +7491,7 @@ fn build_babel_announcement(
     now_us: u32,
     rtt_echo: Option<(u32, u32)>,
     export_filter: Option<&daemon_policy::BabelFilter>,
-) -> Vec<u8> {
+) -> Vec<Vec<u8>> {
     use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
     use lr_babel::tlv::{Tlv, TlvType};
 
@@ -7748,8 +7788,26 @@ fn build_babel_announcement(
             ));
         }
     }
-    lr_babel::BabelCodec::new()
-        .encode_vec(&frame)
+    // RFC 8966 §4: a Babel datagram body MUST NOT exceed 1500 octets.
+    // The Loc-RIB plus re-advertised routes can easily exceed a single
+    // packet on a multi-NIC router whose peers flood hundreds of
+    // Updates per cycle. `pack_frames` splits the announcement into
+    // packet-sized frames, re-emitting Router-Id and NextHop TLVs at
+    // the start of each trailing frame so the receiver applies every
+    // Update with the right source and next hop. The Hello and IHU
+    // stay in the first frame.
+    //
+    // 1496 = 1500 (RFC 8966 §4 UDP payload cap) − 4 (babel header).
+    // Encode each packed frame into its own exactly-sized buffer so a
+    // single oversized TLV (which should not exist — Babel TLV values
+    // are capped at 255 octets) surfaces as an error instead of a
+    // silent empty-payload send.
+    let codec = lr_babel::BabelCodec::new();
+    codec
+        .pack_frames(&frame, lr_babel::MAX_BODY_LENGTH)
+        .into_iter()
+        .map(|f| codec.encode_vec_sized(&f))
+        .collect::<Result<Vec<_>, _>>()
         .unwrap_or_default()
 }
 
