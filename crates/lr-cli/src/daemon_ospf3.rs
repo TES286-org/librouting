@@ -1075,12 +1075,17 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             // events its own tick generates; the kernel-mirror thread
             // spawned with it applies the route events off the router
             // lock.
-            ticker = Some(crate::spawn_ticker(
-                &runtime,
-                cfg.install_kernel,
-                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                None,
-            ));
+            ticker = Some(
+                match crate::spawn_ticker(
+                    &runtime,
+                    cfg,
+                    Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    None,
+                ) {
+                    Ok(handle) => handle,
+                    Err(e) => return crate::daemon_policy::policy_error(e),
+                },
+            );
         }
         Some(h) => {
             // Embedded: every interface's raw socket is bound; report

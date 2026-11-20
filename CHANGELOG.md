@@ -94,6 +94,37 @@ recompiling.
 
 ### Fixed
 
+**Connected routes never reach the kernel mirror, and IPv6 connected
+prefixes carry their network address** (`lr-cli` / `lr-osroute`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+Every IPv6 link prefix failed the mirror install with EINVAL
+(`fd00:286:11e:19::/64 via fd00:286:11e:19:: oif 0: error -22`): the
+Loc-RIB's connected route carried the interface's own address as its
+next hop, and a gateway route whose next hop equals its destination is
+rejected by the kernel. The FIB already owns those rows, so the mirror
+now skips `Protocol::Connected` on install *and* on withdrawal, and
+tracks the plain prefixes it actually installed so a withdrawal for a
+route it never installed (connected, filtered, failed) is a no-op
+instead of a blind delete. Separately, `install_connected_routes`
+keyed IPv6 routes on the host address
+(`2620:91:0:649:b2:5ff:fe7c:6159/64`); `InterfaceV6Addr::network()`
+now zeroes the host bits, symmetric with the IPv4 helper, so the
+Loc-RIB key matches the kernel's `2620:91:0:649::/64` row.
+
+**IPv6 transports source from `local_address_v6`** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+`peer_local_address` preferred the global `local_address` for every
+transport, so a dual-stack config dialed an IPv6 peer from an IPv4
+source and the session failed with "local and peer address families
+differ" before OPEN. The new `dial_local_address(cfg, peer,
+peer_is_v6)` resolves per-peer then global `local_address_v6` for a v6
+dial and `local_address` for v4, ignores a configured value of the
+wrong family instead of handing it to `bind()`, accepts a v6-valued
+legacy `local_address`, and keeps the router-id/listener fallback for
+IPv4 only. `spawn_connector` (per resolved remote family),
+`diagnose_source_address`, and the BFD peer path use it; next-hop-self
+egress keeps the historical v4-first order.
+
 **Linux kernel mirror installs IPv4 routes over IPv6 next hops**
 (`lr-osroute`,
 [issue #101](https://github.com/TES286-org/librouting/issues/101)).
@@ -450,6 +481,20 @@ path is still reachable through the `lrctl shutdown` command the
 test drives explicitly, which is the path under test.
 
 ### Added
+
+**Kernel FIB export filter** (`lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+BIRD parity for `protocol kernel { export filter ...; }`: the
+`[kernel] export_filter` key (`.lr`: `kernel { export_filter "name";
+}`) names a `[[filter]]` that `KernelMirror::apply` consults before
+every plain, blackhole and LSP install. An explicit `reject` keeps the
+route in the Loc-RIB for BGP/Babel export while leaving the FIB
+untouched — the operator idiom that motivated it rejects static
+aggregates and blackhole anchors, which on Linux make `connect()` to a
+covered peer fail with EINVAL. The filter name is resolved by
+`config check` (`finalize` rejects an undeclared name) and compiled at
+startup, fail-closed, before the mirror thread; `to_dsl` emits the
+block, and the kitchen-sink round-trip covers it.
 
 **IBM Power (ppc64le) and IBM Z (s390x) CI matrix** (`ci`,
 [issue #95](https://github.com/TES286-org/librouting/issues/95)).

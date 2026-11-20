@@ -74,6 +74,10 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
         ("bgp", "peer-health") => Some(single("bgp.peer_health")),
         ("", "logging") => Some(single("logging")),
         ("", "safety") => Some(single("safety")),
+        // BIRD `protocol kernel { export filter ...; }` parity. lr
+        // names a `[[filter]]` rather than inlining the body:
+        // `kernel { export_filter "no-static"; }`.
+        ("", "kernel") => Some(single("kernel")),
         // Graceful-shutdown drain (CLI mirror: `--shutdown-mode`,
         // `--shutdown-drain-rate`, `--shutdown-drain-max-wait`).
         ("", "shutdown") => Some(single("shutdown")),

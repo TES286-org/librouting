@@ -194,6 +194,23 @@ bgp {
 }
 
 # ---------------------------------------------------------------------
+# Kernel FIB export policy (BIRD `protocol kernel { export filter ... }`)
+# ---------------------------------------------------------------------
+# Consulted only with `bgp { install_kernel true; }`. Name a `filter`
+# block; an explicit reject keeps the route in the Loc-RIB for BGP/Babel
+# export while leaving the FIB untouched. The classic use rejects
+# static aggregates and blackhole anchors — on Linux a blackhole that
+# covers a peer's transport address makes connect() fail with EINVAL.
+# kernel {
+#     export_filter "kernel-out";
+# }
+#
+# filter kernel-out {
+#     if proto == "static" then reject;
+#     accept;
+# }
+
+# ---------------------------------------------------------------------
 # Daemon hardening (top-level keys)
 # ---------------------------------------------------------------------
 

@@ -142,6 +142,24 @@ impl InterfaceV6Addr {
         (self.addr.segments()[0] & 0xe000) == 0x2000
     }
 
+    /// The network address of this prefix (host bits zeroed). The
+    /// connected-route installer keys the Loc-RIB on the network
+    /// prefix — the kernel's connected rows are network-shaped, and
+    /// installing a `2001:db8::1/64`-style prefix would neither match
+    /// the kernel's on-link route nor be a valid destination prefix.
+    pub fn network(&self) -> std::net::Ipv6Addr {
+        let len = self.prefix_len.min(128) as u32;
+        let bits = u128::from(self.addr);
+        let mask = if len == 0 {
+            0
+        } else if len == 128 {
+            u128::MAX
+        } else {
+            !0u128 << (128 - len)
+        };
+        std::net::Ipv6Addr::from(bits & mask)
+    }
+
     /// Link-local (fe80::/10). Not usable as an LDP targeted-Hello
     /// endpoint (RFC 7552 §5.2) and never preferred for the transport
     /// address TLV (§6.1 rule 5).
@@ -310,6 +328,58 @@ mod tests {
             prefix_len: 8,
         };
         assert_eq!(b.network(), Ipv4Addr::new(10, 0, 0, 0));
+    }
+
+    #[test]
+    fn v6_network_zeroes_host_bits() {
+        // The live failure: a /64 route keyed on the host address
+        // (`2620:91:0:649:b2:5ff:fe7c:6159/64`) never matches the
+        // kernel's network-shaped connected row.
+        let a = InterfaceV6Addr {
+            addr: "2620:91:0:649:b2:5ff:fe7c:6159".parse().unwrap(),
+            prefix_len: 64,
+            scope_id: 0,
+        };
+        assert_eq!(
+            a.network(),
+            "2620:91:0:649::".parse::<std::net::Ipv6Addr>().unwrap()
+        );
+        let b = InterfaceV6Addr {
+            addr: "fd42:c3aa:bc8:a075::1".parse().unwrap(),
+            prefix_len: 64,
+            scope_id: 0,
+        };
+        assert_eq!(
+            b.network(),
+            "fd42:c3aa:bc8:a075::"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+        );
+        // Edge lengths must not shift out of range.
+        let c = InterfaceV6Addr {
+            addr: "2001:db8::1".parse().unwrap(),
+            prefix_len: 0,
+            scope_id: 0,
+        };
+        assert_eq!(c.network(), "::".parse::<std::net::Ipv6Addr>().unwrap());
+        let d = InterfaceV6Addr {
+            addr: "2001:db8::1".parse().unwrap(),
+            prefix_len: 128,
+            scope_id: 0,
+        };
+        assert_eq!(
+            d.network(),
+            "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap()
+        );
+        let e = InterfaceV6Addr {
+            addr: "2001:db8::1".parse().unwrap(),
+            prefix_len: 129, // saturates to /128
+            scope_id: 0,
+        };
+        assert_eq!(
+            e.network(),
+            "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap()
+        );
     }
 
     #[test]

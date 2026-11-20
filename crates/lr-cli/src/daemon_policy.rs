@@ -594,11 +594,51 @@ impl BabelFilter {
     /// `fallthrough`); false when rejected. The export path uses this
     /// to skip routes the operator does not want announced over Babel.
     pub fn accepts(&self, route: &lr_core::rib::Route) -> bool {
-        let mut tmp = route.clone();
-        let verdict =
-            lr_policy::filter::bytecode::execute(&self.compiled, &mut tmp, self.ctx.as_ref());
-        !matches!(verdict, EvalResult::Reject(_))
+        filter_accepts(&self.compiled, self.ctx.as_ref(), route)
     }
+}
+
+/// Look up a named `[[filter]]` body and compile it. `None` when the
+/// name is `None` (no filter configured). The `owner` label prefixes
+/// the error so the operator knows which protocol surface referenced
+/// the unknown name. Every filter-wiring path fails closed here.
+fn compile_named_filter(
+    cfg: &DaemonConfig,
+    name: &Option<String>,
+    owner: &str,
+) -> Result<Option<(String, lr_policy::filter::bytecode::CompiledFilter)>, String> {
+    let Some(name) = name.as_deref() else {
+        return Ok(None);
+    };
+    let filters = build_filters(cfg)?;
+    let Some((_, filter)) = filters.iter().find(|(n, _)| n == name) else {
+        return Err(format!(
+            "{owner}: unknown filter '{name}' (declared filters: {})",
+            filters
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    Ok(Some((
+        name.to_string(),
+        lr_policy::filter::bytecode::compile(filter),
+    )))
+}
+
+/// True when `compiled` accepts the route (`accept` or `fallthrough`).
+/// Only an explicit `reject` drops it — the BIRD default for a filter
+/// with no matching statement is accept, and both Babel and the kernel
+/// mirror follow that.
+fn filter_accepts(
+    compiled: &lr_policy::filter::bytecode::CompiledFilter,
+    ctx: &DaemonFilterContext,
+    route: &lr_core::rib::Route,
+) -> bool {
+    let mut tmp = route.clone();
+    let verdict = lr_policy::filter::bytecode::execute(compiled, &mut tmp, ctx);
+    !matches!(verdict, EvalResult::Reject(_))
 }
 
 /// Look up the named filter in the daemon's `[[filter]]` tables and
@@ -611,26 +651,51 @@ pub(crate) fn build_babel_filter(
     name: &Option<String>,
     roa: &std::sync::Arc<lr_bgp::RoaStore>,
 ) -> Result<Option<BabelFilter>, String> {
-    let Some(name) = name.as_deref() else {
-        return Ok(None);
-    };
-    let filters = build_filters(cfg)?;
-    let Some((_, filter)) = filters.iter().find(|(n, _)| n == name) else {
-        return Err(format!(
-            "babel: unknown filter '{name}' (declared filters: {})",
-            filters
-                .iter()
-                .map(|(n, _)| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    };
-    let compiled = lr_policy::filter::bytecode::compile(filter);
-    Ok(Some(BabelFilter {
-        name: name.to_string(),
-        compiled,
-        ctx: std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::clone(roa))),
-    }))
+    Ok(
+        compile_named_filter(cfg, name, "babel")?.map(|(name, compiled)| BabelFilter {
+            name,
+            compiled,
+            ctx: std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::clone(roa))),
+        }),
+    )
+}
+
+/// A compiled kernel FIB export filter (BIRD `protocol kernel { export
+/// filter ...; }`). Unlike Babel's filter this one is consulted once
+/// per Loc-RIB route at install time, before any plain/blackhole/LSP
+/// operation: a rejected route leaves the FIB untouched and a later
+/// withdrawal has nothing to delete (the mirror tracks what it
+/// installed).
+#[derive(Debug)]
+pub(crate) struct KernelFilter {
+    pub name: String,
+    pub compiled: lr_policy::filter::bytecode::CompiledFilter,
+    pub ctx: std::sync::Arc<DaemonFilterContext>,
+}
+
+impl KernelFilter {
+    /// True when the route may be installed into the kernel FIB.
+    pub fn accepts(&self, route: &lr_core::rib::Route) -> bool {
+        filter_accepts(&self.compiled, self.ctx.as_ref(), route)
+    }
+}
+
+/// Compile `[kernel] export_filter` against the declared filters.
+/// `None` when the operator configured no filter. Fails closed on an
+/// unknown name or a body that does not compile.
+pub(crate) fn build_kernel_filter(
+    cfg: &DaemonConfig,
+    roa: &std::sync::Arc<lr_bgp::RoaStore>,
+) -> Result<Option<KernelFilter>, String> {
+    Ok(
+        compile_named_filter(cfg, &cfg.kernel_export_filter, "kernel")?.map(|(name, compiled)| {
+            KernelFilter {
+                name,
+                compiled,
+                ctx: std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::clone(roa))),
+            }
+        }),
+    )
 }
 
 /// Babel import hook: runs a compiled DSL filter on every route

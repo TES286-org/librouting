@@ -975,12 +975,12 @@ pub(super) fn run_ospf_daemon(
             // OSPF-only daemon (no BGP session to push to); the
             // multi-protocol supervisor spawns the ticker with the
             // driver when both `bgp` and `ospf` are in the protocol set.
-            ticker = Some(crate::spawn_ticker(
-                &runtime,
-                cfg.install_kernel,
-                Arc::new(AtomicUsize::new(0)),
-                None,
-            ));
+            ticker = Some(
+                match crate::spawn_ticker(&runtime, cfg, Arc::new(AtomicUsize::new(0)), None) {
+                    Ok(handle) => handle,
+                    Err(e) => return crate::daemon_policy::policy_error(e),
+                },
+            );
         }
         Some(h) => {
             // Embedded: every interface's raw socket is bound; report

@@ -251,6 +251,40 @@ fn peer_tables_parse_and_inherit() {
     assert_eq!(cfg.peers[1].max_prefixes, Some(1000));
 }
 
+/// `[kernel] export_filter` is the FIB half of BIRD's `protocol
+/// kernel { export filter ...; }`: the name of a declared `[[filter]]`.
+/// A typo must fail `finalize`, not silently install everything.
+#[test]
+fn kernel_export_filter_parses_and_resolves() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[kernel]\nexport_filter = \"kernel-out\"\n\n\
+         [[filter]]\nname = \"kernel-out\"\nbody = \"reject;\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    assert_eq!(cfg.kernel_export_filter.as_deref(), Some("kernel-out"));
+    cfg.finalize().expect("the referenced filter exists");
+
+    let mut bad = DaemonConfig::with_defaults();
+    parse_toml_subset("[kernel]\nexport_filter = \"missing\"\n", &mut bad).unwrap();
+    let err = bad.finalize().unwrap_err();
+    assert!(
+        err.contains("missing"),
+        "unknown filter name must fail: {err}"
+    );
+}
+
+#[test]
+fn kernel_section_rejects_unknown_keys() {
+    let mut cfg = DaemonConfig::with_defaults();
+    let err = parse_toml_subset("[kernel]\nexport_filtr = \"x\"\n", &mut cfg).unwrap_err();
+    assert!(
+        err.contains("unknown [kernel] key"),
+        "a typo in the FIB policy must fail closed: {err}"
+    );
+}
+
 #[test]
 fn previously_ignored_global_keys_now_parse() {
     let mut cfg = DaemonConfig::with_defaults();

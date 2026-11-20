@@ -87,6 +87,25 @@ bgp {
         assert!(cfg.install_kernel);
     }
 
+    /// BIRD `protocol kernel { export filter ...; }` parity: the DSL
+    /// block names a declared `[[filter]]`.
+    #[test]
+    fn parses_kernel_export_filter_block() {
+        let cfg = parse(
+            r#"
+filter kernel-out {
+    if proto == "static" then reject;
+    accept;
+}
+kernel {
+    export_filter "kernel-out";
+}
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.kernel_export_filter.as_deref(), Some("kernel-out"));
+    }
+
     #[test]
     fn parses_policy_bank_and_peer_identity() {
         let cfg = parse(

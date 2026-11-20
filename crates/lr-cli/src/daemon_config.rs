@@ -958,6 +958,18 @@ pub(crate) struct DaemonConfig {
     pub labeled_networks: Vec<String>,
     /// Install best routes into the kernel FIB.
     pub install_kernel: bool,
+    /// Name of a `[[filter]]` body consulted before a Loc-RIB route is
+    /// installed into the kernel FIB (BIRD `protocol kernel { export
+    /// filter ...; }`). `None` (the default) installs every selected
+    /// route. This is the FIB-only counterpart of the BGP/Babel export
+    /// filters: a static aggregate or a blackhole anchor kept in the
+    /// Loc-RIB for advertisement does not need a kernel row, and on
+    /// Linux a blackhole covering a peer's address makes `connect()`
+    /// fail with EINVAL. The mirror compiles this filter once at
+    /// startup; changing it takes a daemon restart, like
+    /// `install_kernel` itself (the netlink table's lifetime is the
+    /// process's).
+    pub kernel_export_filter: Option<String>,
     /// BGP hold time (seconds).
     pub hold_time: u16,
     /// RFC 4724 graceful restart time to advertise (seconds). 0 disables.
@@ -1733,6 +1745,7 @@ impl DaemonConfig {
             babel_pc_window: 0,
             babel_import_filter: None,
             babel_export_filter: None,
+            kernel_export_filter: None,
             babel_interfaces: Vec::new(),
             static_routes: Vec::new(),
             ebgp_policy: "rfc8212".to_string(),
@@ -2365,6 +2378,16 @@ impl DaemonConfig {
             }
             if spec.body.as_deref().map(str::is_empty).unwrap_or(true) {
                 return Err(format!("[[filter]] '{name}' without 'body'"));
+            }
+        }
+        // Resolve the kernel FIB filter name at config-check time so a
+        // typo is reported by `config check`, not at the first route
+        // install (where the daemon would have to fail closed midway).
+        if let Some(name) = &self.kernel_export_filter {
+            if !seen.contains(name) {
+                return Err(format!(
+                    "[kernel] export_filter '{name}' is not a declared [[filter]]"
+                ));
             }
         }
         Ok(())
@@ -3461,6 +3484,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "bgp_ls"
                 && section != "logging"
                 && section != "safety"
+                && section != "kernel"
                 && section != "shutdown"
                 && section != "ospf.auth"
                 && !section.starts_with("unknown-array.")
@@ -3532,6 +3556,13 @@ pub(crate) fn apply_config_key(
     // keys inside them are hard errors (typo protection for
     // policy the operator expects to be in force — fail closed).
     if apply_policy_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // Kernel FIB export policy: fail-closed. A typo here silently
+    // changes which selected routes reach the FIB.
+    if apply_kernel_key(cfg, section, key, value)
         .map_err(|e| format!("line {}: {}", lineno + 1, e))?
     {
         return Ok(());
@@ -3947,6 +3978,34 @@ fn apply_policy_key(
         // Not a policy section: signal the caller to fall through to
         // the global schema.
         _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// The `[kernel]` section: FIB export policy. BIRD parity is
+/// `protocol kernel { export filter ...; }` — lr names the compiled
+/// `[[filter]]` instead of inlining the body, the same indirection
+/// `[babel] import_filter`/`export_filter` uses. Fail-closed: an
+/// unknown key silently changing what reaches the FIB is exactly the
+/// class of typo the daemon must reject at startup.
+fn apply_kernel_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "kernel" {
+        return Ok(false);
+    }
+    match key {
+        "export_filter" => {
+            cfg.kernel_export_filter = Some(unquote_toml_value(value).to_string());
+        }
+        _ => {
+            return Err(format!(
+                "unknown [kernel] key '{key}' (typo protection; kernel export fails closed)"
+            ))
+        }
     }
     Ok(true)
 }

@@ -423,6 +423,103 @@ mod peer_local_address_tests {
             Some(IpAddr::V4([0, 0, 0, 0]))
         );
     }
+
+    /// An IPv6 dial must use `local_address_v6`, never the IPv4
+    /// `local_address`: binding a v4 source on a v6 socket fails with
+    /// EINVAL, which the live daemon reported as "local and peer
+    /// address families differ" for sessions that never came up.
+    #[test]
+    fn v6_dial_prefers_local_address_v6() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        cfg.local_address = Some("172.23.10.102".to_string());
+        cfg.local_address_v6 = Some("fd00:286:11e:2::1".to_string());
+        let peer = PeerSpec::default();
+        assert_eq!(
+            dial_local_address(&cfg, &peer, true),
+            Some("fd00:286:11e:2::1".parse::<IpAddr>().unwrap())
+        );
+        // The v4 transport keeps the v4 source.
+        assert_eq!(
+            dial_local_address(&cfg, &peer, false),
+            Some(IpAddr::V4([172, 23, 10, 102]))
+        );
+    }
+
+    /// A wrong-family value must be skipped rather than bound. Both
+    /// the per-peer and the global slot are checked, for both
+    /// transport families.
+    #[test]
+    fn wrong_family_source_is_ignored() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        // Global v4 in the v6 slot: unusable for either family.
+        cfg.local_address_v6 = Some("10.9.9.9".to_string());
+        let peer = PeerSpec {
+            local_address: Some("10.0.0.2".to_string()),
+            local_address_v6: Some("10.0.0.3".to_string()),
+            ..PeerSpec::default()
+        };
+        assert_eq!(
+            dial_local_address(&cfg, &peer, true),
+            None,
+            "a v4 value in local_address_v6 must not reach a v6 bind()"
+        );
+        assert_eq!(
+            dial_local_address(&cfg, &peer, false),
+            Some(IpAddr::V4([10, 0, 0, 2]))
+        );
+    }
+
+    /// Legacy configs write the only available source into
+    /// `local_address`; a v6 value there is accepted for a v6 dial
+    /// and ignored for a v4 one (the transport family decides).
+    #[test]
+    fn legacy_local_address_is_family_checked() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        cfg.local_address = Some("fd00:286:11e:2::1".to_string());
+        let peer = PeerSpec::default();
+        assert_eq!(
+            dial_local_address(&cfg, &peer, true),
+            Some("fd00:286:11e:2::1".parse::<IpAddr>().unwrap())
+        );
+        assert_eq!(
+            dial_local_address(&cfg, &peer, false),
+            Some(IpAddr::V4([172, 23, 10, 102])),
+            "the v6 value is unusable for v4, so the v4 fallback chain applies"
+        );
+    }
+
+    /// A dual-stack peer with only an IPv4 router-id configured has
+    /// no v6 source; returning `None` lets the kernel choose, which
+    /// is correct (a router-id is a BGP identifier, not a v6 host
+    /// address).
+    #[test]
+    fn v6_dial_without_v6_source_defers_to_the_kernel() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        cfg.local_address = Some("172.23.10.102".to_string());
+        cfg.listen_addr = Some("0.0.0.0:179".to_string());
+        let peer = PeerSpec::default();
+        assert_eq!(dial_local_address(&cfg, &peer, true), None);
+    }
+
+    /// Per-peer `local_address_v6` overrides the global value, and
+    /// the legacy `host:port` form still parses.
+    #[test]
+    fn per_peer_v6_source_wins_and_parses_port_form() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.local_address_v6 = Some("fd00:286:11e:2::1".to_string());
+        let peer = PeerSpec {
+            local_address_v6: Some("[fd00:286:11e:2::2]:1790".to_string()),
+            ..PeerSpec::default()
+        };
+        assert_eq!(
+            dial_local_address(&cfg, &peer, true),
+            Some("fd00:286:11e:2::2".parse::<IpAddr>().unwrap())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -594,6 +691,121 @@ mod kernel_mirror_tests {
         assert!(
             ops.is_empty(),
             "connected route must not be installed or blackholed, got: {ops:?}"
+        );
+    }
+
+    /// A connected route that *does* carry a next hop (the shape
+    /// `install_connected` produces) must be skipped as well: a
+    /// gateway route whose next hop equals its destination prefix is
+    /// rejected by the kernel with EINVAL. This is the live failure —
+    /// every IPv6 link prefix produced `route install failed for
+    /// fd00:286:11e:19::/64 via fd00:286:11e:19:: oif 0: error -22`.
+    #[test]
+    fn connected_routes_with_a_gateway_are_skipped() {
+        let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table(Box::new(RecordingTable {
+            operations: Arc::clone(&operations),
+        }));
+        let prefix: Prefix = "fd00:286:11e:19::/64".parse().unwrap();
+        let route = Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV6_UNICAST),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Connected,
+            preference: Preference::new(0, 0),
+            next_hop: Some("fd00:286:11e:19::".parse::<IpAddr>().unwrap()),
+            attributes: Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        mirror.apply(&[RouterEvent::RouteInstalled(route.clone())]);
+        mirror.apply(&[RouterEvent::RouteWithdrawn(route.key)]);
+        let ops = operations.lock().unwrap();
+        assert!(
+            ops.is_empty(),
+            "connected routes own the kernel row; the mirror must not \
+             install or delete them, got: {ops:?}"
+        );
+    }
+
+    /// `[kernel] export_filter` keeps a route in the Loc-RIB (for BGP
+    /// export) while refusing its FIB install — BIRD's `protocol
+    /// kernel { export filter { if proto = "static" then reject; } }`.
+    /// The live use is a static blackhole anchor that covers a peer's
+    /// transport address: installing it makes `connect()` fail with
+    /// EINVAL on Linux.
+    #[test]
+    fn kernel_export_filter_blocks_the_fib_install() {
+        let cfg = DaemonConfig {
+            filters: vec![crate::daemon_config::FilterSpec {
+                name: Some("kernel-out".into()),
+                body: Some(r#"if proto == "static" then reject; accept;"#.into()),
+                description: None,
+            }],
+            kernel_export_filter: Some("kernel-out".into()),
+            ..DaemonConfig::default()
+        };
+        let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+        let filter = crate::daemon_policy::build_kernel_filter(&cfg, &roa)
+            .expect("the filter compiles")
+            .expect("a filter is configured");
+
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table_and_filter(
+            Box::new(RecordingTable {
+                operations: Arc::clone(&operations),
+            }),
+            Some(filter),
+        );
+        // A blackhole static route: rejected before add_blackhole_route.
+        let mut static_route = route(Protocol::Static, 7);
+        static_route.next_hop = None;
+        mirror.apply(&[RouterEvent::RouteInstalled(static_route)]);
+        assert!(
+            operations.lock().unwrap().is_empty(),
+            "the static anchor must not reach the FIB"
+        );
+        // A BGP route with the same filter in place still installs.
+        let bgp_route = route(Protocol::Bgp, 8);
+        mirror.apply(&[RouterEvent::RouteInstalled(bgp_route.clone())]);
+        let ops = operations.lock().unwrap();
+        assert_eq!(ops.len(), 1, "got: {ops:?}");
+        assert_eq!(
+            ops[0],
+            Operation::Add(bgp_route.key.prefix, bgp_route.next_hop.unwrap(), 0)
+        );
+    }
+
+    /// A filtered route never reaches the FIB, so a later withdrawal
+    /// must not issue a blind delete for it.
+    #[test]
+    fn filtered_route_withdrawal_does_not_delete() {
+        let cfg = DaemonConfig {
+            filters: vec![crate::daemon_config::FilterSpec {
+                name: Some("kernel-out".into()),
+                body: Some("reject;".into()),
+                description: None,
+            }],
+            kernel_export_filter: Some("kernel-out".into()),
+            ..DaemonConfig::default()
+        };
+        let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+        let filter = crate::daemon_policy::build_kernel_filter(&cfg, &roa)
+            .unwrap()
+            .unwrap();
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table_and_filter(
+            Box::new(RecordingTable {
+                operations: Arc::clone(&operations),
+            }),
+            Some(filter),
+        );
+        let r = route(Protocol::Bgp, 9);
+        mirror.apply(&[RouterEvent::RouteInstalled(r.clone())]);
+        mirror.apply(&[RouterEvent::RouteWithdrawn(r.key)]);
+        assert!(
+            operations.lock().unwrap().is_empty(),
+            "no install means no delete"
         );
     }
 
@@ -1577,12 +1789,11 @@ mod event_bus_wiring_tests {
         // `pending_events` until `poll_events`, so an early subscriber
         // sees everything from the first drain on.
         let rx = rt.event_bus.subscribe();
-        let ticker = spawn_ticker(
-            &rt,
-            false, // no kernel install: the mirror thread runs but no-ops
-            Arc::new(AtomicUsize::new(0)),
-            None,
-        );
+        // No kernel install: the mirror thread runs but no-ops.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.install_kernel = false;
+        let ticker = spawn_ticker(&rt, &cfg, Arc::new(AtomicUsize::new(0)), None)
+            .expect("the default config carries no kernel filter");
 
         // An originated route queues a RouteInstalled; the ticker's
         // next pass drains and publishes it.

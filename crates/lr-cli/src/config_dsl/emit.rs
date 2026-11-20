@@ -488,6 +488,16 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.close(0);
     }
 
+    // --- kernel ---------------------------------------------------------------
+    // BIRD `protocol kernel { export filter ...; }` parity. Emitted
+    // only when the operator selected a filter, so a default config
+    // round-trips to an empty file.
+    if let Some(name) = &cfg.kernel_export_filter {
+        e.open(0, "kernel", None);
+        e.kv(1, "export_filter", &fmt_string(name));
+        e.close(0);
+    }
+
     // --- bgp-ls ------------------------------------
     // Emitted only when `enabled` is set OR the operator configured any
     // of the speaker identity / area subset — matches the `safety`

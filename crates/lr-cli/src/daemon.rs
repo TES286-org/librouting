@@ -851,7 +851,14 @@ fn install_connected_routes(r: &mut DefaultRouter) -> usize {
                 if addr.is_link_local() {
                     continue;
                 }
-                let prefix = Prefix::new_v6(addr.addr.octets(), addr.prefix_len);
+                // Key the route on the network prefix, not the host
+                // address: the kernel's connected row is
+                // `2620:91:0:649::/64`, and a Loc-RIB entry for
+                // `2620:91:0:649:b2:5ff:fe7c:6159/64` is neither a
+                // valid destination prefix nor the same route (it
+                // also defeated the mirror's connected-prefix guard).
+                let network = addr.network();
+                let prefix = Prefix::new_v6(network.octets(), addr.prefix_len);
                 let family = NlriFamily::IPV6_UNICAST;
                 r.install_connected(
                     prefix,
@@ -2063,11 +2070,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 );
                 return ExitCode::from(2);
             };
-            let Some(local_ip) = peer_local_address(cfg, &entry.spec) else {
+            let Some(local_ip) = dial_local_address(cfg, &entry.spec, peer_ip.is_ipv6()) else {
                 log_error!(
                     Component::Bfd,
-                    "peer {}: bfd requires a local address \
-                     (--local-address / local_address)",
+                    "peer {}: bfd requires a local address of the peer's \
+                     family (--local-address / local_address; \
+                     local_address_v6 for an IPv6 peer)",
                     entry.label()
                 );
                 return ExitCode::from(2);
@@ -2266,12 +2274,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         } else {
             None
         };
-        ticker = Some(spawn_ticker(
-            &runtime,
-            cfg.install_kernel,
-            Arc::clone(&live_sessions),
-            bgp_ls_driver,
-        ));
+        ticker = Some(
+            match spawn_ticker(&runtime, cfg, Arc::clone(&live_sessions), bgp_ls_driver) {
+                Ok(handle) => handle,
+                Err(e) => return daemon_policy::policy_error(e),
+            },
+        );
     }
 
     // ---- Listener (inbound), if configured. ----
@@ -3085,6 +3093,90 @@ fn peer_local_address(g: &DaemonConfig, p: &PeerSpec) -> Option<IpAddr> {
     }
 }
 
+/// Resolve the source address for an **outbound transport** to a peer.
+///
+/// The transport family decides which configured source applies: an
+/// IPv6 dial uses `local_address_v6` (per-peer, then global), an IPv4
+/// dial uses `local_address`. A configured value of the wrong family
+/// is ignored rather than handed to `bind()` — an IPv4 source on an
+/// IPv6 socket (or the reverse) fails with `EINVAL`, which the
+/// `connect_bound` guard reports as "local and peer address families
+/// differ" and the session never comes up. A dual-stack peer (an
+/// IPv6 transport alongside an IPv4 `local_address`) is exactly the
+/// case this split exists for; next-hop-self egress keeps using
+/// [`peer_local_address`] and its historical v4-first order.
+///
+/// The IPv4 path keeps the historical fallback chain: per-peer
+/// `local_address`, global `local_address`, `--router-id` when it
+/// parses as a literal IPv4, then the listener. The IPv6 path stops
+/// after the configured v6 sources: a router-id is an IPv4 BGP
+/// IDENTIFIER and a `0.0.0.0:179` listener is not a v6 source, so
+/// leaving the choice to the kernel is the right default.
+fn dial_local_address(g: &DaemonConfig, p: &PeerSpec, peer_is_v6: bool) -> Option<IpAddr> {
+    // Accept both the bare-address and the legacy `host:port` forms,
+    // then keep only the value whose family matches the transport.
+    let parse =
+        |s: &str| -> Option<IpAddr> { IpAddr::from_str(s).ok().or_else(|| transport_ip(s)) };
+    let matches_family = |ip: &IpAddr| ip.is_ipv6() == peer_is_v6;
+
+    let preferred = if peer_is_v6 {
+        p.local_address_v6.as_deref()
+    } else {
+        p.local_address.as_deref()
+    };
+    let global = if peer_is_v6 {
+        g.local_address_v6.as_deref()
+    } else {
+        g.local_address.as_deref()
+    };
+    if let Some(ip) = preferred.and_then(parse).filter(matches_family) {
+        return Some(ip);
+    }
+    if let Some(ip) = global.and_then(parse).filter(matches_family) {
+        return Some(ip);
+    }
+    if peer_is_v6 {
+        // Legacy single-field configs that put an IPv6 address in
+        // `local_address` keep working: the explicit family check
+        // above rejects it for a v4 transport but accepts it here.
+        if let Some(ip) = p
+            .local_address
+            .as_deref()
+            .and_then(parse)
+            .filter(matches_family)
+        {
+            return Some(ip);
+        }
+        if let Some(ip) = g
+            .local_address
+            .as_deref()
+            .and_then(parse)
+            .filter(matches_family)
+        {
+            return Some(ip);
+        }
+        return None;
+    }
+    // IPv4 fallbacks (historical order): the router-id is the
+    // operator's declared identity and usually a real v4 address;
+    // the listener is the last resort.
+    if let Ok(v4) = g
+        .router_id
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .parse::<std::net::Ipv4Addr>()
+    {
+        return Some(IpAddr::V4(v4.octets()));
+    }
+    let fallback = if g.explicit_peers {
+        g.listen_addr.as_deref()
+    } else {
+        g.peer_addr.as_deref().or(g.listen_addr.as_deref())
+    };
+    fallback.and_then(transport_ip).filter(matches_family)
+}
+
 /// Match an inbound connection's source address to a configured peer
 /// (explicit mode). Exactly one peer must claim the address.
 fn match_inbound_peer(entries: &[PeerEntry], src: std::net::IpAddr) -> Result<&PeerEntry, String> {
@@ -3241,9 +3333,6 @@ fn expected_peer_ip(spec: &PeerSpec) -> Option<IpAddr> {
 /// the operator sees the warning before the NOTIFICATION storm rather
 /// than after.
 fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
-    let Some(local) = peer_local_address(cfg, &entry.spec) else {
-        return;
-    };
     let Some(remote) = entry.spec.remote.as_deref() else {
         return;
     };
@@ -3253,6 +3342,9 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
     // The diagnostic is informational — never block the daemon on a
     // kernel query that might fail (a peer hostname that does not
     // resolve yet, a route that appears later via Babel, etc.).
+    let Some(local) = dial_local_address(cfg, &entry.spec, peer_ip.is_ipv6()) else {
+        return;
+    };
     match lr_osroute::source_check::check_source_compatibility(local, peer_ip) {
         lr_osroute::source_check::SourceCheck::Ok => {
             // The bind test passed (Windows), the kernel's preferred
@@ -3658,9 +3750,14 @@ fn spawn_connector(
     // on (see `bgp_reactor.rs`).
     let reactor = reactor.clone();
     // Source the connection from the configured local address when
-    // one exists (port 0 = ephemeral).
-    let local =
-        peer_local_address(cfg, &entry.spec).map(|ip| std::net::SocketAddr::new(to_std_ip(ip), 0));
+    // one exists (port 0 = ephemeral). Precompute one candidate per
+    // family: the remote may be a hostname that resolves to either
+    // family, and binding a v4 source on a v6 socket fails with
+    // EINVAL ("local and peer address families differ").
+    let local_v4 = dial_local_address(cfg, &entry.spec, false)
+        .map(|ip| std::net::SocketAddr::new(to_std_ip(ip), 0));
+    let local_v6 = dial_local_address(cfg, &entry.spec, true)
+        .map(|ip| std::net::SocketAddr::new(to_std_ip(ip), 0));
     let _ = thread::Builder::new()
         .name(format!("lr-connect-{}", label))
         .spawn(move || {
@@ -3766,6 +3863,7 @@ fn spawn_connector(
                     continue;
                 }
                 log_info!(Component::Bgp, "peer {label}: connecting to {remote} ...");
+                let local = if sockaddr.is_ipv6() { local_v6 } else { local_v4 };
                 match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
@@ -4164,13 +4262,17 @@ impl KernelMirrorThread {
     /// router accumulates its events in `pending_events` until
     /// `poll_events` drains them, so a subscriber that exists before
     /// the first drain misses nothing.
-    fn spawn(bus: lr_router::event_bus::EventBus, install_kernel: bool) -> Arc<Self> {
+    fn spawn(
+        bus: lr_router::event_bus::EventBus,
+        install_kernel: bool,
+        kernel_filter: Option<crate::daemon_policy::KernelFilter>,
+    ) -> Arc<Self> {
         let rx = bus.subscribe();
         let thread_bus = bus.clone();
         let handle = thread::Builder::new()
             .name("lr-kernel-mirror".into())
             .spawn(move || {
-                let mut mirror = KernelMirror::new(install_kernel);
+                let mut mirror = KernelMirror::new(install_kernel, kernel_filter);
                 loop {
                     match rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(ev) => mirror.apply(std::slice::from_ref(&ev)),
@@ -4243,10 +4345,25 @@ impl KernelMirrorThread {
 /// closes.
 pub(crate) fn spawn_ticker(
     rt: &Arc<Runtime>,
-    install_kernel: bool,
+    cfg: &DaemonConfig,
     live: Arc<AtomicUsize>,
     bgp_ls_driver: Option<BgplsDriver>,
-) -> thread::JoinHandle<()> {
+) -> Result<thread::JoinHandle<()>, String> {
+    // Compile the kernel FIB export policy before the mirror thread
+    // starts: a bad filter name or body fails startup, like every
+    // other filter wiring (BIRD refuses to start the kernel protocol
+    // too). `Runtime::roa_store` is populated by the BGP path and
+    // absent in OSPF/Babel-only daemons; an empty store keeps
+    // `roa.state` deterministic there.
+    let empty_roa;
+    let roa = match rt.roa_store.as_ref() {
+        Some(store) => store,
+        None => {
+            empty_roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+            &empty_roa
+        }
+    };
+    let kernel_filter = crate::daemon_policy::build_kernel_filter(cfg, roa)?;
     // Subscribe the mirror before the loop starts polling: the
     // router holds events in `pending_events` until the first
     // `poll_events`, so the mirror sees every event from the first
@@ -4254,10 +4371,11 @@ pub(crate) fn spawn_ticker(
     // path can close the bus and join the mirror.
     let _ = rt.kernel_mirror.set(KernelMirrorThread::spawn(
         rt.event_bus.clone(),
-        install_kernel,
+        cfg.install_kernel,
+        kernel_filter,
     ));
     let rt = Arc::clone(rt);
-    thread::Builder::new()
+    Ok(thread::Builder::new()
         .name("lr-ticker".into())
         .spawn(move || {
             let mut bgp_ls_driver = bgp_ls_driver;
@@ -4313,7 +4431,7 @@ pub(crate) fn spawn_ticker(
             // (after any final publishes of its own) and joins the
             // mirror thread — see `Runtime::shutdown_event_bus`.
         })
-        .expect("spawn ticker thread")
+        .expect("spawn ticker thread"))
 }
 
 /// Log one event and hand it to every bus subscriber. Called by the
@@ -4464,6 +4582,19 @@ struct KernelMirror {
     /// Loc-RIB has no connected import, so the mirror refuses the
     /// install instead.
     connected: std::collections::HashSet<Prefix>,
+    /// Compiled `[kernel] export_filter`, if any. A rejected route is
+    /// never installed — the FIB half of BIRD's `protocol kernel {
+    /// export filter ...; }`. Connected routes bypass it: they are the
+    /// kernel's own rows and are skipped before this check.
+    kernel_filter: Option<crate::daemon_policy::KernelFilter>,
+    /// Plain IP prefixes this mirror actually installed. `RouteWithdrawn`
+    /// carries only the key, and some Loc-RIB entries never reach the
+    /// kernel on purpose (connected prefixes, filtered routes,
+    /// aggregates without a gateway). Deleting unconditionally would
+    /// remove a row this process does not own — including the kernel's
+    /// connected row for a prefix whose Loc-RIB entry was replaced by
+    /// a learned path.
+    installed: std::collections::HashSet<Prefix>,
     /// Locally originated in-labels currently installed, keyed by
     /// prefix — `RouteWithdrawn` carries only the key, so the tail half
     /// needs this side table to know which label to delete.
@@ -4474,7 +4605,10 @@ struct KernelMirror {
 }
 
 impl KernelMirror {
-    fn new(install_kernel: bool) -> Self {
+    fn new(
+        install_kernel: bool,
+        kernel_filter: Option<crate::daemon_policy::KernelFilter>,
+    ) -> Self {
         let mut ip_table = None;
         let mut connected = std::collections::HashSet::new();
         #[cfg(target_os = "linux")]
@@ -4557,6 +4691,8 @@ impl KernelMirror {
         Self {
             ip_table,
             connected,
+            kernel_filter,
+            installed: std::collections::HashSet::new(),
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -4568,9 +4704,19 @@ impl KernelMirror {
     fn with_ip_table(
         ip_table: Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>,
     ) -> Self {
+        Self::with_ip_table_and_filter(ip_table, None)
+    }
+
+    #[cfg(test)]
+    fn with_ip_table_and_filter(
+        ip_table: Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>,
+        kernel_filter: Option<crate::daemon_policy::KernelFilter>,
+    ) -> Self {
         Self {
             ip_table: Some(ip_table),
             connected: std::collections::HashSet::new(),
+            kernel_filter,
+            installed: std::collections::HashSet::new(),
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -4582,6 +4728,36 @@ impl KernelMirror {
         for ev in events {
             match ev {
                 RouterEvent::RouteInstalled(r) => {
+                    // Connected routes are the kernel's own: interface
+                    // assignment created them, and they enter the
+                    // Loc-RIB only so `[[redistribute]] source =
+                    // "connected"` and BGP export can see them. The
+                    // mirror must never re-install one: `install_
+                    // connected` carries the interface's own address as
+                    // the next hop, and a gateway route whose next hop
+                    // equals its destination is rejected with EINVAL
+                    // (observed live for every IPv6 link prefix, e.g.
+                    // `fd00:286:11e:19::/64 via fd00:286:11e:19::`).
+                    if r.protocol == lr_core::rib::Protocol::Connected {
+                        continue;
+                    }
+                    // FIB export policy (BIRD `protocol kernel { export
+                    // filter ...; }`). Evaluated before every install
+                    // shape — plain, blackhole and LSP — so a filter
+                    // that rejects static aggregates also keeps their
+                    // blackhole anchors out of the kernel. The route
+                    // stays in the Loc-RIB for BGP/Babel export.
+                    if let Some(filter) = self.kernel_filter.as_ref() {
+                        if !filter.accepts(r) {
+                            log_debug!(
+                                Component::Osroute,
+                                "mirror: {} rejected by kernel export filter '{}'",
+                                r.key.prefix,
+                                filter.name
+                            );
+                            continue;
+                        }
+                    }
                     // Classify on every platform (pure); the netlink
                     // half of the mirror exists only on Linux, where
                     // `mirrored` marks a route whose LSP took over the
@@ -4717,11 +4893,14 @@ impl KernelMirror {
                                 );
                             } else if let Some(table) = self.ip_table.as_mut() {
                                 match table.add_blackhole_route(r.key.prefix) {
-                                    Ok(()) => log_info!(
-                                        Component::Osroute,
-                                        "mirror: blackhole route installed {} (kernel discard)",
-                                        r.key.prefix
-                                    ),
+                                    Ok(()) => {
+                                        self.installed.insert(r.key.prefix);
+                                        log_info!(
+                                            Component::Osroute,
+                                            "mirror: blackhole route installed {} (kernel discard)",
+                                            r.key.prefix
+                                        )
+                                    }
                                     Err(e) => log_error!(
                                         Component::Osroute,
                                         "mirror: blackhole route install failed for {}: {}",
@@ -4751,14 +4930,17 @@ impl KernelMirror {
                                 );
                             } else if let Some(table) = self.ip_table.as_mut() {
                                 match table.add_route_tagged(r.key.prefix, nh, oif, r.protocol) {
-                                    Ok(()) => log_info!(
-                                        Component::Osroute,
-                                        "mirror: route installed {} via {} oif {} ({})",
-                                        r.key.prefix,
-                                        nh,
-                                        oif,
-                                        r.protocol.bird_name()
-                                    ),
+                                    Ok(()) => {
+                                        self.installed.insert(r.key.prefix);
+                                        log_info!(
+                                            Component::Osroute,
+                                            "mirror: route installed {} via {} oif {} ({})",
+                                            r.key.prefix,
+                                            nh,
+                                            oif,
+                                            r.protocol.bird_name()
+                                        )
+                                    }
                                     Err(e) => log_error!(
                                         Component::Osroute,
                                         "mirror: route install failed for {} via {} oif {}: {}",
@@ -4778,6 +4960,16 @@ impl KernelMirror {
                     }
                 }
                 RouterEvent::RouteWithdrawn(k) => {
+                    // The mirror never installed a connected prefix
+                    // (see the install arm), so a withdrawal for one —
+                    // interface down, or a connected row replaced in
+                    // the Loc-RIB by a learned path — must not delete
+                    // the kernel's own row. Deleting it would tear
+                    // down the link the daemon's sessions resolve
+                    // over until the interface event re-adds it.
+                    if self.connected.contains(&k.prefix) {
+                        continue;
+                    }
                     #[cfg(target_os = "linux")]
                     if let Some(label) = self.tails.remove(&k.prefix) {
                         if let Some(mpls) = self.mpls.as_mut() {
@@ -4790,6 +4982,13 @@ impl KernelMirror {
                                 );
                             }
                         }
+                    }
+                    // Only a prefix this mirror installed has a plain
+                    // row to remove. Aggregates and connected routes
+                    // never reach the FIB here, and a route whose
+                    // install failed must not produce a blind delete.
+                    if !self.installed.remove(&k.prefix) {
+                        continue;
                     }
                     if let Some(table) = self.ip_table.as_mut() {
                         match table.delete_route(k.prefix) {
@@ -5439,12 +5638,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             // Use the same event consumer as BGP, OSPF, and supervised
             // multi-protocol mode. In particular, this is what connects
             // Babel Loc-RIB changes to --install-kernel-routes.
-            Some(spawn_ticker(
-                &runtime,
-                cfg.install_kernel,
-                Arc::new(AtomicUsize::new(0)),
-                None,
-            ))
+            Some(
+                match spawn_ticker(&runtime, cfg, Arc::new(AtomicUsize::new(0)), None) {
+                    Ok(handle) => handle,
+                    Err(e) => return daemon_policy::policy_error(e),
+                },
+            )
         }
         Some(h) => {
             // Embedded: report the binds, wait for the supervisor's

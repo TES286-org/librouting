@@ -294,6 +294,10 @@ address = "192.0.2.9"
 prefix = "10.0.0.0/8"
 label = 1000
 
+# --- kernel FIB export policy ---
+[kernel]
+export_filter = "in"
+
 # --- damping ---
 [damping]
 enabled = true

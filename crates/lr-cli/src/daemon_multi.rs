@@ -335,12 +335,11 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     } else {
         None
     };
-    let ticker = crate::spawn_ticker(
-        &runtime,
-        cfg.install_kernel,
-        Arc::clone(&live_sessions),
-        bgp_ls_driver,
-    );
+    let ticker = match crate::spawn_ticker(&runtime, cfg, Arc::clone(&live_sessions), bgp_ls_driver)
+    {
+        Ok(handle) => handle,
+        Err(e) => return crate::daemon_policy::policy_error(e),
+    };
 
     // ---- Spawn one thread per engine. ----
     let mut engines: Vec<Engine> = Vec::new();
