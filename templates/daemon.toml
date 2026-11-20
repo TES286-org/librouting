@@ -41,7 +41,12 @@ peer_addr = "192.0.2.2:179"
 # listen_addr = "0.0.0.0:179"
 
 # Source address for next-hop-self egress. Required when the daemon peers
-# over an address not derivable from peer_addr/listen_addr.
+# over an address not derivable from peer_addr/listen_addr. Also the
+# preferred source of the FIB rows `install_kernel` installs: BIRD's
+# `krt_prefsrc` (BIRD `protocol kernel`'s export filter writes
+# `krt_prefsrc = MAIN_V4` on every FIB row; the daemon uses
+# `local_address` for IPv4 rows and `local_address_v6` for IPv6 rows).
+# When neither address is set, the kernel picks a source for the row.
 local_address = "192.0.2.1"
 
 # Hold time in seconds (default 90; 0 disables keepalives).

@@ -454,8 +454,8 @@ warning, not a value.
 | `router_id` | string | — | Dotted quad |
 | `peer_addr` | string | — | Legacy single-peer remote |
 | `listen_addr` | string | — | Inbound listener |
-| `local_address` | string | — | next-hop-self source |
-| `local_address_v6` | string | — | |
+| `local_address` | string | — | next-hop-self source; also the preferred source the kernel mirror stamps on FIB rows (`RTA_PREFSRC`, BIRD `krt_prefsrc`) |
+| `local_address_v6` | string | — | Same for IPv6 rows (see `[kernel]` below) |
 | `networks` | array | — | |
 | `labeled_networks` | array | — | |
 | `install_kernel` | bool | false | |
@@ -508,6 +508,15 @@ the route stays in the Loc-RIB for BGP/Babel export either way.
 The `.lr` form is `kernel { export_filter "name"; }`. Connected
 prefixes are never offered to the filter — the kernel owns those rows
 and the mirror skips them before evaluation.
+
+The mirror also stamps the preferred source of every installed FIB row
+it creates: the configured `[bgp] local_address` (IPv4 rows, including
+the RFC 5549 IPv4-over-IPv6-next-hop shape) and `local_address_v6`
+(IPv6 rows). This is the Linux `RTA_PREFSRC` attribute — BIRD's
+`protocol kernel` sets `krt_prefsrc = MAIN_V4` / `MAIN_V6` on every
+FIB-exported route through its export filter. The address must be
+one of the router's own and same-family as the row; when nothing is
+configured the kernel picks a source for the row.
 
 ### `[[peer]]` and `[peer-template.<name>]`
 
