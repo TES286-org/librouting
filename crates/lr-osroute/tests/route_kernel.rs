@@ -238,6 +238,85 @@ fn unicast_install_and_delete_round_trip() {
     }
 }
 
+/// The daemon-side preferred source: an install carrying
+/// [`OsRouteTable::add_route_tagged_prefsrc`] must produce a kernel
+/// row the kernel reports with the preferred source — `ip route show
+/// <prefix>` prints `src` for it (asserted on Linux; other backends
+/// ignore the value, which is the default impl's contract).
+///
+/// The regression: lr never set `RTA_PREFSRC` on installs, so Babel
+/// routes egressed with the kernel's own source selection — BIRD's
+/// `protocol kernel` export filter writes `krt_prefsrc = MAIN_V4 /
+/// MAIN_V6` on every FIB row (`ip krt_prefsrc`, bird.sgml) and lr's
+/// mirror had no equivalent, leaving `ip route show` with no `src`.
+#[test]
+#[ignore = "kernel-gated: requires CAP_NET_ADMIN (run as root or in a rootless netns)"]
+fn unicast_install_with_prefsrc_is_visible() {
+    if !loopback_up() {
+        eprintln!("SKIP: cannot bring lo up (iproute2 missing)");
+        return;
+    }
+    let mut t = match RtNetlink::connect() {
+        Ok(t) => t,
+        Err(e) => {
+            if is_privilege_error(&e) {
+                eprintln!(
+                    "SKIP: RtNetlink::connect returned EPERM (run as root or in a rootless netns)"
+                );
+                return;
+            }
+            panic!("RtNetlink::connect failed unexpectedly: {}", e);
+        }
+    };
+    let prefix = V4;
+    let gateway = IpAddr::V4([127, 0, 0, 1]);
+    let prefsrc = IpAddr::V4([127, 0, 0, 1]);
+    let _ = t.delete_route(prefix);
+    match t.add_route_tagged_prefsrc(
+        prefix,
+        gateway,
+        0,
+        lr_core::rib::Protocol::Babel,
+        Some(prefsrc),
+    ) {
+        Ok(()) => {}
+        Err(e) => {
+            if is_privilege_error(&e) {
+                eprintln!("SKIP: add_route_tagged_prefsrc returned EPERM");
+                return;
+            }
+            panic!("add_route_tagged_prefsrc({prefix}) failed: {}", e);
+        }
+    }
+    assert!(
+        table_has(&mut t, prefix),
+        "unicast {prefix} must be in the kernel after add_route_tagged_prefsrc"
+    );
+    if cfg!(target_os = "linux") {
+        let out = ip_show(prefix);
+        assert!(
+            out.contains(&format!("src {prefsrc}")),
+            "ip route show {prefix} must print the preferred source {prefsrc}: {out}"
+        );
+    }
+    t.delete_route(prefix)
+        .unwrap_or_else(|e| panic!("delete_route({prefix}) failed: {}", e));
+    assert!(
+        !table_has(&mut t, prefix),
+        "unicast {prefix} must be gone from the kernel after delete_route"
+    );
+}
+
+/// `ip route show <prefix>` output — used by the prefsrc round-trip
+/// test, which checks the kernel reports the row's preferred source.
+fn ip_show(prefix: Prefix) -> String {
+    std::process::Command::new("ip")
+        .args(["route", "show", &prefix.to_string()])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
 /// RFC 5549: an IPv4 route whose next hop is IPv6, over an interface
 /// that carries no IPv4 address at all.
 ///

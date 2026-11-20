@@ -59,6 +59,11 @@ const RTA_DST: u16 = 1;
 const RTA_GATEWAY: u16 = 5;
 const RTA_OIF: u16 = 4;
 const RTA_PRIORITY: u16 = 6;
+/// Preferred source address of the route — the BIRD `krt_prefsrc`
+/// attribute (`ip krt_prefsrc` in BIRD's `protocol kernel`). Used by
+/// the kernel's source-address selection for outgoing packets on the
+/// route; it has to be one of the router's own addresses.
+const RTA_PREFSRC: u16 = 7;
 /// Gateway whose address family differs from the route's `rtm_family`.
 /// Payload is `struct rtvia` (`uapi/linux/rtnetlink.h`): a 2-byte
 /// host-order family followed by the raw address. The IPv4 FIB accepts
@@ -422,6 +427,70 @@ impl RtNetlink {
         via.extend_from_slice(&addr);
         Self::build_rta_attribute(RTA_VIA, &via)
     }
+
+    /// The `RTA_*` attribute vector for an `RTM_NEWROUTE` install:
+    /// `RTA_DST`, the gateway (`RTA_GATEWAY` for a same-family next hop,
+    /// `RTA_VIA` for a cross-family one — see
+    /// [`RtNetlink::build_gateway_attribute`]), `RTA_OIF` when
+    /// `if_index` is nonzero (0 would be rejected with EINVAL; the
+    /// kernel then resolves the gateway against the table), and
+    /// `RTA_PREFSRC` when `prefsrc` is set.
+    fn build_route_attributes(
+        prefix: Prefix,
+        next_hop: IpAddr,
+        if_index: u32,
+        prefsrc: Option<IpAddr>,
+    ) -> Vec<u8> {
+        let (family, addr) = match prefix.addr {
+            IpAddr::V4(b) => (AF_INET, b.to_vec()),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        };
+        let mut attrs = Vec::new();
+        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
+        attrs.extend(Self::build_gateway_attribute(family, next_hop));
+        // With no explicit output interface the kernel resolves the gateway
+        // against the existing table (`ip route add ... via GW` semantics).
+        if if_index != 0 {
+            attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
+        }
+        if let Some(prefsrc) = prefsrc {
+            let src = match prefsrc {
+                IpAddr::V4(b) => b.to_vec(),
+                IpAddr::V6(b) => b.to_vec(),
+            };
+            attrs.extend(Self::build_rta_attribute(RTA_PREFSRC, &src));
+        }
+        // Pad to 4-byte alignment
+        while attrs.len() % 4 != 0 {
+            attrs.push(0);
+        }
+        attrs
+    }
+
+    /// The `RTA_*` attribute vector for an `RTM_BLACKHOLE` install —
+    /// `RTA_DST` plus `RTA_PREFSRC` when `prefsrc` is set. There is no
+    /// gateway and no interface: RTN_BLACKHOLE carries neither, the
+    /// kernel drops packets matching the destination at the input
+    /// boundary.
+    fn build_blackhole_attributes(prefix: Prefix, prefsrc: Option<IpAddr>) -> Vec<u8> {
+        let (_, addr) = match prefix.addr {
+            IpAddr::V4(b) => (AF_INET, b.to_vec()),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        };
+        let mut attrs = Vec::new();
+        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
+        if let Some(prefsrc) = prefsrc {
+            let src = match prefsrc {
+                IpAddr::V4(b) => b.to_vec(),
+                IpAddr::V6(b) => b.to_vec(),
+            };
+            attrs.extend(Self::build_rta_attribute(RTA_PREFSRC, &src));
+        }
+        while attrs.len() % 4 != 0 {
+            attrs.push(0);
+        }
+        attrs
+    }
 }
 
 impl Drop for RtNetlink {
@@ -449,23 +518,22 @@ impl OsRouteTable for RtNetlink {
         if_index: u32,
         protocol: lr_core::rib::Protocol,
     ) -> Result<(), Self::Error> {
-        let (family, addr) = match prefix.addr {
-            IpAddr::V4(b) => (AF_INET, b.to_vec()),
-            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        self.add_route_tagged_prefsrc(prefix, next_hop, if_index, protocol, None)
+    }
+
+    fn add_route_tagged_prefsrc(
+        &mut self,
+        prefix: Prefix,
+        next_hop: IpAddr,
+        if_index: u32,
+        protocol: lr_core::rib::Protocol,
+        prefsrc: Option<IpAddr>,
+    ) -> Result<(), Self::Error> {
+        let family = match prefix.addr {
+            IpAddr::V4(_) => AF_INET,
+            IpAddr::V6(_) => AF_INET6,
         };
-        let mut attrs = Vec::new();
-        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
-        attrs.extend(Self::build_gateway_attribute(family, next_hop));
-        // With no explicit output interface the kernel resolves the gateway
-        // against the existing table (`ip route add ... via GW` semantics).
-        // Passing RTA_OIF=0 would be rejected with EINVAL, so omit it.
-        if if_index != 0 {
-            attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
-        }
-        // Pad to 4-byte alignment
-        while attrs.len() % 4 != 0 {
-            attrs.push(0);
-        }
+        let attributes = RtNetlink::build_route_attributes(prefix, next_hop, if_index, prefsrc);
         let buf = self.build_request(
             RTM_NEWROUTE,
             // Create a missing route and atomically replace an existing
@@ -477,7 +545,7 @@ impl OsRouteTable for RtNetlink {
             rtprot(protocol),
             RTN_UNICAST,
             RT_SCOPE_UNIVERSE,
-            &attrs,
+            &attributes,
         );
         let resp = self.sendmsg_and_recv(&buf)?;
         // For RTM_NEWROUTE with NLM_F_ACK, kernel sends NLMSG_ERROR with
@@ -485,18 +553,22 @@ impl OsRouteTable for RtNetlink {
         check_ack(&resp)
     }
 
+    /// The `RTA_*` attribute vector for an `RTM_NEWROUTE` install is
+    /// [`RtNetlink::build_route_attributes`] (see its docs).
     fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
-        let (family, addr) = match prefix.addr {
-            IpAddr::V4(b) => (AF_INET, b.to_vec()),
-            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        self.add_blackhole_route_prefsrc(prefix, None)
+    }
+
+    fn add_blackhole_route_prefsrc(
+        &mut self,
+        prefix: Prefix,
+        prefsrc: Option<IpAddr>,
+    ) -> Result<(), Self::Error> {
+        let family = match prefix.addr {
+            IpAddr::V4(_) => AF_INET,
+            IpAddr::V6(_) => AF_INET6,
         };
-        let mut attrs = Vec::new();
-        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
-        // No RTA_GATEWAY, no RTA_OIF — RTN_BLACKHOLE carries neither; the
-        // kernel drops packets matching `prefix` at the input boundary.
-        while attrs.len() % 4 != 0 {
-            attrs.push(0);
-        }
+        let attrs = RtNetlink::build_blackhole_attributes(prefix, prefsrc);
         let buf = self.build_request(
             RTM_NEWROUTE,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
@@ -935,6 +1007,103 @@ mod tests {
         assert_eq!(u16::from_ne_bytes([enc[2], enc[3]]), RTA_VIA);
         assert_eq!(&enc[4..6], &u16::from(AF_INET).to_ne_bytes());
         assert_eq!(&enc[6..10], nh.octets());
+    }
+
+    /// Walk the aligned `RTA_*` vector and return the payload of the
+    /// attribute with type `want`, if present. `rta_len` covers the
+    /// header and is not padded, so advance by the aligned length.
+    fn attr_data(attrs: &[u8], want: u16) -> Option<Vec<u8>> {
+        let mut off = 0;
+        while off + 4 <= attrs.len() {
+            let rta_len = u16::from_ne_bytes([attrs[off], attrs[off + 1]]) as usize;
+            let rta_type = u16::from_ne_bytes([attrs[off + 2], attrs[off + 3]]);
+            if rta_len < 4 || off + rta_len > attrs.len() {
+                return None;
+            }
+            if rta_type == want {
+                return Some(attrs[off + 4..off + rta_len].to_vec());
+            }
+            off += (rta_len + 3) & !3;
+        }
+        None
+    }
+
+    /// `RTA_PREFSRC` is the BIRD `krt_prefsrc` attribute — the
+    /// preferred source of the FIB row the install produces. The
+    /// daemon selects the value family-matched to the row
+    /// ([`KernelPrefsrc::for_prefix`] — daemon.rs); this pins the
+    /// encoding.
+    #[test]
+    fn route_attributes_carry_prefsrc() {
+        let prefix = Prefix::new_v4([198, 51, 100, 0], 24);
+        let nh = IpAddr::V4([192, 0, 2, 1]);
+        let prefsrc = IpAddr::V4([10, 0, 0, 1]);
+        let attrs = RtNetlink::build_route_attributes(prefix, nh, 9, Some(prefsrc));
+        assert_eq!(
+            attr_data(&attrs, RTA_DST).as_deref(),
+            Some(&[198, 51, 100, 0][..])
+        );
+        assert_eq!(
+            attr_data(&attrs, RTA_GATEWAY).as_deref(),
+            Some(&[192, 0, 2, 1][..])
+        );
+        assert_eq!(
+            attr_data(&attrs, RTA_OIF).as_deref(),
+            Some(&9u32.to_ne_bytes()[..])
+        );
+        assert_eq!(
+            attr_data(&attrs, RTA_PREFSRC).as_deref(),
+            Some(&[10, 0, 0, 1][..])
+        );
+        assert!(attr_data(&attrs, RTA_VIA).is_none());
+    }
+
+    /// With no preferred source the vector must carry no `RTA_PREFSRC`
+    /// and no `RTA_OIF` when `if_index == 0` (the kernel's "resolve the
+    /// gateway against the table" form — passing 0 explicitly is
+    /// rejected with EINVAL).
+    #[test]
+    fn route_attributes_omit_prefsrc_and_oif_when_unset() {
+        let prefix = Prefix::new_v4([198, 51, 100, 0], 24);
+        let attrs = RtNetlink::build_route_attributes(prefix, IpAddr::V4([192, 0, 2, 1]), 0, None);
+        assert!(attr_data(&attrs, RTA_PREFSRC).is_none());
+        assert!(attr_data(&attrs, RTA_OIF).is_none());
+    }
+
+    /// RFC 5549 shape with a preferred source: the FIB row is v4 (the
+    /// daemon stamps the v4 local address there), the gateway travels
+    /// as `RTA_VIA`.
+    #[test]
+    fn route_attributes_v4_over_v6_prefsrc_is_v4() {
+        let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
+        let nh = IpAddr::V6([0xfd, 0, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        let prefsrc = IpAddr::V4([10, 0, 0, 2]);
+        let attrs = RtNetlink::build_route_attributes(prefix, nh, 0, Some(prefsrc));
+        assert!(attr_data(&attrs, RTA_VIA).is_some());
+        assert_eq!(
+            attr_data(&attrs, RTA_PREFSRC).as_deref(),
+            Some(&[10, 0, 0, 2][..])
+        );
+    }
+
+    /// Blackhole installs carry the preferred source too — BIRD sets
+    /// `krt_prefsrc` on every FIB row it exports, and a static
+    /// `route P reject;` becomes one.
+    #[test]
+    fn blackhole_attributes_carry_prefsrc() {
+        let prefix = Prefix::new_v4([192, 0, 2, 0], 24);
+        let attrs = RtNetlink::build_blackhole_attributes(prefix, Some(IpAddr::V4([10, 0, 0, 3])));
+        assert_eq!(
+            attr_data(&attrs, RTA_DST).as_deref(),
+            Some(&[192, 0, 2, 0][..])
+        );
+        assert_eq!(
+            attr_data(&attrs, RTA_PREFSRC).as_deref(),
+            Some(&[10, 0, 0, 3][..])
+        );
+        // No gateway and no interface on a blackhole.
+        assert!(attr_data(&attrs, RTA_GATEWAY).is_none());
+        assert!(attr_data(&attrs, RTA_OIF).is_none());
     }
 
     /// A dump carries an IPv4 route's IPv6 gateway as `RTA_VIA`

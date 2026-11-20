@@ -276,6 +276,38 @@ pub trait OsRouteTable {
         self.add_route(prefix, next_hop, if_index)
     }
 
+    /// [`OsRouteTable::add_route_tagged`] plus a **preferred source**
+    /// address stamped on the FIB row — the BIRD `krt_prefsrc`
+    /// attribute (`RTA_PREFSRC` on Linux). `prefsrc` is the address the
+    /// kernel uses for source address selection on traffic to `prefix`;
+    /// it must be one of the router's own addresses. Linux implements
+    /// this as `RTA_PREFSRC`; backends without a per-row preferred-source
+    /// concept ignore it, which is what
+    /// [`OsRouteTable::add_route_tagged`] implies anyway.
+    fn add_route_tagged_prefsrc(
+        &mut self,
+        prefix: Prefix,
+        next_hop: IpAddr,
+        if_index: u32,
+        protocol: Protocol,
+        prefsrc: Option<IpAddr>,
+    ) -> Result<(), Self::Error> {
+        let _ = prefsrc;
+        self.add_route_tagged(prefix, next_hop, if_index, protocol)
+    }
+
+    /// [`OsRouteTable::add_blackhole_route`] with a preferred source —
+    /// the same BIRD `krt_prefsrc` mechanism as
+    /// [`OsRouteTable::add_route_tagged_prefsrc`]; see there.
+    fn add_blackhole_route_prefsrc(
+        &mut self,
+        prefix: Prefix,
+        prefsrc: Option<IpAddr>,
+    ) -> Result<(), Self::Error> {
+        let _ = prefsrc;
+        self.add_blackhole_route(prefix)
+    }
+
     /// Add a *blackhole* (discard) route: packets matching `prefix` are
     /// silently dropped by the kernel instead of being forwarded. Used for
     /// static `next_hop = "blackhole"` routes (FRR `Null0`, BIRD
