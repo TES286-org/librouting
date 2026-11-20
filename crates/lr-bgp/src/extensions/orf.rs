@@ -1,0 +1,196 @@
+//! RFC 5291 Outbound Route Filtering (ORF) capability orchestration
+//! helper.
+//!
+//! The wire-level capability lives in
+//! [`crate::capabilities::Capability::orf`] (code 3). The module
+//! computes what a session should advertise and what the daemon
+//! may consume after the OPEN exchange:
+//!
+//! - [`advertised_entries`] — the `(afi, safi, [(orf_type, mode)])`
+//!   triples to put in the OPEN, filtered to families this session
+//!   speaks.
+//! - [`peer_offered`] — whether the peer advertised the ORF
+//!   capability.
+//! - [`peer_entries`] — the peer's advertised ORF entries, decoded
+//!   from its OPEN.
+//! - [`negotiated_entries`] — the effective per-family mode after
+//!   bilateral negotiation: a family appears in the result when
+//!   both speakers advertised it, with the modes the peer offered.
+//!
+//! # Negotiation posture
+//!
+//! RFC 5291 §3: the capability advertises, per address family, the
+//! ORF types the speaker is willing to *send* or *receive* (mode 1
+//! = RECEIVE — willing to receive ORF entries from peer; 2 = SEND
+//! — wants to send; 3 = BOTH). The bilateral agreement: a speaker
+//! may *send* ORF entries to a peer for a family when the peer
+//! advertised RECEIVE or BOTH for that family; a speaker may
+//! *receive* ORF entries when the peer advertised SEND or BOTH.
+//!
+//! The wire encoding of ORF entries inside ROUTE_REFRESH messages
+//! is handled by `lr-bgp::message::route_refresh`. This module is
+//! the OPEN-time negotiation surface.
+
+use crate::capabilities::{Capability, CapabilityCode};
+use crate::capabilities_extra::OrfEntry;
+use crate::peer::PeerConfig;
+use lr_core::nlri::NlriFamily;
+
+/// The ORF entries the OPEN should advertise. Filtered to the
+/// families this session speaks — advertising ORF for an unspoken
+/// family would mislead the peer. Returns an empty vector when
+/// ORF is not configured or no entries survive the filter.
+pub fn advertised_entries(cfg: &PeerConfig) -> Vec<OrfEntry> {
+    if cfg.orf.is_empty() {
+        return Vec::new();
+    }
+    let spoken: Vec<NlriFamily> = cfg
+        .mp_families
+        .iter()
+        .copied()
+        .chain(cfg.default_ipv4_unicast.then_some(NlriFamily::IPV4_UNICAST))
+        .collect();
+    cfg.orf
+        .iter()
+        .filter(|(afi, safi, _)| {
+            spoken.contains(&NlriFamily {
+                afi: *afi,
+                safi: *safi,
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the peer advertised the ORF capability in its OPEN.
+pub fn peer_offered(peer_caps: &[Capability]) -> bool {
+    peer_caps.iter().any(|c| c.code == CapabilityCode::Orf)
+}
+
+/// The peer's advertised ORF entries, decoded from its OPEN
+/// capability. Returns `None` when the peer did not advertise the
+/// capability or its value is malformed (a num_types field that
+/// runs past the entry's bytes, or a trailing partial entry).
+pub fn peer_entries(peer_caps: &[Capability]) -> Option<Vec<OrfEntry>> {
+    peer_caps
+        .iter()
+        .find(|c| c.code == CapabilityCode::Orf)
+        .and_then(Capability::as_orf)
+}
+
+/// The effective per-family ORF modes after bilateral negotiation.
+/// A family appears when both speakers advertised it; the modes
+/// are the peer's (the daemon consults this to decide whether to
+/// send ORF entries to the peer for the family — SEND or BOTH —
+/// and whether to honour ORF entries from the peer — RECEIVE or
+/// BOTH).
+pub fn negotiated_entries(cfg: &PeerConfig, peer_caps: &[Capability]) -> Vec<OrfEntry> {
+    let ours = advertised_entries(cfg);
+    let Some(peers) = peer_entries(peer_caps) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (afi, safi, types) in peers {
+        let family = NlriFamily { afi, safi };
+        if !ours
+            .iter()
+            .any(|(a, s, _)| NlriFamily { afi: *a, safi: *s } == family)
+        {
+            continue;
+        }
+        if !out.iter().any(|(a, s, _)| *a == afi && *s == safi) {
+            out.push((afi, safi, types));
+        }
+    }
+    out
+}
+
+/// Build the ORF capability for a configured peer's OPEN. Returns
+/// `None` when the local config has no entries set or no entries
+/// survive the spoken-families filter.
+pub fn open_capability(cfg: &PeerConfig) -> Option<Capability> {
+    let entries = advertised_entries(cfg);
+    if entries.is_empty() {
+        return None;
+    }
+    Some(Capability::orf(&entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer::PeerConfig;
+    use lr_core::addr::{Asn, RouterId};
+    use lr_core::nlri::NlriFamily;
+
+    fn cfg(orf: &[OrfEntry]) -> PeerConfig {
+        let mut c = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        c.default_ipv4_unicast = true;
+        c.orf = orf.to_vec();
+        c
+    }
+
+    #[test]
+    fn advertised_entries_empty_when_not_configured() {
+        assert!(advertised_entries(&cfg(&[])).is_empty());
+        assert!(open_capability(&cfg(&[])).is_none());
+    }
+
+    /// IPv4 unicast is spoken by default; ORF for it survives.
+    #[test]
+    fn advertised_entries_keeps_ipv4_unicast() {
+        let c = cfg(&[(1, 1, vec![(64, 3)])]);
+        let adv = advertised_entries(&c);
+        assert_eq!(adv.len(), 1);
+        let cap = open_capability(&c).unwrap();
+        assert_eq!(cap.code, CapabilityCode::Orf);
+        assert_eq!(cap.as_orf(), Some(vec![(1, 1, vec![(64, 3)])]));
+    }
+
+    /// A family the session does not speak is filtered out.
+    #[test]
+    fn advertised_entries_filters_unspoken_families() {
+        let c = cfg(&[(1, 1, vec![(64, 3)]), (2, 1, vec![(64, 3)])]);
+        let adv = advertised_entries(&c);
+        assert_eq!(adv.len(), 1);
+        assert_eq!(adv[0].0, 1); // IPv4 only — IPv6 was filtered.
+    }
+
+    /// IPv6 ORF survives when the session speaks IPv6.
+    #[test]
+    fn advertised_entries_keeps_v6_when_configured() {
+        let mut c = cfg(&[(1, 1, vec![(64, 3)]), (2, 1, vec![(64, 3)])]);
+        c.mp_families = vec![NlriFamily::IPV6_UNICAST];
+        let adv = advertised_entries(&c);
+        assert_eq!(adv.len(), 2);
+    }
+
+    #[test]
+    fn peer_offered_when_capability_present() {
+        let cap = Capability::orf(&[(1, 1, vec![(64, 3)])]);
+        assert!(peer_offered(&[cap]));
+    }
+
+    #[test]
+    fn peer_not_offered_when_capability_absent() {
+        assert!(!peer_offered(&[]));
+    }
+
+    /// A family only the peer advertised is not negotiated.
+    #[test]
+    fn negotiated_entries_drops_peer_only_families() {
+        let c = cfg(&[(1, 1, vec![(64, 3)])]);
+        let peer_cap = Capability::orf(&[(1, 1, vec![(64, 3)]), (2, 1, vec![(64, 3)])]);
+        let n = negotiated_entries(&c, &[peer_cap]);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].0, 1); // IPv4 only — IPv6 was peer-only.
+    }
+
+    /// When the peer did not advertise ORF, no entries are
+    /// negotiated even if the local config has them.
+    #[test]
+    fn negotiated_entries_empty_when_peer_did_not_advertise() {
+        let c = cfg(&[(1, 1, vec![(64, 3)])]);
+        assert!(negotiated_entries(&c, &[]).is_empty());
+    }
+}

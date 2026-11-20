@@ -134,6 +134,63 @@ pub struct PeerConfig {
     /// listener consult it before starting or accepting a transport.
     /// Default `false` (peer is up).
     pub admin_down: bool,
+    /// RFC 8654 §3 BGP Extended Message capability. When both peers
+    /// advertise it, the per-message length ceiling rises from the
+    /// RFC 4271 §4.1 4096-octet limit to 65535 octets — the codec
+    /// accepts and emits the larger messages once negotiated. Default
+    /// `false` (the codec stays at the RFC 4271 ceiling).
+    pub extended_message: bool,
+    /// RFC 9234 §3 BGP Role capability. When `Some((role, strict))`
+    /// the OPEN advertises the role (Provider / RS / RS-Client /
+    /// Customer / Peer) and the strict bit; the existing
+    /// [`otc_role`](Self::otc_role) field stays the source of truth
+    /// for the OTC path attribute behaviour (the two are reconciled
+    /// at finalize time — see `daemon_config`). `None` does not
+    /// advertise the capability (the RFC 9234 OTC attribute path
+    /// still runs when `otc_role` is set, but the peer does not learn
+    /// the role from the OPEN).
+    pub bgp_role: Option<(crate::role::OtcRole, bool)>,
+    /// draft-walton-bgp-hostname-capability-01 FQDN capability
+    /// (code 73). When `Some((hostname, domain))` the OPEN advertises
+    /// the strings; `None` does not advertise. Either string may be
+    /// empty — the encoder handles the empty case.
+    pub fqdn: Option<(String, String)>,
+    /// draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode capability
+    /// (code 74). When `true` the OPEN advertises the capability and
+    /// the session does not fall back to the hold timer when BFD is
+    /// down: the session stays down until BFD reports Up. Requires
+    /// `bfd` to be enabled on the peer (the daemon's BFD supervisor
+    /// must be running for the strict-mode gate to fire). Default
+    /// `false`.
+    pub bfd_strict_mode: bool,
+    /// draft-abraitis-bgp-version-capability-11 Software Version
+    /// capability (code 75). When `Some(version)` the OPEN advertises
+    /// the UTF-8 string (the draft recommends `product/version` form,
+    /// e.g. `lr/2.0`); `None` does not advertise.
+    pub software_version: Option<String>,
+    /// draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT
+    /// capability (code 76). The list carries `(afi, safi, limit)`
+    /// triples the local speaker advertises as the maximum number of
+    /// AddPath paths it is willing to *receive* per prefix for the
+    /// family. A limit of `0` is the draft's "ignore this family"
+    /// sentinel. The capability is ignored by the receiver when
+    /// AddPath is not negotiated for the family (the draft's
+    /// mandatory gating).
+    pub paths_limit: Vec<(u16, u8, u16)>,
+    /// draft-white-linklocal-capability-04 Link-Local Next Hop
+    /// capability (code 77). When `true` the OPEN advertises the
+    /// capability and the codec accepts a link-local IPv6 next-hop in
+    /// MP_REACH_NLRI for IPv6 NLRI (16-octet Next Hop field carries
+    /// only the link-local; 32-octet carries link-local + global).
+    /// Default `false`.
+    pub link_local_next_hop: bool,
+    /// RFC 5291 §3 ORF capability (code 3). The list carries
+    /// `(afi, safi, [(orf_type, mode)])` entries the local speaker
+    /// advertises; `mode` is 1 = RECEIVE (willing to receive ORF
+    /// entries from peer), 2 = SEND (wants to send), 3 = BOTH. Empty
+    /// = do not advertise. The wire encoding of ORF entries inside
+    /// ROUTE_REFRESH messages is handled by `lr-bgp::message::route_refresh`.
+    pub orf: Vec<crate::capabilities_extra::OrfEntry>,
 }
 
 /// Action taken when a peer exceeds its configured maximum-prefix limit.
@@ -203,6 +260,14 @@ impl PeerConfig {
             maximum_prefix_threshold: 75,
             maximum_prefix_restart_time: 0,
             admin_down: false,
+            extended_message: false,
+            bgp_role: None,
+            fqdn: None,
+            bfd_strict_mode: false,
+            software_version: None,
+            paths_limit: Vec::new(),
+            link_local_next_hop: false,
+            orf: Vec::new(),
         }
     }
 

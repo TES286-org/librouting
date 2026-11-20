@@ -33,7 +33,7 @@
 pub mod advertise;
 pub mod best_path;
 pub mod capabilities;
-mod capabilities_extra;
+pub mod capabilities_extra;
 pub mod codec;
 pub mod error;
 pub mod extensions;

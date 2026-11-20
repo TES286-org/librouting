@@ -79,6 +79,40 @@ impl OtcRole {
             _ => return None,
         })
     }
+
+    /// Encode the role as the wire value the BGP Role capability
+    /// (RFC 9234 §3, capability code 9) carries. The capability's
+    /// wire values differ from the OTC attribute's enum indices
+    /// (`to_u8`): the capability uses 0 = Provider, 1 = RS,
+    /// 2 = RS-Client, 3 = Customer, 4 = Peer, matching the IANA
+    /// BGP Role registry; the OTC attribute path uses the enum
+    /// indices for its own internal encoding. The two are
+    /// reconciled here so the OPEN builder can advertise the role
+    /// the operator configured.
+    pub fn to_bgp_role_value(self) -> u8 {
+        match self {
+            OtcRole::Provider => 0,
+            OtcRole::RouteServer => 1,
+            OtcRole::RsClient => 2,
+            OtcRole::Customer => 3,
+            OtcRole::Peer => 4,
+            OtcRole::Unset => 0xff, // sentinel: the capability must not be advertised
+        }
+    }
+
+    /// Decode the BGP Role capability's wire value back into the
+    /// enum. Returns `None` for unknown values (5-254) and the
+    /// `Unset` sentinel (255). Mirrors [`to_bgp_role_value`].
+    pub fn from_bgp_role_value(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => Self::Provider,
+            1 => Self::RouteServer,
+            2 => Self::RsClient,
+            3 => Self::Customer,
+            4 => Self::Peer,
+            _ => return None,
+        })
+    }
 }
 
 /// The OTC attribute value. Wraps the 4-byte integer so the policy engine can
