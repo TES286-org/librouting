@@ -960,6 +960,121 @@ fn babel_filters_attach_at_startup_and_unknown_name_fails() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The standalone Babel daemon must not import the kernel's
+/// connected routes (the system interface table, `install_connected`
+/// with `Protocol::Connected`) and re-announce them via Babel
+/// announcements (`build_babel_announcement` snapshots the Loc-RIB,
+/// RFC 8966 §3.7). `show routes count` of a default-mode daemon
+/// therefore lists no `proto=direct` (BIRD `protocol direct` parity)
+/// entries; the config-originated network (`[networks]`) is still
+/// present in `routes` — the positive control that the daemon is
+/// functional and only distributes what the config asked for.
+#[test]
+fn babel_daemon_does_not_import_kernel_routes_by_default() {
+    let dir = std::env::temp_dir().join(format!(
+        "lr-daemon-test-bnokernel-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("daemon.toml");
+    let socket = dir.join("daemon.api");
+    std::fs::write(
+        &conf,
+        "protocol = \"babel\"\n\
+         [bgp]\n\
+         router_id = \"10.0.0.1\"\n\
+         local_address = \"127.0.0.1\"\n\
+         networks = [\"203.0.113.0/24\"]\n\
+         [babel]\n\
+         port = 16701\n",
+    )
+    .unwrap();
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "bnokernel",
+    );
+    wait_log_all(&d.log, &["babel listening on", "runtime API on"]);
+    // No connected routes in the Loc-RIB — on a host with UP
+    // interfaces (the loopback is excluded, like BIRD's `protocol
+    // direct`) the pre-fix daemon would have listed at least one.
+    let routes_count = api_ask(&socket, "show routes count");
+    assert!(
+        !routes_count.contains("proto=direct"),
+        "a default-mode Babel daemon must not import the kernel's \
+         connected routes: {routes_count}"
+    );
+    // Positive control: the config-specified network is there.
+    let routes = api_ask(&socket, "routes");
+    assert!(routes.contains("203.0.113.0/24"), "routes: {routes}");
+
+    d.signal(SIGTERM);
+    let (ok, log) = d.wait_exit();
+    assert!(ok, "babel daemon must exit 0; log:\n{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `[babel] import_kernel_routes = true` opt-in restores the
+/// connected-route import (BIRD `protocol direct` parity) for the
+/// Babel engine: the daemon starts, serves its config-originated
+/// routes, and — on a host with non-loopback UP interfaces — its
+/// Loc-RIB additionally carries the kernel's connected routes. The
+/// gate-on behavior itself is unit-tested (`babel_import_gate_tests`
+/// in the daemon crate); this leg asserts the daemon remains
+/// functional with the opt-in.
+#[test]
+fn babel_daemon_imports_kernel_routes_with_the_opt_in() {
+    let dir = std::env::temp_dir().join(format!(
+        "lr-daemon-test-bkern-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("daemon.toml");
+    let socket = dir.join("daemon.api");
+    std::fs::write(
+        &conf,
+        "protocol = \"babel\"\n\
+         [bgp]\n\
+         router_id = \"10.0.0.1\"\n\
+         local_address = \"127.0.0.1\"\n\
+         networks = [\"203.0.113.0/24\"]\n\
+         [babel]\n\
+         port = 16702\n\
+         import_kernel_routes = true\n",
+    )
+    .unwrap();
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "bkern",
+    );
+    wait_log_all(&d.log, &["babel listening on", "runtime API on"]);
+    let routes_count = api_ask(&socket, "show routes count");
+    let routes = api_ask(&socket, "routes");
+    assert!(routes.contains("203.0.113.0/24"), "routes: {routes}");
+    // The opt-in daemon serves its Loc-RIB the same way the
+    // default-mode one does (plus any connected routes the host has).
+    assert!(
+        routes_count.starts_with("total "),
+        "show routes count parses: {routes_count}"
+    );
+
+    d.signal(SIGTERM);
+    let (ok, log) = d.wait_exit();
+    assert!(ok, "babel daemon must exit 0; log:\n{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A daemon with `[[static.route]]` tables installs them at startup
 /// (BIRD `protocol static`, FRR `ip route`). The Loc-RIB surfaces
 /// them via the runtime API `routes` command, marked `Static`. A
