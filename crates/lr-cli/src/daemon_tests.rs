@@ -1328,10 +1328,11 @@ mod babel_rtt_send_tests {
     }
 
     fn spec() -> BabelInterfaceSpec {
-        let mut s = BabelInterfaceSpec::default();
-        s.name = Some("lo".into());
-        s.kind = Some("wired".into());
-        s
+        BabelInterfaceSpec {
+            name: Some("lo".into()),
+            kind: Some("wired".into()),
+            ..Default::default()
+        }
     }
 
     /// Default: `rtt_cost` unset (0) and `rtt_send` unset →
