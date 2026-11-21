@@ -524,58 +524,23 @@ impl BabelRuntime {
     }
 
     /// One expiry sweep (RFC 8966 §3.2.5): routes whose re-announcement
-    /// hold time lapsed are dropped, and Hellos whose 1.5× interval
-    /// expiry passed are shifted out of the 16-bit history bitmask
-    /// (BIRD `babel_expire_hello`). The Hello expiry degrades the
-    /// neighbour's rxcost continuously — without it, lr's history stays
-    /// frozen between Hellos and rxcost doesn't reflect packet loss
-    /// until the next Hello's seqno gap reveals it. Returns the Loc-RIB
-    /// delta from route expiry (Hello expiry alone does not produce a
-    /// delta unless it causes a neighbour's link cost to flip to
-    /// INFINITY, which `diff` picks up on the next call).
+    /// hold time lapsed are dropped, and the diff against `published`
+    /// becomes the Loc-RIB withdrawal delta. Each neighbour's routes age
+    /// out independently — a shared timer produced the batch withdrawal /
+    /// re-install cycle in the production report.
     pub(super) fn gc(&mut self, now_ms: u64) -> RuntimeDelta {
-        // Expire old Hello slots for every neighbour. This shifts the
-        // 16-bit bitmask and recomputes rxcost — matching BIRD's
-        // `babel_expire_hello` which runs on a per-neighbour timer.
-        let mut hello_changed = false;
-        for state in self.peers.values_mut() {
-            if state.neighbor.expire_hellos(now_ms) {
-                hello_changed = true;
-            }
-        }
-        // If any neighbour's rxcost changed, recompute link costs and
-        // potentially retract routes from neighbours whose cost flipped
-        // to INFINITY. This is the same logic as the IHU handler: a
-        // cost change to None (INFINITY) marks routes unreachable
-        // rather than removing them.
-        if hello_changed {
-            for (peer, state) in &self.peers {
-                let old_cost = state.neighbor.rxcost;
-                let new_cost = self.link_cost(*peer, now_ms);
-                if old_cost >= 0xffff && new_cost.is_some() {
-                    // Neighbour recovered: recompute route metrics.
-                    if let Some(cost) = new_cost {
-                        self.routes.set_neighbor_cost(*peer, cost);
-                    }
-                } else if old_cost < 0xffff && new_cost.is_none() {
-                    // Neighbour became unreachable: mark routes INFINITY.
-                    self.routes.mark_neighbor_unreachable(*peer);
-                }
-            }
-        }
         let expired = self.routes.expire(now_ms);
-        if !expired.is_empty() || hello_changed {
+        if !expired.is_empty() {
             let mut delta = self.diff();
-            if !delta.withdrawn.is_empty() {
-                if delta.withdraw_reason.is_empty() {
-                    delta.withdraw_reason = format!(
-                        "babel route hold time expired ({} route(s) aged out at {} ms)",
-                        expired.len(),
-                        now_ms
-                    );
-                }
-                return delta;
+            if delta.withdrawn.is_empty() {
+                return RuntimeDelta::default();
             }
+            delta.withdraw_reason = format!(
+                "babel route hold time expired ({} route(s) aged out at {} ms)",
+                expired.len(),
+                now_ms
+            );
+            return delta;
         }
         RuntimeDelta::default()
     }

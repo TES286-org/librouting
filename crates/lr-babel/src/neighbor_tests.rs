@@ -179,111 +179,67 @@ fn rtt_wraparound_keeps_small_deltas_correct() {
 // confuse "history length" with "missed count" (defects.txt L244-L249).
 // ---------------------------------------------------------------------------
 
-/// First Hello: no missed packets to count yet — the bitmask has one
-/// bit set, hello_cnt is 1. With limit=12: rcv=1, max=1, 1*16 >= 12*1,
-/// link is good → rxcost = 96 (nominal wired cost).
+/// First Hello: no missed packets to count yet — base rxcost only.
 #[test]
 fn rxcost_first_hello_is_nominal() {
     let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
     n.hello(1, 100, 0);
-    assert_eq!(n.rxcost, 96);
+    assert_eq!(n.rxcost, 100);
 }
 
-/// Consecutive Hellos with no gap: all bits set, link stays good.
+/// Consecutive Hellos with no gap: still nominal — the span equals the
+/// history length, so `missed` stays at 0. The previous implementation
+/// would have computed `16 - history.len()` and charged 50 per slot
+/// below 16, producing a steeply inflated rxcost for every healthy
+/// neighbour.
 #[test]
 fn rxcost_perfect_reception_stays_at_nominal() {
     let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
     for seqno in 1..=8u16 {
         n.hello(seqno, 100, 0);
     }
-    assert_eq!(n.rxcost, 96, "no missed Hellos => nominal rxcost");
+    assert_eq!(n.rxcost, 100, "no missed Hellos => nominal rxcost only");
 }
 
-/// Hellos 1, 2, 3, 5 (missed 4) — the bitmask has 3 bits set in a
-/// 4-slot window. With limit=12: rcv=3, max=4, 3*16=48 >= 12*4=48,
-/// link is still good → rxcost = 96. One missed Hello out of 4 is
-/// 75% reception, exactly at the default limit threshold.
+/// Hellos 1, 2, 3, 5 (missed 4) — span is 5..=1 = 4, history is 3, so
+/// missed = 1; rxcost = 100 + 1 * 50 = 150.
 #[test]
-fn rxcost_one_missed_hello_stays_nominal_at_default_limit() {
+fn rxcost_counts_missed_hellos_from_seqno_gap() {
     let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
     n.hello(1, 100, 0);
     n.hello(2, 100, 0);
     n.hello(3, 100, 0);
     n.hello(5, 100, 0); // missed 4 in transit
     assert_eq!(
-        n.rxcost, 96,
-        "one missed Hello out of 4 is 75% — at the default limit=12 threshold"
+        n.rxcost, 150,
+        "one missed Hello in the recent window => nominal + 50"
     );
 }
 
-/// When enough Hellos are missed that the reception ratio drops below
-/// the limit threshold, the rxcost flips to INFINITY (0xffff). This
-/// matches BIRD's binary k-out-of-j selection — there is no gradual
-/// degradation.
+/// A large gap (15 missed in the recent window) is still finite; the
+/// full 16-missed case flips to INFINITY (0xffff) per RFC 8966 §3.4.3.
 #[test]
-fn rxcost_saturates_to_infinity_below_limit_threshold() {
+fn rxcost_saturates_to_infinity_at_full_window_miss() {
     let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
     n.hello(1, 100, 0);
-    n.hello(2, 100, 0);
-    // Miss 14 Hellos (seqnos 3..=16), then receive 17. The bitmask
-    // has 2 bits set in a 16-slot window: rcv=2, max=16,
-    // 2*16=32 < 12*16=192 → INFINITY.
-    n.hello(17, 100, 0);
-    assert_eq!(
-        n.rxcost, 0xffff,
-        "2 of 16 Hellos received (12.5%) is below the 75% limit → INFINITY"
-    );
+    n.hello(17, 100, 0); // span 17, history 2 → missed 15 — finite
+    assert_eq!(n.rxcost, 100 + 15 * 50);
+    n.hello(18, 100, 0); // span 18, history 3 → missed 15 still
+    assert_eq!(n.rxcost, 100 + 15 * 50);
+    // Now jump past the 16-window: span 20, history 4 → missed 16 →
+    // INFINITY per RFC 8966 §3.4.3.
+    n.hello(20, 100, 0);
+    assert_eq!(n.rxcost, 0xffff);
 }
 
-/// Sequence numbers wrap modulo 2^16. The delta computation must handle
-/// the wrap correctly.
+/// Sequence numbers wrap modulo 2^16. The wrapping span computation
+/// must not panic or misattribute "missed" across the wrap boundary.
 #[test]
 fn rxcost_wraps_correctly_across_seqno_modulus() {
     let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
     n.hello(u16::MAX - 1, 100, 0); // 65534
     n.hello(u16::MAX, 100, 0); // 65535
-    n.hello(1, 100, 0); // wraps to 1; delta = 1 - 0 = 1 (mod 2^16)
-    assert_eq!(n.rxcost, 96, "no gaps across the wrap → nominal");
-}
-
-/// Hello expiry: when the gc loop calls expire_hellos after the
-/// 1.5× interval deadline, the bitmask shifts left, dropping old bits.
-/// After enough expiries, the bitmask clears and rxcost goes to
-/// INFINITY. This is BIRD's babel_expire_hello behavior.
-#[test]
-fn hello_expiry_shifts_bitmask_and_degrades_rxcost() {
-    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
-    // interval_cs = 100 → 10 seconds. Expiry = 15 seconds.
-    n.hello(1, 100, 0);
-    assert_eq!(n.hello_map, 0b1);
-    assert_eq!(n.rxcost, 96);
-    // At t=1600ms, just past the 1500ms (1.5× interval) expiry.
-    // One shift fires.
-    let changed = n.expire_hellos(1_600);
-    assert!(changed, "expiry should have fired");
-    // Map shifted left by 1: 0b10 (the received bit moved, a 0 took
-    // its place). hello_cnt grew to 2.
-    assert_eq!(n.hello_map, 0b10);
-    assert_eq!(n.hello_cnt, 2);
-    // rcv=1, max=2, 1*16=16 >= 12*2=24? No, 16 < 24 → INFINITY.
-    assert_eq!(
-        n.rxcost, 0xffff,
-        "one of two slots filled (50%) is below 75%"
-    );
-}
-
-/// A large seqno jump (> 16) resets the history — the peer restarted
-/// with a very different seqno (BIRD's "flush entries" branch).
-#[test]
-fn large_seqno_jump_resets_history() {
-    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
-    n.hello(1, 100, 0);
-    n.hello(2, 100, 0);
-    n.hello(3, 100, 0);
-    assert_eq!(n.hello_cnt, 3);
-    // Jump by 100 — peer restarted.
-    n.hello(103, 100, 0);
-    assert_eq!(n.hello_cnt, 1, "history was reset by the large jump");
-    assert_eq!(n.hello_map, 0b1);
-    assert_eq!(n.rxcost, 96);
+    n.hello(1, 100, 0); // wraps to 1; span = 1 - 65534 + 1 (mod 2^16) = 4
+                        // history.len() = 3, span = 4 → missed = 1
+    assert_eq!(n.rxcost, 150);
 }

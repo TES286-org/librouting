@@ -6309,25 +6309,9 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             if !iface.link_up {
                 continue;
             }
-            // BIRD's catch-up Hello timer: instead of resetting
-            // `last_announce_ms = now_ms` (which drifts forward every
-            // time the loop runs late), advance it by a multiple of
-            // `hello_interval_ms` so the schedule stays aligned to
-            // the original epoch. BIRD:
-            //   next_hello += period * (1 + (now - next_hello) / period)
-            // This prevents drift that causes BIRD's receiver-side
-            // Hello expiry (1.5× interval) to fire at the wrong time,
-            // prematurely clearing bits from the 16-slot history —
-            // the production symptom where BIRD with `limit 2` saw at
-            // most 2 of lr's Hellos in its window and declared lr
-            // unreachable whenever one Hello was slightly delayed.
-            let next_hello = iface.last_announce_ms + iface.hello_interval_ms;
-            if now_ms < next_hello {
+            if now_ms < iface.last_announce_ms + iface.hello_interval_ms {
                 continue;
             }
-            // Advance by the number of missed periods (at least 1).
-            let periods_missed = 1 + (now_ms - next_hello) / iface.hello_interval_ms;
-            iface.last_announce_ms += periods_missed * iface.hello_interval_ms;
             // §3.4.1: the Hello seqno advances by one with every Hello
             // — receivers count losses from its gaps. Bump now so the
             // Hello TLV carries the new value; if every send below

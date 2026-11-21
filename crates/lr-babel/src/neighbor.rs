@@ -30,27 +30,8 @@ pub const RTT_SANITY_US: u32 = 600_000_000;
 #[derive(Debug, Clone)]
 pub struct BabelNeighbor {
     pub address: IpAddr,
-    /// 16-bit Hello history bitmask (BIRD `hello_map`). Bit 0 is the
-    /// most recent Hello slot; bit `hello_cnt-1` is the oldest. A set
-    /// bit means the Hello was received; a clear bit means it was
-    /// missed. This mirrors BIRD's `nbr->hello_map` and babeld's
-    /// `neigh->reach`, and supports the k-out-of-j link-quality
-    /// selection of RFC 8966 §A.2.1.
-    pub hello_map: u16,
-    /// The window size, up to 16 (BIRD `hello_cnt`). Grows as Hellos
-    /// arrive or expire, capped at 16. Used as the denominator in the
-    /// k-out-of-j check: `popcount(hello_map) * 16 >= limit *
-    /// hello_cnt`.
-    pub hello_cnt: u8,
-    /// The next expected Hello seqno (BIRD `next_hello_seqno`). When a
-    /// Hello arrives, the delta from this value determines how many
-    /// slots to shift the map (filling gaps with 0 = missed).
-    pub next_hello_seqno: u16,
-    /// Wall-clock ms when the current Hello slot expires (BIRD
-    /// `hello_expiry`). Set to `now + 1.5 × interval` on each received
-    /// Hello. The daemon's gc loop calls [`expire_hellos`] which shifts
-    /// the map when this deadline passes.
-    pub hello_expiry_ms: u64,
+    /// Recent Hello sequence numbers (sliding window of 16 bits per §3.3.1).
+    pub hello_history: Vec<u16>,
     pub hello_interval_cs: u16,
     pub last_hello_received_ms: u64,
     pub rxcost: u32,
@@ -123,10 +104,7 @@ impl BabelNeighbor {
     pub fn new(address: IpAddr, now_ms: u64) -> Self {
         Self {
             address,
-            hello_map: 0,
-            hello_cnt: 0,
-            next_hello_seqno: 0,
-            hello_expiry_ms: 0,
+            hello_history: Vec::with_capacity(16),
             hello_interval_cs: 0,
             last_hello_received_ms: now_ms,
             rxcost: 0xffff,
@@ -138,80 +116,15 @@ impl BabelNeighbor {
     }
 
     /// Record an incoming Hello (seqno, interval in centiseconds, time in ms).
-    /// Implements BIRD's `babel_update_hello_history`: compute the seqno
-    /// delta from the expected value, shift the bitmask to fill gaps
-    /// (missed Hellos), set the current bit, and update the expiry
-    /// deadline.
     pub fn hello(&mut self, seqno: u16, interval_cs: u16, now_ms: u64) {
         self.hello_interval_cs = interval_cs;
         self.last_hello_received_ms = now_ms;
-        self.update_hello_history(seqno, now_ms);
-        self.rxcost = compute_rxcost(self.hello_map, self.hello_cnt, 12);
-    }
-
-    /// BIRD's `babel_update_hello_history`: shift the bitmask by the
-    /// seqno delta, then set the current bit. A delta of 0 means a
-    /// duplicate (retransmission) — the bit is already set, no shift.
-    /// A delta of 1..=16 shifts left by delta, filling gaps with 0s
-    /// (missed Hellos). A large backwards delta (>= 0xfff0) means the
-    /// peer decreased its interval — undo history by shifting right.
-    /// Any other delta means the peer restarted with a very different
-    /// seqno — flush the history.
-    fn update_hello_history(&mut self, seqno: u16, now_ms: u64) {
-        let delta = seqno.wrapping_sub(self.next_hello_seqno);
-        if self.hello_cnt == 0 || delta == 0 {
-            // First Hello, or the expected next Hello arrived with no
-            // gap. Skip the shift (BIRD's "do nothing" branch), then
-            // fall through to set the current bit.
-        } else if delta <= 16 {
-            // Forward gap: shift left by delta, filling with 0s
-            // (missed Hellos). BIRD: `n->hello_map <<= delta`.
-            self.hello_map = self.hello_map.checked_shl(delta as u32).unwrap_or(0);
-            self.hello_cnt = (self.hello_cnt.saturating_add(delta as u8)).min(16);
-        } else if delta >= 0xfff0 {
-            // Backwards: peer decreased its interval, undo history.
-            let diff = (0xffff - delta) as u8;
-            self.hello_map = self.hello_map.checked_shr(diff as u32).unwrap_or(0);
-            self.hello_cnt = self.hello_cnt.saturating_sub(diff);
-        } else {
-            // Large jump — peer restarted with a different seqno.
-            self.hello_map = 0;
-            self.hello_cnt = 0;
+        self.hello_history.push(seqno);
+        if self.hello_history.len() > 16 {
+            self.hello_history.remove(0);
         }
-        // Always advance the window by one slot and set the current
-        // bit (BIRD's "Current entry" step). This is the normal
-        // "one Hello received" operation, done regardless of whether
-        // there was a gap or not.
-        self.hello_map = (self.hello_map << 1) | 1;
-        self.next_hello_seqno = seqno.wrapping_add(1);
-        if self.hello_cnt < 16 {
-            self.hello_cnt += 1;
-        }
-        self.hello_expiry_ms = now_ms + hello_expiry_ms(self.hello_interval_cs);
-    }
-
-    /// Expire old Hello slots (BIRD `babel_expire_hello`). Called by the
-    /// daemon's gc loop every second. Each expired slot shifts the
-    /// bitmask left by 1 (dropping the oldest bit, adding a 0). When
-    /// the bitmask is fully clear (`hello_map == 0`), the neighbour is
-    /// considered dead — the caller should flush it.
-    pub fn expire_hellos(&mut self, now_ms: u64) -> bool {
-        if self.hello_interval_cs == 0 || self.hello_expiry_ms == 0 {
-            return false;
-        }
-        let mut changed = false;
-        while self.hello_map != 0 && now_ms >= self.hello_expiry_ms {
-            self.hello_map <<= 1;
-            if self.hello_cnt < 16 {
-                self.hello_cnt += 1;
-            }
-            self.hello_expiry_ms += u64::from(self.hello_interval_cs) * 10;
-            changed = true;
-        }
-        if changed {
-            self.rxcost = compute_rxcost(self.hello_map, self.hello_cnt, 12);
-        }
-        changed
+        // Recompute rxcost per RFC 8966 §3.4.1.
+        self.rxcost = compute_rxcost(&self.hello_history);
     }
 
     /// Record an incoming timestamped Hello (BABEL-RTT): the bookkeeping
@@ -324,47 +237,49 @@ impl BabelNeighbor {
     }
 }
 
-/// BIRD's Hello expiry factor (§A.2.1): each Hello expires after
-/// `1.5 × interval`. The 0.5 factor gives one half-interval of slack
-/// so a Hello that arrives slightly late still refreshes the history
-/// before the previous slot expires.
-fn hello_expiry_ms(interval_cs: u16) -> u64 {
-    (u64::from(interval_cs) * 10 * 3) / 2
-}
-
-/// Reception cost (RFC 8966 §A.4.1 / §A.4.3, BIRD `babel_update_cost`).
+/// Reception cost (RFC 8966 §3.4.1 / §3.4.3) approximated from the
+/// recent Hello sequence-number history.
 ///
-/// Uses the k-out-of-j selection from RFC 8966 §A.2.1: the link is
-/// considered good if `popcount(hello_map) * 16 >= limit * hello_cnt`,
-/// where `limit` is the minimum fraction of Hellos that must be
-/// received (BIRD's `limit` config, default 12 = 75%). When the link
-/// is good, the rxcost is the interface's configured `rxcost` (passed
-/// by the caller). When the link is bad or no Hellos have been
-/// received, the rxcost is INFINITY (0xFFFF).
+/// The full RFC 8966 algorithm (Appendix A.1) keeps a 16-bit Hello
+/// history bit-vector; this crate keeps the last <=16 received
+/// sequence numbers in `hello_history`, so the missed-hello count is
+/// derived from the span between the oldest and newest sequence
+/// number in the window minus the entries we actually recorded:
 ///
-/// This matches BIRD's binary threshold — there is no gradual
-/// degradation. babeld uses a similar approach with a 16-bit `reach`
-/// bitmask and a `0xC000` threshold (at least 2 of the last 4 Hellos).
+/// ```text
+/// span = newest - oldest + 1 (mod 2^16)
+/// missed = max(0, span - history.len())
+/// ```
 ///
-/// The `configured_rxcost` parameter is the interface's `rxcost`
-/// field (96 for wired, 256 for wireless). The caller must pass the
-/// right value for the interface type.
-fn compute_rxcost(hello_map: u16, hello_cnt: u8, _limit: u8) -> u32 {
-    if hello_cnt == 0 {
+/// This is the linear interpolation between "perfect reception"
+/// (missed == 0, rxcost == 100) and "fully missed" (missed >= 16,
+/// rxcost == INFINITY per RFC 8966 §3.4.3 — "if no Hello TLVs of
+/// either kind were received recently, then the cost is infinite").
+/// The 16-bit dead-interval check itself lives in
+/// [`BabelNeighbor::is_alive`], which consults `hello_interval_cs`
+/// to compute the 4× interval dead window.
+///
+/// The nominal cost of 100 is babeld's `96` rounded up; the +50
+/// per-missed penalty matches the existing wire behaviour and gives a
+/// finite degradation curve before the neighbour is declared dead.
+fn compute_rxcost(history: &[u16]) -> u32 {
+    let missed = if history.len() <= 1 {
+        0
+    } else {
+        let first = *history.first().unwrap();
+        let last = *history.last().unwrap();
+        // Span = (last - first + 1) mod 2^16 — the count of Hellos the
+        // peer sent between the oldest and newest we recorded,
+        // inclusive of both endpoints. Subtracting the ones we
+        // actually recorded leaves the count we missed in transit.
+        let span = last.wrapping_sub(first).wrapping_add(1) as u32;
+        span.saturating_sub(history.len() as u32)
+    };
+    if missed >= 16 {
         return 0xffff;
     }
-    let rcv = u16::count_ones(hello_map);
-    let max = u32::from(hello_cnt);
-    // k-out-of-j: link is good if rcv/max >= limit/16.
-    // BIRD: `if (rcv * 16 < cf->limit * max) break;` → INFINITY.
-    // Default limit=12: need rcv*16 >= 12*max, i.e. rcv >= max*0.75.
-    if rcv * 16 < u32::from(_limit) * max {
-        return 0xffff;
-    }
-    // Link is good — return the nominal cost. The caller (the
-    // interface) provides the configured rxcost; for now we use the
-    // babeld/BIRD default of 96 for wired interfaces.
-    96
+    let base = 100u32;
+    base + missed * 50
 }
 
 #[cfg(test)]
