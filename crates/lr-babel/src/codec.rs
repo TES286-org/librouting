@@ -97,10 +97,12 @@ impl BabelCodec {
     ///   per interval.
     /// * `RouterId` and `NextHop` are *state* TLVs: an `Update`
     ///   inherits the most recent one *within the same packet*
-    ///   (RFC 8966 §4.5.2 / §4.6.8). Every trailing frame whose first
-    ///   payload TLV is an `Update` therefore re-emits the most recent
-    ///   `RouterId` and the family-matching `NextHop` so the receiver
-    ///   applies the Updates with the right source and next hop.
+    ///   (RFC 8966 §4.5.2 / §4.6.8). Before the first `Update` in every
+    ///   trailing frame, `pack_frames` re-emits whichever of the two
+    ///   the frame does not already carry. A frame that opens with a
+    ///   `RouterId` (the split landed before a Router-Id group) still
+    ///   gets the family-matching `NextHop`; a frame that opens with a
+    ///   `NextHop` still gets the `RouterId`.
     /// * A `Pad1` or `PadN` never crosses a frame boundary; padding is
     ///   per-packet and is dropped from trailing frames (the receiver
     ///   does not require it).
@@ -236,15 +238,41 @@ fn next_hop_ae(tlv: &Tlv) -> Option<u8> {
     tlv.value.first().copied()
 }
 
+/// The next-hop context an `Update` needs, derived from its
+/// address-encoding byte (RFC 8966 §4.6.9; RFC 9229 §2.4 adds AE 4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpdateNextHop {
+    None,
+    V4,
+    V6,
+    Both,
+}
+
+fn update_next_hop(ae: Option<u8>) -> UpdateNextHop {
+    match ae {
+        // AE 0 is the wildcard retraction: no next hop is used.
+        Some(0) => UpdateNextHop::None,
+        Some(1) => UpdateNextHop::V4,
+        // AE 2/3 are IPv6 destinations; AE 4 is IPv4-via-IPv6.
+        Some(2..=4) => UpdateNextHop::V6,
+        // Unknown AE: carry both families so a receiver that
+        // understands the extension has the context it needs. BIRD
+        // ignores unknown AEs, so the extra TLV is harmless.
+        _ => UpdateNextHop::Both,
+    }
+}
+
 /// Split a flat TLV list into packet-sized [`BabelFrame`]s. See
 /// [`BabelCodec::pack_frames`] for the protocol-level contract.
 ///
 /// Algorithm: walk the input TLVs in order, appending each to the
 /// current frame. When the next TLV would overflow the body budget,
 /// close the current frame and open a new one. Before the first
-/// `Update` in any frame opened this way, re-emit the most recent
-/// `RouterId` TLV and the family-matching `NextHop` TLV — they are
-/// per-packet state the receiver needs to interpret the Update.
+/// `Update` in a frame, re-emit the most recent `RouterId` TLV and the
+/// family-matching `NextHop` TLV — they are per-packet state the
+/// receiver needs to interpret the Update. A frame that already opens
+/// with one of them (the split can land before a Router-Id group) only
+/// gets the missing half.
 ///
 /// `Hello` and `Ihu` are never re-emitted: RFC 8966 §3.4 / §3.5 tie
 /// their cadence to the Hello interval, not to per-datagram presence.
@@ -262,69 +290,116 @@ fn pack_tlvs(tlvs: &[Tlv], max_body_len: usize) -> Vec<BabelFrame> {
     let mut last_next_hop_v4: Option<Tlv> = None;
     let mut last_next_hop_v6: Option<Tlv> = None;
 
+    // What the current frame already carries. A frame that opens with
+    // a Router-Id satisfies the Router-Id requirement but still needs
+    // the NextHop for the Updates behind it.
+    let mut frame_has_router_id = false;
+    let mut frame_has_next_hop_v4 = false;
+    let mut frame_has_next_hop_v6 = false;
+
     let mut first_in_frame = true;
 
     for tlv in tlvs {
         // Skip Pad1/PadN at frame boundaries — padding is per-packet
         // and is dropped from trailing frames. Emitting it would only
-        // waste budget the next real TLV needs.
+        // waste budget the next real TLV needs. A padding TLV that
+        // would itself overflow the frame is dropped rather than
+        // pushing the body past the budget.
         if (tlv.kind == crate::tlv::TlvType::Pad1 && tlv.value.is_empty())
             || tlv.kind == crate::tlv::TlvType::PadN
         {
-            if !first_in_frame {
+            let len = tlv_wire_len(tlv);
+            if !first_in_frame && cur_len + len <= max_body_len {
                 cur.body.push(tlv.clone());
-                cur_len += tlv_wire_len(tlv);
+                cur_len += len;
             }
             continue;
         }
 
         let len = tlv_wire_len(tlv);
+        let is_update = tlv.kind == crate::tlv::TlvType::Update;
+        let next_hop = if is_update {
+            update_next_hop(tlv.value.first().copied())
+        } else {
+            UpdateNextHop::None
+        };
 
-        // Would this TLV overflow the current frame? Close it and open
-        // a new one. The check is on `cur_len + len` against the
-        // budget; a TLV larger than the budget lands in its own frame
-        // (which will exceed the budget — the caller must guarantee no
-        // such TLV exists, and Babel's 255-octet value cap makes that
-        // trivial for any reasonable budget).
-        if !first_in_frame && cur_len + len > max_body_len {
+        // Context this Update still needs in the current frame. A
+        // Router-Id already in the frame is the one the receiver will
+        // use, so only emit it when it is absent.
+        let mut context_len = 0usize;
+        if is_update {
+            if !frame_has_router_id {
+                context_len += last_router_id.as_ref().map_or(0, tlv_wire_len);
+            }
+            if matches!(next_hop, UpdateNextHop::V4 | UpdateNextHop::Both) && !frame_has_next_hop_v4
+            {
+                context_len += last_next_hop_v4.as_ref().map_or(0, tlv_wire_len);
+            }
+            if matches!(next_hop, UpdateNextHop::V6 | UpdateNextHop::Both) && !frame_has_next_hop_v6
+            {
+                context_len += last_next_hop_v6.as_ref().map_or(0, tlv_wire_len);
+            }
+        }
+
+        // Would this TLV (plus the context it needs) overflow the
+        // current frame? Close it and open a new one. The context is
+        // re-established in the fresh frame below. An Update whose own
+        // size exceeds the budget still lands in its own frame.
+        if !first_in_frame && cur_len + context_len + len > max_body_len {
             frames.push(std::mem::take(&mut cur));
             cur_len = 0;
-            first_in_frame = true;
+            frame_has_router_id = false;
+            frame_has_next_hop_v4 = false;
+            frame_has_next_hop_v6 = false;
         }
 
-        // If this is the first real TLV in a frame AND it is an
-        // Update, re-emit the most recent Router-Id and family-matching
-        // NextHop so the receiver interprets the Update with the right
-        // source and next hop. The Router-Id goes first (§4.6.7:
-        // precedes the Updates using it); then the NextHop (§4.6.8:
-        // ditto). We emit both v4 and v6 NextHops when both are set —
-        // the receiver applies the one matching each Update's AE.
-        if first_in_frame && tlv.kind == crate::tlv::TlvType::Update {
-            if let Some(rid) = &last_router_id {
-                let rid_len = tlv_wire_len(rid);
-                if cur_len + rid_len <= max_body_len {
+        if is_update {
+            // Re-establish the per-packet state the receiver needs for
+            // this Update. Router-Id first (§4.6.7), then the
+            // family-matching NextHop (§4.6.8). A Router-Id already in
+            // the frame is not duplicated.
+            if !frame_has_router_id {
+                if let Some(rid) = &last_router_id {
                     cur.body.push(rid.clone());
-                    cur_len += rid_len;
+                    cur_len += tlv_wire_len(rid);
+                    frame_has_router_id = true;
                 }
             }
-            for nh in [last_next_hop_v4.as_ref(), last_next_hop_v6.as_ref()]
-                .into_iter()
-                .flatten()
+            if matches!(next_hop, UpdateNextHop::V4 | UpdateNextHop::Both) && !frame_has_next_hop_v4
             {
-                let nh_len = tlv_wire_len(nh);
-                if cur_len + nh_len <= max_body_len {
+                if let Some(nh) = &last_next_hop_v4 {
                     cur.body.push(nh.clone());
-                    cur_len += nh_len;
+                    cur_len += tlv_wire_len(nh);
+                    frame_has_next_hop_v4 = true;
+                }
+            }
+            if matches!(next_hop, UpdateNextHop::V6 | UpdateNextHop::Both) && !frame_has_next_hop_v6
+            {
+                if let Some(nh) = &last_next_hop_v6 {
+                    cur.body.push(nh.clone());
+                    cur_len += tlv_wire_len(nh);
+                    frame_has_next_hop_v6 = true;
                 }
             }
         }
 
-        // Track state TLVs for re-emission in later frames.
+        // Track state TLVs for re-emission in later frames, and record
+        // that this frame now carries them.
         match tlv.kind {
-            crate::tlv::TlvType::RouterId => last_router_id = Some(tlv.clone()),
+            crate::tlv::TlvType::RouterId => {
+                last_router_id = Some(tlv.clone());
+                frame_has_router_id = true;
+            }
             crate::tlv::TlvType::NextHop => match next_hop_ae(tlv) {
-                Some(1) => last_next_hop_v4 = Some(tlv.clone()),
-                Some(2 | 3) => last_next_hop_v6 = Some(tlv.clone()),
+                Some(1) => {
+                    last_next_hop_v4 = Some(tlv.clone());
+                    frame_has_next_hop_v4 = true;
+                }
+                Some(2 | 3) => {
+                    last_next_hop_v6 = Some(tlv.clone());
+                    frame_has_next_hop_v6 = true;
+                }
                 _ => {}
             },
             _ => {}
@@ -620,5 +695,99 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The production trailing-frame bug: the split lands immediately
+    /// before a Router-Id group, so the second datagram opens with a
+    /// Router-Id followed by Updates. The old packer only re-emitted
+    /// the NextHop when the *first* TLV of the frame was an Update, so
+    /// this frame carried AE 4 Updates with no v6 next hop — BIRD
+    /// aborts the whole datagram ("Update must have next hop") and the
+    /// routes behind it are lost. The frame must keep the in-frame
+    /// Router-Id (not duplicate the previous one) and re-emit the
+    /// family-matching NextHop before the first Update.
+    #[test]
+    fn pack_frames_router_id_led_frame_still_reemits_next_hop() {
+        use crate::message::{NextHop, RouterId as RouterIdTlv, Update};
+        let v6_nh = NextHop {
+            ae: 2,
+            address: lr_core::addr::IpAddr::V6([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9,
+            ]),
+        };
+        let rid_a = RouterIdTlv { id: [1; 8] };
+        let rid_b = RouterIdTlv { id: [2; 8] };
+        let update = |seqno: u16| {
+            Update {
+                ae: 4, // IPv4-via-IPv6 (RFC 9229 §2.4)
+                flags: 0,
+                prefix_len: 32,
+                omitted: 0,
+                interval_cs: 300,
+                seqno,
+                metric: 0,
+                prefix: vec![10, 0, 0, seqno as u8],
+                src_prefix_len: 0,
+                src_prefix: Vec::new(),
+            }
+            .encode()
+        };
+
+        // 48-byte budget: the preamble (20-byte NextHop + 12-byte
+        // Router-Id) plus one 16-byte Update fills frame 1 exactly, so
+        // Router-Id B opens frame 2.
+        let mut frame = BabelFrame::empty();
+        frame.body.push(Tlv::new(TlvType::NextHop, v6_nh.encode()));
+        frame
+            .body
+            .push(Tlv::new(TlvType::RouterId, rid_a.encode().to_vec()));
+        frame.body.push(Tlv::new(TlvType::Update, update(1)));
+        frame
+            .body
+            .push(Tlv::new(TlvType::RouterId, rid_b.encode().to_vec()));
+        frame.body.push(Tlv::new(TlvType::Update, update(2)));
+
+        let packed = BabelCodec::new().pack_frames(&frame, 48);
+        assert_eq!(packed.len(), 2, "the announcement splits after frame 1");
+        let trailing = &packed[1];
+        assert_eq!(
+            trailing.body.first().map(|t| t.kind),
+            Some(TlvType::RouterId),
+            "the trailing frame opens with Router-Id B"
+        );
+        let router_ids: Vec<&Tlv> = trailing
+            .body
+            .iter()
+            .filter(|t| t.kind == TlvType::RouterId)
+            .collect();
+        assert_eq!(
+            router_ids.len(),
+            1,
+            "the in-frame Router-Id is not duplicated"
+        );
+        assert_eq!(
+            router_ids[0].value,
+            rid_b.encode().to_vec(),
+            "the trailing frame keeps Router-Id B, not the previous group's A"
+        );
+        let next_hop_pos = trailing
+            .body
+            .iter()
+            .position(|t| t.kind == TlvType::NextHop)
+            .expect("the trailing frame must re-emit the v6 NextHop");
+        let update_pos = trailing
+            .body
+            .iter()
+            .position(|t| t.kind == TlvType::Update)
+            .expect("the trailing frame carries the second Update");
+        assert!(
+            next_hop_pos < update_pos,
+            "the NextHop must precede the Update that uses it"
+        );
+        assert_eq!(
+            next_hop_ae(&trailing.body[next_hop_pos]),
+            Some(2),
+            "an AE 4 Update rides the v6 NextHop"
+        );
     }
 }

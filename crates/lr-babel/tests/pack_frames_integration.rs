@@ -173,6 +173,111 @@ fn trailing_update_frames_re_emit_the_next_hop() {
     }
 }
 
+/// The daemon groups foreign claims by origin Router-Id, so a split
+/// can land exactly before a Router-Id TLV. With the 1496-byte body
+/// budget the preamble (48 bytes) plus 80 v6 /48 Updates (18 bytes
+/// each) fills 1488 bytes and leaves 8 — the next 12-byte Router-Id
+/// opens the trailing frame. That frame must still carry the NextHop
+/// for the Updates behind the Router-Id. The old packer only
+/// re-emitted it when the frame's first TLV was an Update, so BIRD
+/// rejected the whole datagram ("Update must have next hop") and
+/// every route in it was lost.
+#[test]
+fn router_id_led_trailing_frame_still_carries_next_hop() {
+    let mut frame = BabelFrame::empty();
+    frame
+        .body
+        .push(Tlv::new(TlvType::Hello, Hello::new(1, 400).encode()));
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 1200).encode()));
+    frame.body.push(Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: 2,
+            address: lr_core::addr::IpAddr::V6([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]),
+        }
+        .encode(),
+    ));
+    frame.body.push(Tlv::new(
+        TlvType::RouterId,
+        RouterIdTlv { id: [1; 8] }.encode().to_vec(),
+    ));
+    for i in 0u16..80 {
+        let mut prefix = [0u8; 6];
+        prefix[..2].copy_from_slice(&i.to_be_bytes());
+        let mut body = vec![
+            2u8,
+            0,
+            48,
+            0,
+            0x01,
+            0x2c,
+            0,
+            (i as u8).wrapping_add(1),
+            0,
+            0xc0,
+        ];
+        body.extend_from_slice(&prefix);
+        frame.body.push(Tlv::new(TlvType::Update, body));
+    }
+    // The second origin group. Its Router-Id does not fit in frame 1,
+    // so it opens frame 2; the AE 4 Update behind it needs the v6
+    // NextHop re-emitted after the Router-Id.
+    frame.body.push(Tlv::new(
+        TlvType::RouterId,
+        RouterIdTlv { id: [2; 8] }.encode().to_vec(),
+    ));
+    let mut body = vec![4u8, 0, 32, 0, 0x01, 0x2c, 0, 42, 0, 0xc0];
+    body.extend_from_slice(&[10, 0, 0, 2]);
+    frame.body.push(Tlv::new(TlvType::Update, body));
+
+    let codec = BabelCodec::new();
+    let packed = codec.pack_frames(&frame, MAX_BODY_LENGTH);
+    assert_eq!(
+        packed.len(),
+        2,
+        "the second Router-Id group opens a trailing datagram"
+    );
+    let trailing = &packed[1];
+    assert_eq!(
+        trailing.body.first().map(|t| t.kind),
+        Some(TlvType::RouterId),
+        "the trailing frame opens with the second group's Router-Id"
+    );
+    let router_ids: Vec<&Tlv> = trailing
+        .body
+        .iter()
+        .filter(|t| t.kind == TlvType::RouterId)
+        .collect();
+    assert_eq!(
+        router_ids.len(),
+        1,
+        "the in-frame Router-Id must not be duplicated"
+    );
+    let next_hop = trailing
+        .body
+        .iter()
+        .position(|t| t.kind == TlvType::NextHop)
+        .expect("the Router-Id-led trailing frame must re-emit the v6 NextHop");
+    let update = trailing
+        .body
+        .iter()
+        .position(|t| t.kind == TlvType::Update)
+        .expect("the trailing frame carries the second group's Update");
+    assert!(
+        next_hop < update,
+        "the NextHop must precede the Update that uses it"
+    );
+    assert_eq!(
+        trailing.body[next_hop].value.first(),
+        Some(&2),
+        "the AE 4 Update rides the v6 NextHop"
+    );
+}
+
 #[test]
 fn no_packet_is_an_empty_udp_payload() {
     // The production bug's tcpdump signature was 'babel [|babel]' —
