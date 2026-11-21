@@ -7644,14 +7644,21 @@ fn build_babel_announcement(
     iface.advertised = new_advertised;
     let any_v4_retract = retracted.iter().any(|(k, _)| k.destination.addr.is_ipv4());
     let any_v6_retract = retracted.iter().any(|(k, _)| !k.destination.addr.is_ipv4());
+    // A v6 NextHop is required by v6 Updates and by AE 4 Updates
+    // (IPv4-via-IPv6, RFC 9229 §2.4) — including when the only
+    // destinations are v4 and `v6_ok` is false. This is the production
+    // shape on a v6-only tunnel with `extended_next_hop`: `v4_ok` is
+    // true, `v4_ae` is 4, and without this clause the frame carried an
+    // AE 4 Update with no NextHop, which BIRD rejects ("Update must
+    // have next hop") and every Update behind it is lost.
     let need_v6_nh = v6_ok
+        || (v4_ok && v4_ae == 4)
         || (any_v6_retract && v6_retract_ok)
         // An AE 4 (IPv4-via-IPv6) retraction rides the v6 next hop.
-        || (any_v4_retract
-            && iface.extended_next_hop
-            && iface.next_hop_v4.is_none()
-            && iface.next_hop_v6.is_some());
-    let need_v4_nh = v4_ok || (any_v4_retract && iface.next_hop_v4.is_some() && v4_retract_ok);
+        || (any_v4_retract && v4_retract_ok && v4_ae == 4);
+    // A v4 NextHop is only useful to AE 1 Updates; when v4 rides the
+    // v6 next hop (v4_ae == 4) emitting it would be dead weight.
+    let need_v4_nh = (v4_ok && v4_ae == 1) || (any_v4_retract && v4_retract_ok && v4_ae == 1);
     if need_v6_nh {
         let nh = iface.next_hop_v6.expect("need_v6_nh implies a v6 next hop");
         frame.body.push(Tlv::new(

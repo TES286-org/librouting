@@ -1166,6 +1166,50 @@ mod babel_retraction_tests {
         }
     }
 
+    /// A v6-transport interface with no v4 address: IPv4 destinations
+    /// ride the v6 next hop as AE 4 (RFC 9229 §2.4) when
+    /// `extended_next_hop` is on. Bound to `::1` so the test works
+    /// without a configured v6 device.
+    fn v6_loopback_iface(session: SessionHandle, port: u16) -> BabelIface {
+        let uc = std::net::UdpSocket::bind("[::1]:0").unwrap();
+        BabelIface {
+            name: "lo".into(),
+            manual: false,
+            transports: vec![BabelTransport {
+                local: std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                scope_id: 0,
+                port,
+                group: std::net::IpAddr::V6(std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6)),
+                uc,
+                mc: None,
+            }],
+            port,
+            hello_interval_ms: 1_000,
+            update_interval_ms: 3_000,
+            rxcost: 96,
+            rtt_cost: 0,
+            rtt_send: false,
+            rtt_min_us: 10_000,
+            rtt_max_us: 120_000,
+            check_link: false,
+            next_hop_v4: None,
+            next_hop_v6: Some(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+            extended_next_hop: true,
+            session,
+            if_index: 0,
+            auth: None,
+            auth_debug_line: String::new(),
+            router_id: [1, 2, 3, 4, 5, 6, 7, 8],
+            hello_seqno: 0,
+            seqno: 0,
+            last_sig: String::new(),
+            advertised: std::collections::BTreeMap::new(),
+            last_announce_ms: 0,
+            last_gc_ms: 0,
+            link_up: true,
+        }
+    }
+
     /// Updates and retractions across one or more encoded packets, as
     /// `(metric, prefix-octets)` pairs in wire order.
     ///
@@ -1288,6 +1332,61 @@ mod babel_retraction_tests {
                 .any(|(m, p)| *m == 0xFFFF && p.as_slice() == PFX),
             "the retraction is not repeated forever: {:?}",
             update_metrics(&followup)
+        );
+    }
+
+    /// A v6-only transport with `extended_next_hop` advertises an IPv4
+    /// destination as an AE 4 Update. The NextHop TLV must be the v6
+    /// one even when the announcement contains no IPv6 destination at
+    /// all: `need_v6_nh` used to be gated on `v6_ok`, so this exact
+    /// production shape emitted an AE 4 Update with no NextHop and BIRD
+    /// aborted the datagram ("Update must have next hop").
+    #[test]
+    fn ae4_ipv4_over_v6_carries_a_v6_next_hop() {
+        let mut r = DefaultRouter::new();
+        let s0 = r
+            .add_session(SessionConfig::babel(IpAddr::V4([127, 0, 0, 2])))
+            .unwrap();
+        r.start_session(s0).unwrap();
+        let s1 = r
+            .add_session(SessionConfig::babel(IpAddr::V6([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ])))
+            .unwrap();
+        r.start_session(s1).unwrap();
+        r.feed_input(s0, &peer_frame(ORIGIN, PFX, 7, 96))
+            .expect("a well-formed daemon-shaped frame");
+
+        let mut iface = v6_loopback_iface(s1, 16_696);
+        let packets = build_babel_announcement(
+            &r,
+            &mut iface,
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            0,
+            None,
+            None,
+        );
+        let mut saw_v6_next_hop = false;
+        let mut saw_ae4_update = false;
+        for pkt in &packets {
+            let Some(decoded) = lr_babel::BabelCodec::new()
+                .decode_slice(pkt)
+                .expect("the announcement decodes")
+            else {
+                continue;
+            };
+            for tlv in &decoded.body {
+                match tlv.kind {
+                    TlvType::NextHop if tlv.value.first() == Some(&2) => saw_v6_next_hop = true,
+                    TlvType::Update if tlv.value.first() == Some(&4) => saw_ae4_update = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_ae4_update, "the v4 route is advertised as AE 4");
+        assert!(
+            saw_v6_next_hop,
+            "the AE 4 Update carries the v6 NextHop it needs"
         );
     }
 }
