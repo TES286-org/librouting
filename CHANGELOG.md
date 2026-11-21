@@ -172,8 +172,8 @@ is very jittery, routes flipping between interfaces, all routes
 lost periodically, peer receives ~1 Hello, rtt 0".
 
 `BabelCodec::pack_frames` (new, `lr-babel`) splits one logical
-announcement into packet-sized frames, re-emitting the most recent
-`RouterId` and `NextHop` TLVs at the start of each trailing frame so
+announcement into packet-sized frames, re-emitting the Router-Id and
+family-matching NextHop TLVs at the start of each trailing frame so
 every `Update` carries its source and next-hop context. `Hello` and
 `Ihu` stay in the first frame, matching BIRD and babeld cadence.
 `build_babel_announcement` now returns `Vec<Vec<u8>>` (one encoded
@@ -183,6 +183,28 @@ least one transport accepts the announcement, so a fully failed
 send (ENETUNREACH during a link flap) retries within the 1 s poll
 cap instead of waiting a full Hello interval with no Hello on the
 wire.
+
+**Babel split frames keep their Router-Id and NextHop context, and
+every datagram now fits the IPv6 minimum MTU** (`lr-babel`, `lr-cli`,
+[issue #101](https://github.com/TES286-org/librouting/issues/101)).
+Two trailing-frame defects remained after the initial split. A frame
+whose first TLV was a Router-Id — the daemon groups foreign claims by
+origin — did not re-emit the NextHop, so BIRD aborted the whole
+datagram at the first AE 1/AE 4 Update ("Update must have next hop").
+A v6-only transport with `extended_next_hop` also emitted no NextHop
+at all when the announcement contained only IPv4 destinations, because
+the AE 4 case was missing from the `need_v6_nh` gate. `pack_frames`
+now tracks the Router-Id and per-family NextHop already present in the
+frame and emits only the missing context before the first Update,
+using the Update's AE to choose the family;
+`build_babel_announcement` derives the NextHop requirement from the AE
+the v4 destinations use. Separately, the split budget is now 1228
+octets (1280 − 40 IPv6 − 8 UDP − 4 Babel) instead of RFC 8966 §4's
+1496: on a 1420-MTU tunnel the old 1484-octet first frame fragmented,
+the fragments were lost, BIRD's Hello history expired and it sent
+Route Requests for lr's own prefixes while the small trailing frames
+kept arriving. Every announcement datagram now stays under the IPv6
+minimum MTU, so the first frame is never fragmented.
 
 **Babel `rtt_send` config separates timestamp send from metric
 penalty** (`lr-cli`,
