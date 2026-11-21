@@ -266,9 +266,22 @@ impl BabelRuntime {
                                 }
                                 None => {
                                     // The neighbour declared its link
-                                    // unusable (rxcost = INFINITY). No route
-                                    // through it is admissible any more.
-                                    self.routes.retract_all(peer);
+                                    // unusable (rxcost = INFINITY). BIRD
+                                    // sets `r->metric = BABEL_INFINITY` and
+                                    // lets `babel_select_route` skip the
+                                    // route; the route stays in the cache
+                                    // and is refreshed or expired by the
+                                    // normal hold timer. Immediately
+                                    // retracting all routes when the peer's
+                                    // IHU flips between 96 and 65535
+                                    // caused the production "71 routes
+                                    // withdrawn → re-installed → withdrawn"
+                                    // churn — every IHU flip mass-withdrew
+                                    // and re-learned 71 routes. Marking
+                                    // them unreachable loses the election
+                                    // without removing them, so a brief
+                                    // IHU flip no longer churns the Loc-RIB.
+                                    self.routes.mark_neighbor_unreachable(peer);
                                 }
                             }
                         }

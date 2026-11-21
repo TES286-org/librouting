@@ -181,6 +181,28 @@ impl BabelRouteCache {
         changed
     }
 
+    /// Mark every route learned from `neighbor` as unreachable (metric =
+    /// INFINITY) without removing them from the cache (BIRD
+    /// `babel_update_cost` with `txcost = BABEL_INFINITY`). BIRD sets
+    /// `r->metric = BABEL_INFINITY` and lets `babel_select_route` skip
+    /// it; the route stays in the cache and is refreshed or expired by
+    /// the normal hold timer. Immediately retracting all routes when
+    /// the peer's IHU flips to INFINITY caused the production
+    /// "71 routes withdrawn → re-installed → withdrawn" churn: the
+    /// peer's IHU flips between 96 and 65535 every cycle when it
+    /// briefly loses lr's Hellos, and each flip mass-withdrew and
+    /// re-learned 71 routes. Returns `true` when any metric moved.
+    pub fn mark_neighbor_unreachable(&mut self, neighbor: IpAddr) -> bool {
+        let mut changed = false;
+        for r in self.routes.values_mut().filter(|r| r.neighbor == neighbor) {
+            if r.metric != 0xffff {
+                r.metric = 0xffff;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Retract one neighbour's claim for a destination. Returns the removed
     /// route so the caller can render a precise withdrawal reason.
     pub fn retract(&mut self, dest: RouteDest, neighbor: IpAddr) -> Option<PeerRoute> {
@@ -230,26 +252,57 @@ impl BabelRouteCache {
     }
 
     /// Select the lowest-metric feasible route per destination across all
-    /// neighbours (BIRD `babel_select_route`). On a metric tie the neighbour
-    /// in `keep` stays selected, matching BIRD's "keep the old one in case
-    /// of a tie" rule and avoiding next-hop churn.
+    /// neighbours (BIRD `babel_select_route`). On a metric tie the
+    /// incumbent — the neighbour in `keep` — stays selected, matching
+    /// BIRD's `babel_select_route`: it seeds `best = e->selected` and
+    /// only replaces on a *strictly* lower metric, so a metric tie
+    /// never displaces the incumbent. Without this pre-seed, a
+    /// BTreeMap-order iteration would let the first-seen route (which
+    /// is usually NOT the incumbent) become the tentative best, and
+    /// the tie-check against `prev.neighbor` would fail — every
+    /// re-election would pick a different neighbour, the production
+    /// "babel best-path displacement (71 routes lost the best-path
+    /// election)" churn where routes cycle through all peers every
+    /// 20 seconds.
     pub fn best_routes(&self, keep: &BTreeMap<RouteDest, IpAddr>) -> Vec<PeerRoute> {
         let mut best: BTreeMap<RouteDest, &PeerRoute> = BTreeMap::new();
+        // Pass 1: pre-seed with the incumbent. If the incumbent is
+        // still feasible and in the cache with a finite metric, it
+        // starts as the best and is only displaced by a strictly
+        // lower metric — matching BIRD's `best = e->selected`
+        // initialization. An incumbent whose metric has gone to
+        // INFINITY (the peer's IHU flipped) is not admissible, so it
+        // is skipped — BIRD's `if (!best || best->metric ==
+        // BABEL_INFINITY) best = NULL`.
         for r in self.routes.values() {
-            if !r.feasible {
+            if !r.feasible || r.metric >= 0xffff {
+                continue;
+            }
+            let dest = dest_of(&r.key);
+            if keep.get(&dest) == Some(&r.neighbor) {
+                best.insert(dest, r);
+            }
+        }
+        // Pass 2: walk all routes. A route displaces the current best
+        // only if it has a strictly lower metric. Equal metrics keep
+        // the incumbent (already in `best`). Routes with INFINITY
+        // metric are skipped. Destinations with no incumbent take
+        // their first feasible finite-metric route — stable because
+        // the BTreeMap iteration order is deterministic.
+        for r in self.routes.values() {
+            if !r.feasible || r.metric >= 0xffff {
                 continue;
             }
             let dest = dest_of(&r.key);
             match best.get(&dest) {
-                Some(prev) if prev.metric < r.metric => continue,
-                Some(prev)
-                    if prev.metric == r.metric && keep.get(&dest) == Some(&prev.neighbor) =>
-                {
-                    continue
+                None => {
+                    best.insert(dest, r);
+                }
+                Some(prev) if r.metric < prev.metric => {
+                    best.insert(dest, r);
                 }
                 _ => {}
             }
-            best.insert(dest, r);
         }
         best.into_values().cloned().collect()
     }
@@ -333,6 +386,80 @@ mod tests {
         let chosen = c.best_routes(&keep);
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].neighbor, v6(3));
+    }
+
+    /// Regression for the production "babel best-path displacement" churn.
+    /// Four peers all advertise the same route with the same metric. The
+    /// incumbent (from the previous election's `keep` map) must stay
+    /// selected across successive elections — the route must NOT cycle
+    /// through all four peers every BIRD Update cycle.
+    #[test]
+    fn four_peer_metric_tie_keeps_incumbent_across_re_elections() {
+        let mut c = BabelRouteCache::new();
+        // Four peers, same origin, same metric. BIRD parity: all four
+        // peers re-advertise the same route (originated by a third node)
+        // with metric 0 + their link cost.
+        c.update(route(v6(3), 1, 0, 1));
+        c.update(route(v6(4), 1, 0, 1));
+        c.update(route(v6(8), 1, 0, 1));
+        c.update(route(v6(15), 1, 0, 1));
+        // First election with no keep map: picks one (BTreeMap order → v6(15)).
+        let first = best(&c);
+        assert_eq!(first.len(), 1);
+        let incumbent = first[0].neighbor;
+        // Seed the keep map with the first election's winner.
+        let mut keep = BTreeMap::new();
+        keep.insert(dest_of(&first[0].key), incumbent);
+        // Second election: the incumbent must stay. Without the pre-seed
+        // fix, the BTreeMap iteration would let v6(15) become the
+        // tentative best, and the old tie-check (against prev.neighbor)
+        // would fail, causing a different neighbour to win.
+        let second = c.best_routes(&keep);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].neighbor, incumbent,
+            "incumbent must stay selected on a metric tie"
+        );
+        // Third election (simulating another BIRD Update cycle): still
+        // the same incumbent.
+        keep.insert(dest_of(&second[0].key), second[0].neighbor);
+        let third = c.best_routes(&keep);
+        assert_eq!(third.len(), 1);
+        assert_eq!(
+            third[0].neighbor, incumbent,
+            "incumbent must stay selected across multiple re-elections"
+        );
+    }
+
+    /// When a peer's IHU flips to INFINITY (cost=65535), its routes are
+    /// marked unreachable (metric=0xFFFF) but NOT removed from the cache.
+    /// The best-path election picks a different peer, but the routes stay
+    /// in the cache. When the IHU comes back, the routes' metrics are
+    /// recomputed and they may win again. No mass retract → re-learn cycle.
+    #[test]
+    fn ihu_infinity_marks_unreachable_without_removing() {
+        let mut c = BabelRouteCache::new();
+        c.update(route(v6(3), 1, 0, 1));
+        c.update(route(v6(4), 1, 0, 1));
+        // v6(3) is the incumbent.
+        let mut keep = BTreeMap::new();
+        keep.insert(dest_of(&route(v6(1), 1, 0, 1).key), v6(3));
+        // v6(3)'s IHU flips to INFINITY.
+        assert!(c.mark_neighbor_unreachable(v6(3)));
+        // Election: v6(3)'s routes are INFINITY, so v6(4) wins.
+        let chosen = c.best_routes(&keep);
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].neighbor, v6(4));
+        // But v6(3)'s routes are still in the cache (not retracted).
+        assert_eq!(c.len(), 2, "unreachable routes stay in the cache");
+        // When v6(3)'s IHU comes back, set_neighbor_cost recomputes.
+        assert!(c.set_neighbor_cost(v6(3), 96));
+        // Election again: both have metric 96, incumbent (v6(4)) stays.
+        let mut keep2 = BTreeMap::new();
+        keep2.insert(dest_of(&route(v6(1), 1, 0, 1).key), v6(4));
+        let chosen2 = c.best_routes(&keep2);
+        assert_eq!(chosen2.len(), 1);
+        assert_eq!(chosen2[0].neighbor, v6(4), "incumbent stays after recovery");
     }
 
     #[test]
