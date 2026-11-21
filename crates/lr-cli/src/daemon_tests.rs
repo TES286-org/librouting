@@ -1389,6 +1389,92 @@ mod babel_retraction_tests {
             "the AE 4 Update carries the v6 NextHop it needs"
         );
     }
+
+    /// Every announcement datagram must fit the IPv6 minimum MTU so
+    /// the first frame (Hello/IHU + originated routes) is never
+    /// fragmented on a 1420-octet tunnel. The production failure: a
+    /// 1490-octet first frame was fragmented, the fragments were lost,
+    /// BIRD's Hello history expired (IHU rxcost 65535) and BIRD sent
+    /// Route Requests for lr's own prefixes while the small trailing
+    /// frames kept arriving.
+    #[test]
+    fn large_announcement_stays_under_the_ipv6_minimum_mtu() {
+        let mut r = DefaultRouter::new();
+        let s0 = r
+            .add_session(SessionConfig::babel(IpAddr::V4([127, 0, 0, 2])))
+            .unwrap();
+        r.start_session(s0).unwrap();
+        let s1 = r
+            .add_session(SessionConfig::babel(IpAddr::V6([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ])))
+            .unwrap();
+        r.start_session(s1).unwrap();
+        for i in 0..200u16 {
+            r.feed_input(
+                s0,
+                &peer_frame(ORIGIN, [10, 99, i as u8], i.wrapping_add(1), 96),
+            )
+            .expect("a well-formed daemon-shaped frame");
+        }
+        assert_eq!(r.babel_reachable(s1).len(), 200);
+
+        let mut iface = v6_loopback_iface(s1, 16_696);
+        let packets = build_babel_announcement(
+            &r,
+            &mut iface,
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            0,
+            None,
+            None,
+        );
+        assert!(
+            packets.len() > 1,
+            "200 routes must split across multiple datagrams"
+        );
+        for (idx, pkt) in packets.iter().enumerate() {
+            // 1280 (IPv6 minimum MTU) = 40 (IPv6) + 8 (UDP) + 4
+            // (Babel header) + 1228 (body). The encoder returns the
+            // Babel datagram (4-byte header + body), so the bound is
+            // 1280 - 48 = 1232.
+            assert!(
+                pkt.len() <= 1232,
+                "packet {idx} is {} bytes; the first frame must not fragment",
+                pkt.len()
+            );
+        }
+        let first = lr_babel::BabelCodec::new()
+            .decode_slice(&packets[0])
+            .expect("the first packet decodes")
+            .expect("one whole frame");
+        assert!(
+            first.body.iter().any(|t| t.kind == TlvType::Hello),
+            "the first datagram carries the Hello"
+        );
+        assert!(
+            first.body.iter().any(|t| t.kind == TlvType::Ihu),
+            "the first datagram carries the IHU"
+        );
+        // No packet may strand an Update without the Router-Id that
+        // owns it.
+        for (idx, pkt) in packets.iter().enumerate() {
+            let decoded = lr_babel::BabelCodec::new()
+                .decode_slice(pkt)
+                .expect("a packet decodes")
+                .expect("one whole frame");
+            let mut have_router_id = false;
+            for tlv in &decoded.body {
+                match tlv.kind {
+                    TlvType::RouterId => have_router_id = true,
+                    TlvType::Update => assert!(
+                        have_router_id,
+                        "packet {idx}: Update without a preceding Router-Id"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 /// `rtt_send` (BIRD `rtt send yes` / FRR `babel enable-timestamps`)

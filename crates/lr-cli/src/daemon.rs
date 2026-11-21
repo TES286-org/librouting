@@ -7488,6 +7488,19 @@ fn babel_announcement_signature(router: &DefaultRouter, iface: &BabelIface) -> S
     parts.join("|")
 }
 
+/// The Babel body budget that keeps every datagram under the IPv6
+/// minimum MTU (RFC 8200 §5: 1280 octets). A Babel datagram is 4
+/// (Babel header) + body; the UDP and IPv6 headers add 48, so a
+/// 1228-octet body yields a 1280-octet packet. RFC 8966 §4 permits up
+/// to 1496, but tunnel interfaces commonly run a 1420-octet MTU, and
+/// fragmenting the first frame loses the Hello/IHU and the
+/// router-originated Updates on peers that do not reassemble tunnel
+/// fragments — the production churn where BIRD sent Route Requests
+/// for lr's own prefixes and its Hello history expired. Staying under
+/// the IPv6 minimum MTU avoids fragmentation on every conforming
+/// link.
+const BABEL_SAFE_BODY_LENGTH: usize = 1228;
+
 /// Build one periodic announcement datagram for one interface:
 /// Hello + IHU + Router-Id + Next-Hop + Updates.
 ///
@@ -7838,14 +7851,17 @@ fn build_babel_announcement(
     // Update with the right source and next hop. The Hello and IHU
     // stay in the first frame.
     //
-    // 1496 = 1500 (RFC 8966 §4 UDP payload cap) − 4 (babel header).
-    // Encode each packed frame into its own exactly-sized buffer so a
-    // single oversized TLV (which should not exist — Babel TLV values
-    // are capped at 255 octets) surfaces as an error instead of a
-    // silent empty-payload send.
+    // RFC 8966 §4 allows a 1496-octet body, but the datagram must also
+    // fit the path MTU. `BABEL_SAFE_BODY_LENGTH` keeps the total IPv6
+    // packet at the 1280-octet minimum, so no first frame is
+    // fragmented behind the Hello/IHU on a 1420-MTU tunnel. Encode each
+    // packed frame into its own exactly-sized buffer so a single
+    // oversized TLV (which should not exist — Babel TLV values are
+    // capped at 255 octets) surfaces as an error instead of a silent
+    // empty-payload send.
     let codec = lr_babel::BabelCodec::new();
     codec
-        .pack_frames(&frame, lr_babel::MAX_BODY_LENGTH)
+        .pack_frames(&frame, BABEL_SAFE_BODY_LENGTH)
         .into_iter()
         .map(|f| codec.encode_vec_sized(&f))
         .collect::<Result<Vec<_>, _>>()
