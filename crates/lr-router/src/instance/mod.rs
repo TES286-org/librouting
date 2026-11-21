@@ -2567,7 +2567,7 @@ impl DefaultRouter {
                         stats: session_stats,
                         ..
                     } => {
-                        let heard = !runtime.neighbor.hello_history.is_empty();
+                        let heard = runtime.neighbor.hello_cnt > 0;
                         SessionSummary {
                             handle: SessionHandle(*id),
                             kind: "babel",
