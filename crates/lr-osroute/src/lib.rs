@@ -247,6 +247,23 @@ pub struct KernelRoute {
     pub protocol: Protocol,
 }
 
+/// The kernel's answer to a FIB lookup (`ip route get <addr>`): the
+/// egress interface and, when the destination is behind a gateway, the
+/// resolved underlay gateway. A recursive protocol next hop —
+/// an iBGP/MP-BGP next hop reachable only through an IGP route, or an
+/// IPv4 prefix over an IPv6 next hop (RFC 5549) — must be resolved
+/// before the FIB row can be installed; the kernel's own recursive
+/// lookup does that for the *route being added* only when the gateway
+/// is directly reachable, so the mirror asks explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedNexthop {
+    /// Output interface index (`RTA_OIF`).
+    pub if_index: u32,
+    /// Resolved gateway (`RTA_GATEWAY` / `RTA_VIA`); `None` when the
+    /// destination is directly connected.
+    pub gateway: Option<IpAddr>,
+}
+
 /// Trait abstracting the OS routing table. Implementors are responsible for
 /// platform-specific syscall details.
 #[cfg(feature = "std")]
@@ -319,6 +336,23 @@ pub trait OsRouteTable {
 
     /// Dump all routes currently in the kernel FIB.
     fn list_routes(&mut self) -> Result<Vec<KernelRoute>, Self::Error>;
+
+    /// True when [`resolve_nexthop`](Self::resolve_nexthop) is backed
+    /// by a real FIB lookup. Callers use this to distinguish "the
+    /// backend cannot answer" (`false`, keep the pre-resolution
+    /// behaviour) from "the backend answered but there is no route"
+    /// (`true` + `None`, retry once the underlay converges).
+    fn resolves_nexthops(&self) -> bool {
+        false
+    }
+
+    /// Resolve `addr` through the kernel FIB — the rtnetlink
+    /// `RTM_GETROUTE` / `ip route get <addr>` lookup. Returns `None`
+    /// when no route exists; the caller may retry later. Implemented
+    /// on Linux; other backends inherit the default.
+    fn resolve_nexthop(&mut self, _addr: IpAddr) -> Result<Option<ResolvedNexthop>, Self::Error> {
+        Ok(None)
+    }
 
     /// Convenience: does the kernel currently have a route to this prefix?
     fn has_route(&mut self, prefix: Prefix) -> Result<bool, Self::Error> {

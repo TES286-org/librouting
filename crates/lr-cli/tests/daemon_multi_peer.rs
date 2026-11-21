@@ -378,3 +378,84 @@ fn per_peer_hold_time_reaches_the_session() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A per-peer `import_filter` must not affect routes learned from any
+/// other neighbor (BIRD/FRR scope import policy per neighbor). The
+/// regression this guards against: one receive-only peer (a
+/// FlapAlerted-style collector with `reject;`) used to install its
+/// filter on the router-wide import chain, so every other peer's
+/// routes were silently discarded — the Loc-RIB stayed empty and
+/// nothing was re-advertised.
+#[test]
+fn per_peer_import_filter_does_not_affect_other_peers() {
+    let dir =
+        std::env::temp_dir().join(format!("lr-daemon-mp-filter-scope-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_b = 18511u16;
+    let port_c = 18512u16;
+
+    // B originates a prefix; C is a plain listener and never sends
+    // anything. A's C peer carries the receive-only filter.
+    let b = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.2",
+            "--listen",
+            &format!("127.0.0.1:{port_b}"),
+            "--local-address",
+            "192.0.2.2",
+            "--network",
+            "198.51.100.0/24",
+            "--ebgp-policy",
+            "accept-all",
+        ],
+        "filter-scope-b",
+    );
+    wait_log_all(&b.log, &["listening on"]);
+    let c = Daemon::spawn(
+        &[
+            "--local-as",
+            "64514",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.3",
+            "--listen",
+            &format!("127.0.0.1:{port_c}"),
+            "--ebgp-policy",
+            "accept-all",
+        ],
+        "filter-scope-c",
+    );
+    wait_log_all(&c.log, &["listening on"]);
+
+    let conf = dir.join("a.toml");
+    std::fs::write(
+        &conf,
+        format!(
+            "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
+             ebgp_policy = \"accept-all\"\nlocal_address = \"192.0.2.1\"\n\n\
+             [[filter]]\nname = \"receive-only\"\nbody = \"reject;\"\n\n\
+             [[peer]]\nname = \"b\"\nremote = \"127.0.0.1:{port_b}\"\npeer_as = 64513\n\n\
+             [[peer]]\nname = \"c\"\nremote = \"127.0.0.1:{port_c}\"\npeer_as = 64514\n\
+             import_filter = \"receive-only\"\n"
+        ),
+    )
+    .unwrap();
+    let a = Daemon::spawn(&["--config", conf.to_str().unwrap()], "filter-scope-a");
+    wait_log_all(
+        &a.log,
+        &["session #1 → Established", "session #2 → Established"],
+    );
+
+    // B's route enters A's Loc-RIB despite C's reject-all filter, and
+    // A re-advertises it to C (which accepts it).
+    wait_log_all(&a.log, &["route installed 198.51.100.0/24"]);
+    wait_log_all(&c.log, &["route installed 198.51.100.0/24"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

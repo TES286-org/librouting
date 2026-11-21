@@ -495,6 +495,15 @@ impl FilterContext for DaemonFilterContext {
 /// A BGP-style import hook wrapping a compiled DSL filter. Routes
 /// matching `accept` are kept; `reject` drops them; `fallthrough`
 /// defers to the next hook in the chain.
+///
+/// A configured peer's import filter applies only to routes learned
+/// from that peer's sessions (BIRD `protocol bgp { import filter ... }`
+/// / FRR `neighbor X route-map ... in`). [`sessions`](Self::sessions)
+/// binds the hook to the router session handles that peer owns — a
+/// bidirectional neighbor has two (outbound + inbound challenger), and
+/// both share the same configured filter. `None` is the router-wide
+/// form used by the built-in ROA validation hook, which intentionally
+/// runs for every BGP session.
 pub(crate) struct FilterImportHook {
     pub filter: DslFilter,
     /// Precompiled bytecode: built once at hook
@@ -507,13 +516,24 @@ pub(crate) struct FilterImportHook {
     /// `Instant::now()` calls) is opt-in so the hot path stays free
     /// of observability cost when nobody is scraping.
     pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
+    /// Router sessions this filter is bound to. `None` means the hook
+    /// applies to every session (the router-wide ROA validation hook).
+    pub sessions: Option<std::collections::BTreeSet<u64>>,
 }
 
-impl lr_policy::hooks::ImportHook for FilterImportHook {
-    fn name(&self) -> &str {
-        &self.filter.name
+impl FilterImportHook {
+    /// True when this hook must evaluate `route`. A bound hook ignores
+    /// routes from every session outside its peer binding instead of
+    /// rejecting them — an import filter on one neighbor must never
+    /// become an implicit global filter.
+    fn applies_to(&self, route: &lr_core::rib::Route) -> bool {
+        match &self.sessions {
+            Some(sessions) => sessions.contains(&route.origin.peer),
+            None => true,
+        }
     }
-    fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+
+    fn evaluate(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
         match &self.stats {
             Some(hist) => {
                 let t0 = std::time::Instant::now();
@@ -528,6 +548,18 @@ impl lr_policy::hooks::ImportHook for FilterImportHook {
                 self.ctx.as_ref(),
             )),
         }
+    }
+}
+
+impl lr_policy::hooks::ImportHook for FilterImportHook {
+    fn name(&self) -> &str {
+        &self.filter.name
+    }
+    fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        if !self.applies_to(route) {
+            return lr_policy::hooks::HookVerdict::Keep;
+        }
+        self.evaluate(route)
     }
 }
 
@@ -544,6 +576,15 @@ fn map_verdict(result: EvalResult) -> lr_policy::hooks::HookVerdict {
 
 /// A BGP-style export hook wrapping a compiled DSL filter. Same
 /// semantics as [`FilterImportHook`] but on the outbound side.
+///
+/// Like the import hook, a per-peer export filter is bound to the
+/// router sessions that peer owns via [`sessions`](Self::sessions).
+/// The router dispatches egress through
+/// [`ExportHook::on_export_to`](lr_policy::hooks::ExportHook::on_export_to),
+/// which carries the destination session id; a bound hook ignores
+/// every other destination instead of reusing one neighbor's export
+/// policy on the whole router. `None` keeps the destination-agnostic
+/// behaviour for embedders that install a global export filter.
 pub(crate) struct FilterExportHook {
     pub filter: DslFilter,
     /// See [`FilterImportHook::compiled`].
@@ -551,13 +592,20 @@ pub(crate) struct FilterExportHook {
     pub ctx: std::sync::Arc<DaemonFilterContext>,
     /// See [`FilterImportHook::stats`].
     pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
+    /// Router sessions this filter is bound to. `None` applies to every
+    /// destination.
+    pub sessions: Option<std::collections::BTreeSet<u64>>,
 }
 
-impl lr_policy::hooks::ExportHook for FilterExportHook {
-    fn name(&self) -> &str {
-        &self.filter.name
+impl FilterExportHook {
+    fn applies_to(&self, destination: u64) -> bool {
+        match &self.sessions {
+            Some(sessions) => sessions.contains(&destination),
+            None => true,
+        }
     }
-    fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+
+    fn evaluate(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
         match &self.stats {
             Some(hist) => {
                 let t0 = std::time::Instant::now();
@@ -572,6 +620,32 @@ impl lr_policy::hooks::ExportHook for FilterExportHook {
                 self.ctx.as_ref(),
             )),
         }
+    }
+}
+
+impl lr_policy::hooks::ExportHook for FilterExportHook {
+    fn name(&self) -> &str {
+        &self.filter.name
+    }
+    fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        // The destination-agnostic entry point cannot know which peer
+        // this route is headed to. A bound filter must not evaluate
+        // against an unrelated destination, so it stays out of the way;
+        // an unbound (global) filter evaluates exactly as before.
+        if self.sessions.is_some() {
+            return lr_policy::hooks::HookVerdict::Keep;
+        }
+        self.evaluate(route)
+    }
+    fn on_export_to(
+        &self,
+        route: &mut lr_core::rib::Route,
+        destination: u64,
+    ) -> lr_policy::hooks::HookVerdict {
+        if !self.applies_to(destination) {
+            return lr_policy::hooks::HookVerdict::Keep;
+        }
+        self.evaluate(route)
     }
 }
 

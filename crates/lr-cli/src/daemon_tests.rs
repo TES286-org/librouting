@@ -527,7 +527,7 @@ mod kernel_mirror_tests {
     use super::*;
     use lr_core::attr::Attributes;
     use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
-    use lr_osroute::{KernelRoute, OsRouteError, OsRouteTable};
+    use lr_osroute::{KernelRoute, OsRouteError, OsRouteTable, ResolvedNexthop};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Operation {
@@ -656,6 +656,155 @@ mod kernel_mirror_tests {
                 Operation::Delete(route.key.prefix)
             );
         }
+    }
+
+    /// A recursive next hop that the FIB cannot resolve yet is parked
+    /// and retried; once the underlay route exists the install goes
+    /// through the resolved gateway/interface. This is the BGP-full-
+    /// table-before-Babel startup race.
+    #[test]
+    fn unresolved_next_hop_is_deferred_and_retried() {
+        struct RetryTable {
+            operations: Arc<Mutex<Vec<Operation>>>,
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl OsRouteTable for RetryTable {
+            type Error = OsRouteError;
+            fn resolves_nexthops(&self) -> bool {
+                true
+            }
+            fn resolve_nexthop(
+                &mut self,
+                _addr: IpAddr,
+            ) -> Result<Option<ResolvedNexthop>, Self::Error> {
+                // First lookup: the underlay is not there yet.
+                if self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    == 0
+                {
+                    return Ok(None);
+                }
+                Ok(Some(ResolvedNexthop {
+                    if_index: 7,
+                    gateway: Some(IpAddr::V6([
+                        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4,
+                    ])),
+                }))
+            }
+            fn add_route(
+                &mut self,
+                prefix: Prefix,
+                next_hop: IpAddr,
+                if_index: u32,
+            ) -> Result<(), Self::Error> {
+                self.add_route_tagged_prefsrc(prefix, next_hop, if_index, Protocol::Bgp, None)
+            }
+            fn add_route_tagged_prefsrc(
+                &mut self,
+                prefix: Prefix,
+                next_hop: IpAddr,
+                if_index: u32,
+                _protocol: Protocol,
+                prefsrc: Option<IpAddr>,
+            ) -> Result<(), Self::Error> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(Operation::Add(prefix, next_hop, if_index, prefsrc));
+                Ok(())
+            }
+            fn add_blackhole_route(&mut self, _prefix: Prefix) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            fn delete_route(&mut self, _prefix: Prefix) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            fn list_routes(&mut self) -> Result<Vec<KernelRoute>, Self::Error> {
+                Ok(Vec::new())
+            }
+        }
+
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut mirror = KernelMirror::with_ip_table(Box::new(RetryTable {
+            operations: Arc::clone(&operations),
+            calls: Arc::clone(&calls),
+        }));
+        let route = route(Protocol::Bgp, 1);
+        let prefix = route.key.prefix;
+        mirror.apply(&[RouterEvent::RouteInstalled(route)]);
+        assert!(
+            operations.lock().unwrap().is_empty(),
+            "unresolved next hop must not reach add_route"
+        );
+        assert_eq!(mirror.pending.len(), 1);
+
+        mirror.retry_pending();
+        let ops = operations.lock().unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            ops[0],
+            Operation::Add(
+                prefix,
+                IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]),
+                7,
+                None
+            )
+        );
+        assert!(mirror.pending.is_empty());
+    }
+
+    /// A withdrawal cancels a deferred install — the prefix must not
+    /// reappear in the FIB when the underlay later converges.
+    #[test]
+    fn withdrawal_cancels_a_deferred_install() {
+        struct NeverResolves {
+            adds: Arc<Mutex<usize>>,
+        }
+        impl OsRouteTable for NeverResolves {
+            type Error = OsRouteError;
+            fn resolves_nexthops(&self) -> bool {
+                true
+            }
+            fn resolve_nexthop(
+                &mut self,
+                _addr: IpAddr,
+            ) -> Result<Option<ResolvedNexthop>, Self::Error> {
+                Ok(None)
+            }
+            fn add_route(
+                &mut self,
+                _prefix: Prefix,
+                _next_hop: IpAddr,
+                _if_index: u32,
+            ) -> Result<(), Self::Error> {
+                *self.adds.lock().unwrap() += 1;
+                Ok(())
+            }
+            fn add_blackhole_route(&mut self, _prefix: Prefix) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            fn delete_route(&mut self, _prefix: Prefix) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            fn list_routes(&mut self) -> Result<Vec<KernelRoute>, Self::Error> {
+                Ok(Vec::new())
+            }
+        }
+
+        let adds = Arc::new(Mutex::new(0usize));
+        let mut mirror = KernelMirror::with_ip_table(Box::new(NeverResolves {
+            adds: Arc::clone(&adds),
+        }));
+        let route = route(Protocol::Bgp, 1);
+        let key = route.key.clone();
+        mirror.apply(&[RouterEvent::RouteInstalled(route)]);
+        assert_eq!(mirror.pending.len(), 1);
+        mirror.apply(&[RouterEvent::RouteWithdrawn(key)]);
+        assert!(mirror.pending.is_empty());
+        mirror.retry_pending();
+        assert_eq!(*adds.lock().unwrap(), 0);
     }
 
     /// A blackhole static route (next_hop = None, protocol = Static)

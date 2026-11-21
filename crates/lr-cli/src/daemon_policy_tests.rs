@@ -132,6 +132,7 @@ fn filter_hook_records_latency() {
         filter: f,
         ctx,
         stats: Some(std::sync::Arc::clone(&hist)),
+        sessions: None,
     };
 
     let mut route = Route {
@@ -155,6 +156,85 @@ fn filter_hook_records_latency() {
     other.key.prefix = lr_core::addr::Prefix::new_v4([198, 51, 100, 0], 24);
     assert!(matches!(hook.on_import(&mut other), HookVerdict::Drop));
     assert_eq!(hist.count(), 2, "second evaluation recorded");
+}
+
+/// One test route owned by `peer`.
+fn scoped_route(peer: u64, prefix: [u8; 4]) -> lr_core::rib::Route {
+    lr_core::rib::Route {
+        key: lr_core::rib::RouteKey::new(
+            lr_core::addr::Prefix::new_v4(prefix, 24),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        ),
+        origin: lr_core::rib::RouteOrigin { proto: 0, peer },
+        protocol: lr_core::rib::Protocol::Bgp,
+        preference: lr_core::rib::Preference::new(20, 100),
+        next_hop: None,
+        attributes: lr_core::attr::Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+/// A per-peer import filter runs only on routes from that peer's
+/// sessions. The regression this guards against: a receive-only
+/// neighbor's `reject;` filter used to be installed globally and
+/// dropped every route learned from every other neighbor.
+#[test]
+fn import_filter_is_scoped_to_its_peer_sessions() {
+    use lr_policy::hooks::{HookVerdict, ImportHook};
+
+    let f = dsl::compile("receive-only", "reject;").unwrap();
+    let ctx = std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::new(
+        lr_bgp::RoaStore::new(),
+    )));
+    let hook = FilterImportHook {
+        compiled: lr_policy::filter::bytecode::compile(&f),
+        filter: f,
+        ctx,
+        stats: None,
+        sessions: Some(std::collections::BTreeSet::from([7u64])),
+    };
+
+    let mut from_bound = scoped_route(7, [192, 0, 2, 0]);
+    assert!(matches!(hook.on_import(&mut from_bound), HookVerdict::Drop));
+    let mut from_other = scoped_route(8, [198, 51, 100, 0]);
+    assert!(matches!(hook.on_import(&mut from_other), HookVerdict::Keep));
+}
+
+/// A per-peer export filter runs only for egress to that peer's
+/// sessions. The router dispatches with the destination session id;
+/// other destinations must not inherit the filter's verdict.
+#[test]
+fn export_filter_is_scoped_to_its_peer_sessions() {
+    use lr_policy::hooks::{ExportHook, HookVerdict};
+
+    let f = dsl::compile("receive-only", "reject;").unwrap();
+    let ctx = std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::new(
+        lr_bgp::RoaStore::new(),
+    )));
+    let hook = FilterExportHook {
+        compiled: lr_policy::filter::bytecode::compile(&f),
+        filter: f,
+        ctx,
+        stats: None,
+        sessions: Some(std::collections::BTreeSet::from([7u64])),
+    };
+
+    let mut to_bound = scoped_route(1, [203, 0, 113, 0]);
+    assert!(matches!(
+        hook.on_export_to(&mut to_bound, 7),
+        HookVerdict::Drop
+    ));
+    let mut to_other = scoped_route(1, [203, 0, 113, 0]);
+    assert!(matches!(
+        hook.on_export_to(&mut to_other, 8),
+        HookVerdict::Keep
+    ));
+    // Destination-agnostic dispatch cannot identify a bound peer, so
+    // the hook stays out of the way instead of guessing.
+    let mut unknown = scoped_route(1, [203, 0, 113, 0]);
+    assert!(matches!(hook.on_export(&mut unknown), HookVerdict::Keep));
 }
 
 /// Babel filter lookup: a named filter declared in `[[filter]]`

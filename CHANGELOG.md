@@ -155,6 +155,37 @@ like `install_kernel`); BGP/OSPF daemons keep the connected import on.
 
 ### Fixed
 
+**Per-peer import/export filters are scoped to their neighbor**
+(`lr-cli`). A DSL filter bound to one `[[peer]]` was installed on the
+router-wide hook chain, so one receive-only neighbor's `reject;` import
+filter discarded every route learned from every other peer: the Loc-RIB
+stayed empty, nothing was re-advertised, and BGP appeared to receive
+UPDATEs without installing or forwarding them. `FilterImportHook` now
+evaluates only routes whose `origin.peer` is one of the configured
+peer's session handles (both directions of a bidirectional neighbor),
+and `FilterExportHook` implements the destination-aware
+`on_export_to` dispatch the router already provides. The built-in ROA
+validation hook keeps its intentional router-wide scope.
+
+**Kernel installs resolve recursive next hops through the FIB**
+(`lr-cli`, `lr-osroute`). A BGP next hop that is reachable only through
+an IGP/Babel route (or an IPv4 prefix over an IPv6 gateway, RFC 5549)
+was handed to `RTM_NEWROUTE` unresolved and rejected with
+`EHOSTUNREACH`/`ENETUNREACH`, leaving the Loc-RIB populated but the
+kernel table unchanged. The mirror now performs an `RTM_GETROUTE`
+lookup (`ip route get`), installs through the resolved underlay
+gateway and output interface, and retries deferred installs on its
+idle tick — a full table that races the IGP underlay now converges
+without waiting for the peer to re-advertise every prefix.
+
+**Multi-protocol `show roa` / `lr_roa_entries` see the live table**
+(`lr-cli`). Each embedded engine built a private `RoaStore` while the
+shared runtime kept `None`, so the loader reported thousands of entries
+in the log but `lrctl roa list` printed `roa-total 0` and Babel filters
+evaluated `roa.state` against an empty snapshot. The multi-protocol
+supervisor now creates the router-wide store, the BGP engine's loaders
+populate it, and the Babel engine shares it.
+
 **Babel announces that exceed the 1496-octet datagram cap are now
 split across multiple UDP datagrams** (`lr-babel`, `lr-cli`,
 [issue #101](https://github.com/TES286-org/librouting/issues/101)).

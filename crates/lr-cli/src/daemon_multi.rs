@@ -283,6 +283,12 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     let live_sessions = Arc::new(AtomicUsize::new(0));
     let status = MultiStatus::new();
     let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
+    // The ROA table is router-wide: the BGP engine's loaders populate
+    // it asynchronously and the Babel filters read the same snapshot.
+    // Creating it here (instead of each engine making a private store)
+    // also lets the runtime API's `show roa` and the `lr_roa_entries`
+    // metric see the live table.
+    let roa_store = Arc::new(lr_bgp::RoaStore::new());
     let runtime = Arc::new(crate::Runtime {
         event_bus: lr_router::event_bus::EventBus::new(),
         kernel_mirror: std::sync::OnceLock::new(),
@@ -322,8 +328,11 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             let status = Arc::clone(&status);
             move || status.lines()
         }),
-        roa_len: None,
-        roa_store: None,
+        roa_len: Some(Arc::new({
+            let roa_store = Arc::clone(&roa_store);
+            move || roa_store.len()
+        })),
+        roa_store: Some(Arc::clone(&roa_store)),
         peer_health_table: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),

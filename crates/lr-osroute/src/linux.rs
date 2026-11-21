@@ -37,7 +37,7 @@
 //! `netlink-sys`. The actual send/recv loop is platform-specific; this is a
 //! *reference* implementation and not a production-grade rtnetlink library.
 
-use crate::{KernelRoute, OsRouteError, OsRouteTable};
+use crate::{KernelRoute, OsRouteError, OsRouteTable, ResolvedNexthop};
 use lr_core::addr::{IpAddr, Prefix};
 use lr_core::rib::Protocol;
 
@@ -615,6 +615,36 @@ impl OsRouteTable for RtNetlink {
         check_ack_idempotent_delete(&resp)
     }
 
+    fn resolves_nexthops(&self) -> bool {
+        true
+    }
+
+    /// Resolve one address through the kernel FIB (`ip route get`).
+    /// Recursive protocol next hops (an iBGP next hop reachable only
+    /// through an IGP route, or an IPv4 prefix over an IPv6 gateway)
+    /// need the resolved underlay gateway and output interface before
+    /// `RTM_NEWROUTE` can succeed — the kernel's add-time recursive
+    /// lookup only covers a directly reachable gateway.
+    fn resolve_nexthop(&mut self, addr: IpAddr) -> Result<Option<ResolvedNexthop>, Self::Error> {
+        let (family, dst, dst_len) = match addr {
+            IpAddr::V4(b) => (AF_INET, b.to_vec(), 32u8),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec(), 128u8),
+        };
+        let attributes = Self::build_rta_attribute(RTA_DST, &dst);
+        let buf = self.build_request(
+            RTM_GETROUTE,
+            NLM_F_REQUEST,
+            family,
+            dst_len,
+            0,
+            0,
+            0,
+            &attributes,
+        );
+        let resp = self.sendmsg_and_recv(&buf)?;
+        parse_getroute_response(&resp, addr)
+    }
+
     fn list_routes(&mut self) -> Result<Vec<KernelRoute>, Self::Error> {
         let buf = self.build_request(
             RTM_GETROUTE,
@@ -712,6 +742,88 @@ fn parse_dump_response(resp: &[u8]) -> Result<Vec<KernelRoute>, OsRouteError> {
         }
     }
     Ok(out)
+}
+
+/// Parse a single `RTM_GETROUTE` lookup reply (`ip route get <addr>`).
+/// `queried` supplies the address family for decoding `RTA_GATEWAY`
+/// (the kernel sizes that attribute by the lookup family). `RTA_VIA`
+/// carries a cross-family gateway and its payload names its own
+/// family. A negative `NLMSG_ERROR` (e.g. ENETUNREACH) means the
+/// kernel has no route — reported as `Ok(None)` so the caller can
+/// fall back to its pre-resolution behaviour.
+fn parse_getroute_response(
+    resp: &[u8],
+    queried: IpAddr,
+) -> Result<Option<ResolvedNexthop>, OsRouteError> {
+    if resp.len() < 16 {
+        return Err(OsRouteError(format!(
+            "rtnetlink: short getroute reply (len={})",
+            resp.len()
+        )));
+    }
+    let nlmsg_type = u16::from_ne_bytes([resp[4], resp[5]]);
+    if nlmsg_type == NLMSG_ERROR {
+        if resp.len() < 20 {
+            return Err(OsRouteError(format!(
+                "rtnetlink: short getroute error (len={})",
+                resp.len()
+            )));
+        }
+        // nlmsgerr.error is a negative errno; zero is a plain ACK.
+        return Ok(None);
+    }
+    if nlmsg_type != RTM_NEWROUTE || resp.len() < 28 {
+        return Ok(None);
+    }
+    let mut if_index = 0u32;
+    let mut gateway = None;
+    let mut cursor = 28;
+    while cursor + 4 <= resp.len() {
+        let rta_len = u16::from_ne_bytes([resp[cursor], resp[cursor + 1]]) as usize;
+        let rta_type = u16::from_ne_bytes([resp[cursor + 2], resp[cursor + 3]]);
+        if rta_len < 4 || cursor + rta_len > resp.len() {
+            break;
+        }
+        let data = &resp[cursor + 4..cursor + rta_len];
+        match rta_type {
+            RTA_OIF if data.len() >= 4 => {
+                if_index = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+            }
+            RTA_GATEWAY => match queried {
+                IpAddr::V4(_) if data.len() >= 4 => {
+                    gateway = Some(IpAddr::V4([data[0], data[1], data[2], data[3]]));
+                }
+                IpAddr::V6(_) if data.len() >= 16 => {
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&data[..16]);
+                    gateway = Some(IpAddr::V6(bytes));
+                }
+                _ => {}
+            },
+            RTA_VIA if data.len() >= 2 => {
+                // `struct rtvia`: 2-byte host-order family + address.
+                let family = u16::from_ne_bytes([data[0], data[1]]);
+                let addr = &data[2..];
+                match family {
+                    f if f == u16::from(AF_INET) && addr.len() >= 4 => {
+                        gateway = Some(IpAddr::V4([addr[0], addr[1], addr[2], addr[3]]));
+                    }
+                    f if f == u16::from(AF_INET6) && addr.len() >= 16 => {
+                        let mut bytes = [0u8; 16];
+                        bytes.copy_from_slice(&addr[..16]);
+                        gateway = Some(IpAddr::V6(bytes));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        cursor += (rta_len + 3) & !3;
+    }
+    if if_index == 0 {
+        return Ok(None);
+    }
+    Ok(Some(ResolvedNexthop { if_index, gateway }))
 }
 
 fn check_ack(resp: &[u8]) -> Result<(), OsRouteError> {
@@ -1125,6 +1237,68 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].next_hop, Some(nh));
         assert_eq!(routes[0].protocol, Protocol::Other(u16::from(RTPROT_BABEL)));
+    }
+
+    /// `RTM_GETROUTE` for an IPv4 next hop behind an IPv6 underlay
+    /// gateway returns `RTA_OIF` + `RTA_VIA` (AF_INET6). The mirror
+    /// must hand the resolved v6 gateway and interface to the FIB
+    /// install; without this a v4 route over an RFC 5549 next hop is
+    /// rejected with EHOSTUNREACH.
+    #[test]
+    fn parse_getroute_reads_oif_and_via_gateway() {
+        let gw = IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
+        let mut payload = vec![0u8; 12];
+        payload[0] = AF_INET;
+        payload[1] = 32;
+        payload[7] = RTN_UNICAST;
+        payload.extend_from_slice(&RtNetlink::build_rta_attribute(
+            RTA_OIF,
+            &187u32.to_ne_bytes(),
+        ));
+        payload.extend_from_slice(&RtNetlink::build_gateway_attribute(AF_INET, gw));
+        let resolved = parse_getroute_response(
+            &nlmsg(RTM_NEWROUTE, &payload),
+            IpAddr::V4([172, 23, 10, 97]),
+        )
+        .unwrap()
+        .expect("lookup resolved");
+        assert_eq!(resolved.if_index, 187);
+        assert_eq!(resolved.gateway, Some(gw));
+    }
+
+    /// A directly connected destination has an `RTA_OIF` but no
+    /// gateway; the caller keeps the original next hop as an on-link
+    /// gateway on that interface.
+    #[test]
+    fn parse_getroute_direct_destination_has_no_gateway() {
+        let mut payload = vec![0u8; 12];
+        payload[0] = AF_INET6;
+        payload[1] = 128;
+        payload[7] = RTN_UNICAST;
+        payload.extend_from_slice(&RtNetlink::build_rta_attribute(
+            RTA_OIF,
+            &9u32.to_ne_bytes(),
+        ));
+        let resolved = parse_getroute_response(
+            &nlmsg(RTM_NEWROUTE, &payload),
+            IpAddr::V6([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+        )
+        .unwrap()
+        .expect("lookup resolved");
+        assert_eq!(resolved.if_index, 9);
+        assert_eq!(resolved.gateway, None);
+    }
+
+    /// No route to the queried address arrives as a negative
+    /// NLMSG_ERROR; the mirror falls back to its pre-resolution
+    /// install path instead of failing the whole event.
+    #[test]
+    fn parse_getroute_no_route_is_none() {
+        let resp = nlmsg(NLMSG_ERROR, &(-113i32).to_ne_bytes()); // EHOSTUNREACH
+        assert_eq!(
+            parse_getroute_response(&resp, IpAddr::V4([192, 0, 2, 1])).unwrap(),
+            None
+        );
     }
 
     #[test]

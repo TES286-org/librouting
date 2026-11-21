@@ -1567,7 +1567,18 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         Ok(t) => t,
         Err(e) => return daemon_policy::policy_error(e),
     };
-    let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::new());
+    // Embedded (multi-protocol) mode shares the supervisor's router-wide
+    // store so `show roa` / `lr_roa_entries` see the loader-populated
+    // table and the Babel filters validate against the same snapshot.
+    // Standalone BGP keeps its own store.
+    let roa_store = match &host {
+        Some(h) => h
+            .runtime
+            .roa_store
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(lr_bgp::RoaStore::new())),
+        None => std::sync::Arc::new(lr_bgp::RoaStore::new()),
+    };
     // Advanced ROA loading: the inline `[[roa]]` tables
     // and the per-source loader threads share one `RoaLayerRegistry`.
     // The registry recomputes the union (deduplicated, sorted) and
@@ -1640,6 +1651,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     stats: filter_registry
                         .as_mut()
                         .map(|r| r.register(metrics::FilterDirection::Import, "__roa_validate")),
+                    // RFC 6811 validation is router-wide: it must run
+                    // for every BGP session, not just one peer.
+                    sessions: None,
                 };
                 let mut r = router.write().unwrap();
                 r.hooks_mut().import.push(Box::new(hook));
@@ -1668,6 +1682,16 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             let Some(session) = entries.get(idx) else {
                 continue;
             };
+            // A per-peer filter belongs to this neighbor's sessions
+            // only. Bidirectional peers own two router sessions (the
+            // outbound transport and the inbound collision challenger)
+            // — both share the configured policy. Without this binding
+            // the hook chain would apply one neighbor's filter to every
+            // route on the router (BIRD/FRR import/export filters are
+            // per-neighbor).
+            let peer_sessions: std::collections::BTreeSet<u64> = core::iter::once(session.handle.0)
+                .chain(session.handle_in.iter().map(|h| h.0))
+                .collect();
             if let Some(name) = &peer.import_filter {
                 let Some(f) = by_name.get(name.as_str()) else {
                     return daemon_policy::policy_error(format!(
@@ -1682,8 +1706,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     stats: filter_registry
                         .as_mut()
                         .map(|r| r.register(metrics::FilterDirection::Import, name)),
+                    sessions: Some(peer_sessions.clone()),
                 };
-                let _ = session.handle.0;
                 {
                     let mut r = router.write().unwrap();
                     r.hooks_mut().import.push(Box::new(hook));
@@ -1704,6 +1728,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     stats: filter_registry
                         .as_mut()
                         .map(|r| r.register(metrics::FilterDirection::Export, name)),
+                    sessions: Some(peer_sessions),
                 };
                 {
                     let mut r = router.write().unwrap();
@@ -4453,6 +4478,7 @@ impl KernelMirrorThread {
             .name("lr-kernel-mirror".into())
             .spawn(move || {
                 let mut mirror = KernelMirror::new(install_kernel, kernel_filter, prefsrc);
+                let mut last_retry = WallClock::now();
                 loop {
                     match rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(ev) => mirror.apply(std::slice::from_ref(&ev)),
@@ -4465,6 +4491,13 @@ impl KernelMirrorThread {
                                 // queue still held events at the last
                                 // wake — loop once more.
                                 continue;
+                            }
+                            // Deferred installs (next hop not in the FIB
+                            // yet) are retried once a second — a BGP full
+                            // table can race the IGP/Babel underlay.
+                            if last_retry.elapsed() >= Duration::from_secs(1) {
+                                mirror.retry_pending();
+                                last_retry = WallClock::now();
                             }
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -4785,6 +4818,12 @@ struct KernelMirror {
     /// connected row for a prefix whose Loc-RIB entry was replaced by
     /// a learned path.
     installed: std::collections::HashSet<Prefix>,
+    /// Installs whose next hop had no FIB route yet (`ENETUNREACH`) —
+    /// typically a BGP full table arriving before the IGP/Babel underlay
+    /// has converged (or while the underlay is re-converging). The route
+    /// is retried on the mirror thread's idle timer; a withdrawal drops
+    /// the pending entry.
+    pending: HashMap<Prefix, (IpAddr, lr_core::rib::Protocol)>,
     /// Locally originated in-labels currently installed, keyed by
     /// prefix — `RouteWithdrawn` carries only the key, so the tail half
     /// needs this side table to know which label to delete.
@@ -4932,6 +4971,7 @@ impl KernelMirror {
             kernel_filter,
             prefsrc,
             installed: std::collections::HashSet::new(),
+            pending: HashMap::new(),
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -4968,6 +5008,7 @@ impl KernelMirror {
             kernel_filter,
             prefsrc: KernelPrefsrc::default(),
             installed: std::collections::HashSet::new(),
+            pending: HashMap::new(),
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -4975,10 +5016,149 @@ impl KernelMirror {
         }
     }
 
+    /// Install one plain (non-blackhole, non-LSP) route through the
+    /// resolved underlay gateway. An unresolved next hop — no FIB route
+    /// yet, or `ENETUNREACH` on the add — is parked in
+    /// [`pending`](Self::pending) and retried by
+    /// [`retry_pending`](Self::retry_pending).
+    fn install_plain(&mut self, prefix: Prefix, nh: IpAddr, protocol: lr_core::rib::Protocol) {
+        // The kernel-owned guard: a learned route for a prefix the
+        // kernel holds as *connected* must not replace the on-link row
+        // — see `KernelMirror::connected`.
+        if self.connected.contains(&prefix) {
+            log_info!(
+                Component::Osroute,
+                "mirror: keeping kernel connected route {} over learned route via {}",
+                prefix,
+                nh
+            );
+            return;
+        }
+        // The egress interface the protocol pinned for this next hop
+        // (link-local v6 gateways are interface-scoped by definition;
+        // v4-in-v6 Babel next hops are on-link only on the session's
+        // interface — see NEXTHOP_OIFS). 0 means unresolved: BGP/OSPF
+        // next hops are usually reachable only through an IGP route
+        // (or are a v4 prefix over a v6 gateway, RFC 5549), which the
+        // kernel cannot resolve at add time. Ask the FIB explicitly,
+        // like BIRD's recursive BGP next-hop resolution, and install
+        // through the resolved underlay gateway and interface.
+        let mut nh = nh;
+        let mut oif = nexthop_oif(&nh);
+        // BIRD `krt_prefsrc` (BIRD `protocol kernel`'s export filter
+        // sets `krt_prefsrc = MAIN_V4/MAIN_V6` on every FIB row) — the
+        // daemon stamps its configured local address instead; see
+        // [`KernelPrefsrc`].
+        let prefsrc = self.prefsrc.for_prefix(&prefix);
+        let Some(table) = self.ip_table.as_mut() else {
+            return;
+        };
+        if oif == 0 && table.resolves_nexthops() {
+            match table.resolve_nexthop(nh) {
+                Ok(Some(resolved)) if resolved.if_index != 0 => {
+                    // Program the underlay gateway the kernel itself
+                    // would use; the original protocol next hop is no
+                    // longer needed by the FIB.
+                    if let Some(gw) = resolved.gateway {
+                        nh = gw;
+                    }
+                    oif = resolved.if_index;
+                }
+                Ok(_) => {
+                    // Underlay not converged yet (a BGP full table can
+                    // arrive before the IGP/Babel routes that make its
+                    // next hop reachable). Defer instead of dropping.
+                    log_debug!(
+                        Component::Osroute,
+                        "mirror: deferring {}: no FIB route to next hop {}",
+                        prefix,
+                        nh
+                    );
+                    self.pending.insert(prefix, (nh, protocol));
+                    return;
+                }
+                Err(e) => {
+                    log_debug!(
+                        Component::Osroute,
+                        "mirror: deferring {}: next-hop lookup for {} failed ({})",
+                        prefix,
+                        nh,
+                        e
+                    );
+                    self.pending.insert(prefix, (nh, protocol));
+                    return;
+                }
+            }
+        }
+        match table.add_route_tagged_prefsrc(prefix, nh, oif, protocol, prefsrc) {
+            Ok(()) => {
+                self.installed.insert(prefix);
+                let src = prefsrc
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "(none)".into());
+                log_info!(
+                    Component::Osroute,
+                    "mirror: route installed {} via {} oif {} src {} ({})",
+                    prefix,
+                    nh,
+                    oif,
+                    src,
+                    protocol.bird_name()
+                )
+            }
+            Err(e) => {
+                // EHOSTUNREACH / ENETUNREACH: retry once the underlay
+                // route exists. Any other error is a real configuration
+                // or permission problem and is reported immediately.
+                let text = e.to_string();
+                if text.contains("-113") || text.contains("-101") {
+                    log_debug!(
+                        Component::Osroute,
+                        "mirror: deferring {} via {}: {}",
+                        prefix,
+                        nh,
+                        text
+                    );
+                    self.pending.insert(prefix, (nh, protocol));
+                } else {
+                    log_error!(
+                        Component::Osroute,
+                        "mirror: route install failed for {} via {} oif {}: {}",
+                        prefix,
+                        nh,
+                        oif,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Retry the deferred installs. Called on the mirror thread's idle
+    /// tick so a BGP table that raced the IGP underlay converges without
+    /// waiting for the peer to re-advertise every prefix.
+    fn retry_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let retries: Vec<(Prefix, IpAddr, lr_core::rib::Protocol)> = self
+            .pending
+            .iter()
+            .map(|(prefix, (nh, protocol))| (*prefix, *nh, *protocol))
+            .collect();
+        for (prefix, nh, protocol) in retries {
+            self.pending.remove(&prefix);
+            self.install_plain(prefix, nh, protocol);
+        }
+    }
+
     fn apply(&mut self, events: &[RouterEvent]) {
         for ev in events {
             match ev {
                 RouterEvent::RouteInstalled(r) => {
+                    // A fresh best path supersedes any deferred install
+                    // for the same prefix (the next hop may have changed).
+                    self.pending.remove(&r.key.prefix);
                     // Connected routes are the kernel's own: interface
                     // assignment created them, and they enter the
                     // Loc-RIB only so `[[redistribute]] source =
@@ -5162,63 +5342,7 @@ impl KernelMirror {
                                 }
                             }
                         } else if let Some(nh) = r.next_hop {
-                            // The egress interface the protocol pinned for
-                            // this next hop (link-local v6 gateways are
-                            // interface-scoped by definition; v4-in-v6
-                            // Babel next hops are on-link only on the
-                            // session's interface — see NEXTHOP_OIFS).
-                            // 0 leaves the choice to the kernel, which is
-                            // right for ordinary recursive gateways.
-                            let oif = nexthop_oif(&nh);
-                            // BIRD `krt_prefsrc` (BIRD `protocol kernel`'s
-                            // export filter sets `krt_prefsrc = MAIN_V4/
-                            // MAIN_V6` on every FIB row) — the daemon
-                            // stamps its configured local address instead;
-                            // see [`KernelPrefsrc`].
-                            let prefsrc = self.prefsrc.for_prefix(&r.key.prefix);
-                            // The kernel-owned guard: a learned route for
-                            // a prefix the kernel holds as *connected*
-                            // must not replace the on-link row — see
-                            // `KernelMirror::connected`.
-                            if self.connected.contains(&r.key.prefix) {
-                                log_info!(
-                                    Component::Osroute,
-                                    "mirror: keeping kernel connected route {} over learned route via {}",
-                                    r.key.prefix, nh
-                                );
-                            } else if let Some(table) = self.ip_table.as_mut() {
-                                match table.add_route_tagged_prefsrc(
-                                    r.key.prefix,
-                                    nh,
-                                    oif,
-                                    r.protocol,
-                                    prefsrc,
-                                ) {
-                                    Ok(()) => {
-                                        self.installed.insert(r.key.prefix);
-                                        let src = prefsrc
-                                            .map(|a| a.to_string())
-                                            .unwrap_or_else(|| "(none)".into());
-                                        log_info!(
-                                            Component::Osroute,
-                                            "mirror: route installed {} via {} oif {} src {} ({})",
-                                            r.key.prefix,
-                                            nh,
-                                            oif,
-                                            src,
-                                            r.protocol.bird_name()
-                                        )
-                                    }
-                                    Err(e) => log_error!(
-                                        Component::Osroute,
-                                        "mirror: route install failed for {} via {} oif {}: {}",
-                                        r.key.prefix,
-                                        nh,
-                                        oif,
-                                        e
-                                    ),
-                                }
-                            }
+                            self.install_plain(r.key.prefix, nh, r.protocol);
                         }
                         // else: connected/aggregate route with no
                         // gateway and no blackhole marker — skip the
@@ -5228,6 +5352,9 @@ impl KernelMirror {
                     }
                 }
                 RouterEvent::RouteWithdrawn(k) => {
+                    // A deferred install for a withdrawn prefix must not
+                    // come back when the underlay recovers.
+                    self.pending.remove(&k.prefix);
                     // The mirror never installed a connected prefix
                     // (see the install arm), so a withdrawal for one —
                     // interface down, or a connected row replaced in
@@ -5797,7 +5924,18 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // In standalone Babel mode the store is empty — `roa.state`
     // returns `NotFound` for every prefix, which is the RFC 6811
     // §2-correct answer when no ROAs are configured.
-    let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::new());
+    // Embedded mode shares the supervisor's router-wide store (the BGP
+    // engine's loaders populate it); standalone Babel has no RPKI
+    // source, so its store stays empty and `roa.state` answers
+    // `NotFound` per RFC 6811 §2.
+    let roa_store = match &host {
+        Some(h) => h
+            .runtime
+            .roa_store
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(lr_bgp::RoaStore::new())),
+        None => std::sync::Arc::new(lr_bgp::RoaStore::new()),
+    };
     let babel_export_filter =
         match daemon_policy::build_babel_filter(cfg, &cfg.babel_export_filter, &roa_store) {
             Ok(f) => f,
