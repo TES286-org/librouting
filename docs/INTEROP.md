@@ -139,6 +139,7 @@ portable ones.
 | `babel_reinstall_churn.sh` | two lr speakers | regression: a byte-identical re-install does not re-emit `RouteInstalled` or re-touch the kernel mirror |
 | `babel_withdraw_reason.sh` | lr and BIRD | a wildcard retraction (§4.6.9) logs its real reason instead of the best-path-displacement fallback |
 | `babel_multi_nic.sh` | lr with `[[babel.interface]]` globs on a veth pair | interface enumeration and glob matching resolve each block to the right socket |
+| `babel_multi_packet_announce.sh` | lr and BIRD across two user namespaces | regression for the 1496-octet body cap: an announcement that overflows one datagram splits across multiple, no `babel [|babel]` truncations, BIRD learns every route |
 | `babel_router_id_e2e.sh` | two lr speakers with configured `--router-id` | the configured router id rides the wire as the 8-byte Router-Id TLV |
 | `babel_v6only_extended.sh` | lr over a v6-only tunnel | RFC 9229 extended next hop: v4 routes ride the v6 transport, inferred and explicit, and v4 blackhole statics survive |
 

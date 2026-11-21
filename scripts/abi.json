@@ -1728,6 +1728,87 @@
       ]
     },
     {
+      "name": "lr_babel_codec_pack_frames",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "c",
+          "type": "lr_babel_codec_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "frame",
+          "type": "lr_babel_frame_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "max_body_len",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out_array",
+          "type": "lr_babel_frame_array_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "lr_babel_frame_array_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_babel_frame_array_len",
+      "return_type": "uintptr_t",
+      "params": [
+        {
+          "name": "array",
+          "type": "lr_babel_frame_array_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_babel_frame_array_at",
+      "return_type": "lr_babel_frame_t",
+      "params": [
+        {
+          "name": "array",
+          "type": "lr_babel_frame_array_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "index",
+          "type": "uintptr_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_babel_frame_array_free",
+      "return_type": "void",
+      "params": [
+        {
+          "name": "array",
+          "type": "lr_babel_frame_array_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_babel_hello_new",
       "return_type": "lr_babel_hello_t",
       "params": [
@@ -38651,6 +38732,10 @@
       "c_struct": "OpaqueBabelRouteTable",
       "handle_name": "lr_babel_route_table_t"
     },
+    "lr_babel_frame_array_t": {
+      "c_struct": "OpaqueBabelFrameArray",
+      "handle_name": "lr_babel_frame_array_t"
+    },
     "lr_babel_hello_t": {
       "c_struct": "OpaqueBabelHello",
       "handle_name": "lr_babel_hello_t"
@@ -44768,6 +44853,41 @@
             "is_struct": false
           }
         ]
+      },
+      {
+        "name": "lr_babel_codec_pack_frames",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "c",
+            "type": "lr_babel_codec_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "frame",
+            "type": "lr_babel_frame_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "max_body_len",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out_array",
+            "type": "lr_babel_frame_array_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "lr_babel_frame_array_t"
+          }
+        ]
       }
     ],
     "lr_babel_tlv_t": [
@@ -45545,6 +45665,54 @@
           {
             "name": "r",
             "type": "lr_babel_route_table_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      }
+    ],
+    "lr_babel_frame_array_t": [
+      {
+        "name": "lr_babel_frame_array_len",
+        "return_type": "uintptr_t",
+        "params": [
+          {
+            "name": "array",
+            "type": "lr_babel_frame_array_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_babel_frame_array_at",
+        "return_type": "lr_babel_frame_t",
+        "params": [
+          {
+            "name": "array",
+            "type": "lr_babel_frame_array_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "index",
+            "type": "uintptr_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_babel_frame_array_free",
+        "return_type": "void",
+        "params": [
+          {
+            "name": "array",
+            "type": "lr_babel_frame_array_t",
             "is_const": false,
             "is_ptr": false,
             "is_struct": false

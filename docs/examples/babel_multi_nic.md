@@ -34,6 +34,16 @@ babel {
         rtt_min 10ms;      # 10000 us
         rtt_max 120ms;     # 120000 us
     }
+
+    # Measure RTT without applying a metric penalty (BIRD `rtt send yes`
+    # with `rtt cost 0`). Useful for monitoring and for a peer that
+    # sends timestamped Hellos — without rtt_send, the peer has nothing
+    # to echo and reports RTT 0.
+    interface "wg0" {
+        type "tunnel";
+        rxcost 192;
+        rtt_send true;
+    }
 }
 ```
 
@@ -63,7 +73,8 @@ any single character, `\` escapes the next character.
 | `hello_interval_ms` | duration | 1000 ms | Hello interval (RFC 8966 §3.1) |
 | `update_interval_ms` | duration | 3× hello | Multicast update interval |
 | `rxcost` | int | 96 | Receive cost advertised (§3.5.2) |
-| `rtt_cost` | int | 96 on `tunnel`, else 0 | RTT penalty (§A.2.4) |
+| `rtt_cost` | int | 96 on `tunnel`, else 0 | RTT metric penalty (§A.2.4) |
+| `rtt_send` | bool | `rtt_cost > 0` | Send BABEL-RTT timestamp sub-TLVs in Hellos and echo them in IHUs (BIRD `rtt send yes`, FRR `babel enable-timestamps`). Defaults to off when `rtt_cost` is 0; on when `rtt_cost > 0` so a config that only sets the penalty keeps working. Set `rtt_send true` to measure RTT without applying a metric penalty. |
 | `rtt_min` | duration | 10 ms | Lower RTT bound |
 | `rtt_max` | duration | 120 ms | Upper RTT bound |
 | `next_hop_ipv4` | string | interface address | Advertised IPv4 next hop |
@@ -85,8 +96,13 @@ Startup logs every pattern and every session:
 ```text
 daemon: babel 3 interface pattern(s) configured; enumerating 6 system interface(s)
 daemon: babel interface pattern 'eth*' matched 2 interface(s): eth0, eth1
-daemon: babel interface eth0 session 1 — v6 hello 4000ms update 12000ms rxcost 96 router-id 10.0.0.1 check-link
+daemon: babel interface eth0 session 1 — v6 hello 4000ms update 12000ms rxcost 96 router-id 10:0:0:1 rtt-send check-link
 ```
+
+The `rtt-send` tag appears when the interface attaches BABEL-RTT
+timestamp sub-TLVs to its Hellos (BIRD `rtt send yes`, FRR `babel
+enable-timestamps`). It is implicit when `rtt_cost > 0` and absent
+when both `rtt_send` and `rtt_cost` are unset/false.
 
 A pattern that matches nothing logs
 `daemon: babel interface pattern '...' matched 0 interfaces`. If no

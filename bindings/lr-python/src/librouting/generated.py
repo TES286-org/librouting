@@ -119,6 +119,52 @@ class BabelAck:
         return rc
 
 
+class BabelFrameArray:
+    """Low-level RAII wrapper around ``lr_babel_frame_array_t``.
+
+    Generated; prefer the hand-written wrappers in the other modules when they exist.
+    """
+
+    __slots__ = ("_ptr",)
+
+    def __init__(self, ptr):
+        self._ptr = ptr
+
+    @classmethod
+    def __wrap__(cls, ptr):
+        """Wrap an existing C handle without taking ownership of construction.
+        The handle is still freed by ``__del__``."""
+        return cls(ptr)
+
+    def free(self) -> None:
+        """Release the underlying ``lr_babel_frame_array_t`` handle."""
+        if getattr(self, "_ptr", None) is not None and self._ptr != ffi.NULL:
+            _lib.lr_babel_frame_array_free(self._ptr)
+            self._ptr = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
+    @property
+    def ptr(self):
+        """Return the raw CFFI pointer for direct C ABI access."""
+        return self._ptr
+
+    def len(self):
+        """Low-level wrapper for ``lr_babel_frame_array_len``. See ``include/lr_ffi.h``."""
+        return _lib.lr_babel_frame_array_len(self._ptr)
+
+    def at(self, index):
+        """Low-level wrapper for ``lr_babel_frame_array_at``. See ``include/lr_ffi.h``."""
+        p = _lib.lr_babel_frame_array_at(self._ptr, index)
+        if not p:
+            raise LrError(last_error())
+        return BabelFrame.__wrap__(p)
+
+
 class BabelHello:
     """Low-level RAII wrapper around ``lr_babel_hello_t``.
 

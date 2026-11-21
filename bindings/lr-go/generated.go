@@ -23,6 +23,31 @@ import (
 	"runtime"
 )
 
+type BabelFrameArray struct {
+	ptr C.lr_babel_frame_array_t
+}
+
+func (x *BabelFrameArray) destroy() {
+	if x != nil && x.ptr != nil {
+		C.lr_babel_frame_array_free(x.ptr)
+		x.ptr = nil
+	}
+}
+
+// Free releases the underlying lr_babel_frame_array_t handle. Safe to call multiple times.
+func (x *BabelFrameArray) Free() {
+	if x == nil {
+		return
+	}
+	runtime.SetFinalizer(x, nil)
+	x.destroy()
+}
+
+// Closed reports whether the handle has been freed.
+func (x *BabelFrameArray) Closed() bool {
+	return x == nil || x.ptr == nil
+}
+
 type BabelMacKey struct {
 	ptr C.lr_babel_mac_key_t
 }

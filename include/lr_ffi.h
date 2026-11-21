@@ -2212,6 +2212,21 @@ typedef struct OpaqueBabelRouteTable *lr_babel_route_table_t;
 typedef int32_t (*lr_babel_route_iter_cb)(lr_babel_route_t route, void *user);
 
 /**
+ * An opaque handle to an array of `lr_babel_frame_t` returned by
+ * [`lr_babel_codec_pack_frames`]. The array is heap-allocated by
+ * the Rust allocator; free it with
+ * [`lr_babel_frame_array_free`] when the caller is done with every
+ * element (each element must also be freed with
+ * [`crate::babel::lr_babel_frame_free`] if it was taken out of the
+ * array via [`lr_babel_frame_array_at`]).
+ */
+typedef struct OpaqueBabelFrameArray {
+  uint8_t _private[0];
+} OpaqueBabelFrameArray;
+
+typedef struct OpaqueBabelFrameArray *lr_babel_frame_array_t;
+
+/**
  * Opaque `Hello` handle (RFC 8966 §4.6.5).
  */
 typedef struct OpaqueBabelHello {
@@ -5418,6 +5433,48 @@ int32_t lr_babel_codec_encode_vec(lr_babel_codec_t c,
                                   struct lr_bytes_t *out);
 
 void lr_babel_codec_free(lr_babel_codec_t c);
+
+/**
+ * Split one logical announcement into packet-sized frames, each
+ * whose encoded body fits in `max_body_len` octets (RFC 8966 §4
+ * caps a Babel datagram body at 1500 − 4 = 1496). The Hello and
+ * IHU stay in the first frame; every trailing frame whose first
+ * payload TLV is an Update re-emits the most recent Router-Id and
+ * family-matching NextHop so the receiver applies the Update with
+ * the right source and next hop.
+ *
+ * `out_array` receives an opaque array handle. Query its length
+ * with [`lr_babel_frame_array_len`] and borrow element `i` with
+ * [`lr_babel_frame_array_at`]. Pass `max_body_len = 1496` for the
+ * RFC 8966 §4 default.
+ *
+ * Returns `0` on success, `LR_ERR_NULL` on a NULL pointer.
+ */
+int32_t lr_babel_codec_pack_frames(lr_babel_codec_t c,
+                                   lr_babel_frame_t frame,
+                                   uintptr_t max_body_len,
+                                   lr_babel_frame_array_t *out_array);
+
+/**
+ * The number of frames in a frame array returned by
+ * [`lr_babel_codec_pack_frames`]. Returns `0` if `array` is NULL.
+ */
+uintptr_t lr_babel_frame_array_len(lr_babel_frame_array_t array);
+
+/**
+ * Borrow element `index` of a frame array returned by
+ * [`lr_babel_codec_pack_frames`]. The returned `lr_babel_frame_t`
+ * is still owned by the array — do not free it separately. Returns
+ * NULL if `array` is NULL or `index` is out of bounds.
+ */
+lr_babel_frame_t lr_babel_frame_array_at(lr_babel_frame_array_t array, uintptr_t index);
+
+/**
+ * Free a frame array returned by [`lr_babel_codec_pack_frames`].
+ * Every element is freed with [`crate::babel::lr_babel_frame_free`]
+ * (the elements are owned by the array). NULL-safe.
+ */
+void lr_babel_frame_array_free(lr_babel_frame_array_t array);
 
 /**
  * Construct a `Hello` (RFC 8966 §4.6.5).

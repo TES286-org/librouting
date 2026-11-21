@@ -1144,6 +1144,7 @@ mod babel_retraction_tests {
             update_interval_ms: 3_000,
             rxcost: 96,
             rtt_cost: 0,
+            rtt_send: false,
             rtt_min_us: 10_000,
             rtt_max_us: 120_000,
             check_link: false,
@@ -1165,20 +1166,28 @@ mod babel_retraction_tests {
         }
     }
 
-    /// Updates and retractions in one decoded frame, as
+    /// Updates and retractions across one or more encoded packets, as
     /// `(metric, prefix-octets)` pairs in wire order.
-    fn update_metrics(frame: &[u8]) -> Vec<(u16, Vec<u8>)> {
-        let decoded = lr_babel::BabelCodec::new()
-            .decode_slice(frame)
-            .unwrap()
-            .expect("a whole frame");
+    ///
+    /// `build_babel_announcement` returns `Vec<Vec<u8>>` since the
+    /// multi-packet split landed: one logical announcement may span
+    /// several UDP datagrams (RFC 8966 §4 caps each at 1496 body
+    /// octets). This helper walks every packet so a retraction that
+    /// landed in a trailing frame is still counted.
+    fn update_metrics(packets: &[Vec<u8>]) -> Vec<(u16, Vec<u8>)> {
         let mut out = Vec::new();
-        for tlv in &decoded.body {
-            if tlv.kind == TlvType::Update && tlv.value.len() >= 10 {
-                let metric = u16::from_be_bytes([tlv.value[8], tlv.value[9]]);
-                let plen = tlv.value[2] as usize;
-                let pl = plen.div_ceil(8);
-                out.push((metric, tlv.value[10..10 + pl].to_vec()));
+        for pkt in packets {
+            let decoded = match lr_babel::BabelCodec::new().decode_slice(pkt) {
+                Ok(Some(f)) => f,
+                _ => continue,
+            };
+            for tlv in &decoded.body {
+                if tlv.kind == TlvType::Update && tlv.value.len() >= 10 {
+                    let metric = u16::from_be_bytes([tlv.value[8], tlv.value[9]]);
+                    let plen = tlv.value[2] as usize;
+                    let pl = plen.div_ceil(8);
+                    out.push((metric, tlv.value[10..10 + pl].to_vec()));
+                }
             }
         }
         out
@@ -1280,6 +1289,187 @@ mod babel_retraction_tests {
             "the retraction is not repeated forever: {:?}",
             update_metrics(&followup)
         );
+    }
+}
+
+/// `rtt_send` (BIRD `rtt send yes` / FRR `babel enable-timestamps`)
+/// controls whether the interface attaches BABEL-RTT timestamp
+/// sub-TLVs to its Hellos and echoes them in its IHUs. `rtt_cost > 0`
+/// is the metric penalty; before this split, the daemon conflated the
+/// two and an operator who set `rtt_cost > 0` got timestamps whether
+/// they wanted them or not, while an operator who set neither got
+/// `rtt 0.000 ms` against a BIRD peer that DID send timestamps — the
+/// production complaint that "rtt is 0 even though the peer is
+/// sending timestamped Hellos".
+#[cfg(test)]
+mod babel_rtt_send_tests {
+    use super::*;
+    use crate::daemon_config::{BabelInterfaceSpec, DaemonConfig};
+    use lr_core::addr::IpAddr;
+    use lr_osroute::ospf_transport::InterfaceEntry;
+
+    /// Build a minimal `BabelIface` from a spec + entry, exercising
+    /// the same `babel_iface_from_spec` path the daemon uses at
+    /// startup. The entry uses 127.0.0.1 so the transport binds on
+    /// every platform without needing a configured veth pair.
+    fn iface_from_spec(spec: &BabelInterfaceSpec) -> BabelIface {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.babel_interfaces.push(spec.clone());
+        let _ = cfg.finalize();
+        let entry = InterfaceEntry {
+            name: "lo".into(),
+            v4: vec![std::net::Ipv4Addr::new(127, 0, 0, 1)],
+            v6: vec![],
+            up: true,
+            running: true,
+        };
+        babel_iface_from_spec(&cfg, spec, &entry, [1, 2, 3, 4, 5, 6, 7, 8])
+            .expect("a well-formed spec resolves")
+    }
+
+    fn spec() -> BabelInterfaceSpec {
+        BabelInterfaceSpec {
+            name: Some("lo".into()),
+            kind: Some("wired".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Default: `rtt_cost` unset (0) and `rtt_send` unset →
+    /// `rtt_send` resolves to false. No timestamps on the wire.
+    #[test]
+    fn rtt_send_defaults_off_when_rtt_cost_unset() {
+        let iface = iface_from_spec(&spec());
+        assert_eq!(iface.rtt_cost, 0);
+        assert!(
+            !iface.rtt_send,
+            "rtt_send stays off when neither flag is set"
+        );
+    }
+
+    /// `rtt_cost > 0` implies `rtt_send = true`. A config that only
+    /// sets the penalty must not also need to set the send flag to
+    /// get measurements.
+    #[test]
+    fn rtt_cost_implies_rtt_send() {
+        let mut s = spec();
+        s.rtt_cost = Some(96);
+        let iface = iface_from_spec(&s);
+        assert_eq!(iface.rtt_cost, 96);
+        assert!(
+            iface.rtt_send,
+            "rtt_cost > 0 must imply rtt_send so the penalty has a measurement to work on"
+        );
+    }
+
+    /// `rtt_send = true` alone enables timestamps without applying a
+    /// metric penalty — the operator wants to *measure* RTT (e.g. for
+    /// monitoring) without making it influence route selection. This
+    /// matches BIRD's `rtt send yes` with `rtt cost 0`.
+    #[test]
+    fn rtt_send_true_enables_timestamps_without_metric_penalty() {
+        let mut s = spec();
+        s.rtt_send = Some(true);
+        let iface = iface_from_spec(&s);
+        assert_eq!(iface.rtt_cost, 0);
+        assert!(iface.rtt_send, "rtt_send = true enables timestamps");
+    }
+
+    /// `rtt_send = false` with `rtt_cost > 0` overrides the implicit
+    /// enable. The operator explicitly does not want timestamps even
+    /// though a penalty is configured (unusual but supported).
+    #[test]
+    fn rtt_send_false_overrides_rtt_cost_implicit_enable() {
+        let mut s = spec();
+        s.rtt_cost = Some(96);
+        s.rtt_send = Some(false);
+        let iface = iface_from_spec(&s);
+        assert_eq!(iface.rtt_cost, 96);
+        assert!(
+            !iface.rtt_send,
+            "explicit rtt_send = false overrides rtt_cost's implicit enable"
+        );
+    }
+
+    /// `build_babel_announcement` honours `rtt_send` (not
+    /// `rtt_cost > 0`) for the Hello timestamp sub-TLV. An interface
+    /// with `rtt_send = true` and `rtt_cost = 0` still attaches the
+    /// sub-TLV.
+    #[test]
+    fn build_announcement_attaches_hello_timestamp_when_rtt_send() {
+        let mut s = spec();
+        s.rtt_send = Some(true);
+        let mut iface = iface_from_spec(&s);
+        iface.hello_seqno = 7;
+        let r = DefaultRouter::new();
+        let packets = build_babel_announcement(
+            &r,
+            &mut iface,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            0x1234_5678,
+            None,
+            None,
+        );
+        assert!(!packets.is_empty());
+        let decoded = lr_babel::BabelCodec::new()
+            .decode_slice(&packets[0])
+            .unwrap()
+            .expect("a whole frame");
+        let hello_tlv = decoded
+            .body
+            .iter()
+            .find(|t| t.kind == lr_babel::tlv::TlvType::Hello)
+            .expect("a Hello TLV in the first packet");
+        let hello = lr_babel::message::Hello::decode(&hello_tlv.value).unwrap();
+        assert_eq!(
+            hello.timestamp,
+            Some(0x1234_5678),
+            "rtt_send attaches the BABEL-RTT timestamp sub-TLV to the Hello"
+        );
+    }
+
+    /// `build_babel_announcement` does NOT attach the Hello timestamp
+    /// when `rtt_send` is false, even if `rtt_cost > 0` would have
+    /// triggered it under the old conflated gating.
+    #[test]
+    fn build_announcement_omits_hello_timestamp_when_rtt_send_off() {
+        let mut s = spec();
+        s.rtt_cost = Some(96);
+        s.rtt_send = Some(false);
+        let mut iface = iface_from_spec(&s);
+        iface.hello_seqno = 7;
+        let r = DefaultRouter::new();
+        let packets = build_babel_announcement(
+            &r,
+            &mut iface,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            0x1234_5678,
+            None,
+            None,
+        );
+        assert!(!packets.is_empty());
+        let decoded = lr_babel::BabelCodec::new()
+            .decode_slice(&packets[0])
+            .unwrap()
+            .expect("a whole frame");
+        let hello_tlv = decoded
+            .body
+            .iter()
+            .find(|t| t.kind == lr_babel::tlv::TlvType::Hello)
+            .expect("a Hello TLV in the first packet");
+        let hello = lr_babel::message::Hello::decode(&hello_tlv.value).unwrap();
+        assert_eq!(
+            hello.timestamp, None,
+            "rtt_send = false suppresses the timestamp sub-TLV"
+        );
+    }
+
+    /// Suppress an unused-import warning for `IpAddr` — it is used by
+    /// `babel_iface_from_spec` callers elsewhere but not directly in
+    /// this module's tests yet.
+    #[allow(dead_code)]
+    fn _ip_addr_anchor() -> IpAddr {
+        IpAddr::V4([0; 4])
     }
 }
 
