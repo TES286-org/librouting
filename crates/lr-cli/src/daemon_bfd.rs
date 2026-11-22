@@ -414,12 +414,6 @@ impl BfdSupervisor {
         }
     }
 
-    /// Whether the loop thread is running (i.e. at least one peer was
-    /// ever supervised).
-    pub(crate) fn is_running(&self) -> bool {
-        self.tx.is_some()
-    }
-
     /// The timer triple new sessions start with (and the last one
     /// `update_timers` applied).
     pub(crate) fn min_tx_ms(&self) -> u32 {
@@ -547,28 +541,6 @@ fn supervisor_main(
     run_poll_loop(&mut state, &cmd_rx, &running, &start);
 
     log_info!(Component::Bfd, "bfd supervisor stopped");
-}
-
-/// Start the BFD supervisor thread with an initial peer set. Returns
-/// the liveness flags aligned with `specs`. Fails closed: if any
-/// socket cannot be bound the daemon must not run with BFD silently
-/// absent.
-pub(crate) fn spawn_supervisor(
-    specs: Vec<BfdPeerSpec>,
-    min_tx_ms: u32,
-    min_rx_ms: u32,
-    detect_mult: u8,
-    running: Arc<AtomicBool>,
-) -> Result<Vec<BfdFlags>, String> {
-    if specs.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut supervisor = BfdSupervisor::new(min_tx_ms, min_rx_ms, detect_mult, running);
-    let mut flags = Vec::with_capacity(specs.len());
-    for spec in specs {
-        flags.push(supervisor.add_peer(spec)?);
-    }
-    Ok(flags)
 }
 
 /// Fallback poll cadence for the Windows poll-and-sleep loop and for
@@ -1097,7 +1069,6 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let running_weak = Arc::downgrade(&running);
         let mut supervisor = BfdSupervisor::new(100, 100, 3, Arc::clone(&running));
-        assert!(!supervisor.is_running(), "lazy: no thread before a peer");
 
         let spec = BfdPeerSpec {
             label: "membership-test".into(),
@@ -1111,7 +1082,6 @@ mod tests {
         let flags = supervisor
             .add_peer(spec)
             .expect("add_peer starts the session");
-        assert!(supervisor.is_running(), "thread spawned on first peer");
         assert!(
             !flags.up.load(Ordering::Relaxed),
             "session starts Down (loopback may feed it later, the flag read here races)"
@@ -1183,19 +1153,19 @@ mod tests {
     fn mio_loop_exits_promptly_on_running_false() {
         let running = Arc::new(AtomicBool::new(true));
         let running_weak = Arc::downgrade(&running);
-        let flags = spawn_supervisor(
-            vec![BfdPeerSpec {
+        let mut supervisor = BfdSupervisor::new(100, 100, 3, Arc::clone(&running));
+        let flags = [supervisor
+            .add_peer(BfdPeerSpec {
                 label: "test-peer".into(),
                 peer_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
                 local_ip: IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
                 mode: BfdMode::SingleHop,
-            }],
-            100,
-            100,
-            3,
-            Arc::clone(&running),
-        )
-        .expect("spawn_supervisor");
+            })
+            .expect("add_peer")];
+        // Drop the handle first: it holds its own Arc clone of
+        // `running`, so the strong-count check below would never
+        // reach 1 while the handle is alive.
+        drop(supervisor);
         // Give the supervisor a moment to enter the mio loop and the
         // watcher thread to start polling. The session may or may not
         // reach Up (the loopback tx→rx path can self-feed if the

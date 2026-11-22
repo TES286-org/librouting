@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use lr_bgp::error::BgpCeaseSubcode;
 use lr_core::addr::RouterId;
 use lr_osroute::tcp_auth::TcpAuth;
-use lr_router::{DefaultRouter, RouterInstance, SessionHandle};
+use lr_router::{DefaultRouter, RouterInstance};
 
 #[cfg(feature = "exchange-plane")]
 use super::wire_exchange_plane;
@@ -58,10 +58,10 @@ use super::{
     PeerEntry, PeerRegistry, Runtime,
 };
 use crate::bgp_reactor;
+use crate::bind_tcp_reuse;
 use crate::daemon_bfd::{self, BfdFlags};
 use crate::daemon_config::{DaemonConfig, PeerSpec};
 use crate::daemon_policy::{self, LivePolicyState, SharedPolicyState};
-use crate::{bind_tcp_reuse, Component};
 
 /// Upper bound on waiting for a stopped connector thread to acknowledge
 /// its exit: the sleep slices are ≤100 ms, the dial timeout 5 s, the
@@ -312,6 +312,21 @@ impl BgpReloadContext {
         subcode: BgpCeaseSubcode,
         lines: &mut Vec<String>,
     ) {
+        self.stop_peer_sessions_inner(entry, subcode, lines, true)
+    }
+
+    /// [`Self::stop_peer_sessions`] with the removal choice: `false`
+    /// (the FRR `neighbor X shutdown` toggle) quiesces the peer — the
+    /// live transports close with the Cease and the FSMs go Idle, but
+    /// the router session objects stay so a later `shutdown = false`
+    /// re-arms the same handles instead of dangling them.
+    fn stop_peer_sessions_inner(
+        &self,
+        entry: &PeerEntry,
+        subcode: BgpCeaseSubcode,
+        lines: &mut Vec<String>,
+        remove: bool,
+    ) {
         // 1. Stop the connector: no new dials race the teardown.
         entry.stop.store(true, Ordering::Relaxed);
         // 2. Graceful slot teardown — queues the Cease NOTIFICATION,
@@ -346,10 +361,13 @@ impl BgpReloadContext {
         }
         // 4. Remove the router sessions: Adj-RIB-In purge, bookkeeping
         //    teardown, best-path re-selection and withdrawal
-        //    propagation to the surviving peers.
-        let mut r = self.router.write().unwrap();
-        for handle in [Some(entry.handle), entry.handle_in].into_iter().flatten() {
-            let _ = r.remove_session(handle);
+        //    propagation to the surviving peers. The quiesce path
+        //    skips this — the session objects stay for the re-arm.
+        if remove {
+            let mut r = self.router.write().unwrap();
+            for handle in [Some(entry.handle), entry.handle_in].into_iter().flatten() {
+                let _ = r.remove_session(handle);
+            }
         }
     }
 
@@ -792,12 +810,15 @@ impl BgpReloadContext {
                 (false, true) => {
                     // FRR `neighbor X shutdown`: close the live
                     // sessions with the shutdown Cease and stop the
-                    // connector; the entry stays (admin-down).
+                    // connector; the entry and its router sessions
+                    // stay (quiesced) so a later `shutdown = false`
+                    // re-arms the same handles.
                     if let Some(entry) = &entry_now {
-                        self.stop_peer_sessions(
+                        self.stop_peer_sessions_inner(
                             entry,
                             BgpCeaseSubcode::AdministrativeShutdown,
                             &mut lines,
+                            false,
                         );
                     }
                     lines.push(format!(
@@ -861,21 +882,40 @@ impl BgpReloadContext {
             .map_err(|e| format!("policy: {e}"))?;
             state.install(&self.policy);
             if policy_sections_changed {
+                // Re-apply the inbound policy without bouncing a
+                // single session, FRR `clear soft in` semantics: a
+                // peer with `soft_reconfig_inbound` re-imports from
+                // its pre-policy snapshot; every other peer gets an
+                // RFC 2918 ROUTE-REFRESH so the peer re-advertises
+                // through the fresh filter.
                 let mut reconfigured = 0;
+                let mut refreshed = 0;
                 {
                     let mut r = self.router.write().unwrap();
                     let registry = self.registry.read().unwrap();
                     for entry in registry.iter() {
+                        let soft = entry.spec.soft_reconfig_inbound.unwrap_or(false);
                         for hh in [Some(entry.handle), entry.handle_in].into_iter().flatten() {
-                            if r.soft_reconfig_inbound(hh).is_ok() {
-                                reconfigured += 1;
+                            if soft {
+                                if r.soft_reconfig_inbound(hh).is_ok_and(|n| n > 0) {
+                                    reconfigured += 1;
+                                }
+                            } else if r
+                                .request_route_refresh(hh, lr_core::nlri::NlriFamily::IPV4_UNICAST)
+                                || r.request_route_refresh(
+                                    hh,
+                                    lr_core::nlri::NlriFamily::IPV6_UNICAST,
+                                )
+                            {
+                                refreshed += 1;
                             }
                         }
                     }
                 }
                 lines.push(format!(
-                    "reload: policy recompiled ({} session(s) soft-reconfigured)",
-                    reconfigured
+                    "reload: policy recompiled ({} session(s) soft-reconfigured, \
+                     {} route-refreshed)",
+                    reconfigured, refreshed
                 ));
             }
         }
@@ -1018,12 +1058,14 @@ fn policy_config_changed(current: &DaemonConfig, fresh: &DaemonConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lr_router::SessionHandle;
 
     fn spec(remote: Option<&str>, address: Option<&str>) -> PeerSpec {
-        let mut p = PeerSpec::default();
-        p.remote = remote.map(str::to_string);
-        p.address = address.map(str::to_string);
-        p
+        PeerSpec {
+            remote: remote.map(str::to_string),
+            address: address.map(str::to_string),
+            ..PeerSpec::default()
+        }
     }
 
     fn entry_of(spec: PeerSpec) -> PeerEntry {
@@ -1100,11 +1142,15 @@ mod tests {
     #[test]
     fn plan_classifies_add_remove_and_listener() {
         let base = DaemonConfig::default();
-        let mut fresh = DaemonConfig::default();
-        fresh.listen_addr = Some("0.0.0.0:179".into());
-        let mut keep_spec = spec(Some("10.0.0.1:179"), None);
-        keep_spec.peer_as = 65001;
-        fresh.peers = vec![keep_spec.clone(), spec(None, Some("10.0.0.2"))];
+        let keep_spec = PeerSpec {
+            peer_as: 65001,
+            ..spec(Some("10.0.0.1:179"), None)
+        };
+        let fresh = DaemonConfig {
+            listen_addr: Some("0.0.0.0:179".into()),
+            peers: vec![keep_spec.clone(), spec(None, Some("10.0.0.2"))],
+            ..DaemonConfig::default()
+        };
         let plan = plan_peer_reload(
             &[entry_of(keep_spec)],
             &fresh,

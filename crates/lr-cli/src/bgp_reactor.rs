@@ -551,6 +551,8 @@ fn reactor_main(
                                     bfd,
                                     on_end,
                                 },
+                                &mut read_buf,
+                                now_ms,
                             );
                         }
                         Submission::Listener { listener: l, gate } => {
@@ -563,6 +565,26 @@ fn reactor_main(
                                 continue;
                             }
                             listener = Some(ListenerSlot { mio, gate });
+                            // Edge-trigger fix, listener half: a peer
+                            // can complete its TCP handshake between
+                            // the daemon's bind and this registration;
+                            // the queued connection produces no
+                            // edge. One accept pass drains it (the
+                            // common case costs one EAGAIN accept).
+                            if let Some(ls) = listener.as_mut() {
+                                if running.load(Ordering::Relaxed) {
+                                    accept_batch(
+                                        ls,
+                                        &mut slots,
+                                        &mut free,
+                                        &registry,
+                                        &router,
+                                        &mut read_buf,
+                                        &mut accept_backoff_until,
+                                        now_ms,
+                                    );
+                                }
+                            }
                         }
                         Submission::Close {
                             handle,
@@ -635,6 +657,7 @@ fn reactor_main(
                             &router,
                             &mut read_buf,
                             &mut accept_backoff_until,
+                            now_ms,
                         );
                     }
                 }
@@ -739,6 +762,8 @@ fn register_session(
     registry: &Registry,
     router: &Arc<RwLock<DefaultRouter>>,
     parts: SessionParts,
+    read_buf: &mut [u8; READ_BUF],
+    now_ms: u64,
 ) {
     let SessionParts {
         stream: mio_stream,
@@ -821,6 +846,19 @@ fn register_session(
         return;
     }
     slots[index] = Some(slot);
+    // Edge-trigger fix: the peer's bytes (its OPEN, on a fast
+    // loopback or a loaded host) can arrive between connect()/accept()
+    // and this registration. mio arms READABLE edge-triggered, and an
+    // EPOLL_CTL_ADD does not fire for data that is already queued —
+    // the session would sit in OpenSent until the hold timer kills
+    // it. One pump pass right after registration drains any pending
+    // bytes; the common case costs one immediately-EGAIN read.
+    let Some(slot) = slots[index].as_mut() else {
+        return;
+    };
+    if let PumpOutcome::End(end) = pump_readable(slot, router, read_buf, now_ms) {
+        teardown(slots, free, registry, router, index, end);
+    }
 }
 
 /// Drain the listener's accept queue: accept until `WouldBlock`, and
@@ -829,6 +867,7 @@ fn register_session(
 /// queue off for [`ACCEPT_ERROR_BACKOFF`] — the listener stays
 /// registered and level-triggered, so its events are simply skipped
 /// until the deadline passes, without spinning the reactor.
+#[allow(clippy::too_many_arguments)]
 fn accept_batch(
     ls: &mut ListenerSlot,
     slots: &mut Vec<Option<Slot>>,
@@ -837,8 +876,8 @@ fn accept_batch(
     router: &Arc<RwLock<DefaultRouter>>,
     read_buf: &mut [u8],
     accept_backoff_until: &mut Option<Instant>,
+    now_ms: u64,
 ) {
-    let _ = read_buf;
     if let Some(until) = *accept_backoff_until {
         if Instant::now() < until {
             return;
@@ -871,6 +910,13 @@ fn accept_batch(
                             bfd,
                             on_end,
                         },
+                        {
+                            let buf: &mut [u8; READ_BUF] = read_buf
+                                .try_into()
+                                .expect("accept_batch receives the READ_BUF buffer");
+                            buf
+                        },
+                        now_ms,
                     ),
                     // The gate refused the connection (it logged the
                     // reason); dropping the stream closes the TCP.

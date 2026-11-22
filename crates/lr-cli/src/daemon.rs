@@ -8669,18 +8669,6 @@ fn dispatch_pending_signals(rt: &Runtime) {
     }
 }
 
-/// Sleep in small slices so signals (shutdown / reload) are noticed
-/// within ~100 ms even during long reconnect backoffs.
-fn sleep_interruptible(rt: &Runtime, total: Duration) {
-    let mut remaining = total;
-    while !remaining.is_zero() && rt.running.load(Ordering::Relaxed) {
-        let chunk = remaining.min(Duration::from_millis(100));
-        thread::sleep(chunk);
-        remaining -= chunk;
-        dispatch_signals(rt);
-    }
-}
-
 /// [`sleep_interruptible`] plus the per-peer reload stop flag: a
 /// connector whose peer was removed or replaced by a configuration
 /// reload exits within one 100 ms slice instead of sleeping out its
@@ -8896,6 +8884,7 @@ pub(crate) fn network_reload_state(cfg: &DaemonConfig) -> NetworkReloadState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reload_config(
     path: Option<&str>,
     dialect: Option<&str>,
@@ -8944,7 +8933,11 @@ fn reload_config(
     let Some(path) = path else {
         return vec!["reload: no config file in use; nothing to reload".into()];
     };
-    let mut fresh = DaemonConfig::default();
+    // The base carries the field defaults that differ from
+    // `Default::default()` (hold time 90, BFD timers 100/100/3, …) —
+    // the same base the startup path uses, so a file that leaves a
+    // key unset reloads to the startup semantics rather than zeros.
+    let mut fresh = DaemonConfig::with_defaults();
     // The reload goes through the same dialect path as startup: a
     // config loaded from a BIRD/FRR file re-parses as BIRD/FRR, so a
     // compat-mode daemon does not break on SIGHUP. The name here is

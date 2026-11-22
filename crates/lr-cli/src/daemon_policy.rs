@@ -238,39 +238,6 @@ pub(crate) fn parse_community(text: &str) -> Result<u32, String> {
     })
 }
 
-/// Wire per-peer `import`/`export` route-maps onto session handles.
-/// Call before [`PolicySet::hooks`]; returns a startup error when a
-/// peer references an unknown route-map (fail closed).
-pub(crate) fn bind_peer_policies(
-    cfg: &DaemonConfig,
-    set: &mut PolicySet,
-    session_of_peer: impl Fn(usize) -> u64,
-) -> Result<(), String> {
-    for (idx, peer) in cfg.peers.iter().enumerate() {
-        if let Some(name) = &peer.import {
-            if set.route_map(name).is_none() {
-                return Err(format!(
-                    "peer {}: unknown route-map '{}'",
-                    peer.label(),
-                    name
-                ));
-            }
-            set.bind_import(session_of_peer(idx), name.clone());
-        }
-        if let Some(name) = &peer.export {
-            if set.route_map(name).is_none() {
-                return Err(format!(
-                    "peer {}: unknown route-map '{}'",
-                    peer.label(),
-                    name
-                ));
-            }
-            set.bind_export(session_of_peer(idx), name.clone());
-        }
-    }
-    Ok(())
-}
-
 /// Compile every `[[filter]]` body in the config into a [`DslFilter`]
 /// and return them keyed by name. Returns a startup error on the
 /// first filter that fails to parse or has a duplicate name.
@@ -574,81 +541,6 @@ fn map_verdict(result: EvalResult) -> lr_policy::hooks::HookVerdict {
     }
 }
 
-/// A BGP-style export hook wrapping a compiled DSL filter. Same
-/// semantics as [`FilterImportHook`] but on the outbound side.
-///
-/// Like the import hook, a per-peer export filter is bound to the
-/// router sessions that peer owns via [`sessions`](Self::sessions).
-/// The router dispatches egress through
-/// [`ExportHook::on_export_to`](lr_policy::hooks::ExportHook::on_export_to),
-/// which carries the destination session id; a bound hook ignores
-/// every other destination instead of reusing one neighbor's export
-/// policy on the whole router. `None` keeps the destination-agnostic
-/// behaviour for embedders that install a global export filter.
-pub(crate) struct FilterExportHook {
-    pub filter: DslFilter,
-    /// See [`FilterImportHook::compiled`].
-    pub compiled: lr_policy::filter::bytecode::CompiledFilter,
-    pub ctx: std::sync::Arc<DaemonFilterContext>,
-    /// See [`FilterImportHook::stats`].
-    pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
-    /// Router sessions this filter is bound to. `None` applies to every
-    /// destination.
-    pub sessions: Option<std::collections::BTreeSet<u64>>,
-}
-
-impl FilterExportHook {
-    fn applies_to(&self, destination: u64) -> bool {
-        match &self.sessions {
-            Some(sessions) => sessions.contains(&destination),
-            None => true,
-        }
-    }
-
-    fn evaluate(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
-        match &self.stats {
-            Some(hist) => {
-                let t0 = std::time::Instant::now();
-                let verdict =
-                    lr_policy::filter::bytecode::execute(&self.compiled, route, self.ctx.as_ref());
-                hist.record(t0.elapsed().as_nanos() as u64);
-                map_verdict(verdict)
-            }
-            None => map_verdict(lr_policy::filter::bytecode::execute(
-                &self.compiled,
-                route,
-                self.ctx.as_ref(),
-            )),
-        }
-    }
-}
-
-impl lr_policy::hooks::ExportHook for FilterExportHook {
-    fn name(&self) -> &str {
-        &self.filter.name
-    }
-    fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
-        // The destination-agnostic entry point cannot know which peer
-        // this route is headed to. A bound filter must not evaluate
-        // against an unrelated destination, so it stays out of the way;
-        // an unbound (global) filter evaluates exactly as before.
-        if self.sessions.is_some() {
-            return lr_policy::hooks::HookVerdict::Keep;
-        }
-        self.evaluate(route)
-    }
-    fn on_export_to(
-        &self,
-        route: &mut lr_core::rib::Route,
-        destination: u64,
-    ) -> lr_policy::hooks::HookVerdict {
-        if !self.applies_to(destination) {
-            return lr_policy::hooks::HookVerdict::Keep;
-        }
-        self.evaluate(route)
-    }
-}
-
 /// One end of a Babel import/export filter pair: a compiled bytecode
 /// filter and its evaluation context. Held by the daemon and consulted
 /// per route — for the import direction the [`BabelFilterImportHook`]
@@ -881,7 +773,6 @@ pub(crate) struct LivePolicyState {
 /// record into (when the metrics endpoint is enabled).
 #[derive(Clone)]
 pub(crate) struct NamedCompiledFilter {
-    pub name: String,
     pub compiled: lr_policy::filter::bytecode::CompiledFilter,
     pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
 }
@@ -891,22 +782,10 @@ pub(crate) type SharedPolicyState =
     std::sync::Arc<std::sync::RwLock<std::sync::Arc<LivePolicyState>>>;
 
 impl LivePolicyState {
-    /// The route-map dispatch half as a `PolicyHooks` clone (for
-    /// tests and introspection).
-    pub(crate) fn route_map_hooks(&self) -> lr_policy::set::PolicyHooks {
-        self.route_maps.clone()
-    }
-
     /// Look up one named route-map (network origination,
     /// `[[bgp.network_route_map]]` lookups).
     pub(crate) fn route_map(&self, name: &str) -> Option<lr_policy::route_map::RouteMap> {
         self.route_maps.route_map(name).cloned()
-    }
-
-    /// The import-filter binding of one session, if any (soft
-    /// reconfiguration decisions after a swap).
-    pub(crate) fn import_filter_of(&self, session: u64) -> Option<&str> {
-        self.import_filters.get(&session).map(|f| f.name.as_str())
     }
 
     /// Swap this state in as the dispatch source.
@@ -1024,7 +903,6 @@ pub(crate) fn build_live_policy_state(
                 import_filters.insert(
                     *handle,
                     NamedCompiledFilter {
-                        name: name.clone(),
                         compiled: compiled.clone(),
                         stats: take_histogram(&mut stats, metrics, 0, name),
                     },
@@ -1040,7 +918,6 @@ pub(crate) fn build_live_policy_state(
                 export_filters.insert(
                     *handle,
                     NamedCompiledFilter {
-                        name: name.clone(),
                         compiled: compiled.clone(),
                         stats: take_histogram(&mut stats, metrics, 1, name),
                     },

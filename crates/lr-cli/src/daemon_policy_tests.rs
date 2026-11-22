@@ -41,8 +41,9 @@ fn unknown_references_fail_closed() {
         import: Some("ghost-map".into()),
         ..Default::default()
     });
-    let mut set = PolicySet::new();
-    let err = bind_peer_policies(&cfg2, &mut set, |i| i as u64).unwrap_err();
+    let err = build_live_policy_state(&cfg2, None, None, |i| Some((1 + i as u64, None)))
+        .err()
+        .expect("must fail");
     assert!(err.contains("unknown route-map 'ghost-map'"), "{err}");
 }
 
@@ -209,17 +210,28 @@ fn import_filter_is_scoped_to_its_peer_sessions() {
 fn export_filter_is_scoped_to_its_peer_sessions() {
     use lr_policy::hooks::{ExportHook, HookVerdict};
 
-    let f = dsl::compile("receive-only", "reject;").unwrap();
-    let ctx = std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::new(
-        lr_bgp::RoaStore::new(),
-    )));
-    let hook = FilterExportHook {
-        compiled: lr_policy::filter::bytecode::compile(&f),
-        filter: f,
-        ctx,
-        stats: None,
-        sessions: Some(std::collections::BTreeSet::from([7u64])),
-    };
+    // The live dispatch shape: the per-session export filter rides
+    // the swap boundary, keyed by destination session id.
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.peers.push(crate::daemon_config::PeerSpec {
+        export_filter: Some("receive-only".into()),
+        ..Default::default()
+    });
+    cfg.filters.push(crate::daemon_config::FilterSpec {
+        name: Some("receive-only".into()),
+        body: Some("reject;".into()),
+        ..Default::default()
+    });
+    let shared: SharedPolicyState =
+        std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(
+            build_live_policy_state(&cfg, None, None, |_| Some((7, None))).unwrap(),
+        )));
+    let hook = LiveFilterDispatch::new(
+        std::sync::Arc::clone(&shared),
+        std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::new(
+            lr_bgp::RoaStore::new(),
+        ))),
+    );
 
     let mut to_bound = scoped_route(1, [203, 0, 113, 0]);
     assert!(matches!(

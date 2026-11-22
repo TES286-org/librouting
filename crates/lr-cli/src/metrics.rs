@@ -237,12 +237,6 @@ impl FilterMetricsRegistry {
         hist
     }
 
-    /// True when no series registered (the metric block is omitted
-    /// from the exposition).
-    pub fn is_empty(&self) -> bool {
-        self.entries.lock().unwrap().is_empty()
-    }
-
     /// Render the full histogram block: HELP/TYPE headers plus the
     /// per-series bucket/sum/count lines, series in registration
     /// order (deterministic across scrapes).

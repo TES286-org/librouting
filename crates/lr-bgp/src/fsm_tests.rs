@@ -1,7 +1,6 @@
 use super::*;
 use crate::message::update::Nlri;
 use crate::path::AsPath;
-#[cfg(feature = "exchange-plane")]
 use lr_core::addr::IpAddr;
 use lr_core::addr::Prefix;
 
