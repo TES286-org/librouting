@@ -5,8 +5,8 @@
 //! RFC 9234 BGP Role, draft-walton-bgp-hostname-capability-01 FQDN,
 //! draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode,
 //! draft-abraitis-bgp-version-capability-11 Software Version,
-//! draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT and
-//! draft-white-linklocal-capability-04 Link-Local Next Hop).
+//! draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT and
+//! draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop).
 //!
 //! Codec methods for the 2.x capability block live in
 //! [`crate::capabilities_extra`] (`impl Capability` blocks; the type
@@ -46,9 +46,9 @@ pub enum CapabilityCode {
     BfdStrictMode = 74,
     /// draft-abraitis-bgp-version-capability-11: Software Version
     SoftwareVersion = 75,
-    /// draft-abraitis-idr-addpath-paths-limit-00: PATHS-LIMIT
+    /// draft-ietf-idr-addpath-paths-limit-00: PATHS-LIMIT
     PathsLimit = 76,
-    /// draft-white-linklocal-capability-04: Link-Local Next Hop
+    /// draft-ietf-idr-linklocal-capability-06: Link-Local Next Hop
     LinkLocalNextHop = 77,
     /// Unknown
     Other(u8),

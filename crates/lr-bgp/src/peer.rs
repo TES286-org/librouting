@@ -168,16 +168,18 @@ pub struct PeerConfig {
     /// the UTF-8 string (the draft recommends `product/version` form,
     /// e.g. `lr/2.0`); `None` does not advertise.
     pub software_version: Option<String>,
-    /// draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT
+    /// draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT
     /// capability (code 76). The list carries `(afi, safi, limit)`
     /// triples the local speaker advertises as the maximum number of
     /// AddPath paths it is willing to *receive* per prefix for the
-    /// family. A limit of `0` is the draft's "ignore this family"
-    /// sentinel. The capability is ignored by the receiver when
-    /// AddPath is not negotiated for the family (the draft's
-    /// mandatory gating).
+    /// family. The router enforces that limit on ingress and caps
+    /// egress at the limit the peer advertised (the two directions
+    /// are independent — see [`crate::extensions::paths_limit`]). A
+    /// limit of `0` is the draft's "ignore this tuple" sentinel. The
+    /// capability is ignored when AddPath is not negotiated for the
+    /// family (the draft's mandatory gating).
     pub paths_limit: Vec<(u16, u8, u16)>,
-    /// draft-white-linklocal-capability-04 Link-Local Next Hop
+    /// draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop
     /// capability (code 77). When `true` the OPEN advertises the
     /// capability and the codec accepts a link-local IPv6 next-hop in
     /// MP_REACH_NLRI for IPv6 NLRI (16-octet Next Hop field carries

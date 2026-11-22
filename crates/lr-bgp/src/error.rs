@@ -159,8 +159,12 @@ pub enum BgpCeaseSubcode {
     OtherConfigurationChange = 6,
     ConnectionCollision = 7,
     OutOfResources = 8,
-    /// RFC 9494 §4.5: hard reset of a peer whose LLGR procedures failed.
+    /// RFC 8538 §5: hard reset of a peer whose graceful-restart
+    /// procedures failed.
     HardReset = 9,
+    /// RFC 9384 §3: the BFD session covering this peer went down and
+    /// the BGP connection is being torn down as a result.
+    BfdDown = 10,
 }
 
 impl BgpCeaseSubcode {
@@ -175,6 +179,7 @@ impl BgpCeaseSubcode {
             7 => Self::ConnectionCollision,
             8 => Self::OutOfResources,
             9 => Self::HardReset,
+            10 => Self::BfdDown,
             _ => return None,
         })
     }

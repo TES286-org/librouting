@@ -4,8 +4,8 @@
 //! (draft-walton-bgp-hostname-capability-01), BFD Strict-Mode
 //! (draft-ietf-idr-bgp-bfd-strict-mode-13), Software Version
 //! (draft-abraitis-bgp-version-capability-11), PATHS-LIMIT
-//! (draft-abraitis-idr-addpath-paths-limit-00) and Link-Local Next
-//! Hop (draft-white-linklocal-capability-04).
+//! (draft-ietf-idr-addpath-paths-limit-00) and Link-Local Next
+//! Hop (draft-ietf-idr-linklocal-capability-06).
 //!
 //! These methods live on [`crate::capabilities::Capability`] but are
 //! split into their own file so the core RFC 5492 / 4760 / 4893 / 7911
@@ -236,7 +236,7 @@ impl Capability {
             .map(String::from)
     }
 
-    /// draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT capability
+    /// draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT capability
     /// (code 76). The value is a sequence of 5-byte tuples
     /// `<AFI:2, SAFI:1, Paths-Limit:2>`. The draft scopes the
     /// capability to AddPath-negotiated families — a peer that ships
@@ -270,7 +270,7 @@ impl Capability {
         Some(out)
     }
 
-    /// draft-white-linklocal-capability-04 Link-Local Next Hop
+    /// draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop
     /// capability (code 77). The value is empty — presence alone
     /// signals that the speaker can accept a link-local IPv6
     /// next-hop in MP_REACH_NLRI for the negotiated families. The

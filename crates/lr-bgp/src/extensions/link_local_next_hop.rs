@@ -1,5 +1,5 @@
 //! Link-Local Next Hop capability
-//! (draft-white-linklocal-capability-04) orchestration helper.
+//! (draft-ietf-idr-linklocal-capability-06) orchestration helper.
 //!
 //! The wire-level capability lives in
 //! [`crate::capabilities::Capability::link_local_next_hop`] (code

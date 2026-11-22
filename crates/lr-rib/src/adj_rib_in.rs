@@ -55,6 +55,18 @@ impl AdjRibIn {
         self.inner.get(&(origin, key.clone(), path_id))
     }
 
+    /// Number of paths `origin` contributed for one route key.
+    /// Range-bounded to the key's slot in the
+    /// `(origin, key, path_id)` ordering, so the cost is the paths
+    /// of that prefix rather than the whole Adj-RIB-In. Used by the
+    /// PATHS-LIMIT ingress cap
+    /// (draft-ietf-idr-addpath-paths-limit-00 §3).
+    pub fn paths_len_for(&self, origin: RouteOrigin, key: &RouteKey) -> usize {
+        self.inner
+            .range((origin, key.clone(), u32::MIN)..=(origin, key.clone(), u32::MAX))
+            .count()
+    }
+
     /// Mutate every route contributed by `origin`. The closure returns the
     /// replacement route, or `None` to remove it. Used by the graceful
     /// restart / LLGR retention logic to mark or purge retained routes in
@@ -203,6 +215,28 @@ mod tests {
         // A re-advertisement under the same identifier replaces in place.
         rib.feed_pre_policy(o, route([203, 0, 113, 0], 24, o, 2));
         assert_eq!(rib.len(), 1);
+    }
+
+    /// `paths_len_for` counts exactly one origin's paths for one key —
+    /// the PATHS-LIMIT ingress cap reads it per prefix.
+    #[test]
+    fn paths_len_for_counts_only_the_requested_key() {
+        let mut rib = AdjRibIn::new();
+        let o = RouteOrigin { proto: 0, peer: 9 };
+        rib.feed_pre_policy(o, route([203, 0, 113, 0], 24, o, 1));
+        rib.feed_pre_policy(o, route([203, 0, 113, 0], 24, o, 2));
+        rib.feed_pre_policy(o, route([198, 51, 100, 0], 24, o, 1));
+        let k = RouteKey::new(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
+        assert_eq!(rib.paths_len_for(o, &k), 2);
+        let other = RouteKey::new(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
+        assert_eq!(rib.paths_len_for(o, &other), 1);
+        assert_eq!(rib.paths_len_for(RouteOrigin { proto: 0, peer: 10 }, &k), 0);
     }
 
     /// Same identifier from two different origins is two distinct paths

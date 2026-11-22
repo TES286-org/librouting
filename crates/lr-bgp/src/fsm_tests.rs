@@ -59,6 +59,46 @@ fn basic_establishment() {
     assert!(b.is_established());
 }
 
+/// draft-ietf-idr-addpath-paths-limit-00 §3: each side's capability
+/// value is the number of paths it is willing to receive. After the
+/// handshake the peer's value caps our egress, our own value caps our
+/// ingress, and the two directions never merge.
+#[test]
+fn paths_limit_negotiates_per_direction() {
+    use lr_core::nlri::NlriFamily;
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.add_path = true;
+    cfg_a.paths_limit = vec![(1, 1, 4)];
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.add_path = true;
+    cfg_b.paths_limit = vec![(1, 1, 2)];
+    let mut a = BgpPeer::new(cfg_a);
+    let mut b = BgpPeer::new(cfg_b);
+    establish(&mut a, &mut b);
+    assert_eq!(a.paths_limit_tx_for(NlriFamily::IPV4_UNICAST), Some(2));
+    assert_eq!(a.paths_limit_rx_for(NlriFamily::IPV4_UNICAST), Some(4));
+    assert_eq!(b.paths_limit_tx_for(NlriFamily::IPV4_UNICAST), Some(4));
+    assert_eq!(b.paths_limit_rx_for(NlriFamily::IPV4_UNICAST), Some(2));
+    // Families without an advertised tuple stay uncapped.
+    assert_eq!(a.paths_limit_tx_for(NlriFamily::IPV6_UNICAST), None);
+    assert_eq!(a.paths_limit_rx_for(NlriFamily::IPV6_UNICAST), None);
+}
+
+/// The peer's PATHS-LIMIT is meaningful only when AddPath transmit
+/// was negotiated for the family (draft §3).
+#[test]
+fn paths_limit_ignored_without_add_path() {
+    use lr_core::nlri::NlriFamily;
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.paths_limit = vec![(1, 1, 4)];
+    let cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    let mut a = BgpPeer::new(cfg_a);
+    let mut b = BgpPeer::new(cfg_b);
+    establish(&mut a, &mut b);
+    assert_eq!(a.paths_limit_tx_for(NlriFamily::IPV4_UNICAST), None);
+    assert_eq!(a.paths_limit_rx_for(NlriFamily::IPV4_UNICAST), None);
+}
+
 #[test]
 fn open_with_4byte_asn_capability() {
     let cfg = PeerConfig::new(Asn(70000), Asn(80000), RouterId::from_v4([10, 0, 0, 1]));

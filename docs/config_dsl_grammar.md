@@ -185,8 +185,8 @@ bgp {
     domain_name "example.net";
     bfd_strict_mode true;               # draft-ietf-idr-bgp-bfd-strict-mode-13
     software_version "lr/2.0";          # draft-abraitis-bgp-version-capability-11
-    paths_limit "1:1:16,2:1:32";        # draft-abraitis-idr-addpath-paths-limit-00
-    link_local_next_hop true;           # draft-white-linklocal-capability-04
+    paths_limit "1:1:16,2:1:32";        # draft-ietf-idr-addpath-paths-limit-00
+    link_local_next_hop true;           # draft-ietf-idr-linklocal-capability-06
     orf "1:1:64:both,2:1:64:receive";   # RFC 5291
 }
 ```

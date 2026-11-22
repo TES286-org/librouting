@@ -356,6 +356,30 @@ impl BgpPeer {
         !self.add_path_tx.is_empty() || !self.add_path_rx.is_empty()
     }
 
+    /// The peer's PATHS-LIMIT receive limit for `family`
+    /// (draft-ietf-idr-addpath-paths-limit-00 §3): the maximum number
+    /// of Add-Path paths this speaker may send for one prefix.
+    /// `None` when the peer advertised no non-zero limit or Add-Path
+    /// transmit is not negotiated for the family (the draft's
+    /// mandatory gating).
+    pub fn paths_limit_tx_for(&self, family: NlriFamily) -> Option<u16> {
+        if !self.add_path_tx_for(family) {
+            return None;
+        }
+        crate::extensions::paths_limit::peer_limit(&self.peer_capabilities, family)
+    }
+
+    /// The locally configured PATHS-LIMIT receive limit for `family`:
+    /// the maximum number of Add-Path paths this speaker accepts for
+    /// one prefix. `None` when unset or Add-Path receive is not
+    /// negotiated for the family.
+    pub fn paths_limit_rx_for(&self, family: NlriFamily) -> Option<u16> {
+        if !self.add_path_rx_for(family) {
+            return None;
+        }
+        crate::extensions::paths_limit::local_limit(&self.cfg, family)
+    }
+
     /// RFC 5549 tuples negotiated with the peer (intersection of our
     /// advertised tuples and the peer's). Empty when neither side
     /// advertised the capability.

@@ -34,10 +34,13 @@ daemon-config + DSL key:
   the capability. `BgpCodec::set_extended_message` is the runtime
   gate; the FSM flips it after OPEN negotiation.
 - **RFC 9234 BGP Role** (capability code 9) — advertises the
-  speaker's role (Provider / RS / RS-Client / Customer / Peer)
-  plus the FRR/BIRD strict bit. The role is reconciled with the
-  existing `otc_role` field at finalize time so the OTC attribute
-  path and the capability share one source of truth.
+  speaker's one-octet role (Provider / RS / RS-Client / Customer /
+  Peer). Strict mode is local policy: a missing peer role under
+  strict mode, a non-complementary pair, or conflicting duplicate
+  capabilities is rejected with the Role Mismatch NOTIFICATION
+  (OPEN error 2/11). The role is reconciled with the existing
+  `otc_role` field at finalize time so the OTC attribute path and
+  the capability share one source of truth.
 - **draft-walton-bgp-hostname-capability-01 FQDN** (capability
   code 73) — two length-prefixed UTF-8 strings; the daemon's
   config accepts `hostname = "..."` and `domain_name = "..."`.
@@ -48,11 +51,14 @@ daemon-config + DSL key:
 - **draft-abraitis-bgp-version-capability-11 Software Version**
   (capability code 75) — length-prefixed UTF-8 string; the
   daemon's config accepts `software_version = "lr/2.0"`.
-- **draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT**
+- **draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT**
   (capability code 76) — per-family 5-byte
-  `<AFI, SAFI, Paths-Limit>` tuples; the negotiation helper
-  enforces the draft's mandatory AddPath gating.
-- **draft-white-linklocal-capability-04 Link-Local Next Hop**
+  `<AFI, SAFI, Paths-Limit>` tuples with first-tuple-wins and
+  zero ignored. The peer's value caps AddPath egress; the local
+  value caps ingress, discarding excess paths (the graceful
+  handling §5 recommends). Both directions are gated on AddPath
+  for the family.
+- **draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop**
   (capability code 77) — presence alone signals that the speaker
   can accept a link-local IPv6 next-hop in MP_REACH_NLRI.
 

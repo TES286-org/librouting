@@ -1111,12 +1111,12 @@ pub(crate) struct DaemonConfig {
     /// peer-level `software_version` field. The router-wide
     /// `[bgp] software_version` key sets the default peers inherit.
     pub software_version: Option<String>,
-    /// draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT
+    /// draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT
     /// capability — the router-wide default `(afi, safi, limit)`
     /// triples peers inherit. Empty (the default) does not
     /// advertise the capability.
     pub paths_limit: Vec<(u16, u8, u16)>,
-    /// draft-white-linklocal-capability-04 Link-Local Next Hop
+    /// draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop
     /// capability. Per-peer override (`PeerSpec::link_local_next_hop`)
     /// inherits this when unset. Default off.
     pub link_local_next_hop: bool,
@@ -3416,7 +3416,7 @@ fn parse_bgp_role_value(value: &str) -> Result<(String, bool), String> {
 }
 
 /// Parse a PATHS-LIMIT capability value
-/// (draft-abraitis-idr-addpath-paths-limit-00) for the `[bgp]
+/// (draft-ietf-idr-addpath-paths-limit-00) for the `[bgp]
 /// paths_limit` and `peer.paths_limit` keys. The accepted shape is a
 /// comma-separated list of `afi:safi:limit` triples (e.g.
 /// `"1:1:16,2:1:32"`). Returns the parsed triples; an empty string

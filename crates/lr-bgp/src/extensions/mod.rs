@@ -4,8 +4,8 @@
 //! BGP Role, draft-walton-bgp-hostname-capability-01 FQDN,
 //! draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode,
 //! draft-abraitis-bgp-version-capability-11 Software Version,
-//! draft-abraitis-idr-addpath-paths-limit-00 PATHS-LIMIT,
-//! draft-white-linklocal-capability-04 Link-Local Next Hop, and the
+//! draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT,
+//! draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop, and the
 //! Exchange plane behind the `exchange-plane` feature).
 //!
 //! Most of the wire encoding for these features lives in the main

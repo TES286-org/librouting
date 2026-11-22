@@ -1,30 +1,36 @@
 //! PATHS-LIMIT capability
-//! (draft-abraitis-idr-addpath-paths-limit-00) orchestration
+//! (draft-ietf-idr-addpath-paths-limit-00) orchestration
 //! helper.
 //!
 //! The wire-level capability lives in
 //! [`crate::capabilities::Capability::paths_limit`] (code 76). The
 //! draft scopes the capability to AddPath-negotiated families — a
 //! peer that ships PATHS-LIMIT without AddPath is ignored. This
-//! module computes what a session should advertise and what the
-//! daemon may consume after the OPEN exchange:
+//! module computes what a session should advertise and what each
+//! direction may consume after the OPEN exchange:
 //!
 //! - [`advertised_families`] — the `(afi, safi, limit)` triples to
 //!   put in the OPEN, filtered to the AddPath families this
 //!   session speaks.
-//! - [`negotiated_limits`] — the per-family limits the peer
+//! - [`peer_limits`] / [`peer_limit`] — the receive limits the peer
 //!   advertised, restricted to AddPath-negotiated families. The
-//!   daemon's AddPath egress path uses this to cap the number of
-//!   paths it sends per prefix (the draft's receiver-driven limit).
+//!   sender caps egress at the peer's limit.
+//! - [`local_limit`] — the locally configured receive limit for one
+//!   family, which the router enforces on ingress.
 //!
 //! # Negotiation posture
 //!
 //! The draft's mandatory gating: PATHS-LIMIT is ignored when
-//! AddPath is not negotiated for the family. [`negotiated_limits`]
-//! takes the AddPath-negotiated family list as an argument so the
-//! daemon can apply the limit only where AddPath is active. A
-//! limit of `0` is the draft's "ignore this family" sentinel — the
-//! helper drops those entries before returning.
+//! AddPath is not negotiated for the family. The helpers take the
+//! negotiated family list (or gate on the caller's per-family
+//! AddPath direction) so the limit applies only where AddPath is
+//! active. A limit of `0` is the draft's "ignore this tuple"
+//! sentinel, and the first tuple for an AFI/SAFI wins (§3).
+//!
+//! The capability is asymmetric: the value a speaker advertises is
+//! the number of paths it is willing to *receive*. The peer's value
+//! therefore caps our egress, and our own value caps our ingress.
+//! The two directions must never be merged.
 
 use crate::capabilities::{Capability, CapabilityCode};
 use crate::peer::PeerConfig;
@@ -34,23 +40,35 @@ use lr_core::nlri::NlriFamily;
 /// Filtered to the families this session speaks for AddPath (the
 /// draft's gating: PATHS-LIMIT is meaningful only for AddPath
 /// families). A configured limit of `0` is dropped — the draft's
-/// "ignore this family" sentinel.
+/// "ignore this family" sentinel — and a repeated AFI/SAFI keeps
+/// only its first tuple (§3).
 pub fn advertised_families(cfg: &PeerConfig) -> Vec<(u16, u8, u16)> {
     if cfg.paths_limit.is_empty() || !cfg.add_path {
         return Vec::new();
     }
     let spoken: Vec<NlriFamily> = crate::extensions::addpath::advertised_families(cfg);
-    cfg.paths_limit
-        .iter()
-        .filter(|(afi, safi, limit)| {
-            *limit != 0
-                && spoken.contains(&NlriFamily {
-                    afi: *afi,
-                    safi: *safi,
-                })
-        })
-        .copied()
-        .collect()
+    let mut out = Vec::new();
+    let mut seen: Vec<(u16, u8)> = Vec::new();
+    for (afi, safi, limit) in &cfg.paths_limit {
+        // §3: the first tuple for an AFI/SAFI wins; later duplicates
+        // are ignored even when the first one is the zero sentinel.
+        if seen.contains(&(*afi, *safi)) {
+            continue;
+        }
+        seen.push((*afi, *safi));
+        if *limit == 0 {
+            continue;
+        }
+        let family = NlriFamily {
+            afi: *afi,
+            safi: *safi,
+        };
+        if !spoken.contains(&family) {
+            continue;
+        }
+        out.push((*afi, *safi, *limit));
+    }
+    out
 }
 
 /// Whether the peer advertised the PATHS-LIMIT capability in its
@@ -61,25 +79,44 @@ pub fn peer_offered(peer_caps: &[Capability]) -> bool {
         .any(|c| c.code == CapabilityCode::PathsLimit)
 }
 
-/// The peer's advertised per-family limits, filtered to the
-/// AddPath-negotiated family list (the draft's mandatory gating).
-/// Entries with a limit of `0` are dropped (the draft's "ignore"
-/// sentinel). The daemon's AddPath egress path uses this to cap
-/// the number of paths it sends per prefix.
-pub fn negotiated_limits(
-    cfg: &PeerConfig,
+/// The peer's advertised receive limit for `family`, or `None` when
+/// the peer did not advertise a non-zero limit for it.
+///
+/// Only the first tuple for the AFI/SAFI counts; later duplicates
+/// are ignored (draft-ietf-idr-addpath-paths-limit-00 §3). A
+/// malformed capability value yields `None`, so the sender falls
+/// back to its local egress cap instead of guessing.
+pub fn peer_limit(peer_caps: &[Capability], family: NlriFamily) -> Option<u16> {
+    let cap = peer_caps
+        .iter()
+        .find(|c| c.code == CapabilityCode::PathsLimit)?;
+    let tuples = cap.as_paths_limit()?;
+    let (_, _, limit) = tuples
+        .into_iter()
+        .find(|(afi, safi, _)| *afi == family.afi && *safi == family.safi)?;
+    (limit != 0).then_some(limit)
+}
+
+/// The peer's advertised receive limits, filtered to
+/// `add_path_families` (the draft's mandatory gating) and with the
+/// first tuple per AFI/SAFI winning. Zero limits are dropped. The
+/// daemon's AddPath egress path uses this to cap the number of
+/// paths it sends per prefix.
+pub fn peer_limits(
     peer_caps: &[Capability],
     add_path_families: &[NlriFamily],
 ) -> Vec<(u16, u8, u16)> {
-    let Some(peer_limits) = peer_caps
+    let Some(cap) = peer_caps
         .iter()
         .find(|c| c.code == CapabilityCode::PathsLimit)
-        .and_then(Capability::as_paths_limit)
     else {
         return Vec::new();
     };
+    let Some(tuples) = cap.as_paths_limit() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for (afi, safi, limit) in peer_limits {
+    for (afi, safi, limit) in tuples {
         if limit == 0 {
             continue;
         }
@@ -87,21 +124,22 @@ pub fn negotiated_limits(
         if !add_path_families.contains(&family) {
             continue;
         }
-        if !out.contains(&(afi, safi, limit)) {
-            out.push((afi, safi, limit));
+        if out.iter().any(|(a, s, _)| *a == afi && *s == safi) {
+            continue;
         }
-    }
-    // The local config's limits also matter: the daemon caps
-    // egress at `min(local, peer)` — the draft's bilateral
-    // agreement. Surface the local limit alongside the peer's so
-    // the daemon's egress path can take the min.
-    let local = advertised_families(cfg);
-    for (afi, safi, limit) in local {
-        if !out.contains(&(afi, safi, limit)) {
-            out.push((afi, safi, limit));
-        }
+        out.push((afi, safi, limit));
     }
     out
+}
+
+/// The locally configured receive limit for `family`, or `None` when
+/// unset or zero. The first tuple for the AFI/SAFI wins (§3).
+pub fn local_limit(cfg: &PeerConfig, family: NlriFamily) -> Option<u16> {
+    cfg.paths_limit
+        .iter()
+        .find(|(afi, safi, _)| *afi == family.afi && *safi == family.safi)
+        .map(|(_, _, limit)| *limit)
+        .filter(|limit| *limit != 0)
 }
 
 /// Build the PATHS-LIMIT capability for a configured peer's OPEN.
@@ -154,12 +192,21 @@ mod tests {
         assert_eq!(adv, vec![(1, 1, 16), (2, 1, 32)]);
     }
 
-    /// A limit of 0 is the draft's "ignore this family" sentinel.
+    /// A limit of 0 is the draft's "ignore this tuple" sentinel; the
+    /// first tuple wins, so a later duplicate does not resurrect it.
     #[test]
     fn advertised_families_drops_zero_limits() {
         let c = cfg_with_paths_limit(true, &[(1, 1, 0), (1, 1, 16)]);
-        let adv = advertised_families(&c);
-        assert_eq!(adv, vec![(1, 1, 16)]);
+        assert!(advertised_families(&c).is_empty());
+        let c = cfg_with_paths_limit(true, &[(1, 1, 16), (1, 1, 0)]);
+        assert_eq!(advertised_families(&c), vec![(1, 1, 16)]);
+    }
+
+    /// §3: only the first tuple for an AFI/SAFI is considered.
+    #[test]
+    fn advertised_families_keeps_first_tuple_per_family() {
+        let c = cfg_with_paths_limit(true, &[(1, 1, 16), (1, 1, 32)]);
+        assert_eq!(advertised_families(&c), vec![(1, 1, 16)]);
     }
 
     #[test]
@@ -187,28 +234,74 @@ mod tests {
         assert!(!peer_offered(&[]));
     }
 
+    #[test]
+    fn peer_limit_returns_the_advertised_value() {
+        let cap = Capability::paths_limit(&[(1, 1, 32)]);
+        assert_eq!(peer_limit(&[cap], NlriFamily::IPV4_UNICAST), Some(32));
+    }
+
+    /// §3: a repeated AFI/SAFI uses the first tuple only.
+    #[test]
+    fn peer_limit_keeps_first_tuple_per_family() {
+        let cap = Capability::paths_limit(&[(1, 1, 32), (1, 1, 64)]);
+        assert_eq!(peer_limit(&[cap], NlriFamily::IPV4_UNICAST), Some(32));
+    }
+
+    #[test]
+    fn peer_limit_ignores_zero_and_unknown_families() {
+        let cap = Capability::paths_limit(&[(1, 1, 0), (2, 1, 64)]);
+        assert_eq!(
+            peer_limit(std::slice::from_ref(&cap), NlriFamily::IPV4_UNICAST),
+            None
+        );
+        assert_eq!(peer_limit(&[cap], NlriFamily::IPV6_UNICAST), Some(64));
+    }
+
+    #[test]
+    fn peer_limit_none_when_capability_malformed() {
+        let cap = Capability::new(CapabilityCode::PathsLimit, vec![0, 1, 1, 0]);
+        assert_eq!(peer_limit(&[cap], NlriFamily::IPV4_UNICAST), None);
+    }
+
     /// The draft's mandatory gating: PATHS-LIMIT is meaningful only
     /// for AddPath-negotiated families. A peer limit for a family
     /// not in the AddPath set is dropped.
     #[test]
-    fn negotiated_limits_gated_by_add_path() {
-        let c = cfg_with_paths_limit(true, &[(1, 1, 16)]);
+    fn peer_limits_gated_by_add_path() {
         let peer_cap = Capability::paths_limit(&[(1, 1, 32), (2, 1, 64)]);
         let add_path = vec![NlriFamily::IPV4_UNICAST];
-        let limits = negotiated_limits(&c, &[peer_cap], &add_path);
-        // IPv4 survives (AddPath-negotiated); IPv6 is dropped.
-        assert!(limits.contains(&(1, 1, 32)));
-        assert!(!limits.iter().any(|&(a, s, _)| a == 2 && s == 1));
+        let limits = peer_limits(&[peer_cap], &add_path);
+        assert_eq!(limits, vec![(1, 1, 32)]);
     }
 
-    /// A peer limit of 0 is the draft's "ignore this family"
+    /// A peer limit of 0 is the draft's "ignore this tuple"
     /// sentinel — dropped before returning.
     #[test]
-    fn negotiated_limits_drops_zero_peer_limits() {
-        let c = cfg_with_paths_limit(true, &[(1, 1, 16)]);
+    fn peer_limits_drops_zero_peer_limits() {
         let peer_cap = Capability::paths_limit(&[(1, 1, 0)]);
         let add_path = vec![NlriFamily::IPV4_UNICAST];
-        let limits = negotiated_limits(&c, &[peer_cap], &add_path);
-        assert!(!limits.iter().any(|&(_, _, l)| l == 0));
+        assert!(peer_limits(&[peer_cap], &add_path).is_empty());
+    }
+
+    #[test]
+    fn peer_limits_keeps_first_tuple_per_family() {
+        let peer_cap = Capability::paths_limit(&[(1, 1, 32), (1, 1, 64)]);
+        let add_path = vec![NlriFamily::IPV4_UNICAST];
+        assert_eq!(peer_limits(&[peer_cap], &add_path), vec![(1, 1, 32)]);
+    }
+
+    #[test]
+    fn local_limit_reads_the_configured_value() {
+        let c = cfg_with_paths_limit(true, &[(1, 1, 16)]);
+        assert_eq!(local_limit(&c, NlriFamily::IPV4_UNICAST), Some(16));
+        assert_eq!(local_limit(&c, NlriFamily::IPV6_UNICAST), None);
+    }
+
+    #[test]
+    fn local_limit_ignores_zero_and_keeps_first_tuple() {
+        let c = cfg_with_paths_limit(true, &[(1, 1, 0), (1, 1, 16), (1, 1, 32)]);
+        assert_eq!(local_limit(&c, NlriFamily::IPV4_UNICAST), None);
+        let c = cfg_with_paths_limit(true, &[(1, 1, 16), (1, 1, 32)]);
+        assert_eq!(local_limit(&c, NlriFamily::IPV4_UNICAST), Some(16));
     }
 }

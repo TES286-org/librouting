@@ -769,6 +769,9 @@ struct SessionPolicy {
     warned_import: bool,
     /// Latched after the first export denial is logged.
     warned_export: bool,
+    /// Latched after the first PATHS-LIMIT ingress discard is logged
+    /// for this session (draft-ietf-idr-addpath-paths-limit-00 §5).
+    warned_paths_limit: bool,
 }
 
 /// Per-session maximum-prefix bookkeeping.
@@ -2621,6 +2624,40 @@ impl DefaultRouter {
 
     fn import_route(&mut self, route: Route) {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
+        // draft-ietf-idr-addpath-paths-limit-00 §3/§5: cap the number
+        // of Add-Path paths retained for one prefix at the locally
+        // advertised receive limit. Excess paths are discarded — the
+        // graceful handling §5 recommends over tearing the session
+        // down. Re-announcing an existing path_id replaces in place
+        // and is always admitted.
+        if let Some(limit) = self
+            .sessions
+            .get(&route.origin.peer)
+            .and_then(|state| match state {
+                SessionState::Bgp { peer, .. } => peer.paths_limit_rx_for(route.key.family),
+                _ => None,
+            })
+        {
+            let known = self
+                .adj_rib_in
+                .get(route.origin, &route.key, route.path_id)
+                .is_some();
+            if !known
+                && self.adj_rib_in.paths_len_for(route.origin, &route.key) >= usize::from(limit)
+            {
+                let session = route.origin.peer;
+                let st = self.session_policy.entry(session).or_default();
+                if !st.warned_paths_limit {
+                    st.warned_paths_limit = true;
+                    self.pending_events.push(RouterEvent::Log(format!(
+                        "session {session}: PATHS-LIMIT {limit} reached for {}; \
+                         discarding excess Add-Path paths",
+                        route.key.prefix
+                    )));
+                }
+                return;
+            }
+        }
         // Exchange plane (feature `exchange-plane`): snapshot the
         // private record store off the raw route before the admission
         // gates run — the store is surfaced only if the route is
@@ -3343,6 +3380,14 @@ impl DefaultRouter {
                 }
             }
         }
+        // draft-ietf-idr-addpath-paths-limit-00 §3: the peer's
+        // advertised receive limit caps how many paths we send for
+        // one prefix. The ranking is already truncated to
+        // `add_path_max_paths`; this is the per-peer half of the
+        // effective minimum the draft describes in §6.
+        if let Some(limit) = peer.paths_limit_tx_for(key.family) {
+            desired.truncate(usize::from(limit));
+        }
         let current = self.adj_rib_out.paths_for(
             RouteOrigin {
                 proto: 0,
@@ -3385,14 +3430,17 @@ impl DefaultRouter {
             .collect();
         // Single-path peers refresh the best path per prefix; Add-Path
         // peers (RFC 7911) refresh the whole ranked set.
-        let add_path_tx = self
+        let (add_path_tx, paths_limit) = self
             .sessions
             .get(&session)
             .map(|state| match state {
-                SessionState::Bgp { peer, .. } => peer.add_path_tx_for(family),
-                _ => false,
+                SessionState::Bgp { peer, .. } => (
+                    peer.add_path_tx_for(family),
+                    peer.paths_limit_tx_for(family),
+                ),
+                _ => (false, None),
             })
-            .unwrap_or(false);
+            .unwrap_or((false, None));
         let snapshot: Vec<Vec<Route>> = self
             .loc_rib
             .iter_sets()
@@ -3400,9 +3448,11 @@ impl DefaultRouter {
             .filter(|(key, _)| key.family == family)
             .map(|(_key, set)| {
                 if add_path_tx {
+                    let limit = paths_limit.map(usize::from).unwrap_or(usize::MAX);
                     set.iter()
+                        .filter(|r| r.origin.peer != session)
+                        .take(limit)
                         .enumerate()
-                        .filter(|(_, r)| r.origin.peer != session)
                         .map(|(slot, r)| {
                             let mut c = r.clone();
                             c.path_id = slot as u32 + 1;

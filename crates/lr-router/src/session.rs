@@ -348,11 +348,13 @@ pub struct SessionConfig {
     /// [`lr_bgp::PeerConfig::software_version`].
     pub software_version: Option<String>,
     /// PATHS-LIMIT capability
-    /// (draft-abraitis-idr-addpath-paths-limit-00). Propagated to
-    /// [`lr_bgp::PeerConfig::paths_limit`].
+    /// (draft-ietf-idr-addpath-paths-limit-00). The triples are the
+    /// local receive limits per AFI/SAFI; the router enforces them on
+    /// ingress and caps egress at the peer's advertised limit.
+    /// Propagated to [`lr_bgp::PeerConfig::paths_limit`].
     pub paths_limit: Vec<(u16, u8, u16)>,
     /// Link-Local Next Hop capability
-    /// (draft-white-linklocal-capability-04). Propagated to
+    /// (draft-ietf-idr-linklocal-capability-06). Propagated to
     /// [`lr_bgp::PeerConfig::link_local_next_hop`].
     pub link_local_next_hop: bool,
     /// RFC 5291 ORF capability. Propagated to
@@ -444,6 +446,18 @@ impl SessionConfig {
     /// receive). Requires the peer to offer the capability too.
     pub fn with_add_path(mut self) -> Self {
         self.add_path = true;
+        self
+    }
+
+    /// Advertise the PATHS-LIMIT capability
+    /// (draft-ietf-idr-addpath-paths-limit-00 §3) and cap the number
+    /// of Add-Path paths accepted per prefix at `limit` for `family`.
+    /// A zero limit is ignored (the draft's sentinel). Effective only
+    /// when Add-Path is negotiated for the family.
+    pub fn with_paths_limit(mut self, family: lr_core::nlri::NlriFamily, limit: u16) -> Self {
+        if limit != 0 && !self.paths_limit.contains(&(family.afi, family.safi, limit)) {
+            self.paths_limit.push((family.afi, family.safi, limit));
+        }
         self
     }
 
