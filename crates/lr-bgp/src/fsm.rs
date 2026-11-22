@@ -968,6 +968,17 @@ impl BgpPeer {
             self.enqueue_notification(BgpErrorCode::Open, 6);
             return (BgpState::Idle, vec![BgpAction::Close]);
         }
+        // RFC 9234 §4.2: on an eBGP session, reject the connection
+        // with the Role Mismatch NOTIFICATION (OPEN error 2/11) when
+        // the role pair is not complementary, the peer sent
+        // conflicting role values, or local strict mode required the
+        // peer's role and it was absent.
+        if self.cfg.is_ebgp() {
+            if let Err(subcode) = crate::extensions::bgp_role::validate(&self.cfg, &caps) {
+                self.enqueue_notification(BgpErrorCode::Open, subcode);
+                return (BgpState::Idle, vec![BgpAction::Close]);
+            }
+        }
         self.peer_bgp_id = Some(open.bgp_id);
         self.peer_as = Some(peer_as);
         self.peer_capabilities = caps;

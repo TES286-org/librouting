@@ -65,6 +65,10 @@ pub enum BgpOpenErrorSubcode {
     UnsupportedCapability = 7,
     /// RFC 9205 — Bad OPEN message length.
     BadOpenLength = 8,
+    /// RFC 9234 §4.2 — the BGP Role capabilities do not pair, a
+    /// strict-mode peer omitted the capability, or the peer sent
+    /// conflicting role values.
+    RoleMismatch = 11,
 }
 
 impl BgpOpenErrorSubcode {
@@ -78,6 +82,7 @@ impl BgpOpenErrorSubcode {
             6 => Self::UnacceptableHoldTime,
             7 => Self::UnsupportedCapability,
             8 => Self::BadOpenLength,
+            11 => Self::RoleMismatch,
             _ => return None,
         })
     }

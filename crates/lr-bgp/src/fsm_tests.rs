@@ -87,6 +87,68 @@ fn reset_clears_state() {
     assert!(!p.is_established());
 }
 
+/// Drive one peer into OpenSent with the configured local role and
+/// feed a hand-built OPEN carrying the peer's role capability.
+fn role_handshake(
+    local_role: (crate::role::OtcRole, bool),
+    peer_role: Option<u8>,
+) -> (BgpState, Vec<u8>) {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.bgp_role = Some(local_role);
+    let mut peer = BgpPeer::new(cfg);
+    peer.step(BgpEvent::ManualStart);
+    peer.step(BgpEvent::TransportOpen);
+    let _ = peer.drain_outgoing(); // local OPEN
+    let mut open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 2]));
+    if let Some(role) = peer_role {
+        open.params.push(crate::message::open::OpenParam {
+            param_type: crate::message::open::OpenParam::PARAM_TYPE_CAPABILITY,
+            value: Capability::encode_set(&[Capability::bgp_role(role)]),
+        });
+    }
+    peer.step(BgpEvent::Message(BgpMessage::Open(open)));
+    (peer.state(), peer.drain_outgoing())
+}
+
+fn notification_code_subcode(wire: &[u8]) -> Option<(u8, u8)> {
+    let msg = crate::codec::BgpCodec::new().decode_slice(wire).ok()??;
+    match msg {
+        BgpMessage::Notification(n) => Some((n.error_code, n.error_subcode)),
+        _ => None,
+    }
+}
+
+#[test]
+fn role_mismatch_raises_open_error_11() {
+    use crate::role::OtcRole;
+    let (state, out) = role_handshake((OtcRole::Provider, false), Some(0)); // Provider/Provider
+    assert_eq!(state, BgpState::Idle);
+    assert_eq!(notification_code_subcode(&out), Some((2, 11)));
+}
+
+#[test]
+fn role_complementary_pair_reaches_open_confirm() {
+    use crate::role::OtcRole;
+    let (state, out) = role_handshake((OtcRole::Provider, false), Some(3)); // Customer
+    assert_eq!(state, BgpState::OpenConfirm);
+    assert_eq!(out.get(18).copied(), Some(4)); // KEEPALIVE
+}
+
+#[test]
+fn role_strict_mode_rejects_missing_peer_capability() {
+    use crate::role::OtcRole;
+    let (state, out) = role_handshake((OtcRole::Provider, true), None);
+    assert_eq!(state, BgpState::Idle);
+    assert_eq!(notification_code_subcode(&out), Some((2, 11)));
+}
+
+#[test]
+fn role_lenient_mode_allows_missing_peer_capability() {
+    use crate::role::OtcRole;
+    let (state, _out) = role_handshake((OtcRole::Provider, false), None);
+    assert_eq!(state, BgpState::OpenConfirm);
+}
+
 /// RFC 6793 §4.2.2: when the peer's OPEN lacks the 4-octet-AS
 /// capability the session must downgrade both directions to 2-byte
 /// AS_PATH encoding — BIRD/FRR would reject 4-byte paths otherwise.

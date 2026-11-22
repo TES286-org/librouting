@@ -9,21 +9,22 @@
 //!
 //! # Negotiation posture
 //!
-//! RFC 9234 §3: both speakers MUST advertise the capability and the
+//! RFC 9234 §4.2: when both speakers advertise the capability the
 //! roles MUST be complementary (Provider ↔ Customer, RS ↔
-//! RS-Client, Peer ↔ Peer). A mismatched role pair is a
-//! configuration error the daemon logs at session establishment;
-//! the OTC attribute path keeps running under the local
+//! RS-Client, Peer ↔ Peer). A mismatched pair is rejected with the
+//! OPEN error "Role Mismatch" (code 2, subcode 11). The OTC
+//! attribute path keeps running under the local
 //! [`PeerConfig::otc_role`] so a peer that does not advertise the
 //! capability still interoperates with the local policy.
 //!
-//! # Strict bit
+//! # Strict mode
 //!
-//! The FRR/BIRD extension carries a strict bit in a second value
-//! octet: when set, the receiver rejects a peer whose configured
-//! role does not pair correctly with the local role. The library
-//! advertises the bit when the operator configures it and surfaces
-//! the peer's strict bit to the daemon for the reject decision.
+//! "Strict mode" is a local policy, not a wire field: RFC 9234
+//! §4.2 says an operator may require receipt of the peer's role
+//! capability and reject the session with the Role Mismatch
+//! NOTIFICATION when it is absent. It is the `bool` in
+//! [`PeerConfig::bgp_role`]; the capability value carries only the
+//! one-octet role.
 
 use crate::capabilities::{Capability, CapabilityCode};
 use crate::peer::PeerConfig;
@@ -54,15 +55,56 @@ pub fn peer_offered(peer_caps: &[Capability]) -> bool {
     peer_caps.iter().any(|c| c.code == CapabilityCode::BgpRole)
 }
 
-/// The peer's advertised `(role, strict)` pair, decoded from its
-/// OPEN capability. Returns `None` when the peer did not advertise
-/// the capability or its value is malformed (empty or longer than
-/// 2 octets).
-pub fn peer_role(peer_caps: &[Capability]) -> Option<(u8, bool)> {
+/// The peer's advertised role value, decoded from its OPEN
+/// capability. Returns `None` when the peer did not advertise the
+/// capability or its value is malformed (not exactly one octet).
+pub fn peer_role(peer_caps: &[Capability]) -> Option<u8> {
     peer_caps
         .iter()
         .find(|c| c.code == CapabilityCode::BgpRole)
         .and_then(Capability::as_bgp_role)
+}
+
+/// Validate the peer's BGP Role advertisement against the local
+/// configuration (RFC 9234 §4.2). Returns `Ok(())` when the session
+/// may proceed and the OPEN error subcode to raise otherwise.
+///
+/// The rules, in order:
+///
+/// 1. Multiple role capabilities with different values are a
+///    mismatch; identical duplicates are treated as one (RFC 5492
+///    §3, RFC 9234 §4.2).
+/// 2. A malformed role value is a mismatch.
+/// 3. When both sides advertise a role, the pair must be
+///    complementary (Table 2).
+/// 4. When the local side advertises a role and the peer does not,
+///    lenient mode proceeds; strict mode raises the mismatch.
+pub fn validate(cfg: &PeerConfig, peer_caps: &[Capability]) -> Result<(), u8> {
+    let roles: Vec<&Capability> = peer_caps
+        .iter()
+        .filter(|c| c.code == CapabilityCode::BgpRole)
+        .collect();
+    if roles.is_empty() {
+        return match cfg.bgp_role {
+            Some((_, true)) => Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8),
+            _ => Ok(()),
+        };
+    }
+    let Some(first) = roles.first().and_then(|c| c.as_bgp_role()) else {
+        return Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8);
+    };
+    if roles
+        .iter()
+        .any(|c| c.as_bgp_role().is_none_or(|role| role != first))
+    {
+        return Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8);
+    }
+    match cfg.bgp_role {
+        Some((local, _)) if !roles_complementary(local, first) => {
+            Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Whether *both* speakers advertised the RFC 9234 capability, so
@@ -92,13 +134,14 @@ pub fn roles_complementary(local: OtcRole, peer_role_value: u8) -> bool {
 
 /// Build the RFC 9234 capability for a configured peer's OPEN.
 /// Returns `None` when the local config has the knob off. The
-/// role octet uses the FRR/BIRD wire values (0 = Provider, 1 = RS,
+/// role octet uses the IANA wire values (0 = Provider, 1 = RS,
 /// 2 = RS-Client, 3 = Customer, 4 = Peer) — distinct from the
 /// `OtcRole` enum's `to_u8` (the OTC attribute path's
-/// representation) — see [`OtcRole::to_bgp_role_value`].
+/// representation) — see [`OtcRole::to_bgp_role_value`]. The local
+/// strict flag is not encoded; it only drives [`validate`].
 pub fn open_capability(cfg: &PeerConfig) -> Option<Capability> {
-    let (role, strict) = cfg.bgp_role?;
-    Some(Capability::bgp_role(role.to_bgp_role_value(), strict))
+    let (role, _strict) = cfg.bgp_role?;
+    Some(Capability::bgp_role(role.to_bgp_role_value()))
 }
 
 #[cfg(test)]
@@ -128,7 +171,7 @@ mod tests {
     fn open_capability_on_when_knob_on() {
         let cap = open_capability(&cfg(Some((OtcRole::Customer, true)))).unwrap();
         assert_eq!(cap.code, CapabilityCode::BgpRole);
-        assert_eq!(cap.as_bgp_role(), Some((3, true)));
+        assert_eq!(cap.as_bgp_role(), Some(3));
     }
 
     #[test]
@@ -145,7 +188,7 @@ mod tests {
     #[test]
     fn peer_role_returns_value_when_present() {
         let cap = open_capability(&cfg(Some((OtcRole::Provider, true)))).unwrap();
-        assert_eq!(peer_role(&[cap]), Some((0, true)));
+        assert_eq!(peer_role(&[cap]), Some(0));
     }
 
     #[test]
@@ -190,5 +233,65 @@ mod tests {
     fn unknown_peer_role_is_not_complementary() {
         assert!(!roles_complementary(OtcRole::Provider, 5));
         assert!(!roles_complementary(OtcRole::Peer, 255));
+    }
+
+    #[test]
+    fn validate_accepts_complementary_pair() {
+        let c = cfg(Some((OtcRole::Provider, true)));
+        let peer = Capability::bgp_role(3); // Customer
+        assert_eq!(validate(&c, &[peer]), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_non_complementary_pair() {
+        let c = cfg(Some((OtcRole::Provider, false)));
+        let peer = Capability::bgp_role(0); // Provider
+        assert_eq!(
+            validate(&c, &[peer]),
+            Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8)
+        );
+    }
+
+    #[test]
+    fn validate_lenient_allows_missing_peer_role() {
+        assert_eq!(
+            validate(&cfg(Some((OtcRole::Provider, false))), &[]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_strict_rejects_missing_peer_role() {
+        assert_eq!(
+            validate(&cfg(Some((OtcRole::Provider, true))), &[]),
+            Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8)
+        );
+    }
+
+    #[test]
+    fn validate_accepts_identical_duplicate_roles() {
+        let c = cfg(Some((OtcRole::Provider, false)));
+        let peer = Capability::bgp_role(3);
+        assert_eq!(validate(&c, &[peer.clone(), peer]), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_duplicate_roles() {
+        let c = cfg(Some((OtcRole::Provider, false)));
+        let caps = [Capability::bgp_role(3), Capability::bgp_role(4)];
+        assert_eq!(
+            validate(&c, &caps),
+            Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8)
+        );
+    }
+
+    #[test]
+    fn validate_rejects_malformed_peer_role() {
+        let c = cfg(Some((OtcRole::Provider, false)));
+        let malformed = Capability::new(CapabilityCode::BgpRole, vec![3, 0]);
+        assert_eq!(
+            validate(&c, &[malformed]),
+            Err(crate::error::BgpOpenErrorSubcode::RoleMismatch as u8)
+        );
     }
 }

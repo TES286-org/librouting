@@ -107,8 +107,9 @@ impl Capability {
         self.code == CapabilityCode::ExtendedMessage
     }
 
-    /// RFC 9234 §3 BGP Role capability (code 9). The value is one
-    /// octet encoding the speaker's role for this session:
+    /// RFC 9234 §4.1 BGP Role capability (code 9). The value is
+    /// exactly one octet encoding the speaker's role for this
+    /// session:
     ///
     /// | Value | Role |
     /// | --- | --- |
@@ -118,34 +119,25 @@ impl Capability {
     /// | 3 | Customer |
     /// | 4 | Peer (Lateral Peer) |
     ///
-    /// The `strict` flag (the FRR/BIRD extension that lets a speaker
-    /// reject a peer whose configured role does not pair correctly
-    /// with the local role) is carried in a second octet: `0x00` =
-    /// lenient, `0x01` = strict. The receiver tolerates both the
-    /// 1-octet RFC form and the 2-octet FRR/BIRD form — RFC 9234 §3
-    /// fixes the length at 1, but a peer that ships the strict byte
-    /// is not harmful and the strict bit is observable on the lr
-    /// side.
-    pub fn bgp_role(role: u8, strict: bool) -> Self {
-        let mut v = Vec::with_capacity(2);
-        v.push(role & 0x0f);
-        v.push(if strict { 0x01 } else { 0x00 });
-        Self::new(CapabilityCode::BgpRole, v)
+    /// The "strict" mode is a local policy, not a wire field: RFC
+    /// 9234 §4.2 says an operator may require receipt of the peer's
+    /// role capability and reject the session with the Role Mismatch
+    /// NOTIFICATION when it is absent. It is carried in
+    /// [`crate::peer::PeerConfig::bgp_role`] alongside the role and
+    /// never encoded here.
+    pub fn bgp_role(role: u8) -> Self {
+        Self::new(CapabilityCode::BgpRole, vec![role & 0x0f])
     }
 
-    /// Decode the RFC 9234 BGP Role capability into `(role, strict)`.
-    /// Returns `None` when the value is empty (the RFC requires at
-    /// least the role octet) or longer than 2 octets (an unknown
-    /// extension). The 1-octet RFC form reports `strict = false`.
-    pub fn as_bgp_role(&self) -> Option<(u8, bool)> {
-        if self.code != CapabilityCode::BgpRole {
+    /// Decode the RFC 9234 BGP Role capability into its one-octet
+    /// role value. Returns `None` when the value is not exactly one
+    /// octet — RFC 9234 §4.1 fixes the length at 1, and accepting a
+    /// longer value would make the role ambiguous.
+    pub fn as_bgp_role(&self) -> Option<u8> {
+        if self.code != CapabilityCode::BgpRole || self.value.len() != 1 {
             return None;
         }
-        match self.value.len() {
-            1 => Some((self.value[0] & 0x0f, false)),
-            2 => Some((self.value[0] & 0x0f, self.value[1] & 0x01 != 0)),
-            _ => None,
-        }
+        Some(self.value[0] & 0x0f)
     }
 
     /// draft-walton-bgp-hostname-capability-01 FQDN capability (code
@@ -356,32 +348,28 @@ mod tests {
     }
 
     #[test]
-    fn bgp_role_roundtrip_strict_off() {
-        let cap = Capability::bgp_role(3, false); // Customer, lenient
+    fn bgp_role_roundtrip_customer() {
+        let cap = Capability::bgp_role(3); // Customer
         assert_eq!(cap.code.to_u8(), 9);
-        assert_eq!(cap.value, vec![3, 0]);
-        assert_eq!(cap.as_bgp_role(), Some((3, false)));
+        assert_eq!(cap.value, vec![3]);
+        assert_eq!(cap.as_bgp_role(), Some(3));
     }
 
     #[test]
-    fn bgp_role_roundtrip_strict_on() {
-        let cap = Capability::bgp_role(0, true); // Provider, strict
-        assert_eq!(cap.value, vec![0, 1]);
-        assert_eq!(cap.as_bgp_role(), Some((0, true)));
+    fn bgp_role_roundtrip_provider() {
+        let cap = Capability::bgp_role(0); // Provider
+        assert_eq!(cap.value, vec![0]);
+        assert_eq!(cap.as_bgp_role(), Some(0));
     }
 
-    /// RFC 9234 §3 fixes the value length at 1 octet; the strict
-    /// byte is the FRR/BIRD extension. The receiver accepts the
-    /// RFC form too so a pure-RFC peer interoperates.
-    #[test]
-    fn bgp_role_accepts_one_octet_rfc_form() {
-        let cap = Capability::new(CapabilityCode::BgpRole, vec![3]);
-        assert_eq!(cap.as_bgp_role(), Some((3, false)));
-    }
-
+    /// RFC 9234 §4.1 fixes the value length at 1 octet. A longer
+    /// value is not a valid role capability and is refused rather
+    /// than silently truncated.
     #[test]
     fn bgp_role_rejects_empty_and_too_long() {
         let cap = Capability::new(CapabilityCode::BgpRole, vec![]);
+        assert!(cap.as_bgp_role().is_none());
+        let cap = Capability::new(CapabilityCode::BgpRole, vec![3, 0]);
         assert!(cap.as_bgp_role().is_none());
         let cap = Capability::new(CapabilityCode::BgpRole, vec![3, 0, 0]);
         assert!(cap.as_bgp_role().is_none());
@@ -391,8 +379,8 @@ mod tests {
     /// ships extra high bits does not corrupt the role value.
     #[test]
     fn bgp_role_masks_high_bits() {
-        let cap = Capability::new(CapabilityCode::BgpRole, vec![0x13, 0x01]);
-        assert_eq!(cap.as_bgp_role(), Some((3, true)));
+        let cap = Capability::new(CapabilityCode::BgpRole, vec![0x13]);
+        assert_eq!(cap.as_bgp_role(), Some(3));
     }
 
     #[test]
@@ -555,7 +543,7 @@ mod tests {
         let caps = vec![
             Capability::orf(&[(1, 1, vec![(64, 3)])]),
             Capability::extended_message(),
-            Capability::bgp_role(3, true),
+            Capability::bgp_role(3),
             Capability::fqdn("border-r1", "example.net"),
             Capability::bfd_strict_mode(),
             Capability::software_version("lr/2.0"),
@@ -567,7 +555,7 @@ mod tests {
         assert_eq!(decoded.len(), caps.len());
         assert_eq!(decoded[0].as_orf(), Some(vec![(1, 1, vec![(64, 3)])]));
         assert!(decoded[1].is_extended_message());
-        assert_eq!(decoded[2].as_bgp_role(), Some((3, true)));
+        assert_eq!(decoded[2].as_bgp_role(), Some(3));
         assert_eq!(
             decoded[3].as_fqdn(),
             Some(("border-r1".to_string(), "example.net".to_string()))
