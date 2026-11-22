@@ -919,14 +919,24 @@ impl BgpReloadContext {
                                 if r.soft_reconfig_inbound(hh).is_ok_and(|n| n > 0) {
                                     reconfigured += 1;
                                 }
-                            } else if r
-                                .request_route_refresh(hh, lr_core::nlri::NlriFamily::IPV4_UNICAST)
-                                || r.request_route_refresh(
-                                    hh,
-                                    lr_core::nlri::NlriFamily::IPV6_UNICAST,
-                                )
-                            {
-                                refreshed += 1;
+                            } else {
+                                // RFC 2918 refresh, one request per
+                                // family the session carries: a
+                                // dual-stack peer needs both, and the
+                                // requests must not short-circuit —
+                                // refreshing only IPv4 would leave the
+                                // IPv6 Adj-RIB-In under the stale
+                                // policy. `request_route_refresh`
+                                // itself refuses (false, nothing on
+                                // the wire) when the peer did not
+                                // negotiate the capability.
+                                let mut any = false;
+                                for fam in crate::peer_effective_families(fresh, &entry.spec) {
+                                    any |= r.request_route_refresh(hh, fam);
+                                }
+                                if any {
+                                    refreshed += 1;
+                                }
                             }
                         }
                     }

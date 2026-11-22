@@ -2703,14 +2703,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     ExitCode::SUCCESS
 }
 
-/// Build the `SessionConfig` for one peer, resolving all per-peer
-/// overrides against the `[bgp]` globals.
-fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> SessionConfig {
-    let mut sc = SessionConfig::bgp(Asn(g.local_as), Asn(g.effective_peer_as(p)), rid);
-    sc.hold_time = p.hold_time.unwrap_or(g.hold_time);
-    if p.add_path.unwrap_or(g.add_path) {
-        sc = sc.with_add_path();
-    }
+/// The MP-BGP families one peer's session carries, resolving every
+/// per-peer override against the `[bgp]` globals — the exact list
+/// `build_session_config` advertises in the OPEN. Shared by the
+/// session builder and the reload's RFC 2918 refresh fan-out so the
+/// two can never drift apart.
+fn peer_effective_families(g: &DaemonConfig, p: &PeerSpec) -> Vec<NlriFamily> {
     // RFC 4760 MP-BGP: build the family list from the effective config.
     // Recognised names: `ipv4-unicast`, `ipv6-unicast`,
     // `ipv4-labeled-unicast` (RFC 8277), `ipv6-labeled-unicast`
@@ -2770,6 +2768,18 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     if g.bgp_ls.enabled && p.mp_families.is_none() && !families.contains(&NlriFamily::BGP_LS) {
         families.push(NlriFamily::BGP_LS);
     }
+    families
+}
+
+/// Build the `SessionConfig` for one peer, resolving all per-peer
+/// overrides against the `[bgp]` globals.
+fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> SessionConfig {
+    let mut sc = SessionConfig::bgp(Asn(g.local_as), Asn(g.effective_peer_as(p)), rid);
+    sc.hold_time = p.hold_time.unwrap_or(g.hold_time);
+    if p.add_path.unwrap_or(g.add_path) {
+        sc = sc.with_add_path();
+    }
+    let families = peer_effective_families(g, p);
     // Always override — even when families is empty, this clears the
     // SessionConfig::bgp() default `[IPV4_UNICAST]` so a
     // `default_ipv4_unicast = false` peer with no configured families
@@ -2778,7 +2788,7 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     // Stash the effective default_ipv4_unicast on the SessionConfig
     // so add_session propagates it to PeerConfig — the FSM gates
     // IPv4 NLRI processing on this flag.
-    sc.default_ipv4_unicast = effective_default_ipv4;
+    sc.default_ipv4_unicast = p.default_ipv4_unicast.unwrap_or(g.default_ipv4_unicast);
     // FRR `neighbor X allowas-in N` / BIRD `allow local as`:
     // per-peer override of the router-wide default. add_session
     // propagates it to PeerConfig so the router's per-peer AS-loop
