@@ -16,8 +16,9 @@ import "C"
 
 // ---- Route ----
 
-// ApplySetChecked is an auto-generated wrapper for “lr_apply_set_checked“.
+// ApplySetChecked is an auto-generated wrapper for ``lr_apply_set_checked``.
 func (r *Route) ApplySetChecked(set_kind C.uint8_t, arg1 C.uint32_t, arg2 C.uint32_t, arg3 C.uint32_t) (uint64, error) {
 	rc := C.lr_apply_set_checked(r.ptr, set_kind, arg1, arg2, arg3)
 	return uint64(rc), nil
 }
+

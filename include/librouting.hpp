@@ -14007,6 +14007,18 @@ inline std::int32_t shutdown_session(RouterHandle const& h, std::uint64_t sessio
     return rc;
 }
 
+inline std::int32_t reset_session(RouterHandle const& h, std::uint64_t session) {
+    std::int32_t rc = lr_router_reset_session(h.get(), session);
+    if (rc < 0) throw Error(std::string("lr_router_reset_session failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t deconfigure_session(RouterHandle const& h, std::uint64_t session) {
+    std::int32_t rc = lr_router_deconfigure_session(h.get(), session);
+    if (rc < 0) throw Error(std::string("lr_router_deconfigure_session failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
 inline std::int32_t remove_redistribution_pipe(RouterHandle const& h, std::int32_t source, std::int32_t target) {
     std::int32_t rc = lr_router_remove_redistribution_pipe(h.get(), source, target);
     if (rc < 0) throw Error(std::string("lr_router_remove_redistribution_pipe failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));

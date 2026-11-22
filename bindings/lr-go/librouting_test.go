@@ -180,6 +180,62 @@ func TestDataPlane(t *testing.T) {
 	r.ptr = nil
 }
 
+// TestRouterSessionCloseSubcodes verifies the RFC 4486 §4.1 Cease
+// subcode of the administrative close family: ShutdownSession queues
+// Cease/2 (Administrative Shutdown), ResetSession Cease/4
+// (Administrative Reset, the configuration-reload semantics for a
+// reconfigured peer) and DeconfigureSession Cease/3 (Peer
+// De-configured, a peer removed at runtime) — the wire-level contract
+// the daemon's per-unit reload drives through the same router API.
+func TestRouterSessionCloseSubcodes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		closeFn func(*Router, uint64) (int32, error)
+		subcode byte
+	}{
+		{"shutdown", (*Router).ShutdownSession, 2},
+		{"reset", (*Router).ResetSession, 4},
+		{"deconfigure", (*Router).DeconfigureSession, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := NewRouter()
+			if err != nil {
+				t.Fatalf("NewRouter: %v", err)
+			}
+			h, err := r.AddBGPSessionExt(64512, 64513, 0x0a000001, 90, 0, true,
+				false, 120, false, 3600, 0)
+			if err != nil {
+				t.Fatalf("AddBGPSessionExt: %v", err)
+			}
+			if err := r.StartSession(h); err != nil {
+				t.Fatalf("StartSession: %v", err)
+			}
+			if _, err := tc.closeFn(r, h); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			out, err := r.DrainOutput(h)
+			if err != nil {
+				t.Fatalf("DrainOutput: %v", err)
+			}
+			// Walk the drained messages (marker 16 + length 2 +
+			// type 1) and find the NOTIFICATION: type 3, code 6
+			// (Cease), the variant's subcode.
+			for i := 0; i+21 <= len(out); {
+				mlen := int(out[i+16])<<8 | int(out[i+17])
+				if mlen < 19 || i+mlen > len(out) {
+					break
+				}
+				if out[i+18] == 3 && out[i+19] == 6 && out[i+20] == tc.subcode {
+					return // found the Cease/<subcode>
+				}
+				i += mlen
+			}
+			t.Fatalf("no Cease/%d NOTIFICATION in the drained output: %x",
+				tc.subcode, out)
+		})
+	}
+}
+
 // TestAddBGPSessionExtLLGR verifies the extended session constructor
 // advertises the RFC 9494 LLGR capability (code 71, one 7-byte tuple).
 func TestAddBGPSessionExtLLGR(t *testing.T) {

@@ -32697,6 +32697,46 @@
       ]
     },
     {
+      "name": "lr_router_reset_session",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_router_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "session",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_router_deconfigure_session",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_router_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "session",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_router_remove_redistribution_pipe",
       "return_type": "int32_t",
       "params": [
@@ -58948,6 +58988,46 @@
       },
       {
         "name": "lr_router_shutdown_session",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_router_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "session",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_router_reset_session",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_router_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "session",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_router_deconfigure_session",
         "return_type": "int32_t",
         "params": [
           {

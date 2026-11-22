@@ -18691,6 +18691,24 @@ int32_t lr_router_close_session(lr_router_t r, uint64_t session);
 
 int32_t lr_router_shutdown_session(lr_router_t r, uint64_t session);
 
+/**
+ * Close a live session with a Cease / Administrative Reset NOTIFICATION
+ * (RFC 4486 §4.1 subcode 4) — the configuration-reload semantics for a
+ * peer whose session-affecting fields changed: the peer flushes the
+ * routes it learned (no RFC 4724/9494 retention; the close is
+ * deliberate). Mirrors `lr_router_shutdown_session` with the subcode a
+ * reconfiguration carries.
+ */
+int32_t lr_router_reset_session(lr_router_t r, uint64_t session);
+
+/**
+ * Close a live session with a Cease / Peer De-configured NOTIFICATION
+ * (RFC 4486 §4.1 subcode 3) — the runtime semantics for a peer removed
+ * from the configuration. Mirrors `lr_router_shutdown_session` with the
+ * subcode a removal carries.
+ */
+int32_t lr_router_deconfigure_session(lr_router_t r, uint64_t session);
+
 int32_t lr_router_remove_redistribution_pipe(lr_router_t r, int32_t source, int32_t target);
 
 int32_t lr_router_adj_rib_in_snapshot(lr_router_t r, uint64_t session, struct lr_bytes_t *out);
