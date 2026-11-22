@@ -78,6 +78,58 @@ configuration changed:
 - `cargo test -p lr-bgp --lib` without the `exchange-plane` feature
   failed to compile `fsm_tests` (a cfg-gated import).
 
+### Fixed — reload hardening round (this slice)
+
+- The post-swap RFC 2918 ROUTE-REFRESH fan-out short-circuited on
+  the first family: a dual-stack peer's IPv4 request returned `true`
+  and the IPv6 request was never sent, so the IPv6 Adj-RIB-In kept
+  evaluating under the stale policy. The refresh now fans out over
+  every MP-BGP family the session carries (`peer_effective_families`,
+  the exact list `build_session_config` advertises — shared so the
+  two surfaces cannot drift apart).
+- Collision groups for restarted / added peers were derived from
+  `registry.len() + 1`, which can hand a peer a group a kept peer
+  still owns once removals shift the registry length — two different
+  peers would then share an RFC 4271 §6.8 group. A process-lifetime
+  monotonic allocator seeded from the startup peer count replaces it.
+- The reload slice collapsed the startup banner's
+  `filters: N compiled, X import / Y export bindings` line to
+  `per-session dispatch installed`, breaking the
+  `tests/interop/filter_dsl_bird.sh` lab (it greps the counts) and
+  the documented banner in `docs/examples/filter_dsl_roa.md`. The
+  counts are restored; the dispatch note rides along after them.
+- The Windows build of `daemon_bfd.rs` did not compile: the
+  supervisor-thread spawn passed the unix-only `poll` /
+  `waker_for_thread` arguments unconditionally, and an unconditional
+  `use mio::unix::SourceFd` lived inside `apply_rx_effects`. Both
+  are now `#[cfg(target_family = "unix")]`-gated, so every Windows
+  job (native, cross-build, lr<->lr and BIRD interop) builds.
+- `lr-policy::hooks` imported `Mutex` under `any(bgp, damping,
+  peer-health)` but only the damping and peer-health hooks use it —
+  a bgp-only build (the templates job) failed `-D warnings`. Each
+  name is now imported only under the feature set that uses it.
+- The new `tests/daemon_peer_reload.rs` e2e suite bound its listener
+  daemons on 18301/18302, 18311, 18321 and 18331 — all owned by
+  `tests/daemon_collision.rs` (and 18301 also by
+  `tests/daemon_multi_peer.rs`). cargo runs selected test binaries
+  concurrently, so the two suites cross-connected and the collision
+  tests failed intermittently. The ladder moves to 18361, 18371,
+  18381/18382, 18391, 18341, 18351/18352 — disjoint from every
+  other e2e binary.
+
+### Added — FFI surface for the reload close variants
+
+`lr_router_reset_session` (Cease / 4 Administrative Reset — the
+configuration-reload semantics for a reconfigured peer) and
+`lr_router_deconfigure_session` (Cease / 3 Peer De-configured — a
+peer removed at runtime) join `lr_router_shutdown_session` in the
+C ABI, so an embedder driving a reload-shaped lifecycle through the
+FFI can express the subcode the daemon uses. The header regenerates
+through cbindgen; `scripts/abi.json`, the Go/Python/C++ bindings
+and their generators re-ran; the abi_freeze_check against `v1.0.0`
+stays additive-only. Go and Python tests assert each variant's
+Cease subcode on the drained wire output.
+
 ### Added — `lrctl` pretty status output (issue #101)
 
 `lrctl` gains a `--format=plain|pretty|json|json:pretty` flag and a
