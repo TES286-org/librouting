@@ -838,6 +838,382 @@ pub(crate) fn policy_error(msg: String) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// The compiled policy the daemon's BGP engine dispatches through —
+/// the route-map half and the per-session filter-DSL half behind one
+/// swap boundary.
+///
+/// The router's hook chain is append-only, but a configuration
+/// reload must replace every route-map, named list and per-session
+/// filter binding without restarting a single session. The daemon
+/// therefore installs the two dispatch hooks
+/// ([`LiveRouteMapDispatch`], [`LiveFilterDispatch`]) once at
+/// startup; both read the *current* state through the shared
+/// `Arc<RwLock<Arc<LivePolicyState>>>`, and a reload builds a fresh
+/// state and swaps it under one write-lock acquisition. Import-side
+/// evaluation order is unchanged from the static-hook shape:
+/// route-maps first (the route-map dispatch hook), the router-wide
+/// ROA validation hook in the middle, per-session filter DSL last
+/// (the filter dispatch hook).
+///
+/// Route-map bindings are per *peer*, materialised on every session
+/// handle the peer owns — the outbound session and the RFC 4271 §6.8
+/// inbound challenger both run the neighbour's `import`/`export`
+/// route-maps. (The static shape bound only the outbound handle, so
+/// an inbound-landed session bypassed the route-map — the dispatch
+/// closes that gap and matches the filter-DSL binding shape.)
+#[derive(Clone)]
+pub(crate) struct LivePolicyState {
+    /// Route-map + named-list dispatch (the `PolicySet::hooks()`
+    /// shape: per-session route-map bindings and the list banks).
+    route_maps: lr_policy::set::PolicyHooks,
+    /// Per-session compiled import filters, keyed by session handle.
+    import_filters: std::collections::BTreeMap<u64, NamedCompiledFilter>,
+    /// Per-session compiled export filters, keyed by session handle.
+    export_filters: std::collections::BTreeMap<u64, NamedCompiledFilter>,
+    /// Evaluation-latency histograms by (direction, filter name),
+    /// carried across reloads so a re-built filter keeps its series
+    /// instead of registering a duplicate one.
+    stats:
+        std::collections::BTreeMap<(u8, String), std::sync::Arc<crate::metrics::DurationHistogram>>,
+}
+
+/// One compiled `[[filter]]` body plus the histogram its evaluations
+/// record into (when the metrics endpoint is enabled).
+#[derive(Clone)]
+pub(crate) struct NamedCompiledFilter {
+    pub name: String,
+    pub compiled: lr_policy::filter::bytecode::CompiledFilter,
+    pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
+}
+
+/// The shared, swap-on-reload holder the dispatch hooks read through.
+pub(crate) type SharedPolicyState =
+    std::sync::Arc<std::sync::RwLock<std::sync::Arc<LivePolicyState>>>;
+
+impl LivePolicyState {
+    /// The route-map dispatch half as a `PolicyHooks` clone (for
+    /// tests and introspection).
+    pub(crate) fn route_map_hooks(&self) -> lr_policy::set::PolicyHooks {
+        self.route_maps.clone()
+    }
+
+    /// Look up one named route-map (network origination,
+    /// `[[bgp.network_route_map]]` lookups).
+    pub(crate) fn route_map(&self, name: &str) -> Option<lr_policy::route_map::RouteMap> {
+        self.route_maps.route_map(name).cloned()
+    }
+
+    /// The import-filter binding of one session, if any (soft
+    /// reconfiguration decisions after a swap).
+    pub(crate) fn import_filter_of(&self, session: u64) -> Option<&str> {
+        self.import_filters.get(&session).map(|f| f.name.as_str())
+    }
+
+    /// Swap this state in as the dispatch source.
+    pub(crate) fn install(self, shared: &SharedPolicyState) {
+        *shared.write().unwrap() = std::sync::Arc::new(self);
+    }
+}
+
+/// Take (or reuse) the evaluation-latency histogram for one
+/// (direction, filter name) pair, registering a fresh series against
+/// the metrics registry when the name is new.
+fn take_histogram(
+    stats: &mut std::collections::BTreeMap<
+        (u8, String),
+        std::sync::Arc<crate::metrics::DurationHistogram>,
+    >,
+    metrics: Option<&std::sync::Arc<crate::metrics::FilterMetricsRegistry>>,
+    direction: u8,
+    name: &str,
+) -> Option<std::sync::Arc<crate::metrics::DurationHistogram>> {
+    let metrics = metrics?;
+    let key = (direction, name.to_string());
+    if let Some(h) = stats.get(&key) {
+        return Some(std::sync::Arc::clone(h));
+    }
+    let h = metrics.register(
+        if direction == 0 {
+            crate::metrics::FilterDirection::Import
+        } else {
+            crate::metrics::FilterDirection::Export
+        },
+        name,
+    );
+    stats.insert(key, std::sync::Arc::clone(&h));
+    Some(h)
+}
+
+/// Build the full live policy from a configuration: the route-map
+/// half (`build_policy_set` + per-peer bindings) and the per-session
+/// filter-DSL half, plus the stats map.
+///
+/// `session_of_peer` maps a config peer index to the session handles
+/// the live router holds for it — the outbound handle and the
+/// optional §6.8 challenger — so bindings land on every session the
+/// peer owns even after a reload replaced some of them. `None`
+/// (unknown peer index, e.g. a removed peer) skips the binding.
+///
+/// `prior` is the state being replaced (startup passes `None`): its
+/// stats map carries over so a filter that survives the reload keeps
+/// its histogram series.
+pub(crate) fn build_live_policy_state(
+    cfg: &DaemonConfig,
+    metrics: Option<&std::sync::Arc<crate::metrics::FilterMetricsRegistry>>,
+    prior: Option<&LivePolicyState>,
+    session_of_peer: impl Fn(usize) -> Option<(u64, Option<u64>)>,
+) -> Result<LivePolicyState, String> {
+    // ---- Route-map half ----
+    let mut set = build_policy_set(cfg)?;
+    for (idx, peer) in cfg.peers.iter().enumerate() {
+        let Some((out_handle, in_handle)) = session_of_peer(idx) else {
+            continue;
+        };
+        // Both handles carry the neighbour's route-maps: a
+        // bidirectional peer's inbound challenger session imports and
+        // exports the same policy as its outbound transport.
+        for handle in core::iter::once(out_handle).chain(in_handle) {
+            if let Some(name) = &peer.import {
+                if set.route_map(name).is_none() {
+                    return Err(format!(
+                        "peer {}: unknown route-map '{}'",
+                        peer.label(),
+                        name
+                    ));
+                }
+                set.bind_import(handle, name.clone());
+            }
+            if let Some(name) = &peer.export {
+                if set.route_map(name).is_none() {
+                    return Err(format!(
+                        "peer {}: unknown route-map '{}'",
+                        peer.label(),
+                        name
+                    ));
+                }
+                set.bind_export(handle, name.clone());
+            }
+        }
+    }
+    if let Err((session, direction, name)) = set.validate() {
+        return Err(format!(
+            "session #{session}: {} binding references unknown route-map '{name}'",
+            direction
+        ));
+    }
+    let route_maps = set.hooks();
+
+    // ---- Filter-DSL half ----
+    let filters = build_filters(cfg)?;
+    let by_name: std::collections::BTreeMap<&str, &DslFilter> =
+        filters.iter().map(|(n, f)| (n.as_str(), f)).collect();
+    let mut stats = prior.map(|p| p.stats.clone()).unwrap_or_default();
+    let mut import_filters = std::collections::BTreeMap::new();
+    let mut export_filters = std::collections::BTreeMap::new();
+    for (idx, peer) in cfg.peers.iter().enumerate() {
+        let Some((out_handle, in_handle)) = session_of_peer(idx) else {
+            continue;
+        };
+        let handles: Vec<u64> = core::iter::once(out_handle).chain(in_handle).collect();
+        if let Some(name) = &peer.import_filter {
+            let Some(f) = by_name.get(name.as_str()) else {
+                return Err(format!("peer {}: unknown filter '{name}'", peer.label()));
+            };
+            let compiled = lr_policy::filter::bytecode::compile(f);
+            for handle in &handles {
+                import_filters.insert(
+                    *handle,
+                    NamedCompiledFilter {
+                        name: name.clone(),
+                        compiled: compiled.clone(),
+                        stats: take_histogram(&mut stats, metrics, 0, name),
+                    },
+                );
+            }
+        }
+        if let Some(name) = &peer.export_filter {
+            let Some(f) = by_name.get(name.as_str()) else {
+                return Err(format!("peer {}: unknown filter '{name}'", peer.label()));
+            };
+            let compiled = lr_policy::filter::bytecode::compile(f);
+            for handle in &handles {
+                export_filters.insert(
+                    *handle,
+                    NamedCompiledFilter {
+                        name: name.clone(),
+                        compiled: compiled.clone(),
+                        stats: take_histogram(&mut stats, metrics, 1, name),
+                    },
+                );
+            }
+        }
+    }
+    Ok(LivePolicyState {
+        route_maps,
+        import_filters,
+        export_filters,
+        stats,
+    })
+}
+
+/// The empty state a policy-free daemon dispatches through.
+impl Default for LivePolicyState {
+    fn default() -> Self {
+        Self {
+            route_maps: PolicySet::new().hooks(),
+            import_filters: std::collections::BTreeMap::new(),
+            export_filters: std::collections::BTreeMap::new(),
+            stats: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// The route-map dispatch hook: per-session route-map bindings and
+/// the named-list banks, read through the swap boundary. Installed
+/// once (before the ROA hook, matching the static chain order); a
+/// reload swaps the state it reads.
+#[derive(Clone)]
+pub(crate) struct LiveRouteMapDispatch {
+    shared: SharedPolicyState,
+}
+
+impl LiveRouteMapDispatch {
+    pub(crate) fn new(shared: SharedPolicyState) -> Self {
+        Self { shared }
+    }
+}
+
+impl lr_policy::hooks::ImportHook for LiveRouteMapDispatch {
+    fn name(&self) -> &str {
+        "live-route-maps"
+    }
+    fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        self.shared.read().unwrap().route_maps.on_import(route)
+    }
+}
+
+impl lr_policy::hooks::ExportHook for LiveRouteMapDispatch {
+    fn name(&self) -> &str {
+        "live-route-maps"
+    }
+    fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        self.shared.read().unwrap().route_maps.on_export(route)
+    }
+    fn on_export_to(
+        &self,
+        route: &mut lr_core::rib::Route,
+        destination: u64,
+    ) -> lr_policy::hooks::HookVerdict {
+        self.shared
+            .read()
+            .unwrap()
+            .route_maps
+            .on_export_to(route, destination)
+    }
+}
+
+impl lr_policy::action::MatchResolver for LiveRouteMapDispatch {
+    fn prefix_in(&self, list_id: u32, p: &Prefix) -> bool {
+        self.shared.read().unwrap().route_maps.prefix_in(list_id, p)
+    }
+    fn as_path_in(&self, list_id: u32, route: &lr_core::rib::Route) -> bool {
+        self.shared
+            .read()
+            .unwrap()
+            .route_maps
+            .as_path_in(list_id, route)
+    }
+    fn community_in(&self, list_id: u32, route: &lr_core::rib::Route) -> bool {
+        self.shared
+            .read()
+            .unwrap()
+            .route_maps
+            .community_in(list_id, route)
+    }
+    fn next_hop_in(&self, list_id: u32, route: &lr_core::rib::Route) -> bool {
+        self.shared
+            .read()
+            .unwrap()
+            .route_maps
+            .next_hop_in(list_id, route)
+    }
+}
+
+/// The per-session filter-DSL dispatch hook. Installed once (after
+/// the ROA hook, matching the static chain order); a reload swaps the
+/// state it reads. Sessions without a binding pass through — a filter
+/// on one neighbour must never become an implicit global filter.
+#[derive(Clone)]
+pub(crate) struct LiveFilterDispatch {
+    shared: SharedPolicyState,
+    ctx: std::sync::Arc<DaemonFilterContext>,
+}
+
+impl LiveFilterDispatch {
+    pub(crate) fn new(shared: SharedPolicyState, ctx: std::sync::Arc<DaemonFilterContext>) -> Self {
+        Self { shared, ctx }
+    }
+
+    fn evaluate(
+        &self,
+        f: &NamedCompiledFilter,
+        route: &mut lr_core::rib::Route,
+    ) -> lr_policy::hooks::HookVerdict {
+        match &f.stats {
+            Some(hist) => {
+                let t0 = std::time::Instant::now();
+                let verdict =
+                    lr_policy::filter::bytecode::execute(&f.compiled, route, self.ctx.as_ref());
+                hist.record(t0.elapsed().as_nanos() as u64);
+                map_verdict(verdict)
+            }
+            None => map_verdict(lr_policy::filter::bytecode::execute(
+                &f.compiled,
+                route,
+                self.ctx.as_ref(),
+            )),
+        }
+    }
+}
+
+impl lr_policy::hooks::ImportHook for LiveFilterDispatch {
+    fn name(&self) -> &str {
+        "live-filters-import"
+    }
+    fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        let state = std::sync::Arc::clone(&self.shared.read().unwrap());
+        let Some(f) = state.import_filters.get(&route.origin.peer) else {
+            return lr_policy::hooks::HookVerdict::Keep;
+        };
+        self.evaluate(f, route)
+    }
+}
+
+impl lr_policy::hooks::ExportHook for LiveFilterDispatch {
+    fn name(&self) -> &str {
+        "live-filters-export"
+    }
+    fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        // The destination-agnostic entry point cannot know which peer
+        // this route is headed to. Every binding this dispatch holds
+        // is per-session, so the route passes through here and is
+        // evaluated by `on_export_to` with the real destination.
+        let _ = route;
+        lr_policy::hooks::HookVerdict::Keep
+    }
+    fn on_export_to(
+        &self,
+        route: &mut lr_core::rib::Route,
+        destination: u64,
+    ) -> lr_policy::hooks::HookVerdict {
+        let state = std::sync::Arc::clone(&self.shared.read().unwrap());
+        let Some(f) = state.export_filters.get(&destination) else {
+            return lr_policy::hooks::HookVerdict::Keep;
+        };
+        self.evaluate(f, route)
+    }
+}
+
 #[cfg(test)]
 #[path = "daemon_policy_tests.rs"]
 mod tests;

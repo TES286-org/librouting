@@ -206,26 +206,33 @@ impl FilterDirection {
 /// clone, so recording never touches this registry (no map lookup, no
 /// lock on the hot path).
 ///
+/// The registry is interior-mutable (`&self` registration): a
+/// configuration reload registers newly named filters through the
+/// same `Arc` the metrics thread scrapes, without rebuilding the
+/// exposition context.
+///
 /// The internal `__roa_validate` filter registers like any user
 /// filter — its latency is the ROA-validation cost, which is exactly
 /// what an operator debugging slow imports wants to see separated
 /// from the user policy.
 pub struct FilterMetricsRegistry {
-    entries: Vec<(FilterDirection, String, Arc<DurationHistogram>)>,
+    entries: std::sync::Mutex<Vec<(FilterDirection, String, Arc<DurationHistogram>)>>,
 }
 
 impl FilterMetricsRegistry {
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// Register one (direction, filter) series and return the
     /// histogram the hook records into.
-    pub fn register(&mut self, direction: FilterDirection, filter: &str) -> Arc<DurationHistogram> {
+    pub fn register(&self, direction: FilterDirection, filter: &str) -> Arc<DurationHistogram> {
         let hist = Arc::new(DurationHistogram::new());
         self.entries
+            .lock()
+            .unwrap()
             .push((direction, filter.to_string(), Arc::clone(&hist)));
         hist
     }
@@ -233,7 +240,7 @@ impl FilterMetricsRegistry {
     /// True when no series registered (the metric block is omitted
     /// from the exposition).
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.lock().unwrap().is_empty()
     }
 
     /// Render the full histogram block: HELP/TYPE headers plus the
@@ -241,7 +248,8 @@ impl FilterMetricsRegistry {
     /// order (deterministic across scrapes).
     pub fn render(&self, out: &mut String) {
         use std::fmt::Write as _;
-        if self.is_empty() {
+        let entries = self.entries.lock().unwrap();
+        if entries.is_empty() {
             return;
         }
         let _ = writeln!(
@@ -249,7 +257,7 @@ impl FilterMetricsRegistry {
             "# HELP lr_filter_eval_duration_seconds Filter DSL evaluation latency, by direction and filter name."
         );
         let _ = writeln!(out, "# TYPE lr_filter_eval_duration_seconds histogram");
-        for (direction, name, hist) in &self.entries {
+        for (direction, name, hist) in entries.iter() {
             let labels = format!(
                 "{{direction=\"{}\",filter=\"{}\"}}",
                 direction.label(),

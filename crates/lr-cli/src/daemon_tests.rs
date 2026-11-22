@@ -1213,6 +1213,9 @@ mod source_diagnostic_tests {
             gtsm,
             bfd: None,
             busy: Arc::new(AtomicBool::new(false)),
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            connector_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            connector_exited: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             outbound_lost_collision: Arc::new(AtomicBool::new(false)),
             admin_down: false,
             bfd_strict_mode: false,
@@ -2015,11 +2018,13 @@ mod damping_reload_toggle_tests {
         initial_enabled: bool,
     ) -> (
         Arc<RwLock<DefaultRouter>>,
-        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<super::NetworkReloadState>>,
         Arc<Mutex<Option<DampingController>>>,
     ) {
         let router = Arc::new(RwLock::new(DefaultRouter::new()));
-        let current_networks = Arc::new(Mutex::new(Vec::new()));
+        let current_networks = Arc::new(Mutex::new(super::network_reload_state(
+            &DaemonConfig::default(),
+        )));
         let damping_state: Arc<Mutex<Option<DampingController>>> = Arc::new(Mutex::new(None));
         if initial_enabled {
             let table = Arc::new(Mutex::new(DampingTable::new(DampingConfig::default())));
@@ -2065,6 +2070,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
         // The reload reports the enable.
         assert!(
@@ -2116,6 +2122,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
         assert!(
             lines.iter().any(|l| l.contains("damping disabled")),
@@ -2168,6 +2175,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
         assert!(
             lines
@@ -2218,6 +2226,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
         assert!(
             !lines.iter().any(|l| l.to_lowercase().contains("damping")),
@@ -2255,6 +2264,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
         assert!(damping_state.lock().unwrap().is_some());
 
@@ -2270,6 +2280,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
         assert!(damping_state.lock().unwrap().is_none());
 
@@ -2359,6 +2370,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
 
         // The hook is still installed but pass-throughs: a route
@@ -2387,6 +2399,7 @@ mod damping_reload_toggle_tests {
             &[],
             Some(&damping_state),
             None,
+            &[],
         );
         // The fresh FoM table is empty — the prefix is no longer
         // suppressed — so the route flows through. This is the
@@ -2430,6 +2443,7 @@ mod event_bus_wiring_tests {
             peer_health_table: None,
             filter_metrics: Mutex::new(None),
             session_labels: Arc::new(Mutex::new(HashMap::new())),
+            engine_reloads: Arc::new(Mutex::new(Vec::new())),
             shutdown: None,
         })
     }

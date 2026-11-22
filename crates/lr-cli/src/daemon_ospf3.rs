@@ -1038,6 +1038,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                 peer_health_table: None,
                 filter_metrics: Mutex::new(None),
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
+                engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
             })
         }

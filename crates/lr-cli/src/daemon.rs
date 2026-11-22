@@ -155,7 +155,7 @@ pub(crate) use daemon_logger::{ColorMode, Component, LogConfig, LogFormat, Sever
 use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant as WallClock};
@@ -571,6 +571,7 @@ fn daemon_main() -> ExitCode {
 
 /// One configured BGP peer: its router session(s), transport security
 /// and the busy flag serialising inbound connections on the session.
+#[derive(Clone)]
 struct PeerEntry {
     spec: PeerSpec,
     /// Primary session. For bidirectional peers (both `remote` and
@@ -590,6 +591,20 @@ struct PeerEntry {
     /// True while a transport thread owns this session — prevents two
     /// concurrent connections racing one FSM.
     busy: Arc<AtomicBool>,
+    /// Connector stop flag: a configuration reload that removes or
+    /// replaces this peer sets it, and the connector thread exits at
+    /// its next poll (every sleep slices at 100 ms, every backoff
+    /// pass re-checks) instead of dialing again.
+    stop: Arc<AtomicBool>,
+    /// Connector generation bookkeeping: `connector_gen` counts the
+    /// spawned connectors (incremented at each spawn), and
+    /// `connector_exited` latches the generation whose thread has
+    /// fully returned. A reload that stops a peer waits for
+    /// `exited >= gen` (bounded) so the replacement connector can
+    /// never overlap a lagging predecessor still holding a dial or a
+    /// session submission.
+    connector_gen: Arc<AtomicU64>,
+    connector_exited: Arc<AtomicU64>,
     /// Set once the outbound transport has LOST a §6.8 collision (the
     /// connector's session was closed by the router's resolver). Until
     /// this latches, the connector always dials: the §6.8 convention
@@ -602,21 +617,31 @@ struct PeerEntry {
     outbound_lost_collision: Arc<AtomicBool>,
     /// FRR `neighbor X shutdown` / BIRD `disabled`: the peer is
     /// administratively down. Resolved from `spec.shutdown.unwrap_or(false)`
-    /// at startup so the connector and listener do not re-evaluate the
+    /// so the connector and listener do not re-evaluate the
     /// Option on every iteration. The outbound connector is not spawned
     /// when this is `true`; the listener refuses inbound SYNs from this
-    /// peer's address with a `peer X admin-down` log line. Toggling
-    /// `shutdown` live via SIGHUP is a follow-up — the operator restarts
-    /// the daemon to flip the flag (the connector and listener read it
-    /// at startup).
+    /// peer's address with a `peer X admin-down` log line. A
+    /// configuration reload flips it live: turning it on closes the
+    /// peer's live sessions (RFC 4486 §4.1 Cease/2) and stops its
+    /// connector; turning it off clears the gate and spawns the
+    /// connector again.
     admin_down: bool,
     /// draft-ietf-idr-bgp-bfd-strict-mode-13: when `true` and the peer
     /// has `bfd` enabled, the connector blocks session establishment
     /// until BFD reports Up — not just re-establishment after a BFD
     /// Down-to-Up-to-Down cycle. Resolved from
-    /// `spec.bfd_strict_mode.unwrap_or(cfg.bfd_strict_mode)` at startup.
+    /// `spec.bfd_strict_mode.unwrap_or(cfg.bfd_strict_mode)`.
     bfd_strict_mode: bool,
 }
+
+/// The daemon's live peer set, shared between the inbound gate (read
+/// per accepted connection), the reload path (writes: add, remove,
+/// replace) and status rendering. The gate never holds the lock while
+/// calling into the reactor or the router, and the reload path never
+/// holds it while waiting on the reactor's close handshake — the
+/// reactor thread runs the gate, so a write lock held across a close
+/// would deadlock.
+type PeerRegistry = Arc<RwLock<Vec<PeerEntry>>>;
 
 impl PeerEntry {
     fn label(&self) -> &str {
@@ -1240,7 +1265,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // `graceful_shutdown = false` are exempt from the §3.1 sender-side
     // LOCAL_PREF zeroing. Collected while the handles exist (the
     // installation below consumes the set).
-    let mut gs_exempt_sessions: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    let gs_exempt_sessions: Arc<RwLock<std::collections::BTreeSet<u64>>> =
+        Arc::new(RwLock::new(std::collections::BTreeSet::new()));
     {
         let mut r = router.write().unwrap();
         // RFC 7911 Add-Path: cap how many paths per prefix survive the
@@ -1373,9 +1399,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     // of the §3.1 sender-side rewrite, so exports to its
                     // sessions keep their LOCAL_PREF.
                     if spec.graceful_shutdown == Some(false) {
-                        gs_exempt_sessions.insert(h.0);
+                        gs_exempt_sessions.write().unwrap().insert(h.0);
                         if let Some(h2) = handle_in {
-                            gs_exempt_sessions.insert(h2.0);
+                            gs_exempt_sessions.write().unwrap().insert(h2.0);
                         }
                     }
                     // RFC 8212 §3: declare the policy presence of this
@@ -1466,6 +1492,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         gtsm,
                         bfd: None,
                         busy: Arc::new(AtomicBool::new(false)),
+                        stop: Arc::new(AtomicBool::new(false)),
+                        connector_gen: Arc::new(AtomicU64::new(0)),
+                        connector_exited: Arc::new(AtomicU64::new(0)),
                         outbound_lost_collision: Arc::new(AtomicBool::new(false)),
                         admin_down: spec.shutdown.unwrap_or(false),
                         bfd_strict_mode: spec.bfd_strict_mode.unwrap_or(cfg.bfd_strict_mode),
@@ -1484,15 +1513,21 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         }
     }
 
+    // The registry is the daemon's live peer set: the inbound gate
+    // reads it per accepted connection and the configuration reload
+    // rewrites it (add / remove / replace) — see
+    // `daemon_peer_reload::BgpReloadContext`.
+    let registry: PeerRegistry = Arc::new(RwLock::new(entries));
+
     // ---- D12.4 observability: filter histograms + session labels. ----
     // The registry exists only when the metrics endpoint is
     // configured — the filter hooks then record per-route evaluation
     // latency into it; without `--metrics-addr` the hooks carry no
     // histogram and the hot path stays free of timing cost.
-    let mut filter_registry = cfg
+    let filter_registry: Option<Arc<metrics::FilterMetricsRegistry>> = cfg
         .metrics_addr
         .as_ref()
-        .map(|_| metrics::FilterMetricsRegistry::new());
+        .map(|_| Arc::new(metrics::FilterMetricsRegistry::new()));
     // Handle → configured peer label (name / remote / address,
     // whichever the operator wrote). Bidirectional peers carry two
     // sessions per neighbor (RFC 4271 §6.8 collision resolution);
@@ -1500,50 +1535,45 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // the metrics `peer=` label stays readable while the `session=`
     // label keeps the series unique.
     let mut session_label_map: HashMap<u64, String> = HashMap::new();
-    for e in &entries {
+    for e in registry.read().unwrap().iter() {
         session_label_map.insert(e.handle.0, e.spec.label().to_string());
         if let Some(h2) = e.handle_in {
             session_label_map.insert(h2.0, format!("{} (inbound)", e.spec.label()));
         }
     }
 
-    // ---- Policy (route-maps / lists from the TOML config). ----
-    // Registered before any session comes up so the initial table
-    // dump already flows through per-peer import/export policy.
-    let has_policy_bindings = cfg
-        .peers
-        .iter()
-        .any(|p| p.import.is_some() || p.export.is_some());
-    let has_filter_bindings = cfg
-        .peers
-        .iter()
-        .any(|p| p.import_filter.is_some() || p.export_filter.is_some());
-    // Build the PolicySet whenever the operator wired any policy
-    // (per-peer import/export bindings, free-standing `[[route-map]]`
-    // tables, or `[[bgp.network_route_map]]` qualifiers — the last
-    // needs the route-map lookup at origination, so it forces the
-    // PolicySet to exist even with no per-peer bindings).
-    let policy_hooks: Option<lr_policy::PolicyHooks> = if has_policy_bindings
-        || !cfg.route_maps.is_empty()
-        || !cfg.network_route_maps.is_empty()
-    {
-        let mut policy_set = match daemon_policy::build_policy_set(cfg) {
-            Ok(set) => set,
-            Err(e) => return daemon_policy::policy_error(e),
-        };
-        if let Err(e) = daemon_policy::bind_peer_policies(cfg, &mut policy_set, |idx| {
-            entries.get(idx).map(|e| e.handle.0).unwrap_or(u64::MAX)
+    // ---- Live policy state (route-maps, lists, per-session
+    // filters) ----
+    // One swap boundary behind two dispatch hooks: the daemon
+    // installs the hooks once here, and a configuration reload
+    // re-compiles the state and swaps it (see
+    // `daemon_peer_reload::BgpReloadContext::reload_peers`) —
+    // route-map and filter changes apply without restarting a single
+    // session.
+    let live_policy: daemon_policy::SharedPolicyState = Arc::new(RwLock::new(Arc::new(
+        match daemon_policy::build_live_policy_state(cfg, filter_registry.as_ref(), None, |idx| {
+            registry
+                .read()
+                .unwrap()
+                .get(idx)
+                .map(|e| (e.handle.0, e.handle_in.map(|h| h.0)))
         }) {
-            return daemon_policy::policy_error(e);
-        }
-        let hooks = policy_set.hooks();
+            Ok(state) => state,
+            Err(e) => return daemon_policy::policy_error(e),
+        },
+    )));
+    let route_dispatch = daemon_policy::LiveRouteMapDispatch::new(Arc::clone(&live_policy));
+    {
+        let mut r = router.write().unwrap();
+        // The route-map dispatch comes first — the same chain order
+        // the static shape had: route-maps, then the router-wide ROA
+        // validation hook, then the per-session filter DSL.
+        r.hooks_mut().import.push(Box::new(route_dispatch.clone()));
+        r.hooks_mut().export.push(Box::new(route_dispatch.clone()));
+    }
+    if !cfg.route_maps.is_empty() {
         let bound_imports = cfg.peers.iter().filter(|p| p.import.is_some()).count();
         let bound_exports = cfg.peers.iter().filter(|p| p.export.is_some()).count();
-        {
-            let mut r = router.write().unwrap();
-            r.hooks_mut().import.push(Box::new(hooks.clone()));
-            r.hooks_mut().export.push(Box::new(hooks.clone()));
-        }
         log_info!(
             Component::Policy,
             "policy:      {} route-maps, {} import / {} export bindings",
@@ -1551,10 +1581,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             bound_imports,
             bound_exports
         );
-        Some(hooks)
-    } else {
-        None
-    };
+    }
 
     // ---- ROA / RFC 6811 prefix-origin validation ----
     // Build the table even when `roa_validate` is off so the filter
@@ -1649,7 +1676,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     filter: f,
                     ctx,
                     stats: filter_registry
-                        .as_mut()
+                        .as_ref()
                         .map(|r| r.register(metrics::FilterDirection::Import, "__roa_validate")),
                     // RFC 6811 validation is router-wide: it must run
                     // for every BGP session, not just one peer.
@@ -1665,85 +1692,32 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     }
 
     // ---- BIRD-like filter DSL ([[filter]] tables). ----
-    if has_filter_bindings || !cfg.filters.is_empty() {
-        let filters = match daemon_policy::build_filters(cfg) {
-            Ok(f) => f,
-            Err(e) => return daemon_policy::policy_error(e),
-        };
-        let ctx = std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(
+    // The per-session dispatch through the live policy state: bound
+    // sessions evaluate their `import_filter` / `export_filter`
+    // bodies, everyone else passes through. A reload re-binds by
+    // swapping the state.
+    {
+        let filter_ctx = std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(
             std::sync::Arc::clone(&roa_store),
         ));
-        let mut bound_import_filters = 0usize;
-        let mut bound_export_filters = 0usize;
-        // Index filters by name for O(1) lookup during peer binding.
-        let by_name: std::collections::BTreeMap<&str, &lr_policy::filter::Filter> =
-            filters.iter().map(|(n, f)| (n.as_str(), f)).collect();
-        for (idx, peer) in cfg.peers.iter().enumerate() {
-            let Some(session) = entries.get(idx) else {
-                continue;
-            };
-            // A per-peer filter belongs to this neighbor's sessions
-            // only. Bidirectional peers own two router sessions (the
-            // outbound transport and the inbound collision challenger)
-            // — both share the configured policy. Without this binding
-            // the hook chain would apply one neighbor's filter to every
-            // route on the router (BIRD/FRR import/export filters are
-            // per-neighbor).
-            let peer_sessions: std::collections::BTreeSet<u64> = core::iter::once(session.handle.0)
-                .chain(session.handle_in.iter().map(|h| h.0))
-                .collect();
-            if let Some(name) = &peer.import_filter {
-                let Some(f) = by_name.get(name.as_str()) else {
-                    return daemon_policy::policy_error(format!(
-                        "peer {}: unknown filter '{name}'",
-                        peer.label()
-                    ));
-                };
-                let hook = daemon_policy::FilterImportHook {
-                    compiled: lr_policy::filter::bytecode::compile(f),
-                    filter: (*f).clone(),
-                    ctx: std::sync::Arc::clone(&ctx),
-                    stats: filter_registry
-                        .as_mut()
-                        .map(|r| r.register(metrics::FilterDirection::Import, name)),
-                    sessions: Some(peer_sessions.clone()),
-                };
-                {
-                    let mut r = router.write().unwrap();
-                    r.hooks_mut().import.push(Box::new(hook));
-                }
-                bound_import_filters += 1;
-            }
-            if let Some(name) = &peer.export_filter {
-                let Some(f) = by_name.get(name.as_str()) else {
-                    return daemon_policy::policy_error(format!(
-                        "peer {}: unknown filter '{name}'",
-                        peer.label()
-                    ));
-                };
-                let hook = daemon_policy::FilterExportHook {
-                    compiled: lr_policy::filter::bytecode::compile(f),
-                    filter: (*f).clone(),
-                    ctx: std::sync::Arc::clone(&ctx),
-                    stats: filter_registry
-                        .as_mut()
-                        .map(|r| r.register(metrics::FilterDirection::Export, name)),
-                    sessions: Some(peer_sessions),
-                };
-                {
-                    let mut r = router.write().unwrap();
-                    r.hooks_mut().export.push(Box::new(hook));
-                }
-                bound_export_filters += 1;
-            }
-        }
-        log_info!(
-            Component::Policy,
-            "filters:     {} compiled, {} import / {} export bindings",
-            filters.len(),
-            bound_import_filters,
-            bound_export_filters
+        let dispatch = daemon_policy::LiveFilterDispatch::new(
+            Arc::clone(&live_policy),
+            std::sync::Arc::clone(&filter_ctx),
         );
+        let mut r = router.write().unwrap();
+        r.hooks_mut().import.push(Box::new(dispatch.clone()));
+        r.hooks_mut().export.push(Box::new(dispatch));
+        let bound = cfg
+            .peers
+            .iter()
+            .any(|p| p.import_filter.is_some() || p.export_filter.is_some());
+        if bound || !cfg.filters.is_empty() {
+            log_info!(
+                Component::Policy,
+                "filters:     {} compiled, per-session dispatch installed",
+                cfg.filters.len()
+            );
+        }
     }
 
     // ---- RFC 8326 Graceful Session Shutdown (default-on for BGP). ----
@@ -1772,11 +1746,11 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // want a different policy can replace the hook chain.
     if cfg.runs_protocol("bgp") {
         if cfg.graceful_shutdown {
-            let exempt_count = gs_exempt_sessions.len();
+            let exempt_count = gs_exempt_sessions.read().unwrap().len();
             let mut r = router.write().unwrap();
             r.hooks_mut().export.push(Box::new(
-                lr_policy::hooks::GracefulShutdownExportHook::with_exempt_sessions(
-                    gs_exempt_sessions,
+                lr_policy::hooks::GracefulShutdownExportHook::with_shared_exempt_sessions(
+                    Arc::clone(&gs_exempt_sessions),
                 ),
             ));
             r.hooks_mut()
@@ -1962,8 +1936,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             "rfc8212 (default deny-in/deny-out)"
         }
     );
-    println!("  peers:       {}", entries.len());
-    for e in &entries {
+    println!("  peers:       {}", registry.read().unwrap().len());
+    for e in registry.read().unwrap().iter() {
         // The collision-group label surfaces whether RFC 4271 §6.8
         // resolution is in play for this peer: a bidirectional peer
         // (handle_in is Some) carries the challenger session that
@@ -2054,7 +2028,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
 
     // Locally originated networks. The string list is kept around so
     // reloads can diff old vs new (SIGHUP / runtime API `reload`).
-    let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
+    let current_networks = Arc::new(Mutex::new(network_reload_state(cfg)));
     {
         let mut r = router.write().unwrap();
         for net in &cfg.networks {
@@ -2079,14 +2053,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         .iter()
                         .find(|nr| nr.prefix.as_deref() == Some(net))
                         .and_then(|nr| nr.route_map.as_deref());
-                    if let (Some(name), Some(hooks)) = (route_map_name, &policy_hooks) {
-                        if let Some(rm) = hooks.route_map(name) {
+                    if let Some(name) = route_map_name {
+                        let rm = live_policy.read().unwrap().route_map(name);
+                        if let Some(rm) = rm {
                             match r.originate_family_with_route_map(
                                 p,
                                 family,
                                 nh,
-                                rm,
-                                hooks as &dyn lr_policy::action::MatchResolver,
+                                &rm,
+                                &route_dispatch as &dyn lr_policy::action::MatchResolver,
                             ) {
                                 Some(_) => log_info!(
                                     Component::Bgp,
@@ -2163,10 +2138,20 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // ---- BFD fast-fail supervisor (RFC 5880/5881/5883, W1.3). ----
     // One session per `bfd = true` peer; a BFD Down tears the BGP
     // session immediately instead of waiting out the hold timer.
-    // Fails closed: configured BFD that cannot bind is fatal.
+    // Fails closed: configured BFD that cannot bind is fatal. The
+    // supervisor handle stays alive for the configuration reload
+    // (peer membership and timer re-pointing ride its command
+    // channel).
+    let bfd_supervisor = Arc::new(Mutex::new(daemon_bfd::BfdSupervisor::new(
+        cfg.bfd_min_tx_ms,
+        cfg.bfd_min_rx_ms,
+        cfg.bfd_multiplier,
+        Arc::clone(&running),
+    )));
     {
-        let mut specs = Vec::new();
-        for entry in &entries {
+        // Validation first (fail closed before any bind), then the
+        // adds — the same two-phase shape the reload runs.
+        for entry in registry.read().unwrap().iter() {
             if !cfg.effective_bfd(&entry.spec) {
                 continue;
             }
@@ -2179,7 +2164,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 );
                 return ExitCode::from(2);
             };
-            let Some(local_ip) = dial_local_address(cfg, &entry.spec, peer_ip.is_ipv6()) else {
+            if dial_local_address(cfg, &entry.spec, peer_ip.is_ipv6()).is_none() {
                 log_error!(
                     Component::Bfd,
                     "peer {}: bfd requires a local address of the peer's \
@@ -2188,50 +2173,88 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     entry.label()
                 );
                 return ExitCode::from(2);
-            };
-            let mode = if cfg.effective_bfd_multihop(&entry.spec) {
-                lr_osroute::bfd_transport::BfdMode::Multihop
-            } else {
-                lr_osroute::bfd_transport::BfdMode::SingleHop
-            };
-            specs.push(daemon_bfd::BfdPeerSpec {
-                label: entry.label().to_string(),
-                peer_ip: to_std_ip(peer_ip),
-                local_ip: to_std_ip(local_ip),
-                mode,
-            });
+            }
         }
-        if !specs.is_empty() {
+        // The snapshot breaks the lock chain: the write-back below
+        // must not run under the read guard (the registry RwLock is
+        // not re-entrant — a write under a live read guard on the
+        // same thread deadlocks the startup).
+        let snapshot: Vec<PeerEntry> = registry.read().unwrap().clone();
+        let bfd_count = snapshot
+            .iter()
+            .filter(|e| cfg.effective_bfd(&e.spec))
+            .count();
+        if bfd_count > 0 {
             log_info!(
                 Component::Bfd,
                 "{} session(s), min tx {} ms, min rx {} ms, multiplier {}",
-                specs.len(),
+                bfd_count,
                 cfg.bfd_min_tx_ms,
                 cfg.bfd_min_rx_ms,
                 cfg.bfd_multiplier
             );
-            let flags = match daemon_bfd::spawn_supervisor(
-                specs,
-                cfg.bfd_min_tx_ms,
-                cfg.bfd_min_rx_ms,
-                cfg.bfd_multiplier,
-                Arc::clone(&running),
-            ) {
-                Ok(f) => f,
-                Err(e) => {
-                    log_error!(Component::Bfd, "{e}");
-                    return ExitCode::from(1);
+            let mut assigned: Vec<(String, daemon_bfd::BfdFlags)> = Vec::new();
+            {
+                let mut supervisor = bfd_supervisor.lock().unwrap();
+                for entry in &snapshot {
+                    if !cfg.effective_bfd(&entry.spec) {
+                        continue;
+                    }
+                    let peer_ip = expected_peer_ip(&entry.spec).expect("validated above");
+                    let local_ip = dial_local_address(cfg, &entry.spec, peer_ip.is_ipv6())
+                        .expect("validated above");
+                    let spec = daemon_bfd::BfdPeerSpec {
+                        label: entry.label().to_string(),
+                        peer_ip: to_std_ip(peer_ip),
+                        local_ip: to_std_ip(local_ip),
+                        mode: if cfg.effective_bfd_multihop(&entry.spec) {
+                            lr_osroute::bfd_transport::BfdMode::Multihop
+                        } else {
+                            lr_osroute::bfd_transport::BfdMode::SingleHop
+                        },
+                    };
+                    match supervisor.add_peer(spec) {
+                        Ok(flags) => assigned.push((entry.label().to_string(), flags)),
+                        Err(e) => {
+                            log_error!(Component::Bfd, "{e}");
+                            return ExitCode::from(1);
+                        }
+                    }
                 }
-            };
-            // specs were built in entry order; assign back by position.
-            let mut flag_iter = flags.into_iter();
-            for entry in &mut entries {
-                if cfg.effective_bfd(&entry.spec) {
-                    entry.bfd = flag_iter.next();
-                }
+            }
+            for (label, flags) in assigned {
+                registry
+                    .write()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|e| e.label() == label)
+                    .expect("the entry exists")
+                    .bfd = Some(flags);
             }
         }
     }
+
+    // Whether this engine is embedded in the multi-protocol
+    // supervisor (computed before the `match host` below moves fields
+    // out of it).
+    let embedded = host.is_some();
+
+    // The reactor spawns before the Runtime so the reload context can
+    // carry it (the session pump, the close handshake and the listener
+    // detach/attach all ride its submission channel).
+    let reactor = bgp_reactor::BgpReactor::spawn(Arc::clone(&router), Arc::clone(&running));
+
+    // The session-label map moves into whichever Runtime this engine
+    // uses; the Arc is created here so the reload context can share
+    // it.
+    let session_labels_arc = Arc::new(Mutex::new(session_label_map));
+
+    // Engine-level reload closures. The BGP engine registers its
+    // peer-set reload below (after the reload context exists); the
+    // standalone daemon's reload closure and the multi-protocol
+    // supervisor's shared one both drain this registry after the
+    // fresh configuration validates.
+    let engine_reloads_cell: Arc<Mutex<Vec<EngineReloadFn>>> = Arc::new(Mutex::new(Vec::new()));
 
     // ---- Runtime: standalone builds its own (reload over its own
     // router, empty status lines); an embedded engine shares the
@@ -2301,8 +2324,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             // reporting Started — it spawns the metrics endpoint only
             // after every engine is up, so the registry and labels are
             // in place by the first scrape.
-            *h.runtime.filter_metrics.lock().unwrap() = filter_registry.map(Arc::new);
-            *h.runtime.session_labels.lock().unwrap() = session_label_map;
+            *h.runtime.filter_metrics.lock().unwrap() = filter_registry.clone();
+            *h.runtime.session_labels.lock().unwrap() = session_labels_arc.lock().unwrap().clone();
             Arc::clone(&h.runtime)
         }
         None => {
@@ -2324,7 +2347,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let roa_loader_handles = roa_loader_handles.clone();
                     let damping_state = Arc::clone(&damping_state);
                     let peer_health_table_reload = peer_health_table.clone();
+                    let engine_reloads = Arc::clone(&engine_reloads_cell);
                     move || {
+                        let engines = engine_reloads.lock().unwrap().clone();
                         reload_config(
                             config_path.as_deref(),
                             config_dialect.as_deref(),
@@ -2336,6 +2361,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                             &roa_loader_handles,
                             Some(&damping_state),
                             peer_health_table_reload.as_ref(),
+                            &engines,
                         )
                     }
                 }),
@@ -2361,8 +2387,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 })),
                 roa_store: Some(Arc::clone(&roa_store)),
                 peer_health_table,
-                filter_metrics: Mutex::new(filter_registry.map(Arc::new)),
-                session_labels: Arc::new(Mutex::new(session_label_map)),
+                filter_metrics: Mutex::new(filter_registry.clone()),
+                session_labels: Arc::clone(&session_labels_arc),
+                engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
             })
         }
@@ -2419,7 +2446,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // instead of accepting unauthenticated connections. All inbound
         // peers must share one auth configuration — heterogeneous
         // listener keys are future work.
-        let inbound_auth = match listener_auth(cfg, &entries) {
+        let inbound_auth = match listener_auth(cfg, &registry.read().unwrap()) {
             Ok(a) => a,
             Err(e) => {
                 log_error!(Component::Daemon, "session auth arming failed: {e}");
@@ -2441,7 +2468,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // closed when the kernel does not support IP_MINTTL — running
         // without the filter would defeat the purpose of configuring GTSM.
         // Like auth, the filter is listener-wide.
-        let inbound_gtsm = listener_gtsm(cfg, &entries);
+        let inbound_gtsm = listener_gtsm(cfg, &registry.read().unwrap());
         if !inbound_gtsm.is_disabled() {
             if let Err(e) = lr_osroute::gtsm::arm_listener_gtsm(&l, &inbound_gtsm) {
                 log_error!(Component::Daemon, "GTSM arming failed: {e}");
@@ -2494,9 +2521,63 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // listener and the connectors submit their connected sockets and
     // the reactor pumps them with readiness events, replacing the
     // thread-per-socket model whose 200 ms read timeout was the poll
-    // cadence. See `bgp_reactor.rs` for the design.
-    let reactor =
-        bgp_reactor::BgpReactor::spawn(Arc::clone(&runtime.router), Arc::clone(&runtime.running));
+    // cadence. See `bgp_reactor.rs` for the design. (The reactor
+    // spawns before the Runtime — the reload context carries it.)
+
+    // ---- Configuration reload context (issue #101). ----
+    // Everything the peer-level reload drives: the live registry, the
+    // reactor, the BFD supervisor handle, the policy swap boundary,
+    // the RFC 8326 exemption set, the session labels and the listener
+    // state. Built once here; the engine reload closure below and (in
+    // multi-protocol mode) the supervisor's daemon-wide reload both
+    // reach it through the engine registry.
+    {
+        let strict_inbound = cfg.explicit_peers || cfg.peers.len() > 1;
+        let armed_auth = if cfg.listen_addr.is_some() {
+            listener_auth(cfg, &registry.read().unwrap()).unwrap_or(TcpAuth::None)
+        } else {
+            TcpAuth::None
+        };
+        let router_for_reload = Arc::clone(&runtime.router);
+        let reload_ctx: Arc<daemon_peer_reload::BgpReloadContext> =
+            Arc::new(daemon_peer_reload::BgpReloadContext {
+                rid,
+                router: router_for_reload,
+                runtime: Arc::clone(&runtime),
+                registry: Arc::clone(&registry),
+                reactor: reactor.clone(),
+                bfd: Arc::clone(&bfd_supervisor),
+                policy: Arc::clone(&live_policy),
+                gs_exempt: Arc::clone(&gs_exempt_sessions),
+                session_labels: Arc::clone(&session_labels_arc),
+                live_sessions: Arc::clone(&live_sessions),
+                listen_addr: Mutex::new(cfg.listen_addr.clone()),
+                armed_auth: Mutex::new(armed_auth),
+                strict_inbound,
+                current_config: Arc::new(Mutex::new(cfg.clone())),
+            });
+        let ctx = Arc::clone(&reload_ctx);
+        let engine_reload: EngineReloadFn =
+            Arc::new(move |fresh: &DaemonConfig| -> Result<Vec<String>, String> {
+                let lines = ctx.reload_peers(fresh)?;
+                // The config as last applied becomes the next diff
+                // base. `reload_peers` validated the fresh table; the
+                // daemon-level sections (networks, statics, ROA…)
+                // validated before it ran.
+                *ctx.current_config.lock().unwrap() = fresh.clone();
+                Ok(lines)
+            });
+        // Standalone: the daemon's own reload closure reads the local
+        // cell. Embedded: the supervisor's daemon-wide reload drains
+        // the shared runtime's registry.
+        engine_reloads_cell
+            .lock()
+            .unwrap()
+            .push(engine_reload.clone());
+        if embedded {
+            runtime.engine_reloads.lock().unwrap().push(engine_reload);
+        }
+    }
 
     // ---- Outbound connectors: one thread per remote peer. ----
     // Legacy listen precedence: with a single peer and --listen, the
@@ -2512,13 +2593,14 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // does not expect, and the session bounces with Cease /
         // Connection Collision Resolution (RFC 4486 subcode 7) forever.
         // The diagnostic is a hint, not a gate; the daemon still dials.
-        for entry in &entries {
+        for entry in registry.read().unwrap().iter() {
             if !entry.spec.is_outbound() {
                 continue;
             }
             diagnose_source_address(cfg, entry);
         }
-        for entry in &entries {
+        let snapshot: Vec<PeerEntry> = registry.read().unwrap().clone();
+        for entry in &snapshot {
             if !entry.spec.is_outbound() {
                 continue;
             }
@@ -2550,13 +2632,22 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // thread's accept loop used to run, on the reactor's thread:
         // the same checks, the same logs, the same submission
         // completion (see `build_inbound_gate`).
-        let gate = build_inbound_gate(entries, strict_inbound, Arc::clone(&live_sessions));
+        let gate = build_inbound_gate(
+            Arc::clone(&registry),
+            strict_inbound,
+            Arc::clone(&live_sessions),
+        );
         if let Err(e) = reactor.attach_listener(listener, gate) {
             // The reactor thread is gone — the daemon is exiting
             // anyway (the connectors' completions see the same).
             log_error!(Component::Bgp, "listener attach: {e}");
         }
-    } else if !entries.iter().any(|e| e.spec.is_outbound()) {
+    } else if !registry
+        .read()
+        .unwrap()
+        .iter()
+        .any(|e| e.spec.is_outbound())
+    {
         log_info!(
             Component::Daemon,
             "no --peer/--listen given; idling (tick loop only)"
@@ -3409,78 +3500,107 @@ fn match_inbound_peer(entries: &[PeerEntry], src: std::net::IpAddr) -> Result<&P
 /// owns the transport (the accept queue, TCP_NODELAY); the gate owns
 /// the policy, so the decisions and their logs are unchanged from the
 /// main-thread loop.
+///
+/// The gate reads the live [`PeerRegistry`] per connection, so a
+/// reload that adds, removes or replaces a peer is visible to the
+/// next inbound connection without re-attaching the listener. The
+/// lock is held only for the match and the field clones — never
+/// across a reactor or router call.
 fn build_inbound_gate(
-    entries: Vec<PeerEntry>,
+    registry: PeerRegistry,
     strict_inbound: bool,
     live_sessions: Arc<AtomicUsize>,
 ) -> bgp_reactor::InboundGate {
     Box::new(move |peer_sockaddr: &std::net::SocketAddr| {
         let peer = peer_sockaddr.to_string();
         log_info!(Component::Bgp, "inbound connection from {peer}");
-        let entry = if strict_inbound {
-            match match_inbound_peer(&entries, peer_sockaddr.ip()) {
-                Ok(e) => e,
-                Err(reason) => {
-                    log_warn!(
-                        Component::Bgp,
-                        "inbound connection from {peer} rejected: {reason}"
-                    );
-                    return bgp_reactor::Inbound::Rejected;
+        // The per-connection decision data, cloned out under the
+        // registry read lock. The lock is released before the session
+        // registers — the reactor thread must never block on the
+        // registry while the reload path holds it for a write.
+        let decision = {
+            let entries = registry.read().unwrap();
+            let entry = if strict_inbound {
+                match match_inbound_peer(&entries, peer_sockaddr.ip()) {
+                    Ok(e) => e.clone(),
+                    Err(reason) => {
+                        log_warn!(
+                            Component::Bgp,
+                            "inbound connection from {peer} rejected: {reason}"
+                        );
+                        return bgp_reactor::Inbound::Rejected;
+                    }
                 }
+            } else {
+                // Historical accept-any: session #1.
+                match entries.first() {
+                    Some(e) => e.clone(),
+                    None => {
+                        // An empty registry cannot happen while the
+                        // listener is attached (the daemon holds at
+                        // least one entry), but a reload mid-flight
+                        // can observe a transient empty set — refuse
+                        // rather than panic.
+                        log_warn!(
+                            Component::Bgp,
+                            "inbound connection from {peer} rejected: no configured peers"
+                        );
+                        return bgp_reactor::Inbound::Rejected;
+                    }
+                }
+            };
+            // FRR `neighbor X shutdown` / BIRD `disabled`:
+            // `match_inbound_peer` already proved this peer is
+            // configured for inbound (its `address`/`remote`
+            // matches the source IP). When the peer is admin-
+            // down the listener drops the inbound TCP without
+            // a NOTIFICATION — the operator has explicitly
+            // asked the daemon not to talk to this peer, so
+            // half-opening a session only to send a Cease/2
+            // would defeat the purpose. RFC 4486 §3 says the
+            // shutdown NOTIFICATION is for an Established
+            // session being torn down, not for an inbound SYN
+            // arriving while the peer is already configured
+            // down.
+            if entry.admin_down {
+                log_warn!(
+                    Component::Bgp,
+                    "inbound connection from {peer} rejected: \
+                     peer {} admin-down (shutdown = true)",
+                    entry.label()
+                );
+                return bgp_reactor::Inbound::Rejected;
             }
-        } else {
-            // Historical accept-any: session #1.
-            &entries[0]
+            // RFC 4271 §6.8: a bidirectional peer's inbound
+            // connections run on the challenger session so they
+            // can coexist with the outbound transport while the
+            // router resolves the collision. For bidirectional
+            // peers (those with a `handle_in`), the `busy` flag
+            // MUST NOT block the inbound challenger: the previous
+            // inbound may still be tearing down (collision loser
+            // dispatch, TCP RST, hold-time sweep) when the remote
+            // retries, and dropping the new SYN prevents the
+            // collision resolution from ever converging — both
+            // sessions die and the outbound connector hammers the
+            // peer in a 90-second reconnect loop (the production
+            // "BGP self-connect" symptom). The router's
+            // `resolve_connection_collision` handles duplicate
+            // inbounds: an Established sibling closes the new
+            // challenger immediately per §6.8.
+            let is_bidirectional = entry.handle_in.is_some();
+            if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
+                log_warn!(
+                    Component::Bgp,
+                    "peer {} already has an active session; \
+                     dropping inbound connection from {}",
+                    entry.label(),
+                    peer
+                );
+                return bgp_reactor::Inbound::Rejected;
+            }
+            (entry, is_bidirectional)
         };
-        // FRR `neighbor X shutdown` / BIRD `disabled`:
-        // `match_inbound_peer` already proved this peer is
-        // configured for inbound (its `address`/`remote`
-        // matches the source IP). When the peer is admin-
-        // down the listener drops the inbound TCP without
-        // a NOTIFICATION — the operator has explicitly
-        // asked the daemon not to talk to this peer, so
-        // half-opening a session only to send a Cease/2
-        // would defeat the purpose. RFC 4486 §3 says the
-        // shutdown NOTIFICATION is for an Established
-        // session being torn down, not for an inbound SYN
-        // arriving while the peer is already configured
-        // down.
-        if entry.admin_down {
-            log_warn!(
-                Component::Bgp,
-                "inbound connection from {peer} rejected: \
-                 peer {} admin-down (shutdown = true)",
-                entry.label()
-            );
-            return bgp_reactor::Inbound::Rejected;
-        }
-        // RFC 4271 §6.8: a bidirectional peer's inbound
-        // connections run on the challenger session so they
-        // can coexist with the outbound transport while the
-        // router resolves the collision. For bidirectional
-        // peers (those with a `handle_in`), the `busy` flag
-        // MUST NOT block the inbound challenger: the previous
-        // inbound may still be tearing down (collision loser
-        // dispatch, TCP RST, hold-time sweep) when the remote
-        // retries, and dropping the new SYN prevents the
-        // collision resolution from ever converging — both
-        // sessions die and the outbound connector hammers the
-        // peer in a 90-second reconnect loop (the production
-        // "BGP self-connect" symptom). The router's
-        // `resolve_connection_collision` handles duplicate
-        // inbounds: an Established sibling closes the new
-        // challenger immediately per §6.8.
-        let is_bidirectional = entry.handle_in.is_some();
-        if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
-            log_warn!(
-                Component::Bgp,
-                "peer {} already has an active session; \
-                 dropping inbound connection from {}",
-                entry.label(),
-                peer
-            );
-            return bgp_reactor::Inbound::Rejected;
-        }
+        let (entry, is_bidirectional) = decision;
         let handle = entry.handle_in.unwrap_or(entry.handle);
         let bfd = entry.bfd.clone();
         let busy = Arc::clone(&entry.busy);
@@ -3915,6 +4035,19 @@ mod imp {
     }
 }
 
+/// Drop-guard latching one connector generation as exited (see
+/// `PeerEntry::connector_gen`).
+struct ConnectorExitAck {
+    gen: u64,
+    exited: Arc<AtomicU64>,
+}
+
+impl Drop for ConnectorExitAck {
+    fn drop(&mut self) {
+        self.exited.store(self.gen, Ordering::Relaxed);
+    }
+}
+
 /// One outbound peer: connect, run the session until it drops, back
 /// off, repeat — for the lifetime of the daemon.
 fn spawn_connector(
@@ -3929,6 +4062,17 @@ fn spawn_connector(
     let auth = entry.auth.clone();
     let gtsm = entry.gtsm;
     let handle = entry.handle;
+    // Configuration-reload stop flag: the connector's loop and every
+    // sleep check it, so a reload that removes or replaces this peer
+    // retires the thread within one sleep slice (≤100 ms) or one
+    // backoff pass instead of dialing the now-unconfigured address.
+    let stop = Arc::clone(&entry.stop);
+    // Generation bookkeeping (see `PeerEntry::connector_gen`): this
+    // spawn takes the next generation and the ack latches it on every
+    // exit path — plain return, stop flag, daemon shutdown, panic.
+    let connector_gen = Arc::clone(&entry.connector_gen);
+    let connector_exited = Arc::clone(&entry.connector_exited);
+    let this_generation = connector_gen.fetch_add(1, Ordering::Relaxed) + 1;
     // RFC 4271 §6.8 churn guard: a bidirectional peer holds one transport
     // at a time once its inbound challenger session is Established — the
     // remote's resolver (or ours) has already picked a winner, so a fresh
@@ -3968,6 +4112,14 @@ fn spawn_connector(
     let _ = thread::Builder::new()
         .name(format!("lr-connect-{}", label))
         .spawn(move || {
+            // Latch this connector's generation on exit — every path,
+            // including a panic unwind, so a reload waiting on the
+            // predecessor never waits on a thread that is already
+            // gone.
+            let _exit_ack = ConnectorExitAck {
+                gen: this_generation,
+                exited: connector_exited,
+            };
             let mut backoff_ms: u64 = 1_000;
             // Logs the churn guard's engagement once per continuous
             // hold-off (the guard polls every 500 ms; without the flag
@@ -3976,7 +4128,18 @@ fn spawn_connector(
             // cannot tell “held off by the inbound winner” from a
             // stuck dial).
             let mut holding_off_logged = false;
-            while rt.running.load(Ordering::Relaxed) {
+            loop {
+                // A reload stopped this peer: exit without dialing.
+                if stop.load(Ordering::Relaxed) {
+                    log_info!(
+                        Component::Bgp,
+                        "peer {label}: connector stopped (configuration reload)"
+                    );
+                    return;
+                }
+                if !rt.running.load(Ordering::Relaxed) {
+                    break;
+                }
                 dispatch_signals(&rt);
                 if !rt.running.load(Ordering::Relaxed) {
                     break;
@@ -4002,7 +4165,7 @@ fn spawn_connector(
                         ever_up && !up
                     };
                     if block {
-                        sleep_interruptible(&rt, Duration::from_millis(200));
+                        sleep_interruptible_peer(&rt, &stop, Duration::from_millis(200));
                         continue;
                     }
                 }
@@ -4026,7 +4189,7 @@ fn spawn_connector(
                                  the peer already picked its transport)"
                             );
                         }
-                        sleep_interruptible(&rt, Duration::from_millis(500));
+                        sleep_interruptible_peer(&rt, &stop, Duration::from_millis(500));
                         continue;
                     }
                     holding_off_logged = false;
@@ -4047,7 +4210,7 @@ fn spawn_connector(
                 {
                     // Poll at a sub-second cadence so shutdown and a
                     // router-clock tick both land promptly.
-                    sleep_interruptible(&rt, Duration::from_millis(remaining.min(500)));
+                    sleep_interruptible_peer(&rt, &stop, Duration::from_millis(remaining.min(500)));
                     continue;
                 }
                 let sockaddr = match resolve(&remote) {
@@ -4082,7 +4245,7 @@ fn spawn_connector(
                     // (which would be 30 s on the ladder). Poll every
                     // 1 s so Babel's /32 route lands and the next dial
                     // happens immediately.
-                    sleep_interruptible(&rt, Duration::from_millis(1_000));
+                    sleep_interruptible_peer(&rt, &stop, Duration::from_millis(1_000));
                     continue;
                 }
                 log_info!(Component::Bgp, "peer {label}: connecting to {remote} ...");
@@ -4159,7 +4322,7 @@ fn spawn_connector(
                                     Component::Bgp,
                                     "peer {label}: reconnecting in {backoff_ms}ms"
                                 );
-                                sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
+                                sleep_interruptible_peer(&rt, &stop, Duration::from_millis(backoff_ms));
                                 continue;
                             }
                         }
@@ -4230,7 +4393,7 @@ fn spawn_connector(
                             backoff_ms = (backoff_ms * 2).min(30_000);
                         }
                         log_debug!(Component::Bgp, "peer {label}: reconnecting in {backoff_ms}ms");
-                        sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
+                        sleep_interruptible_peer(&rt, &stop, Duration::from_millis(backoff_ms));
                     }
                     Err((e, fatal)) => {
                         if fatal {
@@ -4241,7 +4404,7 @@ fn spawn_connector(
                             Component::Bgp,
                             "peer {label}: connect failed ({e}); retrying in {backoff_ms}ms"
                         );
-                        sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
+                        sleep_interruptible_peer(&rt, &stop, Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * 2).min(30_000);
                     }
                 }
@@ -5496,6 +5659,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         peer_health_table: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
+        engine_reloads: Arc::new(Mutex::new(Vec::new())),
         // BMP is a passive receiver; the drain posture does not apply
         // (no Loc-RIB to walk, no sessions to tear down beyond the
         // listener). `None` keeps the API's `shutdown drain` honest
@@ -6025,7 +6189,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 let router = Arc::clone(&router);
                 let config_path = cfg.config_path.clone();
                 let config_dialect = cfg.config_dialect.clone();
-                let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
+                let current_networks = Arc::new(Mutex::new(network_reload_state(cfg)));
                 // Babel does not install a damping hook (the `[damping]`
                 // block is a BGP-only construct). Pass `None` so
                 // `reload_config`'s damping toggle is skipped entirely
@@ -6043,6 +6207,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         &[],
                         None,
                         None,
+                        &[],
                     )
                 }
             }),
@@ -6054,6 +6219,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             peer_health_table: None,
             filter_metrics: Mutex::new(None),
             session_labels: Arc::new(Mutex::new(HashMap::new())),
+            engine_reloads: Arc::new(Mutex::new(Vec::new())),
             shutdown: build_shutdown(cfg, &router),
         }),
     };
@@ -8430,7 +8596,21 @@ struct Runtime {
     /// (standalone or embedded) after its sessions exist; other
     /// engines leave it empty (they emit no BGP series).
     session_labels: Arc<Mutex<HashMap<u64, String>>>,
+    /// Engine-level configuration reload closures (issue #101). The
+    /// multi-protocol supervisor's daemon-wide reload calls each
+    /// registered closure with the freshly loaded, finalized
+    /// configuration; an engine whose validation fails aborts the
+    /// whole reload (nothing is applied — atomic replacement). The
+    /// BGP engine registers its peer-set reload (peer
+    /// add/remove/replace, policy swap, listener replacement) here.
+    engine_reloads: Arc<Mutex<Vec<EngineReloadFn>>>,
 }
+
+/// One engine's configuration-reload entry point: validate the fresh
+/// configuration against the engine's live state, then apply it. An
+/// `Err` aborts the whole reload before anything is applied.
+pub(crate) type EngineReloadFn =
+    Arc<dyn Fn(&DaemonConfig) -> Result<Vec<String>, String> + Send + Sync>;
 
 /// Act on every pending signal. SIGTERM/SIGINT trigger a graceful stop
 /// (sessions are closed with a NOTIFICATION before the FIN); SIGHUP
@@ -8494,6 +8674,23 @@ fn dispatch_pending_signals(rt: &Runtime) {
 fn sleep_interruptible(rt: &Runtime, total: Duration) {
     let mut remaining = total;
     while !remaining.is_zero() && rt.running.load(Ordering::Relaxed) {
+        let chunk = remaining.min(Duration::from_millis(100));
+        thread::sleep(chunk);
+        remaining -= chunk;
+        dispatch_signals(rt);
+    }
+}
+
+/// [`sleep_interruptible`] plus the per-peer reload stop flag: a
+/// connector whose peer was removed or replaced by a configuration
+/// reload exits within one 100 ms slice instead of sleeping out its
+/// backoff window.
+fn sleep_interruptible_peer(rt: &Runtime, stop: &AtomicBool, total: Duration) {
+    let mut remaining = total;
+    while !remaining.is_zero()
+        && rt.running.load(Ordering::Relaxed)
+        && !stop.load(Ordering::Relaxed)
+    {
         let chunk = remaining.min(Duration::from_millis(100));
         thread::sleep(chunk);
         remaining -= chunk;
@@ -8661,11 +8858,49 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
 /// keeps the current configuration running (reload must never crash or
 /// half-apply).
 #[allow(clippy::too_many_arguments)]
+/// The daemon-level origination state a reload diffs against: the
+/// originated `networks` list, the per-network route-map bindings
+/// (`[[bgp.network_route_map]]`) and a digest of the policy sections
+/// that feed route-map evaluation. Updated at the end of every
+/// successful reload.
+pub(crate) struct NetworkReloadState {
+    pub networks: Vec<String>,
+    pub network_route_maps: Vec<daemon_config::NetworkRouteMapSpec>,
+    pub policy_digest: u64,
+}
+
+/// A stable-ish digest of the policy-carrying config sections — the
+/// re-origination trigger for networks whose route-map content (not
+/// binding) changed. A hash collision re-origination is harmless (the
+/// fresh route-map is identical); a missed change is not, hence the
+/// digest covers every section route-map evaluation reads.
+pub(crate) fn policy_config_digest(cfg: &DaemonConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // The specs are Debug (all derive it); the rendered form feeds the
+    // digest so no Hash derives are needed on config types.
+    format!("{:?}", cfg.route_maps).hash(&mut hasher);
+    format!("{:?}", cfg.prefix_lists).hash(&mut hasher);
+    format!("{:?}", cfg.as_path_lists).hash(&mut hasher);
+    format!("{:?}", cfg.community_lists).hash(&mut hasher);
+    format!("{:?}", cfg.filters).hash(&mut hasher);
+    format!("{:?}", cfg.filter_functions).hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(crate) fn network_reload_state(cfg: &DaemonConfig) -> NetworkReloadState {
+    NetworkReloadState {
+        networks: cfg.networks.clone(),
+        network_route_maps: cfg.network_route_maps.clone(),
+        policy_digest: policy_config_digest(cfg),
+    }
+}
+
 fn reload_config(
     path: Option<&str>,
     dialect: Option<&str>,
     router: &Arc<RwLock<DefaultRouter>>,
-    current_networks: &Arc<Mutex<Vec<String>>>,
+    network_state: &Arc<Mutex<NetworkReloadState>>,
     roa_store: Option<&Arc<lr_bgp::RoaStore>>,
     rpki: Option<&daemon_rpki::RpkiHandle>,
     // Advanced ROA loading: the registry holds the
@@ -8696,6 +8931,15 @@ fn reload_config(
     // daemon and the multi-protocol supervisor (peer-health is a
     // BGP-only construct owned by the BGP engine).
     peer_health_table: Option<&Arc<Mutex<lr_peer_health::PeerHealthTable>>>,
+    // Engine-level reload closures (issue #101): each receives the
+    // freshly loaded, finalized configuration, validates it against
+    // its live state and applies it (the BGP engine's peer-set
+    // reload: peer add/remove/replace, policy swap, BFD membership,
+    // listener replacement). An `Err` from any engine aborts the
+    // whole reload before the daemon-level sections run — atomic
+    // replacement. Empty for daemon modes without an engine reload
+    // (Babel, BMP, OSPF, LDP binds reload through their own paths).
+    engine_reloads: &[EngineReloadFn],
 ) -> Vec<String> {
     let Some(path) = path else {
         return vec!["reload: no config file in use; nothing to reload".into()];
@@ -8734,11 +8978,27 @@ fn reload_config(
     if let Err(e) = fresh.finalize() {
         return vec![format!("reload: {} (keeping current config)", e)];
     }
-    let mut lines: Vec<String> = fresh
-        .warnings
-        .iter()
-        .map(|w| format!("reload: config warning: {}", w))
-        .collect();
+    // Engine-level reloads run first and validate-before-apply: an
+    // engine that cannot honour the fresh configuration aborts the
+    // whole reload (nothing below runs — the daemon-level sections
+    // keep the running state).
+    let mut lines: Vec<String> = Vec::new();
+    for engine in engine_reloads {
+        match engine(&fresh) {
+            Ok(engine_lines) => lines.extend(engine_lines),
+            Err(e) => {
+                let mut out = vec![format!("reload: {e} (keeping current config)")];
+                out.extend(lines);
+                return out;
+            }
+        }
+    }
+    lines.extend(
+        fresh
+            .warnings
+            .iter()
+            .map(|w| format!("reload: config warning: {}", w)),
+    );
     // TOML deprecation window: the reload reports
     // the notice through the same channel as its parse warnings, so a
     // daemon kept running on the deprecated dialect keeps showing the
@@ -8805,31 +9065,31 @@ fn reload_config(
         }
     }
 
-    let old = current_networks.lock().unwrap().clone();
+    let (old, old_route_maps, old_digest) = {
+        let state = network_state.lock().unwrap();
+        (
+            state.networks.clone(),
+            state.network_route_maps.clone(),
+            state.policy_digest,
+        )
+    };
     let new = fresh.networks.clone();
-    // SIGHUP reload of per-network route-maps: the fresh
-    // config's `[[bgp.network_route_map]]` table is consulted for each
-    // newly-originated network the same way as at startup. A reload
-    // that changes only the route-map (e.g. adjusts `set_local_pref`
-    // on the referenced `[[route-map]]` entry without touching the
-    // `networks` list) does not yet trigger re-origination of the
-    // affected network — the route-map is applied once per origination
-    // event, and the existing route stays in the Loc-RIB until the
-    // prefix is removed and re-added (or the daemon is restarted).
-    // Tracked as a follow-up; the per-network route-map hook here is
-    // the right surface for that follow-up to land on.
-    let reload_hooks = if fresh.network_route_maps.is_empty() {
+    // Per-network route-maps (`[[bgp.network_route_map]]`, FRR
+    // `network PREFIX route-map NAME`): the route-map applies at
+    // origination, so a reload re-originates every network whose
+    // route-map binding or route-map content changed — the previous
+    // behaviour left the stale attributes in the Loc-RIB until the
+    // prefix was removed and re-added. The live policy state (already
+    // swapped by the engine reload above) supplies the fresh
+    // route-maps; the lookup here only needs the dispatch.
+    let reload_hooks: Option<lr_policy::PolicyHooks> = if fresh.network_route_maps.is_empty() {
         None
     } else {
+        // The fresh config already validated (finalize + the policy
+        // probe in the engine reload), so this build cannot fail; a
+        // failure is reported and the networks originate unfiltered.
         match daemon_policy::build_policy_set(&fresh) {
-            Ok(set) => {
-                // The reload path does not need to re-bind peer
-                // policies (the live router already has them; the
-                // import/export bindings survive SIGHUP unchanged).
-                // The PolicySet here is only consulted for the
-                // route-map lookups.
-                Some(set.hooks())
-            }
+            Ok(set) => Some(set.hooks()),
             Err(e) => {
                 lines.push(format!(
                     "reload: per-network route-map set build failed ({e}); \
@@ -8884,6 +9144,61 @@ fn reload_config(
                 Err(_) => lines.push(format!("reload: invalid network '{}' skipped", net)),
             }
         }
+        // Networks present in both whose route-map binding or
+        // route-map content changed: re-originate (unoriginate +
+        // originate through the fresh route-map) so the Loc-RIB
+        // carries the fresh attributes instead of the stale ones.
+        let policy_changed = policy_config_digest(&fresh) != old_digest;
+        for net in new.iter().filter(|n| old.contains(n)) {
+            let binding = |nr_list: &[daemon_config::NetworkRouteMapSpec]| {
+                nr_list
+                    .iter()
+                    .find(|nr| nr.prefix.as_deref() == Some(net))
+                    .and_then(|nr| nr.route_map.clone())
+            };
+            let fresh_binding = binding(&fresh.network_route_maps);
+            let old_binding = binding(&old_route_maps);
+            let needs_reorigination =
+                fresh_binding != old_binding || (policy_changed && fresh_binding.is_some());
+            if !needs_reorigination {
+                continue;
+            }
+            if let Ok(p) = Prefix::from_str(net) {
+                let (p, family) = originate_family_for(p);
+                let key = lr_core::rib::RouteKey::new(p, family);
+                r.unoriginate(&key);
+                let nh = originate_next_hop(&fresh, family);
+                match (&fresh_binding, &reload_hooks) {
+                    (Some(name), Some(hooks)) => {
+                        if let Some(rm) = hooks.route_map(name) {
+                            if r.originate_family_with_route_map(
+                                p,
+                                family,
+                                nh,
+                                rm,
+                                hooks as &dyn lr_policy::action::MatchResolver,
+                            )
+                            .is_some()
+                            {
+                                lines.push(format!(
+                                    "reload: re-originating {} (route-map {})",
+                                    p, name
+                                ));
+                            } else {
+                                lines.push(format!(
+                                    "reload: network {} suppressed by route-map {} (deny verdict)",
+                                    p, name
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        r.originate_family(p, family, nh);
+                        lines.push(format!("reload: re-originating {}", p));
+                    }
+                }
+            }
+        }
         for net in old.iter().filter(|n| !new.contains(n)) {
             if let Ok(p) = Prefix::from_str(net) {
                 let (p, family) = originate_family_for(p);
@@ -8893,7 +9208,7 @@ fn reload_config(
             }
         }
     }
-    *current_networks.lock().unwrap() = new;
+    *network_state.lock().unwrap() = network_reload_state(&fresh);
     // Static ROA re-application:
     // the fresh config's `[[roa]]` tables replace the registry's
     // inline layer (NOT `roa_store.replace_static` directly — that
@@ -9271,7 +9586,20 @@ fn reload_config(
     if lines.is_empty() {
         lines.push("reload: no network changes".into());
     }
-    lines.push("reload: note: AS, router-id, peer and auth changes require a restart".into());
+    if engine_reloads.is_empty() {
+        lines.push("reload: note: AS, router-id, peer and auth changes require a restart".into());
+    } else {
+        // The BGP engine reloads the peer set per unit (add / remove /
+        // replace with an RFC 4486 §4.1 Cease; policy swaps in place).
+        // Speaker identity is the remaining daemon-wide restart: the
+        // local AS and the router-id are baked into every session and
+        // the safety net.
+        lines.push(
+            "reload: note: local AS and router-id changes require a restart; \
+             peer, auth, BFD and policy changes applied per unit"
+                .into(),
+        );
+    }
     lines
 }
 
@@ -9308,6 +9636,9 @@ fn wait_for_shutdown(rt: &Runtime) {
         dispatch_signals(rt);
     }
 }
+
+#[path = "daemon_peer_reload.rs"]
+mod daemon_peer_reload;
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]

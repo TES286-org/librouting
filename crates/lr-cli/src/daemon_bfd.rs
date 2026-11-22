@@ -420,6 +420,20 @@ impl BfdSupervisor {
         self.tx.is_some()
     }
 
+    /// The timer triple new sessions start with (and the last one
+    /// `update_timers` applied).
+    pub(crate) fn min_tx_ms(&self) -> u32 {
+        self.min_tx_ms
+    }
+
+    pub(crate) fn min_rx_ms(&self) -> u32 {
+        self.min_rx_ms
+    }
+
+    pub(crate) fn detect_multiplier(&self) -> u8 {
+        self.detect_mult
+    }
+
     /// Spawn the loop thread on first use. The `mio::Poll` (unix) is
     /// created here, on the caller's thread, so the `Waker` clone the
     /// handle keeps shares the loop's registry — the same shape

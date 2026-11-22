@@ -939,6 +939,7 @@ pub(super) fn run_ospf_daemon(
                 peer_health_table: None,
                 filter_metrics: Mutex::new(None),
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
+                engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
             })
         }
