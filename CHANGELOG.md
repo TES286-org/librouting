@@ -14,7 +14,69 @@ changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA,
-event bus, 2.x capability block
+event bus, 2.x capability block, per-unit configuration reload
+
+### Added — atomic configuration reload with minimal-unit restart
+(issue #101)
+
+A SIGHUP / runtime-API `reload` of the BGP engine now replaces the
+configuration atomically and restarts only the units whose
+configuration changed:
+
+- **Peers are units.** A `[[peer]]` added, removed or reconfigured
+  with session-affecting fields costs exactly that peer's sessions:
+  the reload stops its connector (a generation handshake guarantees
+  the replacement never overlaps a lagging predecessor), closes its
+  live transports with the matching RFC 4486 §4.1 Cease (Peer
+  De-configured for a removal, Administrative Reset for a
+  reconfiguration, Administrative Shutdown for the `shutdown`
+  toggle), removes and re-adds its router sessions and respawns its
+  connector. Every other peer's Established sessions keep running.
+  The `shutdown` flag quiesces instead of removing: the router
+  session objects survive so `shutdown = false` re-arms the same
+  handles (FRR `neighbor X shutdown` semantics).
+- **Policy is a unit behind a swap boundary.** Route-maps, named
+  lists and per-session filter-DSL bindings are recompiled against
+  the post-diff session handles and swapped in place
+  (`daemon_policy::LivePolicyState`); sessions re-apply the inbound
+  policy without a bounce — a peer with `soft_reconfig_inbound`
+  re-imports from its pre-policy snapshot, every other peer gets an
+  RFC 2918 ROUTE-REFRESH. This also fixes route-maps silently
+  bypassing the RFC 4271 §6.8 inbound challenger sessions (the
+  static shape bound only the outbound handle).
+- **The listener is a unit.** A `listen_addr` change or a change of
+  the armed session-auth set replaces the listener socket: detach,
+  bind, arm (auth, GTSM), re-attach.
+- **BFD sessions are per-peer units** through the supervisor's new
+  command channel (lazy thread, stable-token rx slots, monotonic
+  discriminators); the `[bfd]` timer triple re-points every session
+  through `BfdSession::update_timers` (RFC 5880 §6.8.3).
+- **Origination follows policy.** A network whose
+  `[[bgp.network_route_map]]` binding or route-map content changed
+  is re-originated through the fresh route-map.
+- **Atomicity.** The reload validates everything fallible first —
+  parse, finalize, per-peer auth, route-map / filter references, BFD
+  prerequisites — and refuses as one decision otherwise, keeping the
+  running configuration unchanged. A local-AS or router-id change is
+  the daemon-wide identity case and is refused with a
+  restart-required diagnostic. The reload's base config now carries
+  the same field defaults as startup (`with_defaults()`), so a file
+  that leaves a key unset reloads to the startup semantics instead
+  of zeros.
+- **The multi-protocol supervisor drains a per-engine reload
+  registry** (`Runtime::engine_reloads`), so an embedded BGP engine
+  reloads its peers on the daemon-wide SIGHUP.
+
+### Fixed — BGP session reactor
+
+- The edge-triggered registration race: bytes arriving between
+  connect()/accept() and the reactor's registration produced no
+  readable event, so the OPEN exchange could stall until the hold
+  timer killed the session — deterministic under load. The reactor
+  now drains one pass after every session and listener registration
+  (`bgp_reactor`).
+- `cargo test -p lr-bgp --lib` without the `exchange-plane` feature
+  failed to compile `fsm_tests` (a cfg-gated import).
 
 ### Added — BGP capability block (issue #101)
 
