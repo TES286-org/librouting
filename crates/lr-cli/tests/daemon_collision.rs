@@ -481,6 +481,11 @@ fn static_blackhole_for_own_listener_ip_skips_kernel_install() {
     // and the listener goes dark. `local_address` stays a
     // documentation IP so the EBGP NEXT_HOP for A's advertisements
     // is not 127.0.0.1 (which A's safety check would reject).
+    // `hold_time = 9` keeps the §6.8 collision-loss backoff at its
+    // 10 s clamp floor so a collision storm (both sides' resolvers
+    // firing during the OPEN exchange) retries within the 60 s
+    // wait_log_any budget instead of waiting out the default 90 s
+    // hold window.
     let conf_a = dir.join("a.toml");
     std::fs::write(
         &conf_a,
@@ -488,6 +493,7 @@ fn static_blackhole_for_own_listener_ip_skips_kernel_install() {
             "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\nebgp_policy = \"accept-all\"\n\
              listen_addr = \"127.0.0.1:{port_a}\"\n\
              local_address = \"192.0.2.1\"\n\
+             hold_time = 9\n\
              install_kernel = true\n\
              networks = [\"203.0.113.0/24\"]\n\n\
              [[static.route]]\nprefix = \"127.0.0.1/32\"\nnext_hop = \"blackhole\"\n\n\
@@ -502,6 +508,7 @@ fn static_blackhole_for_own_listener_ip_skips_kernel_install() {
             "[bgp]\nlocal_as = 64513\nrouter_id = \"10.0.0.2\"\nebgp_policy = \"accept-all\"\n\
              listen_addr = \"127.0.0.1:{port_b}\"\n\
              local_address = \"192.0.2.2\"\n\
+             hold_time = 9\n\
              install_kernel = true\n\
              networks = [\"198.51.100.0/24\"]\n\n\
              [[peer]]\nname = \"a\"\nremote = \"127.0.0.1:{port_a}\"\npeer_as = 64512\n"
