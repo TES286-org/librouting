@@ -3170,20 +3170,18 @@ mod tests {
     }
 
     #[test]
-    fn mp_reach_v6_link_local_collapses_to_v6_global_on_wire() {
-        // The MP_REACH_NLRI wire form has no discriminator between a
-        // 16-byte V6Global and a 16-byte V6LinkLocal next-hop — the
-        // codec encodes `MpNextHop::V6LinkLocal` as 16 bytes and
-        // decodes 16 bytes as `MpNextHop::V6Global` (RFC 4760 §3
-        // "no semantic difference between link-local and global on
-        // the wire; the link-local-ness is recovered from the IPv6
-        // layer at receive time"). So the round-trip through the
-        // codec surfaces kind=1 (V6Global), not kind=3 (V6LinkLocal)
-        // — the test pins the codec's lossy round-trip so a future
-        // codec change cannot silently flip the kind on the FFI
-        // surface. The `V6LinkLocal` variant is reachable only when
-        // the daemon constructs an `MpReach` directly from kernel
-        // state (where the link-local-ness is known out-of-band).
+    fn mp_reach_v6_link_local_preserved_on_wire() {
+        // draft-ietf-idr-linklocal-capability-06 §3: the codec
+        // classifies a 16-octet MP_REACH_NLRI next-hop by its prefix —
+        // an fe80::/10 address decodes as `MpNextHop::V6LinkLocal`
+        // (FFI kind=3), and the round-trip preserves that
+        // classification (the in-crate test
+        // `link_local_sixteen_byte_next_hop_is_classified_by_prefix`
+        // pins the same behaviour at the `MpReach` level). The
+        // receiver still gates installation on the Link-Local Next Hop
+        // capability or a link-local transport (see `fsm.rs`
+        // `link_local_next_hop_allowed`); the codec only assigns the
+        // variant.
         let bytes = build_update_with_mp_reach(
             lr_core::nlri::NlriFamily::IPV6_UNICAST,
             lr_bgp::path::MpNextHop::V6LinkLocal([
@@ -3203,9 +3201,10 @@ mod tests {
             unsafe { lr_bgp_message_update_mp_reach_next_hop(m, &raw mut nh) },
             0
         );
-        // Wire-level collapse: V6LinkLocal encodes as 16 bytes and
-        // decodes back as V6Global (kind=1).
-        assert_eq!(nh.kind, 1, "wire round-trip collapses to V6Global");
+        // Wire-level preservation: V6LinkLocal encodes as 16 bytes and
+        // the fe80::/10 prefix classifies the round-trip back as
+        // V6LinkLocal (kind=3).
+        assert_eq!(nh.kind, 3, "wire round-trip preserves V6LinkLocal");
         assert_eq!(nh.present, 1);
         assert_eq!(
             nh.addr,

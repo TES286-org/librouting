@@ -2031,6 +2031,19 @@ fn link_local_pair(a_enabled: bool, b_enabled: bool) -> (BgpPeer, BgpPeer) {
     (a, b)
 }
 
+/// Same as [`link_local_pair`] but the transport itself is IPv6
+/// link-local — both speakers bind their `local_address` to an
+/// fe80::/10 address. RFC 2545 §3 permits a link-local next-hop on
+/// such a directly-attached session without any capability.
+fn link_local_transport_pair(a_enabled: bool, b_enabled: bool) -> (BgpPeer, BgpPeer) {
+    let ll_a: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let ll_b: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    let (mut a, mut b) = link_local_pair(a_enabled, b_enabled);
+    a.cfg.local_address = Some(lr_core::addr::IpAddr::V6(ll_a));
+    b.cfg.local_address = Some(lr_core::addr::IpAddr::V6(ll_b));
+    (a, b)
+}
+
 fn link_local_update(next_hop: crate::path::MpNextHop) -> BgpMessage {
     use crate::message::update::Update;
     use crate::path::{AsPath, MpReach};
@@ -2166,6 +2179,86 @@ fn link_local_egress_requires_negotiation() {
         crate::path::MpReach::decode(&u.attributes.get(AttrType::MpReachNlri).unwrap().value)
             .unwrap();
     assert_eq!(reach.next_hop, crate::path::MpNextHop::V6LinkLocal(ll));
+}
+
+/// RFC 2545 §3: a directly-attached session whose transport is itself
+/// IPv6 link-local (both speakers use fe80:: as the local address)
+/// accepts an LL-only next-hop WITHOUT the
+/// draft-ietf-idr-linklocal-capability-06 capability — the
+/// capability is the opt-in for a NON-link-local transport, not for
+/// the standard fe80:: session form BIRD and FRR both accept
+/// out-of-the-box. This guards against the strict-rejection
+/// regressing onto the standard link-local transport use case.
+#[test]
+fn link_local_only_next_hop_installs_on_link_local_transport_without_capability() {
+    let ll = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let (mut a, _b) = link_local_transport_pair(false, false);
+    assert!(!a.link_local_negotiated());
+    assert!(a.transport_is_link_local());
+    assert!(
+        a.link_local_next_hop_allowed(),
+        "a link-local transport allows an LL-only next-hop without the capability"
+    );
+    let actions = a.step(BgpEvent::Message(link_local_update(
+        crate::path::MpNextHop::V6LinkLocal(ll),
+    )));
+    let route = actions
+        .iter()
+        .find_map(|ac| match ac {
+            BgpAction::InstallRoute(r) => Some(r),
+            _ => None,
+        })
+        .expect("route installed on link-local transport");
+    assert_eq!(
+        route.next_hop,
+        Some(lr_core::addr::IpAddr::V6(ll)),
+        "the link-local next hop is preserved on a link-local transport"
+    );
+}
+
+/// RFC 2545 §3 egress mirror: a link-local transport advertises an
+/// LL-only next-hop without the capability, since the peer is on the
+/// same link and the fe80:: next-hop is resolvable there.
+#[test]
+fn link_local_egress_allowed_on_link_local_transport_without_capability() {
+    use crate::path::AsPath;
+    let ll = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut attrs = crate::path::PathAttributes::new();
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        AsPath::from_sequence([Asn(64512)]).encode_4(),
+    ));
+    let route = lr_core::rib::Route {
+        key: lr_core::rib::RouteKey::new(
+            Prefix::new_v6(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                64,
+            ),
+            NlriFamily::IPV6_UNICAST,
+        ),
+        origin: lr_core::rib::RouteOrigin { proto: 2, peer: 0 },
+        protocol: lr_core::rib::Protocol::Bgp,
+        preference: lr_core::rib::Preference::new(20, 1),
+        next_hop: Some(lr_core::addr::IpAddr::V6(ll)),
+        attributes: attrs.into(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    };
+
+    let (mut ll_transport, _b) = link_local_transport_pair(false, false);
+    assert!(!ll_transport.link_local_negotiated());
+    assert!(ll_transport.transport_is_link_local());
+    assert!(
+        ll_transport.advertise(&route),
+        "a link-local transport advertises an LL-only next-hop without the capability"
+    );
 }
 
 // ---------------------------------------------------------------------------

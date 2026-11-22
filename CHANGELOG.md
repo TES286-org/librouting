@@ -78,6 +78,42 @@ configuration changed:
 - `cargo test -p lr-bgp --lib` without the `exchange-plane` feature
   failed to compile `fsm_tests` (a cfg-gated import).
 
+### Added — `lrctl` pretty status output (issue #101)
+
+`lrctl` gains a `--format=plain|pretty|json|json:pretty` flag and a
+`--color=auto|always|never` flag. The default format is `pretty` when
+stdout is a TTY (a human at a terminal gets the readable view) and
+`plain` otherwise (a shell pipeline gets the scriptable wire form);
+`--json` and `--json=pretty` stay as aliases for `--format=json` and
+`--format=json:pretty`.
+
+The `pretty` renderer lays out every supported command (`status`,
+`show status`, `sessions`, `show sessions [detail]`,
+`show session <handle>`, `show routes count`, `show memory`,
+`routes show`, `routes count`, `show roa`, `ping`, `shutdown status`)
+with section headings, aligned tables, colour-coded session state
+(Established green, Active/Cyan/Connect/OpenSent/OpenConfirm yellow,
+Idle red), human-friendly uptime (`1h 2m 3s`) and memory
+(`12.3 MiB`), and a bold-red `Error:` prefix for daemon error
+replies. Colour is ANSI 16-colour, emitted only under the `pretty`
+path and only when `--color=auto` (the default) sees a TTY or
+`--color=always` is set. The plain and JSON paths never carry
+colour.
+
+The plain wire shape (`local-as 64512`, `kind=bgp state=Idle`) is
+preserved byte-for-byte under `--format=plain` and under the
+piped-stdout default, so existing scripts and tests stay green. The
+JSON shapes in [`docs/bindings/lrctl-json.md`](docs/bindings/lrctl-json.md)
+are unchanged.
+
+The new module `crates/lr-cli/src/lrctl_pretty.rs` owns the
+renderers; the call sites in `crates/lr-cli/src/lrctl.rs` thread an
+`Output { format, color }` value through every command handler. 25
+unit tests cover the renderers without spawning a daemon; 13 new
+integration tests in `crates/lr-cli/tests/lrctl.rs` cover the
+end-to-end format selection through the real `lrctl` binary against
+a running `lr-daemon`.
+
 ### Added — BGP capability block (issue #101)
 
 Eight BGP capabilities land on the OPEN advertisement surface, each
@@ -143,10 +179,14 @@ daemon-config + DSL key:
   can accept a link-local IPv6 next-hop in MP_REACH_NLRI. A
   16-octet fe80::/10 next hop is classified as link-local-only;
   ::/LL and LL/LL use the second slot for forwarding; a non-LL
-  second slot is malformed. Without the capability an LL-only
-  announcement is treated as withdraw. Egress refuses an LL-only
-  next hop unless negotiated, and a route reflector rewrites it to
-  its own address or suppresses it.
+  second slot is malformed. An LL-only announcement is treated as
+  withdraw (RFC 7606 §2) on a non-link-local transport without the
+  capability; a link-local transport (RFC 2545 §3 — both speakers
+  bind fe80::/10) accepts an LL-only next-hop without the
+  capability, the form BIRD and FRR permit on fe80:: sessions.
+  Egress refuses an LL-only next hop unless the capability was
+  negotiated or the transport is link-local, and a route reflector
+  rewrites it to its own address or suppresses it.
 
 Public Rust API growth beyond the new `CapabilityCode` variants,
 `Capability` constructors, `PeerConfig` fields and extension
@@ -156,6 +196,32 @@ module surfaces: `RouteRefresh` carries an optional
 and `RouterInstance` gains a default `set_bfd_state` no-op plus
 `DefaultRouter::send_orf` / `set_orf_tx`. Pre-2.0 semver debt the
 `api-surface` CI job already tracks. C ABI untouched.
+
+### Fixed — Link-Local next-hop on a link-local transport (CI regression)
+
+The Link-Local Next Hop runtime landed above with a strict
+"without the capability an LL-only announcement is treated as
+withdraw" gate that fired regardless of transport. That broke the
+standard RFC 2545 §3 form — a directly-attached session whose
+transport is itself IPv6 link-local (both speakers bind fe80::/10)
+already permits an LL-only next-hop without any capability, the
+form BIRD and FRR both accept on fe80:: sessions. The codec now
+accepts (ingress) and emits (egress) an LL-only next-hop when
+either the capability was negotiated or the transport is
+link-local; the strict reject still fires on a non-link-local
+transport without the capability, matching the draft and the
+`link_local_only_next_hop_without_capability_is_treated_as_withdraw`
+fsm_test. The stale FFI test
+`mp_reach_v6_link_local_collapses_to_v6_global_on_wire` (which
+pinned a pre-capability wire-collapse behaviour the §3 prefix
+classification superseded) is renamed to
+`mp_reach_v6_link_local_preserved_on_wire` and now expects kind=3
+(`V6LinkLocal`) preserved through the round-trip, mirroring the
+in-crate `link_local_sixteen_byte_next_hop_is_classified_by_prefix`
+test. Restores the four link-local BGP session modes
+(`mode2`/`mode4`/`mode6`/`mode8` in `bgp_session_modes`) that
+nextest was cancelling the unit-test job on across ubuntu, macOS,
+Windows and RISC-V.
 
 ### Added — filter DSL surface, event bus
 

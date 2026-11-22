@@ -262,15 +262,20 @@ impl BgpPeer {
 
         // --- Link-Local Next Hop (draft-ietf-idr-linklocal-capability-06) ---
         // A link-local-only next hop may cross only a directly attached
-        // session that negotiated the capability (§4). A route
-        // reflector must rewrite it to its own address for clients that
-        // are not provably on the originator's segment; without an
-        // interface map, any third-party iBGP advertisement is rewritten
-        // or withheld. When no next hop survives, the route is not
+        // session — either one that negotiated the capability (§4, the
+        // draft's opt-in for a non-link-local transport), or one whose
+        // transport is itself link-local (RFC 2545 §3, where the peer is
+        // by definition on the same link and the fe80:: next-hop is
+        // resolvable without any capability — the form BIRD and FRR
+        // both accept on fe80:: sessions). A route reflector must
+        // rewrite it to its own address for clients that are not
+        // provably on the originator's segment; without an interface
+        // map, any third-party iBGP advertisement is rewritten or
+        // withheld. When no next hop survives, the route is not
         // advertised (treat-as-withdraw).
         if let Some(lr_core::addr::IpAddr::V6(b)) = next_hop {
             if crate::extensions::link_local_next_hop::is_link_local(&b) {
-                if !self.link_local_negotiated() {
+                if !self.link_local_next_hop_allowed() {
                     return false;
                 }
                 if topo.rs_client || (topo.role.is_internal() && route.origin.proto != 2) {

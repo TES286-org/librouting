@@ -1534,3 +1534,385 @@ fn lrctl_session_missing_op_exits_nonzero() {
     lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
     let _ = d.wait_exit();
 }
+
+// ---------------------------------------------------------------------------
+// `lrctl --format=plain|pretty|json` and `--color=never|always` — the
+// issue #101 "Enhancing and Enriching Status Output in `lrctl`"
+// surface. The integration tests verify each format end-to-end through
+// the real `lrctl` binary against a running `lr-daemon`. The default
+// (no `--format` flag) is `plain` under a piped stdout (the test
+// harness uses `Command::output()`), so the existing assertions stay
+// green; these tests pin the explicit `--format=pretty` and
+// `--format=plain` shapes.
+// ---------------------------------------------------------------------------
+
+/// `lrctl --format=plain status` reproduces the daemon's verbatim
+/// `key value\n` wire body — the legacy shape scripts parse. This is
+/// the regression guard for the new default: a redirect must keep
+/// seeing the plain form even after the pretty renderer lands.
+#[test]
+fn lrctl_format_plain_status_is_verbatim_wire_body() {
+    let (socket, d) = spawn_show_daemon("fmt-plain-status", "18140");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=plain",
+        "status",
+    ]);
+    assert!(ok, "lrctl --format=plain status: stderr={stderr}");
+    // The plain wire shape is `key value` per line — `local-as 64512`
+    // with a single space, no alignment padding, no section headings.
+    assert!(stdout.contains("version "), "plain status: {stdout}");
+    assert!(stdout.contains("local-as 64512"), "plain status: {stdout}");
+    assert!(
+        stdout.contains("router-id 10.0.0.1"),
+        "plain status: {stdout}"
+    );
+    assert!(stdout.contains("uptime-secs "), "plain status: {stdout}");
+    // The pretty banner `librouting lr-daemon` must NOT appear in the
+    // plain form — that is the pretty-only header.
+    assert!(
+        !stdout.contains("librouting lr-daemon"),
+        "plain status must not have the pretty banner: {stdout}"
+    );
+    // No ANSI escape bytes in the plain path.
+    assert!(
+        !stdout.contains('\x1b'),
+        "plain status must not contain ANSI escapes: {stdout:?}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=pretty status` renders the banner + aligned rows.
+/// This is the shape a human at a TTY sees by default; the explicit
+/// flag forces it on even under the test harness's piped stdout.
+#[test]
+fn lrctl_format_pretty_status_renders_banner_and_aligned_rows() {
+    let (socket, d) = spawn_show_daemon("fmt-pretty-status", "18141");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=pretty",
+        "--color=never",
+        "status",
+    ]);
+    assert!(ok, "lrctl --format=pretty status: stderr={stderr}");
+    assert!(
+        stdout.contains("librouting lr-daemon"),
+        "pretty status banner: {stdout}"
+    );
+    assert!(
+        stdout.contains("AS 64512 → AS 64513"),
+        "pretty status AS pair: {stdout}"
+    );
+    assert!(
+        stdout.contains("Router-id   10.0.0.1"),
+        "pretty status aligned router-id: {stdout}"
+    );
+    // No ANSI escapes under --color=never, even in pretty mode.
+    assert!(
+        !stdout.contains('\x1b'),
+        "pretty status with --color=never must not emit ANSI: {stdout:?}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=pretty --color=always status` emits ANSI bold on
+/// the banner so a `less -R` filter or a forced-colour CI log sees
+/// the colour bytes the operator at a TTY would see.
+#[test]
+fn lrctl_format_pretty_color_always_emits_ansi_bold() {
+    let (socket, d) = spawn_show_daemon("fmt-pretty-color", "18142");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=pretty",
+        "--color=always",
+        "status",
+    ]);
+    assert!(
+        ok,
+        "lrctl --format=pretty --color=always status: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("\x1b[1m"),
+        "pretty status --color=always should emit bold: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\x1b[36m"),
+        "pretty status --color=always should emit cyan: {stdout:?}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=pretty show status` renders the Sessions + Memory
+/// sections with their bold headings.
+#[test]
+fn lrctl_format_pretty_show_status_renders_sections() {
+    let (socket, d) = spawn_show_daemon("fmt-pretty-show-status", "18143");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=pretty",
+        "--color=never",
+        "show",
+        "status",
+    ]);
+    assert!(ok, "lrctl --format=pretty show status: stderr={stderr}");
+    assert!(stdout.contains("librouting lr-daemon"), "banner: {stdout}");
+    assert!(stdout.contains("Sessions"), "Sessions section: {stdout}");
+    // Per-protocol breakdown is surfaced under the Sessions heading.
+    assert!(
+        stdout.contains("total=") && stdout.contains("established="),
+        "per-protocol line: {stdout}"
+    );
+    assert!(stdout.contains("Memory"), "Memory section: {stdout}");
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=pretty sessions` renders the table header row.
+#[test]
+fn lrctl_format_pretty_sessions_renders_table_header() {
+    let (socket, d) = spawn_show_daemon("fmt-pretty-sessions", "18144");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=pretty",
+        "--color=never",
+        "sessions",
+    ]);
+    assert!(ok, "lrctl --format=pretty sessions: stderr={stderr}");
+    assert!(stdout.contains("HANDLE"), "header: {stdout}");
+    assert!(stdout.contains("KIND"), "header: {stdout}");
+    assert!(stdout.contains("STATE"), "header: {stdout}");
+    assert!(stdout.contains("#1"), "row: {stdout}");
+    assert!(stdout.contains("bgp"), "row: {stdout}");
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=pretty show routes count` renders the Total line
+/// and the per-protocol table.
+#[test]
+fn lrctl_format_pretty_show_routes_count_renders_table() {
+    let (socket, d) = spawn_show_daemon("fmt-pretty-routes-count", "18145");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=pretty",
+        "--color=never",
+        "show",
+        "routes",
+        "count",
+    ]);
+    assert!(
+        ok,
+        "lrctl --format=pretty show routes count: stderr={stderr}"
+    );
+    assert!(stdout.contains("Total"), "Total heading: {stdout}");
+    assert!(stdout.contains("routes"), "routes word: {stdout}");
+    assert!(stdout.contains("PROTOCOL"), "header: {stdout}");
+    assert!(stdout.contains("bgp"), "bgp row: {stdout}");
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=pretty routes show` renders the table header and
+/// the route rows.
+#[test]
+fn lrctl_format_pretty_routes_show_renders_table() {
+    let (socket, d) = spawn_show_daemon("fmt-pretty-routes-show", "18146");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=pretty",
+        "--color=never",
+        "routes",
+        "show",
+    ]);
+    assert!(ok, "lrctl --format=pretty routes show: stderr={stderr}");
+    assert!(stdout.contains("PREFIX"), "header: {stdout}");
+    assert!(stdout.contains("NEXT-HOP"), "header: {stdout}");
+    assert!(stdout.contains("PROTO"), "header: {stdout}");
+    assert!(stdout.contains("203.0.113.0/24"), "row prefix: {stdout}");
+    // The daemon-origined network has `proto=Bgp` in the wire shape;
+    // the pretty view renders it as `Bgp` (the proto column value).
+    assert!(stdout.contains("Bgp"), "row proto: {stdout}");
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=pretty ping` renders the ✓ symbol and colour.
+/// Under `--color=never` no ANSI escapes appear.
+#[test]
+fn lrctl_format_pretty_ping_renders_check_mark() {
+    let (socket, d) = spawn_show_daemon("fmt-pretty-ping", "18147");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=pretty",
+        "--color=never",
+        "ping",
+    ]);
+    assert!(ok, "lrctl --format=pretty ping: stderr={stderr}");
+    assert!(stdout.contains('✓'), "check mark: {stdout}");
+    assert!(stdout.contains("ok"), "ok word: {stdout}");
+    assert!(stdout.contains("ms"), "ms unit: {stdout}");
+    assert!(
+        !stdout.contains('\x1b'),
+        "pretty ping with --color=never must not emit ANSI: {stdout:?}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=json status` matches `--json status` byte-for-byte
+/// (the new flag is an alias for the legacy one).
+#[test]
+fn lrctl_format_json_matches_legacy_json_flag() {
+    let (socket, d) = spawn_show_daemon("fmt-json-alias", "18148");
+    let (ok_a, stdout_a, _) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=json",
+        "status",
+    ]);
+    let (ok_b, stdout_b, _) = lrctl(&["--socket", socket.to_str().unwrap(), "--json", "status"]);
+    assert!(ok_a && ok_b, "both forms should exit 0");
+    assert_eq!(
+        stdout_a.trim(),
+        stdout_b.trim(),
+        "--format=json and --json should produce identical output"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=json:pretty` produces 2-space-indented JSON.
+#[test]
+fn lrctl_format_json_pretty_indents_two_spaces() {
+    let (socket, d) = spawn_show_daemon("fmt-json-pretty", "18149");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=json:pretty",
+        "status",
+    ]);
+    assert!(ok, "lrctl --format=json:pretty status: stderr={stderr}");
+    let line = stdout.lines().next().unwrap_or("").trim();
+    assert!(
+        line.starts_with('{'),
+        "json:pretty status should start with '{{': {stdout}"
+    );
+    // The 2-space indent appears on the second line.
+    let second = stdout.lines().nth(1).unwrap_or("");
+    assert!(
+        second.starts_with("  "),
+        "json:pretty status should indent 2 spaces on line 2: {stdout:?}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=bogus` exits 2 with a clear error.
+#[test]
+fn lrctl_format_unknown_exits_nonzero() {
+    let (socket, d) = spawn_show_daemon("fmt-bogus", "18150");
+    let (ok, _stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=bogus",
+        "status",
+    ]);
+    assert!(!ok, "lrctl --format=bogus should exit non-zero");
+    assert!(
+        stderr.contains("--format=bogus"),
+        "error names the bad value: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --color=bogus` exits 2 with a clear error.
+#[test]
+fn lrctl_color_unknown_exits_nonzero() {
+    let (socket, d) = spawn_show_daemon("color-bogus", "18151");
+    let (ok, _stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--color=bogus",
+        "status",
+    ]);
+    assert!(!ok, "lrctl --color=bogus should exit non-zero");
+    assert!(
+        stderr.contains("--color=bogus"),
+        "error names the bad value: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl --format=plain --json` honours `--format=plain` (the more
+/// specific request wins). The body must be the verbatim wire shape,
+/// not a JSON object.
+#[test]
+fn lrctl_format_plain_overrides_json_flag() {
+    let (socket, d) = spawn_show_daemon("fmt-plain-overrides-json", "18152");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--format=plain",
+        "--json",
+        "status",
+    ]);
+    assert!(ok, "lrctl --format=plain --json status: stderr={stderr}");
+    // The plain wire form has `local-as 64512` (with a space); the
+    // JSON form would have `"local_as":64512`. The plain form wins.
+    assert!(stdout.contains("local-as 64512"), "plain shape: {stdout}");
+    assert!(
+        !stdout.starts_with('{'),
+        "JSON shape must not appear when --format=plain is given: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+/// `lrctl status` with no `--format` flag defaults to the plain wire
+/// form when stdout is not a TTY (the test harness pipes stdout). This
+/// is the regression guard for the default behaviour: scripts that
+/// pipe `lrctl status` keep seeing the wire shape, not the pretty
+/// view.
+#[test]
+fn lrctl_default_format_under_pipe_is_plain() {
+    let (socket, d) = spawn_show_daemon("fmt-default-pipe", "18153");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "status"]);
+    assert!(ok, "lrctl status: stderr={stderr}");
+    // The plain wire form has `local-as 64512` with a single space.
+    assert!(stdout.contains("local-as 64512"), "plain default: {stdout}");
+    // The pretty banner must NOT appear — the default under a pipe is
+    // plain, not pretty.
+    assert!(
+        !stdout.contains("librouting lr-daemon"),
+        "default under pipe must not be pretty: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
