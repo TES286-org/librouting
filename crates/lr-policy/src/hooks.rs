@@ -49,8 +49,8 @@ use lr_bgp::path::{Community, PathAttributes};
 
 #[cfg(feature = "damping")]
 use lr_damping::DampingTable;
-#[cfg(any(feature = "damping", feature = "peer-health"))]
-use std::sync::{Arc, Mutex};
+#[cfg(any(feature = "damping", feature = "peer-health", feature = "bgp"))]
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Verdict returned by a hook. The route is either dropped, kept as-is, or
 /// replaced by a modified copy.
@@ -175,8 +175,10 @@ pub struct GracefulShutdownExportHook {
     /// `None` (the [`Default`] / [`Self::new`] shape) means no
     /// exemptions and skips the per-destination lookup entirely —
     /// the rc.3 destination-agnostic behaviour with zero added
-    /// cost on the export hot path.
-    exempt: Option<std::collections::BTreeSet<u64>>,
+    /// cost on the export hot path. The set is shared so a
+    /// configuration reload can replace its contents without
+    /// rebuilding the hook chain.
+    exempt: Option<Arc<RwLock<std::collections::BTreeSet<u64>>>>,
 }
 
 #[cfg(feature = "bgp")]
@@ -187,20 +189,31 @@ impl GracefulShutdownExportHook {
 
     /// Destination-scoped variant: routes exported to any of
     /// `sessions` are left untouched by the §3.1 rewrite. An empty
-    /// set degrades to [`Self::new`].
+    /// set degrades to [`Self::new`]. The set is frozen at
+    /// construction; embedders that need to swap it at runtime
+    /// (a configuration reload) use [`Self::with_shared_exempt_sessions`].
     pub fn with_exempt_sessions(sessions: std::collections::BTreeSet<u64>) -> Self {
+        Self::with_shared_exempt_sessions(Arc::new(RwLock::new(sessions)))
+    }
+
+    /// [`Self::with_exempt_sessions`] over a set the embedder keeps
+    /// a handle to: swapping the contents replaces the exemption
+    /// list in place, without reinstalling the hook. An empty set is
+    /// stored (not collapsed to `None`) so a later swap can add
+    /// exemptions through the same handle — the per-route cost is one
+    /// uncontended read-lock acquisition only when the handle is
+    /// present.
+    pub fn with_shared_exempt_sessions(
+        sessions: Arc<RwLock<std::collections::BTreeSet<u64>>>,
+    ) -> Self {
         Self {
-            exempt: if sessions.is_empty() {
-                None
-            } else {
-                Some(sessions)
-            },
+            exempt: Some(sessions),
         }
     }
 
     /// The exempt session ids, if any.
-    pub fn exempt_sessions(&self) -> Option<&std::collections::BTreeSet<u64>> {
-        self.exempt.as_ref()
+    pub fn exempt_sessions(&self) -> Option<std::collections::BTreeSet<u64>> {
+        self.exempt.as_ref().map(|s| s.read().unwrap().clone())
     }
 
     /// The §3.1 rewrite itself, shared by `on_export` and
@@ -243,7 +256,7 @@ impl ExportHook for GracefulShutdownExportHook {
         if self
             .exempt
             .as_ref()
-            .is_some_and(|s| s.contains(&destination))
+            .is_some_and(|s| s.read().unwrap().contains(&destination))
         {
             return HookVerdict::Keep;
         }
@@ -1325,13 +1338,49 @@ mod tests {
     fn gs_export_hook_empty_exempt_set_degrades_to_agnostic() {
         let hook = GracefulShutdownExportHook::with_exempt_sessions(Default::default());
         assert!(
-            hook.exempt_sessions().is_none(),
-            "an empty set must collapse to None so the hot path stays lookup-free"
+            hook.exempt_sessions().is_some_and(|s| s.is_empty()),
+            "an empty set keeps its shared handle so a later swap can add exemptions"
         );
         let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
         attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
         let _ = hook.on_export_to(&mut r, 42);
         assert_eq!(local_pref_of(&r), Some(0));
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn gs_export_hook_shared_exempt_set_swaps_live() {
+        // The configuration-reload shape: the daemon installs the hook
+        // once with a shared set and replaces its contents when a peer
+        // is re-added under a new session handle.
+        let shared: Arc<RwLock<std::collections::BTreeSet<u64>>> =
+            Arc::new(RwLock::new([7].into_iter().collect()));
+        let hook = GracefulShutdownExportHook::with_shared_exempt_sessions(Arc::clone(&shared));
+
+        let mut before = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut before, Community::GRACEFUL_SHUTDOWN);
+        let _ = hook.on_export_to(&mut before, 7);
+        assert_eq!(local_pref_of(&before), Some(100), "session 7 exempt");
+
+        // Reload: the exemption moves to session 9.
+        *shared.write().unwrap() = [9].into_iter().collect();
+
+        let mut still_old = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut still_old, Community::GRACEFUL_SHUTDOWN);
+        let _ = hook.on_export_to(&mut still_old, 7);
+        assert_eq!(
+            local_pref_of(&still_old),
+            Some(0),
+            "session 7 lost its exemption after the swap"
+        );
+        let mut now_new = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut now_new, Community::GRACEFUL_SHUTDOWN);
+        let _ = hook.on_export_to(&mut now_new, 9);
+        assert_eq!(
+            local_pref_of(&now_new),
+            Some(100),
+            "session 9 is exempt after the swap"
+        );
     }
 
     // ==== DampingImportHook (RFC 2439) tests ====

@@ -155,6 +155,14 @@ pub(crate) enum SessionEnd {
     /// The daemon is shutting down (`running == false`) — the
     /// session-thread equivalent of the pump's `Ok(())`.
     DaemonShutdown,
+    /// A configuration reload administratively closed the session
+    /// (`BgpReactor::close_session_admin`). Carries the RFC 4486
+    /// §4.1 Cease subcode the reload chose — Administrative Reset (4)
+    /// for a reconfigured peer, Peer De-configured (3) for a removed
+    /// one — so the teardown path queues the matching NOTIFICATION
+    /// through `DefaultRouter::reset_session` /
+    /// `deconfigure_session` instead of the shutdown flavour.
+    AdminClose(u8),
 }
 
 impl SessionEnd {
@@ -169,14 +177,16 @@ impl SessionEnd {
             SessionEnd::ClosedByRouter => "session closed by the router (FSM Idle)",
             SessionEnd::CollisionLost => "connection lost the RFC 4271 §6.8 collision resolution",
             SessionEnd::DaemonShutdown => "daemon shutdown",
+            SessionEnd::AdminClose(_) => "session closed by a configuration reload",
         }
     }
 
-    /// The pump's `Err` equivalent test: every end except the shutdown
-    /// is an error-path teardown (`close_session`, not
+    /// The pump's `Err` equivalent test: every end except the
+    /// deliberate admin closes (shutdown and reload) is an error-path
+    /// teardown (`close_session`, not the NOTIFICATION-carrying
     /// `shutdown_session`).
     pub(crate) fn is_err_path(&self) -> bool {
-        !matches!(self, SessionEnd::DaemonShutdown)
+        !matches!(self, SessionEnd::DaemonShutdown | SessionEnd::AdminClose(_))
     }
 }
 
@@ -310,6 +320,20 @@ enum Submission {
         listener: StdTcpListener,
         gate: InboundGate,
     },
+    /// Close every slot carrying `handle` with the RFC 4486 §4.1
+    /// Cease subcode (configuration reload). `done` fires once the
+    /// matching slots are torn down (or immediately when none
+    /// matched), so the sender can `remove_session` only after the
+    /// pump stopped feeding that handle.
+    Close {
+        handle: SessionHandle,
+        subcode: u8,
+        done: std::sync::mpsc::Sender<()>,
+    },
+    /// Drop the attached listener (configuration reload replacing
+    /// the listener, e.g. a session-auth change). `done` fires after
+    /// the socket is deregistered and closed, releasing the port.
+    ListenerDetach { done: std::sync::mpsc::Sender<()> },
 }
 
 /// The attached listener: the mio-registered socket plus the
@@ -405,6 +429,52 @@ impl BgpReactor {
             .map_err(|_| "reactor thread is gone".to_string())?;
         self.waker.wake().map_err(|e| format!("waker: {e}"))
     }
+
+    /// Gracefully close every live slot carrying `handle` — the
+    /// configuration-reload teardown. The reactor queues the RFC 4486
+    /// §4.1 Cease NOTIFICATION for the subcode the caller chose
+    /// ([`SessionEnd::AdminClose`]), flushes it to the wire and only
+    /// then closes the socket. Returns once every matching slot is
+    /// gone (or immediately when the session has no live slot), so
+    /// the caller can safely `remove_session` afterwards; the bounded
+    /// wait (a few seconds, far above the 500 ms final-flush write
+    /// timeout) gives up on a wedged reactor rather than blocking the
+    /// reload forever — the teardown still runs, just later.
+    pub(crate) fn close_session_admin(
+        &self,
+        handle: SessionHandle,
+        subcode: u8,
+    ) -> Result<(), String> {
+        let (done, done_rx) = mpsc::channel::<()>();
+        self.tx
+            .send(Submission::Close {
+                handle,
+                subcode,
+                done,
+            })
+            .map_err(|_| "reactor thread is gone".to_string())?;
+        self.waker.wake().map_err(|e| format!("waker: {e}"))?;
+        match done_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) => Ok(()),
+            Err(_) => Err("reactor did not confirm the close in time".to_string()),
+        }
+    }
+
+    /// Drop the attached listener and release its port — the first
+    /// half of a listener replacement (bind the fresh socket only
+    /// after this returns). Returns once the old listener is
+    /// deregistered and closed.
+    pub(crate) fn detach_listener(&self) -> Result<(), String> {
+        let (done, done_rx) = mpsc::channel::<()>();
+        self.tx
+            .send(Submission::ListenerDetach { done })
+            .map_err(|_| "reactor thread is gone".to_string())?;
+        self.waker.wake().map_err(|e| format!("waker: {e}"))?;
+        match done_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) => Ok(()),
+            Err(_) => Err("reactor did not confirm the detach in time".to_string()),
+        }
+    }
 }
 
 /// The reactor thread body: the event loop, the slot table, the
@@ -493,6 +563,51 @@ fn reactor_main(
                                 continue;
                             }
                             listener = Some(ListenerSlot { mio, gate });
+                        }
+                        Submission::Close {
+                            handle,
+                            subcode,
+                            done,
+                        } => {
+                            // Tear every slot carrying the handle down
+                            // with the reload's RFC 4486 §4.1 subcode,
+                            // then confirm so the sender can
+                            // `remove_session` only after the pump
+                            // stopped feeding the handle. A handle with
+                            // no live slot (never connected, or already
+                            // ended) confirms immediately.
+                            let mut matched = false;
+                            for index in (0..slots.len()).rev() {
+                                if slots[index].as_ref().is_some_and(|s| s.handle == handle) {
+                                    matched = true;
+                                    teardown(
+                                        &mut slots,
+                                        &mut free,
+                                        &registry,
+                                        &router,
+                                        index,
+                                        SessionEnd::AdminClose(subcode),
+                                    );
+                                }
+                            }
+                            let _ = done.send(());
+                            if matched {
+                                log_info!(
+                                    crate::Component::Bgp,
+                                    "session #{} closed for a configuration reload",
+                                    handle.0
+                                );
+                            }
+                        }
+                        Submission::ListenerDetach { done } => {
+                            // Drop the attached listener: the deregister
+                            // stops its events, the drop closes the
+                            // socket and releases the port for the
+                            // replacement bind.
+                            if let Some(mut ls) = listener.take() {
+                                let _ = registry.deregister(&mut ls.mio);
+                            }
+                            let _ = done.send(());
                         }
                     }
                 }
@@ -984,10 +1099,20 @@ fn teardown(
     // Final router pass: classify the close, drain the last bytes.
     let out = {
         let mut r = router.write().unwrap();
-        if reason.is_err_path() {
-            r.close_session(slot.handle);
-        } else {
-            r.shutdown_session(slot.handle);
+        match &reason {
+            SessionEnd::AdminClose(subcode) => {
+                // A configuration reload closed this session: queue the
+                // reload's RFC 4486 §4.1 Cease subcode (Administrative
+                // Reset for a reconfigured peer, Peer De-configured for
+                // a removed one).
+                if *subcode == lr_bgp::error::BgpCeaseSubcode::PeerDeconfigured as u8 {
+                    r.deconfigure_session(slot.handle);
+                } else {
+                    r.reset_session(slot.handle);
+                }
+            }
+            end if end.is_err_path() => r.close_session(slot.handle),
+            _ => r.shutdown_session(slot.handle),
         }
         r.drain_output(slot.handle)
     };
