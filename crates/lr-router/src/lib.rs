@@ -14,7 +14,7 @@ pub mod session;
 
 pub use event::{EventSink, OspfGraceEvent, RouterEvent};
 pub use event_bus::{EventBus, EventSubscriber};
-pub use instance::{AggregateOptions, DefaultRouter, PeerHealthLookup, RouterInstance};
+pub use instance::{AggregateOptions, DefaultRouter, OrfTxEntry, PeerHealthLookup, RouterInstance};
 pub use redistribution::{MetricPolicy, RedistributionPipe};
 pub use session::{
     OspfAreaType, OspfNetworkType, Session, SessionConfig, SessionErrorKind, SessionHandle,

@@ -174,6 +174,9 @@ pub(crate) struct PeerSpec {
     /// RFC 5291 ORF capability — per-peer override of the
     /// router-wide `[bgp] orf`. `None` inherits.
     pub orf: Option<Vec<OrfEntrySpec>>,
+    /// RFC 5291 Address Prefix ORF entries — per-peer override of the
+    /// router-wide `[bgp] orf_entries`. `None` inherits.
+    pub orf_entries: Option<Vec<(u16, u8, Vec<lr_bgp::message::AddressPrefixOrf>)>>,
     /// FRR `neighbor X shutdown` / BIRD `disabled`: administratively
     /// down the peer. `None` (the default) inherits `false`; `Some(true)`
     /// keeps the outbound connector passive (no dial) and refuses
@@ -1124,6 +1127,11 @@ pub(crate) struct DaemonConfig {
     /// `(afi, safi, [(orf_type, mode)])` entries peers inherit.
     /// Empty (the default) does not advertise the capability.
     pub orf: Vec<OrfEntrySpec>,
+    /// RFC 5291 §6 Address Prefix ORF entries to send after the
+    /// session establishes, grouped per address family. Peers inherit
+    /// this unless they set their own `orf_entries`. Empty (the
+    /// default) sends no ORF.
+    pub orf_entries: Vec<(u16, u8, Vec<lr_bgp::message::AddressPrefixOrf>)>,
     /// Local IPv6 source address for next-hop-self egress.
     pub local_address_v6: Option<String>,
     /// RFC 5082 GTSM: `None` = disabled; `Some(hops)` = multihop.
@@ -1865,6 +1873,7 @@ impl DaemonConfig {
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),
+            orf_entries: Vec::new(),
             bfd_min_tx_ms: 100,
             bfd_min_rx_ms: 100,
             bfd_multiplier: 3,
@@ -3508,6 +3517,82 @@ fn parse_orf_entries(value: &str) -> Result<Vec<OrfEntrySpec>, String> {
     Ok(out)
 }
 
+/// Parse the RFC 5292 §3 Address Prefix ORF entries for the
+/// `[bgp] orf_entries` and `peer.orf_entries` keys.
+///
+/// The accepted shape is a comma-separated list of whitespace-separated
+/// entries:
+///
+/// ```text
+/// afi:safi sequence permit|deny prefix minlen maxlen
+/// ```
+///
+/// for example `"1:1 10 permit 10.0.0.0/16 0 24, 1:1 20 deny
+/// 198.51.100.0/24 0 0"`. Whitespace (not `:`) separates the fields so
+/// an IPv6 prefix such as `2001:db8::/32` parses without escaping.
+/// `minlen` / `maxlen` are 0 when unspecified. Entries sharing an
+/// AFI/SAFI are grouped into one ORF message for that family.
+fn parse_orf_prefix_entries(
+    value: &str,
+) -> Result<Vec<(u16, u8, Vec<lr_bgp::message::AddressPrefixOrf>)>, String> {
+    use lr_core::addr::Prefix;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<(u16, u8, Vec<lr_bgp::message::AddressPrefixOrf>)> = Vec::new();
+    for entry in trimmed.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = entry.split_whitespace().collect();
+        if parts.len() != 6 {
+            return Err(format!(
+                "bad orf_entries entry '{entry}' (expected \
+                 'afi:safi sequence permit|deny prefix minlen maxlen')"
+            ));
+        }
+        let (afi, safi) = parts[0]
+            .split_once(':')
+            .ok_or_else(|| format!("bad orf_entries family '{}'", parts[0]))?;
+        let afi: u16 = afi
+            .parse()
+            .map_err(|_| format!("bad orf_entries afi '{}'", parts[0]))?;
+        let safi: u8 = safi
+            .parse()
+            .map_err(|_| format!("bad orf_entries safi '{}'", parts[0]))?;
+        let sequence: u32 = parts[1]
+            .parse()
+            .map_err(|_| format!("bad orf_entries sequence '{}'", parts[1]))?;
+        let permit = match parts[2].to_ascii_lowercase().as_str() {
+            "permit" => true,
+            "deny" => false,
+            other => {
+                return Err(format!(
+                    "bad orf_entries match '{other}' (expected permit | deny)"
+                ));
+            }
+        };
+        let prefix: Prefix = parts[3]
+            .parse()
+            .map_err(|_| format!("bad orf_entries prefix '{}'", parts[3]))?;
+        let min_len: u8 = parts[4]
+            .parse()
+            .map_err(|_| format!("bad orf_entries minlen '{}'", parts[4]))?;
+        let max_len: u8 = parts[5]
+            .parse()
+            .map_err(|_| format!("bad orf_entries maxlen '{}'", parts[5]))?;
+        let entry =
+            lr_bgp::message::AddressPrefixOrf::add(sequence, permit, prefix, min_len, max_len);
+        match out.iter_mut().find(|(a, s, _)| *a == afi && *s == safi) {
+            Some((_, _, entries)) => entries.push(entry),
+            None => out.push((afi, safi, vec![entry])),
+        }
+    }
+    Ok(out)
+}
+
 /// Strip a `#`-to-end-of-line comment from a TOML line, respecting
 /// both basic (`"..."`) and literal (`'...'`) string forms so a `#`
 /// inside a quoted value is preserved (e.g. `md5_key = "a#b"` keeps
@@ -3992,6 +4077,7 @@ pub(crate) fn apply_config_key(
         "bgp.paths_limit" => cfg.paths_limit = parse_paths_limit(value)?,
         "bgp.link_local_next_hop" => cfg.link_local_next_hop = parse_bool(value),
         "bgp.orf" => cfg.orf = parse_orf_entries(value)?,
+        "bgp.orf_entries" => cfg.orf_entries = parse_orf_prefix_entries(value)?,
         "bgp.local_address_v6" => cfg.local_address_v6 = Some(value.to_string()),
         "bgp.gtsm" => cfg.gtsm_hops = parse_gtsm(value),
         "bgp.max_prefixes" => {
@@ -6155,6 +6241,7 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         "paths_limit" => peer.paths_limit = Some(parse_paths_limit(value)?),
         "link_local_next_hop" => peer.link_local_next_hop = Some(parse_bool(value)),
         "orf" => peer.orf = Some(parse_orf_entries(value)?),
+        "orf_entries" => peer.orf_entries = Some(parse_orf_prefix_entries(value)?),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
         "max_prefixes" => {
             peer.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);

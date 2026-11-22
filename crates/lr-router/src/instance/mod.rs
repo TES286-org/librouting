@@ -750,6 +750,14 @@ pub struct DefaultRouter {
     /// stale paths from ECMP / add-path. `None` when peer-health is
     /// off — the standard `BestPath::rank` runs unchanged.
     peer_health: Option<std::sync::Arc<dyn PeerHealthLookup>>,
+    /// RFC 5291 ORF entries received from each peer, applied to that
+    /// peer's Adj-RIB-Out. Cleared when the session is torn down (the
+    /// ORF lifetime is the BGP session, §6).
+    orf_rx: BTreeMap<u64, OrfSessionState>,
+    /// RFC 5291 ORF entries this router should send to each peer once
+    /// the session establishes (and after an operator update). The
+    /// lifetime is the session; the map is cleared on teardown.
+    orf_tx: BTreeMap<u64, Vec<OrfTxEntry>>,
 }
 
 /// Exchange plane bookkeeping for one BGP session (feature
@@ -807,6 +815,28 @@ struct MaxPrefixState {
     restart_cooldown_until: Option<u64>,
 }
 
+/// RFC 5291 ORF state received from one peer, applied to that peer's
+/// Adj-RIB-Out.
+#[derive(Debug, Clone, Default)]
+struct OrfSessionState {
+    /// Per-family Address Prefix ORF entries, keyed by sequence (the
+    /// RFC 5292 §2 ordering field). A route is advertised only when the
+    /// first matching entry (smallest sequence) is PERMIT; a route
+    /// matching no entry is not advertised (RFC 5291 §6). An absent
+    /// family has no ORF installed, so everything is advertised.
+    families: BTreeMap<NlriFamily, BTreeMap<u32, lr_bgp::message::AddressPrefixOrf>>,
+    /// Families for which a plain ROUTE-REFRESH or an IMMEDIATE ORF
+    /// arrived. RFC 5291 §6 tells the sender not to advertise a family
+    /// before that point when the peer advertised a willingness to
+    /// send ORF entries for it; the initial dump consults this set.
+    ready: BTreeSet<NlriFamily>,
+}
+
+/// One ORF family the router should send to a peer after establishing
+/// the session (RFC 5291 §6: after ORF changes, send the updated
+/// entries with IMMEDIATE).
+pub type OrfTxEntry = (NlriFamily, Vec<lr_bgp::message::AddressPrefixOrf>);
+
 impl Default for DefaultRouter {
     fn default() -> Self {
         Self {
@@ -847,6 +877,8 @@ impl Default for DefaultRouter {
             graceful_restart: BTreeMap::new(),
             llgr_caps: BTreeMap::new(),
             max_prefix_state: BTreeMap::new(),
+            orf_rx: BTreeMap::new(),
+            orf_tx: BTreeMap::new(),
             collision_meta: BTreeMap::new(),
             collision_lost: BTreeSet::new(),
             administrative_close: BTreeSet::new(),
@@ -2557,6 +2589,8 @@ impl DefaultRouter {
                             updates_sent: s.update_sent,
                             message_stats: s,
                             stats: *stats,
+                            peer_fqdn: peer.peer_fqdn(),
+                            peer_software_version: peer.peer_software_version(),
                         }
                     }
                     SessionState::Ospf { runtime, stats, .. } => SessionSummary {
@@ -2573,6 +2607,8 @@ impl DefaultRouter {
                         updates_sent: 0,
                         message_stats: lr_bgp::PeerMessageStats::default(),
                         stats: *stats,
+                        peer_fqdn: None,
+                        peer_software_version: None,
                     },
                     SessionState::Babel {
                         runtime,
@@ -2594,6 +2630,8 @@ impl DefaultRouter {
                             updates_sent: 0,
                             message_stats: lr_bgp::PeerMessageStats::default(),
                             stats: *session_stats,
+                            peer_fqdn: None,
+                            peer_software_version: None,
                         }
                     }
                 }
@@ -3332,6 +3370,13 @@ impl DefaultRouter {
         if !peer.is_established() {
             return (Vec::new(), Vec::new());
         }
+        // RFC 5291 §6: do not advertise a family while the peer's ORF
+        // for it is still pending — the initial dump helper and the
+        // steady-state export path must agree, or a route originated
+        // after establishment would leak past the suppression.
+        if self.orf_initial_suppressed(session, key.family) {
+            return (Vec::new(), Vec::new());
+        }
         // RFC 8212 §3: an external session with no explicit export
         // policy must not carry routes in its Adj-RIB-Out. Desired
         // stays empty so the diff below withdraws anything the
@@ -3362,6 +3407,11 @@ impl DefaultRouter {
                 if route.origin.peer == session {
                     continue; // split horizon, per path
                 }
+                // RFC 5291 §6: the peer's ORF constrains the Adj-RIB-Out
+                // in addition to local export policy.
+                if !self.orf_permits(session, key.family, &route.key.prefix) {
+                    continue;
+                }
                 let mut candidate = route.clone();
                 candidate.path_id = slot as u32 + 1;
                 if matches!(
@@ -3377,6 +3427,7 @@ impl DefaultRouter {
                 if best.protocol == Protocol::Bgp
                     && best.origin.peer != session
                     && !rfc8212_deny_export
+                    && self.orf_permits(session, key.family, &best.key.prefix)
                 {
                     let mut candidate = best.clone();
                     candidate.path_id = 0;
@@ -3421,6 +3472,168 @@ impl DefaultRouter {
         (advertise, withdraw_ids)
     }
 
+    /// Whether the ORF entries received from `session` permit
+    /// advertising `prefix` of `family` (RFC 5291 §6 / RFC 5292 §4).
+    ///
+    /// A family with no ORF installed (or with every entry removed)
+    /// permits everything. Otherwise the route must match at least one
+    /// entry and the first match (smallest sequence) must be PERMIT: a
+    /// route that matches no entry is not advertised (§6), and ORFs
+    /// from different types combine with DENY winning (this
+    /// implementation advertises only the Address Prefix ORF, so the
+    /// type-64 list is the whole combination).
+    fn orf_permits(&self, session: u64, family: NlriFamily, prefix: &Prefix) -> bool {
+        let Some(state) = self.orf_rx.get(&session) else {
+            return true;
+        };
+        let Some(entries) = state.families.get(&family) else {
+            return true;
+        };
+        if entries.is_empty() {
+            return true;
+        }
+        match entries.values().find(|e| e.matches(prefix)) {
+            Some(entry) => entry.permit,
+            None => false,
+        }
+    }
+
+    /// RFC 5291 §6: while the peer has advertised that it will send ORF
+    /// entries for `family` and none has arrived (or arrived only with
+    /// `DEFER`), the initial dump must withhold that family.
+    fn orf_initial_suppressed(&self, session: u64, family: NlriFamily) -> bool {
+        let ready = self
+            .orf_rx
+            .get(&session)
+            .is_some_and(|s| s.ready.contains(&family));
+        if ready {
+            return false;
+        }
+        match self.sessions.get(&session) {
+            Some(SessionState::Bgp { peer, .. }) => lr_bgp::extensions::orf::peer_will_send_any(
+                peer.config(),
+                peer.peer_capabilities(),
+                family,
+            ),
+            _ => false,
+        }
+    }
+
+    /// Apply an RFC 5291 ORF update received from `session` and, when
+    /// `When-to-refresh` is IMMEDIATE, re-advertise the family so the
+    /// peer's new filter takes effect (§6). `DEFER` stores the entries
+    /// and leaves re-advertisement to the next plain ROUTE-REFRESH or
+    /// IMMEDIATE ORF.
+    fn apply_orf(
+        &mut self,
+        session: u64,
+        family: NlriFamily,
+        when: lr_bgp::message::OrfWhenToRefresh,
+        lists: &[lr_bgp::message::OrfList],
+    ) {
+        use lr_bgp::message::{OrfAction, OrfEntry, OrfWhenToRefresh};
+        {
+            let state = self.orf_rx.entry(session).or_default();
+            for list in lists {
+                // Only the Address Prefix ORF is advertised from config;
+                // RFC 5291 §6 lets a receiver ignore types it did not
+                // advertise. The FSM already filters on that.
+                if list.orf_type != lr_bgp::message::OrfList::ADDRESS_PREFIX {
+                    continue;
+                }
+                let entries = state.families.entry(family).or_default();
+                for entry in &list.entries {
+                    match entry {
+                        OrfEntry::RemoveAll => entries.clear(),
+                        OrfEntry::AddressPrefix(e) => match e.action {
+                            OrfAction::Add => {
+                                entries.insert(e.sequence, *e);
+                            }
+                            OrfAction::Remove => {
+                                // RFC 5291 §6: a REMOVE for an entry
+                                // that is not installed is ignored.
+                                entries.remove(&e.sequence);
+                            }
+                            // §6: an unrecognized field value removes
+                            // the whole ORF previously received.
+                            OrfAction::Unknown => entries.clear(),
+                            OrfAction::RemoveAll => entries.clear(),
+                        },
+                        OrfEntry::Raw(_) => {}
+                    }
+                }
+                // RFC 5291 §6: an ORF is removed when its last entry
+                // is removed, so a family with no entries permits
+                // every route (the `orf_permits` fast path).
+                if entries.is_empty() {
+                    state.families.remove(&family);
+                }
+            }
+            // RFC 5291 §6: a DEFER update applies the entries but leaves
+            // re-advertisement to the next plain ROUTE-REFRESH (which
+            // always re-announces and consults the stored filter) or an
+            // IMMEDIATE ORF.
+            if when == OrfWhenToRefresh::Immediate {
+                state.ready.insert(family);
+            }
+        }
+        if when == OrfWhenToRefresh::Immediate {
+            self.reannounce_to_session(session, family);
+        }
+    }
+
+    /// Send RFC 5291 ORF entries to a peer. Requires the session to be
+    /// established and both speakers to have advertised the ORF
+    /// capability with compatible Send/Receive modes; returns `false`
+    /// (and writes nothing) otherwise.
+    pub fn send_orf(
+        &mut self,
+        h: SessionHandle,
+        family: NlriFamily,
+        when: lr_bgp::message::OrfWhenToRefresh,
+        entries: &[lr_bgp::message::AddressPrefixOrf],
+    ) -> Result<bool, String> {
+        let list = lr_bgp::message::OrfList::address_prefix(entries.to_vec());
+        let sent = match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, conn, .. }) => {
+                let sent = peer.send_orf(family, when, std::slice::from_ref(&list));
+                if sent {
+                    let bytes = peer.drain_outgoing();
+                    if !bytes.is_empty() {
+                        conn.put_output(&bytes);
+                    }
+                }
+                sent
+            }
+            _ => return Err(format!("BGP session {} not found", h.0)),
+        };
+        Ok(sent)
+    }
+
+    /// Replace the ORF entries this router sends to a peer after the
+    /// session establishes. The daemon calls this from the config build
+    /// path; an embedder may call it to drive ORF from its own policy.
+    pub fn set_orf_tx(&mut self, h: SessionHandle, entries: Vec<OrfTxEntry>) {
+        self.orf_tx.insert(h.0, entries);
+    }
+
+    /// The Address Prefix ORF entries currently installed from a peer,
+    /// per family. Empty when no ORF is active. Used by `show`.
+    pub fn orf_entries(
+        &self,
+        h: SessionHandle,
+    ) -> Vec<(NlriFamily, Vec<lr_bgp::message::AddressPrefixOrf>)> {
+        self.orf_rx
+            .get(&h.0)
+            .map(|s| {
+                s.families
+                    .iter()
+                    .map(|(f, entries)| (*f, entries.values().copied().collect()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Re-evaluate and resend one address family after an RFC 2918 request.
     ///
     /// This intentionally re-runs export hooks rather than replaying cached
@@ -3459,7 +3672,10 @@ impl DefaultRouter {
                 if add_path_tx {
                     let limit = paths_limit.map(usize::from).unwrap_or(usize::MAX);
                     set.iter()
-                        .filter(|r| r.origin.peer != session)
+                        .filter(|r| {
+                            r.origin.peer != session
+                                && self.orf_permits(session, family, &r.key.prefix)
+                        })
                         .take(limit)
                         .enumerate()
                         .map(|(slot, r)| {
@@ -3470,7 +3686,10 @@ impl DefaultRouter {
                         .collect::<Vec<_>>()
                 } else {
                     set.first()
-                        .filter(|r| r.origin.peer != session)
+                        .filter(|r| {
+                            r.origin.peer != session
+                                && self.orf_permits(session, family, &r.key.prefix)
+                        })
                         .cloned()
                         .into_iter()
                         .collect::<Vec<_>>()
@@ -3659,8 +3878,12 @@ impl DefaultRouter {
     /// best path only.
     fn on_bgp_established(&mut self, h: u64) {
         // The families the session speaks, each with its Add-Path mode —
-        // the pair decides which Loc-RIB view to dump.
-        let families: Vec<(NlriFamily, bool)> = match self.sessions.get(&h) {
+        // the pair decides which Loc-RIB view to dump. The third flag is
+        // RFC 5291 §6's initial suppression: when the peer advertised
+        // that it will send ORF entries for the family, the sender waits
+        // for them (or a plain ROUTE-REFRESH) before advertising that
+        // family.
+        let families: Vec<(NlriFamily, bool, bool)> = match self.sessions.get(&h) {
             Some(SessionState::Bgp { peer, .. }) => {
                 let mut fams = vec![NlriFamily::IPV4_UNICAST];
                 for f in &peer.config().mp_families {
@@ -3669,13 +3892,26 @@ impl DefaultRouter {
                     }
                 }
                 fams.into_iter()
-                    .map(|f| (f, peer.add_path_tx_for(f)))
+                    .map(|f| {
+                        (
+                            f,
+                            peer.add_path_tx_for(f),
+                            self.orf_initial_suppressed(h, f),
+                        )
+                    })
                     .collect()
             }
             _ => Vec::new(),
         };
+        let mut ipv4_unicast_suppressed = false;
         let mut snapshot: Vec<Route> = Vec::new();
-        for (family, add_path_tx) in families {
+        for (family, add_path_tx, suppressed) in families {
+            if suppressed {
+                if family == NlriFamily::IPV4_UNICAST {
+                    ipv4_unicast_suppressed = true;
+                }
+                continue;
+            }
             if add_path_tx {
                 for (key, set) in self.loc_rib.iter_sets() {
                     if key.family != family {
@@ -3703,20 +3939,28 @@ impl DefaultRouter {
                         if route.protocol != Protocol::Bgp {
                             continue;
                         }
+                        if !self.orf_permits(h, family, &route.key.prefix) {
+                            continue;
+                        }
                         let mut r = route.clone();
                         r.path_id = slot as u32 + 1;
                         snapshot.push(r);
                     }
                 }
             } else {
-                snapshot.extend(self.loc_rib.iter_best().filter(|route| {
-                    // Same two gates as the Add-Path branch:
-                    // family + split horizon, and the
-                    // protocol-direct exclusion (see above).
-                    route.key.family == family
-                        && route.origin.peer != h
-                        && route.protocol == Protocol::Bgp
-                }));
+                for route in self.loc_rib.iter_best() {
+                    // Same gates as the Add-Path branch: family + split
+                    // horizon, the protocol-direct exclusion, and the
+                    // peer's ORF.
+                    if route.key.family != family
+                        || route.origin.peer == h
+                        || route.protocol != Protocol::Bgp
+                        || !self.orf_permits(h, family, &route.key.prefix)
+                    {
+                        continue;
+                    }
+                    snapshot.push(route);
+                }
             }
         }
         let hooks = std::mem::take(&mut self.hooks);
@@ -3749,7 +3993,24 @@ impl DefaultRouter {
             .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
             .collect();
 
+        // RFC 5291 §6: send the configured ORF entries once the session
+        // is up, so the peer can constrain its Adj-RIB-Out before (or
+        // while) it sends routes. The FSM drops the message when the
+        // capability was not negotiated in a send-compatible direction.
+        let orf_tx = self.orf_tx.get(&h).cloned().unwrap_or_default();
+
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&h) {
+            for (family, entries) in &orf_tx {
+                if entries.is_empty() {
+                    continue;
+                }
+                let list = lr_bgp::message::OrfList::address_prefix(entries.clone());
+                peer.send_orf(
+                    *family,
+                    lr_bgp::message::OrfWhenToRefresh::Immediate,
+                    std::slice::from_ref(&list),
+                );
+            }
             for route in &snapshot {
                 if rfc8212_deny_export {
                     continue;
@@ -3765,7 +4026,12 @@ impl DefaultRouter {
             }
             // RFC 4724 §4: mark the end of the initial dump so the peer can
             // detect convergence (BIRD/FRR log End-of-RIB reception).
-            peer.send_end_of_rib();
+            // RFC 5291 §6: when IPv4 unicast awaits the peer's ORF, the
+            // empty UPDATE would falsely signal convergence for it, so
+            // withhold the marker until the ORF-triggered refresh.
+            if !ipv4_unicast_suppressed {
+                peer.send_end_of_rib();
+            }
             let bytes = peer.drain_outgoing();
             if !bytes.is_empty() {
                 conn.put_output(&bytes);
@@ -3869,7 +4135,18 @@ impl DefaultRouter {
                     self.withdraw_from_session(origin, &key, path_id);
                 }
                 BgpAction::RouteRefreshRequested(family) => {
+                    // RFC 5291 §6: a plain ROUTE-REFRESH also lifts the
+                    // initial ORF suppression for the family and applies
+                    // any entries received with `DEFER`.
+                    self.orf_rx.entry(session).or_default().ready.insert(family);
                     self.reannounce_to_session(session, family);
+                }
+                BgpAction::OrfReceived {
+                    family,
+                    when,
+                    lists,
+                } => {
+                    self.apply_orf(session, family, when, &lists);
                 }
                 BgpAction::BeginOfRouteRefresh(family) => {
                     // RFC 7313 §3.2 BoRR: the peer is about to
@@ -4186,6 +4463,11 @@ impl DefaultRouter {
     /// Loc-RIB re-selected, withdrawing the stale best routes from the
     /// other sessions' Adj-RIB-Out).
     fn teardown_bgp_session(&mut self, session: u64) {
+        // RFC 5291 §6: the lifetime of a received ORF is the BGP
+        // session, so the peer's entries die with the transport
+        // incarnation. The locally configured ORF we send (`orf_tx`)
+        // survives, because a re-established session must resend it.
+        self.orf_rx.remove(&session);
         if let Some(mrai) = self.mrai.get_mut(&session) {
             mrai.last_sent.clear();
             mrai.pending.clear();
@@ -4701,6 +4983,9 @@ impl RouterInstance for DefaultRouter {
                         ..MraiState::default()
                     },
                 );
+                if !cfg.orf_entries.is_empty() {
+                    self.orf_tx.insert(h.0, cfg.orf_entries.clone());
+                }
                 if self.safety.is_none() {
                     self.safety = Some(SafetyNet::new(cfg.local_as));
                 }

@@ -116,3 +116,73 @@ fn mp_reach_ipv4_with_32_byte_next_hop_is_rejected() {
     enc.extend_from_slice(&[203, 0, 113]);
     assert!(MpReach::decode(&enc).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// draft-ietf-idr-linklocal-capability-06 next-hop classification.
+// ---------------------------------------------------------------------------
+
+fn v6_nlri() -> Vec<Nlri> {
+    vec![Nlri::plain(Prefix::new_v6(
+        [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        64,
+    ))]
+}
+
+/// §3: a 16-octet fe80::/10 next hop is Link-Local-only; a 16-octet
+/// other address stays the RFC 2545 global form.
+#[test]
+fn link_local_sixteen_byte_next_hop_is_classified_by_prefix() {
+    let ll = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mp = MpReach::new(
+        NlriFamily::IPV6_UNICAST,
+        MpNextHop::V6LinkLocal(ll),
+        v6_nlri(),
+    );
+    let dec = MpReach::decode(&mp.encode()).unwrap();
+    assert_eq!(dec.next_hop, MpNextHop::V6LinkLocal(ll));
+
+    let gua = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mp = MpReach::new(
+        NlriFamily::IPV6_UNICAST,
+        MpNextHop::V6Global(gua),
+        v6_nlri(),
+    );
+    let dec = MpReach::decode(&mp.encode()).unwrap();
+    assert_eq!(dec.next_hop, MpNextHop::V6Global(gua));
+}
+
+/// §6: ::/LL and LL/LL use the second (link-local) slot for
+/// forwarding; GUA/LL stays a global + link-local pair.
+#[test]
+fn link_local_thirty_two_byte_next_hop_uses_the_second_slot() {
+    let gua = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let ll1 = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let ll2 = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    let unspecified = [0u8; 16];
+
+    let decoded = |g: [u8; 16], l: [u8; 16]| {
+        let mp = MpReach::new(
+            NlriFamily::IPV6_UNICAST,
+            MpNextHop::V6GlobalLinkLocal(g, l),
+            v6_nlri(),
+        );
+        MpReach::decode(&mp.encode()).unwrap().next_hop
+    };
+    assert_eq!(decoded(gua, ll1), MpNextHop::V6GlobalLinkLocal(gua, ll1));
+    assert_eq!(decoded(unspecified, ll1), MpNextHop::V6LinkLocal(ll1));
+    assert_eq!(decoded(ll1, ll2), MpNextHop::V6LinkLocal(ll2));
+}
+
+/// §6: a 32-octet field whose second slot is not link-local is
+/// malformed and must be treated as withdraw (the decoder rejects it).
+#[test]
+fn link_local_thirty_two_byte_next_hop_rejects_non_link_local_second() {
+    let gua = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut enc = vec![0x00, 0x02, 0x01, 32];
+    enc.extend_from_slice(&gua);
+    enc.extend_from_slice(&gua);
+    enc.push(0);
+    enc.push(64);
+    enc.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0]);
+    assert!(MpReach::decode(&enc).is_none());
+}

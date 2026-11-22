@@ -1908,3 +1908,375 @@ fn bfd_strict_mode_not_advertised_without_bfd() {
         "code 74 must be absent when BFD is not enabled"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RFC 5291 / RFC 5292 Outbound Route Filtering.
+// ---------------------------------------------------------------------------
+
+fn orf_pair(a_mode: u8, b_mode: u8) -> (BgpPeer, BgpPeer) {
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.orf = vec![(1, 1, vec![(64, a_mode)])];
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.orf = vec![(1, 1, vec![(64, b_mode)])];
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+    (a, b)
+}
+
+/// RFC 5291 §4/§6: an ORF ROUTE-REFRESH from a SEND-mode peer reaches a
+/// RECEIVE-mode peer as `BgpAction::OrfReceived`, not as a plain refresh
+/// request.
+#[test]
+fn orf_received_when_both_sides_negotiated() {
+    use crate::message::{AddressPrefixOrf, OrfList, OrfWhenToRefresh};
+    let (mut a, mut b) = orf_pair(1 /* receive */, 2 /* send */);
+    assert!(a.orf_negotiated() && b.orf_negotiated());
+
+    let entries = vec![AddressPrefixOrf::add(
+        7,
+        true,
+        Prefix::new_v4([10, 0, 0, 0], 8),
+        0,
+        0,
+    )];
+    assert!(b.send_orf(
+        NlriFamily::IPV4_UNICAST,
+        OrfWhenToRefresh::Immediate,
+        &[OrfList::address_prefix(entries.clone())],
+    ));
+    let actions = a.feed_bytes(&b.drain_outgoing()).unwrap();
+    let found = actions.iter().find_map(|action| match action {
+        BgpAction::OrfReceived {
+            family,
+            when,
+            lists,
+        } => Some((*family, *when, lists.clone())),
+        _ => None,
+    });
+    let (family, when, lists) = found.expect("OrfReceived action");
+    assert_eq!(family, NlriFamily::IPV4_UNICAST);
+    assert_eq!(when, OrfWhenToRefresh::Immediate);
+    assert_eq!(lists.len(), 1);
+    assert_eq!(lists[0].address_prefix_entries(), Some(entries));
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, BgpAction::RouteRefreshRequested(_))),
+        "an ORF message is not a plain refresh request"
+    );
+}
+
+/// A peer that advertised only RECEIVE cannot send ORF entries; the FSM
+/// refuses to put them on the wire (RFC 5291 §6).
+#[test]
+fn orf_send_refused_when_peer_only_receives() {
+    use crate::message::{AddressPrefixOrf, OrfList, OrfWhenToRefresh};
+    let (mut a, _b) = orf_pair(3 /* both */, 2 /* send only */);
+    let entries = vec![AddressPrefixOrf::add(
+        1,
+        true,
+        Prefix::new_v4([10, 0, 0, 0], 8),
+        0,
+        0,
+    )];
+    assert!(!a.send_orf(
+        NlriFamily::IPV4_UNICAST,
+        OrfWhenToRefresh::Immediate,
+        &[OrfList::address_prefix(entries)],
+    ));
+    assert!(a.drain_outgoing().is_empty());
+}
+
+/// An ORF type we did not advertise as RECEIVE is dropped before the
+/// action is surfaced (RFC 5291 §6).
+#[test]
+fn orf_received_drops_unadvertised_type() {
+    use crate::message::{OrfEntry, OrfList, OrfRefresh, OrfWhenToRefresh, RouteRefresh};
+    let (mut a, _b) = orf_pair(1, 2);
+    // Hand-build a message carrying type 65, which neither side
+    // advertised.
+    let refresh = RouteRefresh {
+        family: NlriFamily::IPV4_UNICAST,
+        subtype: crate::message::RouteRefreshSubtype::Normal,
+        orf: Some(OrfRefresh {
+            when: OrfWhenToRefresh::Immediate,
+            lists: vec![OrfList {
+                orf_type: 65,
+                entries: vec![OrfEntry::Raw(vec![0])],
+            }],
+        }),
+    };
+    let codec = crate::codec::BgpCodec::new();
+    let bytes = codec
+        .encode_vec(&BgpMessage::RouteRefresh(refresh))
+        .unwrap();
+    let actions = a.feed_bytes(&bytes).unwrap();
+    assert!(!actions
+        .iter()
+        .any(|a| matches!(a, BgpAction::OrfReceived { .. })));
+}
+
+// ---------------------------------------------------------------------------
+// draft-ietf-idr-linklocal-capability-06 runtime.
+// ---------------------------------------------------------------------------
+
+fn link_local_pair(a_enabled: bool, b_enabled: bool) -> (BgpPeer, BgpPeer) {
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.link_local_next_hop = a_enabled;
+    cfg_a.mp_families = vec![NlriFamily::IPV6_UNICAST];
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.link_local_next_hop = b_enabled;
+    cfg_b.mp_families = vec![NlriFamily::IPV6_UNICAST];
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+    (a, b)
+}
+
+fn link_local_update(next_hop: crate::path::MpNextHop) -> BgpMessage {
+    use crate::message::update::Update;
+    use crate::path::{AsPath, MpReach};
+    let prefix = Prefix::new_v6(
+        [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        64,
+    );
+    let mut u = Update::new();
+    u.attributes.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    u.attributes.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        AsPath::from_sequence([Asn(64513)]).encode_4(),
+    ));
+    let reach = MpReach::new(
+        NlriFamily::IPV6_UNICAST,
+        next_hop,
+        vec![crate::message::update::Nlri::plain(prefix)],
+    );
+    u.attributes.insert(PathAttribute::new(
+        PathAttrFlags::new().set_optional(true),
+        AttrType::MpReachNlri,
+        reach.encode(),
+    ));
+    BgpMessage::Update(u)
+}
+
+/// §3: a Link-Local-only next hop without the capability negotiated is
+/// treated as withdraw, not installed with an unusable fe80:: next hop.
+#[test]
+fn link_local_only_next_hop_without_capability_is_treated_as_withdraw() {
+    let ll = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let (mut a, _b) = link_local_pair(false, false);
+    assert!(!a.link_local_negotiated());
+    let actions = a.step(BgpEvent::Message(link_local_update(
+        crate::path::MpNextHop::V6LinkLocal(ll),
+    )));
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, BgpAction::InstallRoute(_))),
+        "an unnegotiated link-local next hop must not be installed"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, BgpAction::WithdrawRoute { .. })),
+        "the UPDATE is a treat-as-withdraw"
+    );
+}
+
+/// When both sides negotiated the capability, the link-local next hop is
+/// installed as the route's next hop.
+#[test]
+fn link_local_only_next_hop_installs_when_negotiated() {
+    let ll = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let (mut a, _b) = link_local_pair(true, true);
+    assert!(a.link_local_negotiated());
+    let actions = a.step(BgpEvent::Message(link_local_update(
+        crate::path::MpNextHop::V6LinkLocal(ll),
+    )));
+    let route = actions
+        .iter()
+        .find_map(|a| match a {
+            BgpAction::InstallRoute(r) => Some(r),
+            _ => None,
+        })
+        .expect("route installed");
+    assert_eq!(
+        route.next_hop,
+        Some(lr_core::addr::IpAddr::V6(ll)),
+        "the link-local next hop is preserved"
+    );
+}
+
+/// §4: egress refuses a link-local-only next hop when the capability was
+/// not negotiated, and puts a 16-octet fe80:: next hop on the wire when
+/// it was.
+#[test]
+fn link_local_egress_requires_negotiation() {
+    use crate::path::AsPath;
+    let ll = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut attrs = crate::path::PathAttributes::new();
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        AsPath::from_sequence([Asn(64512)]).encode_4(),
+    ));
+    let route = lr_core::rib::Route {
+        key: lr_core::rib::RouteKey::new(
+            Prefix::new_v6(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                64,
+            ),
+            NlriFamily::IPV6_UNICAST,
+        ),
+        origin: lr_core::rib::RouteOrigin { proto: 2, peer: 0 },
+        protocol: lr_core::rib::Protocol::Bgp,
+        preference: lr_core::rib::Preference::new(20, 1),
+        next_hop: Some(lr_core::addr::IpAddr::V6(ll)),
+        attributes: attrs.into(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    };
+
+    let (mut plain, _b) = link_local_pair(false, false);
+    assert!(
+        !plain.advertise(&route),
+        "no capability, no LL advertisement"
+    );
+
+    let (mut ll_peer, _b) = link_local_pair(true, true);
+    assert!(ll_peer.advertise(&route));
+    let bytes = ll_peer.drain_outgoing();
+    use lr_core::codec::Decoder as _;
+    let mut codec = BgpCodec::new().with_asn4(true);
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    let msg = codec.decode(&mut r).unwrap().expect("an UPDATE");
+    let BgpMessage::Update(u) = msg else {
+        panic!("expected UPDATE");
+    };
+    let reach =
+        crate::path::MpReach::decode(&u.attributes.get(AttrType::MpReachNlri).unwrap().value)
+            .unwrap();
+    assert_eq!(reach.next_hop, crate::path::MpNextHop::V6LinkLocal(ll));
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8654 Extended Message.
+// ---------------------------------------------------------------------------
+
+/// A route whose serialized UPDATE exceeds the RFC 4271 4096-octet
+/// ceiling (a large optional-transitive attribute).
+fn oversized_route() -> Route {
+    let mut attrs = PathAttributes::new();
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        AsPath::from_sequence([Asn(64512)]).encode_4(),
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::NextHop,
+        vec![10, 0, 0, 1],
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_optional(true).set_transitive(true),
+        AttrType::Other(99),
+        vec![0xab; 5000],
+    ));
+    Route {
+        key: RouteKey::new(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        ),
+        origin: RouteOrigin { proto: 2, peer: 0 },
+        protocol: Protocol::Bgp,
+        preference: Preference::new(20, 1),
+        next_hop: Some(IpAddr::V4([10, 0, 0, 1])),
+        attributes: attrs.into(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+/// RFC 8654 §3: with the capability negotiated on both sides an UPDATE
+/// larger than 4096 octets is emitted and accepted; without it the
+/// encoder refuses rather than truncating.
+#[test]
+fn extended_message_carries_an_oversized_update() {
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.extended_message = true;
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.extended_message = true;
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+    assert!(a.codec_extended_message_active());
+
+    let route = oversized_route();
+    assert!(a.advertise(&route));
+    let bytes = a.drain_outgoing();
+    assert!(
+        bytes.len() > 4096,
+        "the UPDATE must use the extended ceiling (got {} bytes)",
+        bytes.len()
+    );
+    let actions = b.feed_bytes(&bytes).unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, BgpAction::InstallRoute(_))),
+        "the peer must accept the extended UPDATE"
+    );
+}
+
+/// Without the capability the 4096-octet ceiling still applies: an
+/// oversized UPDATE is not emitted (no silent truncation).
+#[test]
+fn extended_message_not_negotiated_refuses_the_oversized_update() {
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    assert!(!a.codec_extended_message_active());
+    assert!(!a.advertise(&oversized_route()));
+    assert!(a.drain_outgoing().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// FQDN / Software Version capability surfacing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn peer_fqdn_and_software_version_are_surfaced() {
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.fqdn = Some(("edge-a".into(), "example.net".into()));
+    cfg_a.software_version = Some("lr/2.0-a".into());
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.fqdn = Some(("edge-b".into(), "example.net".into()));
+    cfg_b.software_version = Some("bird/2.16".into());
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+
+    assert_eq!(
+        a.peer_fqdn(),
+        Some(("edge-b".to_string(), "example.net".to_string()))
+    );
+    assert_eq!(a.peer_software_version(), Some("bird/2.16".to_string()));
+    assert_eq!(
+        b.peer_fqdn(),
+        Some(("edge-a".to_string(), "example.net".to_string()))
+    );
+    assert_eq!(b.peer_software_version(), Some("lr/2.0-a".to_string()));
+}

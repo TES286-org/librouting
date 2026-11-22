@@ -60,6 +60,19 @@ pub fn open_capability(cfg: &PeerConfig) -> Option<Capability> {
     }
 }
 
+/// True when `addr` is an IPv6 link-local address (fe80::/10,
+/// RFC 4291 §2.5.6). The draft classifies a 16-octet MP_REACH next
+/// hop by this test (§3).
+pub fn is_link_local(addr: &[u8; 16]) -> bool {
+    addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80
+}
+
+/// True for the unspecified address (::), which the draft treats as
+/// "use the second next-hop slot" in a 32-octet field (§6).
+pub fn is_unspecified(addr: &[u8; 16]) -> bool {
+    addr.iter().all(|b| *b == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

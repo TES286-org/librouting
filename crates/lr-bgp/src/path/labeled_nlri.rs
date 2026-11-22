@@ -342,32 +342,11 @@ pub fn decode_mp_unreach(b: &[u8], add_path: bool) -> Option<(NlriFamily, Vec<La
 
 /// Same next-hop decoding rules as plain MP-BGP, restricted to the
 /// labelled-unicast families (IPv4 → 4 or 16 bytes; IPv6 → 16 or 32).
+/// Delegates to the plain decoder so the Link-Local Next Hop
+/// classification (draft-ietf-idr-linklocal-capability-06 §3/§6) is
+/// applied uniformly.
 fn decode_next_hop(b: &[u8], family: NlriFamily) -> Option<MpNextHop> {
-    match (family.afi, b.len()) {
-        (1, 4) => {
-            let mut a = [0u8; 4];
-            a.copy_from_slice(b);
-            Some(MpNextHop::V4(a))
-        }
-        (1, 16) => {
-            let mut a = [0u8; 16];
-            a.copy_from_slice(b);
-            Some(MpNextHop::V4OverV6(a))
-        }
-        (2, 16) => {
-            let mut a = [0u8; 16];
-            a.copy_from_slice(b);
-            Some(MpNextHop::V6Global(a))
-        }
-        (2, 32) => {
-            let mut g = [0u8; 16];
-            let mut l = [0u8; 16];
-            g.copy_from_slice(&b[..16]);
-            l.copy_from_slice(&b[16..]);
-            Some(MpNextHop::V6GlobalLinkLocal(g, l))
-        }
-        _ => None,
-    }
+    crate::path::mp_nlri::decode_next_hop(b, family)
 }
 
 #[cfg(test)]

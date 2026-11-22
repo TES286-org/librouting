@@ -133,6 +133,17 @@ pub enum BgpAction {
     /// the EoRR is treated as the End-of-RIB marker, so the same action
     /// runs the same helper in the router.
     EndOfRib(lr_core::nlri::NlriFamily),
+    /// RFC 5291 §4/§6: the peer sent ORF entries in a ROUTE-REFRESH.
+    /// Emitted only when both speakers advertised the ORF capability
+    /// and the entries are for an `<AFI/SAFI, ORF-Type>` this speaker
+    /// advertised as willing to receive. Entries for types the peer is
+    /// not allowed to send are dropped in the FSM before the action is
+    /// emitted (`lists` is never empty).
+    OrfReceived {
+        family: lr_core::nlri::NlriFamily,
+        when: crate::message::OrfWhenToRefresh,
+        lists: Vec<crate::message::OrfList>,
+    },
     Emit(lr_core::event::Event),
     None,
 }
@@ -457,9 +468,11 @@ impl BgpPeer {
         self.exchange_plane_session.as_ref()
     }
 
-    /// Whether both speakers negotiated the RFC 2918 route-refresh capability.
+    /// Whether both speakers negotiated the RFC 2918 route-refresh
+    /// capability. ORF (RFC 5291 §6) requires ROUTE-REFRESH support, so
+    /// a configured ORF capability also demands and implies it.
     pub fn route_refresh_negotiated(&self) -> bool {
-        self.cfg.route_refresh
+        (self.cfg.route_refresh || !self.cfg.orf.is_empty())
             && self
                 .peer_capabilities
                 .iter()
@@ -543,6 +556,34 @@ impl BgpPeer {
             .collect()
     }
 
+    /// Whether both speakers advertised the Link-Local Next Hop
+    /// capability (draft-ietf-idr-linklocal-capability-06 §2), so a
+    /// 16-octet fe80::/10 next hop may be sent and accepted.
+    pub fn link_local_negotiated(&self) -> bool {
+        crate::extensions::link_local_next_hop::negotiated(&self.cfg, &self.peer_capabilities)
+    }
+
+    /// Whether the codec currently accepts and emits RFC 8654 Extended
+    /// Messages (both speakers advertised capability code 6).
+    pub fn codec_extended_message_active(&self) -> bool {
+        self.codec.extended_message_active()
+    }
+
+    /// The peer's FQDN/hostname capability value
+    /// (draft-walton-bgp-hostname-capability-01), as `(hostname,
+    /// domain)`. `None` when the peer did not advertise the capability
+    /// or its value is malformed.
+    pub fn peer_fqdn(&self) -> Option<(String, String)> {
+        crate::extensions::fqdn::peer_fqdn(&self.peer_capabilities)
+    }
+
+    /// The peer's Software Version capability value
+    /// (draft-abraitis-bgp-version-capability-11). `None` when the peer
+    /// did not advertise it or its value is malformed.
+    pub fn peer_software_version(&self) -> Option<String> {
+        crate::extensions::software_version::peer_software_version(&self.peer_capabilities)
+    }
+
     pub fn enhanced_route_refresh_negotiated(&self) -> bool {
         self.route_refresh_negotiated()
             && self.cfg.enhanced_rr
@@ -565,6 +606,46 @@ impl BgpPeer {
             return false;
         }
         self.send_msg(&BgpMessage::RouteRefresh(refresh))
+    }
+
+    /// Whether both speakers advertised the RFC 5291 ORF capability.
+    pub fn orf_negotiated(&self) -> bool {
+        crate::extensions::orf::negotiated(&self.cfg, &self.peer_capabilities)
+    }
+
+    /// Send RFC 5291 ORF entries in a ROUTE-REFRESH.
+    ///
+    /// Only lists for an `<AFI/SAFI, ORF-Type>` we advertised as willing
+    /// to send (SEND or BOTH) and the peer advertised as willing to
+    /// receive (RECEIVE or BOTH) are put on the wire (§6). Returns
+    /// `false` without writing bytes when the session is not
+    /// established, ORF was not negotiated, or no list survives the
+    /// filter.
+    pub fn send_orf(
+        &mut self,
+        family: NlriFamily,
+        when: crate::message::OrfWhenToRefresh,
+        lists: &[crate::message::OrfList],
+    ) -> bool {
+        if !self.is_established() || !self.route_refresh_negotiated() {
+            return false;
+        }
+        let Some(lists) = crate::extensions::orf::filter_outgoing(
+            &self.cfg,
+            &self.peer_capabilities,
+            family,
+            lists,
+        ) else {
+            return false;
+        };
+        self.send_msg(&BgpMessage::RouteRefresh(
+            crate::message::RouteRefresh::with_orf(family, when, lists),
+        ))
+    }
+
+    /// The peer's OPEN capabilities, in the order they were received.
+    pub fn peer_capabilities(&self) -> &[Capability] {
+        &self.peer_capabilities
     }
 
     /// Start an RFC 7313 enhanced-refresh response for an address family.
@@ -659,7 +740,10 @@ impl BgpPeer {
         for fam in &self.cfg.mp_families {
             caps.push(Capability::multiprotocol(fam.afi, fam.safi));
         }
-        if self.cfg.route_refresh {
+        // RFC 5291 §6: a speaker that advertises ORF MUST support
+        // ROUTE-REFRESH, so configuring ORF implies the capability even
+        // when the explicit route-refresh knob is off.
+        if self.cfg.route_refresh || !self.cfg.orf.is_empty() {
             caps.push(Capability::route_refresh());
         }
         if self.cfg.enhanced_rr {
@@ -1256,41 +1340,66 @@ impl BgpPeer {
                 // silently ignore them per §3.2).
                 use crate::message::RouteRefreshSubtype;
                 if self.route_refresh_negotiated() {
-                    match refresh.subtype {
-                        RouteRefreshSubtype::Normal => {
-                            my_actions.push(BgpAction::RouteRefreshRequested(refresh.family));
-                        }
-                        RouteRefreshSubtype::BeginOfRib => {
-                            // RFC 7313 §3.2: BoRR. Only surface when
-                            // both speakers advertised the Enhanced
-                            // Route Refresh capability; a peer that
-                            // sends a BoRR without negotiating the
-                            // capability is malformed and the receiver
-                            // silently ignores per §3.2.
-                            if self.enhanced_route_refresh_negotiated() {
-                                my_actions.push(BgpAction::BeginOfRouteRefresh(refresh.family));
+                    if let Some(orf) = &refresh.orf {
+                        // RFC 5291 §4/§6: an ORF ROUTE-REFRESH is not
+                        // a plain refresh request — it carries entries
+                        // the receiver applies to its Adj-RIB-Out. It
+                        // is only valid when both speakers advertised
+                        // the ORF capability and the peer is allowed
+                        // to send this `<AFI/SAFI, ORF-Type>`; entries
+                        // that fail that test are ignored (§6).
+                        if crate::extensions::orf::negotiated(&self.cfg, &self.peer_capabilities) {
+                            let lists = crate::extensions::orf::filter_received(
+                                &self.cfg,
+                                &self.peer_capabilities,
+                                refresh.family,
+                                orf,
+                            );
+                            if !lists.is_empty() {
+                                my_actions.push(BgpAction::OrfReceived {
+                                    family: refresh.family,
+                                    when: orf.when,
+                                    lists,
+                                });
                             }
                         }
-                        RouteRefreshSubtype::EndOfRib => {
-                            // RFC 7313 §3.3: EoRR is treated as the
-                            // End-of-RIB marker (RFC 4724 §4) for the
-                            // family, so the existing
-                            // `BgpAction::EndOfRib` runs the same
-                            // helper in the router (`on_end_of_rib`):
-                            // the GR-retention purge for the family
-                            // ends, and stale routes the peer did not
-                            // refresh are removed. Only surface when
-                            // the capability is negotiated; a peer
-                            // that sends an EoRR without negotiating
-                            // the capability is malformed (silently
-                            // ignored per §3.2).
-                            if self.enhanced_route_refresh_negotiated() {
-                                my_actions.push(BgpAction::EndOfRib(refresh.family));
+                    } else {
+                        match refresh.subtype {
+                            RouteRefreshSubtype::Normal => {
+                                my_actions.push(BgpAction::RouteRefreshRequested(refresh.family));
                             }
-                        }
-                        RouteRefreshSubtype::Unknown => {
-                            // RFC 7313 §3.2: an unknown subtype MUST
-                            // be silently ignored. No action emitted.
+                            RouteRefreshSubtype::BeginOfRib => {
+                                // RFC 7313 §3.2: BoRR. Only surface when
+                                // both speakers advertised the Enhanced
+                                // Route Refresh capability; a peer that
+                                // sends a BoRR without negotiating the
+                                // capability is malformed and the receiver
+                                // silently ignores per §3.2.
+                                if self.enhanced_route_refresh_negotiated() {
+                                    my_actions.push(BgpAction::BeginOfRouteRefresh(refresh.family));
+                                }
+                            }
+                            RouteRefreshSubtype::EndOfRib => {
+                                // RFC 7313 §3.3: EoRR is treated as the
+                                // End-of-RIB marker (RFC 4724 §4) for the
+                                // family, so the existing
+                                // `BgpAction::EndOfRib` runs the same
+                                // helper in the router (`on_end_of_rib`):
+                                // the GR-retention purge for the family
+                                // ends, and stale routes the peer did not
+                                // refresh are removed. Only surface when
+                                // the capability is negotiated; a peer
+                                // that sends an EoRR without negotiating
+                                // the capability is malformed (silently
+                                // ignored per §3.2).
+                                if self.enhanced_route_refresh_negotiated() {
+                                    my_actions.push(BgpAction::EndOfRib(refresh.family));
+                                }
+                            }
+                            RouteRefreshSubtype::Unknown => {
+                                // RFC 7313 §3.2: an unknown subtype MUST
+                                // be silently ignored. No action emitted.
+                            }
                         }
                     }
                 }
@@ -1567,6 +1676,12 @@ impl BgpPeer {
             proto: u32::from(topo.role.is_internal()),
             peer: self.cfg.peer_id,
         };
+        // draft-ietf-idr-linklocal-capability-06 §3: a Link-Local-only
+        // next hop is conformant only when the capability was
+        // negotiated. Without it the receiver treats the route as
+        // withdrawn (RFC 7606 §2) rather than installing an fe80::
+        // next hop that no forwarding lookup can resolve.
+        let link_local_ok = self.link_local_negotiated();
 
         // --- Withdrawals (IPv4 legacy section) ---
         // FRR `no bgp default ipv4-unicast`: a peer not activated
@@ -1790,7 +1905,16 @@ impl BgpPeer {
                         crate::path::decode_labeled_mp_reach(&attr.value, add_path)
                     {
                         let nh = mp_next_hop_to_ip(&mp_nh);
+                        let link_local_only =
+                            matches!(mp_nh, crate::path::MpNextHop::V6LinkLocal(_));
                         for e in &entries {
+                            if link_local_only && !link_local_ok {
+                                actions.push(BgpAction::WithdrawRoute {
+                                    key: RouteKey::new(e.prefix, family),
+                                    path_id: e.path_id,
+                                });
+                                continue;
+                            }
                             let mut attrs = normalized.clone();
                             attrs.set_label_stack(&e.label_stack);
                             let metric = canonical_path.length() as u32;
@@ -1815,7 +1939,16 @@ impl BgpPeer {
                     }
                 } else if let Some(mp) = crate::path::MpReach::decode_ex(&attr.value, add_path) {
                     let nh = mp_next_hop_to_ip(&mp.next_hop);
+                    let link_local_only =
+                        matches!(mp.next_hop, crate::path::MpNextHop::V6LinkLocal(_));
                     for entry in &mp.nlri {
+                        if link_local_only && !link_local_ok {
+                            actions.push(BgpAction::WithdrawRoute {
+                                key: RouteKey::new(entry.prefix, mp.family),
+                                path_id: entry.path_id,
+                            });
+                            continue;
+                        }
                         announce(entry.prefix, mp.family, entry.path_id, nh, &mut actions);
                     }
                 }
@@ -1823,7 +1956,15 @@ impl BgpPeer {
             #[cfg(not(feature = "labeled_unicast"))]
             if let Some(mp) = u.attributes.mp_reach_with(|fam| self.add_path_rx_for(fam)) {
                 let nh = mp_next_hop_to_ip(&mp.next_hop);
+                let link_local_only = matches!(mp.next_hop, crate::path::MpNextHop::V6LinkLocal(_));
                 for entry in &mp.nlri {
+                    if link_local_only && !link_local_ok {
+                        actions.push(BgpAction::WithdrawRoute {
+                            key: RouteKey::new(entry.prefix, mp.family),
+                            path_id: entry.path_id,
+                        });
+                        continue;
+                    }
                     announce(entry.prefix, mp.family, entry.path_id, nh, &mut actions);
                 }
             }
@@ -1907,6 +2048,15 @@ impl StateMachine for BgpPeer {
                         family,
                     })
                 }
+                // RFC 5291 §4 ORF entries carry `lr-bgp`-specific types
+                // (`OrfList` / `AddressPrefixOrf`) that the small,
+                // string-friendly `lr_core::event::Event` surface does
+                // not model. Router-aware embedders (the daemon, the
+                // `RouterInstance` path) consume `BgpAction::OrfReceived`
+                // directly, exactly like `InstallRoute`; the trait-only
+                // adapter drops the payload rather than inventing an
+                // untyped event.
+                BgpAction::OrfReceived { .. } => Action::None,
                 BgpAction::None => Action::None,
             })
             .collect()

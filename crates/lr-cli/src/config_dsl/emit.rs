@@ -674,6 +674,12 @@ fn bgp_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Result<Vec<(String, Str
     if !cfg.orf.is_empty() {
         v.push(("orf".into(), fmt_string(&orf_entries_value(&cfg.orf))));
     }
+    if !cfg.orf_entries.is_empty() {
+        v.push((
+            "orf_entries".into(),
+            fmt_string(&orf_prefix_entries_value(&cfg.orf_entries)),
+        ));
+    }
     if let Some(x) = &cfg.local_address_v6 {
         v.push(("local_address_v6".into(), fmt_string(x)));
     }
@@ -959,6 +965,14 @@ fn peer_block(peer: &crate::daemon_config::PeerSpec) -> Result<Vec<(String, Stri
     if let Some(x) = &peer.orf {
         if !x.is_empty() {
             v.push(("orf".into(), fmt_string(&orf_entries_value(x))));
+        }
+    }
+    if let Some(x) = &peer.orf_entries {
+        if !x.is_empty() {
+            v.push((
+                "orf_entries".into(),
+                fmt_string(&orf_prefix_entries_value(x)),
+            ));
         }
     }
     if let Some(x) = peer.gtsm_hops {
@@ -1621,6 +1635,32 @@ fn orf_entries_value(entries: &[crate::daemon_config::OrfEntrySpec]) -> String {
         .map(|e| format!("{}:{}:{}:{}", e.afi, e.safi, e.orf_type, e.mode))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Render Address Prefix ORF entries as the whitespace/comma form
+/// `parse_orf_prefix_entries` accepts. Only `Add` entries are
+/// configurable; `Remove`/`RemoveAll` are runtime operations.
+fn orf_prefix_entries_value(
+    entries: &[(u16, u8, Vec<lr_bgp::message::AddressPrefixOrf>)],
+) -> String {
+    entries
+        .iter()
+        .flat_map(|(afi, safi, list)| {
+            list.iter().map(move |e| {
+                format!(
+                    "{}:{} {} {} {} {} {}",
+                    afi,
+                    safi,
+                    e.sequence,
+                    if e.permit { "permit" } else { "deny" },
+                    e.prefix,
+                    e.min_len,
+                    e.max_len,
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ---------------------------------------------------------------------------

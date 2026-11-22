@@ -190,7 +190,7 @@ fn enhanced_route_refresh_markers_roundtrip() {
         RouteRefresh::begin_of_rib(NlriFamily::IPV4_UNICAST),
         RouteRefresh::end_of_rib(NlriFamily::IPV4_UNICAST),
     ] {
-        let decoded = roundtrip(BgpMessage::RouteRefresh(refresh), false);
+        let decoded = roundtrip(BgpMessage::RouteRefresh(refresh.clone()), false);
         assert_eq!(decoded, BgpMessage::RouteRefresh(refresh));
     }
 }
@@ -206,6 +206,125 @@ fn route_refresh_rejects_invalid_length() {
 fn route_refresh_unknown_subtype_is_ignored() {
     let r = decode_route_refresh(&[0, 1, 3, 1]).unwrap();
     assert_eq!(r.subtype, crate::message::RouteRefreshSubtype::Unknown);
+}
+
+/// RFC 5291 §4 / RFC 5292 §3: an ORF ROUTE-REFRESH round-trips every
+/// Address Prefix entry action and the Minlen/Maxlen fields, for both
+/// address families.
+#[test]
+fn orf_route_refresh_roundtrip() {
+    use crate::message::route_refresh::{
+        AddressPrefixOrf, OrfAction, OrfEntry, OrfList, OrfRefresh, OrfWhenToRefresh,
+    };
+    use lr_core::addr::Prefix;
+
+    let v4 = AddressPrefixOrf {
+        sequence: 10,
+        action: OrfAction::Add,
+        permit: true,
+        prefix: Prefix::new_v4([192, 0, 2, 0], 24),
+        min_len: 24,
+        max_len: 28,
+    };
+    let deny = AddressPrefixOrf {
+        sequence: 20,
+        action: OrfAction::Add,
+        permit: false,
+        prefix: Prefix::new_v4([198, 51, 100, 0], 24),
+        min_len: 0,
+        max_len: 0,
+    };
+    let remove = AddressPrefixOrf {
+        sequence: 30,
+        action: OrfAction::Remove,
+        permit: true,
+        prefix: Prefix::new_v4([203, 0, 113, 0], 24),
+        min_len: 0,
+        max_len: 0,
+    };
+    let v6 = AddressPrefixOrf {
+        sequence: 40,
+        action: OrfAction::Add,
+        permit: true,
+        prefix: Prefix::new_v6(
+            [
+                0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            48,
+        ),
+        min_len: 0,
+        max_len: 64,
+    };
+
+    for (family, entries) in [
+        (
+            NlriFamily::IPV4_UNICAST,
+            vec![
+                OrfEntry::AddressPrefix(v4),
+                OrfEntry::AddressPrefix(deny),
+                OrfEntry::AddressPrefix(remove),
+                OrfEntry::RemoveAll,
+            ],
+        ),
+        (NlriFamily::IPV6_UNICAST, vec![OrfEntry::AddressPrefix(v6)]),
+    ] {
+        let refresh = RouteRefresh {
+            family,
+            subtype: crate::message::RouteRefreshSubtype::Normal,
+            orf: Some(OrfRefresh {
+                when: OrfWhenToRefresh::Immediate,
+                lists: vec![OrfList {
+                    orf_type: OrfList::ADDRESS_PREFIX,
+                    entries,
+                }],
+            }),
+        };
+        let decoded = roundtrip(BgpMessage::RouteRefresh(refresh.clone()), false);
+        assert_eq!(decoded, BgpMessage::RouteRefresh(refresh));
+    }
+}
+
+/// RFC 5291 §4: an ORF type this implementation does not understand is
+/// preserved as one raw block so it can be ignored without guessing at
+/// its entry layout.
+#[test]
+fn orf_unknown_type_is_preserved_raw() {
+    use crate::message::route_refresh::{OrfEntry, OrfList, OrfRefresh, OrfWhenToRefresh};
+    let refresh = RouteRefresh {
+        family: NlriFamily::IPV4_UNICAST,
+        subtype: crate::message::RouteRefreshSubtype::Normal,
+        orf: Some(OrfRefresh {
+            when: OrfWhenToRefresh::Defer,
+            lists: vec![OrfList {
+                orf_type: 65,
+                entries: vec![OrfEntry::Raw(vec![0xde, 0xad, 0xbe, 0xef])],
+            }],
+        }),
+    };
+    let decoded = roundtrip(BgpMessage::RouteRefresh(refresh.clone()), false);
+    assert_eq!(decoded, BgpMessage::RouteRefresh(refresh));
+}
+
+/// A truncated ORF block is an invalid message length (RFC 7313 §5
+/// subcode 1), not a silently ignored refresh.
+#[test]
+fn orf_route_refresh_rejects_truncated_block() {
+    // AFI 1, reserved, SAFI 1, when=Immediate, type 64, length 8, only
+    // two entry bytes.
+    let err = decode_route_refresh(&[0, 1, 0, 1, 1, 64, 0, 8, 0, 0]).unwrap_err();
+    match err {
+        BgpError::Notification(n) => {
+            assert_eq!(n.error_code, crate::error::BgpErrorCode::RouteRefresh as u8);
+            assert_eq!(n.error_subcode, 1);
+        }
+        other => panic!("expected a NOTIFICATION, got {other:?}"),
+    }
+}
+
+/// The When-to-refresh field only accepts IMMEDIATE (1) and DEFER (2).
+#[test]
+fn orf_route_refresh_rejects_unknown_when_to_refresh() {
+    assert!(decode_route_refresh(&[0, 1, 0, 1, 3, 64, 0, 1, 0]).is_err());
 }
 
 #[test]

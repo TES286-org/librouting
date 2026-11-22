@@ -192,6 +192,7 @@ pub extern "C" fn lr_bgp_message_new_route_refresh(
             box_bgp_message(BgpMessage::RouteRefresh(RouteRefresh {
                 family,
                 subtype: subtype_enum,
+                orf: None,
             }))
         },
         std::ptr::null_mut(),

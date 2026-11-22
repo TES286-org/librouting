@@ -3370,3 +3370,38 @@ fn parse_exchange_plane_policy_role_rejects_unknown() {
         );
     }
 }
+
+// --------------------------------------------------------------
+// RFC 5291 / RFC 5292 ORF entries.
+// --------------------------------------------------------------
+
+#[test]
+fn orf_prefix_entries_parse_group_by_family() {
+    let entries = parse_orf_prefix_entries(
+        "1:1 10 permit 10.0.0.0/16 0 24, 1:1 20 deny 198.51.100.0/24 0 0, \
+         2:1 1 permit 2001:db8::/32 32 48",
+    )
+    .unwrap();
+    assert_eq!(entries.len(), 2);
+    let (afi, safi, list) = &entries[0];
+    assert_eq!((*afi, *safi), (1, 1));
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].sequence, 10);
+    assert!(list[0].permit);
+    assert_eq!(list[0].min_len, 0);
+    assert_eq!(list[0].max_len, 24);
+    assert_eq!(list[1].sequence, 20);
+    assert!(!list[1].permit);
+    let (afi, safi, list) = &entries[1];
+    assert_eq!((*afi, *safi), (2, 1));
+    assert_eq!(list[0].prefix.to_string(), "2001:db8::/32");
+}
+
+#[test]
+fn orf_prefix_entries_reject_malformed() {
+    assert!(parse_orf_prefix_entries("1:1 10 permit 10.0.0.0/16 0").is_err());
+    assert!(parse_orf_prefix_entries("1:1 10 maybe 10.0.0.0/16 0 0").is_err());
+    assert!(parse_orf_prefix_entries("1:1 10 permit not-a-prefix 0 0").is_err());
+    assert!(parse_orf_prefix_entries("1 10 permit 10.0.0.0/16 0 0").is_err());
+    assert!(parse_orf_prefix_entries("1:1 x permit 10.0.0.0/16 0 0").is_err());
+}

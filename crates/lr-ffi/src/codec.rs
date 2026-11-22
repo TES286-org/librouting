@@ -2599,6 +2599,7 @@ mod tests {
         let rr = RouteRefresh {
             family: NlriFamily { afi: 2, safi: 1 },
             subtype: RouteRefreshSubtype::BeginOfRib,
+            orf: None,
         };
         let codec = BgpC::new();
         let bytes = codec.encode_vec(&BgpMessage::RouteRefresh(rr)).unwrap();

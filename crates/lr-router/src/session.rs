@@ -368,6 +368,16 @@ pub struct SessionConfig {
     /// RFC 5291 ORF capability. Propagated to
     /// [`lr_bgp::PeerConfig::orf`].
     pub orf: Vec<lr_bgp::capabilities_extra::OrfEntry>,
+    /// RFC 5291 ORF entries to send to the peer once the session
+    /// establishes. Each entry is per address family; the router sends
+    /// an IMMEDIATE ORF update only when the local capability mode is
+    /// SEND/BOTH and the peer advertised RECEIVE/BOTH. The lifetime of
+    /// the entries is the session: a re-established session resends
+    /// them.
+    pub orf_entries: Vec<(
+        lr_core::nlri::NlriFamily,
+        Vec<lr_bgp::message::AddressPrefixOrf>,
+    )>,
     /// RFC 9234 OTC role override. When `Some(role)`, propagated to
     /// [`lr_bgp::PeerConfig::otc_role`] by
     /// [`crate::DefaultRouter::add_session`]; the OTC attribute path
@@ -441,6 +451,7 @@ impl SessionConfig {
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),
+            orf_entries: Vec::new(),
             otc_role: None,
         }
     }
@@ -465,6 +476,21 @@ impl SessionConfig {
     /// Override the MP-BGP address families advertised in OPEN.
     pub fn with_mp_families(mut self, families: Vec<lr_core::nlri::NlriFamily>) -> Self {
         self.mp_families = families;
+        self
+    }
+
+    /// Install RFC 5291 Address Prefix ORF entries to send to the peer
+    /// once the session establishes. Replaces any entries previously
+    /// configured for the same family.
+    pub fn with_orf_entries(
+        mut self,
+        family: lr_core::nlri::NlriFamily,
+        entries: Vec<lr_bgp::message::AddressPrefixOrf>,
+    ) -> Self {
+        self.orf_entries.retain(|(f, _)| *f != family);
+        if !entries.is_empty() {
+            self.orf_entries.push((family, entries));
+        }
         self
     }
 
@@ -746,6 +772,7 @@ impl SessionConfig {
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),
+            orf_entries: Vec::new(),
             otc_role: None,
         }
     }
@@ -812,6 +839,7 @@ impl SessionConfig {
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),
+            orf_entries: Vec::new(),
             otc_role: None,
         }
     }
@@ -982,7 +1010,7 @@ impl SessionStats {
 ///
 /// Produced by [`crate::DefaultRouter::session_summaries`]; fields outside
 /// the session's protocol are zero/`None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     /// Opaque session handle.
     pub handle: SessionHandle,
@@ -1025,6 +1053,15 @@ pub struct SessionSummary {
     /// Per-session operational statistics: uptime,
     /// transition count, last error kind + time.
     pub stats: SessionStats,
+    /// The peer's FQDN/hostname capability value
+    /// (draft-walton-bgp-hostname-capability-01), `(hostname, domain)`.
+    /// `None` when the peer did not advertise it (or the session is not
+    /// BGP).
+    pub peer_fqdn: Option<(String, String)>,
+    /// The peer's Software Version capability value
+    /// (draft-abraitis-bgp-version-capability-11). `None` when the peer
+    /// did not advertise it (or the session is not BGP).
+    pub peer_software_version: Option<String>,
 }
 
 /// One session.

@@ -295,7 +295,7 @@ impl MpUnreach {
     }
 }
 
-fn decode_next_hop(b: &[u8], family: NlriFamily) -> Option<MpNextHop> {
+pub(crate) fn decode_next_hop(b: &[u8], family: NlriFamily) -> Option<MpNextHop> {
     match (family.afi, b.len()) {
         (1, 4) => {
             let mut a = [0u8; 4];
@@ -315,14 +315,37 @@ fn decode_next_hop(b: &[u8], family: NlriFamily) -> Option<MpNextHop> {
         (2, 16) => {
             let mut a = [0u8; 16];
             a.copy_from_slice(b);
-            Some(MpNextHop::V6Global(a))
+            // draft-ietf-idr-linklocal-capability-06 §3: a 16-octet
+            // next hop in fe80::/10 is a Link-Local-only next hop;
+            // otherwise it is the RFC 2545 global form.
+            if crate::extensions::link_local_next_hop::is_link_local(&a) {
+                Some(MpNextHop::V6LinkLocal(a))
+            } else {
+                Some(MpNextHop::V6Global(a))
+            }
         }
         (2, 32) => {
             let mut g = [0u8; 16];
             let mut l = [0u8; 16];
             g.copy_from_slice(&b[..16]);
             l.copy_from_slice(&b[16..]);
-            Some(MpNextHop::V6GlobalLinkLocal(g, l))
+            // draft-ietf-idr-linklocal-capability-06 §6: the second
+            // slot carries the link-local address. When the first is
+            // also link-local, or unspecified (::/LL), forward via the
+            // second — that is the address the sender intended. A
+            // 32-octet field whose second slot is not link-local is
+            // malformed per RFC 2545 and is rejected so the caller can
+            // treat the UPDATE as withdraw.
+            if !crate::extensions::link_local_next_hop::is_link_local(&l) {
+                return None;
+            }
+            if crate::extensions::link_local_next_hop::is_link_local(&g)
+                || crate::extensions::link_local_next_hop::is_unspecified(&g)
+            {
+                Some(MpNextHop::V6LinkLocal(l))
+            } else {
+                Some(MpNextHop::V6GlobalLinkLocal(g, l))
+            }
         }
         _ => None,
     }

@@ -520,28 +520,154 @@ fn decode_notification(body: &[u8]) -> BgpNotification {
     BgpNotification::new(code, sub, data)
 }
 
+/// A malformed ROUTE-REFRESH or ORF payload. RFC 7313 §5 assigns
+/// subcode 1 "Invalid Message Length" to the ROUTE-REFRESH error code
+/// (7); RFC 5291 does not define a more specific code, so a truncated
+/// ORF block uses the same notification.
+fn bad_route_refresh_length() -> BgpError {
+    BgpError::Notification(BgpNotification::new(
+        crate::error::BgpErrorCode::RouteRefresh as u8,
+        1,
+        vec![],
+    ))
+}
+
 fn decode_route_refresh(body: &[u8]) -> Result<RouteRefresh, BgpError> {
-    // RFC 2918 §3: a ROUTE-REFRESH message is exactly 4 bytes
+    // RFC 2918 §3: a plain ROUTE-REFRESH is exactly 4 bytes
     // (AFI:2, subtype:1, SAFI:1); RFC 7313 BoRR/EoRR share the layout.
-    // Anything else is a Bad Message Length header error (RFC 4271 §6.1).
-    if body.len() != 4 {
-        return Err(BgpError::Notification(BgpNotification::new(
-            crate::error::BgpErrorCode::Header as u8,
-            crate::error::BgpHeaderErrorSubcode::BadMessageLength as u8,
-            vec![],
-        )));
+    // RFC 5291 §4 appends When-to-refresh and ORF blocks from the fifth
+    // octet on. Anything shorter than the four-octet prefix cannot be
+    // either message.
+    if body.len() < 4 {
+        return Err(bad_route_refresh_length());
     }
     let afi = u16::from_be_bytes([body[0], body[1]]);
-    // RFC 7313 §3.2: a ROUTE-REFRESH with an unknown subtype MUST be
-    // ignored — surface it as an unknown subtype the FSM skips rather
-    // than tearing the session down.
-    let subtype = crate::message::RouteRefreshSubtype::from_u8(body[2])
-        .unwrap_or(crate::message::RouteRefreshSubtype::Unknown);
     let safi = body[3];
+    let family = NlriFamily { afi, safi };
+    if body.len() == 4 {
+        // RFC 7313 §3.2: a ROUTE-REFRESH with an unknown subtype MUST
+        // be ignored — surface it as an unknown subtype the FSM skips
+        // rather than tearing the session down.
+        let subtype = crate::message::RouteRefreshSubtype::from_u8(body[2])
+            .unwrap_or(crate::message::RouteRefreshSubtype::Unknown);
+        return Ok(RouteRefresh {
+            family,
+            subtype,
+            orf: None,
+        });
+    }
+
+    // RFC 5291 §4: the third octet is reserved in an ORF message.
+    if body[2] != 0 {
+        return Err(bad_route_refresh_length());
+    }
+    let when =
+        crate::message::OrfWhenToRefresh::from_u8(body[4]).ok_or_else(bad_route_refresh_length)?;
+    let mut lists = Vec::new();
+    let mut r = ReadBuf::new(&body[5..]);
+    while r.remaining() > 0 {
+        if r.remaining() < 3 {
+            return Err(bad_route_refresh_length());
+        }
+        let orf_type = r.get_u8().ok_or_else(bad_route_refresh_length)?;
+        let len = r.get_u16_be().ok_or_else(bad_route_refresh_length)? as usize;
+        let bytes = r.get_bytes(len).ok_or_else(bad_route_refresh_length)?;
+        lists.push(decode_orf_list(afi, orf_type, bytes)?);
+    }
+    // RFC 5291 §4: an ORF message carries one or more ORFs.
+    if lists.is_empty() {
+        return Err(bad_route_refresh_length());
+    }
     Ok(RouteRefresh {
-        family: NlriFamily { afi, safi },
-        subtype,
+        family,
+        subtype: crate::message::RouteRefreshSubtype::Normal,
+        orf: Some(crate::message::OrfRefresh { when, lists }),
     })
+}
+
+/// Decode one `(ORF Type, length, entries)` block (RFC 5291 §4).
+///
+/// Only the Address Prefix ORF (type 64, RFC 5292) has a known
+/// layout. Other types are preserved as one [`OrfEntry::Raw`] block so
+/// the receiver can ignore them per RFC 5291 §6 without guessing at
+/// their entry boundaries.
+fn decode_orf_list(
+    afi: u16,
+    orf_type: u8,
+    bytes: &[u8],
+) -> Result<crate::message::OrfList, BgpError> {
+    if orf_type != crate::message::OrfList::ADDRESS_PREFIX {
+        return Ok(crate::message::OrfList {
+            orf_type,
+            entries: vec![crate::message::OrfEntry::Raw(bytes.to_vec())],
+        });
+    }
+    let max_bits: u8 = match afi {
+        1 => 32,
+        2 => 128,
+        // RFC 5292 §3: Length/Maxlen are bounded by the address
+        // family's host-address length. An ORF for another AFI is not
+        // one this implementation advertised, so keep it raw.
+        _ => {
+            return Ok(crate::message::OrfList {
+                orf_type,
+                entries: vec![crate::message::OrfEntry::Raw(bytes.to_vec())],
+            })
+        }
+    };
+    let mut entries = Vec::new();
+    let mut r = ReadBuf::new(bytes);
+    while r.remaining() > 0 {
+        let common = r.get_u8().ok_or_else(bad_route_refresh_length)?;
+        let action = crate::message::OrfAction::from_u8(common >> 6);
+        let permit = (common >> 5) & 1 == 0;
+        if action == crate::message::OrfAction::RemoveAll {
+            entries.push(crate::message::OrfEntry::RemoveAll);
+            continue;
+        }
+        let sequence = r.get_u32_be().ok_or_else(bad_route_refresh_length)?;
+        let min_len = r.get_u8().ok_or_else(bad_route_refresh_length)?;
+        let max_len = r.get_u8().ok_or_else(bad_route_refresh_length)?;
+        let prefix_len = r.get_u8().ok_or_else(bad_route_refresh_length)?;
+        let nbytes = usize::from(prefix_len).div_ceil(8);
+        let raw = r.get_bytes(nbytes).ok_or_else(bad_route_refresh_length)?;
+        // RFC 5292 §3 bounds Length and Maxlen by the family. A
+        // semantic violation is not a framing error: RFC 5291 §6
+        // removes the whole ORF instead, which the router does when it
+        // sees `OrfAction::Unknown`.
+        let semantic_bad = prefix_len > max_bits
+            || min_len > max_bits
+            || max_len > max_bits
+            || (min_len != 0 && max_len != 0 && min_len > max_len);
+        let action = if semantic_bad {
+            crate::message::OrfAction::Unknown
+        } else {
+            action
+        };
+        let prefix = if afi == 1 {
+            let mut a = [0u8; 4];
+            a[..nbytes.min(4)].copy_from_slice(&raw[..nbytes.min(4)]);
+            Prefix::new_v4(a, prefix_len.min(max_bits))
+        } else {
+            let mut a = [0u8; 16];
+            a[..nbytes.min(16)].copy_from_slice(&raw[..nbytes.min(16)]);
+            Prefix::new_v6(a, prefix_len.min(max_bits))
+        };
+        entries.push(crate::message::OrfEntry::AddressPrefix(
+            crate::message::AddressPrefixOrf {
+                sequence,
+                action,
+                permit,
+                prefix: Prefix {
+                    addr: prefix.network(),
+                    prefix_len: prefix.prefix_len,
+                },
+                min_len,
+                max_len,
+            },
+        ));
+    }
+    Ok(crate::message::OrfList { orf_type, entries })
 }
 
 // ===== Encoders =====
@@ -677,9 +803,67 @@ fn encode_notification(n: &BgpNotification, out: &mut WriteBuf<'_>) -> Result<()
 fn encode_route_refresh(r: &RouteRefresh, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
     out.put_u16_be(r.family.afi)
         .ok_or(EncodeError::BufferFull)?;
-    out.put_u8(r.subtype as u8).ok_or(EncodeError::BufferFull)?;
+    match &r.orf {
+        // RFC 5291 §4: the third octet is reserved in an ORF message.
+        Some(_) => out.put_u8(0).ok_or(EncodeError::BufferFull)?,
+        None => out.put_u8(r.subtype as u8).ok_or(EncodeError::BufferFull)?,
+    }
     out.put_u8(r.family.safi).ok_or(EncodeError::BufferFull)?;
+    let Some(orf) = &r.orf else {
+        return Ok(());
+    };
+    out.put_u8(orf.when.as_u8())
+        .ok_or(EncodeError::BufferFull)?;
+    for list in &orf.lists {
+        let mut body = Vec::new();
+        for entry in &list.entries {
+            encode_orf_entry(entry, &mut body);
+        }
+        let len = u16::try_from(body.len()).map_err(|_| EncodeError::BufferFull)?;
+        out.put_u8(list.orf_type).ok_or(EncodeError::BufferFull)?;
+        out.put_u16_be(len).ok_or(EncodeError::BufferFull)?;
+        out.put_bytes(&body).ok_or(EncodeError::BufferFull)?;
+    }
     Ok(())
+}
+
+fn encode_orf_entry(entry: &crate::message::OrfEntry, out: &mut Vec<u8>) {
+    use crate::message::{AddressPrefixOrf, OrfAction, OrfEntry};
+    let value = match entry {
+        OrfEntry::Raw(bytes) => {
+            out.extend_from_slice(bytes);
+            return;
+        }
+        OrfEntry::RemoveAll => AddressPrefixOrf {
+            sequence: 0,
+            action: OrfAction::RemoveAll,
+            permit: false,
+            prefix: Prefix::new_v4([0, 0, 0, 0], 0),
+            min_len: 0,
+            max_len: 0,
+        },
+        OrfEntry::AddressPrefix(e) => *e,
+    };
+    let action = match value.action {
+        OrfAction::Add => 0u8,
+        OrfAction::Remove => 1,
+        OrfAction::RemoveAll => 2,
+        OrfAction::Unknown => 3,
+    };
+    let common = (action << 6) | (u8::from(!value.permit) << 5);
+    out.push(common);
+    if value.action == OrfAction::RemoveAll {
+        return;
+    }
+    out.extend_from_slice(&value.sequence.to_be_bytes());
+    out.push(value.min_len);
+    out.push(value.max_len);
+    out.push(value.prefix.prefix_len);
+    let nbytes = usize::from(value.prefix.prefix_len).div_ceil(8);
+    match value.prefix.addr {
+        IpAddr::V4(a) => out.extend_from_slice(&a[..nbytes.min(4)]),
+        IpAddr::V6(a) => out.extend_from_slice(&a[..nbytes.min(16)]),
+    }
 }
 
 #[cfg(test)]

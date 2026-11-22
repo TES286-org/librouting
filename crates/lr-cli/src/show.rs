@@ -281,6 +281,20 @@ fn render_session_detail(out: &mut String, s: &SessionSummary) {
         "  last-keepalive-rx-ms={}",
         s.stats.last_keepalive_received_ms,
     );
+    // draft-walton-bgp-hostname-capability-01 and
+    // draft-abraitis-bgp-version-capability-11: name the peer and its
+    // software so an operator can audit the mix without packet capture.
+    if let Some((hostname, domain)) = &s.peer_fqdn {
+        let fqdn = if domain.is_empty() {
+            hostname.clone()
+        } else {
+            format!("{hostname}.{domain}")
+        };
+        let _ = writeln!(out, "  peer-fqdn {fqdn}");
+    }
+    if let Some(version) = &s.peer_software_version {
+        let _ = writeln!(out, "  peer-software-version {version}");
+    }
     // Full per-PDU BGP message breakdown (BIRD `show protocols all
     // <name>` parity). OSPF and Babel sessions carry a zeroed
     // PeerMessageStats — the line still prints so the surface stays

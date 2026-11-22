@@ -2765,6 +2765,16 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         }
     }
     sc.orf = orf_resolved;
+    // RFC 5291 §6: the Address Prefix ORF entries to send once the
+    // session establishes. The router only puts them on the wire when
+    // both sides advertised compatible SEND/RECEIVE modes.
+    let orf_prefixes = p
+        .orf_entries
+        .clone()
+        .unwrap_or_else(|| g.orf_entries.clone());
+    for (afi, safi, entries) in orf_prefixes {
+        sc = sc.with_orf_entries(lr_core::nlri::NlriFamily { afi, safi }, entries);
+    }
     // Per-peer maximum-prefix (BIRD `maximum prefix`, FRR
     // `maximum-prefix`).
     if let Some(limit) = p.max_prefixes.or(g.max_prefixes) {

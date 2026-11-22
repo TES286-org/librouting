@@ -260,6 +260,28 @@ impl BgpPeer {
             }
         }
 
+        // --- Link-Local Next Hop (draft-ietf-idr-linklocal-capability-06) ---
+        // A link-local-only next hop may cross only a directly attached
+        // session that negotiated the capability (§4). A route
+        // reflector must rewrite it to its own address for clients that
+        // are not provably on the originator's segment; without an
+        // interface map, any third-party iBGP advertisement is rewritten
+        // or withheld. When no next hop survives, the route is not
+        // advertised (treat-as-withdraw).
+        if let Some(lr_core::addr::IpAddr::V6(b)) = next_hop {
+            if crate::extensions::link_local_next_hop::is_link_local(&b) {
+                if !self.link_local_negotiated() {
+                    return false;
+                }
+                if topo.rs_client || (topo.role.is_internal() && route.origin.proto != 2) {
+                    match self.cfg.local_address {
+                        Some(local @ lr_core::addr::IpAddr::V6(_)) => next_hop = Some(local),
+                        _ => return false,
+                    }
+                }
+            }
+        }
+
         // --- Route-Reflector reflection attributes (RFC 4456 §3) ---
         // ORIGINATOR_ID and CLUSTER_LIST are optional non-transitive
         // (RFC 4456 §5): optional=1, transitive=0 → 0x80.
@@ -342,6 +364,11 @@ impl BgpPeer {
             };
             let nh = match next_hop {
                 Some(lr_core::addr::IpAddr::V4(b)) => MpNextHop::V4(b),
+                Some(lr_core::addr::IpAddr::V6(b))
+                    if crate::extensions::link_local_next_hop::is_link_local(&b) =>
+                {
+                    MpNextHop::V6LinkLocal(b)
+                }
                 Some(lr_core::addr::IpAddr::V6(b)) => MpNextHop::V6Global(b),
                 None => return false,
             };
@@ -365,8 +392,7 @@ impl BgpPeer {
                 ),
             ));
             update.attributes = attrs;
-            self.send_msg(&BgpMessage::Update(update));
-            return true;
+            return self.send_msg(&BgpMessage::Update(update));
         }
 
         // RFC 5549: when (1, 1, 2) is negotiated and the next-hop is IPv6,
@@ -408,6 +434,11 @@ impl BgpPeer {
                 _ => {
                     let nh = match next_hop {
                         Some(lr_core::addr::IpAddr::V4(b)) => MpNextHop::V4(b),
+                        Some(lr_core::addr::IpAddr::V6(b))
+                            if crate::extensions::link_local_next_hop::is_link_local(&b) =>
+                        {
+                            MpNextHop::V6LinkLocal(b)
+                        }
                         Some(lr_core::addr::IpAddr::V6(b)) => MpNextHop::V6Global(b),
                         None => return false, // cannot encode MP_REACH without next-hop
                     };
@@ -423,8 +454,10 @@ impl BgpPeer {
             }
         }
         update.attributes = attrs;
-        self.send_msg(&BgpMessage::Update(update));
-        true
+        // Return the encoder result: with the RFC 4271 4096-octet
+        // ceiling an oversized UPDATE is refused (no silent truncation),
+        // and the router must not record it in the Adj-RIB-Out.
+        self.send_msg(&BgpMessage::Update(update))
     }
 
     /// Withdraw prefixes previously advertised to this peer (single-path

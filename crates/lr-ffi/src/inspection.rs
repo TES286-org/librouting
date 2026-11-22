@@ -621,6 +621,8 @@ mod tests {
             updates_sent: 78,
             message_stats: lr_bgp::PeerMessageStats::default(),
             stats: lr_router::SessionStats::default(),
+            peer_fqdn: Some(("edge-1".into(), "example.net".into())),
+            peer_software_version: Some("lr/2.0".into()),
         };
         let c = summary_to_c(&s);
         assert_eq!(c.handle, 42);
@@ -654,6 +656,8 @@ mod tests {
             updates_sent: 0,
             message_stats: lr_bgp::PeerMessageStats::default(),
             stats: lr_router::SessionStats::default(),
+            peer_fqdn: None,
+            peer_software_version: None,
         };
         let c = summary_to_c(&s);
         assert_eq!(c.peer_bgp_id_present, 0);
