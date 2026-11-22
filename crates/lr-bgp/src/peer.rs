@@ -155,14 +155,27 @@ pub struct PeerConfig {
     /// the strings; `None` does not advertise. Either string may be
     /// empty — the encoder handles the empty case.
     pub fqdn: Option<(String, String)>,
+    /// Whether BFD is configured and enabled for this session (the
+    /// draft's `BfdEnabled`). The strict-mode capability is advertised
+    /// only when this is `true` as well; the FSM also treats an
+    /// unknown BFD state as not-Up for the establishment gate. The
+    /// daemon sets it from `effective_bfd`; standalone embedders set
+    /// it together with [`Self::bfd_strict_mode`] and feed
+    /// [`crate::BgpEvent::Bfd`]. Default `false`.
+    pub bfd_enabled: bool,
     /// draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode capability
-    /// (code 74). When `true` the OPEN advertises the capability and
-    /// the session does not fall back to the hold timer when BFD is
-    /// down: the session stays down until BFD reports Up. Requires
-    /// `bfd` to be enabled on the peer (the daemon's BFD supervisor
-    /// must be running for the strict-mode gate to fire). Default
-    /// `false`.
+    /// (code 74). When `true` (and [`Self::bfd_enabled`] is also
+    /// `true`) the OPEN advertises the capability. When the peer
+    /// advertised it too, the FSM holds the KEEPALIVE and the
+    /// OpenConfirm transition until BFD reports Up or AdminDown, and
+    /// a BFD Down in OpenSent/OpenConfirm tears the session down with
+    /// Cease / BFD Down (6/10). Default `false`.
     pub bfd_strict_mode: bool,
+    /// `BfdHoldTime` in seconds (draft-ietf-idr-bgp-bfd-strict-mode-13
+    /// §3): how long the FSM waits for BFD to come Up while the
+    /// negotiated BGP hold time is zero. A non-zero BGP hold time
+    /// bounds the wait instead, matching the draft. Default 30.
+    pub bfd_hold_time: u16,
     /// draft-abraitis-bgp-version-capability-11 Software Version
     /// capability (code 75). When `Some(version)` the OPEN advertises
     /// the UTF-8 string (the draft recommends `product/version` form,
@@ -265,7 +278,9 @@ impl PeerConfig {
             extended_message: false,
             bgp_role: None,
             fqdn: None,
+            bfd_enabled: false,
             bfd_strict_mode: false,
+            bfd_hold_time: 30,
             software_version: None,
             paths_limit: Vec::new(),
             link_local_next_hop: false,

@@ -84,6 +84,7 @@ use mio::net::TcpStream as MioTcpStream;
 use mio::{Events, Interest, Poll, Registry, Token, Waker};
 use socket2::SockRef;
 
+use lr_bgp::BfdState;
 use lr_router::{DefaultRouter, RouterInstance, SessionHandle};
 
 use crate::daemon_bfd::BfdFlags;
@@ -185,10 +186,10 @@ struct Slot {
     stream: MioTcpStream,
     handle: SessionHandle,
     bfd: Option<BfdFlags>,
-    /// Last-seen BFD liveness, so only an Up-to-Down *transition*
-    /// tears the session (a BFD session that never came up must not
-    /// kill BGP — BIRD parity). `None` while there is no BFD binding.
-    bfd_up_seen: Option<bool>,
+    /// Last-seen BFD state, so only a *transition* is fed to the
+    /// router (a BFD session that never came up must not kill BGP —
+    /// BIRD parity). `None` while there is no BFD binding.
+    bfd_state_seen: Option<BfdState>,
     /// Bytes the socket would not take in one write (send buffer full
     /// mid-UPDATE). Non-empty tail ⇒ the slot also carries WRITABLE
     /// interest; the writable event flushes it.
@@ -532,7 +533,7 @@ fn reactor_main(
                 // this window is one iteration wide at most.
                 continue;
             };
-            if let Some(end) = check_bfd_transition(slot) {
+            if let Some(end) = check_bfd_transition(slot, &router) {
                 teardown(&mut slots, &mut free, &registry, &router, index, end);
                 continue;
             }
@@ -634,6 +635,10 @@ fn register_session(
     // session thread ran before its first pump iteration.
     let out = {
         let mut r = router.write().unwrap();
+        // Seed the BFD liveness before the FSM emits its OPEN: the
+        // strict-mode gate must see the current state when the peer's
+        // OPEN arrives (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5).
+        r.set_bfd_state(handle, bfd.as_ref().map(bfd_state_of));
         if let Err(e) = r.start_session(handle) {
             // The old path: run_peer_session's `?` returned the error
             // before any pump work — no close call ran at all (the
@@ -659,15 +664,15 @@ fn register_session(
         stream: mio_stream,
         handle,
         bfd,
-        bfd_up_seen: None,
+        bfd_state_seen: None,
         pending_out: Vec::new(),
         pending_off: 0,
         on_end: Some(on_end),
     };
-    // BFD baseline: seed the last-seen liveness so only a *transition*
-    // tears the session later (the first check must not see `None →
-    // false` as a transition).
-    slot.bfd_up_seen = slot.bfd.as_ref().map(|f| f.up.load(Ordering::Relaxed));
+    // BFD baseline: seed the last-seen state so only a *transition*
+    // reaches the router later (the first check must not replay the
+    // state the OPEN already saw).
+    slot.bfd_state_seen = slot.bfd.as_ref().map(bfd_state_of);
     slot.enqueue(&out);
     match slot.flush() {
         Ok(_) => {}
@@ -834,15 +839,49 @@ fn pump_readable(
 
 /// Check the BFD Up-to-Down transition for a slot. `Some(end)` means
 /// the session must tear down now.
-fn check_bfd_transition(slot: &mut Slot) -> Option<SessionEnd> {
-    let flags = slot.bfd.as_ref()?;
-    let up = flags.up.load(Ordering::Relaxed);
-    let seen = slot.bfd_up_seen;
-    slot.bfd_up_seen = Some(up);
-    if seen == Some(true) && !up {
-        return Some(SessionEnd::BfdDown);
+fn check_bfd_transition(
+    slot: &mut Slot,
+    router: &Arc<RwLock<DefaultRouter>>,
+) -> Option<SessionEnd> {
+    let state = bfd_state_of(slot.bfd.as_ref()?);
+    if slot.bfd_state_seen == Some(state) {
+        return None;
+    }
+    slot.bfd_state_seen = Some(state);
+    let (out, closed) = {
+        let mut r = router.write().unwrap();
+        r.set_bfd_state(slot.handle, Some(state));
+        (
+            r.drain_output(slot.handle),
+            r.session_peer_state(slot.handle) == Some("Idle"),
+        )
+    };
+    slot.enqueue(&out);
+    if let Err(e) = slot.flush() {
+        return Some(SessionEnd::TransportError(format!("write: {e}")));
+    }
+    if closed {
+        return Some(if state == BfdState::Down {
+            SessionEnd::BfdDown
+        } else {
+            SessionEnd::ClosedByRouter
+        });
     }
     None
+}
+
+/// Map the shared BFD liveness flags to the FSM's event state.
+/// AdminDown is distinct from Down: the strict-mode gate accepts it
+/// while Established sessions ignore it
+/// (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5.1, §8.7.1).
+fn bfd_state_of(flags: &BfdFlags) -> BfdState {
+    if flags.admin_down.load(Ordering::Relaxed) {
+        BfdState::AdminDown
+    } else if flags.up.load(Ordering::Relaxed) {
+        BfdState::Up
+    } else {
+        BfdState::Down
+    }
 }
 
 /// One maintenance pass over every live slot: BFD transitions,
@@ -859,7 +898,7 @@ fn sweep(
         let Some(slot) = slots[index].as_mut() else {
             continue;
         };
-        if let Some(end) = check_bfd_transition(slot) {
+        if let Some(end) = check_bfd_transition(slot, router) {
             teardown(slots, free, registry, router, index, end);
             continue;
         }
@@ -1058,7 +1097,7 @@ mod tests {
             stream,
             handle: SessionHandle(1),
             bfd: None,
-            bfd_up_seen: None,
+            bfd_state_seen: None,
             pending_out: vec![1u8; 10],
             pending_off: 5,
             on_end: None,
@@ -1087,7 +1126,7 @@ mod tests {
             stream,
             handle: SessionHandle(1),
             bfd: None,
-            bfd_up_seen: None,
+            bfd_state_seen: None,
             pending_out: Vec::new(),
             pending_off: 0,
             on_end: None,
@@ -1268,7 +1307,7 @@ mod tests {
             stream,
             handle: SessionHandle(1),
             bfd: None,
-            bfd_up_seen: None,
+            bfd_state_seen: None,
             pending_out: Vec::new(),
             pending_off: 0,
             on_end: None,
@@ -1329,7 +1368,7 @@ mod tests {
             stream,
             handle: SessionHandle(1),
             bfd: None,
-            bfd_up_seen: None,
+            bfd_state_seen: None,
             pending_out: Vec::new(),
             pending_off: 0,
             on_end: None,

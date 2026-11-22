@@ -2721,6 +2721,11 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     if hostname.is_some() || domain.is_some() {
         sc.fqdn = Some((hostname.unwrap_or_default(), domain.unwrap_or_default()));
     }
+    // draft-ietf-idr-bgp-bfd-strict-mode-13 §3: `BfdStrictEnabled`
+    // has no impact unless `BfdEnabled` is true, so strict-mode only
+    // advertises and gates when BFD is actually configured for this
+    // peer.
+    sc.bfd_enabled = g.effective_bfd(p);
     sc.bfd_strict_mode = p.bfd_strict_mode.unwrap_or(g.bfd_strict_mode);
     sc.software_version = p
         .software_version
@@ -3977,8 +3982,12 @@ fn spawn_connector(
                 if let Some(bfd) = &bfd {
                     let ever_up = bfd.ever_up.load(Ordering::Relaxed);
                     let up = bfd.up.load(Ordering::Relaxed);
+                    let admin_down = bfd.admin_down.load(Ordering::Relaxed);
+                    // The draft treats AdminDown as an acceptable
+                    // non-Down state for the strict-mode gate
+                    // (§8.5.1), so only a real Down blocks.
                     let block = if entry_bfd_strict_mode {
-                        !up
+                        !up && !admin_down
                     } else {
                         ever_up && !up
                     };

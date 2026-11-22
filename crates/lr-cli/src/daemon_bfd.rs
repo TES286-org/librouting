@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant as WallClock};
 
-use lr_bfd::{BfdConfig, BfdSession, BfdSessionEvent, SessionRole};
+use lr_bfd::{BfdConfig, BfdSession, BfdSessionEvent, SessionRole, State};
 use lr_core::time::Instant;
 use lr_osroute::bfd_transport::{BfdMode, BfdRxSocket, BfdTxSocket};
 
@@ -56,6 +56,12 @@ use mio::{Events, Interest, Poll, Token, Waker};
 pub(crate) struct BfdFlags {
     /// True while the BFD session is Up.
     pub up: Arc<AtomicBool>,
+    /// True while the BFD session is administratively down. The BGP
+    /// strict-mode gate treats AdminDown like Up (draft
+    /// draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5.1) while Established
+    /// sessions ignore it (§8.7.1), so the reactor needs the
+    /// distinction rather than folding it into `up`.
+    pub admin_down: Arc<AtomicBool>,
     /// True once the BFD session has been Up at least once (used to
     /// gate reconnects without blocking first establishment).
     pub ever_up: Arc<AtomicBool>,
@@ -65,6 +71,7 @@ impl BfdFlags {
     fn new() -> Self {
         Self {
             up: Arc::new(AtomicBool::new(false)),
+            admin_down: Arc::new(AtomicBool::new(false)),
             ever_up: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -519,6 +526,9 @@ fn apply_events(p: &mut BfdPeer, evs: Vec<BfdSessionEvent>) {
 fn refresh_flags(p: &BfdPeer) {
     let up = p.session.is_up();
     p.flags.up.store(up, Ordering::Relaxed);
+    p.flags
+        .admin_down
+        .store(p.session.state() == State::AdminDown, Ordering::Relaxed);
     if up {
         p.flags.ever_up.store(true, Ordering::Relaxed);
     }

@@ -45,9 +45,13 @@ daemon-config + DSL key:
   code 73) — two length-prefixed UTF-8 strings; the daemon's
   config accepts `hostname = "..."` and `domain_name = "..."`.
 - **draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode**
-  (capability code 74) — when negotiated, the daemon's connector
-  blocks session establishment until BFD reports Up (no
-  hold-timer fallback).
+  (capability code 74) — advertised only when BFD is enabled.
+  When both speakers offer it, the FSM holds the KEEPALIVE and
+  the OpenConfirm transition until BFD is Up/AdminDown/Disabled
+  (no hold-timer fallback; the `BfdHoldTimer` bounds the wait
+  when the BGP hold time is zero). BFD Down in
+  OpenConfirm/Established sends Cease / BFD Down (6/10) and
+  purges the peer's routes.
 - **draft-abraitis-bgp-version-capability-11 Software Version**
   (capability code 75) — length-prefixed UTF-8 string; the
   daemon's config accepts `software_version = "lr/2.0"`.

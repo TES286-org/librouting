@@ -54,6 +54,7 @@ pub use error::{
     BgpCeaseSubcode, BgpErrorCode, BgpHeaderErrorSubcode, BgpNotification, BgpOpenErrorSubcode,
     BgpUpdateErrorSubcode,
 };
+pub use extensions::bfd_strict_mode::BfdState;
 pub use fsm::{BgpAction, BgpEvent, BgpPeer, BgpState, PeerMessageStats};
 pub use message::{BgpHeader, BgpMessage, BgpMessageType};
 pub use peer::{MaxPrefixAction, PeerConfig};

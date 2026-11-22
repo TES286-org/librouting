@@ -339,9 +339,17 @@ pub struct SessionConfig {
     /// FQDN capability (draft-walton-bgp-hostname-capability-01).
     /// Propagated to [`lr_bgp::PeerConfig::fqdn`].
     pub fqdn: Option<(String, String)>,
+    /// Whether BFD is configured and enabled for the session (the
+    /// draft's `BfdEnabled`). Propagated to
+    /// [`lr_bgp::PeerConfig::bfd_enabled`]; the strict-mode capability
+    /// is advertised only when this and [`Self::bfd_strict_mode`] are
+    /// both true.
+    pub bfd_enabled: bool,
     /// BFD Strict-Mode capability
     /// (draft-ietf-idr-bgp-bfd-strict-mode-13). Propagated to
-    /// [`lr_bgp::PeerConfig::bfd_strict_mode`].
+    /// [`lr_bgp::PeerConfig::bfd_strict_mode`]. The FSM gates the
+    /// KEEPALIVE/OpenConfirm transition on BFD Up when the peer also
+    /// advertised the capability.
     pub bfd_strict_mode: bool,
     /// Software Version capability
     /// (draft-abraitis-bgp-version-capability-11). Propagated to
@@ -427,6 +435,7 @@ impl SessionConfig {
             extended_message: false,
             bgp_role: None,
             fqdn: None,
+            bfd_enabled: false,
             bfd_strict_mode: false,
             software_version: None,
             paths_limit: Vec::new(),
@@ -434,6 +443,23 @@ impl SessionConfig {
             orf: Vec::new(),
             otc_role: None,
         }
+    }
+
+    /// Enable BFD liveness for this session (the draft's
+    /// `BfdEnabled`). The embedder still reports the actual BFD state
+    /// through [`crate::RouterInstance::set_bfd_state`].
+    pub fn with_bfd(mut self) -> Self {
+        self.bfd_enabled = true;
+        self
+    }
+
+    /// Enable the BFD Strict-Mode capability
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-13). Implies
+    /// [`Self::with_bfd`]: strict-mode has no effect without BFD.
+    pub fn with_bfd_strict_mode(mut self) -> Self {
+        self.bfd_enabled = true;
+        self.bfd_strict_mode = true;
+        self
     }
 
     /// Override the MP-BGP address families advertised in OPEN.
@@ -714,6 +740,7 @@ impl SessionConfig {
             extended_message: false,
             bgp_role: None,
             fqdn: None,
+            bfd_enabled: false,
             bfd_strict_mode: false,
             software_version: None,
             paths_limit: Vec::new(),
@@ -779,6 +806,7 @@ impl SessionConfig {
             extended_message: false,
             bgp_role: None,
             fqdn: None,
+            bfd_enabled: false,
             bfd_strict_mode: false,
             software_version: None,
             paths_limit: Vec::new(),
@@ -889,6 +917,12 @@ pub enum SessionErrorKind {
     /// is reset; the offending LSA is dropped from the LSDB and the
     /// adjacency re-floods from the ExStart state.
     OspfBadLsa = 9,
+    /// BFD reported Down for a session with BFD configured. The FSM
+    /// sends Cease / BFD Down (6/10, RFC 9384 §4.1) and the peer's
+    /// routes are purged rather than retained under graceful restart:
+    /// the forwarding path failed, so keeping them would blackhole
+    /// traffic (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.7.2).
+    BfdDown = 10,
 }
 
 impl SessionErrorKind {
@@ -907,6 +941,7 @@ impl SessionErrorKind {
             Self::OspfKill => "ospf-kill",
             Self::OspfSeqMismatch => "ospf-seq-mismatch",
             Self::OspfBadLsa => "ospf-bad-lsa",
+            Self::BfdDown => "bfd-down",
         }
     }
 }
@@ -1087,6 +1122,7 @@ mod session_stats_tests {
             (SessionErrorKind::OspfKill, "ospf-kill"),
             (SessionErrorKind::OspfSeqMismatch, "ospf-seq-mismatch"),
             (SessionErrorKind::OspfBadLsa, "ospf-bad-lsa"),
+            (SessionErrorKind::BfdDown, "bfd-down"),
         ];
         for (kind, name) in cases {
             assert_eq!(kind.as_str(), name);

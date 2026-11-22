@@ -1713,3 +1713,198 @@ fn route_refresh_normal_subtype_still_dispatched_without_enhanced_rr() {
          base capability path"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BFD Strict-Mode (draft-ietf-idr-bgp-bfd-strict-mode-13).
+// ---------------------------------------------------------------------------
+
+/// A peer pair with BFD enabled and strict-mode configured on both
+/// sides. `hold_time` is the BGP hold time (0 exercises the draft's
+/// BfdHoldTimer path).
+fn bfd_strict_pair(hold_time: u16) -> (BgpPeer, BgpPeer) {
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.bfd_enabled = true;
+    cfg_a.bfd_strict_mode = true;
+    cfg_a.hold_time = hold_time;
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.bfd_enabled = true;
+    cfg_b.bfd_strict_mode = true;
+    cfg_b.hold_time = hold_time;
+    (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b))
+}
+
+/// Drive both peers through the OPEN exchange while BFD is Down.
+/// Returns the two OPEN payloads already cross-fed; both FSMs must be
+/// in OpenSentBfdUpPending.
+fn open_with_bfd_down(a: &mut BgpPeer, b: &mut BgpPeer) {
+    a.set_bfd_state(Some(BfdState::Down));
+    b.set_bfd_state(Some(BfdState::Down));
+    a.step(BgpEvent::ManualStart);
+    a.step(BgpEvent::TransportOpen);
+    b.step(BgpEvent::ManualStart);
+    b.step(BgpEvent::TransportOpen);
+    let a_open = a.drain_outgoing();
+    let b_open = b.drain_outgoing();
+    b.feed_bytes(&a_open).unwrap();
+    a.feed_bytes(&b_open).unwrap();
+}
+
+/// draft §8.1/§8.5: the KEEPALIVE and the OpenConfirm transition wait
+/// for BFD Up; BfdUp then releases the handshake.
+#[test]
+fn bfd_strict_mode_holds_open_confirm_until_up() {
+    let (mut a, mut b) = bfd_strict_pair(90);
+    open_with_bfd_down(&mut a, &mut b);
+    assert_eq!(a.state(), BgpState::OpenSent);
+    assert_eq!(b.state(), BgpState::OpenSent);
+    assert!(a.bfd_strict_negotiated() && b.bfd_strict_negotiated());
+    assert!(a.bfd_pending() && b.bfd_pending());
+    assert!(
+        a.drain_outgoing().is_empty() && b.drain_outgoing().is_empty(),
+        "no KEEPALIVE may be sent while BFD is Down"
+    );
+
+    // One side comes Up: it sends its KEEPALIVE and moves on.
+    b.step(BgpEvent::Bfd(BfdState::Up));
+    assert_eq!(b.state(), BgpState::OpenConfirm);
+    assert!(!b.bfd_pending());
+    let b_ka = b.drain_outgoing();
+    assert_eq!(b_ka[18], 4, "KEEPALIVE released by BfdUp");
+
+    // The other side is still pending; the KEEPALIVE is ignored in
+    // OpenSent and does not advance the FSM.
+    a.feed_bytes(&b_ka).unwrap();
+    assert_eq!(a.state(), BgpState::OpenSent);
+
+    a.step(BgpEvent::Bfd(BfdState::Up));
+    assert_eq!(a.state(), BgpState::OpenConfirm);
+    let a_ka = a.drain_outgoing();
+    assert_eq!(a_ka[18], 4);
+    a.feed_bytes(&b_ka).unwrap();
+    b.feed_bytes(&a_ka).unwrap();
+    assert!(a.is_established() && b.is_established());
+}
+
+/// draft §6: strict-mode applies only when both speakers advertised
+/// the capability. A peer that did not advertise it keeps the normal
+/// OPEN path even when the local BFD is Down.
+#[test]
+fn bfd_strict_mode_requires_peer_advertisement() {
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.bfd_enabled = true;
+    cfg_a.bfd_strict_mode = true;
+    let cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    a.set_bfd_state(Some(BfdState::Down));
+    b.set_bfd_state(Some(BfdState::Down));
+
+    a.step(BgpEvent::ManualStart);
+    a.step(BgpEvent::TransportOpen);
+    b.step(BgpEvent::ManualStart);
+    b.step(BgpEvent::TransportOpen);
+    let a_open = a.drain_outgoing();
+    let b_open = b.drain_outgoing();
+    b.feed_bytes(&a_open).unwrap();
+    a.feed_bytes(&b_open).unwrap();
+
+    assert!(!a.bfd_strict_negotiated());
+    assert!(!a.bfd_pending());
+    assert_eq!(a.state(), BgpState::OpenConfirm);
+    let out = a.drain_outgoing();
+    assert_eq!(out[18], 4, "the normal KEEPALIVE still goes out");
+}
+
+/// draft §8.6.2: BFD Down in OpenConfirm tears the session down with
+/// Cease / BFD Down (6/10) when strict-mode was negotiated.
+#[test]
+fn bfd_down_in_open_confirm_strict_sends_cease() {
+    let (mut a, mut b) = bfd_strict_pair(90);
+    open_with_bfd_down(&mut a, &mut b);
+    a.step(BgpEvent::Bfd(BfdState::Up));
+    assert_eq!(a.state(), BgpState::OpenConfirm);
+    let _ = a.drain_outgoing();
+
+    a.step(BgpEvent::Bfd(BfdState::Down));
+    assert_eq!(a.state(), BgpState::Idle);
+    assert!(a.bfd_down_teardown());
+    let out = a.drain_outgoing();
+    assert_eq!(out[18], 3, "NOTIFICATION");
+    assert_eq!(out[19], 6, "Cease");
+    assert_eq!(out[20], 10, "BFD Down");
+}
+
+/// draft §8.7.2: BFD Down in Established always tears the session down
+/// with Cease / BFD Down; AdminDown is ignored (§8.7.1).
+#[test]
+fn bfd_down_in_established_sends_cease_and_admin_down_is_ignored() {
+    let (mut a, mut b) = bfd_strict_pair(90);
+    a.set_bfd_state(Some(BfdState::Up));
+    b.set_bfd_state(Some(BfdState::Up));
+    establish(&mut a, &mut b);
+
+    a.step(BgpEvent::Bfd(BfdState::AdminDown));
+    assert_eq!(a.state(), BgpState::Established);
+    assert!(a.drain_outgoing().is_empty(), "AdminDown is ignored");
+
+    a.step(BgpEvent::Bfd(BfdState::Down));
+    assert_eq!(a.state(), BgpState::Idle);
+    assert!(a.bfd_down_teardown());
+    let out = a.drain_outgoing();
+    assert_eq!(out[18], 3);
+    assert_eq!(out[19], 6);
+    assert_eq!(out[20], 10);
+}
+
+/// draft §8.5.1: BfdAdminDown releases the pending handshake just like
+/// BfdUp (only BfdDown holds it).
+#[test]
+fn bfd_admin_down_releases_pending_open() {
+    let (mut a, mut b) = bfd_strict_pair(90);
+    open_with_bfd_down(&mut a, &mut b);
+    a.step(BgpEvent::Bfd(BfdState::AdminDown));
+    assert_eq!(a.state(), BgpState::OpenConfirm);
+    let out = a.drain_outgoing();
+    assert_eq!(out[18], 4);
+}
+
+/// draft §3/§8.5.2: with a zero negotiated hold time the BfdHoldTimer
+/// bounds the wait; expiry sends Cease / BFD Down and returns to Idle.
+#[test]
+fn bfd_hold_timer_expiry_with_zero_hold_time() {
+    let (mut a, mut b) = bfd_strict_pair(0);
+    open_with_bfd_down(&mut a, &mut b);
+    assert!(a.bfd_pending());
+
+    a.step(BgpEvent::TimerBfdHoldExpired);
+    assert_eq!(a.state(), BgpState::Idle);
+    assert!(a.bfd_down_teardown());
+    let out = a.drain_outgoing();
+    assert_eq!(out[18], 3);
+    assert_eq!(out[19], 6);
+    assert_eq!(out[20], 10);
+}
+
+/// The strict-mode capability is advertised only when BFD itself is
+/// enabled (the draft's `BfdEnabled`): strict without BFD has no
+/// effect and must not gate or advertise.
+#[test]
+fn bfd_strict_mode_not_advertised_without_bfd() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.bfd_strict_mode = true;
+    let mut a = BgpPeer::new(cfg);
+    a.step(BgpEvent::ManualStart);
+    a.step(BgpEvent::TransportOpen);
+    let open = a.drain_outgoing();
+    // OPEN body: version, my_as, hold, bgp_id, optional-parameter
+    // length; the FSM emits one capability parameter.
+    let opt_len = open[28] as usize;
+    let params = &open[29..29 + opt_len];
+    assert_eq!(params[0], 2, "capability parameter");
+    let caps = crate::capabilities::Capability::decode_set(&params[2..2 + params[1] as usize]);
+    assert!(
+        !caps
+            .iter()
+            .any(|c| c.code == crate::capabilities::CapabilityCode::BfdStrictMode),
+        "code 74 must be absent when BFD is not enabled"
+    );
+}

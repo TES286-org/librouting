@@ -103,6 +103,15 @@ pub trait RouterInstance {
     /// Begin protocol operation on a session (BGP: ManualStart +
     /// TransportOpen). Call once the transport is connected.
     fn start_session(&mut self, h: SessionHandle) -> Result<(), String>;
+    /// Report the BFD liveness for a BGP session
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-13 §4). `None` means BFD is
+    /// not configured for the session. Seeding the state before
+    /// [`Self::start_session`] lets the OPEN-time strict-mode gate see
+    /// it; later calls drive the FSM's `Bfd` events. A Down transition
+    /// on a session with BFD configured queues Cease / BFD Down (6/10)
+    /// and tears the session down. The default no-op keeps embedders
+    /// without BFD source-compatible.
+    fn set_bfd_state(&mut self, _h: SessionHandle, _state: Option<lr_bgp::BfdState>) {}
     fn feed_input(&mut self, h: SessionHandle, bytes: &[u8]) -> Result<(), String>;
     /// Feed one received datagram together with the transport's clocks:
     /// `now_ms` — wall-clock milliseconds since the transport started,
@@ -3917,6 +3926,9 @@ impl DefaultRouter {
                     // distinguishes the NOTIFICATION path from the
                     // hold-timer / transport-close / ManualStop paths.
                     let cause = match self.sessions.get(&session) {
+                        Some(SessionState::Bgp { peer, .. }) if peer.bfd_down_teardown() => {
+                            SessionErrorKind::BfdDown
+                        }
                         Some(SessionState::Bgp { peer, .. }) if peer.notification_received() => {
                             SessionErrorKind::NotificationReceived
                         }
@@ -4214,6 +4226,7 @@ impl DefaultRouter {
                 // blackhole traffic for the whole window.
                 if !*was_established
                     || peer.notification_received()
+                    || peer.bfd_down_teardown()
                     || self.administrative_close.contains(&session)
                 {
                     return self.session_down_cleanup(session);
@@ -4648,6 +4661,7 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.extended_message = cfg.extended_message;
                 p_cfg.bgp_role = cfg.bgp_role;
                 p_cfg.fqdn = cfg.fqdn.clone();
+                p_cfg.bfd_enabled = cfg.bfd_enabled;
                 p_cfg.bfd_strict_mode = cfg.bfd_strict_mode;
                 p_cfg.software_version = cfg.software_version.clone();
                 p_cfg.paths_limit = cfg.paths_limit.clone();
@@ -4896,6 +4910,37 @@ impl RouterInstance for DefaultRouter {
         self.collision_lost.remove(&h.0);
         self.administrative_close.remove(&h.0);
         Ok(())
+    }
+
+    fn set_bfd_state(&mut self, h: SessionHandle, state: Option<lr_bgp::BfdState>) {
+        let actions = {
+            let Some(SessionState::Bgp { peer, .. }) = self.sessions.get_mut(&h.0) else {
+                return;
+            };
+            if peer.bfd_state() == state {
+                return;
+            }
+            match state {
+                Some(s) => {
+                    peer.set_bfd_state(Some(s));
+                    peer.step(BgpEvent::Bfd(s))
+                }
+                None => {
+                    // `Bfd_Disabled`: releases an OpenSentBfdUpPending
+                    // handshake, ignored elsewhere (draft
+                    // draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5.1).
+                    // The event sets the FSM's state to Disabled, so
+                    // clear it afterwards to keep "not configured"
+                    // distinct.
+                    let actions = peer.step(BgpEvent::Bfd(lr_bgp::BfdState::Disabled));
+                    peer.set_bfd_state(None);
+                    actions
+                }
+            }
+        };
+        if !actions.is_empty() {
+            self.dispatch_bgp_actions(h.0, actions);
+        }
     }
 
     fn feed_input(&mut self, h: SessionHandle, bytes: &[u8]) -> Result<(), String> {
@@ -5345,6 +5390,7 @@ impl RouterInstance for DefaultRouter {
                     BgpEvent::TimerConnectRetry
                 }
                 c if c == lr_bgp::fsm::timer_ids::IDLE_HOLD.0 as u8 => BgpEvent::TimerIdleHold,
+                c if c == lr_bgp::fsm::timer_ids::BFD_HOLD.0 as u8 => BgpEvent::TimerBfdHoldExpired,
                 _ => continue,
             };
             let actions = peer.step(ev);

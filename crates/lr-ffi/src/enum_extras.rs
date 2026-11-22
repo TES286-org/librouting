@@ -415,7 +415,7 @@ pub extern "C" fn lr_router_ospf_network_type_name(v: i32) -> *const std::os::ra
 pub extern "C" fn lr_router_session_error_kind_name(v: i32) -> *const std::os::raw::c_char {
     guarded(
         || {
-            // SessionErrorKind is #[repr(u8)] with variants 0..=9.
+            // SessionErrorKind is #[repr(u8)] with variants 0..=10.
             let s = match v {
                 0 => "None",
                 1 => "NotificationReceived",
@@ -427,6 +427,7 @@ pub extern "C" fn lr_router_session_error_kind_name(v: i32) -> *const std::os::r
                 7 => "OspfKill",
                 8 => "OspfSeqMismatch",
                 9 => "OspfBadLsa",
+                10 => "BfdDown",
                 _ => "unknown",
             };
             name_ptr(s)
