@@ -16,6 +16,42 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 ## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA,
 event bus, 2.x capability block
 
+### Added — `lrctl` pretty status output (issue #101)
+
+`lrctl` gains a `--format=plain|pretty|json|json:pretty` flag and a
+`--color=auto|always|never` flag. The default format is `pretty` when
+stdout is a TTY (a human at a terminal gets the readable view) and
+`plain` otherwise (a shell pipeline gets the scriptable wire form);
+`--json` and `--json=pretty` stay as aliases for `--format=json` and
+`--format=json:pretty`.
+
+The `pretty` renderer lays out every supported command (`status`,
+`show status`, `sessions`, `show sessions [detail]`,
+`show session <handle>`, `show routes count`, `show memory`,
+`routes show`, `routes count`, `show roa`, `ping`, `shutdown status`)
+with section headings, aligned tables, colour-coded session state
+(Established green, Active/Cyan/Connect/OpenSent/OpenConfirm yellow,
+Idle red), human-friendly uptime (`1h 2m 3s`) and memory
+(`12.3 MiB`), and a bold-red `Error:` prefix for daemon error
+replies. Colour is ANSI 16-colour, emitted only under the `pretty`
+path and only when `--color=auto` (the default) sees a TTY or
+`--color=always` is set. The plain and JSON paths never carry
+colour.
+
+The plain wire shape (`local-as 64512`, `kind=bgp state=Idle`) is
+preserved byte-for-byte under `--format=plain` and under the
+piped-stdout default, so existing scripts and tests stay green. The
+JSON shapes in [`docs/bindings/lrctl-json.md`](docs/bindings/lrctl-json.md)
+are unchanged.
+
+The new module `crates/lr-cli/src/lrctl_pretty.rs` owns the
+renderers; the call sites in `crates/lr-cli/src/lrctl.rs` thread an
+`Output { format, color }` value through every command handler. 25
+unit tests cover the renderers without spawning a daemon; 13 new
+integration tests in `crates/lr-cli/tests/lrctl.rs` cover the
+end-to-end format selection through the real `lrctl` binary against
+a running `lr-daemon`.
+
 ### Added — BGP capability block (issue #101)
 
 Eight BGP capabilities land on the OPEN advertisement surface, each

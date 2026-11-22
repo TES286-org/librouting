@@ -1,17 +1,29 @@
 # `lrctl` JSON output shape
 
-`lrctl --json` produces machine-readable JSON for the supported
-commands. This document is the canonical shape contract for consumers
-scripts.
+`lrctl --json` (or `lrctl --format=json`) produces machine-readable
+JSON for the supported commands. This document is the canonical shape
+contract for consumer scripts.
 
 ## Global flags
 
 ```
---json            Compact JSON (default).
---json=compact    Compact JSON (explicit).
---json=pretty     Pretty-printed JSON (2-space indent).
--j                Alias for --json.
+--json                   Compact JSON (alias for --format=json).
+--json=compact           Compact JSON (explicit).
+--json=pretty            Pretty-printed JSON (2-space indent).
+-j                       Alias for --json.
+--format=json            Compact JSON.
+--format=json:pretty     Pretty-printed JSON (2-space indent).
+--format=plain           The daemon's line-oriented wire shape.
+--format=pretty          Human-readable pretty view (default on a TTY).
+--color=auto             Colour when stdout is a TTY (default).
+--color=always           Force colour on (pretty path only).
+--color=never            Force colour off.
 ```
+
+The `--format` flag takes precedence over `--json` when both are given
+— `--format=plain --json` is plain. See
+[lr-cli.md](../lr-cli.md) for the format-selection rules and the
+default behaviour under a TTY vs a pipe.
 
 The flag may appear anywhere in the args (before, after, or in
 between the command's own args). It applies to the commands listed

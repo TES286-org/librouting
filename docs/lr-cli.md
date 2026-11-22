@@ -136,7 +136,7 @@ outside the crate's own tests the wire proxy is the only writer.
 ## `lrctl` — the operational CLI
 
 `lrctl` connects to a running daemon's runtime API socket, sends one
-command and prints the reply verbatim. `filter compile` runs entirely
+command and prints the reply. `filter compile` runs entirely
 client-side through `lr-policy`.
 
 The socket comes from `--socket PATH`, `-s PATH` or `--socket=PATH`, in
@@ -144,6 +144,30 @@ any position; the first occurrence wins. Without one, `lrctl` uses
 `/run/lr-daemon.api` — the path `templates/daemon.lr` shows. On a
 non-Unix target the transport refuses with `runtime API requires Unix
 domain sockets (not supported here)`.
+
+### Output format
+
+`--format plain|pretty|json|json:pretty` selects the output shape. The
+default is `pretty` when stdout is a TTY (a human at a terminal gets
+the readable view) and `plain` otherwise (a shell pipeline gets the
+scriptable wire form). `--json` and `--json=pretty` stay as aliases for
+`--format=json` and `--format=json:pretty`.
+
+`--color auto|always|never` controls colour emission (the `pretty` path
+only). `auto` is the default: colour when stdout is a TTY. `always`
+forces colour on (useful with `less -R`); `never` forces it off. The
+`plain` and `json` paths never carry colour.
+
+The three formats:
+
+- `plain` — the daemon's line-oriented `key value` / `key=value` wire
+  shape, verbatim. The shape scripts parse. Default for pipes.
+- `pretty` — section headings, aligned tables, colour-coded session
+  state, human-friendly uptime (`1h 2m 3s`) and memory (`12.3 MiB`).
+  Default for TTYs.
+- `json` — a JSON value per the shapes in
+  [bindings/lrctl-json.md](bindings/lrctl-json.md). `json:pretty`
+  pretty-prints with a 2-space indent.
 
 | Command | Daemon command | Effect |
 | --- | --- | --- |
