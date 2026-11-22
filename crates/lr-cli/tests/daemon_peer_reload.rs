@@ -136,8 +136,11 @@ fn listener_daemon(
 fn sighup_replaces_peer_without_restart() {
     let dir = std::env::temp_dir().join(format!("lr-daemon-pr-replace-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let port_b = 18301u16;
-    let port_c = 18302u16;
+    // 18381/18382: this file's port ladder stays disjoint from every
+    // other e2e binary cargo may run in parallel (daemon_collision and
+    // daemon_multi_peer both own 18301+, 18311+, 18321+ and 18331+).
+    let port_b = 18381u16;
+    let port_c = 18382u16;
 
     let b = listener_daemon(
         "repl-b",
@@ -183,8 +186,8 @@ fn sighup_replaces_peer_without_restart() {
     wait_log_all(
         &a.log,
         &[
-            "reload: peer 127.0.0.1:18301 removed",
-            "reload: peer 127.0.0.1:18302 added",
+            "reload: peer 127.0.0.1:18381 removed",
+            "reload: peer 127.0.0.1:18382 added",
             // The new session establishes (a fresh handle, session #2
             // or later — match the state line loosely).
             "→ Established",
@@ -213,7 +216,11 @@ fn sighup_replaces_peer_without_restart() {
 fn sighup_restarts_reconfigured_peer_sessions() {
     let dir = std::env::temp_dir().join(format!("lr-daemon-pr-restart-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let port_b = 18311u16;
+    // 18361: this file's ladder (18361, 18371, 18381/18382, 18391,
+    // 18341, 18351/18352) stays disjoint from every other e2e binary
+    // cargo may run in parallel — daemon_collision and daemon_multi_peer
+    // own 18301+, 18311+, 18321+ and 18331+.
+    let port_b = 18361u16;
 
     let b = listener_daemon("rst-b", "64513", "10.0.0.2", port_b, None);
 
@@ -243,7 +250,7 @@ fn sighup_restarts_reconfigured_peer_sessions() {
     wait_log_all(
         &a.log,
         &[
-            "reload: peer 127.0.0.1:18311 reconfigured — restarting its sessions",
+            "reload: peer 127.0.0.1:18361 reconfigured — restarting its sessions",
             "session #2 → Established",
         ],
     );
@@ -262,7 +269,8 @@ fn sighup_restarts_reconfigured_peer_sessions() {
 fn sighup_swaps_import_filter_without_session_bounce() {
     let dir = std::env::temp_dir().join(format!("lr-daemon-pr-filter-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let port_b = 18321u16;
+    // 18371: see the port note in `sighup_restarts_reconfigured_peer_sessions`.
+    let port_b = 18371u16;
 
     let _b = listener_daemon(
         "flt-b",
@@ -326,7 +334,8 @@ fn sighup_swaps_import_filter_without_session_bounce() {
 fn sighup_toggles_peer_shutdown() {
     let dir = std::env::temp_dir().join(format!("lr-daemon-pr-shut-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let port_b = 18331u16;
+    // 18391: see the port note in `sighup_replaces_peer_without_restart`.
+    let port_b = 18391u16;
 
     let b = listener_daemon("shut-b", "64513", "10.0.0.2", port_b, None);
 
@@ -356,7 +365,7 @@ fn sighup_toggles_peer_shutdown() {
     a.signal(SIGHUP);
     wait_log_all(
         &a.log,
-        &["reload: peer 127.0.0.1:18331 admin-down (shutdown = true)"],
+        &["reload: peer 127.0.0.1:18391 admin-down (shutdown = true)"],
     );
     wait_log_all(&b.log, &["NOTIFICATION code=6"]);
 
@@ -367,7 +376,7 @@ fn sighup_toggles_peer_shutdown() {
     a.signal(SIGHUP);
     wait_log_all(
         &a.log,
-        &["reload: peer 127.0.0.1:18331 admin-up (shutdown = false) — connector started"],
+        &["reload: peer 127.0.0.1:18391 admin-up (shutdown = false) — connector started"],
     );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
