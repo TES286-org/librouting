@@ -1091,10 +1091,17 @@ mod tests {
         let flags = supervisor
             .add_peer(spec)
             .expect("add_peer starts the session");
-        assert!(
-            !flags.up.load(Ordering::Relaxed),
-            "session starts Down (loopback may feed it later, the flag read here races)"
-        );
+        // The session starts in Down (the FSM's initial state), but a
+        // loopback peer whose peer_ip equals local_ip feeds its own
+        // BFD packets back to its rx socket — on a fast runner the
+        // Down → Init → Up transition can complete before this
+        // assertion runs. The flag's job is to be a live liveness
+        // signal the BGP reactor reads; its value at this exact
+        // instant is not part of the membership contract under test.
+        // Asserting it either way would race; we only assert the flag
+        // is loadable here and defer state assertions to the
+        // dedicated FSM tests in lr-bfd.
+        let _ = flags.up.load(Ordering::Relaxed);
 
         // A second session on the same (local, mode) reuses the rx
         // socket: the add must succeed without a second bind.
