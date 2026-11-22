@@ -47,13 +47,13 @@ files of the `lr-cli` binary crate, which is not a library.
 | Confederation segments (RFC 5065) | yes | `lr-bgp::role::confederation` |
 | Route server egress (RFC 7947) | yes | `lr-bgp::role::route_server` |
 | OTC attribute and role negotiation (RFC 9234) | yes | `lr-bgp::role::otc`, `lr-bgp::extensions::bgp_role` |
-| Extended Message capability and codec gate (RFC 8654) | yes | `lr-bgp::extensions::extended_message`, `lr-bgp::codec::BgpCodec::set_extended_message` |
-| Outbound Route Filtering capability (RFC 5291) | yes | `lr-bgp::extensions::orf`, `lr-bgp::capabilities::Capability::orf` |
-| FQDN/Hostname capability (draft-walton-bgp-hostname-capability-01) | yes | `lr-bgp::extensions::fqdn`, `lr-bgp::capabilities::Capability::fqdn` |
+| Extended Message capability and codec gate (RFC 8654) | yes | `lr-bgp::extensions::extended_message`, `lr-bgp::codec::BgpCodec::set_extended_message`, `lr-bgp::advertise` |
+| Outbound Route Filtering capability and egress filter (RFC 5291/5292) | yes | `lr-bgp::extensions::orf`, `lr-bgp::message::route_refresh`, `lr-router::instance::{apply_orf, send_orf}` |
+| FQDN/Hostname capability (draft-walton-bgp-hostname-capability-01) | yes | `lr-bgp::extensions::fqdn`, `lr-router::session::SessionSummary::peer_fqdn`, `show session <h>` |
 | BFD Strict-Mode capability and establishment gate (draft-ietf-idr-bgp-bfd-strict-mode-13) | yes | `lr-bgp::extensions::bfd_strict_mode`, `lr-bgp::fsm`, `lr-router::instance`, `lr-cli::bgp_reactor` |
-| Software Version capability (draft-abraitis-bgp-version-capability-11) | yes | `lr-bgp::extensions::software_version`, `lr-bgp::capabilities::Capability::software_version` |
+| Software Version capability (draft-abraitis-bgp-version-capability-11) | yes | `lr-bgp::extensions::software_version`, `lr-router::session::SessionSummary::peer_software_version`, `show session <h>` |
 | PATHS-LIMIT capability and per-prefix ingress/egress caps (draft-ietf-idr-addpath-paths-limit-00) | yes | `lr-bgp::extensions::paths_limit`, `lr-bgp::capabilities::Capability::paths_limit`, `lr-router::instance` |
-| Link-Local Next Hop capability (draft-ietf-idr-linklocal-capability-06) | yes | `lr-bgp::extensions::link_local_next_hop`, `lr-bgp::capabilities::Capability::link_local_next_hop` |
+| Link-Local Next Hop capability and MP next-hop handling (draft-ietf-idr-linklocal-capability-06) | yes | `lr-bgp::extensions::link_local_next_hop`, `lr-bgp::path::mp_nlri`, `lr-bgp::fsm`, `lr-bgp::advertise` |
 | Best-path selection and the router-id tiebreak | yes | `lr-bgp::best_path` |
 | Standard, extended and large communities | yes | `lr-bgp::path::communities` |
 | Well-known communities and attribute flags | yes | `lr-bgp::path::well_known`, `lr-bgp::path` |

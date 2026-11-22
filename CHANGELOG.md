@@ -24,15 +24,22 @@ with a typed codec, an extension module following the established
 triple shape, a `PeerConfig` / `SessionConfig` field and a
 daemon-config + DSL key:
 
-- **RFC 5291 ORF** (capability code 3) — per-family
-  `(afi, safi, [(orf_type, mode)])` triples. The daemon's config
-  accepts `orf = "1:1:64:both,2:1:64:receive"` (per-peer override
-  inherits the router-wide default).
+- **RFC 5291/5292 ORF** (capability code 3) — per-family
+  `(afi, safi, [(orf_type, mode)])` triples, direction-gated per
+  §6. Address Prefix ORF entries (type 64) ride ROUTE-REFRESH and
+  are applied to the peer's Adj-RIB-Out: `IMMEDIATE` re-advertises
+  the family, `DEFER` waits for a plain refresh, and REMOVE/REMOVE-
+  ALL lift the filter. A family with a pending peer ORF withholds
+  its initial dump. The config accepts
+  `orf = "1:1:64:both,2:1:64:receive"` and
+  `orf_entries = "1:1 10 permit 10.0.0.0/16 0 24"` (per-peer
+  overrides inherit the router-wide defaults).
 - **RFC 8654 Extended Message** (capability code 6) — the codec's
   per-message length ceiling rises from the RFC 4271 §4.1
   4096-octet limit to 65535 octets when both speakers advertise
-  the capability. `BgpCodec::set_extended_message` is the runtime
-  gate; the FSM flips it after OPEN negotiation.
+  the capability. Egress allocates for the negotiated ceiling and
+  returns the encoder result, so an oversized UPDATE is emitted
+  with the capability and refused (never truncated) without it.
 - **RFC 9234 BGP Role** (capability code 9) — advertises the
   speaker's one-octet role (Provider / RS / RS-Client / Customer /
   Peer). Strict mode is local policy: a missing peer role under
@@ -44,6 +51,9 @@ daemon-config + DSL key:
 - **draft-walton-bgp-hostname-capability-01 FQDN** (capability
   code 73) — two length-prefixed UTF-8 strings; the daemon's
   config accepts `hostname = "..."` and `domain_name = "..."`.
+  The peer's pair is exposed through `BgpPeer::peer_fqdn` and
+  `SessionSummary::peer_fqdn`, and `show session <h>` renders it
+  as `peer-fqdn`.
 - **draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode**
   (capability code 74) — advertised only when BFD is enabled.
   When both speakers offer it, the FSM holds the KEEPALIVE and
@@ -54,7 +64,11 @@ daemon-config + DSL key:
   purges the peer's routes.
 - **draft-abraitis-bgp-version-capability-11 Software Version**
   (capability code 75) — length-prefixed UTF-8 string; the
-  daemon's config accepts `software_version = "lr/2.0"`.
+  daemon's config accepts `software_version = "lr/2.0"`. The
+  peer's version is exposed through
+  `BgpPeer::peer_software_version` and
+  `SessionSummary::peer_software_version`, rendered by
+  `show session <h>` as `peer-software-version`.
 - **draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT**
   (capability code 76) — per-family 5-byte
   `<AFI, SAFI, Paths-Limit>` tuples with first-tuple-wins and
@@ -64,12 +78,22 @@ daemon-config + DSL key:
   for the family.
 - **draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop**
   (capability code 77) — presence alone signals that the speaker
-  can accept a link-local IPv6 next-hop in MP_REACH_NLRI.
+  can accept a link-local IPv6 next-hop in MP_REACH_NLRI. A
+  16-octet fe80::/10 next hop is classified as link-local-only;
+  ::/LL and LL/LL use the second slot for forwarding; a non-LL
+  second slot is malformed. Without the capability an LL-only
+  announcement is treated as withdraw. Egress refuses an LL-only
+  next hop unless negotiated, and a route reflector rewrites it to
+  its own address or suppresses it.
 
-No public Rust API change beyond the new `CapabilityCode`
-variants, `Capability` constructors, `PeerConfig` fields and
-extension module surfaces — pre-2.0 semver debt the `api-surface`
-CI job already tracks. C ABI untouched.
+Public Rust API growth beyond the new `CapabilityCode` variants,
+`Capability` constructors, `PeerConfig` fields and extension
+module surfaces: `RouteRefresh` carries an optional
+`OrfRefresh` (so it is no longer `Copy`), `SessionSummary` gains
+`peer_fqdn` / `peer_software_version` (also no longer `Copy`),
+and `RouterInstance` gains a default `set_bfd_state` no-op plus
+`DefaultRouter::send_orf` / `set_orf_tx`. Pre-2.0 semver debt the
+`api-surface` CI job already tracks. C ABI untouched.
 
 ### Added — filter DSL surface, event bus
 

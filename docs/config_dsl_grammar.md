@@ -187,7 +187,8 @@ bgp {
     software_version "lr/2.0";          # draft-abraitis-bgp-version-capability-11
     paths_limit "1:1:16,2:1:32";        # draft-ietf-idr-addpath-paths-limit-00
     link_local_next_hop true;           # draft-ietf-idr-linklocal-capability-06
-    orf "1:1:64:both,2:1:64:receive";   # RFC 5291
+    orf "1:1:64:both,2:1:64:receive";   # RFC 5291 capability modes
+    orf_entries "1:1 10 permit 10.0.0.0/16 0 24";  # entries to send (afi:safi seq permit|deny prefix minlen maxlen)
 }
 ```
 
