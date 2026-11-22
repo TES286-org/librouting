@@ -563,6 +563,31 @@ impl BgpPeer {
         crate::extensions::link_local_next_hop::negotiated(&self.cfg, &self.peer_capabilities)
     }
 
+    /// Whether the session transport is itself IPv6 link-local — the
+    /// local address (and therefore the peer, since link-local
+    /// addresses are on-link only per RFC 4291 §2.5.6) is an fe80::/10
+    /// IPv6 address. RFC 2545 §3 already permits a link-local
+    /// next-hop on a directly-attached session without any capability,
+    /// so the codec accepts an LL-only next-hop in that case; the
+    /// draft-ietf-idr-linklocal-capability-06 opt-in only gates the
+    /// case where the transport is NOT link-local (e.g. a global IPv6
+    /// transport or a tunnel) and the next-hop still is.
+    pub fn transport_is_link_local(&self) -> bool {
+        matches!(
+            self.cfg.local_address,
+            Some(lr_core::addr::IpAddr::V6(b))
+                if crate::extensions::link_local_next_hop::is_link_local(&b)
+        )
+    }
+
+    /// Whether an LL-only MP_REACH next-hop may be accepted on this
+    /// session: either the Link-Local Next Hop capability was
+    /// negotiated (the draft's opt-in), or the transport itself is
+    /// link-local (RFC 2545 §3's directly-attached session).
+    pub fn link_local_next_hop_allowed(&self) -> bool {
+        self.link_local_negotiated() || self.transport_is_link_local()
+    }
+
     /// Whether the codec currently accepts and emits RFC 8654 Extended
     /// Messages (both speakers advertised capability code 6).
     pub fn codec_extended_message_active(&self) -> bool {
@@ -1677,11 +1702,16 @@ impl BgpPeer {
             peer: self.cfg.peer_id,
         };
         // draft-ietf-idr-linklocal-capability-06 §3: a Link-Local-only
-        // next hop is conformant only when the capability was
-        // negotiated. Without it the receiver treats the route as
-        // withdrawn (RFC 7606 §2) rather than installing an fe80::
-        // next hop that no forwarding lookup can resolve.
-        let link_local_ok = self.link_local_negotiated();
+        // next hop is conformant when the capability was negotiated
+        // (the draft's opt-in for a non-link-local transport) OR when
+        // the transport itself is link-local (RFC 2545 §3's
+        // directly-attached session — a link-local next-hop is
+        // resolvable there without any capability, the form BIRD and
+        // FRR both accept on fe80:: sessions). Otherwise the receiver
+        // treats the route as withdrawn (RFC 7606 §2) rather than
+        // installing an fe80:: next hop that no forwarding lookup can
+        // resolve.
+        let link_local_ok = self.link_local_next_hop_allowed();
 
         // --- Withdrawals (IPv4 legacy section) ---
         // FRR `no bgp default ipv4-unicast`: a peer not activated
