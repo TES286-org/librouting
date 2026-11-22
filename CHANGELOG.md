@@ -81,10 +81,14 @@ daemon-config + DSL key:
   can accept a link-local IPv6 next-hop in MP_REACH_NLRI. A
   16-octet fe80::/10 next hop is classified as link-local-only;
   ::/LL and LL/LL use the second slot for forwarding; a non-LL
-  second slot is malformed. Without the capability an LL-only
-  announcement is treated as withdraw. Egress refuses an LL-only
-  next hop unless negotiated, and a route reflector rewrites it to
-  its own address or suppresses it.
+  second slot is malformed. An LL-only announcement is treated as
+  withdraw (RFC 7606 §2) on a non-link-local transport without the
+  capability; a link-local transport (RFC 2545 §3 — both speakers
+  bind fe80::/10) accepts an LL-only next-hop without the
+  capability, the form BIRD and FRR permit on fe80:: sessions.
+  Egress refuses an LL-only next hop unless the capability was
+  negotiated or the transport is link-local, and a route reflector
+  rewrites it to its own address or suppresses it.
 
 Public Rust API growth beyond the new `CapabilityCode` variants,
 `Capability` constructors, `PeerConfig` fields and extension
@@ -94,6 +98,32 @@ module surfaces: `RouteRefresh` carries an optional
 and `RouterInstance` gains a default `set_bfd_state` no-op plus
 `DefaultRouter::send_orf` / `set_orf_tx`. Pre-2.0 semver debt the
 `api-surface` CI job already tracks. C ABI untouched.
+
+### Fixed — Link-Local next-hop on a link-local transport (CI regression)
+
+The Link-Local Next Hop runtime landed above with a strict
+"without the capability an LL-only announcement is treated as
+withdraw" gate that fired regardless of transport. That broke the
+standard RFC 2545 §3 form — a directly-attached session whose
+transport is itself IPv6 link-local (both speakers bind fe80::/10)
+already permits an LL-only next-hop without any capability, the
+form BIRD and FRR both accept on fe80:: sessions. The codec now
+accepts (ingress) and emits (egress) an LL-only next-hop when
+either the capability was negotiated or the transport is
+link-local; the strict reject still fires on a non-link-local
+transport without the capability, matching the draft and the
+`link_local_only_next_hop_without_capability_is_treated_as_withdraw`
+fsm_test. The stale FFI test
+`mp_reach_v6_link_local_collapses_to_v6_global_on_wire` (which
+pinned a pre-capability wire-collapse behaviour the §3 prefix
+classification superseded) is renamed to
+`mp_reach_v6_link_local_preserved_on_wire` and now expects kind=3
+(`V6LinkLocal`) preserved through the round-trip, mirroring the
+in-crate `link_local_sixteen_byte_next_hop_is_classified_by_prefix`
+test. Restores the four link-local BGP session modes
+(`mode2`/`mode4`/`mode6`/`mode8` in `bgp_session_modes`) that
+nextest was cancelling the unit-test job on across ubuntu, macOS,
+Windows and RISC-V.
 
 ### Added — filter DSL surface, event bus
 
