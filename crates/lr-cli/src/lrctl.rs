@@ -28,12 +28,15 @@
 //! ```
 
 use std::env;
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 mod lrctl_json;
+mod lrctl_pretty;
 mod pipe_name;
 
 use lrctl_json::{JArray, JObject, JValue};
+use lrctl_pretty::{Format, JsonFormat, Output};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,6 +65,25 @@ fn main() -> ExitCode {
     // applied centrally in `proxy_raw`/`proxy` rather than per
     // sub-command.
     let (json, cmd_args) = extract_json_flag(&cmd_args);
+    // Pull `--format=plain|pretty|json[:pretty]` out of the arg
+    // list. Takes precedence over `--json` so an operator can
+    // force the plain wire form even after a stale `--json` shell
+    // alias.
+    let (format, cmd_args) = lrctl_pretty::extract_format_flag(&cmd_args);
+    // Pull `--color=auto|always|never` out of the arg list. Only
+    // affects the pretty path; the plain and JSON paths never carry
+    // colour.
+    let (color, cmd_args) = lrctl_pretty::extract_color_flag(&cmd_args);
+    // Resolve the final output format + colour flag. The default
+    // is `Pretty` when stdout is a TTY (a human at a terminal gets
+    // the readable view) and `Plain` otherwise (a shell pipeline
+    // gets the scriptable wire form). This keeps the existing
+    // test suite — which runs `lrctl` under `Command::output()`
+    // (stdout piped, not a TTY) — on the plain path it asserted
+    // against, while an operator typing `lrctl status` at a
+    // terminal gets the new pretty view.
+    let is_tty = std::io::stdout().is_terminal();
+    let output = lrctl_pretty::resolve_output(format, json, color, is_tty);
     if cmd_args.is_empty() {
         print_usage();
         return ExitCode::from(1);
@@ -77,7 +99,12 @@ fn main() -> ExitCode {
             print_usage();
             ExitCode::SUCCESS
         }
-        "status" => proxy_with_json(&socket, "status", json, parse_status_body),
+        "status" => proxy_with_output(&socket, "status", output, parse_status_body, {
+            fn r(body: &str, color: bool) -> String {
+                lrctl_pretty::render_status(body, color)
+            }
+            r
+        }),
         "sessions" => {
             // `sessions` and `sessions list` both map to the daemon's
             // `sessions` command — the daemon has no list/detail
@@ -86,7 +113,12 @@ fn main() -> ExitCode {
                 eprintln!("usage: lrctl sessions [list]");
                 return ExitCode::from(2);
             }
-            proxy_with_json(&socket, "sessions", json, parse_sessions_body)
+            proxy_with_output(&socket, "sessions", output, parse_sessions_body, {
+                fn r(body: &str, color: bool) -> String {
+                    lrctl_pretty::render_sessions(body, color)
+                }
+                r
+            })
         }
         // BIRD-style alias: `neighbor` / `neighbors` is the
         // operator's muscle-memory word for "show me the peers". The
@@ -94,14 +126,14 @@ fn main() -> ExitCode {
         // routes there. `neighbor <handle>` is a thin alias for
         // `show session <handle>` so the BIRD `show protocols all
         // <name>` operator gets the deep dive from the same verb.
-        "neighbor" | "neighbors" => neighbor(&socket, rest, json),
+        "neighbor" | "neighbors" => neighbor(&socket, rest, output),
         // `ping` round-trips the API socket with the cheapest
         // command the daemon answers (`help`): success means the
         // daemon is up, the API socket is reachable, and the
         // round-trip latency is a proxy for "the daemon's event
         // loop is not wedged". BIRD has no direct equivalent;
         // FRR's `vtysh -c 'show version'` is the closest analogue.
-        "ping" => ping(&socket, json),
+        "ping" => ping(&socket, output),
         // `metrics` connects to the daemon's HTTP /metrics
         // endpoint and proxies the scrape to stdout. The address
         // defaults to the daemon's documented default
@@ -110,12 +142,12 @@ fn main() -> ExitCode {
         // because the metrics endpoint is TCP, not the Unix API
         // socket).
         "metrics" => metrics(&socket, rest),
-        "routes" => routes(&socket, rest, json),
-        "roa" => roa(&socket, rest, json),
+        "routes" => routes(&socket, rest, output),
+        "roa" => roa(&socket, rest, output),
         "session" => session(&socket, rest),
-        "show" => show(&socket, rest, json),
+        "show" => show(&socket, rest, output),
         "reload" => proxy(&socket, "reload"),
-        "shutdown" => shutdown(&socket, rest),
+        "shutdown" => shutdown(&socket, rest, output),
         "filter" => filter(rest),
         other => {
             eprintln!("error: unknown command '{other}'");
@@ -168,13 +200,6 @@ fn extract_json_flag(args: &[String]) -> (Option<JsonFormat>, Vec<String>) {
     (json, rest)
 }
 
-/// Output format selected by `--json` / `--json=pretty`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum JsonFormat {
-    Compact,
-    Pretty,
-}
-
 /// Pull a `--socket PATH` / `--socket=PATH` flag out of the arg list.
 /// Returns the socket value (when present) and the remaining args in
 /// their original order.
@@ -208,7 +233,7 @@ fn print_usage() {
     println!("lrctl {} — librouting operational CLI", VERSION);
     println!();
     println!("USAGE:");
-    println!("    lrctl [--socket PATH] [--json[=pretty]] <command> [args]");
+    println!("    lrctl [--socket PATH] [--format FORMAT] [--color MODE] [--json[=pretty]] <command> [args]");
     println!();
     println!(
         "The default socket is {} (matches templates/daemon.toml).",
@@ -217,8 +242,12 @@ fn print_usage() {
     println!();
     println!("GLOBAL FLAGS:");
     println!("    --socket PATH       API socket path (default: {DEFAULT_SOCKET})");
-    println!("    --json              Emit machine-readable JSON for supported commands");
-    println!("    --json=pretty       Pretty-printed JSON (2-space indent)");
+    println!("    --format FORMAT     Output format: plain | pretty | json | json:pretty");
+    println!("                        (default: pretty when stdout is a TTY, plain otherwise)");
+    println!("    --color MODE        Colour output (pretty only): auto | always | never");
+    println!("                        (default: auto — colour when stdout is a TTY)");
+    println!("    --json              Alias for --format=json (machine-readable JSON)");
+    println!("    --json=pretty       Alias for --format=json:pretty (2-space indent)");
     println!("    -j                  Alias for --json");
     println!();
     println!("DAEMON COMMANDS (proxy the runtime API):");
@@ -256,17 +285,18 @@ fn print_usage() {
     println!("    version             Print lrctl version");
     println!("    help                Show this message");
     println!();
-    println!("JSON OUTPUT (--json):");
-    println!(
-        "    status, sessions, ping, neighbor, show status/sessions/session/routes count/memory"
-    );
-    println!("    emit a JSON value to stdout instead of the line-oriented form. The shape is");
-    println!("    documented in docs/bindings/lrctl-json.md. Other commands ignore --json.");
+    println!("OUTPUT FORMATS:");
+    println!("    plain   The daemon's line-oriented wire shape (key value / key=value).");
+    println!("            The default when stdout is not a TTY — what scripts and pipes see.");
+    println!("    pretty  Section headings, aligned tables, colour-coded state, human-friendly");
+    println!("            uptime and memory. The default when stdout is a TTY.");
+    println!("    json    A JSON value per the shapes in docs/bindings/lrctl-json.md.");
+    println!("            Use --json=pretty for a 2-space indent.");
 }
 
 /// `lrctl routes <show|count|dump> ...` — split out because the
 /// sub-commands have different argument shapes.
-fn routes(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
+fn routes(socket: &str, rest: &[String], output: Output) -> ExitCode {
     if rest.is_empty() {
         eprintln!("usage: lrctl routes <show [prefix] | count | dump <path>>");
         return ExitCode::from(2);
@@ -285,10 +315,20 @@ fn routes(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
                 Err(code) => return code,
             };
             match prefix_filter {
-                None => {
-                    print!("{raw}");
-                    ExitCode::SUCCESS
-                }
+                None => match output.format {
+                    Format::Pretty => {
+                        let rendered = lrctl_pretty::render_routes(&raw, output.color);
+                        print!("{rendered}");
+                        if !rendered.ends_with('\n') {
+                            println!();
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    _ => {
+                        print!("{raw}");
+                        ExitCode::SUCCESS
+                    }
+                },
                 Some(needle) => {
                     let mut matched = 0u64;
                     for line in raw.lines() {
@@ -317,7 +357,18 @@ fn routes(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
         // count`; the alias just routes there. The `--json` flag
         // is honoured: the daemon's `total N / proto=P routes=M`
         // body is parsed into `{"total": N, "by_protocol": [{"protocol": P, "routes": M}, ...]}`.
-        "count" => proxy_with_json(socket, "show routes count", json, parse_routes_count_body),
+        "count" => proxy_with_output(
+            socket,
+            "show routes count",
+            output,
+            parse_routes_count_body,
+            {
+                fn r(body: &str, color: bool) -> String {
+                    lrctl_pretty::render_routes_count(body, color)
+                }
+                r
+            },
+        ),
         "dump" => {
             if rest.len() < 2 {
                 eprintln!("usage: lrctl routes dump <path>");
@@ -345,13 +396,31 @@ fn routes(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
 /// line per entry, BIRD `show roa` parity). `roa count` extracts just
 /// the summary line — `roa-total N static S rtr R` — so a script can
 /// poll the table size without parsing the entry list.
-fn roa(socket: &str, rest: &[String], _json: Option<JsonFormat>) -> ExitCode {
+fn roa(socket: &str, rest: &[String], output: Output) -> ExitCode {
     if rest.is_empty() {
         eprintln!("usage: lrctl roa <list | count>");
         return ExitCode::from(2);
     }
     match rest[0].as_str() {
-        "list" => proxy(socket, "show roa"),
+        "list" => match output.format {
+            Format::Pretty => {
+                // Pretty-view of `show roa`: the daemon's `roa_view`
+                // body already groups the summary + per-entry table;
+                // the pretty renderer colour-codes the summary line.
+                match proxy_raw(socket, "show roa") {
+                    Ok(body) => {
+                        let rendered = lrctl_pretty::render_show_roa(&body, output.color);
+                        print!("{rendered}");
+                        if !rendered.ends_with('\n') {
+                            println!();
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(code) => code,
+                }
+            }
+            _ => proxy(socket, "show roa"),
+        },
         "count" => {
             // The daemon's `show roa` reply starts with the summary
             // line; `roa count` strips the per-entry lines so a
@@ -380,14 +449,36 @@ fn roa(socket: &str, rest: &[String], _json: Option<JsonFormat>) -> ExitCode {
 /// `shutdown drain`, `shutdown status`, `shutdown abort` and plain
 /// `shutdown` keywords, with the same on-the-wire framing (the
 /// daemon's line protocol already parses them).
-fn shutdown(socket: &str, rest: &[String]) -> ExitCode {
+///
+/// Under the Pretty view, `shutdown status` formats the
+/// `state=X remaining=N` line with colour-coded state; the other
+/// sub-commands proxy the daemon's short reply verbatim (their
+/// bodies are a single line like `drain started (state=draining)`).
+fn shutdown(socket: &str, rest: &[String], output: Output) -> ExitCode {
     if rest.is_empty() {
         // `lrctl shutdown` (no subcommand) — immediate.
         return proxy(socket, "shutdown");
     }
     match rest[0].as_str() {
         "drain" => proxy(socket, "shutdown drain"),
-        "status" => proxy(socket, "shutdown status"),
+        "status" => {
+            // Pretty-view of `shutdown status`: the daemon's
+            // `state=X remaining=N` reply gets a colour-coded state.
+            match output.format {
+                Format::Pretty => match proxy_raw(socket, "shutdown status") {
+                    Ok(body) => {
+                        let rendered = lrctl_pretty::render_shutdown_status(&body, output.color);
+                        print!("{rendered}");
+                        if !rendered.ends_with('\n') {
+                            println!();
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(code) => code,
+                },
+                _ => proxy(socket, "shutdown status"),
+            }
+        }
         "abort" => proxy(socket, "shutdown abort"),
         "now" => proxy(socket, "shutdown"),
         other => {
@@ -408,20 +499,30 @@ fn shutdown(socket: &str, rest: &[String]) -> ExitCode {
 /// `lrctl show` (no sub) maps to `show status`, mirroring BIRD's
 /// `show` shortcut.
 ///
-/// `--json` is honoured for `status`, `sessions`, `routes count` and
-/// `memory`. For `session <handle>` the JSON view falls back to the
-/// raw body — the per-session block is multi-line key=value with
+/// `--format=json` is honoured for `status`, `sessions`, `routes count`
+/// and `memory`. For `session <handle>` the JSON view falls back to
+/// the raw body — the per-session block is multi-line key=value with
 /// nested `stats:` / `last-error:` / `messages:` lines that do not
 /// round-trip cleanly into a flat object, so the line-oriented form
-/// is preserved verbatim under `--json` (an operator trading off
-/// fidelity for JSON-parsability can use the `sessions` JSON view
-/// plus a client-side handle filter instead).
-fn show(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
+/// is preserved verbatim under `--format=json` (an operator trading
+/// off fidelity for JSON-parsability can use the `sessions` JSON
+/// view plus a client-side handle filter instead).
+fn show(socket: &str, rest: &[String], output: Output) -> ExitCode {
     if rest.is_empty() {
-        return proxy_with_json(socket, "show status", json, parse_show_status_body);
+        return proxy_with_output(socket, "show status", output, parse_show_status_body, {
+            fn r(body: &str, color: bool) -> String {
+                lrctl_pretty::render_show_status(body, color)
+            }
+            r
+        });
     }
     match rest[0].as_str() {
-        "status" => proxy_with_json(socket, "show status", json, parse_show_status_body),
+        "status" => proxy_with_output(socket, "show status", output, parse_show_status_body, {
+            fn r(body: &str, color: bool) -> String {
+                lrctl_pretty::render_show_status(body, color)
+            }
+            r
+        }),
         "sessions" => {
             // `show sessions detail` and `show sessions` map to
             // distinct daemon commands (the daemon's renderer chooses
@@ -430,14 +531,34 @@ fn show(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
             // unambiguous — `sessions list` belongs to the legacy
             // `lrctl sessions` command.
             if rest.len() == 1 {
-                proxy_with_json(socket, "show sessions", json, parse_sessions_body)
+                proxy_with_output(socket, "show sessions", output, parse_sessions_body, {
+                    fn r(body: &str, color: bool) -> String {
+                        lrctl_pretty::render_sessions(body, color)
+                    }
+                    r
+                })
             } else if rest.len() == 2 && rest[1] == "detail" {
                 // `show sessions detail` carries the multi-line
-                // per-session block — the JSON view falls back to
-                // the raw body for the same reason as `show session
+                // per-session block. The pretty renderer regroups the
+                // per-session detail blocks; the JSON view falls back
+                // to the raw body for the same reason as `show session
                 // <handle>` (see above). The plain `show sessions`
                 // one-line form round-trips cleanly.
-                proxy(socket, "show sessions detail")
+                match output.format {
+                    Format::Pretty => match proxy_raw(socket, "show sessions detail") {
+                        Ok(body) => {
+                            let rendered =
+                                lrctl_pretty::render_sessions_detail(&body, output.color);
+                            print!("{rendered}");
+                            if !rendered.ends_with('\n') {
+                                println!();
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(code) => code,
+                    },
+                    _ => proxy(socket, "show sessions detail"),
+                }
             } else {
                 eprintln!("usage: lrctl show sessions [detail]");
                 ExitCode::from(2)
@@ -453,7 +574,20 @@ fn show(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
             // so the client does not duplicate the lookup — it just
             // forwards the (syntax-validated) numeric token.
             match rest[1].parse::<u64>() {
-                Ok(h) => proxy(socket, &format!("show session {h}")),
+                Ok(h) => match output.format {
+                    Format::Pretty => match proxy_raw(socket, &format!("show session {h}")) {
+                        Ok(body) => {
+                            let rendered = lrctl_pretty::render_show_session(&body, output.color);
+                            print!("{rendered}");
+                            if !rendered.ends_with('\n') {
+                                println!();
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(code) => code,
+                    },
+                    _ => proxy(socket, &format!("show session {h}")),
+                },
                 Err(_) => {
                     eprintln!("error: invalid session handle '{}'", rest[1]);
                     eprintln!("usage: lrctl show session <handle>");
@@ -466,9 +600,25 @@ fn show(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
                 eprintln!("usage: lrctl show routes count");
                 return ExitCode::from(2);
             }
-            proxy_with_json(socket, "show routes count", json, parse_routes_count_body)
+            proxy_with_output(
+                socket,
+                "show routes count",
+                output,
+                parse_routes_count_body,
+                {
+                    fn r(body: &str, color: bool) -> String {
+                        lrctl_pretty::render_routes_count(body, color)
+                    }
+                    r
+                },
+            )
         }
-        "memory" => proxy_with_json(socket, "show memory", json, parse_show_memory_body),
+        "memory" => proxy_with_output(socket, "show memory", output, parse_show_memory_body, {
+            fn r(body: &str, color: bool) -> String {
+                lrctl_pretty::render_show_memory(body, color)
+            }
+            r
+        }),
         other => {
             eprintln!("error: unknown show subcommand '{other}'");
             eprintln!(
@@ -482,16 +632,34 @@ fn show(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
 /// `lrctl neighbor [handle]` — BIRD-style alias. With no argument,
 /// maps to `sessions` (the daemon's `sessions` wire keyword). With a
 /// numeric handle, maps to `show session <handle>` for the deep
-/// dive. The `--json` flag is honoured for the no-argument form (the
-/// handle form falls back to the raw `show session` body — see
-/// `show`'s doc comment for why).
-fn neighbor(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
+/// dive. The output format is honoured for the no-argument form (the
+/// handle form falls back to the raw `show session` body under JSON —
+/// see `show`'s doc comment for why).
+fn neighbor(socket: &str, rest: &[String], output: Output) -> ExitCode {
     if rest.is_empty() {
-        return proxy_with_json(socket, "sessions", json, parse_sessions_body);
+        return proxy_with_output(socket, "sessions", output, parse_sessions_body, {
+            fn r(body: &str, color: bool) -> String {
+                lrctl_pretty::render_sessions(body, color)
+            }
+            r
+        });
     }
     // `neighbor <handle>` — alias for `show session <handle>`.
     match rest[0].parse::<u64>() {
-        Ok(h) => proxy(socket, &format!("show session {h}")),
+        Ok(h) => match output.format {
+            Format::Pretty => match proxy_raw(socket, &format!("show session {h}")) {
+                Ok(body) => {
+                    let rendered = lrctl_pretty::render_show_session(&body, output.color);
+                    print!("{rendered}");
+                    if !rendered.ends_with('\n') {
+                        println!();
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(code) => code,
+            },
+            _ => proxy(socket, &format!("show session {h}")),
+        },
         Err(_) => {
             eprintln!("error: invalid session handle '{}'", rest[0]);
             eprintln!("usage: lrctl neighbor [handle]");
@@ -512,7 +680,7 @@ fn neighbor(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode
 /// command list. `status` would also work, but `help` is faster
 /// (no router read-lock) and is the canonical "is anyone home"
 /// probe in the BIRD / vtysh lineage.
-fn ping(socket: &str, json: Option<JsonFormat>) -> ExitCode {
+fn ping(socket: &str, output: Output) -> ExitCode {
     let start = std::time::Instant::now();
     match transport::round_trip(socket, "help") {
         Ok(body) => {
@@ -522,27 +690,26 @@ fn ping(socket: &str, json: Option<JsonFormat>) -> ExitCode {
             // as a non-zero exit so a health-check loop sees it.
             let is_help = body.starts_with("commands:") || body.contains("commands:");
             if !is_help {
-                return emit_ping_result(json, false, ms, Some(&body));
+                return emit_ping_result(output, false, ms, Some(&body));
             }
-            emit_ping_result(json, true, ms, None)
+            emit_ping_result(output, true, ms, None)
         }
         Err(e) => {
             let ms = start.elapsed().as_millis();
-            emit_ping_result(json, false, ms, Some(&e))
+            emit_ping_result(output, false, ms, Some(&e))
         }
     }
 }
 
-/// Format the `ping` result for stdout according to the JSON flag.
-/// Returns the exit code (SUCCESS when ok=true, FAILURE otherwise).
-fn emit_ping_result(
-    json: Option<JsonFormat>,
-    ok: bool,
-    ms: u128,
-    detail: Option<&str>,
-) -> ExitCode {
-    match json {
-        Some(fmt) => {
+/// Format the `ping` result for stdout according to the output
+/// format. Returns the exit code (SUCCESS when ok=true, FAILURE
+/// otherwise). Under JSON, the result is `{"ok":…,"round_trip_ms":N}`
+/// (plus `"detail"` on failure). Under Pretty, the result is
+/// `✓ ok Nms` / `✗ fail Nms — <detail>` with colour. Under Plain,
+/// the legacy `ok Nms` / `fail Nms: <detail>` shape.
+fn emit_ping_result(output: Output, ok: bool, ms: u128, detail: Option<&str>) -> ExitCode {
+    match output.format {
+        Format::Json(fmt) => {
             let mut o = JObject::new();
             o.push_bool("ok", ok).push_uint("round_trip_ms", ms as u64);
             if let Some(d) = detail {
@@ -551,7 +718,11 @@ fn emit_ping_result(
             let v = JValue::Object(o);
             print_json(&v, fmt);
         }
-        None => match detail {
+        Format::Pretty => {
+            let rendered = lrctl_pretty::render_ping(ok, ms, detail, output.color);
+            print!("{rendered}");
+        }
+        Format::Plain => match detail {
             Some(d) => println!("fail {ms}ms: {d}"),
             None => println!("ok {ms}ms"),
         },
@@ -1188,30 +1359,36 @@ fn proxy_raw(socket: &str, cmd: &str) -> Result<String, ExitCode> {
     }
 }
 
-/// Like [`proxy`] but with an optional JSON view. When `json` is
-/// `Some`, the daemon's reply is passed through `parser` to produce
-/// a [`JValue`], then serialized in the requested format (compact or
-/// pretty). When `json` is `None`, the daemon's reply is printed
-/// verbatim — the same as `proxy`.
+/// Like [`proxy`] but with the full output-format machinery. The
+/// daemon's reply is dispatched through three paths:
+///
+/// - `Format::Plain` — printed verbatim (the legacy wire shape
+///   scripts parse).
+/// - `Format::Pretty` — passed through `pretty(body, color)` for
+///   the human-readable view (section headings, aligned tables,
+///   colour-coded session states).
+/// - `Format::Json(fmt)` — passed through `parser(body)` to produce
+///   a [`JValue`], then serialized in the requested JSON format.
 ///
 /// A transport failure or a daemon `error:` line is a non-zero exit
-/// in both modes; the JSON view is only applied to success replies.
-/// Under `--json`, a daemon error surfaces as
+/// in every mode. Under JSON, a daemon error surfaces as
 /// `{"ok":false,"error":"…"}` so a JSON-consuming script sees the
-/// same shape across success and failure (and does not have to
-/// special-case a non-JSON line).
-fn proxy_with_json(
+/// same shape across success and failure. Under Pretty, an error
+/// gets a bold-red `Error:` prefix. Under Plain, the error body is
+/// printed verbatim.
+fn proxy_with_output(
     socket: &str,
     cmd: &str,
-    json: Option<JsonFormat>,
+    output: Output,
     parser: fn(&str) -> JValue,
+    pretty: fn(&str, bool) -> String,
 ) -> ExitCode {
     match transport::round_trip(socket, cmd) {
         Ok(body) => {
             let is_error = body.lines().any(|l| l.starts_with("error:"));
             if is_error {
-                match json {
-                    Some(fmt) => {
+                match output.format {
+                    Format::Json(fmt) => {
                         let mut o = JObject::new();
                         o.push_bool("ok", false);
                         // The first `error:` line carries the reason;
@@ -1227,7 +1404,11 @@ fn proxy_with_json(
                         let v = JValue::Object(o);
                         print_json(&v, fmt);
                     }
-                    None => {
+                    Format::Pretty => {
+                        let rendered = lrctl_pretty::render_error(&body, output.color);
+                        print!("{rendered}");
+                    }
+                    Format::Plain => {
                         print!("{body}");
                         if !body.ends_with('\n') {
                             println!();
@@ -1236,12 +1417,19 @@ fn proxy_with_json(
                 }
                 return ExitCode::from(1);
             }
-            match json {
-                Some(fmt) => {
+            match output.format {
+                Format::Json(fmt) => {
                     let v = parser(&body);
                     print_json(&v, fmt);
                 }
-                None => {
+                Format::Pretty => {
+                    let rendered = pretty(&body, output.color);
+                    print!("{rendered}");
+                    if !rendered.ends_with('\n') {
+                        println!();
+                    }
+                }
+                Format::Plain => {
                     print!("{body}");
                     if !body.ends_with('\n') {
                         println!();
@@ -1250,18 +1438,19 @@ fn proxy_with_json(
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            match json {
-                Some(fmt) => {
-                    let mut o = JObject::new();
-                    o.push_bool("ok", false).push_str("error", &e);
-                    let v = JValue::Object(o);
-                    print_json(&v, fmt);
-                }
-                None => eprintln!("lrctl: {e}"),
+        Err(e) => match output.format {
+            Format::Json(fmt) => {
+                let mut o = JObject::new();
+                o.push_bool("ok", false).push_str("error", &e);
+                let v = JValue::Object(o);
+                print_json(&v, fmt);
+                ExitCode::from(1)
             }
-            ExitCode::from(1)
-        }
+            _ => {
+                eprintln!("lrctl: {e}");
+                ExitCode::from(1)
+            }
+        },
     }
 }
 
