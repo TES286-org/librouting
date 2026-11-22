@@ -41,7 +41,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::TcpListener as StdTcpListener;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -293,9 +293,28 @@ pub(super) struct BgpReloadContext {
     /// for policy-change detection). Updated by the daemon-level
     /// reload after every successful pass.
     pub(super) current_config: Arc<Mutex<DaemonConfig>>,
+    /// RFC 4271 §6.8 collision-group allocator for sessions a reload
+    /// (re)creates. A collision group must be unique per peer: two
+    /// *different* peers sharing one make the resolver treat each
+    /// other's OpenSent/OpenConfirm sessions as collision siblings
+    /// when their remote BGP Identifiers match (parallel sessions to
+    /// the same physical router under two addresses). Startup hands
+    /// out `1..=N`; this counter continues from there and never
+    /// reuses a value, so a reload that removes peers and restarts
+    /// another cannot hand the restarted peer a group a kept peer
+    /// still owns — the naive `registry.len() + 1` does exactly that
+    /// once removals shift the registry length.
+    pub(super) next_collision_group: AtomicU64,
 }
 
 impl BgpReloadContext {
+    /// The next never-yet-used collision group. Values are unique for
+    /// the process lifetime (see the field doc); a restart or add
+    /// takes one per peer.
+    fn alloc_collision_group(&self) -> u64 {
+        self.next_collision_group.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     /// Stop one peer's connector and live sessions with the RFC 4486
     /// §4.1 Cease subcode the caller chose, wait for the connector
     /// thread to acknowledge its exit, then remove the router
@@ -717,7 +736,7 @@ impl BgpReloadContext {
                 .expect("the plan matched it");
             match self.bfd_add(fresh, spec, old.bfd.as_ref()) {
                 Ok(bfd) => {
-                    let group = (self.registry.read().unwrap().len() + 1) as u64;
+                    let group = self.alloc_collision_group();
                     match self.build_peer_entry(fresh, spec, group) {
                         Ok(mut entry) => {
                             entry.bfd = bfd;
@@ -758,7 +777,7 @@ impl BgpReloadContext {
             let spec = &fresh.peers[planned.fresh_index];
             match self.bfd_add(fresh, spec, None) {
                 Ok(bfd) => {
-                    let group = (self.registry.read().unwrap().len() + 1) as u64;
+                    let group = self.alloc_collision_group();
                     match self.build_peer_entry(fresh, spec, group) {
                         Ok(mut entry) => {
                             entry.bfd = bfd;

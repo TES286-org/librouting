@@ -1712,10 +1712,27 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             .iter()
             .any(|p| p.import_filter.is_some() || p.export_filter.is_some());
         if bound || !cfg.filters.is_empty() {
+            // Keep the historical `N compiled, X import / Y export
+            // bindings` shape — the interop lab greps it and
+            // docs/examples/filter_dsl_roa.md documents it; the
+            // per-session dispatch note rides along after the counts.
+            let bound_imports = cfg
+                .peers
+                .iter()
+                .filter(|p| p.import_filter.is_some())
+                .count();
+            let bound_exports = cfg
+                .peers
+                .iter()
+                .filter(|p| p.export_filter.is_some())
+                .count();
             log_info!(
                 Component::Policy,
-                "filters:     {} compiled, per-session dispatch installed",
-                cfg.filters.len()
+                "filters:     {} compiled, {} import / {} export bindings \
+                 (per-session dispatch)",
+                cfg.filters.len(),
+                bound_imports,
+                bound_exports
             );
         }
     }
@@ -2555,6 +2572,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 armed_auth: Mutex::new(armed_auth),
                 strict_inbound,
                 current_config: Arc::new(Mutex::new(cfg.clone())),
+                // Startup handed out collision groups `1..=N`; the
+                // reload allocator continues from there and never
+                // reuses a value (see `BgpReloadContext`'s field doc).
+                next_collision_group: std::sync::atomic::AtomicU64::new(cfg.peers.len() as u64),
             });
         let ctx = Arc::clone(&reload_ctx);
         let engine_reload: EngineReloadFn =

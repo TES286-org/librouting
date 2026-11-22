@@ -88,7 +88,7 @@ Startup reports both halves:
 
 ```text
   roa:         2 inline entries, validate=true (action: reject)
-  filters:     1 compiled, 1 import / 0 export bindings
+  filters:     1 compiled, 1 import / 0 export bindings (per-session dispatch)
 ```
 
 Then confirm the verdicts on live routes. `proto` renders as a

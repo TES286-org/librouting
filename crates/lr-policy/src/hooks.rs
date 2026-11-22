@@ -49,8 +49,19 @@ use lr_bgp::path::{Community, PathAttributes};
 
 #[cfg(feature = "damping")]
 use lr_damping::DampingTable;
+// `Arc` covers every hook family (the RFC 8326 graceful-shutdown pair
+// under `bgp`, the damping and peer-health tables), `RwLock` is the
+// graceful-shutdown exempt-session set (`bgp`), and `Mutex` the
+// damping / peer-health tables — each name is imported only under the
+// feature set that actually uses it, so a template build with just
+// `bgp` (or any single feature) stays warning-clean under
+// `-D warnings`.
 #[cfg(any(feature = "damping", feature = "peer-health", feature = "bgp"))]
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+#[cfg(any(feature = "damping", feature = "peer-health"))]
+use std::sync::Mutex;
+#[cfg(feature = "bgp")]
+use std::sync::RwLock;
 
 /// Verdict returned by a hook. The route is either dropped, kept as-is, or
 /// replaced by a modified copy.

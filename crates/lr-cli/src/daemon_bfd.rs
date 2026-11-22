@@ -449,7 +449,15 @@ impl BfdSupervisor {
         #[cfg(target_family = "unix")]
         let waker_for_thread = Arc::clone(&waker);
         let _ = thread::Builder::new().name("lr-bfd".into()).spawn(move || {
-            supervisor_main(state, rx, running, poll, waker_for_thread);
+            supervisor_main(
+                state,
+                rx,
+                running,
+                #[cfg(target_family = "unix")]
+                poll,
+                #[cfg(target_family = "unix")]
+                waker_for_thread,
+            );
         });
         self.tx = Some(tx);
         #[cfg(target_family = "unix")]
@@ -619,6 +627,7 @@ fn apply_rx_effects(
     effects: Vec<RxSlotEffect>,
     registry: Option<&mio::Registry>,
 ) {
+    #[cfg(target_family = "unix")]
     use mio::unix::SourceFd;
     for effect in effects {
         match effect {
