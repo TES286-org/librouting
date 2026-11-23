@@ -456,10 +456,13 @@ fn core_attributes_encode_as_wire_tlvs() {
 }
 
 #[test]
-fn extended_length_attribute_sets_flag_bit() {
+fn extended_length_attribute_uses_two_octet_length() {
     use lr_core::attr::{AttrTag, Attribute};
-    // RFC 4271 §4.3: values > 255 octets need the extended-length form:
-    // the 0x10 flag bit set in the flags octet plus a 3-octet length.
+    // RFC 4271 §4.3: values > 255 octets use the extended-length form:
+    // the 0x10 flag bit set in the flags octet plus a 2-octet length
+    // field. No 0xff marker precedes the length — the flag bit is the
+    // selector, matching what BIRD, FRR and every MRT-reading tool
+    // emit and consume.
     let big = vec![0xabu8; 300];
     let mut attrs = lr_core::attr::Attributes::new();
     attrs.insert(Attribute {
@@ -468,12 +471,19 @@ fn extended_length_attribute_sets_flag_bit() {
         value: big.clone(),
     });
     let wire = encode_attributes(&attrs);
-    assert_eq!(wire.len(), 1 + 1 + 1 + 2 + 300);
+    assert_eq!(wire.len(), 1 + 1 + 2 + 300);
     assert_eq!(wire[0], 0x40 | 0x10, "extended-length flag must be set");
     assert_eq!(wire[1], 9);
-    assert_eq!(wire[2], 0xff);
-    assert_eq!(u16::from_be_bytes([wire[3], wire[4]]), 300);
-    assert_eq!(&wire[5..], &big[..]);
+    assert_eq!(u16::from_be_bytes([wire[2], wire[3]]), 300);
+    assert_eq!(&wire[4..], &big[..]);
+    // Round-trip through `decode_attributes`: the encoder and decoder
+    // agree on the RFC 4271 layout, so a re-decode of the encoded
+    // bytes reproduces the original attribute set.
+    let decoded = decode_attributes(&wire);
+    assert_eq!(decoded.len(), 1);
+    let a = decoded.get(AttrTag::raw(9)).unwrap();
+    assert_eq!(a.flags, 0x40 | 0x10);
+    assert_eq!(a.value.len(), 300);
 }
 
 #[test]
