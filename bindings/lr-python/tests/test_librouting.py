@@ -1665,6 +1665,51 @@ def test_router_close_shutdown_session_unknown_handle():
             r.shutdown_session(99999)
         except librouting.LrError:
             pass
+        # The RFC 4486 §4.1 subcode variants share the shape.
+        try:
+            r.reset_session(99999)
+        except librouting.LrError:
+            pass
+        try:
+            r.deconfigure_session(99999)
+        except librouting.LrError:
+            pass
+
+
+def test_router_session_close_subcodes():
+    """reset_session / deconfigure_session / shutdown_session queue a
+    NOTIFICATION with the RFC 4486 §4.1 Cease subcode each variant is
+    defined to carry (4 Administrative Reset, 3 Peer De-configured,
+    2 Administrative Shutdown) — the wire-level contract the daemon's
+    configuration reload drives through the same router API."""
+    with librouting.Router() as r:
+        for closer, subcode in (
+            (r.reset_session, 4),
+            (r.deconfigure_session, 3),
+            (r.shutdown_session, 2),
+        ):
+            h = r.add_bgp_session(local_as=64512, peer_as=64513, local_bgp_id=0x0a000001)
+            r.start_session(h)
+            closer(h)
+            out = r.drain_output(h)
+            # Walk the drained messages (marker 16 + length 2 + type 1)
+            # and find the NOTIFICATION: type 3, code 6 (Cease), the
+            # variant's subcode.
+            i = 0
+            found = False
+            while i + 19 < len(out) and len(out) >= i + 21:
+                mlen = int.from_bytes(out[i + 16 : i + 18], "big")
+                if mlen < 19 or i + mlen > len(out):
+                    break
+                mtype = out[i + 18]
+                if mtype == 3 and out[i + 19] == 6 and out[i + 20] == subcode:
+                    found = True
+                    break
+                i += mlen
+            assert found, (
+                f"no Cease/{subcode} NOTIFICATION in the drained output "
+                f"for {closer.__name__}: {out.hex()}"
+            )
 
 
 def test_route_apply_set_checked_set_metric():

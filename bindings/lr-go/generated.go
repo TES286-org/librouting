@@ -6428,6 +6428,22 @@ func (x *Router) ShutdownSession(session uint64) (int32, error) {
 	return int32(rc), nil
 }
 
+func (x *Router) ResetSession(session uint64) (int32, error) {
+	rc := C.lr_router_reset_session(x.ptr, C.uint64_t(session))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_router_reset_session: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
+func (x *Router) DeconfigureSession(session uint64) (int32, error) {
+	rc := C.lr_router_deconfigure_session(x.ptr, C.uint64_t(session))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_router_deconfigure_session: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
 func (x *Router) RemoveRedistributionPipe(source int32, target int32) (int32, error) {
 	rc := C.lr_router_remove_redistribution_pipe(x.ptr, C.int32_t(source), C.int32_t(target))
 	if rc < 0 {

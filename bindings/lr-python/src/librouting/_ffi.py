@@ -4971,12 +4971,17 @@ uintptr_t lr_babel_frame_array_len(lr_babel_frame_array_t array);
 lr_babel_frame_t lr_babel_frame_array_at(lr_babel_frame_array_t array, uintptr_t index);
 void lr_babel_frame_array_free(lr_babel_frame_array_t array);
 
+typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
+typedef struct lr_afi_safi_t lr_nlri_family_t;
+
 /* GENERATED ADDITIONS - do not edit by hand.
    Source: scripts/gen_python.py + scripts/abi.json
    Re-run: python3 scripts/gen_python.py */
 
 typedef lr_ospf_external_route_vec_t lr_ospf_nssa_route_vec_t;
 typedef struct lr_afi_safi_t lr_nlri_family_t;
+int32_t lr_router_reset_session(lr_router_t r, uint64_t session);
+int32_t lr_router_deconfigure_session(lr_router_t r, uint64_t session);
 """
 
 

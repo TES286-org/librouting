@@ -290,22 +290,41 @@ error keeps the running configuration and reports it:
 `reload: <error> (keeping current config)`. Reload never crashes and
 never half-applies.
 
-What reload actually re-applies:
+The reload is atomic per engine and per unit: the fresh file parses,
+finalizes and validates against the live state (per-peer auth, every
+referenced route-map and filter name, BFD prerequisites, the speaker
+identity) before anything is applied. A validation failure keeps the
+running configuration entirely unchanged. What reload then re-applies,
+per unit:
 
-| Config | Reload behaviour |
-| --- | --- |
-| `networks` | Added prefixes are originated, removed ones unoriginated |
-| `[[static.route]]` | Added and changed routes installed, removed ones withdrawn |
-| `[[roa]]` | The static ROA layer is replaced wholesale |
-| `[bgp.rpki]` | Cache address change re-points the RTR client; same address re-syncs; removing the `[bgp.rpki] cache` block tears the live RTR thread down (transport closed, RTR-sourced ROAs withdrawn, thread exits) — restart the daemon to re-enable RPKI from a re-added block |
-| `[logging] file` (or `--log-file`) | Re-opens the file destination — the standard `logrotate` postrotate contract. The daemon drops the old fd and re-opens the path so the next record lands in the new file (no in-place rename tracking, no inode games). A fresh `[logging] file = ...` in the config changes the path; an absent `[logging]` block re-opens the startup `--log-file` path. The OSPF / OSPFv3 / LDP / BMP standalone daemons re-open the file too even though their full config reload is a no-op. |
-| `[[ldp.bind]]` (LDP daemon only) | Added / changed FEC-label bindings are advertised to every operational peer via Label Mapping messages; removed ones are withdrawn via Label Withdraw messages (RFC 5036 §3.5.7 / §3.5.10). A label change for an existing FEC reaches peers as a withdraw of the old label followed by an advertise of the new one. The kernel MPLS mirror (`[ldp] install_kernel`, Linux only) is updated in lockstep: pop routes for new tail labels are installed, pop routes for removed labels are deleted. The session table, transit bookkeeping and interface set are out of scope for this slice (they need a real diff/apply pass) and still require a restart. |
-| everything else | Reported as needing a restart |
+| Unit | Config | Reload behaviour |
+| --- | --- | --- |
+| peer | `[[peer]]` added | Sessions created, BFD started when `bfd = true`, connector spawned — other peers' sessions keep running |
+| peer | `[[peer]]` removed | Live transports closed with the RFC 4486 §4.1 Peer De-configured Cease (subcode 3), sessions removed, connector retired, BFD session stopped |
+| peer | `[[peer]]` reconfigured | Session-affecting fields (AS, auth, timers, capability set, `bfd`) restart exactly that peer with the Administrative Reset Cease (subcode 4) |
+| peer | `shutdown` flag | `true` closes the live sessions with the Administrative Shutdown Cease (subcode 2) and parks the connector; `false` re-arms the same sessions and starts the connector (FRR `neighbor X shutdown`) |
+| policy | `[[route-map]]`, `[[prefix-list]]`, `[[as-path-list]]`, `[[community-list]]`, `[[filter]]`, per-peer `import` / `export` / `import_filter` / `export_filter` | Recompiled and swapped in place. Sessions re-apply the inbound policy without a bounce: a peer with `soft_reconfig_inbound` re-imports from its pre-policy snapshot, every other peer gets an RFC 2918 ROUTE-REFRESH |
+| origination | `networks` | Added prefixes are originated, removed ones unoriginated |
+| origination | `[[bgp.network_route_map]]` | A network whose route-map binding or route-map content changed is re-originated through the fresh route-map |
+| data plane | `[[static.route]]` | Added and changed routes installed, removed ones withdrawn |
+| data plane | `[[roa]]` | The static ROA layer is replaced wholesale |
+| data plane | `[bgp.rpki]` | Cache address change re-points the RTR client; same address re-syncs; removing the `[bgp.rpki] cache` block tears the live RTR thread down (transport closed, RTR-sourced ROAs withdrawn, thread exits) — restart the daemon to re-enable RPKI from a re-added block |
+| listener | `listen_addr`, inbound session auth | The listener socket is replaced: the reactor drops the old one, the reload binds and arms the fresh socket (auth, GTSM) and re-attaches it. Inbound connections are refused for the replacement window |
+| BFD | `[bfd]` timers | Every session re-points via `BfdSession::update_timers` (RFC 5880 §6.8.3 poll sequences) |
+| logging | `[logging] file` (or `--log-file`) | Re-opens the file destination — the standard `logrotate` postrotate contract. The daemon drops the old fd and re-opens the path so the next record lands in the new file (no in-place rename tracking, no inode games). A fresh `[logging] file = ...` in the config changes the path; an absent `[logging]` block re-opens the startup `--log-file` path. The OSPF / OSPFv3 / LDP / BMP standalone daemons re-open the file too even though their full config reload is a no-op. |
+| LDP | `[[ldp.bind]]` (LDP daemon only) | Added / changed FEC-label bindings are advertised to every operational peer via Label Mapping messages; removed ones are withdrawn via Label Withdraw messages (RFC 5036 §3.5.7 / §3.5.10). A label change for an existing FEC reaches peers as a withdraw of the old label followed by an advertise of the new one. The kernel MPLS mirror (`[ldp] install_kernel`, Linux only) is updated in lockstep: pop routes for new tail labels are installed, pop routes for removed labels are deleted. |
+| daemon | `local_as`, `router_id` | Speaker identity — refused with a restart-required diagnostic; the local AS is baked into every session and the safety net, the router-id into every OPEN |
+| damping | `[damping]` | The import hook's enabled flag flips live; a tuned `decay_interval_s` respawns the decay ticker. Other tuning fields are baked into the `DampingTable` at construction and require a restart |
+| peer health | `[bgp.peer_health] rollout` | Flips the live mode with session state preserved |
+| everything else | | Reported as needing a restart |
 
-If nothing changed, reload prints `reload: no network changes`. It
-always ends with `reload: note: AS, router-id, peer and auth changes
-require a restart`. Damping is installed for the process lifetime and
-cannot be unset by a reload.
+If nothing changed, reload prints `reload: no network changes`. With a
+BGP engine loaded it ends with `reload: note: local AS and router-id
+changes require a restart; peer, auth, BFD and policy changes applied
+per unit`; without one, with `reload: note: AS, router-id, peer and
+auth changes require a restart` (the Babel / BMP standalone daemons
+have no engine reload registered). The OSPF / OSPFv3 session tables
+still require a restart.
 
 Windows has no `SIGHUP`. Send the runtime API `reload` command over the
 pipe; `lrctl` is Unix-only.

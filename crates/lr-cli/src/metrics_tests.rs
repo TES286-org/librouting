@@ -66,7 +66,7 @@ fn seconds_formatting_is_exact() {
 /// order.
 #[test]
 fn registry_renders_prometheus_block() {
-    let mut r = FilterMetricsRegistry::new();
+    let r = FilterMetricsRegistry::new();
     let import = r.register(FilterDirection::Import, "in-filter");
     let export = r.register(FilterDirection::Export, "out-filter");
     import.record(120);
@@ -112,10 +112,9 @@ fn registry_renders_prometheus_block() {
 #[test]
 fn empty_registry_renders_nothing() {
     let r = FilterMetricsRegistry::new();
-    assert!(r.is_empty());
     let mut out = String::new();
     r.render(&mut out);
-    assert!(out.is_empty());
+    assert!(out.is_empty(), "an empty registry renders nothing: {out}");
 }
 
 /// Histograms are shareable across threads: concurrent records

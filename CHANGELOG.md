@@ -14,7 +14,121 @@ changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA,
-event bus, 2.x capability block
+event bus, 2.x capability block, per-unit configuration reload
+
+### Added — atomic configuration reload with minimal-unit restart
+(issue #101)
+
+A SIGHUP / runtime-API `reload` of the BGP engine now replaces the
+configuration atomically and restarts only the units whose
+configuration changed:
+
+- **Peers are units.** A `[[peer]]` added, removed or reconfigured
+  with session-affecting fields costs exactly that peer's sessions:
+  the reload stops its connector (a generation handshake guarantees
+  the replacement never overlaps a lagging predecessor), closes its
+  live transports with the matching RFC 4486 §4.1 Cease (Peer
+  De-configured for a removal, Administrative Reset for a
+  reconfiguration, Administrative Shutdown for the `shutdown`
+  toggle), removes and re-adds its router sessions and respawns its
+  connector. Every other peer's Established sessions keep running.
+  The `shutdown` flag quiesces instead of removing: the router
+  session objects survive so `shutdown = false` re-arms the same
+  handles (FRR `neighbor X shutdown` semantics).
+- **Policy is a unit behind a swap boundary.** Route-maps, named
+  lists and per-session filter-DSL bindings are recompiled against
+  the post-diff session handles and swapped in place
+  (`daemon_policy::LivePolicyState`); sessions re-apply the inbound
+  policy without a bounce — a peer with `soft_reconfig_inbound`
+  re-imports from its pre-policy snapshot, every other peer gets an
+  RFC 2918 ROUTE-REFRESH. This also fixes route-maps silently
+  bypassing the RFC 4271 §6.8 inbound challenger sessions (the
+  static shape bound only the outbound handle).
+- **The listener is a unit.** A `listen_addr` change or a change of
+  the armed session-auth set replaces the listener socket: detach,
+  bind, arm (auth, GTSM), re-attach.
+- **BFD sessions are per-peer units** through the supervisor's new
+  command channel (lazy thread, stable-token rx slots, monotonic
+  discriminators); the `[bfd]` timer triple re-points every session
+  through `BfdSession::update_timers` (RFC 5880 §6.8.3).
+- **Origination follows policy.** A network whose
+  `[[bgp.network_route_map]]` binding or route-map content changed
+  is re-originated through the fresh route-map.
+- **Atomicity.** The reload validates everything fallible first —
+  parse, finalize, per-peer auth, route-map / filter references, BFD
+  prerequisites — and refuses as one decision otherwise, keeping the
+  running configuration unchanged. A local-AS or router-id change is
+  the daemon-wide identity case and is refused with a
+  restart-required diagnostic. The reload's base config now carries
+  the same field defaults as startup (`with_defaults()`), so a file
+  that leaves a key unset reloads to the startup semantics instead
+  of zeros.
+- **The multi-protocol supervisor drains a per-engine reload
+  registry** (`Runtime::engine_reloads`), so an embedded BGP engine
+  reloads its peers on the daemon-wide SIGHUP.
+
+### Fixed — BGP session reactor
+
+- The edge-triggered registration race: bytes arriving between
+  connect()/accept() and the reactor's registration produced no
+  readable event, so the OPEN exchange could stall until the hold
+  timer killed the session — deterministic under load. The reactor
+  now drains one pass after every session and listener registration
+  (`bgp_reactor`).
+- `cargo test -p lr-bgp --lib` without the `exchange-plane` feature
+  failed to compile `fsm_tests` (a cfg-gated import).
+
+### Fixed — reload hardening round (this slice)
+
+- The post-swap RFC 2918 ROUTE-REFRESH fan-out short-circuited on
+  the first family: a dual-stack peer's IPv4 request returned `true`
+  and the IPv6 request was never sent, so the IPv6 Adj-RIB-In kept
+  evaluating under the stale policy. The refresh now fans out over
+  every MP-BGP family the session carries (`peer_effective_families`,
+  the exact list `build_session_config` advertises — shared so the
+  two surfaces cannot drift apart).
+- Collision groups for restarted / added peers were derived from
+  `registry.len() + 1`, which can hand a peer a group a kept peer
+  still owns once removals shift the registry length — two different
+  peers would then share an RFC 4271 §6.8 group. A process-lifetime
+  monotonic allocator seeded from the startup peer count replaces it.
+- The reload slice collapsed the startup banner's
+  `filters: N compiled, X import / Y export bindings` line to
+  `per-session dispatch installed`, breaking the
+  `tests/interop/filter_dsl_bird.sh` lab (it greps the counts) and
+  the documented banner in `docs/examples/filter_dsl_roa.md`. The
+  counts are restored; the dispatch note rides along after them.
+- The Windows build of `daemon_bfd.rs` did not compile: the
+  supervisor-thread spawn passed the unix-only `poll` /
+  `waker_for_thread` arguments unconditionally, and an unconditional
+  `use mio::unix::SourceFd` lived inside `apply_rx_effects`. Both
+  are now `#[cfg(target_family = "unix")]`-gated, so every Windows
+  job (native, cross-build, lr<->lr and BIRD interop) builds.
+- `lr-policy::hooks` imported `Mutex` under `any(bgp, damping,
+  peer-health)` but only the damping and peer-health hooks use it —
+  a bgp-only build (the templates job) failed `-D warnings`. Each
+  name is now imported only under the feature set that uses it.
+- The new `tests/daemon_peer_reload.rs` e2e suite bound its listener
+  daemons on 18301/18302, 18311, 18321 and 18331 — all owned by
+  `tests/daemon_collision.rs` (and 18301 also by
+  `tests/daemon_multi_peer.rs`). cargo runs selected test binaries
+  concurrently, so the two suites cross-connected and the collision
+  tests failed intermittently. The ladder moves to 18361, 18371,
+  18381/18382, 18391, 18341, 18351/18352 — disjoint from every
+  other e2e binary.
+
+### Added — FFI surface for the reload close variants
+
+`lr_router_reset_session` (Cease / 4 Administrative Reset — the
+configuration-reload semantics for a reconfigured peer) and
+`lr_router_deconfigure_session` (Cease / 3 Peer De-configured — a
+peer removed at runtime) join `lr_router_shutdown_session` in the
+C ABI, so an embedder driving a reload-shaped lifecycle through the
+FFI can express the subcode the daemon uses. The header regenerates
+through cbindgen; `scripts/abi.json`, the Go/Python/C++ bindings
+and their generators re-ran; the abi_freeze_check against `v1.0.0`
+stays additive-only. Go and Python tests assert each variant's
+Cease subcode on the drained wire output.
 
 ### Added — `lrctl` pretty status output (issue #101)
 

@@ -346,6 +346,46 @@ pub extern "C" fn lr_router_shutdown_session(r: lr_router_t, session: u64) -> i3
     )
 }
 
+/// Close a live session with a Cease / Administrative Reset NOTIFICATION
+/// (RFC 4486 §4.1 subcode 4) — the configuration-reload semantics for a
+/// peer whose session-affecting fields changed: the peer flushes the
+/// routes it learned (no RFC 4724/9494 retention; the close is
+/// deliberate). Mirrors `lr_router_shutdown_session` with the subcode a
+/// reconfiguration carries.
+#[no_mangle]
+pub extern "C" fn lr_router_reset_session(r: lr_router_t, session: u64) -> i32 {
+    guarded(
+        || {
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.reset_session(SessionHandle(session));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Close a live session with a Cease / Peer De-configured NOTIFICATION
+/// (RFC 4486 §4.1 subcode 3) — the runtime semantics for a peer removed
+/// from the configuration. Mirrors `lr_router_shutdown_session` with the
+/// subcode a removal carries.
+#[no_mangle]
+pub extern "C" fn lr_router_deconfigure_session(r: lr_router_t, session: u64) -> i32 {
+    guarded(
+        || {
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            router.deconfigure_session(SessionHandle(session));
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lr_router_remove_redistribution_pipe(
     r: lr_router_t,

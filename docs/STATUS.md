@@ -221,6 +221,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | RPKI-RTR cache client in the daemon | yes | `crates/lr-cli/src/daemon_rpki.rs` |
 | YANG instance data for Babel and key chains | yes | `crates/lr-cli/src/yang.rs`, `yang/ietf-babel@2024-10-10.yang` |
 | Privilege drop, signal handling and reload | yes | `crates/lr-cli/src/privdrop.rs`, `crates/lr-cli/src/signal.rs` |
+| Atomic configuration reload with minimal-unit restart: peer add/remove/replace (RFC 4486 §4.1 Cease/3, Cease/4), `shutdown` toggle, policy swap with soft re-configure / RFC 2918 refresh, listener replacement, BFD membership and timers (RFC 5880 §6.8.3) | yes | `crates/lr-cli/src/daemon_peer_reload.rs`, `crates/lr-cli/src/daemon_policy::LivePolicyState`, `crates/lr-cli/src/daemon_bfd::BfdSupervisor`, `crates/lr-cli/src/bgp_reactor` |
 | Cross-crate integration tests | yes | `crates/lr-tests/tests/` |
 
 ## Outstanding work — partial / not started

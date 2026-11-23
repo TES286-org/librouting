@@ -4271,13 +4271,35 @@ impl DefaultRouter {
     /// already Idle (the transport died first, or the peer already sent
     /// its own NOTIFICATION) is closed without a queued message.
     pub fn shutdown_session(&mut self, h: SessionHandle) {
+        self.admin_close_session(h, BgpCeaseSubcode::AdministrativeShutdown);
+    }
+
+    /// Close a live session with a Cease / Administrative Reset
+    /// NOTIFICATION (RFC 4486 §4.1 subcode 4) — the configuration-reload
+    /// path for a peer whose session-affecting fields changed (FRR sends
+    /// the same subcode when `clear bgp` re-establishes a neighbor after
+    /// a reconfiguration). The peer flushes the routes it learned (no
+    /// RFC 4724/9494 retention: the close is deliberate).
+    pub fn reset_session(&mut self, h: SessionHandle) {
+        self.admin_close_session(h, BgpCeaseSubcode::AdministrativeReset);
+    }
+
+    /// Close a live session with a Cease / Peer De-configured
+    /// NOTIFICATION (RFC 4486 §4.1 subcode 3) — the path for a peer
+    /// removed from the configuration at runtime.
+    pub fn deconfigure_session(&mut self, h: SessionHandle) {
+        self.admin_close_session(h, BgpCeaseSubcode::PeerDeconfigured);
+    }
+
+    /// The shared body of the administrative close family: queue the
+    /// NOTIFICATION (unless the FSM is already Idle), latch the
+    /// deliberate-goodbye bit that suppresses RFC 4724/9494 route
+    /// retention, then run the ordinary transport close.
+    fn admin_close_session(&mut self, h: SessionHandle, subcode: BgpCeaseSubcode) {
         let mut administrative = false;
         if let Some(SessionState::Bgp { peer, .. }) = self.sessions.get_mut(&h.0) {
             if peer.state() != BgpState::Idle {
-                peer.enqueue_notification(
-                    BgpErrorCode::Cease,
-                    BgpCeaseSubcode::AdministrativeShutdown as u8,
-                );
+                peer.enqueue_notification(BgpErrorCode::Cease, subcode as u8);
                 administrative = true;
             }
         }

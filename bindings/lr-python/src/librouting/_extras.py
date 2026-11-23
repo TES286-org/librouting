@@ -211,6 +211,24 @@ def _impl_router_shutdown_session(self, session):
 
 setattr(_import_router.Router, "shutdown_session", _impl_router_shutdown_session)
 
+def _impl_router_reset_session(self, session):
+    """Auto-generated wrapper for ``lr_router_reset_session``. See ``include/lr_ffi.h``."""
+    rc = get_lib().lr_router_reset_session(self._ptr, session)
+    if rc < 0:
+        raise LrError(f"lr_router_reset_session failed (rc={rc}): {last_error()}")
+    return int(rc)
+
+setattr(_import_router.Router, "reset_session", _impl_router_reset_session)
+
+def _impl_router_deconfigure_session(self, session):
+    """Auto-generated wrapper for ``lr_router_deconfigure_session``. See ``include/lr_ffi.h``."""
+    rc = get_lib().lr_router_deconfigure_session(self._ptr, session)
+    if rc < 0:
+        raise LrError(f"lr_router_deconfigure_session failed (rc={rc}): {last_error()}")
+    return int(rc)
+
+setattr(_import_router.Router, "deconfigure_session", _impl_router_deconfigure_session)
+
 def _impl_router_remove_redistribution_pipe(self, source, target):
     """Auto-generated wrapper for ``lr_router_remove_redistribution_pipe``. See ``include/lr_ffi.h``."""
     rc = get_lib().lr_router_remove_redistribution_pipe(self._ptr, source, target)

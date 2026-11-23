@@ -978,6 +978,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         peer_health_table: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
+        engine_reloads: Arc::new(Mutex::new(Vec::new())),
         shutdown,
     });
     if let Err(sig) = crate::signal::init() {

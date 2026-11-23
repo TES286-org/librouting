@@ -282,13 +282,19 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     let running = Arc::new(AtomicBool::new(true));
     let live_sessions = Arc::new(AtomicUsize::new(0));
     let status = MultiStatus::new();
-    let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
+    let current_networks = Arc::new(Mutex::new(crate::network_reload_state(cfg)));
     // The ROA table is router-wide: the BGP engine's loaders populate
     // it asynchronously and the Babel filters read the same snapshot.
     // Creating it here (instead of each engine making a private store)
     // also lets the runtime API's `show roa` and the `lr_roa_entries`
     // metric see the live table.
     let roa_store = Arc::new(lr_bgp::RoaStore::new());
+    // Engine-level reload closures (issue #101): the engines register
+    // here as they start (the BGP engine's peer-set reload); the
+    // daemon-wide reload drains the registry after the fresh
+    // configuration validates.
+    let runtime_engine_reloads: Arc<Mutex<Vec<crate::EngineReloadFn>>> =
+        Arc::new(Mutex::new(Vec::new()));
     let runtime = Arc::new(crate::Runtime {
         event_bus: lr_router::event_bus::EventBus::new(),
         kernel_mirror: std::sync::OnceLock::new(),
@@ -297,6 +303,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             let current_networks = Arc::clone(&current_networks);
             let config_path = cfg.config_path.clone();
             let config_dialect = cfg.config_dialect.clone();
+            let engine_reloads = Arc::clone(&runtime_engine_reloads);
             // Multi-protocol supervisor: damping is owned by the BGP
             // engine (when it is in the protocol set), but the
             // BGP engine's `DampingController` is local to
@@ -308,6 +315,11 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             // the `[damping]` block it was started with; the
             // supervisor's SIGHUP does not change it.
             move || {
+                // The engines registered their reload closures on the
+                // shared runtime (the BGP engine's peer-set reload:
+                // peer add/remove/replace, policy swap, BFD
+                // membership, listener replacement).
+                let engines = engine_reloads.lock().unwrap().clone();
                 crate::reload_config(
                     config_path.as_deref(),
                     config_dialect.as_deref(),
@@ -319,6 +331,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                     &[],
                     None,
                     None,
+                    &engines,
                 )
             }
         }),
@@ -336,6 +349,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         peer_health_table: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
+        engine_reloads: Arc::clone(&runtime_engine_reloads),
         shutdown: crate::build_shutdown(cfg, &router),
     });
 
