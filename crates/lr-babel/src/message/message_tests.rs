@@ -152,6 +152,61 @@ fn route_request_rejects_wildcard_with_plen() {
 }
 
 #[test]
+fn update_wildcard_retraction_with_nonzero_plen_is_rejected() {
+    // RFC 8966 §4.6.9: "If AE is 0, the Update TLV carries a wildcard
+    // retraction. In that case, Plen MUST be 0 and Omitted MUST be 0,
+    // and the prefix is empty." A malformed AE=0 Update with Plen > 0
+    // must be rejected, not decoded into a route with no address
+    // family but a non-empty prefix. The body carries the prefix
+    // octets Plen implies so the bounds check does not reject the TLV
+    // first — the AE=0 shape check has to fire.
+    let mut v = vec![0u8; 10 + 3]; // 10-byte header + 3 prefix octets
+    v[0] = 0; // AE = wildcard
+    v[2] = 24; // Plen non-zero — illegal under AE=0
+    v[10] = 203;
+    v[11] = 0;
+    v[12] = 113;
+    assert!(
+        Update::decode(&v).is_none(),
+        "AE=0 with Plen > 0 must be rejected"
+    );
+}
+
+#[test]
+fn update_wildcard_retraction_with_nonzero_omitted_is_rejected() {
+    // AE=0, Plen=24, Omitted > 0 — illegal under RFC 8966 §4.6.9.
+    // Plen and Omitted together imply a non-empty in-band prefix
+    // (ceil(24/8) - 1 = 2 octets), which we provide so the bounds
+    // check does not fire first.
+    let mut v = vec![0u8; 10 + 2];
+    v[0] = 0; // AE = wildcard
+    v[2] = 24; // Plen non-zero
+    v[3] = 1; // Omitted > 0 — illegal
+    v[10] = 203;
+    v[11] = 0;
+    assert!(
+        Update::decode(&v).is_none(),
+        "AE=0 with Omitted > 0 must be rejected"
+    );
+}
+
+#[test]
+fn update_wildcard_retraction_with_zero_plen_and_omitted_decodes() {
+    // The matching positive case: AE=0, Plen=0, Omitted=0 — the only
+    // legal shape for a wildcard retraction.
+    let mut v = vec![0u8; 10];
+    v[0] = 0; // AE = wildcard
+    v[8] = 0xff;
+    v[9] = 0xff; // metric = infinity (retraction)
+    let dec = Update::decode(&v).expect("a well-formed AE=0 wildcard retraction decodes");
+    assert_eq!(dec.ae, 0);
+    assert_eq!(dec.prefix_len, 0);
+    assert_eq!(dec.omitted, 0);
+    assert!(dec.prefix.is_empty());
+    assert_eq!(dec.metric, 0xffff);
+}
+
+#[test]
 fn seqno_request_roundtrip() {
     let r = SeqnoRequest {
         ae: 1,

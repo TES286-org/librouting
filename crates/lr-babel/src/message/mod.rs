@@ -412,6 +412,15 @@ impl Update {
         if prefix_len > 128 {
             return None;
         }
+        // RFC 8966 §4.6.9: "If AE is 0, the Update TLV carries a
+        // wildcard retraction. In that case, Plen MUST be 0 and Omitted
+        // MUST be 0, and the prefix is empty." Reject the malformed TLV
+        // — babeld and BIRD ignore the whole TLV in that case, and a
+        // non-empty prefix on AE=0 would otherwise leak into the route
+        // cache as a route with no address family.
+        if ae == 0 && (prefix_len != 0 || omitted != 0) {
+            return None;
+        }
         // Prefix size is ceil(Plen/8) - Omitted octets.
         let full_octets = (prefix_len as usize).div_ceil(8);
         let pfx_octets = full_octets.checked_sub(omitted as usize)?;
