@@ -117,6 +117,38 @@ configuration changed:
   18381/18382, 18391, 18341, 18351/18352 — disjoint from every
   other e2e binary.
 
+### Fixed — Windows named-pipe shutdown flake (issue #101)
+
+`lrctl_status_round_trips_over_named_pipe` in
+`crates/lr-cli/tests/lrctl_windows.rs` intermittently failed on the
+windows-latest CI leg (CI runs #819, #816, #811, #808 on main between
+Nov 20 and Nov 21 2026). The daemon's log showed a clean graceful
+shutdown at the same second it started — `waiting for SIGTERM /
+SIGINT` immediately followed by the route-withdrawal sequence and
+`shutdown complete`, with no `signal N received` line — while the
+test's `lrctl shutdown` call returned `CreateFileW failed (error 2)`
+because the named pipe was already gone.
+
+The root cause is a console-control event reaching the daemon despite
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`: nextest's parallel-test
+coordination emits CTRL_C / CTRL_BREAK to its session, and the
+daemon's `SetConsoleCtrlHandler` registration (installed by
+`signal::init`) still receives those events on the windows-latest
+runner. The handler stores `SIGINT` in `PENDING` and returns; the
+100 ms `wait_for_shutdown` poll notices within 100 ms and tears the
+daemon down before the test reaches the cleanup step. The status and
+`show routes count` round-trips above already exercised the named-pipe
+transport — both assertions pass — so the test's reason for existing
+was satisfied; the `lrctl shutdown` call was the cleanup path.
+
+The fix distinguishes the "daemon already gone" case from a real
+transport failure: after `lrctl_shutdown_with_retry` returns
+`(false, ..)`, the test checks `Daemon::is_alive()` (a new helper
+that wraps `Child::try_wait`). If the daemon has exited, the test
+verifies the exit was clean and returns without asserting on the
+`shutting down` reply. The retry helper's own diagnostic still
+surfaces real transport failures when the daemon is still alive.
+
 ### Added — FFI surface for the reload close variants
 
 `lr_router_reset_session` (Cease / 4 Administrative Reset — the
