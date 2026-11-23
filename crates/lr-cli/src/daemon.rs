@@ -239,6 +239,10 @@ fn print_usage() {
          all peers share --peer-as; per-peer settings need [[peer]])\n  \
          --listen ADDR:PORT       Accept inbound BGP connections\n  \
          --network PREFIX         Locally originate PREFIX (repeatable)\n  \
+         --mrt-feed FILE          Install routes from an MRT RIB dump\n  \
+         into the Loc-RIB at startup (issue #101 bench feed path)\n  \
+         --mrt-feed-cap N         Cap routes installed from --mrt-feed\n  \
+         (0 = no cap; default 0)\n  \
          --hold-time SEC          BGP hold time in seconds (default 90)\n  \
          --graceful-restart SEC   RFC 4724 restart time to advertise\n  \
          (default 120; 0 disables)\n  \
@@ -2137,6 +2141,51 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     entry,
                     msg
                 ),
+            }
+        }
+        // MRT feed (issue #101 "Benchmark Based on Real Data" feed
+        // path): install every route from a TABLE_DUMP_V2 RIB dump
+        // into the Loc-RIB, preserving the dump's path attributes.
+        // The daemon's existing BGP export path advertises them to
+        // peers as if learned from a session; the harness in
+        // `tests/bench/real_data.sh` uses this to feed a real
+        // public routing table to a reference implementation for
+        // cross-implementation comparison.
+        if let Some(mrt_path) = cfg.mrt_feed.as_deref() {
+            match load_mrt_feed(mrt_path) {
+                Ok(mut routes) => {
+                    if cfg.mrt_feed_cap > 0 && routes.len() > cfg.mrt_feed_cap {
+                        log_info!(
+                            Component::Daemon,
+                            "mrt-feed: capping {} route(s) to {} (LR_BENCH_BIRD_CAP)",
+                            routes.len(),
+                            cfg.mrt_feed_cap
+                        );
+                        routes.truncate(cfg.mrt_feed_cap);
+                    }
+                    let rib = r.rib_handle();
+                    let mut installed = 0usize;
+                    for route in &routes {
+                        if rib.install(route.clone()) {
+                            installed += 1;
+                        }
+                    }
+                    log_info!(
+                        Component::Daemon,
+                        "mrt-feed: {} route(s) installed from {} ({} in dump)",
+                        installed,
+                        mrt_path,
+                        routes.len()
+                    );
+                }
+                Err(e) => {
+                    log_error!(
+                        Component::Daemon,
+                        "mrt-feed: failed to load {}: {}",
+                        mrt_path,
+                        e
+                    );
+                }
             }
         }
     }
@@ -6120,6 +6169,48 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 Err(_) => log_error!(Component::Bgp, "invalid network '{}'", net),
             }
         }
+        // MRT feed (issue #101 bench feed path) — the BGP daemon's
+        // startup path carries the canonical install site; the Babel
+        // daemon shares the same `--mrt-feed` flag through the
+        // `load_mrt_feed` helper but installs here when running in
+        // standalone Babel mode.
+        if let Some(mrt_path) = cfg.mrt_feed.as_deref() {
+            match load_mrt_feed(mrt_path) {
+                Ok(mut routes) => {
+                    if cfg.mrt_feed_cap > 0 && routes.len() > cfg.mrt_feed_cap {
+                        log_info!(
+                            Component::Daemon,
+                            "mrt-feed: capping {} route(s) to {} (LR_BENCH_BIRD_CAP)",
+                            routes.len(),
+                            cfg.mrt_feed_cap
+                        );
+                        routes.truncate(cfg.mrt_feed_cap);
+                    }
+                    let rib = r.rib_handle();
+                    let mut installed = 0usize;
+                    for route in &routes {
+                        if rib.install(route.clone()) {
+                            installed += 1;
+                        }
+                    }
+                    log_info!(
+                        Component::Daemon,
+                        "mrt-feed: {} route(s) installed from {} ({} in dump)",
+                        installed,
+                        mrt_path,
+                        routes.len()
+                    );
+                }
+                Err(e) => {
+                    log_error!(
+                        Component::Daemon,
+                        "mrt-feed: failed to load {}: {}",
+                        mrt_path,
+                        e
+                    );
+                }
+            }
+        }
     }
 
     // ---- Babel import/export filters (RFC 8966 §3.7 / BIRD `protocol
@@ -8558,6 +8649,63 @@ fn originate_next_hop(cfg: &DaemonConfig, family: NlriFamily) -> Option<IpAddr> 
             }),
         _ => None,
     }
+}
+
+/// Load every route from a TABLE_DUMP_V2 MRT RIB dump. Each
+/// `(prefix, entry)` becomes one `Route` with the dump's raw path
+/// attributes decoded into an `Attributes` set, the peer index as
+/// the route's origin peer, and LOCAL_PREF (or 100 when absent) as
+/// the metric. Used by the `--mrt-feed` flag to seed the Loc-RIB
+/// from a real public routing table (issue #101 bench feed path).
+fn load_mrt_feed(path: &str) -> Result<Vec<lr_core::rib::Route>, String> {
+    use lr_core::attr::Attributes;
+    use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
+    use lr_mrt::{decode_attributes, walk_attributes, MrtRecord, PeerIndexTable};
+
+    let records = lr_mrt::parse_file(path).map_err(|e| format!("parse {path}: {e}"))?;
+    let mut peers: Option<PeerIndexTable> = None;
+    let mut routes: Vec<Route> = Vec::new();
+    for record in &records {
+        match record {
+            MrtRecord::PeerIndexTable(pit) => peers = Some(pit.clone()),
+            MrtRecord::Rib(table) => {
+                let family = if table.prefix.is_ipv4() {
+                    NlriFamily::IPV4_UNICAST
+                } else {
+                    NlriFamily::IPV6_UNICAST
+                };
+                for entry in &table.entries {
+                    let attrs: Attributes = decode_attributes(&entry.attributes);
+                    let summary = walk_attributes(entry);
+                    let local_pref = summary.local_pref.unwrap_or(100);
+                    let _peer_bgp_id = peers
+                        .as_ref()
+                        .and_then(|p| p.peers.get(entry.peer_index as usize))
+                        .map(|p| p.bgp_id)
+                        .unwrap_or(0);
+                    routes.push(Route {
+                        key: RouteKey::new(table.prefix, family),
+                        origin: RouteOrigin {
+                            proto: 1,
+                            peer: entry.peer_index as u64,
+                        },
+                        protocol: Protocol::Bgp,
+                        preference: Preference::new(
+                            Protocol::Bgp.default_admin_distance(),
+                            local_pref,
+                        ),
+                        next_hop: summary.next_hop,
+                        attributes: attrs,
+                        age_ms: (entry.originated_time as u64) * 1000,
+                        path_id: entry.path_id,
+                        tag: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(routes)
 }
 
 /// Shared daemon state threaded through the I/O loops.
