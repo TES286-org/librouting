@@ -166,6 +166,34 @@ integration tests in `crates/lr-cli/tests/lrctl.rs` cover the
 end-to-end format selection through the real `lrctl` binary against
 a running `lr-daemon`.
 
+### Changed — `cargo semver-checks` gate suspended for the 1.x → 2.0
+transition (issue #101)
+
+The `Rust API surface (semver-checks + public-api diff)` CI job has
+been failing on every run on `main` since the 2.x capability block
+started landing. The failures are the intentional pre-2.0 breaking
+changes the 2.x plan is accumulating: `BabelNeighbor.hello_history`
+split into `hello_map` + `hello_cnt` + `next_hello_seqno` +
+`hello_expiry_ms` (PR #126); new `lr-bgp::path::AttrType` variants
+(PR #123); `#[non_exhaustive]` on types ahead of 2.0; the
+`EventBus::subscribe` receiver-type move (PR #113); the `lr-core`
+optional-feature removal (PR #103).
+
+Per the 2.x plan (issue #101), the gate is suspended for the
+1.x → 2.0 transition window. The `cargo semver-checks` step gains
+`continue-on-error: true` so the job's conclusion stays `success`
+and a PR that lands more 2.0 prep is not blocked by the debt it is
+intentionally accumulating. The per-crate `Added/Changed/Removed`
+report in the `api-surface-diff` artifact is still uploaded for
+triage. The gate becomes blocking again at the 2.0.0 release cut —
+the version bump clears the debt and the existing `release_cut`
+skip condition drops out, so any new breaking change past 2.0.0
+fails the run as a major-version violation.
+
+The `abi-freeze` job (the C ABI additive-only gate) is unaffected —
+it stays blocking, the C ABI has been additive-only since `v1.0.0`,
+and every FFI addition in the 2.x wave was additive.
+
 ### Added — BGP capability block (issue #101)
 
 Eight BGP capabilities land on the OPEN advertisement surface, each
