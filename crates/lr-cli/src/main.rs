@@ -32,6 +32,7 @@ use std::process::ExitCode;
 use lr_core::buf::ReadBuf;
 use lr_core::codec::Decoder;
 
+mod bench;
 mod parity;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -57,6 +58,7 @@ fn main() -> ExitCode {
         "routes" => routes(rest),
         "mrt" => mrt(rest),
         "parity-replay" => parity::cmd_parity_replay(rest),
+        "bench" => bench::cmd_bench(rest),
         "help" | "--help" | "-h" => {
             print_usage();
             ExitCode::SUCCESS
@@ -88,6 +90,10 @@ fn print_usage() {
     println!("    mrt diff <a> <b>    Content-diff two MRT RIB dumps");
     println!("    parity-replay       Replay a captured BGP stream into an");
     println!("                       offline router, dump the Loc-RIB as MRT");
+    println!("    bench replay --mrt <file>");
+    println!("                       Replay a real MRT RIB dump into a");
+    println!("                       fresh Loc-RIB, report processing time,");
+    println!("                       memory and path-selection correctness");
     println!("    help                Show this message");
 }
 
