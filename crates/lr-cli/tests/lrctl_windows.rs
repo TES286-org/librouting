@@ -234,7 +234,13 @@ fn lrctl_shutdown_with_retry(pipe: &str) -> (bool, String, String) {
 #[test]
 fn lrctl_status_round_trips_over_named_pipe() {
     let pipe = unique_pipe("status");
-    let d = Daemon::spawn(
+    // `mut` so the `Daemon::is_alive` helper (which wraps
+    // `Child::try_wait`, a `&mut self` method on `std::process::Child`)
+    // can borrow the daemon mutably without moving out of `d`. The
+    // later `d.wait_exit()` calls consume `d` — the `mut` binding is
+    // compatible with that, and every other use of `d` in this test
+    // is a shared `&self` borrow (`d.wait_log`, `&d.log`).
+    let mut d = Daemon::spawn(
         &[
             "--local-as",
             "64512",
