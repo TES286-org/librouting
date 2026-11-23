@@ -140,6 +140,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | BFD Keyed MD5 / Meticulous Keyed MD5 / Keyed SHA1 / Meticulous Keyed SHA1 authentication (RFC 5880 §4.3 / §4.4 / §6.7.3 / §6.7.4) | yes | `lr-bfd::keyed_auth::BfdKeyedAuth`, `lr-bfd::session::BfdSession::set_keyed_auth` |
 | BMP codec, split feed, peer headers (RFC 7854) | yes | `lr-bmp` |
 | MRT TABLE_DUMP_V2 read and write, BGP4MP (RFC 6396) | yes | `lr-mrt` |
+| Real-data RIB replay benchmark (issue #101) | yes | `lr-cli::bench`, `lr-mrt::decode_attributes`, `crates/lr-mrt/benches/mrt_replay.rs`, `tests/bench/real_data.sh` |
 | Route flap damping figure of merit (RFC 2439) | yes | `lr-damping` |
 | Per-peer flap suppression | yes | `lr-peer-health`, `lr-policy::hooks::{PeerHealthImportHook, PeerHealthShadowSelectionHook}`, `lr-router::PeerHealthLookup` (dynamic tiering in `reselect`), `lr-bgp::best_path::BestPath::rank_tiered` (stamp-based fallback), `lr-cli::peer_health_view` (`show peer-health`), SIGHUP live rollout-mode reload |
 

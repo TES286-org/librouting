@@ -109,6 +109,20 @@ ppc64le runner is registered.
 
 ## Tooling and supply chain
 
+**Real-data benchmark: cross-implementation prefix-by-prefix diff.**
+The storage bench landed: `lr bench replay --mrt <file>` parses a
+public TABLE_DUMP_V2 RIB dump, installs every route into a fresh
+`LocRib`, and reports processing efficiency, memory usage, path-
+selection correctness, soft-reload peak RSS and steady-state drift
+(see [`examples/real_data_benchmark.md`](examples/real_data_benchmark.md)).
+`lr-daemon --mrt-feed <file> [--mrt-feed-cap N]` feeds the same
+routes to a reference implementation over a BGP session; the harness
+in `tests/bench/real_data.sh` drives BIRD with this flag. What
+remains is the prefix-by-prefix diff between lr's Loc-RIB dump and
+BIRD's MRT dump of the lr-learned routes — the harness reports counts
+today, and a follow-up wires `lr mrt diff` against the daemon's
+runtime-API `dump mrt` output to surface every divergent prefix.
+
 **IDE integration.** The `.lr` configuration DSL and the filter DSL
 have grammar references
 ([`config_dsl_grammar.md`](config_dsl_grammar.md),
