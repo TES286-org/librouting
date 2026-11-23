@@ -29,3 +29,11 @@ bgp = ["dep:lr-bgp"]
 [dependencies]
 lr-core = { workspace = true }
 lr-bgp = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+lr-rib = { workspace = true }
+
+[[bench]]
+name = "mrt_replay"
+harness = false
