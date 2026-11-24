@@ -315,9 +315,11 @@ mod tests {
         // additive increment. The existing entry (FoM 3000,
         // suppressed) survives; the fresh parameters govern future
         // computations.
-        let mut tuned = DampingConfig::default();
-        tuned.suppress_threshold = 10_000;
-        tuned.additive_incr = 500;
+        let tuned = DampingConfig {
+            suppress_threshold: 10_000,
+            additive_incr: 500,
+            ..DampingConfig::default()
+        };
         t.update_config(tuned.clone());
         assert_eq!(t.config(), &tuned, "the table carries the fresh config");
         assert_eq!(t.entries().count(), 1, "history is not discarded");
@@ -367,10 +369,10 @@ mod tests {
         t.on_withdraw(&p("10.0.0.0/8"), 0);
         assert!(t.on_withdraw(&p("10.0.0.0/8"), 0));
 
-        let mut tuned = DampingConfig::default();
-        // FoM is 3000; decay_factor_withdrawn 0.5 over one interval
-        // halves it to 1500. A reuse threshold of 2000 reactivates.
-        tuned.reuse_threshold = 2_000;
+        let tuned = DampingConfig {
+            reuse_threshold: 2_000,
+            ..DampingConfig::default()
+        };
         t.update_config(tuned);
         let reactivated = t.decay_all(30); // one decay interval later
         assert!(

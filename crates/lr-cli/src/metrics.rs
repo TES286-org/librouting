@@ -312,9 +312,18 @@ pub struct MetricsContext {
     /// sessions without a label (non-BGP daemons never emit BGP
     /// series, so the fallback is cosmetic).
     pub session_label: Box<dyn Fn(u64) -> String + Send + Sync>,
+    /// Live speaker identity `(local_as, router_id)` reader. When
+    /// present, every scrape overlays the values it returns onto
+    /// `MetricsInfo`'s `local_as` / `router_id` — the BGP engine's
+    /// reload updates the underlying runtime state on a
+    /// speaker-identity change, and the `lr_info` labels must never
+    /// serve the pre-reload identity. `None` for daemon modes without
+    /// a reloadable identity.
+    pub identity: Option<Box<dyn Fn() -> (u32, String) + Send + Sync>>,
 }
 
 /// Static daemon facts served by `lr_info`.
+#[derive(Clone)]
 pub struct MetricsInfo {
     pub version: String,
     pub local_as: u32,
@@ -351,6 +360,7 @@ mod imp {
     /// `Arc`-cloned once per accepted connection).
     struct ScrapeState {
         info: Arc<MetricsInfo>,
+        identity: Option<Arc<dyn Fn() -> (u32, String) + Send + Sync>>,
         router: Arc<RwLock<DefaultRouter>>,
         rib: std::sync::Arc<lr_rib::LocRib>,
         event_bus: lr_router::event_bus::EventBus,
@@ -446,11 +456,14 @@ mod imp {
         };
         let filter_metrics = ctx.filter_metrics;
         let session_label = Arc::from(ctx.session_label);
+        let identity: Option<Arc<dyn Fn() -> (u32, String) + Send + Sync>> =
+            ctx.identity.map(Arc::from);
         let started = std::time::Instant::now();
         let addr_owned = addr.to_string();
 
         let state = Arc::new(ScrapeState {
             info,
+            identity,
             router,
             rib,
             event_bus,
@@ -565,6 +578,7 @@ mod imp {
     fn render_metrics(state: &ScrapeState) -> String {
         let ScrapeState {
             info,
+            identity,
             router,
             rib,
             event_bus,
@@ -574,6 +588,20 @@ mod imp {
             session_label,
             started,
         } = state;
+        // A speaker-identity reload re-points the live
+        // `(local_as, router_id)` on the runtime; read them per scrape
+        // so the `lr_info` labels never serve the pre-reload identity
+        // (the runtime API's `status` does the same overlay per
+        // connection).
+        let info = {
+            let mut info = (**info).clone();
+            if let Some(read) = identity {
+                let (local_as, router_id) = read();
+                info.local_as = local_as;
+                info.router_id = router_id;
+            }
+            info
+        };
         // Snapshot everything we need from the router under one
         // read-lock acquisition. The lock is held for microseconds
         // (no I/O while it's held — same contract as `api.rs`'s

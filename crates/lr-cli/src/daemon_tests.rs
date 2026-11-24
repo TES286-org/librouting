@@ -2522,6 +2522,10 @@ mod event_bus_wiring_tests {
             session_labels: Arc::new(Mutex::new(HashMap::new())),
             engine_reloads: Arc::new(Mutex::new(Vec::new())),
             shutdown: None,
+            // The wiring tests exercise the event-bus contract, not the
+            // speaker identity; a neutral default keeps the struct
+            // literal complete.
+            speaker_identity: RwLock::new((0, String::new())),
         })
     }
 
@@ -2548,8 +2552,13 @@ mod event_bus_wiring_tests {
         // No kernel install: the mirror thread runs but no-ops.
         let mut cfg = DaemonConfig::with_defaults();
         cfg.install_kernel = false;
-        let ticker = spawn_ticker(&rt, &cfg, Arc::new(AtomicUsize::new(0)), None)
-            .expect("the default config carries no kernel filter");
+        let ticker = spawn_ticker(
+            &rt,
+            &cfg,
+            Arc::new(AtomicUsize::new(0)),
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        )
+        .expect("the default config carries no kernel filter");
 
         // An originated route queues a RouteInstalled; the ticker's
         // next pass drains and publishes it.

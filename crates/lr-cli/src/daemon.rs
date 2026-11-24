@@ -2457,6 +2457,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 session_labels: Arc::clone(&session_labels_arc),
                 engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
+                speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
             })
         }
     };
@@ -2469,15 +2470,28 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // across sessions. ---
     // Embedded: the supervisor already spawned one shared ticker (and
     // fed it our live-session counter via the host).
+    //
+    // The BGP-LS driver lives behind a shared slot (standalone:
+    // created here; embedded: the supervisor's slot arrives through
+    // the host) so the reload context below can swap it on a
+    // speaker-identity change without restarting the ticker.
+    let bgp_ls_slot: Arc<Mutex<Option<BgplsDriver>>> = match &host {
+        Some(h) => Arc::clone(&h.bgp_ls_slot),
+        None => Arc::new(Mutex::new(
+            cfg.bgp_ls
+                .enabled
+                .then(|| BgplsDriver::new(&cfg.bgp_ls, cfg.local_as)),
+        )),
+    };
     let mut ticker: Option<thread::JoinHandle<()>> = None;
     if host.is_none() {
-        let bgp_ls_driver = if cfg.bgp_ls.enabled {
-            Some(BgplsDriver::new(&cfg.bgp_ls, cfg.local_as))
-        } else {
-            None
-        };
         ticker = Some(
-            match spawn_ticker(&runtime, cfg, Arc::clone(&live_sessions), bgp_ls_driver) {
+            match spawn_ticker(
+                &runtime,
+                cfg,
+                Arc::clone(&live_sessions),
+                Arc::clone(&bgp_ls_slot),
+            ) {
                 Ok(handle) => handle,
                 Err(e) => return daemon_policy::policy_error(e),
             },
@@ -2607,7 +2621,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         let router_for_reload = Arc::clone(&runtime.router);
         let reload_ctx: Arc<daemon_peer_reload::BgpReloadContext> =
             Arc::new(daemon_peer_reload::BgpReloadContext {
-                rid,
+                rid: Mutex::new(rid),
+                bgp_ls_slot: Arc::clone(&bgp_ls_slot),
                 router: router_for_reload,
                 runtime: Arc::clone(&runtime),
                 registry: Arc::clone(&registry),
@@ -4805,12 +4820,14 @@ impl KernelMirrorThread {
 /// ([`KernelMirrorThread`]) — see its docs for the ordering and
 /// shutdown contract.
 ///
-/// When `bgp_ls_driver` is `Some`, the ticker additionally polls each
-/// configured OSPF area's `topology_version` once per pass and runs the
-/// BGP-LS projection's incremental republish driver on change. The
-/// driver state (per-area `topology_version` cache and the last
-/// projected NLRI set) lives inside the [`BgplsDriver`] — the ticker
-/// owns it for the lifetime of the daemon.
+/// When the BGP-LS slot holds a driver, the ticker additionally polls
+/// each configured OSPF area's `topology_version` once per pass and
+/// runs the BGP-LS projection's incremental republish driver on
+/// change. The driver state (per-area `topology_version` cache and
+/// the last projected NLRI set) lives inside the [`BgplsDriver`]
+/// behind the shared `bgp_ls_slot` — the ticker polls the slot every
+/// pass, so a speaker-identity reload that swaps the driver takes
+/// effect at the next tick without restarting the ticker.
 ///
 /// The caller owns the returned join handle and MUST join it at
 /// shutdown before [`Runtime::shutdown_event_bus`] — the handle's
@@ -4822,7 +4839,7 @@ pub(crate) fn spawn_ticker(
     rt: &Arc<Runtime>,
     cfg: &DaemonConfig,
     live: Arc<AtomicUsize>,
-    bgp_ls_driver: Option<BgplsDriver>,
+    bgp_ls_slot: Arc<Mutex<Option<BgplsDriver>>>,
 ) -> Result<thread::JoinHandle<()>, String> {
     // Compile the kernel FIB export policy before the mirror thread
     // starts: a bad filter name or body fails startup, like every
@@ -4858,7 +4875,7 @@ pub(crate) fn spawn_ticker(
     Ok(thread::Builder::new()
         .name("lr-ticker".into())
         .spawn(move || {
-            let mut bgp_ls_driver = bgp_ls_driver;
+            let bgp_ls_slot = bgp_ls_slot;
             let start = WallClock::now();
             loop {
                 let shutting_down = !rt.running.load(Ordering::Relaxed);
@@ -4878,7 +4895,12 @@ pub(crate) fn spawn_ticker(
                     // input), poll each configured area and republish
                     // the diff. Skip when no driver is configured (the
                     // common case: a BGP-only or Babel-only daemon).
-                    if let Some(driver) = bgp_ls_driver.as_mut() {
+                    // The driver lives behind the shared slot so a
+                    // speaker-identity reload can swap it (a fresh
+                    // driver re-projects every node descriptor with
+                    // the fresh AS); the lock is held for the tick
+                    // call only, never across an iteration boundary.
+                    if let Some(driver) = bgp_ls_slot.lock().unwrap().as_mut() {
                         driver.tick(&mut r);
                     }
                     events
@@ -5745,6 +5767,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         // listener). `None` keeps the API's `shutdown drain` honest
         // ("drain not configured") instead of pretending to drain.
         shutdown: None,
+        speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
     });
     if let Err(e) = spawn_api(cfg, &runtime) {
         log_error!(Component::Api, "{e}");
@@ -6343,6 +6366,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             session_labels: Arc::new(Mutex::new(HashMap::new())),
             engine_reloads: Arc::new(Mutex::new(Vec::new())),
             shutdown: build_shutdown(cfg, &router),
+            speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
         }),
     };
     let running = Arc::clone(&runtime.running);
@@ -6361,7 +6385,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             // multi-protocol mode. In particular, this is what connects
             // Babel Loc-RIB changes to --install-kernel-routes.
             Some(
-                match spawn_ticker(&runtime, cfg, Arc::new(AtomicUsize::new(0)), None) {
+                match spawn_ticker(
+                    &runtime,
+                    cfg,
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(Mutex::new(None)),
+                ) {
                     Ok(handle) => handle,
                     Err(e) => return daemon_policy::policy_error(e),
                 },
@@ -8783,6 +8812,13 @@ struct Runtime {
     /// BGP engine registers its peer-set reload (peer
     /// add/remove/replace, policy swap, listener replacement) here.
     engine_reloads: Arc<Mutex<Vec<EngineReloadFn>>>,
+    /// The live speaker identity `(local_as, router_id)`. Every
+    /// daemon mode initializes it from its config; the BGP engine's
+    /// reload updates it when the operator changes `local_as` /
+    /// `router_id`, and the runtime API / metrics endpoints read it
+    /// per connection / per scrape so `lrctl status` and the
+    /// `lr_info` labels never serve a pre-reload identity.
+    speaker_identity: RwLock<(u32, String)>,
 }
 
 /// One engine's configuration-reload entry point: validate the fresh
@@ -8808,6 +8844,12 @@ fn dispatch_signals(rt: &Runtime) {
 }
 
 impl Runtime {
+    /// The live speaker identity — see the field doc. Read per
+    /// connection by the API, per scrape by metrics.
+    pub(crate) fn speaker_identity(&self) -> (u32, String) {
+        self.speaker_identity.read().unwrap().clone()
+    }
+
     /// The event-bus shutdown handshake:
     /// close the bus (no further publish is accepted; subscribers
     /// drain their queues then observe `Disconnected`) and wait for
@@ -8895,6 +8937,13 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             config_path: cfg.config_path.clone(),
             config_dialect: cfg.config_dialect.clone(),
         },
+        // The live identity overlay: a speaker-identity reload updates
+        // the runtime's snapshot, and every connection re-reads it so
+        // `status` never serves the pre-reload `local-as` line.
+        identity: Some(Arc::new({
+            let rt = Arc::clone(rt);
+            move || rt.speaker_identity()
+        })),
         router: Arc::clone(&rt.router),
         // The shared Loc-RIB handle (issue #101 — the multi-threaded
         // RIB read path): the RIB-dumping commands (`routes`, `mrt`,
@@ -9012,6 +9061,13 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
                     .unwrap_or_else(|| "?".to_string())
             }
         }),
+        // The live identity overlay: a speaker-identity reload updates
+        // the runtime's snapshot, and every scrape re-reads it so the
+        // `lr_info` labels never serve the pre-reload identity.
+        identity: Some(Box::new({
+            let rt = Arc::clone(rt);
+            move || rt.speaker_identity()
+        })),
     };
     metrics::spawn(addr, ctx)
         .map(|a| log_info!(Component::Metrics, "metrics endpoint on http://{a}/metrics"))
@@ -9019,11 +9075,12 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
 }
 
 /// Re-apply the configuration file: diff the `networks` list against the
-/// currently originated set and apply add/remove. Identity and transport
-/// auth changes cannot be applied to a live session — they are reported
-/// so the operator knows a restart is required. A parse or I/O error
-/// keeps the current configuration running (reload must never crash or
-/// half-apply).
+/// currently originated set and apply add/remove. Peer, policy, BFD and
+/// listener changes are applied per unit by the engine reloads; a
+/// speaker-identity change (`local_as` / `router_id`) is applied as one
+/// daemon-wide unit (every session restarted with the fresh identity).
+/// A parse or I/O error keeps the current configuration running (reload
+/// must never crash or half-apply).
 #[allow(clippy::too_many_arguments)]
 /// The daemon-level origination state a reload diffs against: the
 /// originated `networks` list, the per-network route-map bindings
@@ -9781,16 +9838,18 @@ fn reload_config(
         lines.push("reload: no network changes".into());
     }
     if engine_reloads.is_empty() {
-        lines.push("reload: note: AS, router-id, peer and auth changes require a restart".into());
+        lines.push("reload: note: peer and auth changes require a restart".into());
     } else {
         // The BGP engine reloads the peer set per unit (add / remove /
-        // replace with an RFC 4486 §4.1 Cease; policy swaps in place).
-        // Speaker identity is the remaining daemon-wide restart: the
-        // local AS and the router-id are baked into every session and
-        // the safety net.
+        // replace with an RFC 4486 §4.1 Cease; policy swaps in place),
+        // and a speaker-identity change (local AS / router-id) is
+        // applied as one daemon-wide unit: every session restarts
+        // with the fresh identity, the safety net re-points and the
+        // BGP-LS driver follows — the daemon process keeps running.
         lines.push(
-            "reload: note: local AS and router-id changes require a restart; \
-             peer, auth, BFD and policy changes applied per unit"
+            "reload: note: peer, auth, BFD and policy changes applied per unit; \
+             a local AS or router-id change restarts every session with the \
+             fresh identity"
                 .into(),
         );
     }

@@ -1040,6 +1040,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
                 engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
+                speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
             })
         }
     };
@@ -1085,7 +1086,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                     &runtime,
                     cfg,
                     Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                    None,
+                    Arc::new(Mutex::new(None)),
                 ) {
                     Ok(handle) => handle,
                     Err(e) => return crate::daemon_policy::policy_error(e),

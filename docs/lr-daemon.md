@@ -292,9 +292,9 @@ never half-applies.
 
 The reload is atomic per engine and per unit: the fresh file parses,
 finalizes and validates against the live state (per-peer auth, every
-referenced route-map and filter name, BFD prerequisites, the speaker
-identity) before anything is applied. A validation failure keeps the
-running configuration entirely unchanged. What reload then re-applies,
+referenced route-map and filter name, BFD prerequisites, the fresh
+router-id parses) before anything is applied. A validation failure keeps
+the running configuration entirely unchanged. What reload then re-applies,
 per unit:
 
 | Unit | Config | Reload behaviour |
@@ -313,16 +313,16 @@ per unit:
 | BFD | `[bfd]` timers | Every session re-points via `BfdSession::update_timers` (RFC 5880 §6.8.3 poll sequences) |
 | logging | `[logging] file` (or `--log-file`) | Re-opens the file destination — the standard `logrotate` postrotate contract. The daemon drops the old fd and re-opens the path so the next record lands in the new file (no in-place rename tracking, no inode games). A fresh `[logging] file = ...` in the config changes the path; an absent `[logging]` block re-opens the startup `--log-file` path. The OSPF / OSPFv3 / LDP / BMP standalone daemons re-open the file too even though their full config reload is a no-op. |
 | LDP | `[[ldp.bind]]` (LDP daemon only) | Added / changed FEC-label bindings are advertised to every operational peer via Label Mapping messages; removed ones are withdrawn via Label Withdraw messages (RFC 5036 §3.5.7 / §3.5.10). A label change for an existing FEC reaches peers as a withdraw of the old label followed by an advertise of the new one. The kernel MPLS mirror (`[ldp] install_kernel`, Linux only) is updated in lockstep: pop routes for new tail labels are installed, pop routes for removed labels are deleted. |
-| daemon | `local_as`, `router_id` | Speaker identity — refused with a restart-required diagnostic; the local AS is baked into every session and the safety net, the router-id into every OPEN |
+| daemon | `local_as`, `router_id` | Speaker identity — one daemon-wide unit: every session is closed with the Administrative Reset Cease (subcode 4, the FRR `router bgp <as>` behaviour) and re-added with the fresh identity; the safety net's local AS re-points, the BGP-LS driver is rebuilt when it derives its AS from `local_as`, and the runtime API / metrics identity follows so `lrctl status` and the `lr_info` labels never serve the pre-reload values |
 | damping | `[damping]` | The import hook's enabled flag flips live; a kept-enabled reload re-points the live table to the fresh tuning (`DampingTable::update_config`) with the figure-of-merit history preserved, and respawns the decay ticker at the reloaded `decay_interval_s` |
 | peer health | `[bgp.peer_health] rollout` | Flips the live mode with session state preserved |
 | everything else | | Reported as needing a restart |
 
 If nothing changed, reload prints `reload: no network changes`. With a
-BGP engine loaded it ends with `reload: note: local AS and router-id
-changes require a restart; peer, auth, BFD and policy changes applied
-per unit`; without one, with `reload: note: AS, router-id, peer and
-auth changes require a restart` (the Babel / BMP standalone daemons
+BGP engine loaded it ends with `reload: note: peer, auth, BFD and policy
+changes applied per unit; a local AS or router-id change restarts every
+session with the fresh identity`; without one, with `reload: note: peer
+and auth changes require a restart` (the Babel / BMP standalone daemons
 have no engine reload registered). The OSPF / OSPFv3 session tables
 still require a restart.
 

@@ -980,6 +980,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         session_labels: Arc::new(Mutex::new(HashMap::new())),
         engine_reloads: Arc::new(Mutex::new(Vec::new())),
         shutdown,
+        speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
     });
     if let Err(sig) = crate::signal::init() {
         log_error!(

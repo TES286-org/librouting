@@ -74,6 +74,26 @@ under `lr-mrt::interpret::walk_attributes` (which is RFC-compliant),
 breaking the round-trip the new bench's `decode_attributes` relies
 on. Removed; the round-trip is now pinned by a test.
 
+### Changed — speaker identity (`local_as` / `router_id`) reloads as one
+daemon-wide unit (issue #101)
+
+A SIGHUP / runtime-API reload that changes the local AS or the router-id
+is no longer refused with a restart-required diagnostic: it is applied
+as the unit model's one daemon-wide case — every peer's sessions close
+with the RFC 4486 §4.1 Administrative Reset Cease (subcode 4, the same
+behaviour FRR's `router bgp <as>` re-configuration follows) and are
+re-added with the fresh identity. The daemon process keeps running.
+
+The identity swap re-points everything the two values anchor: the
+safety net's local AS (the AS_PATH loop check counts against it — a new
+`DefaultRouter::safety_net()` accessor exposes the installed net), the
+router-id every rebuilt session's OPEN carries, and the BGP-LS driver
+(a fresh driver re-projects every node descriptor when it derives its
+AS from `local_as`). The runtime API and the metrics endpoint now read
+the identity per connection / per scrape from the runtime's live
+snapshot, so `lrctl status` and the `lr_info` labels never serve the
+pre-reload values.
+
 ### Changed — damping re-tune is live on reload (issue #101)
 
 A SIGHUP / runtime-API reload that keeps `[damping]` enabled now

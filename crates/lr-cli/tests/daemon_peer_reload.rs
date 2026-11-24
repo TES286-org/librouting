@@ -270,6 +270,8 @@ fn sighup_swaps_import_filter_without_session_bounce() {
     let dir = std::env::temp_dir().join(format!("lr-daemon-pr-filter-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     // 18371: see the port note in `sighup_restarts_reconfigured_peer_sessions`.
+    // The full ladder: 18341, 18342, 18351/18352, 18361, 18371,
+    // 18381/18382, 18391 — disjoint from every other e2e binary.
     let port_b = 18371u16;
 
     let _b = listener_daemon(
@@ -456,8 +458,12 @@ fn sighup_invalid_reload_changes_nothing() {
         );
     }
 
-    // 2. A local-AS change is a daemon-wide identity change: refused
-    //    atomically, with a message naming it.
+    // 2. A local-AS change is a daemon-wide identity change: applied
+    //    as a restart of every peer's session (the unit model — FRR
+    //    `router bgp <as>` behaviour), reported as one decision. The
+    //    lab peer still expects AS 64512, so the rebuilt session is
+    //    rejected on the wire — the assertion covers the identity
+    //    swap and the session restart, not a re-establishment.
     std::fs::write(
         &conf,
         "[bgp]\n\
@@ -472,14 +478,82 @@ fn sighup_invalid_reload_changes_nothing() {
     a.signal(SIGHUP);
     let text = wait_log_all(
         &a.log,
-        &["local AS 64512 -> 64599 requires a daemon restart"],
+        &["reload: speaker identity changed (AS 64512 -> 64599)"],
     );
     assert!(
-        !text.contains("reload: peer 127.0.0.1:18341 removed"),
-        "an identity-change refusal must not touch the peers; log:\n{text}"
+        text.contains("restarting its sessions"),
+        "the identity change restarts the peer's sessions; log:\n{text}"
     );
 
-    // The session from the ORIGINAL configuration is still up.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A speaker-identity change that the lab peer CAN accept — a
+/// router-id change (the peer does not enforce the remote bgp-id) —
+/// restarts every session and re-establishes with the fresh identity:
+/// the full positive cycle of the identity-reload unit.
+#[test]
+fn sighup_router_id_change_restarts_and_reestablishes() {
+    let dir = std::env::temp_dir().join(format!("lr-daemon-pr-rid-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // 18342: see the port note in `sighup_restarts_reconfigured_peer_sessions`
+    // — this file's ladder stays disjoint from every other e2e binary.
+    let port_b = 18342u16;
+
+    let _b = listener_daemon("rid-b", "64513", "10.0.0.2", port_b, None);
+
+    let conf = dir.join("a.toml");
+    let write_conf = |router_id: &str| {
+        std::fs::write(
+            &conf,
+            format!(
+                "[bgp]\n\
+                 local_as = 64512\n\
+                 peer_as = 64513\n\
+                 router_id = \"{router_id}\"\n\
+                 ebgp_policy = \"accept-all\"\n\n\
+                 [[peer]]\n\
+                 remote = \"127.0.0.1:{port_b}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+    write_conf("10.0.0.1");
+    let mut a = Daemon::spawn(&["--config", conf.to_str().unwrap()], "rid-a");
+    wait_log_all(&a.log, &["session #1 → Established"]);
+
+    // First Established count: the initial session.
+    let first_established = wait_log_all(&a.log, &["session #1 → Established"])
+        .matches("→ Established")
+        .count();
+
+    // Change only the router-id: the identity unit fires, the session
+    // restarts (Cease/4) and comes back Established with the fresh id.
+    write_conf("10.0.0.7");
+    a.signal(SIGHUP);
+    let text = wait_log_all(
+        &a.log,
+        &["reload: speaker identity changed (router-id 10.0.0.1 -> 10.0.0.7)"],
+    );
+    assert!(
+        text.contains("restarting its sessions"),
+        "the router-id change restarts the peer's sessions; log:\n{text}"
+    );
+    // A second Established line: the rebuilt session (a fresh handle)
+    // negotiated successfully with the fresh identity.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let text = std::fs::read_to_string(&a.log).unwrap_or_default();
+        if text.matches("→ Established").count() > first_established {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the session must re-establish after the identity change; log:\n{text}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

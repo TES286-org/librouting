@@ -39,6 +39,7 @@ use lr_router::DefaultRouter;
 ///
 /// Read by the platform-specific `spawn` implementation (Unix
 /// domain socket on Unix, named pipe on Windows).
+#[derive(Clone)]
 pub struct DaemonInfo {
     pub version: String,
     pub local_as: u32,
@@ -95,6 +96,14 @@ pub struct ApiContext {
     /// `PeerHealthImportHook`. The Arc is shared with the hook and
     /// the ticker thread.
     pub peer_health_table: Option<Arc<std::sync::Mutex<lr_peer_health::PeerHealthTable>>>,
+    /// Live speaker identity `(local_as, router_id)` reader. When
+    /// present, every connection overlays the values it returns onto
+    /// the startup snapshot's `local_as` / `router_id` — the BGP
+    /// engine's reload updates the underlying runtime state on a
+    /// speaker-identity change, and `status` must never serve the
+    /// pre-reload identity. `None` for daemon modes without a
+    /// reloadable identity (they serve the startup snapshot).
+    pub identity: Option<Arc<dyn Fn() -> (u32, String) + Send + Sync>>,
 }
 
 #[cfg(unix)]
@@ -151,6 +160,7 @@ mod imp {
 
         let path_owned = path.to_string();
         let info = Arc::new(ctx.info);
+        let identity = ctx.identity;
         let router = Arc::clone(&ctx.router);
         let rib = ctx.rib;
         let running = Arc::clone(&ctx.running);
@@ -168,6 +178,7 @@ mod imp {
                     // Serve each connection on its own thread so a slow or
                     // idle client cannot hold the management socket hostage.
                     let info = Arc::clone(&info);
+                    let identity = identity.clone();
                     let router = Arc::clone(&router);
                     let rib = Arc::clone(&rib);
                     let running = Arc::clone(&running);
@@ -182,6 +193,16 @@ mod imp {
                         .spawn(move || {
                             // `shutdown` removes the socket file itself so
                             // the cleanup does not race the process exit.
+                            // A speaker-identity reload re-points the live
+                            // `(local_as, router_id)` on the runtime; read
+                            // them per connection so `status` never serves
+                            // the pre-reload identity.
+                            let mut info = (*info).clone();
+                            if let Some(read) = &identity {
+                                let (local_as, router_id) = read();
+                                info.local_as = local_as;
+                                info.router_id = router_id;
+                            }
                             let deps = ConnDeps {
                                 info: &info,
                                 router: &router,
@@ -770,6 +791,7 @@ mod imp {
                 shutdown: None,
                 roa_store: None,
                 peer_health_table: None,
+                identity: None,
             }
         }
 

@@ -941,6 +941,7 @@ pub(super) fn run_ospf_daemon(
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
                 engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
+                speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
             })
         }
     };
@@ -981,7 +982,12 @@ pub(super) fn run_ospf_daemon(
             // multi-protocol supervisor spawns the ticker with the
             // driver when both `bgp` and `ospf` are in the protocol set.
             ticker = Some(
-                match crate::spawn_ticker(&runtime, cfg, Arc::new(AtomicUsize::new(0)), None) {
+                match crate::spawn_ticker(
+                    &runtime,
+                    cfg,
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(Mutex::new(None)),
+                ) {
                     Ok(handle) => handle,
                     Err(e) => return crate::daemon_policy::policy_error(e),
                 },
