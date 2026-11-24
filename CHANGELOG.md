@@ -207,6 +207,52 @@ verifies the exit was clean and returns without asserting on the
 `shutting down` reply. The retry helper's own diagnostic still
 surfaces real transport failures when the daemon is still alive.
 
+### Fixed — wire-validation gaps (issue #101)
+
+Four codec paths accepted malformed input that the protocol text
+forbids. None of them let an unprivileged peer reach privileged
+state, but each could let a malformed frame propagate unchecked
+into the route calculation or back out onto the wire.
+
+- **OSPF LSU count mismatch** (`lr-ospf::codec::decode_lsupdate`).
+  RFC 2328 §A.3.5 / RFC 5340 §A.3.5 declares the 4-octet `# LS
+  advertisements` field to be the exact count of LSAs that follow.
+  The decoder loop exited on either `lsa_count` reached or buffer
+  exhausted, then returned a body whose `lsa_count` was the wire's
+  declared value — so a truncated LSU declaring five LSAs but
+  carrying three decoded as `lsa_count=5, lsas.len()=3`, and
+  re-encoding wrote a malformed LSU declaring five LSAs with only
+  three bodies. A surplus LSU declared zero with a trailing LSA
+  was silently dropped. The decoder now parses every LSA the
+  buffer holds, validates the declared count equals the parsed
+  count, and returns `ParseError::bad_length` on mismatch — both
+  directions of mismatch are rejected. The body's `lsa_count`
+  reflects the actual count so a re-encode of a decoded value
+  stays byte-faithful.
+- **OSPFv3 inter-area-prefix-LSA Plen > 128**
+  (`lr-ospf::lsa::decode_v3_inter_area_prefix_body`). RFC 5340
+  §4.4.3.4 caps an OSPFv3 prefix at 128 bits. `V3Prefix::decode`
+  enforced the bound; this parallel path did not, so a malformed
+  body with Plen = 200 propagated into `Prefix::new_v6(.., 200)`
+  — `new_v6` is a `const fn` and does not validate — and the bogus
+  length rode the SPF candidate into the Loc-RIB. Plen > 128 now
+  returns `None`.
+- **OSPFv3 prefix-link-local entry Plen > 128**
+  (`lr-ospf::lsa::decode_v3_prefix_link_local_entry`). RFC 7684
+  §2 reuses the v3 prefix length field, so Plen is at most 128.
+  Same shape, same gap, same fix as the inter-area-prefix body:
+  Plen > 128 returns `None`.
+- **Babel Update TLV AE=0 wildcard retraction shape**
+  (`lr-babel::message::Update::decode`). RFC 8966 §4.6.9: "If AE
+  is 0, the Update TLV carries a wildcard retraction. In that
+  case, Plen MUST be 0 and Omitted MUST be 0, and the prefix is
+  empty." The decoder accepted `AE=0, Plen=20`, leaving a
+  non-empty prefix on a wildcard retraction; `babeld` and BIRD
+  ignore the whole TLV in that case. The decoder now rejects any
+  AE=0 Update whose Plen or Omitted is non-zero. The matching
+  positive case (AE=0, Plen=0, Omitted=0, empty prefix) still
+  decodes.
+
 ### Added — FFI surface for the reload close variants
 
 `lr_router_reset_session` (Cease / 4 Administrative Reset — the

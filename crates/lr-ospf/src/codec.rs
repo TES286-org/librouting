@@ -581,10 +581,18 @@ fn decode_lsupdate(b: &[u8], version: OspfVersion) -> Result<LsUpdateBody, Parse
     if b.len() < 4 {
         return Err(ParseError::truncated("ospf.lsupdate.body"));
     }
-    let lsa_count = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
-    let mut lsas = Vec::with_capacity(lsa_count);
+    // RFC 2328 §A.3.5 / RFC 5340 §A.3.5: the 4-octet `# LS
+    // advertisements` field is the exact count of LSAs that follow. Parse
+    // every LSA that fits, then verify the count field matches. A
+    // mismatch is malformed — BIRD and FRR drop the whole LSU when the
+    // counts disagree — so the function returns `ParseError::bad_length`
+    // instead of silently truncating or fabricating entries. Returning
+    // the actual count (always equal to the wire count on success) keeps
+    // a re-encode of the decoded value byte-faithful to the input.
+    let declared_count = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+    let mut lsas = Vec::with_capacity(declared_count);
     let mut i = 4;
-    while i + LsaHeader::LEN <= b.len() && lsas.len() < lsa_count {
+    while i + LsaHeader::LEN <= b.len() {
         let h = decode_lsa_header(&b[i..i + LsaHeader::LEN], version)?;
         let body_len = h.length as usize;
         if body_len < LsaHeader::LEN {
@@ -598,8 +606,17 @@ fn decode_lsupdate(b: &[u8], version: OspfVersion) -> Result<LsUpdateBody, Parse
         lsas.push(Lsa { header: h, body });
         i += body_total;
     }
+    if lsas.len() != declared_count {
+        return Err(
+            ParseError::bad_length(0, "ospf.lsupdate.count").with_detail(format!(
+                "declared {} LSAs, parsed {}",
+                declared_count,
+                lsas.len()
+            )),
+        );
+    }
     Ok(LsUpdateBody {
-        lsa_count: lsa_count as u32,
+        lsa_count: lsas.len() as u32,
         lsas,
     })
 }
@@ -785,6 +802,85 @@ mod tests {
                 assert!(u.lsas[0].checksum_ok());
             }
             _ => panic!("expected LS Update"),
+        }
+    }
+
+    /// RFC 2328 §A.3.5: the 4-octet count field is the exact number of
+    /// LSAs that follow. A mismatch is malformed and must surface as a
+    /// `ParseError::bad_length`, never as a silently truncated body
+    /// with a misleading count. Both directions of mismatch (declared
+    /// higher than actual, declared lower than actual) are rejected.
+    #[test]
+    fn lsupdate_count_mismatch_is_rejected() {
+        use crate::abr::{originate_summary_lsa, SummaryDestination};
+        use lr_core::addr::Prefix;
+
+        let dest = SummaryDestination::new(Prefix::new_v4([10, 10, 10, 0], 24), 10);
+        let lsa = originate_summary_lsa(0x01020304, &dest, None).unwrap();
+        let lsa_wire = lsa.to_wire();
+
+        // Declared count (3) higher than the actual LSA count (1).
+        let mut too_high = Vec::new();
+        too_high.extend_from_slice(&3u32.to_be_bytes());
+        too_high.extend_from_slice(&lsa_wire);
+        let err = decode_lsupdate(&too_high, OspfVersion::V2);
+        assert!(
+            err.is_err(),
+            "declared 3 with one LSA must be rejected, got {:?}",
+            err
+        );
+
+        // Declared count (0) lower than the actual LSA count (1).
+        let mut too_low = Vec::new();
+        too_low.extend_from_slice(&0u32.to_be_bytes());
+        too_low.extend_from_slice(&lsa_wire);
+        let err = decode_lsupdate(&too_low, OspfVersion::V2);
+        assert!(
+            err.is_err(),
+            "declared 0 with one LSA must be rejected, got {:?}",
+            err
+        );
+    }
+
+    /// The wire count and the actual LSA count agree: the decoded body
+    /// carries the count verbatim and the LSA survives byte-for-byte.
+    #[test]
+    fn lsupdate_count_match_decodes() {
+        use crate::abr::{originate_summary_lsa, SummaryDestination};
+        use lr_core::addr::Prefix;
+
+        let dest = SummaryDestination::new(Prefix::new_v4([10, 10, 10, 0], 24), 10);
+        let lsa = originate_summary_lsa(0x01020304, &dest, None).unwrap();
+        let lsa_wire = lsa.to_wire();
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&lsa_wire);
+        let decoded = decode_lsupdate(&body, OspfVersion::V2).expect("a well-formed LSU decodes");
+        assert_eq!(decoded.lsa_count, 1);
+        assert_eq!(decoded.lsas.len(), 1);
+        assert_eq!(decoded.lsas[0].to_wire(), lsa_wire);
+    }
+
+    /// A zero-LSA LSU with only the count word is valid; a count word
+    /// alone with a non-zero declared count is rejected. The latter
+    /// previously returned a body with `lsa_count=N, lsas=[]`, which
+    /// would re-emit as a malformed LSU declaring N LSAs but containing
+    /// none. Verified on both v2 and v3.
+    #[test]
+    fn lsupdate_zero_count_is_valid_and_non_zero_count_with_no_lsas_is_rejected() {
+        for version in [OspfVersion::V2, OspfVersion::V3] {
+            let empty = 0u32.to_be_bytes();
+            let decoded = decode_lsupdate(&empty, version).expect("a zero-count LSU decodes");
+            assert_eq!(decoded.lsa_count, 0);
+            assert!(decoded.lsas.is_empty());
+
+            let bogus = 2u32.to_be_bytes();
+            assert!(
+                decode_lsupdate(&bogus, version).is_err(),
+                "non-zero declared count with no LSAs must be rejected on {:?}",
+                version
+            );
         }
     }
 

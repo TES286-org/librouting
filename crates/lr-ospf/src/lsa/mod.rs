@@ -383,13 +383,21 @@ pub struct V3InterAreaPrefixBody {
 }
 
 /// Decode the body of an OSPFv3 inter-area-prefix-LSA. Returns `None`
-/// when the body is truncated.
+/// when the body is truncated or carries an out-of-range prefix length.
 pub fn decode_v3_inter_area_prefix_body(body: &[u8]) -> Option<V3InterAreaPrefixBody> {
     if body.len() < 8 {
         return None;
     }
     let metric = u32::from_be_bytes([0, body[1], body[2], body[3]]);
     let prefix_len = body[4];
+    // RFC 5340 §4.4.3.4: a v3 prefix is an IPv6 prefix, so Plen is at
+    // most 128. `V3Prefix::decode` already enforces the bound; this
+    // path missed it, so a malformed body with Plen > 128 was decoded
+    // into a `Prefix::new_v6(.., prefix_len)` that propagated the bogus
+    // length into the SPF calculation unchecked.
+    if prefix_len > 128 {
+        return None;
+    }
     let prefix_options = body[5];
     let n = (prefix_len as usize).div_ceil(8);
     let padded = n.next_multiple_of(4);
@@ -725,7 +733,8 @@ pub fn encode_v3_prefix_link_local_entry(entry: &V3PrefixLinkLocalEntry) -> Vec<
 
 /// Decode a single RFC 7684 prefix entry from `body` starting at
 /// `offset`. Returns `(entry, next_offset)` on success, or `None`
-/// when the body is truncated.
+/// when the body is truncated or carries an out-of-range prefix
+/// length.
 pub fn decode_v3_prefix_link_local_entry(
     body: &[u8],
     offset: usize,
@@ -734,6 +743,13 @@ pub fn decode_v3_prefix_link_local_entry(
         return None;
     }
     let prefix_len = body[offset];
+    // RFC 7684 §2: the per-prefix entry mirrors the v3 prefix length
+    // field (RFC 5340 §4.4.3.4), so Plen is at most 128. `V3Prefix::decode`
+    // enforces the bound; this path missed it, so a malformed entry with
+    // Plen > 128 over-read the trailing padding.
+    if prefix_len > 128 {
+        return None;
+    }
     let prefix_options = body[offset + 1];
     let af = (prefix_options & v3_prefix_options::AF_BIT) != 0;
     let mut i = offset + 2;
@@ -908,5 +924,24 @@ mod v3_prefix_link_local_tests {
         assert_eq!(t.to_string(), "Prefix-LinkLocal-AS-LSA");
         // Unknown 16-bit value → None.
         assert!(LsaTypeV3::from_u16(0x9999).is_none());
+    }
+
+    #[test]
+    fn prefix_entry_rejects_prefix_len_above_128() {
+        // RFC 7684 §2: the prefix-length field mirrors RFC 5340
+        // §4.4.3.4 (a v3 prefix is at most 128 bits). A malformed
+        // entry with Plen > 128 must be rejected, not decoded into a
+        // bogus prefix that would over-read trailing padding into the
+        // prefix address. Build a body long enough to satisfy the
+        // naive length check (ceil(200/8) = 25 bytes), then assert
+        // the decoder refuses it.
+        let prefix_len = 200u8;
+        let n = (prefix_len as usize).div_ceil(8);
+        let mut wire = vec![prefix_len, v3_prefix_options::LA_BIT];
+        wire.extend(std::iter::repeat_n(0u8, n));
+        assert!(
+            decode_v3_prefix_link_local_entry(&wire, 0).is_none(),
+            "Plen > 128 must be rejected"
+        );
     }
 }

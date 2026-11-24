@@ -397,3 +397,40 @@ fn originate_v3_as_external_lsa_shape() {
         Some([0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
     );
 }
+
+/// RFC 5340 §A.4.5: the inter-area-prefix-LSA body carries one IPv6
+/// prefix, so Plen is at most 128. `decode_v3_inter_area_prefix_body`
+/// rejects a malformed body whose Plen exceeds 128 — previously the
+/// bogus length propagated into the SPF calculation as
+/// `Prefix::new_v6(.., 200)`, since `Prefix::new_v6` is a `const fn`
+/// and does not validate.
+#[test]
+fn decode_v3_inter_area_prefix_body_rejects_plen_above_128() {
+    // A body long enough to satisfy the naive ceil(200/8)=25-byte
+    // length check, padded to a 32-bit boundary (28 bytes).
+    let prefix_len = 200u8;
+    let n = (prefix_len as usize).div_ceil(8);
+    let padded = n.next_multiple_of(4);
+    let mut body = vec![0u8; 8 + padded];
+    body[4] = prefix_len;
+    assert!(
+        crate::lsa::decode_v3_inter_area_prefix_body(&body).is_none(),
+        "Plen > 128 must be rejected by the v3 inter-area-prefix decoder"
+    );
+}
+
+/// The matching positive case: a /48 IPv6 prefix decodes and the
+/// prefix length and bytes survive.
+#[test]
+fn decode_v3_inter_area_prefix_body_decodes_a_normal_prefix() {
+    let prefix: Prefix = Prefix::new_v6(
+        [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        48,
+    );
+    let body = crate::lsa::encode_v3_inter_area_prefix_body(&prefix, 7);
+    let decoded =
+        crate::lsa::decode_v3_inter_area_prefix_body(&body).expect("a /48 prefix decodes");
+    assert_eq!(decoded.prefix_len, 48);
+    assert_eq!(decoded.metric, 7);
+    assert_eq!(decoded.prefix_bytes, vec![0x20, 0x01, 0x0d, 0xb8, 0, 0]);
+}
