@@ -35,7 +35,7 @@ use lr_core::addr::Prefix;
 use lr_core::attr::Attributes;
 use lr_core::nlri::NlriFamily;
 use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
-use lr_mrt::{decode_attributes, walk_attributes, MrtRecord, MrtReader};
+use lr_mrt::{decode_attributes, walk_attributes, MrtReader, MrtRecord};
 use lr_rib::LocRib;
 
 /// Candidate paths grouped by prefix, ranked best-first, plus the
@@ -104,10 +104,7 @@ pub(crate) fn load(path: &str, cap: usize, max_paths: usize) -> Result<Feed, Str
 
 /// Decode every record in `path`, handing each one to `on_record`.
 /// Stops early when the callback returns `false`.
-fn stream_records(
-    path: &str,
-    mut on_record: impl FnMut(MrtRecord) -> bool,
-) -> Result<(), String> {
+fn stream_records(path: &str, mut on_record: impl FnMut(MrtRecord) -> bool) -> Result<(), String> {
     use std::io::Read;
 
     let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
@@ -264,10 +261,7 @@ mod tests {
         let feed = write_dump(path.to_str().unwrap(), 0);
         assert_eq!(feed.dump_paths, 6);
         assert_eq!(feed.sets.len(), 2);
-        assert_eq!(
-            feed.sets.iter().map(|(_, set)| set.len()).sum::<usize>(),
-            6
-        );
+        assert_eq!(feed.sets.iter().map(|(_, set)| set.len()).sum::<usize>(), 6);
         let (_, set) = &feed.sets[0];
         assert_eq!(set.len(), 3, "all candidates retained");
         assert_eq!(
@@ -281,10 +275,7 @@ mod tests {
 
     #[test]
     fn cap_counts_prefixes_not_entries() {
-        let dir = std::env::temp_dir().join(format!(
-            "lr_mrt_feed_cap_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("lr_mrt_feed_cap_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("feed.mrt");
         let feed = write_dump(path.to_str().unwrap(), 1);

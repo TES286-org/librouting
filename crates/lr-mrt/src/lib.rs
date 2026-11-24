@@ -261,8 +261,7 @@ impl MrtReader {
         if buf.len() < HEADER_LEN {
             return Ok(None);
         }
-        let length =
-            u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
+        let length = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
         // A declared length beyond the record-size bound is malformed;
         // drop the buffer so one bad header cannot wedge the stream.
         if length > MAX_RECORD_BODY {

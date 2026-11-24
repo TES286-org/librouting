@@ -135,10 +135,7 @@ fn parse_file_handles_many_records() {
     for _ in 0..10_000 {
         wire.extend_from_slice(BIRD_DUMP);
     }
-    let path = std::env::temp_dir().join(format!(
-        "lr_mrt_many_{}.mrt",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("lr_mrt_many_{}.mrt", std::process::id()));
     std::fs::write(&path, &wire).unwrap();
     let records = parse_file(path.to_str().unwrap()).unwrap();
     assert_eq!(records.len(), 30_000);

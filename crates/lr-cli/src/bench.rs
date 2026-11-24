@@ -802,7 +802,10 @@ mod tests {
         // `correctness_vs_feed` is a storage invariant, not a check
         // that any dump candidate happens to match: dropping the
         // ranked set must show up as `missing`.
-        let key = RouteKey::new(Prefix::new_v4([203, 0, 113, 0], 24), NlriFamily::IPV4_UNICAST);
+        let key = RouteKey::new(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
         let route = Route {
             key: key.clone(),
             origin: RouteOrigin { proto: 0, peer: 0 },
