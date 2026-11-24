@@ -8020,10 +8020,7 @@ impl BabelReloadCoord {
             if let Ok(sys) = lr_osroute::ospf_transport::list_interfaces() {
                 for iface in ifaces {
                     if let Some(entry) = sys.iter().find(|e| e.name == iface.name) {
-                        target.insert(
-                            iface.name.clone(),
-                            BabelIfEffective::resolve(cfg, entry),
-                        );
+                        target.insert(iface.name.clone(), BabelIfEffective::resolve(cfg, entry));
                     }
                 }
             }
@@ -8059,10 +8056,13 @@ fn build_babel_iface_unit(
     let spec = cfg
         .babel_interfaces
         .iter()
-        .find(|s| {
-            crate::daemon_config::glob_match(s.name.as_deref().unwrap_or(""), &entry.name)
-        })
-        .ok_or_else(|| format!("interface {}: no [[babel.interface]] pattern matches", entry.name))?;
+        .find(|s| crate::daemon_config::glob_match(s.name.as_deref().unwrap_or(""), &entry.name))
+        .ok_or_else(|| {
+            format!(
+                "interface {}: no [[babel.interface]] pattern matches",
+                entry.name
+            )
+        })?;
     let mut nonce = lr_babel::SystemNonceSource::new();
     use lr_babel::NonceSource;
     let mut boot = [0u8; 8];
@@ -8077,7 +8077,10 @@ fn build_babel_iface_unit(
 /// build fails is skipped with a report line and stays out of the
 /// target table — the next SIGHUP retries it (the startup
 /// skip-with-warning semantics). Returns the operator-facing lines.
-fn plan_babel_reload(fresh: &DaemonConfig, coord: &BabelReloadCoord) -> Result<Vec<String>, String> {
+fn plan_babel_reload(
+    fresh: &DaemonConfig,
+    coord: &BabelReloadCoord,
+) -> Result<Vec<String>, String> {
     let mut lines: Vec<String> = Vec::new();
     let mut ops: Vec<BabelIfOp> = Vec::new();
 
@@ -8364,10 +8367,7 @@ fn drain_babel_reload(
                         match r.add_session(sc) {
                             Ok(h) => {
                                 if let Err(e) = r.start_session(h) {
-                                    log_error!(
-                                        Component::Babel,
-                                        "babel reload start_session: {e}"
-                                    );
+                                    log_error!(Component::Babel, "babel reload start_session: {e}");
                                     continue;
                                 }
                                 h

@@ -346,9 +346,7 @@ impl OspfIfEffective {
     fn resolve(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Self, String> {
         let name = spec.label().to_string();
         let network_type = match spec.network_type.as_deref() {
-            None | Some("p2p") | Some("point-to-point") | Some("") => {
-                OspfNetworkType::PointToPoint
-            }
+            None | Some("p2p") | Some("point-to-point") | Some("") => OspfNetworkType::PointToPoint,
             Some("broadcast") => OspfNetworkType::Broadcast,
             Some(other) => {
                 return Err(format!(
@@ -524,10 +522,7 @@ impl OspfReloadCoord {
 /// the plan. Everything fallible happens here; an `Err` aborts the
 /// whole reload with nothing queued (the running configuration keeps
 /// running). Returns the operator-facing report lines.
-fn plan_ospf_reload(
-    fresh: &DaemonConfig,
-    coord: &OspfReloadCoord,
-) -> Result<Vec<String>, String> {
+fn plan_ospf_reload(fresh: &DaemonConfig, coord: &OspfReloadCoord) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     let mut ops: Vec<OspfIfOp> = Vec::new();
 
@@ -620,8 +615,7 @@ fn plan_ospf_reload(
             cost: (old.cost != eff.cost).then_some(eff.cost),
             hello_interval: (old.hello_interval != eff.hello_interval)
                 .then_some(eff.hello_interval),
-            dead_interval: (old.dead_interval != eff.dead_interval)
-                .then_some(eff.dead_interval),
+            dead_interval: (old.dead_interval != eff.dead_interval).then_some(eff.dead_interval),
             rxmt_interval_ms: (old.rxmt_interval_ms != eff.rxmt_interval_ms)
                 .then_some(eff.rxmt_interval_ms),
             priority: (old.priority != eff.priority).then_some(eff.priority),
@@ -665,9 +659,7 @@ fn plan_ospf_reload(
     // the area types.
     let (rid, srgb, sids, ranges, areas, gr_role) = &coord.identity;
     if *rid != fresh.router_id {
-        lines.push(
-            "ospf: router-id change requires a restart (the OSPF speaker identity)".into(),
-        );
+        lines.push("ospf: router-id change requires a restart (the OSPF speaker identity)".into());
     }
     if *srgb != fresh.ospf_srgb_base.zip(fresh.ospf_srgb_range)
         || *sids != fresh.ospf_prefix_sids
@@ -1859,11 +1851,7 @@ impl OspfDaemon {
                 if self.anchors.contains_key(area) {
                     continue;
                 }
-                let mtu = self
-                    .interfaces
-                    .first()
-                    .map(|i| i.mtu)
-                    .unwrap_or(1500);
+                let mtu = self.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
                 let rxmt_ms = self
                     .interfaces
                     .iter()
@@ -2000,8 +1988,7 @@ impl OspfDaemon {
                 // Router-LSA (§12.4.1): premature-age the live
                 // instance; an empty-links body is fine — receivers
                 // purge a MaxAge instance on sight.
-                let lsdb_prev =
-                    router.ospf_area_lsa(area, 1, rid, rid);
+                let lsdb_prev = router.ospf_area_lsa(area, 1, rid, rid);
                 let prev = self
                     .lsa_seq
                     .get(&area)
@@ -2128,8 +2115,7 @@ impl OspfDaemon {
                     if let Ok(mut mpls) = lr_osroute::mpls_route::MplsNetlink::connect() {
                         for key in stale {
                             if let Some(label) = self.sr_link_pops.remove(&key) {
-                                if let Err(e) =
-                                    mpls.delete_route(lr_mpls::Label::new_value(label))
+                                if let Err(e) = mpls.delete_route(lr_mpls::Label::new_value(label))
                                 {
                                     log_error!(
                                         Component::Ospf,

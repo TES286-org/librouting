@@ -2667,10 +2667,7 @@ mod babel_reload_tests {
         let entry = real_lo_entry();
         let eff = BabelIfEffective::resolve(cfg, &entry);
         BabelReloadCoord {
-            target: Mutex::new(std::collections::BTreeMap::from([(
-                "lo".to_string(),
-                eff,
-            )])),
+            target: Mutex::new(std::collections::BTreeMap::from([("lo".to_string(), eff)])),
             target_manual: Mutex::new(false),
             manual_identity: (None, 6696, None, Vec::new()),
             configured_router_id: babel_router_id_from_config(cfg),
@@ -2779,10 +2776,15 @@ mod babel_reload_tests {
         fresh.router_id = "172.23.10.103".to_string();
         let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
         assert!(
-            lines.iter().any(|l| l.contains("router-id change requires a restart")),
+            lines
+                .iter()
+                .any(|l| l.contains("router-id change requires a restart")),
             "the restart-required line is reported: {lines:?}"
         );
-        assert!(coord.take_plans().is_empty(), "no unit ops for a restart-required surface");
+        assert!(
+            coord.take_plans().is_empty(),
+            "no unit ops for a restart-required surface"
+        );
     }
 
     /// Switching the interface mode (manual single-socket ↔
@@ -2801,7 +2803,10 @@ mod babel_reload_tests {
                 .any(|l| l.contains("interface mode change") && l.contains("requires a restart")),
             "the mode-switch line is reported: {lines:?}"
         );
-        assert!(coord.take_plans().is_empty(), "no unit ops on a mode switch");
+        assert!(
+            coord.take_plans().is_empty(),
+            "no unit ops on a mode switch"
+        );
     }
 
     /// A manual-path surface change (the `[babel]` port) is reported
@@ -2822,7 +2827,10 @@ mod babel_reload_tests {
                 .any(|l| l.contains("[babel] port change requires a restart")),
             "the port line is reported: {lines:?}"
         );
-        assert!(coord.take_plans().is_empty(), "no unit ops on the manual path");
+        assert!(
+            coord.take_plans().is_empty(),
+            "no unit ops on the manual path"
+        );
     }
 
     /// Consecutive reloads chain: the target table advances at queue

@@ -569,9 +569,7 @@ impl Ospf3IfEffective {
     fn resolve(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Self, String> {
         let name = spec.label().to_string();
         let network_type = match spec.network_type.as_deref() {
-            None | Some("p2p") | Some("point-to-point") | Some("") => {
-                OspfNetworkType::PointToPoint
-            }
+            None | Some("p2p") | Some("point-to-point") | Some("") => OspfNetworkType::PointToPoint,
             Some("broadcast") => OspfNetworkType::Broadcast,
             Some(other) => {
                 return Err(format!(
@@ -818,8 +816,7 @@ fn plan_ospf3_reload(
             cost: (old.cost != eff.cost).then_some(eff.cost),
             hello_interval: (old.hello_interval != eff.hello_interval)
                 .then_some(eff.hello_interval),
-            dead_interval: (old.dead_interval != eff.dead_interval)
-                .then_some(eff.dead_interval),
+            dead_interval: (old.dead_interval != eff.dead_interval).then_some(eff.dead_interval),
             rxmt_interval_ms: (old.rxmt_interval_ms != eff.rxmt_interval_ms)
                 .then_some(eff.rxmt_interval_ms),
             priority: (old.priority != eff.priority).then_some(eff.priority),
@@ -860,9 +857,7 @@ fn plan_ospf3_reload(
 
     let (rid, locators, extended, areas, gr_role) = &coord.identity;
     if *rid != fresh.router_id {
-        lines.push(
-            "ospf: router-id change requires a restart (the OSPF speaker identity)".into(),
-        );
+        lines.push("ospf: router-id change requires a restart (the OSPF speaker identity)".into());
     }
     if *locators != fresh.ospf_srv6_locators {
         lines.push(
@@ -870,8 +865,7 @@ fn plan_ospf3_reload(
         );
     }
     if *extended != fresh.ospf_extended_lsas {
-        lines
-            .push("ospf: extended-LSA mode changes require a restart (RFC 8362)".into());
+        lines.push("ospf: extended-LSA mode changes require a restart (RFC 8362)".into());
     }
     if *areas != fresh.ospf_areas {
         lines.push("ospf: area type changes require a restart".into());
@@ -2277,9 +2271,7 @@ impl Ospf3Daemon {
                     self.ri_lsa_seq.remove(&area),
                 );
                 if let Some(seq) = ri_seq {
-                    if let Some(mut lsa) =
-                        originate_v3_srv6_ri_lsa(rid, 0, &[], &[], Some(seq))
-                    {
+                    if let Some(mut lsa) = originate_v3_srv6_ri_lsa(rid, 0, &[], &[], Some(seq)) {
                         lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
                         lsa.finalize();
                         area_flush.push(lsa);
@@ -2294,9 +2286,7 @@ impl Ospf3Daemon {
                     self.srv6_lsa_seq.remove(&area),
                 );
                 if let Some(seq) = loc_seq {
-                    if let Some(mut lsa) =
-                        originate_v3_srv6_locator_lsa(rid, 1, &[], Some(seq))
-                    {
+                    if let Some(mut lsa) = originate_v3_srv6_locator_lsa(rid, 1, &[], Some(seq)) {
                         lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
                         lsa.finalize();
                         area_flush.push(lsa);

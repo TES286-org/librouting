@@ -1314,7 +1314,9 @@ fn reload_plan_retunes_a_kept_interface() {
     fresh.ospf_interfaces[0].cost = Some(50);
     let lines = super::plan_ospf_reload(&fresh, &coord).expect("valid fresh config");
     assert!(
-        lines.iter().any(|l| l.contains("eth0 re-tuned (cost -> 50)")),
+        lines
+            .iter()
+            .any(|l| l.contains("eth0 re-tuned (cost -> 50)")),
         "the retune line names the interface and the field: {lines:?}"
     );
     let plans = coord.take_plans();
@@ -1376,11 +1378,13 @@ fn reload_plan_rejects_duplicate_interface_names() {
     let cfg = reload_cfg_two_interfaces();
     let coord = super::OspfReloadCoord::new(&cfg);
     let mut fresh = cfg.clone();
-    fresh.ospf_interfaces.push(crate::daemon_config::OspfIfSpec {
-        name: Some("eth0".to_string()),
-        cost: Some(99),
-        ..Default::default()
-    });
+    fresh
+        .ospf_interfaces
+        .push(crate::daemon_config::OspfIfSpec {
+            name: Some("eth0".to_string()),
+            cost: Some(99),
+            ..Default::default()
+        });
     let err = super::plan_ospf_reload(&fresh, &coord).expect_err("duplicate name rejected");
     assert!(err.contains("duplicate interface 'eth0'"), "got: {err}");
     assert!(coord.take_plans().is_empty(), "nothing queued on abort");
