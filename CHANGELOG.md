@@ -74,6 +74,148 @@ under `lr-mrt::interpret::walk_attributes` (which is RFC-compliant),
 breaking the round-trip the new bench's `decode_attributes` relies
 on. Removed; the round-trip is now pinned by a test.
 
+### Changed — speaker identity (`local_as` / `router_id`) reloads as one
+daemon-wide unit (issue #101)
+
+A SIGHUP / runtime-API reload that changes the local AS or the router-id
+is no longer refused with a restart-required diagnostic: it is applied
+as the unit model's one daemon-wide case — every peer's sessions close
+with the RFC 4486 §4.1 Administrative Reset Cease (subcode 4, the same
+behaviour FRR's `router bgp <as>` re-configuration follows) and are
+re-added with the fresh identity. The daemon process keeps running.
+
+The identity swap re-points everything the two values anchor: the
+safety net's local AS (the AS_PATH loop check counts against it — a new
+`DefaultRouter::safety_net()` accessor exposes the installed net), the
+router-id every rebuilt session's OPEN carries, and the BGP-LS driver
+(a fresh driver re-projects every node descriptor when it derives its
+AS from `local_as`). The runtime API and the metrics endpoint now read
+the identity per connection / per scrape from the runtime's live
+snapshot, so `lrctl status` and the `lr_info` labels never serve the
+pre-reload values.
+
+### Changed — damping re-tune is live on reload (issue #101)
+
+A SIGHUP / runtime-API reload that keeps `[damping]` enabled now
+re-points the live table to the fresh tuning through the new
+`lr_damping::DampingTable::update_config`: the figure-of-merit
+history is preserved (a re-tune, not a reset — the same semantics
+FRR's `bgp dampening` re-tune carries) and every future
+computation reads the fresh `suppress_threshold` /
+`reuse_threshold` / `additive_incr` / `upper_limit` /
+`decay_factor_*`. Previously every `DampingConfig` field except
+`decay_interval_s` was baked into the table at construction and
+silently required a daemon restart to change. A raised
+`reuse_threshold` re-evaluates every suppressed entry on the next
+decay pass (at most one `decay_interval_s` later) and reactivates
+the ones whose figure-of-merit is already below the new threshold.
+
+### Added — OSPF / OSPFv3 / Babel interface-set reload (issue #101)
+
+The reload gap the tracker lists for the three non-BGP engines closes:
+the OSPF, OSPFv3 and Babel standalone daemons reload their interface
+sets on SIGHUP / runtime-API `reload` with the same per-unit atomicity
+the BGP engine's peer reload carries. The reload closure (signal / API
+thread) validates the fresh configuration, resolves every new unit
+against the kernel (addresses, raw-socket or UDP binds) and queues the
+plan; the engine loop applies it on its next pass — the apply pass is
+infallible by construction, so a validation failure keeps the running
+configuration entirely unchanged.
+
+- **OSPF (v2 and v3): one configured interface is one unit.** A
+  removal closes its adjacencies and flushes its LSAs (v2: the
+  Network-LSA and Extended-Link LSA; v3: the Link-LSA, Network-LSA and
+  network-referenced Intra-Area-Prefix-LSA) with flush-before-close
+  ordering so the MaxAge instances reach the wire, then re-originates
+  the area's Router-LSA without its links; when it was the area's last
+  interface the area's LSAs flush (MaxAge) and the anchor session
+  closes. An add resolves against the kernel and starts from
+  interface-down. A re-tune updates cost / timers / priority (and the
+  v2 `adj_sid`, the v3 `srv6_end_x` / `srv6_end_x_lan`) in place with
+  the adjacencies kept; a cost change re-originates the Router-LSA,
+  a priority change re-enters the DR election. An area or network-type
+  change restarts the unit (Remove + Add, the FRR behaviour).
+- **OSPF daemon-wide policy swaps in place**: the RFC 2328 §D auth
+  strategy (v3: the RFC 7166 trailer) and the RFC 3623 §3 / RFC 5187
+  §3 graceful-restart helper policy. Router-id, SR origination
+  config (SRGB / prefix-SIDs / mapping-server; v3: SRv6 locators,
+  extended-LSA mode), area types and the graceful-restart role are
+  reported as requiring a restart, honestly.
+- **Babel: one resolved interface is one unit.** A removal flushes its
+  session (`babel_flush_session` — the learned routes leave the
+  Loc-RIB and the other interfaces' re-advertisements) and closes it;
+  an add binds fresh transports and starts announcing from a fresh
+  source identity (RFC 8966 §3.3 — a bind failure skips the unit and
+  is retried on the next SIGHUP, the startup skip-with-warning
+  semantics). A re-tune updates hello / update / rxcost / RTT bounds /
+  `check_link` / `extended_next_hop` / next hops in place with the
+  session, neighbour state and route cache kept; the RTT cost
+  parameters re-point the session's link-cost model. A port or group
+  change restarts the unit. The interface-scoped RFC 8967 auth surface
+  (`[[babel.key]]` sets plus the `[babel]` auth globals) rebuilds in
+  place with a fresh outbound Index (§3.1). The interface mode
+  (manual ↔ `[[babel.interface]]`), the manual path's transport
+  surface and the configured router-id are reported as requiring a
+  restart. The engine loop rewrites its poll registry in place:
+  removals kill the removed unit's socket-table slots (their
+  registered clones drop) and shift later indices, adds append at the
+  tail — no socket is ever re-registered.
+- **The reload posture note is per daemon.** Each daemon appends its
+  own honest summary line (the BGP peer-unit note, the babel
+  interface-set note, the supervisor's engine registry note) instead
+  of one shared BGP-shaped line.
+
+Planner-level tests pin the diff surface for all three engines
+(retunes, removals, rejection with nothing queued, the auth swaps,
+the restart-required reports and the chaining contract that makes a
+repeat SIGHUP a no-op).
+
+### Fixed — FFI policy introspection stubs answered 0 for every input
+(issue #101)
+
+Three C ABI entry points in the lr-policy gap-fill surface were
+placeholders that ignored their argument and returned 0 — the exact
+"does not function as claimed" class the 2.x plan's Fixing
+Identifiable Issues item names:
+
+- `lr_policy_route_field_is_settable` documented a mirror of
+  `RouteFieldKind::is_settable` and a `LR_ROUTE_FIELD_*` constant
+  family, but no such constants existed anywhere and the body
+  answered 0 regardless of `kind`. The constants now exist (one per
+  `RouteFieldKind` variant, Rust declaration order, appended-to by
+  future variants) and the entry point answers the parser's real
+  settable predicate.
+- `lr_policy_value_truthy` claimed to read "the truthy flag of a
+  `Value`", which a kind-only argument cannot see. The contract is
+  now the kind-level question it can answer honestly: 1 when every
+  value of the named kind is truthy (`ip`, `prefix`, `asn`,
+  `community-pattern`, `protocol`, `roa-state`), 0 when truthiness
+  depends on the value's contents (`int`, `bool`, `string`, the
+  sequence kinds). `LR_VALUE_*` constants name the kinds.
+- `lr_policy_binary_op_precedence` covered 13 of the 20 `BinaryOp`
+  variants through an id mapping published nowhere — the seven it
+  missed (bitwise AND/OR/XOR, shifts, `~`, `!~`) answered 0,
+  "unknown". `LR_BINARY_OP_*` constants now publish the ids; ids
+  1–13 keep their historical values and 14–20 name the missing
+  operators.
+
+The Go, Python and C++ bindings gain the constant families (Go
+`ValueIp` / `BinaryOpAnd` / `RouteFieldBgpLocalPref` …; Python
+`VALUE_*` / `BINARY_OP_*` / `ROUTE_FIELD_*` plus `value_truthy` /
+`binary_op_precedence` / `route_field_is_settable` wrappers; C++
+`FilterValueKind` / `FilterBinaryOp` / `RouteField` enum classes with
+typed overloads alongside the raw-int entry points), each with tests.
+
+`scripts/gen_python.py` was not idempotent despite its docstring:
+the generated-block stripper anchored on a line that occurs inside
+the marker header, so generated declarations survived as
+"hand-written", and the alias-typedef forms (`typedef struct
+lr_afi_safi_t lr_nlri_family_t;`) were never recognized as present —
+every run re-appended them and `_ffi.py` grew. Both detection gaps
+are fixed; regeneration is now a no-op on an up-to-date tree (the
+run also flushed the two `lr_router_*_session` declarations from the
+reload PR that had not been re-synced through the generator).
+
 ### Added — atomic configuration reload with minimal-unit restart
 (issue #101)
 

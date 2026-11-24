@@ -1122,6 +1122,9 @@ fn gr_status_test_daemon(
         router_id: RouterId::from_u32(0),
         event_bus: lr_router::event_bus::EventBus::new(),
         auth: OspfAuthState::None,
+        reload_coord: Arc::new(super::OspfReloadCoord::new(
+            &crate::daemon_config::DaemonConfig::with_defaults(),
+        )),
     }
 }
 
@@ -1269,4 +1272,203 @@ fn refresh_gr_status_omits_inactive_helpers() {
         !lines.iter().any(|l| l.contains("grace left")),
         "no helper status line, got: {lines:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Configuration reload — the interface set as units (issue #101).
+// Planner-level tests: everything the reload closure does before the
+// engine's apply pass. The kernel-touching paths (the Add op resolves
+// the fresh interface against the kernel) need raw OSPF sockets and
+// are covered by the netns integration scripts; these cover the pure
+// diff surface — retunes, removals, rejection, policy swaps, the
+// restart-required report and the chaining contract.
+// ---------------------------------------------------------------------
+
+/// A startup-shaped config: two p2p interfaces in area 0 (the names
+/// never reach the kernel on the planner-only paths).
+fn reload_cfg_two_interfaces() -> DaemonConfig {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    cfg.ospf_version = "v2".to_string();
+    cfg.ospf_interfaces.push(crate::daemon_config::OspfIfSpec {
+        name: Some("eth0".to_string()),
+        cost: Some(10),
+        ..Default::default()
+    });
+    cfg.ospf_interfaces.push(crate::daemon_config::OspfIfSpec {
+        name: Some("eth1".to_string()),
+        cost: Some(20),
+        ..Default::default()
+    });
+    cfg.router_id = "1.1.1.1".to_string();
+    cfg
+}
+
+/// A cost retune is one unit: the kept interface's parameters diff
+/// into a Retune op and the report names the field.
+#[test]
+fn reload_plan_retunes_a_kept_interface() {
+    let cfg = reload_cfg_two_interfaces();
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh.ospf_interfaces[0].cost = Some(50);
+    let lines = super::plan_ospf_reload(&fresh, &coord).expect("valid fresh config");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("eth0 re-tuned (cost -> 50)")),
+        "the retune line names the interface and the field: {lines:?}"
+    );
+    let plans = coord.take_plans();
+    assert_eq!(plans.len(), 1, "one plan queued");
+    assert_eq!(plans[0].ops.len(), 1, "one unit");
+    assert!(
+        matches!(&plans[0].ops[0], super::OspfIfOp::Retune(name, retune)
+            if name == "eth0" && retune.cost == Some(50)),
+        "the op is a cost retune on eth0"
+    );
+    assert!(plans[0].auth.is_none() && plans[0].gr_helper.is_none());
+}
+
+/// An interface dropped from the fresh configuration tears its unit
+/// down; the untouched sibling keeps running.
+#[test]
+fn reload_plan_removes_a_dropped_interface() {
+    let cfg = reload_cfg_two_interfaces();
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh.ospf_interfaces.remove(1);
+    let lines = super::plan_ospf_reload(&fresh, &coord).expect("valid fresh config");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("eth1 removed (adjacencies closed, LSAs re-originated)")),
+        "the removal line names the interface: {lines:?}"
+    );
+    let plans = coord.take_plans();
+    assert_eq!(plans.len(), 1);
+    assert!(
+        matches!(&plans[0].ops[0], super::OspfIfOp::Remove(name) if name == "eth1"),
+        "the op is a teardown of eth1"
+    );
+}
+
+/// A pure timer retune queues the unit but does not force the area's
+/// LSA re-origination (the apply pass picks the forced flag).
+#[test]
+fn reload_plan_timer_retune_is_not_lsa_relevant() {
+    let cfg = reload_cfg_two_interfaces();
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh.ospf_interfaces[0].hello_interval = Some(3);
+    super::plan_ospf_reload(&fresh, &coord).expect("valid fresh config");
+    let plans = coord.take_plans();
+    assert_eq!(plans.len(), 1);
+    assert!(
+        matches!(&plans[0].ops[0], super::OspfIfOp::Retune(_, retune)
+            if retune.cost.is_none() && retune.hello_interval == Some(3)),
+        "the retune carries the hello delta only"
+    );
+}
+
+/// A duplicate interface name makes the unit diff ambiguous: the whole
+/// reload aborts and nothing is queued (the atomicity contract).
+#[test]
+fn reload_plan_rejects_duplicate_interface_names() {
+    let cfg = reload_cfg_two_interfaces();
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh
+        .ospf_interfaces
+        .push(crate::daemon_config::OspfIfSpec {
+            name: Some("eth0".to_string()),
+            cost: Some(99),
+            ..Default::default()
+        });
+    let err = super::plan_ospf_reload(&fresh, &coord).expect_err("duplicate name rejected");
+    assert!(err.contains("duplicate interface 'eth0'"), "got: {err}");
+    assert!(coord.take_plans().is_empty(), "nothing queued on abort");
+}
+
+/// An unknown network type is named per interface and aborts the
+/// reload before anything is queued.
+#[test]
+fn reload_plan_rejects_unknown_network_type() {
+    let cfg = reload_cfg_two_interfaces();
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh.ospf_interfaces[0].network_type = Some("nbma".to_string());
+    let err = super::plan_ospf_reload(&fresh, &coord).expect_err("unknown type rejected");
+    assert!(
+        err.contains("eth0") && err.contains("unknown network_type 'nbma'"),
+        "the error names the interface and the value: {err}"
+    );
+    assert!(coord.take_plans().is_empty(), "nothing queued on abort");
+}
+
+/// An `[ospf.auth]` change swaps the daemon-wide strategy in place —
+/// the plan carries the fresh state and the report says new packets
+/// carry it (peers must be reconfigured in lockstep).
+#[test]
+fn reload_plan_swaps_the_auth_strategy_in_place() {
+    let cfg = reload_cfg_two_interfaces();
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh.ospf_auth.auth_type = Some("simple".to_string());
+    fresh.ospf_auth.password = Some("hunter2".to_string());
+    let lines = super::plan_ospf_reload(&fresh, &coord).expect("valid fresh config");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("auth strategy -> simple") && l.contains("fresh strategy")),
+        "the swap line names the fresh strategy: {lines:?}"
+    );
+    let plans = coord.take_plans();
+    assert_eq!(plans.len(), 1, "the policy swap queues a plan");
+    assert!(plans[0].auth.is_some(), "the fresh strategy rides the plan");
+    assert!(plans[0].ops.is_empty(), "no interface units involved");
+}
+
+/// Daemon-wide identity surfaces (router-id, SR origination, area
+/// types, GR role) are reported as requiring a restart — honestly,
+/// instead of silently ignoring the change.
+#[test]
+fn reload_plan_reports_restart_required_surfaces() {
+    let mut cfg = reload_cfg_two_interfaces();
+    cfg.ospf_srgb_base = Some(16000);
+    cfg.ospf_srgb_range = Some(1000);
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh.router_id = "2.2.2.2".to_string();
+    let lines = super::plan_ospf_reload(&fresh, &coord).expect("valid fresh config");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("router-id change requires a restart")),
+        "the router-id line is reported: {lines:?}"
+    );
+    // No interface ops (the set is unchanged), nothing queued: a
+    // restart-required report alone is not a reload.
+    assert!(coord.take_plans().is_empty());
+}
+
+/// Consecutive reloads chain: the target tables advance at queue
+/// time, so a second SIGHUP with the same configuration is a no-op
+/// (idempotent) — the LDP daemon's `current_binds` contract.
+#[test]
+fn reload_plan_chains_targets_so_a_repeat_is_a_noop() {
+    let cfg = reload_cfg_two_interfaces();
+    let coord = super::OspfReloadCoord::new(&cfg);
+    let mut fresh = cfg.clone();
+    fresh.ospf_interfaces[0].cost = Some(50);
+    super::plan_ospf_reload(&fresh, &coord).expect("first reload queues");
+    assert_eq!(coord.take_plans().len(), 1);
+    // Same fresh configuration again: the diff against the advanced
+    // target is empty — no ops, no plan.
+    let lines = super::plan_ospf_reload(&fresh, &coord).expect("second reload");
+    assert!(
+        !lines.iter().any(|l| l.contains("queued")),
+        "nothing queued on the repeat: {lines:?}"
+    );
+    assert!(coord.take_plans().is_empty());
 }

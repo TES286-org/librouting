@@ -2751,6 +2751,93 @@ const (
         EvalPermit      = C.LR_EVAL_PERMIT
 )
 
+// Filter Value kinds (LR_VALUE_*): the payload-carrying types a filter
+// expression evaluates to. Consumed by Policy.ValueTruthy.
+const (
+        ValueInt              = C.LR_VALUE_INT
+        ValueBool             = C.LR_VALUE_BOOL
+        ValueStr              = C.LR_VALUE_STR
+        ValueIp               = C.LR_VALUE_IP
+        ValuePrefix           = C.LR_VALUE_PREFIX
+        ValueAsn              = C.LR_VALUE_ASN
+        ValueAsPath           = C.LR_VALUE_AS_PATH
+        ValueCommunities      = C.LR_VALUE_COMMUNITIES
+        ValueCommPattern      = C.LR_VALUE_COMM_PATTERN
+        ValueLargeCommunities = C.LR_VALUE_LARGE_COMMUNITIES
+        ValueExtCommunities   = C.LR_VALUE_EXT_COMMUNITIES
+        ValueSet              = C.LR_VALUE_SET
+        ValueProtocol         = C.LR_VALUE_PROTOCOL
+        ValueRoaState         = C.LR_VALUE_ROA_STATE
+)
+
+// Filter binary operator ids (LR_BINARY_OP_*). Consumed by
+// Policy.BinaryOpPrecedence.
+const (
+        BinaryOpAnd       = C.LR_BINARY_OP_AND
+        BinaryOpOr        = C.LR_BINARY_OP_OR
+        BinaryOpEq        = C.LR_BINARY_OP_EQ
+        BinaryOpNe        = C.LR_BINARY_OP_NE
+        BinaryOpLt        = C.LR_BINARY_OP_LT
+        BinaryOpLe        = C.LR_BINARY_OP_LE
+        BinaryOpGt        = C.LR_BINARY_OP_GT
+        BinaryOpGe        = C.LR_BINARY_OP_GE
+        BinaryOpAdd       = C.LR_BINARY_OP_ADD
+        BinaryOpSub       = C.LR_BINARY_OP_SUB
+        BinaryOpMul       = C.LR_BINARY_OP_MUL
+        BinaryOpDiv       = C.LR_BINARY_OP_DIV
+        BinaryOpMod       = C.LR_BINARY_OP_MOD
+        BinaryOpBitAnd    = C.LR_BINARY_OP_BIT_AND
+        BinaryOpBitOr     = C.LR_BINARY_OP_BIT_OR
+        BinaryOpBitXor    = C.LR_BINARY_OP_BIT_XOR
+        BinaryOpShl       = C.LR_BINARY_OP_SHL
+        BinaryOpShr       = C.LR_BINARY_OP_SHR
+        BinaryOpMatch     = C.LR_BINARY_OP_MATCH
+        BinaryOpNotMatch  = C.LR_BINARY_OP_NOT_MATCH
+)
+
+// Route-field kinds (LR_ROUTE_FIELD_*), one per filter DSL field in
+// Rust enum declaration order. Consumed by Policy.RouteFieldIsSettable.
+const (
+        RouteFieldNet                    = C.LR_ROUTE_FIELD_NET
+        RouteFieldProto                  = C.LR_ROUTE_FIELD_PROTO
+        RouteFieldSource                 = C.LR_ROUTE_FIELD_SOURCE
+        RouteFieldBgpLocalPref           = C.LR_ROUTE_FIELD_BGP_LOCAL_PREF
+        RouteFieldBgpMed                 = C.LR_ROUTE_FIELD_BGP_MED
+        RouteFieldBgpNextHop             = C.LR_ROUTE_FIELD_BGP_NEXT_HOP
+        RouteFieldBgpAsPath              = C.LR_ROUTE_FIELD_BGP_AS_PATH
+        RouteFieldBgpCommunities         = C.LR_ROUTE_FIELD_BGP_COMMUNITIES
+        RouteFieldBgpExtCommunities      = C.LR_ROUTE_FIELD_BGP_EXT_COMMUNITIES
+        RouteFieldBgpLargeCommunities    = C.LR_ROUTE_FIELD_BGP_LARGE_COMMUNITIES
+        RouteFieldBgpOrigin              = C.LR_ROUTE_FIELD_BGP_ORIGIN
+        RouteFieldBgpAtomicAggregate     = C.LR_ROUTE_FIELD_BGP_ATOMIC_AGGREGATE
+        RouteFieldBgpOriginatorId        = C.LR_ROUTE_FIELD_BGP_ORIGINATOR_ID
+        RouteFieldBgpClusterList         = C.LR_ROUTE_FIELD_BGP_CLUSTER_LIST
+        RouteFieldBgpOtc                 = C.LR_ROUTE_FIELD_BGP_OTC
+        RouteFieldBgpAigp                = C.LR_ROUTE_FIELD_BGP_AIGP
+        RouteFieldBgpAggregatorAsn       = C.LR_ROUTE_FIELD_BGP_AGGREGATOR_ASN
+        RouteFieldBgpAggregatorSpeaker   = C.LR_ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER
+        RouteFieldBgpPmsiTunnel          = C.LR_ROUTE_FIELD_BGP_PMSI_TUNNEL
+        RouteFieldOspfMetric1            = C.LR_ROUTE_FIELD_OSPF_METRIC1
+        RouteFieldOspfMetric2            = C.LR_ROUTE_FIELD_OSPF_METRIC2
+        RouteFieldOspfTag                = C.LR_ROUTE_FIELD_OSPF_TAG
+        RouteFieldOspfRouterId           = C.LR_ROUTE_FIELD_OSPF_ROUTER_ID
+        RouteFieldBabelMetric            = C.LR_ROUTE_FIELD_BABEL_METRIC
+        RouteFieldBabelSeqno             = C.LR_ROUTE_FIELD_BABEL_SEQNO
+        RouteFieldBabelRouterId          = C.LR_ROUTE_FIELD_BABEL_ROUTER_ID
+        RouteFieldLrxpVerified           = C.LR_ROUTE_FIELD_LRXP_VERIFIED
+        RouteFieldLrxpPartialTransit     = C.LR_ROUTE_FIELD_LRXP_PARTIAL_TRANSIT
+        RouteFieldLrxpHintRank           = C.LR_ROUTE_FIELD_LRXP_HINT_RANK
+        RouteFieldLrxpHintDampFom        = C.LR_ROUTE_FIELD_LRXP_HINT_DAMP_FOM
+        RouteFieldLrxpHintIgpCost        = C.LR_ROUTE_FIELD_LRXP_HINT_IGP_COST
+        RouteFieldLrxpPolicyRole         = C.LR_ROUTE_FIELD_LRXP_POLICY_ROLE
+        RouteFieldLrxpPolicyImportDigest = C.LR_ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST
+        RouteFieldLrxpPolicyExportDigest = C.LR_ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST
+        RouteFieldLrxpOriginAs           = C.LR_ROUTE_FIELD_LRXP_ORIGIN_AS
+        RouteFieldLrxpOriginMaxValidLen  = C.LR_ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN
+        RouteFieldLrxpOriginExpiry       = C.LR_ROUTE_FIELD_LRXP_ORIGIN_EXPIRY
+        RouteFieldRoaState               = C.LR_ROUTE_FIELD_ROA_STATE
+)
+
 // Route is an owned policy route handle (a boxed lr_core::rib::Route):
 // the exact data model filter and route-map evaluation run against.
 type Route struct {

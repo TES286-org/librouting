@@ -296,7 +296,7 @@ fn sighup_reloads_an_lr_config() {
             "reload: unoriginating 203.0.113.0/24",
         ],
     );
-    assert!(text.contains("require a restart"), "log: {text}");
+    assert!(text.contains("applied per unit"), "log: {text}");
 
     // The runtime API sees the reloaded RIB.
     let routes = api_ask(&socket, "routes");

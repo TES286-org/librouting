@@ -893,6 +893,150 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_BFD_KEYED_AUTH_ALGO_METICULOUS_KEYED_SHA1 4
 
+#define LR_VALUE_INT 0
+
+#define LR_VALUE_BOOL 1
+
+#define LR_VALUE_STR 2
+
+#define LR_VALUE_IP 3
+
+#define LR_VALUE_PREFIX 4
+
+#define LR_VALUE_ASN 5
+
+#define LR_VALUE_AS_PATH 6
+
+#define LR_VALUE_COMMUNITIES 7
+
+#define LR_VALUE_COMM_PATTERN 8
+
+#define LR_VALUE_LARGE_COMMUNITIES 9
+
+#define LR_VALUE_EXT_COMMUNITIES 10
+
+#define LR_VALUE_SET 11
+
+#define LR_VALUE_PROTOCOL 12
+
+#define LR_VALUE_ROA_STATE 13
+
+#define LR_BINARY_OP_AND 1
+
+#define LR_BINARY_OP_OR 2
+
+#define LR_BINARY_OP_EQ 3
+
+#define LR_BINARY_OP_NE 4
+
+#define LR_BINARY_OP_LT 5
+
+#define LR_BINARY_OP_LE 6
+
+#define LR_BINARY_OP_GT 7
+
+#define LR_BINARY_OP_GE 8
+
+#define LR_BINARY_OP_ADD 9
+
+#define LR_BINARY_OP_SUB 10
+
+#define LR_BINARY_OP_MUL 11
+
+#define LR_BINARY_OP_DIV 12
+
+#define LR_BINARY_OP_MOD 13
+
+#define LR_BINARY_OP_BIT_AND 14
+
+#define LR_BINARY_OP_BIT_OR 15
+
+#define LR_BINARY_OP_BIT_XOR 16
+
+#define LR_BINARY_OP_SHL 17
+
+#define LR_BINARY_OP_SHR 18
+
+#define LR_BINARY_OP_MATCH 19
+
+#define LR_BINARY_OP_NOT_MATCH 20
+
+#define LR_ROUTE_FIELD_NET 0
+
+#define LR_ROUTE_FIELD_PROTO 1
+
+#define LR_ROUTE_FIELD_SOURCE 2
+
+#define LR_ROUTE_FIELD_BGP_LOCAL_PREF 3
+
+#define LR_ROUTE_FIELD_BGP_MED 4
+
+#define LR_ROUTE_FIELD_BGP_NEXT_HOP 5
+
+#define LR_ROUTE_FIELD_BGP_AS_PATH 6
+
+#define LR_ROUTE_FIELD_BGP_COMMUNITIES 7
+
+#define LR_ROUTE_FIELD_BGP_EXT_COMMUNITIES 8
+
+#define LR_ROUTE_FIELD_BGP_LARGE_COMMUNITIES 9
+
+#define LR_ROUTE_FIELD_BGP_ORIGIN 10
+
+#define LR_ROUTE_FIELD_BGP_ATOMIC_AGGREGATE 11
+
+#define LR_ROUTE_FIELD_BGP_ORIGINATOR_ID 12
+
+#define LR_ROUTE_FIELD_BGP_CLUSTER_LIST 13
+
+#define LR_ROUTE_FIELD_BGP_OTC 14
+
+#define LR_ROUTE_FIELD_BGP_AIGP 15
+
+#define LR_ROUTE_FIELD_BGP_AGGREGATOR_ASN 16
+
+#define LR_ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER 17
+
+#define LR_ROUTE_FIELD_BGP_PMSI_TUNNEL 18
+
+#define LR_ROUTE_FIELD_OSPF_METRIC1 19
+
+#define LR_ROUTE_FIELD_OSPF_METRIC2 20
+
+#define LR_ROUTE_FIELD_OSPF_TAG 21
+
+#define LR_ROUTE_FIELD_OSPF_ROUTER_ID 22
+
+#define LR_ROUTE_FIELD_BABEL_METRIC 23
+
+#define LR_ROUTE_FIELD_BABEL_SEQNO 24
+
+#define LR_ROUTE_FIELD_BABEL_ROUTER_ID 25
+
+#define LR_ROUTE_FIELD_LRXP_VERIFIED 26
+
+#define LR_ROUTE_FIELD_LRXP_PARTIAL_TRANSIT 27
+
+#define LR_ROUTE_FIELD_LRXP_HINT_RANK 28
+
+#define LR_ROUTE_FIELD_LRXP_HINT_DAMP_FOM 29
+
+#define LR_ROUTE_FIELD_LRXP_HINT_IGP_COST 30
+
+#define LR_ROUTE_FIELD_LRXP_POLICY_ROLE 31
+
+#define LR_ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST 32
+
+#define LR_ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST 33
+
+#define LR_ROUTE_FIELD_LRXP_ORIGIN_AS 34
+
+#define LR_ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN 35
+
+#define LR_ROUTE_FIELD_LRXP_ORIGIN_EXPIRY 36
+
+#define LR_ROUTE_FIELD_ROA_STATE 37
+
 /**
  * Maximum text length for the `kind` and `state` strings in
  * [`lr_session_summary_t`]. RFC 2328 / RFC 5340 / RFC 8966 never use
@@ -11748,22 +11892,34 @@ int32_t lr_policy_lexer_tokenize(const char *src, struct lr_bytes_t *out);
 lr_filter_t lr_policy_parse_filter(const char *name, const char *src);
 
 /**
- * Read the `truthy` flag of a `Value`. Returns 1 when the value is
- * truthy, 0 when not. (Standalone entry — kept here because the
- * Value type is internal and not exposed via a handle.)
+ * Kind-level truthiness for a filter `Value`: returns 1 when every
+ * value of the named kind is truthy, 0 when truthiness depends on
+ * the value's contents (or the kind is unknown). The always-truthy
+ * kinds are `ip`, `prefix`, `asn`, `community-pattern`, `protocol`
+ * and `roa-state`; for `int` (`0` is falsy), `bool`, `string` (empty
+ * is falsy) and the sequence kinds (`as-path`, `community-set`,
+ * `large-community-set`, `ext-community-set`, `set` — empty is
+ * falsy) the answer depends on the value a filter actually holds,
+ * which this kind-only entry point cannot see. `value_kind` is one
+ * of the `LR_VALUE_*` constants.
  */
 uint8_t lr_policy_value_truthy(int32_t value_kind);
 
 /**
- * Read the precedence of a `BinaryOp` (1–7, mirroring Rust's
- * `BinaryOp::precedence`). Stateless — given the operator's i32 id,
- * returns its precedence.
+ * Read the precedence of a `BinaryOp` — higher binds tighter
+ * (BIRD's filter-grammar layering: `||` 1, `&&` 2, `==`/`!=` 3,
+ * comparisons and `~`/`!~` 4, `|` 5, `^` 6, `&` 7, shifts 8,
+ * `+`/`-` 9, `*`/`/`/`%` 10). Stateless — given one of the
+ * `LR_BINARY_OP_*` constants, returns its precedence, or 0 for an
+ * unknown id.
  */
 uint8_t lr_policy_binary_op_precedence(int32_t op);
 
 /**
- * True (1) when `kind` is settable (mirrors `RouteFieldKind::is_settable`).
- * `kind` is one of the `LR_ROUTE_FIELD_*` constants.
+ * True (1) when `kind` names a route field the filter DSL can
+ * assign (`bgp.local_pref = 100;`) — the exact predicate the parser
+ * enforces on assignment targets. `kind` is one of the
+ * `LR_ROUTE_FIELD_*` constants; an unknown id answers 0.
  */
 uint8_t lr_policy_route_field_is_settable(int32_t kind);
 

@@ -53,6 +53,11 @@ def existing_python_opaques(cdef: str) -> set[str]:
     out = set()
     for m in re.finditer(r"typedef struct (Opaque\w+) \*(lr_\w+);", cdef):
         out.add(m.group(2))
+    # Alias typedefs (`typedef <alias> lr_x_t;` / `typedef struct <alias>
+    # lr_x_t;` — what `render_opaque` emits for an `alias_of` entry).
+    # Without this arm the emitted form is never recognized on the
+    # next run, the alias is re-added every time, and the file grows.
+    out |= set(re.findall(r"^\s*typedef\s+(?:struct\s+)?\w+\s+(lr_\w+_t)\s*;", cdef, re.MULTILINE))
     return out
 
 
@@ -62,6 +67,10 @@ def existing_python_structs(cdef: str) -> set[str]:
         out.add(m.group(1))
     for m in re.finditer(r"^\s*struct\s+(lr_\w+_t)\s*\{", cdef, re.MULTILINE):
         out.add(m.group(1))
+    # Alias typedefs (`typedef struct <alias> lr_x_t;` — what
+    # `render_struct` emits for an `alias_of` entry). Same rationale
+    # as in `existing_python_opaques`.
+    out |= set(re.findall(r"^\s*typedef\s+(?:struct\s+)?\w+\s+(lr_\w+_t)\s*;", cdef, re.MULTILINE))
     return out
 
 
@@ -446,8 +455,16 @@ def patch_ffi(abi: dict) -> None:
     if not m:
         raise RuntimeError("cannot find _HEADER")
     cdef = m.group(2)
-    pat = re.compile(re.escape(GEN_BEGIN) + r".*?" + re.escape(GEN_END) + r"\s*", re.DOTALL)
-    cdef_clean = pat.sub("", cdef)
+    # The generated block is always the tail of the cdef (it is
+    # appended after the hand-written part below), so strip from the
+    # marker to the end of the string. The previous pattern ended at
+    # GEN_END — a line that occurs inside the marker header itself —
+    # so it stripped only the 4 header lines and left the generated
+    # declarations in `cdef_clean` as if they were hand-written: the
+    # next run re-appended the marker after them and the file grew
+    # on every regeneration (the opposite of idempotent).
+    pat = re.compile(re.escape(GEN_BEGIN) + r".*\Z", re.DOTALL)
+    cdef_clean = pat.sub("", cdef).rstrip()
     present_opaques = existing_python_opaques(cdef_clean)
     present_structs = existing_python_structs(cdef_clean)
     present_syms = existing_python_symbols(cdef_clean)

@@ -281,6 +281,437 @@ impl OspfAuthState {
     }
 }
 
+// ---------------------------------------------------------------------
+// Configuration reload — the interface set as units (issue #101).
+//
+// The unit model mirrors the BGP engine's peer reload:
+//
+// - **One configured interface is one unit.** An interface added,
+//   removed or re-tuned costs exactly that interface: a removal
+//   closes its adjacencies (sessions withdrawn, its Network-LSA and
+//   Extended-Link LSA flushed) and re-originates the area's
+//   Router-LSA without its links; an add resolves against the kernel
+//   and starts from interface-down; a re-tune updates the wire/LSA
+//   parameters in place with the adjacencies kept. Every other
+//   interface's adjacencies keep running.
+// - **Identity fields (area, network type) change = unit restart** —
+//   a Remove + Add pair (the FRR behaviour: nothing about the
+//   adjacency is worth preserving across an area move or a type
+//   change).
+// - **Daemon-wide policy is swappable in place**: the RFC 2328 §D
+//   auth strategy (new packets are stamped with the fresh strategy —
+//   peers must be reconfigured in lockstep, exactly as they would
+//   after a restart) and the RFC 3623 §3 helper policy flags.
+//
+// Threading: the reload closure runs on the signal-handling or API
+// thread, never on the engine loop; the plan it queues is applied by
+// the engine's [`OspfDaemon::pump`] on its next pass (the loop's
+// poll-timeout ceiling, ≤50 ms). Everything fallible — parse,
+// finalize, address resolution, the raw-socket bind for a new
+// interface — happens in the planner, so the apply pass is
+// infallible by construction (the atomicity contract every engine
+// reload carries: a validation failure keeps the running
+// configuration entirely unchanged).
+//
+// Not reloadable (reported as requiring a restart, honestly): the
+// router-id, the SR origination config (SRGB / prefix-SIDs /
+// mapping-server ranges), the graceful-restart role and period, and
+// the `[[ospf.area]]` types. Those are daemon-wide identity or
+// origination surfaces, not session-table state.
+// ---------------------------------------------------------------------
+
+/// The effective (resolved) parameters of one configured interface —
+/// the diff surface of the interface-set reload. Per-interface values
+/// override the `[ospf]` globals, which override the RFC 2328
+/// defaults; the same resolution [`resolve_interface`] applies, minus
+/// the kernel work (addresses, raw-socket bind, MTU) only the
+/// engine's apply path needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OspfIfEffective {
+    name: String,
+    area: u32,
+    network_type: OspfNetworkType,
+    cost: u16,
+    hello_interval: u16,
+    dead_interval: u32,
+    rxmt_interval_ms: u64,
+    priority: u8,
+    adj_sid: Option<u32>,
+}
+
+impl OspfIfEffective {
+    /// Resolve one spec against the config's globals (the pure half of
+    /// [`resolve_interface`]). An invalid `network_type` is named per
+    /// interface (finalize already rejects it globally).
+    fn resolve(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Self, String> {
+        let name = spec.label().to_string();
+        let network_type = match spec.network_type.as_deref() {
+            None | Some("p2p") | Some("point-to-point") | Some("") => OspfNetworkType::PointToPoint,
+            Some("broadcast") => OspfNetworkType::Broadcast,
+            Some(other) => {
+                return Err(format!(
+                    "interface {name}: unknown network_type '{other}' \
+                     (use \"p2p\" or \"broadcast\")"
+                ))
+            }
+        };
+        let hello = spec
+            .hello_interval
+            .unwrap_or(cfg.ospf_hello_interval)
+            .max(1);
+        let dead = spec
+            .dead_interval
+            .unwrap_or(cfg.ospf_dead_interval)
+            .max(u32::from(hello));
+        let rxmt_secs = spec.rxmt_interval.unwrap_or(cfg.ospf_rxmt_interval).max(1);
+        Ok(Self {
+            name,
+            area: spec.area.unwrap_or(cfg.ospf_area),
+            network_type,
+            cost: spec.cost.unwrap_or(10),
+            hello_interval: hello,
+            dead_interval: dead,
+            rxmt_interval_ms: u64::from(rxmt_secs) * 1_000,
+            priority: spec.priority.unwrap_or(1),
+            adj_sid: spec.adj_sid,
+        })
+    }
+}
+
+/// In-place parameter deltas for one kept interface (identity — name,
+/// area, network type — unchanged): `None` fields keep the live value.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct OspfIfRetune {
+    cost: Option<u16>,
+    hello_interval: Option<u16>,
+    dead_interval: Option<u32>,
+    rxmt_interval_ms: Option<u64>,
+    priority: Option<u8>,
+    /// `Some(None)` = the adj_sid was removed; `Some(Some(v))` = set
+    /// or changed. `None` = unchanged.
+    adj_sid: Option<Option<u32>>,
+}
+
+impl OspfIfRetune {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// One operator-facing summary of the changed fields
+    /// (`"cost 10 -> 20, hello 10s -> 5s"`).
+    fn summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(v) = self.cost {
+            parts.push(format!("cost -> {v}"));
+        }
+        if let Some(v) = self.hello_interval {
+            parts.push(format!("hello -> {v}s"));
+        }
+        if let Some(v) = self.dead_interval {
+            parts.push(format!("dead -> {v}s"));
+        }
+        if let Some(v) = self.rxmt_interval_ms {
+            parts.push(format!("rxmt -> {}s", v / 1_000));
+        }
+        if let Some(v) = self.priority {
+            parts.push(format!("priority -> {v}"));
+        }
+        if let Some(v) = self.adj_sid {
+            match v {
+                Some(sid) => parts.push(format!("adj-sid -> {sid}")),
+                None => parts.push("adj-sid removed".into()),
+            }
+        }
+        parts.join(", ")
+    }
+}
+
+/// One planned interface-set operation, in apply order (removals and
+/// replace-teardowns first, retunes next, installs last).
+enum OspfIfOp {
+    /// Install a newly resolved interface. The transport is already
+    /// bound (the planner's fallible half); the apply pass re-anchors
+    /// the broadcast WaitTimer base to its own clock.
+    Add(Box<OspfInterface>),
+    /// Tear one interface down by name: adjacencies on it close, its
+    /// Network-LSA and Extended-Link LSA flush, and — when it was the
+    /// area's last interface — the area's Router-LSA and SR LSAs
+    /// flush (MaxAge) and the anchor session closes.
+    Remove(String),
+    /// Update a kept interface's parameters in place.
+    Retune(String, OspfIfRetune),
+}
+
+/// One validated reload plan: everything the engine's apply pass
+/// needs, with the fallible work already done. Queued by the planner,
+/// drained in order by [`OspfDaemon::drain_reload_queue`].
+struct OspfReloadPlan {
+    ops: Vec<OspfIfOp>,
+    /// The fresh auth strategy when `[ospf.auth]` changed.
+    auth: Option<OspfAuthState>,
+    /// Fresh RFC 3623 §3 helper policy `(enabled, cap)` when the
+    /// flags changed.
+    gr_helper: Option<(bool, u32)>,
+}
+
+/// The reload coordination state shared between the reload closure
+/// (signal / API thread) and the engine loop: the closure validates
+/// the fresh configuration, resolves every new interface (the kernel
+/// work: addresses + raw-socket bind) and queues the plan; the pump
+/// applies it on its next pass.
+///
+/// The target tables are the diff base for the NEXT reload and are
+/// updated at queue time, so consecutive SIGHUPs chain correctly even
+/// when the pump has not drained the earlier plan yet (the same
+/// contract the LDP daemon's `current_binds` carries).
+struct OspfReloadCoord {
+    /// Interface table the last queued reload targeted.
+    target: Mutex<Vec<OspfIfEffective>>,
+    /// `[ospf.auth]` spec the last queued reload targeted.
+    target_auth: Mutex<crate::daemon_config::OspfAuthSpec>,
+    /// Helper policy the last queued reload targeted: `(enabled, cap)`.
+    target_gr_helper: Mutex<(bool, u32)>,
+    /// The daemon's startup identity/origination snapshot, for the
+    /// restart-required diff lines: router-id string, SRGB, prefix-SID
+    /// specs, mapping-server specs, area specs, graceful-restart role
+    /// and grace period.
+    identity: OspfIdentitySnapshot,
+    /// Queued plans, drained by the engine pump in order.
+    queue: Mutex<Vec<OspfReloadPlan>>,
+}
+
+/// The startup identity/origination snapshot behind
+/// [`OspfReloadCoord::identity`] — a tuple alias so the field's type
+/// stays a single name (a struct would buy nothing: every consumer
+/// destructures positionally).
+type OspfIdentitySnapshot = (
+    String,
+    Option<(u32, u32)>,
+    Vec<crate::daemon_config::OspfPrefixSidSpec>,
+    Vec<crate::daemon_config::OspfMappingServerSpec>,
+    Vec<crate::daemon_config::OspfAreaSpec>,
+    (bool, u32),
+);
+
+impl OspfReloadCoord {
+    /// Snapshot the startup configuration's reload surface.
+    pub(crate) fn new(cfg: &DaemonConfig) -> Self {
+        let target = cfg
+            .ospf_interfaces
+            .iter()
+            .map(|spec| OspfIfEffective::resolve(cfg, spec))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_default();
+        Self {
+            target: Mutex::new(target),
+            target_auth: Mutex::new(cfg.ospf_auth.clone()),
+            target_gr_helper: Mutex::new((cfg.ospf_gr_helper, cfg.ospf_helper_grace_cap)),
+            identity: (
+                cfg.router_id.clone(),
+                cfg.ospf_srgb_base.zip(cfg.ospf_srgb_range),
+                cfg.ospf_prefix_sids.clone(),
+                cfg.ospf_mapping_servers.clone(),
+                cfg.ospf_areas.clone(),
+                (cfg.ospf_graceful_restart, cfg.ospf_grace_period),
+            ),
+            queue: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Take every queued plan (the pump's drain side).
+    fn take_plans(&self) -> Vec<OspfReloadPlan> {
+        std::mem::take(&mut *self.queue.lock().unwrap())
+    }
+}
+
+/// Validate the fresh configuration against the live target and queue
+/// the plan. Everything fallible happens here; an `Err` aborts the
+/// whole reload with nothing queued (the running configuration keeps
+/// running). Returns the operator-facing report lines.
+fn plan_ospf_reload(fresh: &DaemonConfig, coord: &OspfReloadCoord) -> Result<Vec<String>, String> {
+    let mut lines = Vec::new();
+    let mut ops: Vec<OspfIfOp> = Vec::new();
+
+    let target = coord.target.lock().unwrap().clone();
+    // The fresh table resolved against the fresh globals. Duplicate
+    // names are rejected here (the unit identity is the name — a
+    // duplicate would make the diff ambiguous).
+    let mut fresh_eff: Vec<OspfIfEffective> = Vec::new();
+    for spec in &fresh.ospf_interfaces {
+        let eff = OspfIfEffective::resolve(fresh, spec).map_err(|e| format!("ospf: {e}"))?;
+        if fresh_eff.iter().any(|e| e.name == eff.name) {
+            return Err(format!(
+                "ospf: duplicate interface '{}' in the fresh configuration",
+                eff.name
+            ));
+        }
+        fresh_eff.push(eff);
+    }
+
+    // Removals (and the teardown half of a replace) first, so a unit
+    // restarted under the same name lands in a clean slot.
+    for old in &target {
+        if !fresh_eff.iter().any(|f| f.name == old.name) {
+            ops.push(OspfIfOp::Remove(old.name.clone()));
+            lines.push(format!(
+                "ospf: interface {} removed (adjacencies closed, LSAs re-originated)",
+                old.name
+            ));
+        }
+    }
+
+    // Adds, replaces and retunes.
+    for eff in &fresh_eff {
+        let spec = fresh
+            .ospf_interfaces
+            .iter()
+            .find(|s| s.label() == eff.name)
+            .expect("fresh_eff was built from this table");
+        let Some(old) = target.iter().find(|t| t.name == eff.name) else {
+            // New interface — resolve against the kernel now (the
+            // fallible half: addresses, raw-socket bind, MTU).
+            ops.push(OspfIfOp::Add(Box::new(
+                resolve_interface(fresh, spec).map_err(|e| format!("ospf: {e}"))?,
+            )));
+            lines.push(format!(
+                "ospf: interface {} added (area {}, {})",
+                eff.name,
+                area_label(eff.area),
+                if eff.network_type == OspfNetworkType::Broadcast {
+                    "broadcast"
+                } else {
+                    "point-to-point"
+                },
+            ));
+            continue;
+        };
+        if old.area != eff.area || old.network_type != eff.network_type {
+            // Identity change: restart the unit. The teardown half
+            // rides the same Remove op shape (a replace under one
+            // name is a Remove followed by an Add).
+            let teardown = matches!(
+                ops.last(),
+                Some(OspfIfOp::Remove(n)) if *n == eff.name
+            );
+            if !teardown {
+                ops.push(OspfIfOp::Remove(old.name.clone()));
+            }
+            ops.push(OspfIfOp::Add(Box::new(
+                resolve_interface(fresh, spec).map_err(|e| format!("ospf: {e}"))?,
+            )));
+            lines.push(format!(
+                "ospf: interface {} restarted ({} -> area {}, {})",
+                eff.name,
+                if old.area != eff.area {
+                    format!("area {} ->", area_label(old.area))
+                } else {
+                    "type change".to_string()
+                },
+                area_label(eff.area),
+                if eff.network_type == OspfNetworkType::Broadcast {
+                    "broadcast"
+                } else {
+                    "point-to-point"
+                },
+            ));
+            continue;
+        }
+        // Same unit identity: diff the parameters.
+        let retune = OspfIfRetune {
+            cost: (old.cost != eff.cost).then_some(eff.cost),
+            hello_interval: (old.hello_interval != eff.hello_interval)
+                .then_some(eff.hello_interval),
+            dead_interval: (old.dead_interval != eff.dead_interval).then_some(eff.dead_interval),
+            rxmt_interval_ms: (old.rxmt_interval_ms != eff.rxmt_interval_ms)
+                .then_some(eff.rxmt_interval_ms),
+            priority: (old.priority != eff.priority).then_some(eff.priority),
+            adj_sid: (old.adj_sid != eff.adj_sid).then_some(eff.adj_sid),
+        };
+        if !retune.is_empty() {
+            ops.push(OspfIfOp::Retune(eff.name.clone(), retune));
+            lines.push(format!(
+                "ospf: interface {} re-tuned ({})",
+                eff.name,
+                retune.summary()
+            ));
+        }
+    }
+
+    // Daemon-wide policy diffs.
+    let fresh_auth = fresh.ospf_auth.clone();
+    let auth_changed = *coord.target_auth.lock().unwrap() != fresh_auth;
+    let auth = if auth_changed {
+        Some(build_ospf_auth(fresh))
+    } else {
+        None
+    };
+    if auth_changed {
+        lines.push(format!(
+            "ospf: auth strategy -> {} (new packets carry the fresh strategy)",
+            fresh.ospf_auth.effective_type()
+        ));
+    }
+    let fresh_gr = (fresh.ospf_gr_helper, fresh.ospf_helper_grace_cap);
+    let gr_changed = *coord.target_gr_helper.lock().unwrap() != fresh_gr;
+    if gr_changed {
+        lines.push(format!(
+            "ospf: gr-helper policy -> enabled={} cap={}s",
+            fresh_gr.0, fresh_gr.1
+        ));
+    }
+
+    // Restart-required surfaces, reported honestly: the router-id,
+    // the SR origination config, the graceful-restart role/period and
+    // the area types.
+    let (rid, srgb, sids, ranges, areas, gr_role) = &coord.identity;
+    if *rid != fresh.router_id {
+        lines.push("ospf: router-id change requires a restart (the OSPF speaker identity)".into());
+    }
+    if *srgb != fresh.ospf_srgb_base.zip(fresh.ospf_srgb_range)
+        || *sids != fresh.ospf_prefix_sids
+        || *ranges != fresh.ospf_mapping_servers
+    {
+        lines.push(
+            "ospf: SR configuration changes require a restart (srgb / prefix-sids / mapping-server)"
+                .into(),
+        );
+    }
+    if *areas != fresh.ospf_areas {
+        lines.push("ospf: area type changes require a restart".into());
+    }
+    if *gr_role != (fresh.ospf_graceful_restart, fresh.ospf_grace_period) {
+        lines.push(
+            "ospf: graceful-restart role/period changes require a restart (the shutdown path)"
+                .into(),
+        );
+    }
+
+    if ops.is_empty() && auth.is_none() && !gr_changed {
+        // Nothing queued; the restart-required lines above (if any)
+        // still surface.
+        *coord.target.lock().unwrap() = fresh_eff;
+        *coord.target_auth.lock().unwrap() = fresh_auth;
+        *coord.target_gr_helper.lock().unwrap() = fresh_gr;
+        return Ok(lines);
+    }
+    let n_units = ops.len();
+    coord.queue.lock().unwrap().push(OspfReloadPlan {
+        ops,
+        auth,
+        gr_helper: gr_changed.then_some(fresh_gr),
+    });
+    // The plan is queued: the target tables advance to the fresh
+    // state so the next reload diffs against what this one will
+    // produce (chaining — see the struct doc).
+    *coord.target.lock().unwrap() = fresh_eff;
+    *coord.target_auth.lock().unwrap() = fresh_auth;
+    *coord.target_gr_helper.lock().unwrap() = fresh_gr;
+    lines.push(format!(
+        "ospf: interface-set reload queued ({n_units} unit(s) — applied on the next engine pass)"
+    ));
+    Ok(lines)
+}
+
 /// Daemon-wide state (the router is shared with the ticker/API threads).
 struct OspfDaemon {
     router: Arc<RwLock<DefaultRouter>>,
@@ -404,6 +835,10 @@ struct OspfDaemon {
     /// in `pump_hellos` / `pump_outbound` / `send_grace_lsas` keeps
     /// working unchanged.
     auth: OspfAuthState,
+    /// The reload coordination state shared with the reload closure
+    /// (issue #101): the closure queues validated plans, the pump
+    /// drains them — see [`OspfReloadCoord`].
+    reload_coord: Arc<OspfReloadCoord>,
 }
 
 /// One configured prefix SID (RFC 8665 §5): the prefix, its SID index
@@ -521,6 +956,11 @@ pub(super) fn run_ospf_daemon(
         Some(h) => h.runtime.event_bus.clone(),
         None => lr_router::event_bus::EventBus::new(),
     };
+    // The reload coordination (issue #101): built from the startup
+    // config's interface table; shared between the reload closure
+    // (standalone: `runtime.reload`; embedded: the supervisor's
+    // engine-reload registry) and the daemon's pump.
+    let reload_coord = Arc::new(OspfReloadCoord::new(cfg));
     let mut daemon = OspfDaemon {
         router,
         event_bus: event_bus.clone(),
@@ -603,6 +1043,7 @@ pub(super) fn run_ospf_daemon(
         gr_status: Arc::new(std::sync::Mutex::new(Vec::new())),
         router_id: rid,
         auth: build_ospf_auth(cfg),
+        reload_coord: Arc::clone(&reload_coord),
     };
     // Surface the resolved auth strategy at startup so the operator
     // sees whether the daemon is signing packets and which strategy is
@@ -895,9 +1336,26 @@ pub(super) fn run_ospf_daemon(
     // status view registered into its MultiStatus registry and a
     // startup gate between the raw-socket binds above and the LSA
     // origination + main loop below.
+    //
+    // The engine-reload closure (issue #101): validates the fresh
+    // configuration, resolves every new interface and queues the plan
+    // the pump applies. Registered twice — standalone, wrapped in the
+    // config-file re-parse the `runtime.reload` entry point needs;
+    // embedded, pushed onto the supervisor's engine-reload registry
+    // (the supervisor loads and finalizes the fresh configuration
+    // itself and hands every engine its slice).
+    let engine_reload: crate::EngineReloadFn = {
+        let coord = Arc::clone(&reload_coord);
+        Arc::new(move |fresh: &DaemonConfig| plan_ospf_reload(fresh, &coord))
+    };
     let runtime = match &host {
         Some(h) => {
             h.status.register(Arc::clone(&status_lines));
+            h.runtime
+                .engine_reloads
+                .lock()
+                .unwrap()
+                .push(Arc::clone(&engine_reload));
             Arc::clone(&h.runtime)
         }
         None => {
@@ -911,25 +1369,63 @@ pub(super) fn run_ospf_daemon(
             Arc::new(crate::Runtime {
                 event_bus: event_bus.clone(),
                 kernel_mirror: std::sync::OnceLock::new(),
-                reload: Arc::new(|| {
-                    // OSPF reload is not wired yet (interface set changes need
-                    // LSA re-origination + session moves); report it loudly
-                    // instead of pretending to apply. The log file is
-                    // still re-opened so the operator's `logrotate`
-                    // postrotate SIGHUP works on the OSPF daemon the
-                    // same way it does on the BGP daemon — the
-                    // `reopen_log_file` helper re-opens the path the
-                    // live `[logging] file` carries without touching
-                    // the rest of the configuration.
-                    let mut lines = vec![
-                        "ospf: configuration reload is not supported yet; shutdown still works"
-                            .to_string(),
-                    ];
-                    match crate::daemon_logger::reopen_log_file() {
-                        Ok(()) => lines.push("ospf: log file re-opened (SIGHUP)".to_string()),
-                        Err(e) => lines.push(format!("ospf: log file reopen failed: {e}")),
+                reload: Arc::new({
+                    let engine_reload = Arc::clone(&engine_reload);
+                    let config_path = cfg.config_path.clone();
+                    let config_dialect = cfg.config_dialect.clone();
+                    move || {
+                        // The log-file reopen happens unconditionally
+                        // so the operator's `logrotate` postrotate
+                        // SIGHUP works on the OSPF daemon the same way
+                        // it does on the BGP daemon.
+                        let mut lines = Vec::new();
+                        match crate::daemon_logger::reopen_log_file() {
+                            Ok(()) => lines.push("ospf: log file re-opened (SIGHUP)".to_string()),
+                            Err(e) => lines.push(format!("ospf: log file reopen failed: {e}")),
+                        }
+                        let Some(path) = config_path.as_deref() else {
+                            lines.push(
+                                "ospf: no config file in use; nothing to reload \
+                                 (only log file re-opened)"
+                                    .to_string(),
+                            );
+                            return lines;
+                        };
+                        // Re-parse through the same dialect path the
+                        // startup used (a BIRD/FRR-loaded daemon
+                        // re-parses as BIRD/FRR).
+                        let forced = match config_dialect.as_deref() {
+                            Some(name) => match crate::compat::Dialect::from_flag(name) {
+                                Ok(d) => Some(d),
+                                Err(e) => {
+                                    lines.push(format!("ospf: {e} (keeping current config)"));
+                                    return lines;
+                                }
+                            },
+                            None => Some(crate::compat::Dialect::Toml),
+                        };
+                        let mut fresh = DaemonConfig::with_defaults();
+                        if let Err(e) =
+                            crate::daemon_config::load_config_file(path, forced, &mut fresh)
+                        {
+                            lines.push(format!("ospf: {e} (keeping current config)"));
+                            return lines;
+                        }
+                        if let Err(e) = fresh.finalize() {
+                            lines.push(format!("ospf: {e} (keeping current config)"));
+                            return lines;
+                        }
+                        for w in &fresh.warnings {
+                            lines.push(format!("ospf: config warning: {w}"));
+                        }
+                        match engine_reload(&fresh) {
+                            Ok(mut engine_lines) => {
+                                lines.append(&mut engine_lines);
+                            }
+                            Err(e) => lines.push(format!("ospf: {e} (keeping current config)")),
+                        }
+                        lines
                     }
-                    lines
                 }),
                 router: Arc::clone(&daemon.router),
                 running: Arc::new(AtomicBool::new(true)),
@@ -941,6 +1437,7 @@ pub(super) fn run_ospf_daemon(
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
                 engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
+                speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
             })
         }
     };
@@ -981,7 +1478,12 @@ pub(super) fn run_ospf_daemon(
             // multi-protocol supervisor spawns the ticker with the
             // driver when both `bgp` and `ospf` are in the protocol set.
             ticker = Some(
-                match crate::spawn_ticker(&runtime, cfg, Arc::new(AtomicUsize::new(0)), None) {
+                match crate::spawn_ticker(
+                    &runtime,
+                    cfg,
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(Mutex::new(None)),
+                ) {
                     Ok(handle) => handle,
                     Err(e) => return crate::daemon_policy::policy_error(e),
                 },
@@ -1257,6 +1759,7 @@ impl OspfDaemon {
     /// the DR election, check adjacency transitions and the dead timer,
     /// originate Hellos, drain and transmit.
     fn pump(&mut self, recv_buf: &mut [u8], now_ms: u64) {
+        self.drain_reload_queue(now_ms);
         self.pump_inbound(recv_buf, now_ms);
         self.pump_election(now_ms);
         self.pump_adjacency(now_ms);
@@ -1265,6 +1768,487 @@ impl OspfDaemon {
         self.pump_gr(now_ms);
         self.pump_hellos(now_ms);
         self.pump_outbound();
+    }
+
+    /// Apply every reload plan the reload closure queued since the
+    /// last pass, in order (issue #101). The plans were fully
+    /// validated and resolved by [`plan_ospf_reload`]; this pass is
+    /// infallible by construction.
+    fn drain_reload_queue(&mut self, now_ms: u64) {
+        for plan in self.reload_coord.take_plans() {
+            self.apply_reload(plan, now_ms);
+        }
+    }
+
+    /// Apply one validated reload plan. Ordering inside the pass:
+    /// teardowns (removals) first — flushing LSAs and draining the
+    /// wire BEFORE the sessions close, so the MaxAge instances reach
+    /// the neighbours — then retunes, then installs, then the
+    /// daemon-wide policy swaps, and finally the re-origination
+    /// scheduling for every touched area.
+    fn apply_reload(&mut self, plan: OspfReloadPlan, now_ms: u64) {
+        let mut touched_areas: BTreeMap<u32, bool> = BTreeMap::new();
+        for op in plan.ops {
+            match op {
+                OspfIfOp::Remove(name) => {
+                    if let Some(area) = self.teardown_interface(&name, now_ms) {
+                        touched_areas.insert(area, true);
+                    }
+                }
+                OspfIfOp::Retune(name, retune) => {
+                    if let Some(area) = self.retune_interface(&name, &retune, now_ms) {
+                        // A cost change re-originates the Router-LSA
+                        // (the links re-metric); timer/priority changes
+                        // do not (they are wire/FSM parameters the next
+                        // Hello carries). An adj_sid removal flushes
+                        // its Extended-Link LSA inside
+                        // `retune_interface` — the reoriginate pass
+                        // skips interfaces without an adj_sid, so the
+                        // forced flag is not needed for it. The flag
+                        // merges (several retunes can hit one area in
+                        // a single plan).
+                        let forced = touched_areas.entry(area).or_insert(false);
+                        *forced |= retune.cost.is_some();
+                    }
+                }
+                OspfIfOp::Add(mut iface) => {
+                    let area = iface.area;
+                    // Re-anchor the broadcast WaitTimer base to this
+                    // pass: `resolve_interface` assumed the clock
+                    // starts at resolution time, but the engine clock
+                    // has been running since daemon start (RFC 2328
+                    // §9.3: the WaitTimer runs RouterDeadInterval
+                    // from ifup — ifup is now).
+                    if iface.if_state == IfState::Waiting {
+                        iface.wait_deadline_ms = now_ms + u64::from(iface.dead_interval) * 1000;
+                    }
+                    iface.router_id = self.router_id.as_u32();
+                    log_info!(
+                        Component::Ospf,
+                        "ospf interface {} area {} — {} address(es), cost {}, \
+                         hello {}s dead {}s rxmt {}s, {} (priority {}, reload)",
+                        iface.name,
+                        area_label(area),
+                        iface.addrs.len(),
+                        iface.cost,
+                        iface.hello_interval,
+                        iface.dead_interval,
+                        iface.rxmt_interval_ms / 1_000,
+                        match iface.network_type {
+                            OspfNetworkType::PointToPoint => "point-to-point",
+                            OspfNetworkType::Broadcast => "broadcast",
+                        },
+                        iface.priority,
+                    );
+                    self.interfaces.push(*iface);
+                    touched_areas.insert(area, true);
+                }
+            }
+        }
+        // Anchor sessions for areas that gained their first interface.
+        // `add_session` for a fresh `(rid, area)` pair cannot collide
+        // (the anchor map is keyed by area); the defensive error keeps
+        // the engine running and names the failure instead of
+        // unwinding a half-applied plan.
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.write().unwrap();
+            for area in touched_areas.keys() {
+                if self.anchors.contains_key(area) {
+                    continue;
+                }
+                let mtu = self.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
+                let rxmt_ms = self
+                    .interfaces
+                    .iter()
+                    .find(|i| i.area == *area)
+                    .map(|i| i.rxmt_interval_ms)
+                    .unwrap_or(5_000);
+                match router.add_session(
+                    SessionConfig::ospfv2(self.router_id, *area)
+                        .with_ospf_mtu(mtu)
+                        .with_ospf_rxmt_interval(rxmt_ms),
+                ) {
+                    Ok(h) => {
+                        self.anchors.insert(*area, h);
+                    }
+                    Err(e) => {
+                        log_error!(
+                            Component::Ospf,
+                            "ospf reload: anchor session for area {}: {e}",
+                            area_label(*area)
+                        );
+                    }
+                }
+            }
+        }
+        // Daemon-wide policy swaps.
+        if let Some(auth) = plan.auth {
+            self.auth = auth;
+        }
+        if let Some((enabled, cap)) = plan.gr_helper {
+            self.gr_helper_enabled = enabled;
+            self.gr_helper_cap = cap;
+        }
+        // Re-origination scheduling for every touched area: the
+        // Router-LSA links changed (a removal dropped them, an add
+        // will grow them, a cost change re-metrics them). Removals
+        // and adds schedule immediately (true); a pure retune of
+        // non-LSA fields (timers) does not force the LSA (false) —
+        // MinLSArrival spacing applies as on every adjacency change.
+        for (area, lsa_relevant) in touched_areas {
+            if lsa_relevant {
+                self.schedule_reoriginate(area, now_ms);
+            }
+        }
+        // Publish whatever the teardown closed (route withdrawals).
+        let events = self.router.write().unwrap().poll_events();
+        self.handle_router_events(events);
+    }
+
+    /// The teardown half of one interface unit: close its adjacencies,
+    /// flush its Network-LSA and Extended-Link LSA, drop the transport
+    /// and — when it was the area's last interface — flush the area's
+    /// Router-LSA and SR LSAs (MaxAge) and close the anchor session.
+    /// Returns the affected area.
+    ///
+    /// Flush-before-close ordering: the MaxAge instances are fed
+    /// through the anchor (the router floods them onto the area's
+    /// live sessions) and the outbound queues are drained BEFORE the
+    /// sessions close, so the flushes actually reach the wire — a
+    /// session closed with undrained output would take its flush
+    /// datagrams with it.
+    fn teardown_interface(&mut self, name: &str, now_ms: u64) -> Option<u32> {
+        let pos = self.interfaces.iter().position(|i| i.name == name)?;
+        let iface = self.interfaces.remove(pos);
+        let area = iface.area;
+        let ifindex = iface.transport.ifindex();
+        let local = iface.addrs.first().map(|a| u32::from(a.addr)).unwrap_or(0);
+        let rid = self.router_id.as_u32();
+        log_info!(
+            Component::Ospf,
+            "ospf interface {} removed (area {}) — closing adjacencies",
+            name,
+            area_label(area)
+        );
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.write().unwrap();
+            let mut flush: Vec<Lsa> = Vec::new();
+            // §12.4.2 / §14.1: a removed DR's Network-LSA flushes.
+            if iface.net_lsa_active {
+                if let Some(seq) = iface.net_lsa_seq {
+                    if let Some(mut lsa) = originate_network_lsa(
+                        rid,
+                        local,
+                        prefix_mask(iface.addrs.first().map(|a| a.prefix_len).unwrap_or(24)),
+                        &[rid],
+                        Some(seq),
+                    ) {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        flush.push(lsa);
+                    }
+                }
+            }
+            // RFC 8665 §7.4.1: the interface's Extended-Link LSA
+            // flushes with the unit; its kernel tail pops go with it.
+            let sr_key = (area, ifindex);
+            if self.sr_link_active.remove(&sr_key).is_some() {
+                let lsid = opaque_lsa_id(OPAQUE_TYPE_EXT_LINK, link_slot(ifindex));
+                if let Some(prev) = self.sr_prev_seq(&router, area, lsid) {
+                    let mut lsa = Lsa {
+                        header: LsaHeader {
+                            ls_age: lr_ospf::lsdb::MAX_AGE_SECS,
+                            options: 0x02 | OPTIONS_O_BIT,
+                            ls_type: LsaTypeV2::OpaqueAreaLsa as u16,
+                            link_state_id: lsid,
+                            advertising_router: rid,
+                            ls_sequence_number: prev,
+                            ls_checksum: 0,
+                            length: 0,
+                        },
+                        body: Vec::new(),
+                    };
+                    lsa.finalize();
+                    flush.push(lsa);
+                }
+            }
+            if let Some(&anchor) = self.anchors.get(&area) {
+                if !flush.is_empty() {
+                    let packet = self_lsu(self.router_id, area, flush);
+                    if let Ok(mut bytes) = OspfCodec::v2().encode_vec(&packet) {
+                        finalize_v2_packet(&mut bytes);
+                        if let Err(e) = router.feed_input(anchor, &bytes) {
+                            log_warn!(Component::Daemon, "ospf reload flush feed: {e}");
+                        }
+                    }
+                }
+            }
+            // The area's Router-LSA and SR LSAs flush when this was
+            // its last interface (the router leaves the area — the
+            // BIRD/FRR area-removal behaviour).
+            let area_emptied = !self.interfaces.iter().any(|i| i.area == area);
+            if area_emptied {
+                let mut area_flush: Vec<Lsa> = Vec::new();
+                // Router-LSA (§12.4.1): premature-age the live
+                // instance; an empty-links body is fine — receivers
+                // purge a MaxAge instance on sight.
+                let lsdb_prev = router.ospf_area_lsa(area, 1, rid, rid);
+                let prev = self
+                    .lsa_seq
+                    .get(&area)
+                    .copied()
+                    .or(lsdb_prev.map(|l| l.header.ls_sequence_number));
+                if let Some(mut lsa) =
+                    originate_router_lsa(rid, router.ospf_router_lsa_flags(area), &[], prev)
+                {
+                    lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                    lsa.finalize();
+                    area_flush.push(lsa);
+                }
+                // SR LSAs (RFC 8665 §3/§5/§4): the RI LSA and every
+                // Extended Prefix slot this daemon originated in the
+                // area (prefix SIDs and mapping-server ranges share
+                // the Extended Prefix LSA shape — the range's own
+                // re-origination fields map onto the SID config's).
+                if let Some((base, range)) = self.sr_srgb {
+                    let ri_lsid = opaque_lsa_id(OPAQUE_TYPE_RI, 0);
+                    if let Some(prev) = self.sr_prev_seq(&router, area, ri_lsid) {
+                        if let Some(mut lsa) = originate_sr_ri_lsa(rid, base, range, Some(prev)) {
+                            lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                            lsa.finalize();
+                            area_flush.push(lsa);
+                        }
+                    }
+                    let range_slots: Vec<SrSidConfig> = self
+                        .sr_ranges
+                        .iter()
+                        .map(|r| SrSidConfig {
+                            prefix: r.prefix,
+                            prefix_len: r.prefix_len,
+                            sid: r.sid,
+                            node: false,
+                            no_php: r.no_php,
+                            opaque_index: r.opaque_index,
+                        })
+                        .collect();
+                    for cfg in self.sr_sids.iter().chain(range_slots.iter()) {
+                        let lsid = opaque_lsa_id(OPAQUE_TYPE_EXT_PREFIX, cfg.opaque_index);
+                        if let Some(prev) = self.sr_prev_seq(&router, area, lsid) {
+                            let advert = lr_ospf::lsa::SrPrefixAdvert {
+                                route_type: 1,
+                                flags: if cfg.node { 0x40 } else { 0x00 },
+                                prefix: cfg.prefix,
+                                prefix_len: cfg.prefix_len,
+                                sid_flags: if cfg.no_php {
+                                    lr_ospf::lsa::sr::sid_flags::NP
+                                } else {
+                                    0
+                                },
+                                sid: cfg.sid,
+                                algorithm: 0,
+                            };
+                            if let Some(mut lsa) =
+                                originate_sr_prefix_lsa(rid, &advert, cfg.opaque_index, Some(prev))
+                            {
+                                lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                                lsa.finalize();
+                                area_flush.push(lsa);
+                            }
+                        }
+                    }
+                }
+                if !area_flush.is_empty() {
+                    if let Some(&anchor) = self.anchors.get(&area) {
+                        let packet = self_lsu(self.router_id, area, area_flush);
+                        if let Ok(mut bytes) = OspfCodec::v2().encode_vec(&packet) {
+                            finalize_v2_packet(&mut bytes);
+                            if let Err(e) = router.feed_input(anchor, &bytes) {
+                                log_warn!(Component::Daemon, "ospf reload flush feed: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Drain the wire BEFORE the sessions close: the flushes above
+        // sit on the neighbour sessions' output queues — closing now
+        // would take the datagrams with them.
+        self.pump_outbound();
+        // Close every adjacency heard on the removed interface. A
+        // neighbour that is also heard on a surviving interface is
+        // re-discovered by the next Hello (the session key includes
+        // the area; pump_inbound re-creates missing sessions).
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.write().unwrap();
+            let gone: Vec<(u32, u32)> = self
+                .neighbors
+                .iter()
+                .filter(|((_, _), n)| n.ifindex == ifindex)
+                .map(|(k, _)| *k)
+                .collect();
+            for key in gone {
+                if let Some(n) = self.neighbors.remove(&key) {
+                    router.close_session(n.handle);
+                    log_info!(
+                        Component::Ospf,
+                        "ospf neighbor {} session closed (interface {} removed)",
+                        fmt_rid(key.1),
+                        name
+                    );
+                }
+            }
+            if !self.interfaces.iter().any(|i| i.area == area) {
+                if let Some(anchor) = self.anchors.remove(&area) {
+                    router.close_session(anchor);
+                }
+            }
+        }
+        // Kernel tail pops for the removed interface's adjacencies
+        // (only with install_kernel — the mirror is opt-in).
+        if self.install_kernel_mpls {
+            #[cfg(target_os = "linux")]
+            {
+                let stale: Vec<(u32, u32, u32)> = self
+                    .sr_link_pops
+                    .keys()
+                    .filter(|(a, idx, _)| *a == area && *idx == ifindex)
+                    .copied()
+                    .collect();
+                if !stale.is_empty() {
+                    if let Ok(mut mpls) = lr_osroute::mpls_route::MplsNetlink::connect() {
+                        for key in stale {
+                            if let Some(label) = self.sr_link_pops.remove(&key) {
+                                if let Err(e) = mpls.delete_route(lr_mpls::Label::new_value(label))
+                                {
+                                    log_error!(
+                                        Component::Ospf,
+                                        "lsp: adj pop delete for {label}: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let _ = now_ms;
+        Some(area)
+    }
+
+    /// The retune half of one interface unit: in-place parameter
+    /// updates with the adjacencies kept. Returns the affected area.
+    fn retune_interface(&mut self, name: &str, retune: &OspfIfRetune, now_ms: u64) -> Option<u32> {
+        // (area, ifindex, adj_sid-was-removed) — computed under the
+        // interfaces borrow, applied after it ends so the adj_sid
+        // flush below can take `&mut self`.
+        let outcome: Option<(u32, u32, bool)> = {
+            let iface = self.interfaces.iter_mut().find(|i| i.name == name)?;
+            let area = iface.area;
+            let ifindex = iface.transport.ifindex();
+            if let Some(v) = retune.cost {
+                iface.cost = v;
+            }
+            if let Some(v) = retune.hello_interval {
+                iface.hello_interval = v;
+            }
+            if let Some(v) = retune.dead_interval {
+                iface.dead_interval = v;
+            }
+            if let Some(v) = retune.rxmt_interval_ms {
+                iface.rxmt_interval_ms = v;
+            }
+            if let Some(v) = retune.priority {
+                iface.priority = v;
+                // A priority change re-enters the election on
+                // broadcast segments (§9.3 NeighborChange on
+                // ourselves).
+                iface.election_dirty = true;
+            }
+            let mut adj_sid_removed = false;
+            if let Some(v) = retune.adj_sid {
+                adj_sid_removed = iface.adj_sid.is_some() && v.is_none();
+                iface.adj_sid = v;
+            }
+            Some((area, ifindex, adj_sid_removed))
+        };
+        let (area, ifindex, adj_sid_removed) = outcome?;
+        if adj_sid_removed {
+            // The Extended-Link LSA's content is gone with the
+            // adj_sid: flush it (the §7.4.1 withdrawal — the
+            // reoriginate pass skips interfaces without an adj_sid,
+            // so the flush is driven from here).
+            self.flush_ext_link_lsa(area, ifindex, now_ms);
+        }
+        Some(area)
+    }
+
+    /// Flush one interface's Extended-Link LSA (RFC 8665 §7.4.1 — the
+    /// "below 2-Way the advertisement MUST be withdrawn" rule applied
+    /// to a configuration removal) and drop its kernel tail pops.
+    fn flush_ext_link_lsa(&mut self, area: u32, ifindex: u32, now_ms: u64) {
+        if self.sr_link_active.remove(&(area, ifindex)).is_none() {
+            return;
+        }
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.write().unwrap();
+            let lsid = opaque_lsa_id(OPAQUE_TYPE_EXT_LINK, link_slot(ifindex));
+            if let Some(prev) = self.sr_prev_seq(&router, area, lsid) {
+                let mut lsa = Lsa {
+                    header: LsaHeader {
+                        ls_age: lr_ospf::lsdb::MAX_AGE_SECS,
+                        options: 0x02 | OPTIONS_O_BIT,
+                        ls_type: LsaTypeV2::OpaqueAreaLsa as u16,
+                        link_state_id: lsid,
+                        advertising_router: self.router_id.as_u32(),
+                        ls_sequence_number: prev,
+                        ls_checksum: 0,
+                        length: 0,
+                    },
+                    body: Vec::new(),
+                };
+                lsa.finalize();
+                if let Some(&anchor) = self.anchors.get(&area) {
+                    let packet = self_lsu(self.router_id, area, vec![lsa]);
+                    if let Ok(mut bytes) = OspfCodec::v2().encode_vec(&packet) {
+                        finalize_v2_packet(&mut bytes);
+                        if let Err(e) = router.feed_input(anchor, &bytes) {
+                            log_warn!(Component::Daemon, "ospf ext-link flush feed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        if self.install_kernel_mpls {
+            #[cfg(target_os = "linux")]
+            {
+                let stale: Vec<(u32, u32, u32)> = self
+                    .sr_link_pops
+                    .keys()
+                    .filter(|(a, idx, _)| *a == area && *idx == ifindex)
+                    .copied()
+                    .collect();
+                if !stale.is_empty() {
+                    if let Ok(mut mpls) = lr_osroute::mpls_route::MplsNetlink::connect() {
+                        for key in stale {
+                            if let Some(label) = self.sr_link_pops.remove(&key) {
+                                if let Err(e) = mpls.delete_route(lr_mpls::Label::new_value(label))
+                                {
+                                    log_error!(
+                                        Component::Ospf,
+                                        "lsp: adj pop delete for {label}: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let _ = now_ms;
     }
 
     /// Receive every pending datagram and feed it into the matching

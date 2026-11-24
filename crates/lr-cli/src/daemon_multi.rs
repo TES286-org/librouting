@@ -79,6 +79,11 @@ pub(crate) struct EngineHost {
     /// Session-thread liveness the shared ticker waits on at shutdown
     /// (the BGP engine counts its live peer sessions here).
     pub(crate) live_sessions: Arc<AtomicUsize>,
+    /// The supervisor ticker's BGP-LS driver slot. Shared with the
+    /// BGP engine's reload context so a speaker-identity reload can
+    /// swap the driver (the projected node descriptors follow the
+    /// fresh AS). Empty when `[bgp_ls]` is off.
+    pub(crate) bgp_ls_slot: Arc<Mutex<Option<crate::BgplsDriver>>>,
     /// Startup report channel to the supervisor: send
     /// [`EngineReport::Started`] once every socket is bound.
     pub(crate) report: SyncSender<EngineReport>,
@@ -318,9 +323,10 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                 // The engines registered their reload closures on the
                 // shared runtime (the BGP engine's peer-set reload:
                 // peer add/remove/replace, policy swap, BFD
-                // membership, listener replacement).
+                // membership, listener replacement; the OSPF, LDP and
+                // Babel engines: their interface sets per unit).
                 let engines = engine_reloads.lock().unwrap().clone();
-                crate::reload_config(
+                let mut lines = crate::reload_config(
                     config_path.as_deref(),
                     config_dialect.as_deref(),
                     &router,
@@ -332,7 +338,17 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                     None,
                     None,
                     &engines,
-                )
+                );
+                // The supervisor's engine-level posture: every
+                // registered engine reloads its own unit surface; the
+                // daemon-level sections above report their diffs.
+                lines.push(
+                    "reload: note: engine reloads apply peer and interface-set changes \
+                     per unit; a daemon-wide identity change restarts the affected \
+                     sessions with the fresh identity"
+                        .into(),
+                );
+                lines
             }
         }),
         router: Arc::clone(&router),
@@ -351,6 +367,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         session_labels: Arc::new(Mutex::new(HashMap::new())),
         engine_reloads: Arc::clone(&runtime_engine_reloads),
         shutdown: crate::build_shutdown(cfg, &router),
+        speaker_identity: std::sync::RwLock::new((cfg.local_as, cfg.router_id.clone())),
     });
 
     println!("librouting daemon (lr-daemon)");
@@ -360,14 +377,21 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // One shared ticker drives every session's timers (BGP keepalive,
-    // OSPF refresh/aging, Babel expiry) from one clock.
-    let bgp_ls_driver = if cfg.bgp_ls.enabled {
-        Some(crate::BgplsDriver::new(&cfg.bgp_ls, cfg.local_as))
-    } else {
-        None
-    };
-    let ticker = match crate::spawn_ticker(&runtime, cfg, Arc::clone(&live_sessions), bgp_ls_driver)
-    {
+    // OSPF refresh/aging, Babel expiry) from one clock. The BGP-LS
+    // driver lives behind a shared slot so the BGP engine's reload
+    // path can swap it on a speaker-identity change (the descriptors
+    // follow the fresh AS).
+    let bgp_ls_slot: Arc<Mutex<Option<crate::BgplsDriver>>> = Arc::new(Mutex::new(
+        cfg.bgp_ls
+            .enabled
+            .then(|| crate::BgplsDriver::new(&cfg.bgp_ls, cfg.local_as)),
+    ));
+    let ticker = match crate::spawn_ticker(
+        &runtime,
+        cfg,
+        Arc::clone(&live_sessions),
+        Arc::clone(&bgp_ls_slot),
+    ) {
         Ok(handle) => handle,
         Err(e) => return crate::daemon_policy::policy_error(e),
     };
@@ -380,6 +404,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         let host = EngineHost {
             runtime: Arc::clone(&runtime),
             live_sessions: Arc::clone(&live_sessions),
+            bgp_ls_slot: Arc::clone(&bgp_ls_slot),
             report: report_tx,
             gate: Arc::clone(&gate),
             status: Arc::clone(&status),

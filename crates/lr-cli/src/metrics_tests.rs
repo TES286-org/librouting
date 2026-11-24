@@ -173,6 +173,7 @@ fn test_ctx(router: Arc<RwLock<DefaultRouter>>, running: Arc<AtomicBool>) -> Met
         roa_len: None,
         filter_metrics: None,
         session_label: Box::new(|_| "?".to_string()),
+        identity: None,
     }
 }
 
@@ -569,6 +570,7 @@ fn scrape_reports_event_bus_counters_and_they_track_publishes() {
             roa_len: None,
             filter_metrics: None,
             session_label: Box::new(|_| "?".to_string()),
+            identity: None,
         }
     };
     let bound = spawn(&addr, ctx).expect("metrics server spawns");

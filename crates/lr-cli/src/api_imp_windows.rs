@@ -222,6 +222,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
 
     let info = Arc::new(ctx.info);
+    let identity = ctx.identity;
     let router = Arc::clone(&ctx.router);
     let rib = ctx.rib;
     let running = Arc::clone(&ctx.running);
@@ -249,6 +250,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
         .spawn(move || {
             accept_loop(probe, &name_wide, &running, |stream| {
                 let info = Arc::clone(&info);
+                let identity = identity.clone();
                 let router = Arc::clone(&router);
                 let rib = Arc::clone(&rib);
                 let running = Arc::clone(&running);
@@ -260,6 +262,17 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                 thread::Builder::new()
                     .name("lr-api-conn".into())
                     .spawn(move || {
+                        // A speaker-identity reload re-points the live
+                        // `(local_as, router_id)` on the runtime; read
+                        // them per connection so `status` never serves
+                        // the pre-reload identity (the Unix side does
+                        // the same overlay).
+                        let mut info = (*info).clone();
+                        if let Some(read) = &identity {
+                            let (local_as, router_id) = read();
+                            info.local_as = local_as;
+                            info.router_id = router_id;
+                        }
                         let deps = ConnDeps {
                             info: &info,
                             router: &router,

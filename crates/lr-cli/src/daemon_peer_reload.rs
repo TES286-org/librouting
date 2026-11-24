@@ -28,6 +28,17 @@
 //!   supervisor's command channel; the `[bfd]` timer triple re-points
 //!   every session through `BfdSession::update_timers` (RFC 5880
 //!   §6.8.3).
+//! - **The speaker identity is one daemon-wide unit.** A `local_as`
+//!   or `router_id` change is applied as a restart of every peer's
+//!   sessions (RFC 4486 §4.1 Cease/4 Administrative Reset — the FRR
+//!   `router bgp <as>` re-configuration behaviour): the reload
+//!   re-points the safety net's local AS, re-reads the fresh
+//!   router-id into every rebuilt session's OPEN, rebuilds the
+//!   BGP-LS driver when it derives its AS from `local_as`, and
+//!   updates the runtime API / metrics identity snapshot so
+//!   `lrctl status` never serves a stale `local-as` line. The
+//!   daemon process itself keeps running — the unit that restarts
+//!   is the session set, not the process.
 //!
 //! Atomicity: the reload validates everything fallible first — the
 //! fresh file parses and finalizes, every peer's auth builds, every
@@ -109,6 +120,12 @@ struct PeerReloadPlan {
     /// The `[bfd]` timer triple changed and every session must
     /// re-point.
     bfd_timers_changed: bool,
+    /// The speaker identity (`local_as` / `router_id`) changed: every
+    /// kept peer is restarted with the fresh identity (the sessions
+    /// carry both values — the local AS in the OPEN and the safety
+    /// net, the router-id in every OPEN — so no session can survive
+    /// an identity change).
+    identity_changed: bool,
 }
 
 /// The transport identity of a peer: `(remote, address)` after
@@ -193,6 +210,7 @@ fn plan_peer_reload(
     live_listen_addr: Option<&str>,
     live_armed_auth: &TcpAuth,
     live_bfd_timers: (u32, u32, u8),
+    identity_changed: bool,
 ) -> PeerReloadPlan {
     let mut peers = Vec::with_capacity(fresh.peers.len());
     for (fresh_index, spec) in fresh.peers.iter().enumerate() {
@@ -200,7 +218,21 @@ fn plan_peer_reload(
             .iter()
             .position(|e| peer_identity(&e.spec) == peer_identity(spec));
         let action = match live_index {
-            Some(idx) => classify_peer_change(&live[idx].spec, spec),
+            Some(idx) => {
+                let classified = classify_peer_change(&live[idx].spec, spec);
+                // An identity change upgrades every kept peer to a
+                // restart: the local AS and the router-id ride every
+                // OPEN, so a Keep or HotUpdate session would keep
+                // negotiating with the OLD identity after the
+                // daemon-wide swap.
+                if identity_changed
+                    && matches!(classified, PeerAction::Keep | PeerAction::HotUpdate)
+                {
+                    PeerAction::Restart
+                } else {
+                    classified
+                }
+            }
             None => PeerAction::Add,
         };
         peers.push(PlannedPeer {
@@ -241,6 +273,7 @@ fn plan_peer_reload(
         peers,
         replace_listener,
         bfd_timers_changed,
+        identity_changed,
     }
 }
 
@@ -274,7 +307,17 @@ fn listener_auth_of(fresh: &DaemonConfig) -> TcpAuth {
 /// or embedded in the multi-protocol supervisor) and shared into its
 /// reload closure.
 pub(super) struct BgpReloadContext {
-    pub(super) rid: RouterId,
+    /// The speaker's router-id. Behind a `Mutex` because a reload that
+    /// changes `router_id` re-reads the fresh value here before the
+    /// rebuilt sessions are added (every OPEN the new sessions emit
+    /// carries it).
+    pub(super) rid: Mutex<RouterId>,
+    /// The ticker's BGP-LS driver slot — a clone of the same `Arc`
+    /// the ticker polls every pass. Empty when bgp_ls is off; the
+    /// reload swaps the driver in place on a speaker-identity change
+    /// so the projected node descriptors follow the fresh AS without
+    /// a daemon restart.
+    pub(super) bgp_ls_slot: Arc<Mutex<Option<crate::BgplsDriver>>>,
     pub(super) router: Arc<RwLock<DefaultRouter>>,
     pub(super) runtime: Arc<Runtime>,
     pub(super) registry: PeerRegistry,
@@ -462,7 +505,7 @@ impl BgpReloadContext {
     ) -> Result<PeerEntry, String> {
         let auth = build_peer_tcp_auth(cfg, spec)?;
         let gtsm = build_peer_gtsm(cfg, spec);
-        let sc = build_session_config(cfg, spec, self.rid);
+        let sc = build_session_config(cfg, spec, *self.rid.lock().unwrap());
         let bidirectional = spec.is_outbound() && (spec.is_inbound() || cfg.listen_addr.is_some());
         let mut sc_out = sc.clone();
         let mut sc_in: Option<lr_router::SessionConfig> = None;
@@ -547,24 +590,33 @@ impl BgpReloadContext {
             let bfd = self.bfd.lock().unwrap();
             (bfd.min_tx_ms(), bfd.min_rx_ms(), bfd.detect_multiplier())
         };
-        let plan = plan_peer_reload(&live, fresh, live_listen.as_deref(), &live_auth, live_bfd);
+        // The speaker identity (local AS + router-id) is one
+        // daemon-wide unit: both values ride every OPEN, the local AS
+        // also anchors the safety net's AS_PATH loop check. A change
+        // is applied as a restart of every peer's sessions — the same
+        // unit model FRR's `router bgp <as>` re-configuration follows
+        // — not a refusal.
+        let as_changed = fresh.local_as != current.local_as;
+        let rid_changed = fresh.router_id != current.router_id;
+        let identity_changed = as_changed || rid_changed;
+        let plan = plan_peer_reload(
+            &live,
+            fresh,
+            live_listen.as_deref(),
+            &live_auth,
+            live_bfd,
+            identity_changed,
+        );
 
         // ---- Validation pass: everything fallible, no mutation. ----
-        // Speaker identity is daemon-wide: the local AS is baked into
-        // every session configuration and the safety net, the
-        // router-id into every OPEN. A change is a daemon restart,
-        // not a per-unit reload — refuse the whole reload so the
-        // operator sees it as one atomic decision.
-        if fresh.local_as != current.local_as {
+        // A speaker-identity reload parses the fresh router-id here —
+        // the apply phase below is infallible by contract, so an
+        // invalid id must refuse the whole reload before anything is
+        // touched.
+        if rid_changed && fresh.router_id.parse::<lr_core::addr::RouterId>().is_err() {
             return Err(format!(
-                "local AS {} -> {} requires a daemon restart (speaker identity)",
-                current.local_as, fresh.local_as
-            ));
-        }
-        if fresh.router_id != current.router_id {
-            return Err(format!(
-                "router-id {} -> {} requires a daemon restart (speaker identity)",
-                current.router_id, fresh.router_id
+                "router-id '{}' is not a valid id (keeping current config)",
+                fresh.router_id
             ));
         }
         for spec in &fresh.peers {
@@ -640,6 +692,61 @@ impl BgpReloadContext {
         // ---- Apply pass. ----
         let mut lines = Vec::new();
         let policy_sections_changed = policy_config_changed(&current, fresh);
+
+        // Speaker identity swap first: the fresh values must be in
+        // place before the rebuilt sessions are added (every OPEN
+        // they emit carries the fresh AS and router-id) and before
+        // any import runs through the safety net (the AS_PATH loop
+        // check counts against the fresh local AS).
+        if plan.identity_changed {
+            let mut identity_report = Vec::new();
+            if as_changed {
+                // Re-point the safety net the same way startup armed
+                // it: the net keeps its configured checks and local
+                // addresses, only the AS the loop check counts against
+                // moves. A daemon without a `[safety]` section has no
+                // net installed — nothing to re-point.
+                let mut r = self.router.write().unwrap();
+                if let Some(net) = r.safety_net() {
+                    let mut net = net.clone();
+                    net.local_as = lr_core::addr::Asn(fresh.local_as);
+                    r.set_safety_net(net);
+                }
+                // The BGP-LS driver derives its AS from `local_as`
+                // unless the operator pinned `[bgp_ls] as_number`; a
+                // fresh driver re-projects every node descriptor with
+                // the fresh AS (the per-area caches reset, so the next
+                // tick republishes the full NLRI set — correct, since
+                // the descriptors all changed).
+                if fresh.bgp_ls.enabled {
+                    *self.bgp_ls_slot.lock().unwrap() =
+                        Some(crate::BgplsDriver::new(&fresh.bgp_ls, fresh.local_as));
+                }
+                identity_report.push(format!("AS {} -> {}", current.local_as, fresh.local_as));
+            }
+            if rid_changed {
+                // Validated above: an invalid id refused the reload
+                // before the apply phase began.
+                *self.rid.lock().unwrap() = fresh
+                    .router_id
+                    .parse::<lr_core::addr::RouterId>()
+                    .expect("the validation pass parsed this id");
+                identity_report.push(format!(
+                    "router-id {} -> {}",
+                    current.router_id, fresh.router_id
+                ));
+            }
+            // The runtime API / metrics identity snapshot follows, so
+            // `lrctl status` and the `lr_info` labels never serve the
+            // pre-swap values after the reload completes.
+            *self.runtime.speaker_identity.write().unwrap() =
+                (fresh.local_as, fresh.router_id.clone());
+            lines.push(format!(
+                "reload: speaker identity changed ({}) — every session \
+                 restarted with the fresh identity (RFC 4486 §4.1 Cease/4)",
+                identity_report.join(", ")
+            ));
+        }
 
         // BFD timer re-point first: every surviving session picks the
         // fresh triple up before any peer churn (RFC 5880 §6.8.3).
@@ -1186,6 +1293,7 @@ mod tests {
             None,
             &TcpAuth::None,
             (base.bfd_min_tx_ms, base.bfd_min_rx_ms, base.bfd_multiplier),
+            false,
         );
         assert_eq!(plan.peers.len(), 2);
         assert_eq!(plan.peers[0].action, PeerAction::Keep);
@@ -1197,6 +1305,56 @@ mod tests {
         assert!(!plan.bfd_timers_changed);
     }
 
+    /// A speaker-identity change (`local_as` / `router_id`) upgrades
+    /// every kept peer to a restart: both values ride every OPEN, so
+    /// a Keep or HotUpdate session would keep negotiating with the
+    /// OLD identity after the daemon-wide swap. Removals stay
+    /// removals (the peer is going away regardless); additions stay
+    /// additions (they are created with the fresh identity already).
+    #[test]
+    fn identity_change_restarts_every_kept_peer() {
+        let keep_spec = PeerSpec {
+            peer_as: 65001,
+            ..spec(Some("10.0.0.1:179"), None)
+        };
+        let hot_spec = PeerSpec {
+            peer_as: 65002,
+            import: Some("rm-in".into()),
+            ..spec(Some("10.0.0.9:179"), None)
+        };
+        let fresh = DaemonConfig {
+            peers: vec![keep_spec.clone(), hot_spec.clone()],
+            ..DaemonConfig::default()
+        };
+        // The live registry carries both peers: one identical to its
+        // fresh spec (Keep) and one whose fresh spec adds a policy
+        // binding (HotUpdate).
+        let live = vec![
+            entry_of(keep_spec),
+            entry_of(PeerSpec {
+                peer_as: 65002,
+                ..spec(Some("10.0.0.9:179"), None)
+            }),
+        ];
+        let plan = plan_peer_reload(&live, &fresh, None, &TcpAuth::None, (0, 0, 0), false);
+        assert_eq!(plan.peers[0].action, PeerAction::Keep);
+        assert_eq!(plan.peers[1].action, PeerAction::HotUpdate);
+
+        // The identity change upgrades both to Restart.
+        let plan = plan_peer_reload(&live, &fresh, None, &TcpAuth::None, (0, 0, 0), true);
+        assert_eq!(
+            plan.peers[0].action,
+            PeerAction::Restart,
+            "a Keep peer restarts under a changed identity"
+        );
+        assert_eq!(
+            plan.peers[1].action,
+            PeerAction::Restart,
+            "a HotUpdate peer restarts under a changed identity"
+        );
+        assert!(plan.identity_changed);
+    }
+
     #[test]
     fn plan_marks_removals() {
         let fresh = DaemonConfig::default();
@@ -1206,6 +1364,7 @@ mod tests {
             None,
             &TcpAuth::None,
             (0, 0, 0),
+            false,
         );
         assert_eq!(plan.peers.len(), 1);
         assert_eq!(plan.peers[0].action, PeerAction::Remove);

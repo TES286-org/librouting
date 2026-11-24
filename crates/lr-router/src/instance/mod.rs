@@ -1008,6 +1008,14 @@ impl DefaultRouter {
         self.safety = Some(net);
     }
 
+    /// The installed safety net, when one was configured. The daemon's
+    /// reload path reads it to re-point the local AS on a
+    /// speaker-identity change (the AS_PATH loop check counts against
+    /// `SafetyNet::local_as`, which is otherwise frozen at startup).
+    pub fn safety_net(&self) -> Option<&SafetyNet> {
+        self.safety.as_ref()
+    }
+
     /// Access the hook chain to register import/selection/export hooks.
     pub fn hooks_mut(&mut self) -> &mut HookChain {
         &mut self.hooks

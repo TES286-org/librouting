@@ -42302,6 +42302,294 @@
       "value": "4"
     },
     {
+      "name": "LR_VALUE_INT",
+      "value": "0"
+    },
+    {
+      "name": "LR_VALUE_BOOL",
+      "value": "1"
+    },
+    {
+      "name": "LR_VALUE_STR",
+      "value": "2"
+    },
+    {
+      "name": "LR_VALUE_IP",
+      "value": "3"
+    },
+    {
+      "name": "LR_VALUE_PREFIX",
+      "value": "4"
+    },
+    {
+      "name": "LR_VALUE_ASN",
+      "value": "5"
+    },
+    {
+      "name": "LR_VALUE_AS_PATH",
+      "value": "6"
+    },
+    {
+      "name": "LR_VALUE_COMMUNITIES",
+      "value": "7"
+    },
+    {
+      "name": "LR_VALUE_COMM_PATTERN",
+      "value": "8"
+    },
+    {
+      "name": "LR_VALUE_LARGE_COMMUNITIES",
+      "value": "9"
+    },
+    {
+      "name": "LR_VALUE_EXT_COMMUNITIES",
+      "value": "10"
+    },
+    {
+      "name": "LR_VALUE_SET",
+      "value": "11"
+    },
+    {
+      "name": "LR_VALUE_PROTOCOL",
+      "value": "12"
+    },
+    {
+      "name": "LR_VALUE_ROA_STATE",
+      "value": "13"
+    },
+    {
+      "name": "LR_BINARY_OP_AND",
+      "value": "1"
+    },
+    {
+      "name": "LR_BINARY_OP_OR",
+      "value": "2"
+    },
+    {
+      "name": "LR_BINARY_OP_EQ",
+      "value": "3"
+    },
+    {
+      "name": "LR_BINARY_OP_NE",
+      "value": "4"
+    },
+    {
+      "name": "LR_BINARY_OP_LT",
+      "value": "5"
+    },
+    {
+      "name": "LR_BINARY_OP_LE",
+      "value": "6"
+    },
+    {
+      "name": "LR_BINARY_OP_GT",
+      "value": "7"
+    },
+    {
+      "name": "LR_BINARY_OP_GE",
+      "value": "8"
+    },
+    {
+      "name": "LR_BINARY_OP_ADD",
+      "value": "9"
+    },
+    {
+      "name": "LR_BINARY_OP_SUB",
+      "value": "10"
+    },
+    {
+      "name": "LR_BINARY_OP_MUL",
+      "value": "11"
+    },
+    {
+      "name": "LR_BINARY_OP_DIV",
+      "value": "12"
+    },
+    {
+      "name": "LR_BINARY_OP_MOD",
+      "value": "13"
+    },
+    {
+      "name": "LR_BINARY_OP_BIT_AND",
+      "value": "14"
+    },
+    {
+      "name": "LR_BINARY_OP_BIT_OR",
+      "value": "15"
+    },
+    {
+      "name": "LR_BINARY_OP_BIT_XOR",
+      "value": "16"
+    },
+    {
+      "name": "LR_BINARY_OP_SHL",
+      "value": "17"
+    },
+    {
+      "name": "LR_BINARY_OP_SHR",
+      "value": "18"
+    },
+    {
+      "name": "LR_BINARY_OP_MATCH",
+      "value": "19"
+    },
+    {
+      "name": "LR_BINARY_OP_NOT_MATCH",
+      "value": "20"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_NET",
+      "value": "0"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_PROTO",
+      "value": "1"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_SOURCE",
+      "value": "2"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_LOCAL_PREF",
+      "value": "3"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_MED",
+      "value": "4"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_NEXT_HOP",
+      "value": "5"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_AS_PATH",
+      "value": "6"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_COMMUNITIES",
+      "value": "7"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_EXT_COMMUNITIES",
+      "value": "8"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_LARGE_COMMUNITIES",
+      "value": "9"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_ORIGIN",
+      "value": "10"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_ATOMIC_AGGREGATE",
+      "value": "11"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_ORIGINATOR_ID",
+      "value": "12"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_CLUSTER_LIST",
+      "value": "13"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_OTC",
+      "value": "14"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_AIGP",
+      "value": "15"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_AGGREGATOR_ASN",
+      "value": "16"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER",
+      "value": "17"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BGP_PMSI_TUNNEL",
+      "value": "18"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_OSPF_METRIC1",
+      "value": "19"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_OSPF_METRIC2",
+      "value": "20"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_OSPF_TAG",
+      "value": "21"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_OSPF_ROUTER_ID",
+      "value": "22"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BABEL_METRIC",
+      "value": "23"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BABEL_SEQNO",
+      "value": "24"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_BABEL_ROUTER_ID",
+      "value": "25"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_VERIFIED",
+      "value": "26"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_PARTIAL_TRANSIT",
+      "value": "27"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_HINT_RANK",
+      "value": "28"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_HINT_DAMP_FOM",
+      "value": "29"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_HINT_IGP_COST",
+      "value": "30"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_POLICY_ROLE",
+      "value": "31"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST",
+      "value": "32"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST",
+      "value": "33"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_ORIGIN_AS",
+      "value": "34"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN",
+      "value": "35"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_LRXP_ORIGIN_EXPIRY",
+      "value": "36"
+    },
+    {
+      "name": "LR_ROUTE_FIELD_ROA_STATE",
+      "value": "37"
+    },
+    {
       "name": "LR_SESSION_TEXT_MAX",
       "value": "32"
     },

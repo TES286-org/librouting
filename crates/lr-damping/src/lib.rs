@@ -132,6 +132,25 @@ impl DampingTable {
         &self.cfg
     }
 
+    /// Replace the tuning parameters, keeping the figure-of-merit
+    /// history (the SIGHUP reload path — the daemon re-points the
+    /// live table instead of rebuilding it so a re-tune does not
+    /// reset accumulated flaps). Every future `on_withdraw` /
+    /// `on_announce` / `decay_all` call reads the new parameters; the
+    /// per-prefix entries (FoM, suppression flag, timestamps) survive
+    /// verbatim. This is the same semantics FRR's `bgp dampening`
+    /// re-tune carries: parameter changes apply to future
+    /// computations, existing history is not discarded.
+    ///
+    /// A raised `reuse_threshold` can leave suppressed entries whose
+    /// FoM is already below the new threshold still flagged; the next
+    /// `decay_all` pass re-evaluates every entry against the fresh
+    /// parameters and reactivates them (the decay ticker's regular
+    /// cadence, at most one `decay_interval_s` away).
+    pub fn update_config(&mut self, cfg: DampingConfig) {
+        self.cfg = cfg;
+    }
+
     /// Record a withdrawal. Returns `true` if the route should be suppressed
     /// (i.e. dropped from the Loc-RIB) as a result.
     pub fn on_withdraw(&mut self, prefix: &Prefix, now_s: u64) -> bool {
@@ -279,5 +298,87 @@ mod tests {
         t.forget(&p("10.0.0.0/8"));
         assert!(!t.is_suppressed(&p("10.0.0.0/8")));
         assert_eq!(t.entries().count(), 0);
+    }
+
+    #[test]
+    fn update_config_keeps_history_and_applies_new_params() {
+        // Default tuning: three rapid flaps suppress (FoM 3000 >= 2000).
+        let mut t = DampingTable::new(DampingConfig::default());
+        t.on_withdraw(&p("10.0.0.0/8"), 0);
+        t.on_withdraw(&p("10.0.0.0/8"), 0);
+        assert!(
+            t.on_withdraw(&p("10.0.0.0/8"), 0),
+            "defaults: 3rd flap suppresses"
+        );
+
+        // Re-tune: a much higher suppress threshold and a lower
+        // additive increment. The existing entry (FoM 3000,
+        // suppressed) survives; the fresh parameters govern future
+        // computations.
+        let tuned = DampingConfig {
+            suppress_threshold: 10_000,
+            additive_incr: 500,
+            ..DampingConfig::default()
+        };
+        t.update_config(tuned.clone());
+        assert_eq!(t.config(), &tuned, "the table carries the fresh config");
+        assert_eq!(t.entries().count(), 1, "history is not discarded");
+        let entry = t.entries().next().unwrap().clone();
+        assert!(
+            entry.suppressed,
+            "the suppression flag survives the re-tune"
+        );
+        assert_eq!(entry.flap_count, 3, "the flap history survives the re-tune");
+
+        // The new increment applies: a 4th flap adds 500, not 1000
+        // (FoM was 3000 at t=0; no decay in between).
+        let fom_before = entry.figure_of_merit;
+        t.on_withdraw(&p("10.0.0.0/8"), 0);
+        let after = t.entries().next().unwrap().clone();
+        assert!(
+            (after.figure_of_merit - fom_before - 500.0).abs() < f64::EPSILON,
+            "the fresh additive_incr governs: {}",
+            after.figure_of_merit
+        );
+
+        // A fresh prefix under the fresh tuning: even three more
+        // rapid flaps do not reach the raised threshold.
+        let mut fresh = DampingTable::new(DampingConfig::default());
+        fresh.update_config(tuned);
+        assert!(
+            !fresh.on_withdraw(&p("192.0.2.0/24"), 0),
+            "1st flap: no suppress"
+        );
+        assert!(
+            !fresh.on_withdraw(&p("192.0.2.0/24"), 0),
+            "2nd flap: no suppress"
+        );
+        assert!(
+            !fresh.on_withdraw(&p("192.0.2.0/24"), 0),
+            "3rd flap: no suppress"
+        );
+    }
+
+    #[test]
+    fn update_config_raised_reuse_reactivates_on_next_decay() {
+        // Suppress a prefix under the defaults, then raise the reuse
+        // threshold above the entry's FoM. The next decay_all pass
+        // re-evaluates against the fresh parameters and reactivates.
+        let mut t = DampingTable::new(DampingConfig::default());
+        t.on_withdraw(&p("10.0.0.0/8"), 0);
+        t.on_withdraw(&p("10.0.0.0/8"), 0);
+        assert!(t.on_withdraw(&p("10.0.0.0/8"), 0));
+
+        let tuned = DampingConfig {
+            reuse_threshold: 2_000,
+            ..DampingConfig::default()
+        };
+        t.update_config(tuned);
+        let reactivated = t.decay_all(30); // one decay interval later
+        assert!(
+            reactivated.contains(&p("10.0.0.0/8")),
+            "the raised reuse threshold reactivates the suppressed prefix"
+        );
+        assert!(!t.is_suppressed(&p("10.0.0.0/8")));
     }
 }

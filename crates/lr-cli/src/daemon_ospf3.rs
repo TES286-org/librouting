@@ -109,6 +109,7 @@ use lr_ospf::lsa::v3::{
     LINK_TYPE_TRANSIT, LS_TYPE_INTRA_PREFIX, LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER,
     ROUTER_BIT_B, ROUTER_BIT_E, ROUTER_BIT_V6,
 };
+use lr_ospf::lsa::Lsa;
 use lr_ospf::lsa::{
     originate_v3_e_intra_area_prefix_lsa, originate_v3_e_link_lsa, originate_v3_e_network_lsa,
     originate_v3_e_router_lsa, EPrefixTlv, ERouterLinkTlv, LS_TYPE_E_INTRA_PREFIX, LS_TYPE_E_LINK,
@@ -523,6 +524,409 @@ impl OspfV3AuthState {
     }
 }
 
+// ---------------------------------------------------------------------
+// Configuration reload — the interface set as units (issue #101).
+//
+// The v3 mirror of the v2 daemon's reload section: one configured
+// interface is one unit (add / remove / retune with only that
+// interface's adjacencies affected; an area or network-type change
+// restarts the unit), the RFC 7166 auth strategy and the RFC 5187 §3
+// helper policy swap in place, and everything else is reported as
+// requiring a restart honestly. The v3-specific LSA lifecycle on
+// teardown: the interface's Link-LSA, Network-LSA (as DR) and
+// network-referenced Intra-Area-Prefix-LSA flush with the unit; an
+// emptied area additionally flushes its Router-LSA (plus the
+// sparse-mode E-Router-LSA, the router-referenced IAP and the SRv6
+// RI / Locator LSAs) and closes its anchor session.
+//
+// Threading matches the v2 shape: the reload closure (signal / API
+// thread) validates, resolves and queues; the engine pump applies on
+// its next pass (≤50 ms). Flush-before-close ordering: the MaxAge
+// instances are fed through the anchor and the wire drained BEFORE
+// the neighbour sessions close.
+// ---------------------------------------------------------------------
+
+/// The effective (resolved) parameters of one configured interface —
+/// the diff surface of the v3 interface-set reload. The pure half of
+/// [`resolve_interface`]: per-interface overrides over `[ospf]`
+/// globals over RFC 5340 defaults, plus the RFC 9513 §9.1/§9.2 End.X
+/// resolutions against the fresh locator table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ospf3IfEffective {
+    name: String,
+    area: u32,
+    network_type: OspfNetworkType,
+    cost: u16,
+    hello_interval: u16,
+    dead_interval: u32,
+    rxmt_interval_ms: u64,
+    priority: u8,
+    end_x_sid: Option<([u8; 16], u8)>,
+    end_x_lan: Option<([u8; 16], u8)>,
+}
+
+impl Ospf3IfEffective {
+    fn resolve(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Self, String> {
+        let name = spec.label().to_string();
+        let network_type = match spec.network_type.as_deref() {
+            None | Some("p2p") | Some("point-to-point") | Some("") => OspfNetworkType::PointToPoint,
+            Some("broadcast") => OspfNetworkType::Broadcast,
+            Some(other) => {
+                return Err(format!(
+                    "interface {name}: unknown network_type '{other}' \
+                     (use \"p2p\" or \"broadcast\")"
+                ))
+            }
+        };
+        let hello = spec
+            .hello_interval
+            .unwrap_or(cfg.ospf_hello_interval)
+            .max(1);
+        let dead = spec
+            .dead_interval
+            .unwrap_or(cfg.ospf_dead_interval)
+            .max(u32::from(hello));
+        let rxmt_secs = spec.rxmt_interval.unwrap_or(cfg.ospf_rxmt_interval).max(1);
+        let end_x_sid = spec.srv6_end_x.as_deref().and_then(|text| {
+            let sid: Ipv6Addr = text.parse().ok()?;
+            let algorithm =
+                covering_locator_algorithm(&cfg.ospf_srv6_locators, &sid.octets()).unwrap_or(0);
+            Some((sid.octets(), algorithm))
+        });
+        let end_x_lan = spec
+            .srv6_end_x_lan
+            .as_deref()
+            .and_then(|text| mask_lan_base(text, &cfg.ospf_srv6_locators));
+        Ok(Self {
+            name,
+            area: spec.area.unwrap_or(cfg.ospf_area),
+            network_type,
+            cost: spec.cost.unwrap_or(10),
+            hello_interval: hello,
+            dead_interval: dead,
+            rxmt_interval_ms: u64::from(rxmt_secs) * 1_000,
+            priority: spec.priority.unwrap_or(1),
+            end_x_sid,
+            end_x_lan,
+        })
+    }
+}
+
+/// In-place parameter deltas for one kept interface: `None` fields
+/// keep the live value.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Ospf3IfRetune {
+    cost: Option<u16>,
+    hello_interval: Option<u16>,
+    dead_interval: Option<u32>,
+    rxmt_interval_ms: Option<u64>,
+    priority: Option<u8>,
+    end_x_sid: Option<Option<([u8; 16], u8)>>,
+    end_x_lan: Option<Option<([u8; 16], u8)>>,
+}
+
+impl Ospf3IfRetune {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether the retune touches LSA content: a cost re-metrics the
+    /// Router-LSA links; an End.X change re-shapes the E-Router-LSA's
+    /// sub-TLV region (RFC 9513 §9). Timers and priority are wire / FSM
+    /// parameters the next Hello and election pass carry — no LSA.
+    fn lsa_relevant(&self) -> bool {
+        self.cost.is_some() || self.end_x_sid.is_some() || self.end_x_lan.is_some()
+    }
+
+    fn summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(v) = self.cost {
+            parts.push(format!("cost -> {v}"));
+        }
+        if let Some(v) = self.hello_interval {
+            parts.push(format!("hello -> {v}s"));
+        }
+        if let Some(v) = self.dead_interval {
+            parts.push(format!("dead -> {v}s"));
+        }
+        if let Some(v) = self.rxmt_interval_ms {
+            parts.push(format!("rxmt -> {}s", v / 1_000));
+        }
+        if let Some(v) = self.priority {
+            parts.push(format!("priority -> {v}"));
+        }
+        if self.end_x_sid.is_some() {
+            parts.push("end-x -> fresh".into());
+        }
+        if self.end_x_lan.is_some() {
+            parts.push("end-x-lan -> fresh".into());
+        }
+        parts.join(", ")
+    }
+}
+
+/// One planned interface-set operation, in apply order.
+enum Ospf3IfOp {
+    /// Install a newly resolved interface (transport bound; the apply
+    /// pass re-anchors the broadcast WaitTimer base).
+    Add(Box<Ospf3Interface>),
+    /// Tear one interface down by name (adjacencies closed, its
+    /// Link / Network / network-IAP LSAs flushed; an emptied area
+    /// flushes its Router / E-Router / IAP / SRv6 LSAs and closes
+    /// the anchor).
+    Remove(String),
+    /// Update a kept interface's parameters in place.
+    Retune(String, Ospf3IfRetune),
+}
+
+/// One validated reload plan (see the v2 twin for the contract).
+struct Ospf3ReloadPlan {
+    ops: Vec<Ospf3IfOp>,
+    auth: Option<OspfV3AuthState>,
+    gr_helper: Option<(bool, u32)>,
+}
+
+/// The reload coordination state shared between the reload closure
+/// and the engine loop (the v2 twin's contract: target tables advance
+/// at queue time so consecutive reloads chain).
+struct Ospf3ReloadCoord {
+    target: Mutex<Vec<Ospf3IfEffective>>,
+    target_auth: Mutex<crate::daemon_config::OspfAuthSpec>,
+    target_gr_helper: Mutex<(bool, u32)>,
+    /// Startup snapshot for the restart-required diffs: router-id,
+    /// SRv6 locators, extended-LSA mode, area specs, graceful-restart
+    /// role + grace period.
+    identity: Ospf3IdentitySnapshot,
+    queue: Mutex<Vec<Ospf3ReloadPlan>>,
+}
+
+/// The startup identity/origination snapshot behind
+/// [`Ospf3ReloadCoord::identity`] — a tuple alias so the field's type
+/// stays a single name (a struct would buy nothing: every consumer
+/// destructures positionally).
+type Ospf3IdentitySnapshot = (
+    String,
+    Vec<OspfSrv6LocatorSpec>,
+    bool,
+    Vec<crate::daemon_config::OspfAreaSpec>,
+    (bool, u32),
+);
+
+impl Ospf3ReloadCoord {
+    fn new(cfg: &DaemonConfig) -> Self {
+        let target = cfg
+            .ospf_interfaces
+            .iter()
+            .map(|spec| Ospf3IfEffective::resolve(cfg, spec))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_default();
+        Self {
+            target: Mutex::new(target),
+            target_auth: Mutex::new(cfg.ospf_auth.clone()),
+            target_gr_helper: Mutex::new((cfg.ospf_gr_helper, cfg.ospf_helper_grace_cap)),
+            identity: (
+                cfg.router_id.clone(),
+                cfg.ospf_srv6_locators.clone(),
+                cfg.ospf_extended_lsas,
+                cfg.ospf_areas.clone(),
+                (cfg.ospf_graceful_restart, cfg.ospf_grace_period),
+            ),
+            queue: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_plans(&self) -> Vec<Ospf3ReloadPlan> {
+        std::mem::take(&mut *self.queue.lock().unwrap())
+    }
+}
+
+/// Validate the fresh configuration against the live target and queue
+/// the plan (the v2 twin's contract: fallible work happens here; an
+/// `Err` aborts with nothing queued).
+fn plan_ospf3_reload(
+    fresh: &DaemonConfig,
+    coord: &Ospf3ReloadCoord,
+) -> Result<Vec<String>, String> {
+    let mut lines = Vec::new();
+    let mut ops: Vec<Ospf3IfOp> = Vec::new();
+
+    let target = coord.target.lock().unwrap().clone();
+    let mut fresh_eff: Vec<Ospf3IfEffective> = Vec::new();
+    for spec in &fresh.ospf_interfaces {
+        let eff = Ospf3IfEffective::resolve(fresh, spec).map_err(|e| format!("ospf: {e}"))?;
+        if fresh_eff.iter().any(|e| e.name == eff.name) {
+            return Err(format!(
+                "ospf: duplicate interface '{}' in the fresh configuration",
+                eff.name
+            ));
+        }
+        fresh_eff.push(eff);
+    }
+
+    for old in &target {
+        if !fresh_eff.iter().any(|f| f.name == old.name) {
+            ops.push(Ospf3IfOp::Remove(old.name.clone()));
+            lines.push(format!(
+                "ospf: interface {} removed (adjacencies closed, LSAs re-originated)",
+                old.name
+            ));
+        }
+    }
+
+    for eff in &fresh_eff {
+        let spec = fresh
+            .ospf_interfaces
+            .iter()
+            .find(|s| s.label() == eff.name)
+            .expect("fresh_eff was built from this table");
+        let Some(old) = target.iter().find(|t| t.name == eff.name) else {
+            ops.push(Ospf3IfOp::Add(Box::new(
+                resolve_interface(fresh, spec).map_err(|e| format!("ospf: {e}"))?,
+            )));
+            lines.push(format!(
+                "ospf: interface {} added (area {}, {})",
+                eff.name,
+                area_label(eff.area),
+                if eff.network_type == OspfNetworkType::Broadcast {
+                    "broadcast"
+                } else {
+                    "point-to-point"
+                },
+            ));
+            continue;
+        };
+        if old.area != eff.area || old.network_type != eff.network_type {
+            let teardown = matches!(
+                ops.last(),
+                Some(Ospf3IfOp::Remove(n)) if *n == eff.name
+            );
+            if !teardown {
+                ops.push(Ospf3IfOp::Remove(old.name.clone()));
+            }
+            ops.push(Ospf3IfOp::Add(Box::new(
+                resolve_interface(fresh, spec).map_err(|e| format!("ospf: {e}"))?,
+            )));
+            lines.push(format!(
+                "ospf: interface {} restarted (identity change -> area {}, {})",
+                eff.name,
+                area_label(eff.area),
+                if eff.network_type == OspfNetworkType::Broadcast {
+                    "broadcast"
+                } else {
+                    "point-to-point"
+                },
+            ));
+            continue;
+        }
+        let retune = Ospf3IfRetune {
+            cost: (old.cost != eff.cost).then_some(eff.cost),
+            hello_interval: (old.hello_interval != eff.hello_interval)
+                .then_some(eff.hello_interval),
+            dead_interval: (old.dead_interval != eff.dead_interval).then_some(eff.dead_interval),
+            rxmt_interval_ms: (old.rxmt_interval_ms != eff.rxmt_interval_ms)
+                .then_some(eff.rxmt_interval_ms),
+            priority: (old.priority != eff.priority).then_some(eff.priority),
+            end_x_sid: (old.end_x_sid != eff.end_x_sid).then_some(eff.end_x_sid),
+            end_x_lan: (old.end_x_lan != eff.end_x_lan).then_some(eff.end_x_lan),
+        };
+        if !retune.is_empty() {
+            ops.push(Ospf3IfOp::Retune(eff.name.clone(), retune));
+            lines.push(format!(
+                "ospf: interface {} re-tuned ({})",
+                eff.name,
+                retune.summary()
+            ));
+        }
+    }
+
+    let fresh_auth = fresh.ospf_auth.clone();
+    let auth_changed = *coord.target_auth.lock().unwrap() != fresh_auth;
+    let auth = if auth_changed {
+        Some(build_ospf_v3_auth(fresh))
+    } else {
+        None
+    };
+    if auth_changed {
+        lines.push(format!(
+            "ospf: auth strategy -> {} (new packets carry the fresh trailer)",
+            fresh.ospf_auth.effective_type()
+        ));
+    }
+    let fresh_gr = (fresh.ospf_gr_helper, fresh.ospf_helper_grace_cap);
+    let gr_changed = *coord.target_gr_helper.lock().unwrap() != fresh_gr;
+    if gr_changed {
+        lines.push(format!(
+            "ospf: gr-helper policy -> enabled={} cap={}s",
+            fresh_gr.0, fresh_gr.1
+        ));
+    }
+
+    let (rid, locators, extended, areas, gr_role) = &coord.identity;
+    if *rid != fresh.router_id {
+        lines.push("ospf: router-id change requires a restart (the OSPF speaker identity)".into());
+    }
+    if *locators != fresh.ospf_srv6_locators {
+        lines.push(
+            "ospf: SRv6 locator changes require a restart (the RFC 9513 origination set)".into(),
+        );
+    }
+    if *extended != fresh.ospf_extended_lsas {
+        lines.push("ospf: extended-LSA mode changes require a restart (RFC 8362)".into());
+    }
+    if *areas != fresh.ospf_areas {
+        lines.push("ospf: area type changes require a restart".into());
+    }
+    if *gr_role != (fresh.ospf_graceful_restart, fresh.ospf_grace_period) {
+        lines.push(
+            "ospf: graceful-restart role/period changes require a restart (the shutdown path)"
+                .into(),
+        );
+    }
+
+    if ops.is_empty() && auth.is_none() && !gr_changed {
+        *coord.target.lock().unwrap() = fresh_eff;
+        *coord.target_auth.lock().unwrap() = fresh_auth;
+        *coord.target_gr_helper.lock().unwrap() = fresh_gr;
+        return Ok(lines);
+    }
+    let n_units = ops.len();
+    coord.queue.lock().unwrap().push(Ospf3ReloadPlan {
+        ops,
+        auth,
+        gr_helper: gr_changed.then_some(fresh_gr),
+    });
+    *coord.target.lock().unwrap() = fresh_eff;
+    *coord.target_auth.lock().unwrap() = fresh_auth;
+    *coord.target_gr_helper.lock().unwrap() = fresh_gr;
+    lines.push(format!(
+        "ospf: interface-set reload queued ({n_units} unit(s) — applied on the next engine pass)"
+    ));
+    Ok(lines)
+}
+
+/// Encode one self-origination LSU (the reoriginate_area wire shape —
+/// the v3 checksum is finalized per-packet at send time, so the
+/// encoded bytes feed the anchor directly).
+fn v3_reload_lsu(rid: RouterId, area: u32, lsas: Vec<Lsa>) -> Option<Vec<u8>> {
+    let packet = lr_ospf::packet::OspfPacket {
+        header: lr_ospf::packet::OspfHeader {
+            version: lr_ospf::packet::OspfVersion::V3 as u8,
+            kind: OspfPacketType::LinkStateUpdate as u8,
+            length: 0,
+            router_id: rid.as_u32(),
+            area_id: area,
+            checksum: 0,
+            au_type_or_instance: 0,
+            auth_data: 0,
+        },
+        body: OspfBody::LsUpdate(lr_ospf::packet::LsUpdateBody {
+            lsa_count: lsas.len() as u32,
+            lsas,
+        }),
+    };
+    OspfCodec::v3().encode_vec(&packet).ok()
+}
+
 struct Ospf3Daemon {
     router: Arc<RwLock<DefaultRouter>>,
     /// The daemon's router-event bus (the event-bus wiring): the
@@ -599,6 +1003,10 @@ struct Ospf3Daemon {
     /// peers; the per-interface / per-packet IPv6 source is passed
     /// explicitly through the `*_with_source` variants.
     auth: OspfV3AuthState,
+    /// The reload coordination state shared with the reload closure
+    /// (issue #101): the closure queues validated plans, the pump
+    /// drains them — see [`Ospf3ReloadCoord`].
+    reload_coord: Arc<Ospf3ReloadCoord>,
 }
 
 /// The resolved RFC 9513 origination state: what `reoriginate_area`
@@ -787,6 +1195,11 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         Some(h) => h.runtime.event_bus.clone(),
         None => lr_router::event_bus::EventBus::new(),
     };
+    // The reload coordination (issue #101): built from the startup
+    // config's interface table; shared between the reload closure
+    // (standalone: `runtime.reload`; embedded: the supervisor's
+    // engine-reload registry) and the daemon's pump.
+    let reload_coord = Arc::new(Ospf3ReloadCoord::new(cfg));
     let mut daemon = Ospf3Daemon {
         router,
         event_bus: event_bus.clone(),
@@ -816,6 +1229,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         gr_recovery: BTreeMap::new(),
         gr_topology: BTreeMap::new(),
         auth: build_ospf_v3_auth(cfg),
+        reload_coord: Arc::clone(&reload_coord),
     };
     if let Some(s) = &daemon.srv6 {
         log_info!(
@@ -997,9 +1411,26 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
     // status view registered into its MultiStatus registry and a
     // startup gate between the raw-socket binds above and the LSA
     // origination + main loop below.
+    // The engine-reload closure (issue #101, the v2 twin's shape):
+    // validates the fresh configuration, resolves every new interface
+    // and queues the plan the pump applies. Registered twice —
+    // standalone, wrapped in the config-file re-parse the
+    // `runtime.reload` entry point needs; embedded, pushed onto the
+    // supervisor's engine-reload registry (the supervisor loads and
+    // finalizes the fresh configuration itself and hands every engine
+    // its slice).
+    let engine_reload: crate::EngineReloadFn = {
+        let coord = Arc::clone(&reload_coord);
+        Arc::new(move |fresh: &DaemonConfig| plan_ospf3_reload(fresh, &coord))
+    };
     let runtime = match &host {
         Some(h) => {
             h.status.register(Arc::clone(&status_lines));
+            h.runtime
+                .engine_reloads
+                .lock()
+                .unwrap()
+                .push(Arc::clone(&engine_reload));
             Arc::clone(&h.runtime)
         }
         None => {
@@ -1011,24 +1442,63 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             Arc::new(crate::Runtime {
                 event_bus: event_bus.clone(),
                 kernel_mirror: std::sync::OnceLock::new(),
-                reload: Arc::new(|| {
-                    // OSPFv3 reload is not wired yet (same shape as
-                    // the v2 standalone daemon: interface set changes
-                    // need LSA re-origination + session moves). The log
-                    // file is still re-opened so the operator's
-                    // `logrotate` postrotate SIGHUP works on the OSPFv3
-                    // daemon — `reopen_log_file` re-opens the path the
-                    // live `[logging] file` carries without touching
-                    // the rest of the configuration.
-                    let mut lines = vec![
-                        "ospf3: configuration reload is not supported yet; shutdown still works"
-                            .to_string(),
-                    ];
-                    match crate::daemon_logger::reopen_log_file() {
-                        Ok(()) => lines.push("ospf3: log file re-opened (SIGHUP)".to_string()),
-                        Err(e) => lines.push(format!("ospf3: log file reopen failed: {e}")),
+                reload: Arc::new({
+                    let engine_reload = Arc::clone(&engine_reload);
+                    let config_path = cfg.config_path.clone();
+                    let config_dialect = cfg.config_dialect.clone();
+                    move || {
+                        // The log-file reopen happens unconditionally
+                        // so the operator's `logrotate` postrotate
+                        // SIGHUP works on the OSPFv3 daemon the same
+                        // way it does on the BGP daemon.
+                        let mut lines = Vec::new();
+                        match crate::daemon_logger::reopen_log_file() {
+                            Ok(()) => lines.push("ospf3: log file re-opened (SIGHUP)".to_string()),
+                            Err(e) => lines.push(format!("ospf3: log file reopen failed: {e}")),
+                        }
+                        let Some(path) = config_path.as_deref() else {
+                            lines.push(
+                                "ospf3: no config file in use; nothing to reload \
+                                 (only log file re-opened)"
+                                    .to_string(),
+                            );
+                            return lines;
+                        };
+                        // Re-parse through the same dialect path the
+                        // startup used (a BIRD/FRR-loaded daemon
+                        // re-parses as BIRD/FRR).
+                        let forced = match config_dialect.as_deref() {
+                            Some(name) => match crate::compat::Dialect::from_flag(name) {
+                                Ok(d) => Some(d),
+                                Err(e) => {
+                                    lines.push(format!("ospf3: {e} (keeping current config)"));
+                                    return lines;
+                                }
+                            },
+                            None => Some(crate::compat::Dialect::Toml),
+                        };
+                        let mut fresh = DaemonConfig::with_defaults();
+                        if let Err(e) =
+                            crate::daemon_config::load_config_file(path, forced, &mut fresh)
+                        {
+                            lines.push(format!("ospf3: {e} (keeping current config)"));
+                            return lines;
+                        }
+                        if let Err(e) = fresh.finalize() {
+                            lines.push(format!("ospf3: {e} (keeping current config)"));
+                            return lines;
+                        }
+                        for w in &fresh.warnings {
+                            lines.push(format!("ospf3: config warning: {w}"));
+                        }
+                        match engine_reload(&fresh) {
+                            Ok(mut engine_lines) => {
+                                lines.append(&mut engine_lines);
+                            }
+                            Err(e) => lines.push(format!("ospf3: {e} (keeping current config)")),
+                        }
+                        lines
                     }
-                    lines
                 }),
                 router: Arc::clone(&daemon.router),
                 running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -1040,6 +1510,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
                 engine_reloads: Arc::new(Mutex::new(Vec::new())),
                 shutdown,
+                speaker_identity: RwLock::new((cfg.local_as, cfg.router_id.clone())),
             })
         }
     };
@@ -1085,7 +1556,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                     &runtime,
                     cfg,
                     Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                    None,
+                    Arc::new(Mutex::new(None)),
                 ) {
                     Ok(handle) => handle,
                     Err(e) => return crate::daemon_policy::policy_error(e),
@@ -1385,6 +1856,7 @@ impl Ospf3Interface {
 
 impl Ospf3Daemon {
     fn pump(&mut self, recv_buf: &mut [u8], now_ms: u64) {
+        self.drain_reload_queue(now_ms);
         self.pump_inbound(recv_buf, now_ms);
         self.pump_election(now_ms);
         self.pump_adjacency(now_ms);
@@ -1393,6 +1865,526 @@ impl Ospf3Daemon {
         self.pump_gr(now_ms);
         self.pump_hellos(now_ms);
         self.pump_outbound();
+    }
+
+    /// Apply every reload plan the reload closure queued since the
+    /// last pass, in order (issue #101, the v2 twin's contract). The
+    /// plans were fully validated and resolved by [`plan_ospf3_reload`];
+    /// this pass is infallible by construction.
+    fn drain_reload_queue(&mut self, now_ms: u64) {
+        for plan in self.reload_coord.take_plans() {
+            self.apply_reload(plan, now_ms);
+        }
+    }
+
+    /// Apply one validated reload plan. Ordering inside the pass
+    /// mirrors the v2 daemon: teardowns first — flushing the MaxAge
+    /// instances through the anchor and draining the wire BEFORE the
+    /// sessions close, so the flushes actually reach the neighbours —
+    /// then retunes, then installs, then the daemon-wide policy swaps,
+    /// and finally the re-origination scheduling for every touched
+    /// area (the Router-LSA / E-Router-LSA link set changed with every
+    /// removal and install; the next `pump_reoriginate` pass carries
+    /// it, MinLSArrival-spaced).
+    fn apply_reload(&mut self, plan: Ospf3ReloadPlan, now_ms: u64) {
+        let mut touched_areas: BTreeMap<u32, bool> = BTreeMap::new();
+        for op in plan.ops {
+            match op {
+                Ospf3IfOp::Remove(name) => {
+                    if let Some(area) = self.teardown_interface(&name, now_ms) {
+                        touched_areas.insert(area, true);
+                    }
+                }
+                Ospf3IfOp::Retune(name, retune) => {
+                    if let Some(area) = self.retune_interface(&name, &retune, now_ms) {
+                        // A cost change re-metrics the Router-LSA links
+                        // and an End.X change re-shapes the E-Router
+                        // sub-TLVs (LSA-relevant); timer/priority
+                        // changes are wire/FSM parameters the next
+                        // Hello and election pass carry. The flag
+                        // merges (several retunes can hit one area in
+                        // a single plan).
+                        let forced = touched_areas.entry(area).or_insert(false);
+                        *forced |= retune.lsa_relevant();
+                    }
+                }
+                Ospf3IfOp::Add(mut iface) => {
+                    let area = iface.area;
+                    // Re-anchor the broadcast WaitTimer base to this
+                    // pass: `resolve_interface` assumed the clock
+                    // starts at resolution time, but the engine clock
+                    // has been running since daemon start (RFC 2328
+                    // §9.3 carried over by RFC 5340 §4.1.2: the
+                    // WaitTimer runs RouterDeadInterval from ifup —
+                    // ifup is now).
+                    if iface.if_state == IfState::Waiting {
+                        iface.wait_deadline_ms = now_ms + u64::from(iface.dead_interval) * 1000;
+                    }
+                    log_info!(
+                        Component::Ospfv3,
+                        "ospf3 interface {} area {} — ifindex {} (interface id), \
+                         link-local {}, {} global prefix(es), cost {}, hello {}s dead {}s \
+                         rxmt {}s, {} (reload)",
+                        iface.name,
+                        area_label(area),
+                        iface.interface_id,
+                        iface.link_local,
+                        iface.prefixes.len(),
+                        iface.cost,
+                        iface.hello_interval,
+                        iface.dead_interval,
+                        iface.rxmt_interval_ms / 1_000,
+                        match iface.network_type {
+                            OspfNetworkType::PointToPoint => "point-to-point",
+                            OspfNetworkType::Broadcast => "broadcast",
+                        },
+                    );
+                    self.interfaces.push(*iface);
+                    touched_areas.insert(area, true);
+                }
+            }
+        }
+        // Anchor sessions for areas that gained their first interface
+        // (the defensive error keeps the engine running and names the
+        // failure instead of unwinding a half-applied plan).
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.write().unwrap();
+            for area in touched_areas.keys() {
+                if self.anchors.contains_key(area) {
+                    continue;
+                }
+                let mtu = self
+                    .interfaces
+                    .iter()
+                    .find(|i| i.area == *area)
+                    .map(|i| i.mtu)
+                    .unwrap_or(1500);
+                let rxmt_ms = self
+                    .interfaces
+                    .iter()
+                    .find(|i| i.area == *area)
+                    .map(|i| i.rxmt_interval_ms)
+                    .unwrap_or(5_000);
+                match router.add_session(
+                    SessionConfig::ospfv3(self.router_id, *area)
+                        .with_ospf_mtu(mtu)
+                        .with_ospf_rxmt_interval(rxmt_ms),
+                ) {
+                    Ok(h) => {
+                        self.anchors.insert(*area, h);
+                    }
+                    Err(e) => {
+                        log_error!(
+                            Component::Ospfv3,
+                            "ospf3 reload: anchor session for area {}: {e}",
+                            area_label(*area)
+                        );
+                    }
+                }
+            }
+        }
+        // Daemon-wide policy swaps.
+        if let Some(auth) = plan.auth {
+            self.auth = auth;
+        }
+        if let Some((enabled, cap)) = plan.gr_helper {
+            self.gr_helper_enabled = enabled;
+            self.gr_helper_cap = cap;
+        }
+        // Re-origination scheduling for every touched area (removals
+        // and adds schedule immediately; a pure timer retune rides the
+        // regular cadence).
+        for (area, lsa_relevant) in touched_areas {
+            if lsa_relevant {
+                self.schedule_reoriginate(area, now_ms);
+            }
+        }
+        // Publish whatever the teardown closed (route withdrawals) —
+        // the dead-neighbor path's pattern: the kernel-mirror thread
+        // applies the withdrawals, a merely-logged drain would leave
+        // the kernel routes installed forever.
+        let events = self.router.write().unwrap().poll_events();
+        crate::publish_and_log(&self.event_bus, events);
+    }
+
+    /// The teardown half of one interface unit (the v2 twin's ordering
+    /// contract): close its adjacencies, flush its Link-LSA, its
+    /// Network-LSA (as a former DR) and its network-referenced
+    /// Intra-Area-Prefix-LSA, drop the transport and — when it was the
+    /// area's last interface — flush the area's Router-LSA, the
+    /// sparse-mode E-Router-LSA companion, the router-referenced
+    /// Intra-Area-Prefix-LSA and the SRv6 RI / Locator LSAs (MaxAge)
+    /// and close the anchor session. Returns the affected area.
+    fn teardown_interface(&mut self, name: &str, now_ms: u64) -> Option<u32> {
+        let pos = self.interfaces.iter().position(|i| i.name == name)?;
+        let iface = self.interfaces.remove(pos);
+        let area = iface.area;
+        let ifindex = iface.interface_id;
+        let rid = self.router_id.as_u32();
+        log_info!(
+            Component::Ospfv3,
+            "ospf3 interface {} removed (area {}) — closing adjacencies",
+            name,
+            area_label(area)
+        );
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.write().unwrap();
+            let mut flush: Vec<Lsa> = Vec::new();
+            // The interface's own Link-LSA flushes with the unit
+            // (§4.4.3.9): a neighbour whose session survives on another
+            // interface of the same area purges it from its LSDB when
+            // the MaxAge instance is re-flooded through the anchor.
+            let link_lsa_type = if self.extended_lsas {
+                LS_TYPE_E_LINK
+            } else {
+                LS_TYPE_LINK
+            };
+            let link_seq = lsa_seq_floor(
+                &router,
+                area,
+                link_lsa_type,
+                ifindex,
+                rid,
+                self.link_lsa_seq.remove(&(area, ifindex)),
+            );
+            if let Some(seq) = link_seq {
+                let prefixes: Vec<V3Prefix> = iface
+                    .prefixes
+                    .iter()
+                    .map(|(addr, len)| {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(&addr.octets());
+                        V3Prefix {
+                            prefix_len: *len,
+                            options: 0,
+                            metric: 0,
+                            addr: octets,
+                        }
+                    })
+                    .collect();
+                let originated = if self.extended_lsas {
+                    originate_v3_e_link_lsa(
+                        rid,
+                        ifindex,
+                        1,
+                        OSPF_V3_OPTIONS_DEFAULT,
+                        iface.link_local.octets(),
+                        e_prefix_tlvs(prefixes),
+                        Some(seq),
+                    )
+                } else {
+                    originate_v3_link_lsa(
+                        rid,
+                        ifindex,
+                        1,
+                        OSPF_V3_OPTIONS_DEFAULT,
+                        iface.link_local.octets(),
+                        prefixes,
+                        Some(seq),
+                    )
+                };
+                if let Some(mut lsa) = originated {
+                    lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                    lsa.finalize();
+                    flush.push(lsa);
+                }
+            }
+            // A removed DR's Network-LSA and network-referenced
+            // Intra-Area-Prefix-LSA flush (§4.4.3.3 / §4.4.3.5, §14.1
+            // MaxAge reflood — the reoriginate_area flush shape).
+            if iface.net_lsa_active {
+                if let Some(seq) = iface.net_lsa_seq {
+                    let originated = if self.extended_lsas {
+                        originate_v3_e_network_lsa(
+                            rid,
+                            ifindex,
+                            OSPF_V3_OPTIONS_DEFAULT,
+                            &[rid],
+                            Some(seq),
+                        )
+                    } else {
+                        originate_v3_network_lsa(
+                            rid,
+                            ifindex,
+                            OSPF_V3_OPTIONS_DEFAULT,
+                            &[rid],
+                            Some(seq),
+                        )
+                    };
+                    if let Some(mut lsa) = originated {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        flush.push(lsa);
+                    }
+                }
+            }
+            if iface.net_iap_active {
+                if let Some(seq) = iface.net_iap_seq {
+                    let originated = if self.extended_lsas {
+                        originate_v3_e_intra_area_prefix_lsa(
+                            rid,
+                            ifindex | 1 << 31,
+                            LS_TYPE_E_NETWORK,
+                            ifindex,
+                            rid,
+                            Vec::new(),
+                            Some(seq),
+                        )
+                    } else {
+                        originate_v3_intra_area_prefix_lsa(
+                            rid,
+                            ifindex | 1 << 31,
+                            LS_TYPE_NETWORK,
+                            ifindex,
+                            rid,
+                            Vec::new(),
+                            Some(seq),
+                        )
+                    };
+                    if let Some(mut lsa) = originated {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        flush.push(lsa);
+                    }
+                }
+            }
+            // The area's topology LSAs flush when this was its last
+            // interface (the router leaves the area — the BIRD/FRR
+            // area-removal behaviour).
+            let area_emptied = !self.interfaces.iter().any(|i| i.area == area);
+            if area_emptied {
+                let mut area_flush: Vec<Lsa> = Vec::new();
+                // Router-LSA (§4.4.3.2): premature-age the live
+                // instance; an empty-links body is fine — receivers
+                // purge a MaxAge instance on sight.
+                let router_lsa_type = if self.extended_lsas {
+                    LS_TYPE_E_ROUTER
+                } else {
+                    LS_TYPE_ROUTER
+                };
+                let router_seq = lsa_seq_floor(
+                    &router,
+                    area,
+                    router_lsa_type,
+                    0,
+                    rid,
+                    self.router_lsa_seq.remove(&area),
+                );
+                if let Some(seq) = router_seq {
+                    let originated = if self.extended_lsas {
+                        originate_v3_e_router_lsa(
+                            rid,
+                            ROUTER_BIT_V6,
+                            OSPF_V3_OPTIONS_DEFAULT,
+                            Vec::new(),
+                            Some(seq),
+                        )
+                    } else {
+                        originate_v3_router_lsa(
+                            rid,
+                            ROUTER_BIT_V6,
+                            OSPF_V3_OPTIONS_DEFAULT,
+                            &[],
+                            Some(seq),
+                        )
+                    };
+                    if let Some(mut lsa) = originated {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        area_flush.push(lsa);
+                    }
+                }
+                // The router-referenced Intra-Area-Prefix-LSA flushes
+                // with the Router-LSA it attaches prefixes to (the
+                // LS ID 1 instance; §4.4.3.5).
+                let iap_key = (area, 1u32);
+                let iap_lsa_type = if self.extended_lsas {
+                    LS_TYPE_E_INTRA_PREFIX
+                } else {
+                    LS_TYPE_INTRA_PREFIX
+                };
+                let iap_seq = lsa_seq_floor(
+                    &router,
+                    area,
+                    iap_lsa_type,
+                    1,
+                    rid,
+                    self.iap_lsa_seq.remove(&iap_key),
+                );
+                if let Some(seq) = iap_seq {
+                    let originated = if self.extended_lsas {
+                        originate_v3_e_intra_area_prefix_lsa(
+                            rid,
+                            1,
+                            LS_TYPE_E_ROUTER,
+                            0,
+                            rid,
+                            Vec::new(),
+                            Some(seq),
+                        )
+                    } else {
+                        originate_v3_intra_area_prefix_lsa(
+                            rid,
+                            1,
+                            LS_TYPE_ROUTER,
+                            0,
+                            rid,
+                            Vec::new(),
+                            Some(seq),
+                        )
+                    };
+                    if let Some(mut lsa) = originated {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        area_flush.push(lsa);
+                    }
+                }
+                // The RFC 8362 §6.2 sparse-mode E-Router-LSA companion
+                // flushes when it was originated (the RFC 9513 §9
+                // End.X carrier).
+                let e_seq = lsa_seq_floor(
+                    &router,
+                    area,
+                    LS_TYPE_E_ROUTER,
+                    0,
+                    rid,
+                    self.e_router_lsa_seq.remove(&area),
+                );
+                if let Some(seq) = e_seq {
+                    if let Some(mut lsa) = originate_v3_e_router_lsa(
+                        rid,
+                        ROUTER_BIT_V6,
+                        OSPF_V3_OPTIONS_DEFAULT,
+                        Vec::new(),
+                        Some(seq),
+                    ) {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        area_flush.push(lsa);
+                    }
+                }
+                // The SRv6 RI and Locator LSAs flush with the area
+                // (RFC 9513 §2-§4/§7 — the origination set is
+                // daemon-wide, the LSAs are per-area).
+                let ri_seq = lsa_seq_floor(
+                    &router,
+                    area,
+                    LS_TYPE_V3_ROUTER_INFORMATION,
+                    0,
+                    rid,
+                    self.ri_lsa_seq.remove(&area),
+                );
+                if let Some(seq) = ri_seq {
+                    if let Some(mut lsa) = originate_v3_srv6_ri_lsa(rid, 0, &[], &[], Some(seq)) {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        area_flush.push(lsa);
+                    }
+                }
+                let loc_seq = lsa_seq_floor(
+                    &router,
+                    area,
+                    LS_TYPE_SRV6_LOCATOR,
+                    1,
+                    rid,
+                    self.srv6_lsa_seq.remove(&area),
+                );
+                if let Some(seq) = loc_seq {
+                    if let Some(mut lsa) = originate_v3_srv6_locator_lsa(rid, 1, &[], Some(seq)) {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        area_flush.push(lsa);
+                    }
+                }
+                flush.append(&mut area_flush);
+            }
+            if !flush.is_empty() {
+                if let Some(&anchor) = self.anchors.get(&area) {
+                    if let Some(bytes) = v3_reload_lsu(self.router_id, area, flush) {
+                        // The v3 checksum is finalized per-packet at
+                        // send time; the anchor feed takes the encoded
+                        // bytes as the codec produced them.
+                        if let Err(e) = router.feed_input(anchor, &bytes) {
+                            log_warn!(Component::Daemon, "ospf3 reload flush feed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        // Drain the wire BEFORE the sessions close: the flushes above
+        // sit on the neighbour sessions' output queues — closing now
+        // would take the datagrams with them.
+        self.pump_outbound();
+        // Close every adjacency heard on the removed interface. A
+        // neighbour that is also heard on a surviving interface keeps
+        // its (area, rid)-keyed session — pump_inbound re-anchors it
+        // on the next Hello (the interface id rides the Hello, and
+        // the Router-LSA re-origination below re-describes the
+        // surviving link).
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.write().unwrap();
+            let gone: Vec<(u32, u32)> = self
+                .neighbors
+                .iter()
+                .filter(|((_, _), n)| n.ifindex == ifindex)
+                .map(|(k, _)| *k)
+                .collect();
+            for key in gone {
+                if let Some(n) = self.neighbors.remove(&key) {
+                    router.close_session(n.handle);
+                    log_info!(
+                        Component::Ospfv3,
+                        "ospf3 neighbor {} session closed (interface {} removed)",
+                        fmt_rid(key.1),
+                        name
+                    );
+                }
+            }
+            if !self.interfaces.iter().any(|i| i.area == area) {
+                if let Some(anchor) = self.anchors.remove(&area) {
+                    router.close_session(anchor);
+                }
+            }
+        }
+        let _ = now_ms;
+        Some(area)
+    }
+
+    /// The retune half of one interface unit: in-place parameter
+    /// updates with the adjacencies kept. Returns the affected area.
+    fn retune_interface(&mut self, name: &str, retune: &Ospf3IfRetune, now_ms: u64) -> Option<u32> {
+        let iface = self.interfaces.iter_mut().find(|i| i.name == name)?;
+        let area = iface.area;
+        if let Some(v) = retune.cost {
+            iface.cost = v;
+        }
+        if let Some(v) = retune.hello_interval {
+            iface.hello_interval = v;
+        }
+        if let Some(v) = retune.dead_interval {
+            iface.dead_interval = v;
+        }
+        if let Some(v) = retune.rxmt_interval_ms {
+            iface.rxmt_interval_ms = v;
+        }
+        if let Some(v) = retune.priority {
+            iface.priority = v;
+            // A priority change re-enters the election on broadcast
+            // segments (§9.3 NeighborChange on ourselves, carried over
+            // by RFC 5340 §4.1.2).
+            iface.election_dirty = true;
+        }
+        if let Some(v) = retune.end_x_sid {
+            iface.end_x_sid = v;
+        }
+        if let Some(v) = retune.end_x_lan {
+            iface.end_x_lan = v;
+        }
+        let _ = now_ms;
+        Some(area)
     }
 
     /// Drive the interface FSM and the DR/BDR election on broadcast

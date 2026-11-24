@@ -1651,6 +1651,17 @@ mod babel_rtt_send_tests {
     /// every platform without needing a configured veth pair.
     fn iface_from_spec(spec: &BabelInterfaceSpec) -> BabelIface {
         let mut cfg = DaemonConfig::with_defaults();
+        // Ephemeral ports, matching `babel_router_id_tests`: the
+        // sibling tests in this module each build a full transport
+        // (a specific-address uc socket plus a wildcard mc socket),
+        // and nextest runs them as parallel processes. On Linux
+        // SO_REUSEADDR tolerates the wildcard/specific overlap across
+        // processes; on macOS it does not, and one test's uc bind
+        // raced another's live mc wildcard bind into
+        // `Address already in use` (the Native macos-latest flake).
+        // Port 0 gives every socket its own ephemeral port, so no
+        // cross-process bind can collide on any platform.
+        cfg.babel_port = 0;
         cfg.babel_interfaces.push(spec.clone());
         let _ = cfg.finalize();
         let entry = InterfaceEntry {
@@ -2206,6 +2217,72 @@ mod damping_reload_toggle_tests {
         let _ = std::fs::remove_file(&cfg_path);
     }
 
+    /// on → on with a re-tuned `[damping]` block: the live table
+    /// re-points to the fresh parameters through
+    /// `DampingTable::update_config` — the figure-of-merit history
+    /// survives (a re-tune, not a reset) and every future
+    /// computation reads the fresh thresholds. The reload reports
+    /// the re-tune.
+    #[test]
+    fn reload_on_to_on_re_tunes_live_table() {
+        let cfg_path = temp_config_path("on-on-tuned");
+        // A tuned block: a raised suppress threshold and a shorter
+        // decay interval.
+        std::fs::write(
+            &cfg_path,
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+             [damping]\nenabled = true\nsuppress_threshold = 8000\n\
+             decay_interval_s = 15\n",
+        )
+        .expect("write temp config");
+        let (router, current_networks, damping_state) = setup(true);
+
+        // Seed figure-of-merit history on the live table so the
+        // "history preserved" half of the contract is observable:
+        // three flaps under the default tuning (FoM 3000).
+        {
+            let state = damping_state.lock().unwrap();
+            let controller = state.as_ref().expect("setup installed the controller");
+            let mut table = controller.table.lock().unwrap();
+            let prefix = "203.0.113.0/24".parse().unwrap();
+            table.on_withdraw(&prefix, 0);
+            table.on_withdraw(&prefix, 0);
+            table.on_withdraw(&prefix, 0);
+        }
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            None,
+            &[],
+            Some(&damping_state),
+            None,
+            &[],
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("damping re-tuned")),
+            "reload should report the re-tune: {lines:?}"
+        );
+        // The live table carries the fresh parameters AND the
+        // seeded history.
+        let state = damping_state.lock().unwrap();
+        let controller = state.as_ref().expect("controller survives on->on");
+        let table = controller.table.lock().unwrap();
+        assert_eq!(table.config().suppress_threshold, 8_000);
+        assert_eq!(table.config().decay_interval_s, 15);
+        let prefix: lr_core::addr::Prefix = "203.0.113.0/24".parse().unwrap();
+        let entry = table
+            .entries()
+            .find(|e| e.prefix == prefix)
+            .expect("the seeded entry survives the re-tune");
+        assert_eq!(entry.flap_count, 3, "FoM history is preserved");
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
     /// off → off: a SIGHUP that keeps damping disabled is a no-op.
     /// The damping_state stays `None` and the reload does not
     /// mention damping.
@@ -2445,6 +2522,10 @@ mod event_bus_wiring_tests {
             session_labels: Arc::new(Mutex::new(HashMap::new())),
             engine_reloads: Arc::new(Mutex::new(Vec::new())),
             shutdown: None,
+            // The wiring tests exercise the event-bus contract, not the
+            // speaker identity; a neutral default keeps the struct
+            // literal complete.
+            speaker_identity: RwLock::new((0, String::new())),
         })
     }
 
@@ -2471,8 +2552,13 @@ mod event_bus_wiring_tests {
         // No kernel install: the mirror thread runs but no-ops.
         let mut cfg = DaemonConfig::with_defaults();
         cfg.install_kernel = false;
-        let ticker = spawn_ticker(&rt, &cfg, Arc::new(AtomicUsize::new(0)), None)
-            .expect("the default config carries no kernel filter");
+        let ticker = spawn_ticker(
+            &rt,
+            &cfg,
+            Arc::new(AtomicUsize::new(0)),
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        )
+        .expect("the default config carries no kernel filter");
 
         // An originated route queues a RouteInstalled; the ticker's
         // next pass drains and publishes it.
@@ -2550,6 +2636,299 @@ mod event_bus_wiring_tests {
             .key
             .prefix,
             prefix
+        );
+    }
+}
+
+#[cfg(test)]
+mod babel_reload_tests {
+    use super::*;
+    use crate::daemon_config::{BabelInterfaceSpec, DaemonConfig};
+    use std::sync::Mutex;
+
+    /// A startup-shaped per-interface config: one spec matching the
+    /// loopback interface (by its real name — see [`real_lo_entry`]).
+    fn babel_cfg() -> DaemonConfig {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.babel_port = 0; // ephemeral
+        cfg.babel_interfaces.push(BabelInterfaceSpec {
+            name: Some(lo_name()),
+            ..Default::default()
+        });
+        cfg
+    }
+
+    /// A coord whose target table carries one resolved loopback unit —
+    /// the shape `BabelReloadCoord::new` produces for a live daemon
+    /// running that interface. Built directly (the live unit set needs
+    /// bound sockets, which the pure planner tests do not exercise)
+    /// from the REAL enumerated loopback entry — the planner enumerates
+    /// the system itself, so both diff sides must see the same
+    /// addresses under the same name.
+    fn coord_with_lo(cfg: &DaemonConfig) -> BabelReloadCoord {
+        let entry = real_lo_entry();
+        let eff = BabelIfEffective::resolve(cfg, &entry);
+        BabelReloadCoord {
+            target: Mutex::new(std::collections::BTreeMap::from([(entry.name, eff)])),
+            target_manual: Mutex::new(false),
+            manual_identity: (None, 6696, None, Vec::new()),
+            configured_router_id: babel_router_id_from_config(cfg),
+            queue: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The real enumerated loopback entry (Linux names it `lo`, macOS
+    /// and the BSDs `lo0`, Windows "Loopback Pseudo-Interface 1"; the
+    /// final fallback addresses it — the loopback owns 127.0.0.1). The
+    /// planner's pure paths re-enumerate the same set.
+    fn real_lo_entry() -> lr_osroute::ospf_transport::InterfaceEntry {
+        use std::net::Ipv4Addr;
+        let entries = lr_osroute::ospf_transport::list_interfaces()
+            .expect("interface enumeration works unprivileged");
+        entries
+            .iter()
+            .find(|e| e.name == "lo" || e.name == "lo0")
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|e| e.name.to_ascii_lowercase().contains("loopback"))
+            })
+            .or_else(|| entries.iter().find(|e| e.v4.contains(&Ipv4Addr::LOCALHOST)))
+            .cloned()
+            .expect("a loopback interface exists in the test environment")
+    }
+
+    /// The loopback unit's name (see [`real_lo_entry`]).
+    fn lo_name() -> String {
+        real_lo_entry().name
+    }
+
+    /// A hello-interval retune is one unit: the kept interface's
+    /// parameter diff lands in a Retune op and the report names it.
+    #[test]
+    fn babel_reload_plan_retunes_a_kept_interface() {
+        let lo = lo_name();
+        let cfg = babel_cfg();
+        let coord = coord_with_lo(&cfg);
+        let mut fresh = cfg.clone();
+        fresh.babel_interfaces[0].hello_interval_ms = Some(4_000);
+        let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
+        assert!(
+            lines.iter().any(|l| {
+                l.contains(&format!("{lo} re-tuned (hello -> 4000ms"))
+                    // The update interval derives from the hello
+                    // interval (3×) — it rides the same retune.
+                    && l.contains("update -> 12000ms")
+            }),
+            "the retune line names the interface and the fields: {lines:?}"
+        );
+        let plans = coord.take_plans();
+        assert_eq!(plans.len(), 1, "one plan queued");
+        assert!(
+            matches!(&plans[0].ops[0], BabelIfOp::Retune(name, retune)
+                if name == &lo && retune.hello_interval_ms == Some(4_000)),
+            "the op is a hello retune on the loopback unit"
+        );
+    }
+
+    /// An interface dropped from the fresh configuration (the pattern
+    /// no longer matches) tears its unit down.
+    #[test]
+    fn babel_reload_plan_removes_a_dropped_interface() {
+        let lo = lo_name();
+        let cfg = babel_cfg();
+        let coord = coord_with_lo(&cfg);
+        let mut fresh = cfg.clone();
+        fresh.babel_interfaces[0].name = Some("eth9".to_string());
+        let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(&format!("{lo} removed (session flushed, routes withdrawn)"))),
+            "the removal line names the interface: {lines:?}"
+        );
+        let plans = coord.take_plans();
+        assert_eq!(plans.len(), 1);
+        assert!(
+            matches!(&plans[0].ops[0], BabelIfOp::Remove(name) if name == &lo),
+            "the op is a teardown of the loopback unit"
+        );
+    }
+
+    /// An interface-scoped key set change swaps the RFC 8967 auth
+    /// state in place — the retune carries the freshly built
+    /// interface and the report says fresh keys.
+    #[test]
+    fn babel_reload_plan_swaps_auth_in_place() {
+        let lo = lo_name();
+        let cfg = babel_cfg();
+        let coord = coord_with_lo(&cfg);
+        let mut fresh = cfg.clone();
+        fresh.babel_keys.push(crate::daemon_config::BabelKeySpec {
+            secret: Some("a-thirty-two-octet-secret-for-hmac".to_string()),
+            algorithm: Some("hmac-sha256".to_string()),
+            interface: Some(lo.clone()),
+        });
+        let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
+        assert!(
+            lines.iter().any(
+                |l| l.contains(&format!("{lo} re-tuned (")) && l.contains("auth -> fresh keys")
+            ),
+            "the retune line carries the auth swap: {lines:?}"
+        );
+        let plans = coord.take_plans();
+        assert_eq!(plans.len(), 1);
+        assert!(
+            matches!(&plans[0].ops[0], BabelIfOp::Retune(_, retune)
+                if retune.auth.is_some() && retune.auth.as_ref().unwrap().0.is_some()),
+            "the retune carries the freshly built auth interface"
+        );
+    }
+
+    /// A configured router-id change re-seeds every session's source
+    /// identity (RFC 8966 §3.3): reported as requiring a restart, no
+    /// unit ops queued by itself.
+    #[test]
+    fn babel_reload_plan_reports_router_id_restart() {
+        let mut cfg = babel_cfg();
+        cfg.router_id = "172.23.10.102".to_string();
+        let coord = coord_with_lo(&cfg);
+        let mut fresh = cfg.clone();
+        fresh.router_id = "172.23.10.103".to_string();
+        let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("router-id change requires a restart")),
+            "the restart-required line is reported: {lines:?}"
+        );
+        assert!(
+            coord.take_plans().is_empty(),
+            "no unit ops for a restart-required surface"
+        );
+    }
+
+    /// Switching the interface mode (manual single-socket ↔
+    /// `[[babel.interface]]` blocks) reshapes the whole daemon:
+    /// reported as requiring a restart, no unit ops.
+    #[test]
+    fn babel_reload_plan_mode_switch_requires_restart() {
+        let cfg = babel_cfg();
+        let coord = coord_with_lo(&cfg);
+        *coord.target_manual.lock().unwrap() = true; // live daemon is manual
+        let fresh = cfg.clone();
+        let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("interface mode change") && l.contains("requires a restart")),
+            "the mode-switch line is reported: {lines:?}"
+        );
+        assert!(
+            coord.take_plans().is_empty(),
+            "no unit ops on a mode switch"
+        );
+    }
+
+    /// A manual-path surface change (the `[babel]` port) is reported
+    /// as requiring a restart — the transport binds it.
+    #[test]
+    fn babel_reload_plan_manual_surface_changes() {
+        let cfg = babel_cfg();
+        let coord = coord_with_lo(&cfg);
+        // The live daemon is manual; the fresh config stays manual.
+        *coord.target_manual.lock().unwrap() = true;
+        coord.target.lock().unwrap().clear();
+        let mut fresh = DaemonConfig::with_defaults();
+        fresh.babel_port = 6697;
+        let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[babel] port change requires a restart")),
+            "the port line is reported: {lines:?}"
+        );
+        assert!(
+            coord.take_plans().is_empty(),
+            "no unit ops on the manual path"
+        );
+    }
+
+    /// Consecutive reloads chain: the target table advances at queue
+    /// time, so a second SIGHUP with the same configuration is a
+    /// no-op (the OSPF/LDP contract).
+    #[test]
+    fn babel_reload_plan_chains_targets_so_a_repeat_is_a_noop() {
+        let cfg = babel_cfg();
+        let coord = coord_with_lo(&cfg);
+        let mut fresh = cfg.clone();
+        fresh.babel_interfaces[0].hello_interval_ms = Some(4_000);
+        plan_babel_reload(&fresh, &coord).expect("first reload queues");
+        assert_eq!(coord.take_plans().len(), 1);
+        let lines = plan_babel_reload(&fresh, &coord).expect("second reload");
+        assert!(
+            !lines.iter().any(|l| l.contains("queued")),
+            "nothing queued on the repeat: {lines:?}"
+        );
+        assert!(coord.take_plans().is_empty());
+    }
+
+    /// The socket-table rewrite contract: removing the unit at
+    /// position `p` kills its slots and shifts the later units'
+    /// indices down — the demux stays correct without re-registering
+    /// any socket. Exercised through the op sequence the drain runs,
+    /// on a synthetic table.
+    #[test]
+    fn babel_reload_sock_table_rewrite_shifts_indices() {
+        // Three units, two transports each (uc + mc), the standard
+        // table shape: slots ordered unit-major, transport-minor.
+        let mut sock_table: Vec<(usize, usize, bool)> = Vec::new();
+        let mut registered: Vec<Option<mio::net::UdpSocket>> = Vec::new();
+        for unit in 0..3usize {
+            for ti in 0..2usize {
+                // Real (ephemeral, loopback-bound) sockets for the
+                // clones, so "kept" and "dropped" are distinguishable.
+                for is_mc in [false, true] {
+                    let std_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                    registered.push(Some(mio::net::UdpSocket::from_std(std_sock)));
+                    sock_table.push((unit, ti, is_mc));
+                }
+            }
+        }
+        // Remove unit 1 (position 1): its four slots die; unit 2's
+        // shift down to 1.
+        let pos = 1usize;
+        for (idx, entry) in sock_table.iter_mut().enumerate() {
+            if entry.0 == pos {
+                *entry = (BABEL_SOCK_TABLE_DEAD, usize::MAX, false);
+                registered[idx] = None;
+            } else if entry.0 != BABEL_SOCK_TABLE_DEAD && entry.0 > pos {
+                entry.0 -= 1;
+            }
+        }
+        let dead: Vec<usize> = sock_table
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.0 == BABEL_SOCK_TABLE_DEAD)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(dead, vec![4, 5, 6, 7], "the removed unit's four slots die");
+        assert!(
+            sock_table[..4].iter().all(|e| e.0 == 0),
+            "the unit before the removal keeps its index and tokens"
+        );
+        assert!(
+            sock_table[8..].iter().all(|e| e.0 == 1),
+            "the unit after the removal shifted down one"
+        );
+        assert!(
+            registered[..4].iter().all(|r| r.is_some())
+                && registered[8..].iter().all(|r| r.is_some()),
+            "the live slots' clones kept (before and after the removal point)"
+        );
+        assert!(
+            registered[4..8].iter().all(|r| r.is_none()),
+            "the dead slots' clones dropped"
         );
     }
 }
