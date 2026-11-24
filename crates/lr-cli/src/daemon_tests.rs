@@ -2678,20 +2678,24 @@ mod babel_reload_tests {
     }
 
     /// The real enumerated loopback entry (Linux names it `lo`, macOS
-    /// and the BSDs `lo0`; the planner's pure paths re-enumerate the
-    /// same set).
+    /// and the BSDs `lo0`, Windows "Loopback Pseudo-Interface 1"; the
+    /// final fallback addresses it — the loopback owns 127.0.0.1). The
+    /// planner's pure paths re-enumerate the same set.
     fn real_lo_entry() -> lr_osroute::ospf_transport::InterfaceEntry {
+        use std::net::Ipv4Addr;
         let entries = lr_osroute::ospf_transport::list_interfaces()
             .expect("interface enumeration works unprivileged");
-        let name = entries
-            .iter()
-            .map(|e| e.name.clone())
-            .find(|n| n == "lo" || n == "lo0")
-            .expect("a loopback interface exists in the test environment");
         entries
-            .into_iter()
-            .find(|e| e.name == name)
-            .expect("the loopback entry is in the enumeration")
+            .iter()
+            .find(|e| e.name == "lo" || e.name == "lo0")
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|e| e.name.to_ascii_lowercase().contains("loopback"))
+            })
+            .or_else(|| entries.iter().find(|e| e.v4.contains(&Ipv4Addr::LOCALHOST)))
+            .cloned()
+            .expect("a loopback interface exists in the test environment")
     }
 
     /// The loopback unit's name (see [`real_lo_entry`]).
