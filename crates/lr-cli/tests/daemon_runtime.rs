@@ -488,7 +488,7 @@ fn sighup_reloads_networks_from_config_file() {
             "reload: config deprecation:",
         ],
     );
-    assert!(text.contains("require a restart"), "log: {text}");
+    assert!(text.contains("applied per unit"), "log: {text}");
 
     // The runtime API sees the reloaded RIB.
     let routes = api_ask(&socket, "routes");

@@ -58,7 +58,7 @@ reload: rpki re-sync requested from rpki.example.net:8282
 reload: log destination re-opened (SIGHUP)
 reload: config warning: line 12: unknown key 'bgp.typo' (ignored)
 reload: no network changes
-reload: note: AS, router-id, peer and auth changes require a restart
+reload: note: peer, auth, BFD and policy changes applied per unit; a local AS or router-id change restarts every session with the fresh identity
 ```
 
 The `reload: log destination re-opened (SIGHUP)` line is the standard
@@ -141,7 +141,7 @@ rib-entries 1
 mrt-dump /tmp/rib.mrt records=1
 > reload
 reload: no network changes
-reload: note: AS, router-id, peer and auth changes require a restart
+reload: note: peer, auth, BFD and policy changes applied per unit; a local AS or router-id change restarts every session with the fresh identity
 > shutdown
 shutting down
 ```
@@ -462,10 +462,17 @@ answer.
 
 **Reload ignored a peer edit.**
 Reload re-applies `networks`, `[[static.route]]`, `[[roa]]` and
-`[bgp.rpki]`. AS, router-id, peer and auth changes are restart-only by
-design, and the reload output ends with
-`reload: note: AS, router-id, peer and auth changes require a restart`.
-Adding or removing a peer block also needs a restart.
+`[bgp.rpki]`, and the BGP engine re-applies the peer table per unit:
+added, removed and reconfigured `[[peer]]` blocks cost exactly that
+peer's sessions (RFC 4486 §4.1 Cease with the matching subcode),
+policy swaps in place (soft reconfiguration / RFC 2918 refresh), and
+a `local_as` / `router_id` change is one daemon-wide unit — every
+session restarts with the fresh identity. The reload output ends
+with a `reload: note:` line naming the per-unit behaviour. When a
+peer edit seems ignored, check for a preceding
+`reload: ... (keeping current config)` line — a validation failure
+(an unknown route-map reference, a bad auth key) keeps the running
+configuration unchanged.
 
 **`daemon: peer <name>: bidirectional (remote + listener); collision
 resolution per RFC 4271 §6.8 on sessions #1 / #2`.**
