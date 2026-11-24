@@ -25,33 +25,45 @@ real BGP sessions, measures each during the feed, and compares them:
 
 - `lr-daemon --mrt-feed <file> [--mrt-feed-cap N]` loads a
   TABLE_DUMP_V2 RIB dump into the daemon's Loc-RIB at startup,
-  preserving the dump's path attributes. The daemon's existing BGP
-  export path advertises the routes to connected peers — the same
-  path a production deployment uses. `--mrt-feed-cap N` truncates the
-  feed for CI budgets.
+  grouping entries by prefix, ranking each prefix's candidates with
+  the BGP decision process and installing the ranked set — the
+  daemon's existing BGP export path advertises the best path to
+  connected peers, the same path a production deployment uses.
+  `--mrt-feed-cap N` caps the prefixes read (`0` = no cap) to keep
+  the session within CI budgets.
 - `tests/bench/real_data.sh` orchestrates the multi-speaker
   comparison: a source lr-daemon (`--mrt-feed`) listens; targets
-  (lr-daemon, BIRD, FRR bgpd — each optional) connect and learn the
-  routes via real BGP sessions. Per-target samplers
+  run sequentially — the lr-daemon target connects first and
+  converges, then the BIRD and FRR targets take the peer slot (the
+  source rejects a second inbound session per peer). The harness
+  gates on the lr target holding at least one learned BGP route
+  (the old gate counted connected routes too) and dumps both target
+  Loc-RIBs, then runs `lr mrt diff` as a cross-implementation path-
+  selection check. Per-target samplers
   (`tests/bench/sample_metrics.sh`) write one JSONL line per second
   (`{t, routes, rss_kb}`); `tests/bench/compare_report.py` computes
   routes_final, convergence_s, routes_per_sec, rss_peak_kb and
   rss_final_kb per target and prints a comparison table + JSON.
   Targets use `--local-address 192.0.2.x` (TEST-NET) so the RFC 4271
   §6.3 NEXT_HOP safety check does not reject routes whose next hop
-  matches the peer's loopback address.
-- `lr bench replay --mrt <file>` is the Loc-RIB storage bench
-  (regression baseline): parses the dump, installs every route into
-  a fresh `LocRib` directly (no BGP session), and reports
-  `parse_ms`, `install_ms`, `routes_per_sec`, `rss_peak_kb` /
-  `rss_final_kb`, `soft_reload_ms` / `soft_reload_peak_rss_kb`,
-  `steady_state_drift_kb` and per-prefix
-  `correctness.{matched, mismatched, missing, extra}`. `--json`
-  emits the same fields as one JSON object.
-- `lr bench fetch --to <dir>` downloads a small public RIB dump
-  (RouteViews route-views2 `bview-latest.gz` by default,
-  overridable through `LR_BENCH_MRT_URL`). SKIPs cleanly (exit 0)
-  when the network egress is unavailable.
+  matches the peer's loopback address. The harness is hardened
+  against leftover daemons/BIRDs from interrupted runs (the EXIT
+  trap only fires on clean exits).
+- `lr bench replay --mrt <file> [--cap N]` is the Loc-RIB storage
+  bench (regression baseline): parses the dump through the streaming
+  `MrtReader`, ranks each prefix with the BGP decision process and
+  installs the ranked sets into a fresh `LocRib` directly (no BGP
+  session), and reports `parse_ms`, `install_ms`, `routes_per_sec`,
+  `routes_in`, `routes_installed`, `rss_peak_kb` / `rss_final_kb`,
+  `soft_reload_ms` / `soft_reload_peak_rss_kb`,
+  `steady_state_drift_kb` and the storage-side path-selection
+  `correctness.{matched, mismatched, missing, extra}` check. `--cap`
+  caps the prefixes read. `--json` emits the same fields as one JSON
+  object.
+- `lr bench fetch --to <dir>` downloads a public RIB dump
+  (RIPE RIS RRC26 `latest-bview.gz` by default, overridable through
+  `LR_BENCH_MRT_URL`). SKIPs cleanly (exit 0) when the network
+  egress is unavailable.
 - A criterion bench `cargo bench -p lr-mrt --bench mrt_replay`
   measures the `LocRib::install` throughput against either a real
   dump (`LR_BENCH_MRT` env) or a synthetic 1000-prefix fallback.
@@ -61,6 +73,35 @@ real BGP sessions, measures each during the feed, and compares them:
 - New docs page
   [`docs/examples/real_data_benchmark.md`](docs/examples/real_data_benchmark.md)
   is the operator walkthrough.
+
+### Fixed — the real-data benchmark now measures a real dump's selection
+
+Four concrete defects in the real-data benchmark path are repaired:
+
+- **`MrtReader` O(n^2).** The reader consumed the stream with a
+  per-record `drain(0..n)`; `parse_file` fed the whole 320 MB dump
+  and parsing was quadratic (a real RIPE RIS `rrc26` dump ran 5+ min
+  at 100% CPU with no output). The reader now tracks a read offset
+  and compacts only when the consumed prefix is at least half the
+  buffer; `parse_file` owns the file buffer instead of copying it.
+- **`--mrt-feed` installed the wrong path per prefix.** Every RIB
+  entry has `path_id = 0` without Add-Path, so `LocRib::install`
+  replaced the candidate each time and the last entry, not the best
+  path, won. The new shared loader (`lr-cli::mrt_feed`) groups by
+  prefix, ranks via `BestPath::rank` and installs via
+  `LocRib::install_set`. The daemon keeps the best path
+  (`origin.proto = 0`); `--mrt-feed-cap` now caps prefixes read.
+- **`lr bench replay` correctness was tautological.** It compared
+  the stored path against the dump's candidate set, so any candidate
+  "matched". Correctness is now a storage invariant — the Loc-RIB
+  must hold exactly the ranked set the decision process produced.
+- **The BIRD harness leg was broken.** The BIRD protocol was named
+  `source` (a BIRD keyword) and defaulted to listening on privileged
+  port 179. The harness renames it to `lrfeed` and sets an
+  unprivileged listen port; the harness now runs the targets
+  sequentially (the source drops a second inbound session per busy
+  peer) and gates on learned BGP routes, and it diffs the target
+  Loc-RIBs with `lr mrt diff`.
 
 ### Fixed — `lr-mrt::encode_attributes` extended-length form is RFC 4271 §4.3 compliant
 

@@ -110,18 +110,16 @@ ppc64le runner is registered.
 ## Tooling and supply chain
 
 **Real-data benchmark: cross-implementation prefix-by-prefix diff.**
-The storage bench landed: `lr bench replay --mrt <file>` parses a
-public TABLE_DUMP_V2 RIB dump, installs every route into a fresh
-`LocRib`, and reports processing efficiency, memory usage, path-
-selection correctness, soft-reload peak RSS and steady-state drift
+The storage bench and the `--mrt-feed` path landed
 (see [`examples/real_data_benchmark.md`](examples/real_data_benchmark.md)).
-`lr-daemon --mrt-feed <file> [--mrt-feed-cap N]` feeds the same
-routes to a reference implementation over a BGP session; the harness
-in `tests/bench/real_data.sh` drives BIRD with this flag. What
-remains is the prefix-by-prefix diff between lr's Loc-RIB dump and
-BIRD's MRT dump of the lr-learned routes — the harness reports counts
-today, and a follow-up wires `lr mrt diff` against the daemon's
-runtime-API `dump mrt` output to surface every divergent prefix.
+The dump reader (`MrtReader`) is a cursor-based stream decoder, so
+`lr bench replay` and the daemon loader parse multi-hundred-megabyte
+dumps without the quadratic per-record drain. The loader groups
+dump entries by prefix, ranks them with the BGP decision process
+(`BestPath::rank`) and installs the ranked set via
+`LocRib::install_set`. The harness runs `lr mrt diff` between the lr
+target's Loc-RIB dump and BIRD's MRT dump of the same routes to
+surface every divergent prefix.
 
 **IDE integration.** The `.lr` configuration DSL and the filter DSL
 have grammar references
