@@ -74,6 +74,52 @@ under `lr-mrt::interpret::walk_attributes` (which is RFC-compliant),
 breaking the round-trip the new bench's `decode_attributes` relies
 on. Removed; the round-trip is now pinned by a test.
 
+### Fixed — FFI policy introspection stubs answered 0 for every input
+(issue #101)
+
+Three C ABI entry points in the lr-policy gap-fill surface were
+placeholders that ignored their argument and returned 0 — the exact
+"does not function as claimed" class the 2.x plan's Fixing
+Identifiable Issues item names:
+
+- `lr_policy_route_field_is_settable` documented a mirror of
+  `RouteFieldKind::is_settable` and a `LR_ROUTE_FIELD_*` constant
+  family, but no such constants existed anywhere and the body
+  answered 0 regardless of `kind`. The constants now exist (one per
+  `RouteFieldKind` variant, Rust declaration order, appended-to by
+  future variants) and the entry point answers the parser's real
+  settable predicate.
+- `lr_policy_value_truthy` claimed to read "the truthy flag of a
+  `Value`", which a kind-only argument cannot see. The contract is
+  now the kind-level question it can answer honestly: 1 when every
+  value of the named kind is truthy (`ip`, `prefix`, `asn`,
+  `community-pattern`, `protocol`, `roa-state`), 0 when truthiness
+  depends on the value's contents (`int`, `bool`, `string`, the
+  sequence kinds). `LR_VALUE_*` constants name the kinds.
+- `lr_policy_binary_op_precedence` covered 13 of the 20 `BinaryOp`
+  variants through an id mapping published nowhere — the seven it
+  missed (bitwise AND/OR/XOR, shifts, `~`, `!~`) answered 0,
+  "unknown". `LR_BINARY_OP_*` constants now publish the ids; ids
+  1–13 keep their historical values and 14–20 name the missing
+  operators.
+
+The Go, Python and C++ bindings gain the constant families (Go
+`ValueIp` / `BinaryOpAnd` / `RouteFieldBgpLocalPref` …; Python
+`VALUE_*` / `BINARY_OP_*` / `ROUTE_FIELD_*` plus `value_truthy` /
+`binary_op_precedence` / `route_field_is_settable` wrappers; C++
+`FilterValueKind` / `FilterBinaryOp` / `RouteField` enum classes with
+typed overloads alongside the raw-int entry points), each with tests.
+
+`scripts/gen_python.py` was not idempotent despite its docstring:
+the generated-block stripper anchored on a line that occurs inside
+the marker header, so generated declarations survived as
+"hand-written", and the alias-typedef forms (`typedef struct
+lr_afi_safi_t lr_nlri_family_t;`) were never recognized as present —
+every run re-appended them and `_ffi.py` grew. Both detection gaps
+are fixed; regeneration is now a no-op on an up-to-date tree (the
+run also flushed the two `lr_router_*_session` declarations from the
+reload PR that had not been re-synced through the generator).
+
 ### Added — atomic configuration reload with minimal-unit restart
 (issue #101)
 

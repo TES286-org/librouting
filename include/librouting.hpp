@@ -8357,6 +8357,130 @@ inline std::vector<std::uint8_t> memory_conn_drain_output(const MemoryConn& c) {
     return std::vector<std::uint8_t>(p, p + len);
 }
 
+
+/// Filter Value kinds (mirror LR_VALUE_*): the payload-carrying types
+/// a filter expression evaluates to. Consumed by the enum-class
+/// policy_value_truthy overload below.
+enum class FilterValueKind : std::int32_t {
+    Int              = LR_VALUE_INT,
+    Bool             = LR_VALUE_BOOL,
+    Str              = LR_VALUE_STR,
+    Ip               = LR_VALUE_IP,
+    Prefix           = LR_VALUE_PREFIX,
+    Asn              = LR_VALUE_ASN,
+    AsPath           = LR_VALUE_AS_PATH,
+    Communities      = LR_VALUE_COMMUNITIES,
+    CommPattern      = LR_VALUE_COMM_PATTERN,
+    LargeCommunities = LR_VALUE_LARGE_COMMUNITIES,
+    ExtCommunities   = LR_VALUE_EXT_COMMUNITIES,
+    Set              = LR_VALUE_SET,
+    Protocol         = LR_VALUE_PROTOCOL,
+    RoaState         = LR_VALUE_ROA_STATE,
+};
+
+/// Filter binary operators (mirror LR_BINARY_OP_*). Consumed by
+/// policy_binary_op_precedence.
+enum class FilterBinaryOp : std::int32_t {
+    And      = LR_BINARY_OP_AND,
+    Or       = LR_BINARY_OP_OR,
+    Eq       = LR_BINARY_OP_EQ,
+    Ne       = LR_BINARY_OP_NE,
+    Lt       = LR_BINARY_OP_LT,
+    Le       = LR_BINARY_OP_LE,
+    Gt       = LR_BINARY_OP_GT,
+    Ge       = LR_BINARY_OP_GE,
+    Add      = LR_BINARY_OP_ADD,
+    Sub      = LR_BINARY_OP_SUB,
+    Mul      = LR_BINARY_OP_MUL,
+    Div      = LR_BINARY_OP_DIV,
+    Mod      = LR_BINARY_OP_MOD,
+    BitAnd   = LR_BINARY_OP_BIT_AND,
+    BitOr    = LR_BINARY_OP_BIT_OR,
+    BitXor   = LR_BINARY_OP_BIT_XOR,
+    Shl      = LR_BINARY_OP_SHL,
+    Shr      = LR_BINARY_OP_SHR,
+    Match    = LR_BINARY_OP_MATCH,
+    NotMatch = LR_BINARY_OP_NOT_MATCH,
+};
+
+/// Route-field kinds (mirror LR_ROUTE_FIELD_*), one per filter DSL
+/// field in Rust enum declaration order; new fields append. Consumed
+/// by policy_route_field_is_settable.
+enum class RouteField : std::int32_t {
+    Net                    = LR_ROUTE_FIELD_NET,
+    Proto                  = LR_ROUTE_FIELD_PROTO,
+    Source                 = LR_ROUTE_FIELD_SOURCE,
+    BgpLocalPref           = LR_ROUTE_FIELD_BGP_LOCAL_PREF,
+    BgpMed                 = LR_ROUTE_FIELD_BGP_MED,
+    BgpNextHop             = LR_ROUTE_FIELD_BGP_NEXT_HOP,
+    BgpAsPath              = LR_ROUTE_FIELD_BGP_AS_PATH,
+    BgpCommunities         = LR_ROUTE_FIELD_BGP_COMMUNITIES,
+    BgpExtCommunities      = LR_ROUTE_FIELD_BGP_EXT_COMMUNITIES,
+    BgpLargeCommunities    = LR_ROUTE_FIELD_BGP_LARGE_COMMUNITIES,
+    BgpOrigin              = LR_ROUTE_FIELD_BGP_ORIGIN,
+    BgpAtomicAggregate     = LR_ROUTE_FIELD_BGP_ATOMIC_AGGREGATE,
+    BgpOriginatorId        = LR_ROUTE_FIELD_BGP_ORIGINATOR_ID,
+    BgpClusterList         = LR_ROUTE_FIELD_BGP_CLUSTER_LIST,
+    BgpOtc                 = LR_ROUTE_FIELD_BGP_OTC,
+    BgpAigp                = LR_ROUTE_FIELD_BGP_AIGP,
+    BgpAggregatorAsn       = LR_ROUTE_FIELD_BGP_AGGREGATOR_ASN,
+    BgpAggregatorSpeaker   = LR_ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER,
+    BgpPmsiTunnel          = LR_ROUTE_FIELD_BGP_PMSI_TUNNEL,
+    OspfMetric1            = LR_ROUTE_FIELD_OSPF_METRIC1,
+    OspfMetric2            = LR_ROUTE_FIELD_OSPF_METRIC2,
+    OspfTag                = LR_ROUTE_FIELD_OSPF_TAG,
+    OspfRouterId           = LR_ROUTE_FIELD_OSPF_ROUTER_ID,
+    BabelMetric            = LR_ROUTE_FIELD_BABEL_METRIC,
+    BabelSeqno             = LR_ROUTE_FIELD_BABEL_SEQNO,
+    BabelRouterId          = LR_ROUTE_FIELD_BABEL_ROUTER_ID,
+    LrxpVerified           = LR_ROUTE_FIELD_LRXP_VERIFIED,
+    LrxpPartialTransit     = LR_ROUTE_FIELD_LRXP_PARTIAL_TRANSIT,
+    LrxpHintRank           = LR_ROUTE_FIELD_LRXP_HINT_RANK,
+    LrxpHintDampFom        = LR_ROUTE_FIELD_LRXP_HINT_DAMP_FOM,
+    LrxpHintIgpCost        = LR_ROUTE_FIELD_LRXP_HINT_IGP_COST,
+    LrxpPolicyRole         = LR_ROUTE_FIELD_LRXP_POLICY_ROLE,
+    LrxpPolicyImportDigest = LR_ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST,
+    LrxpPolicyExportDigest = LR_ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST,
+    LrxpOriginAs           = LR_ROUTE_FIELD_LRXP_ORIGIN_AS,
+    LrxpOriginMaxValidLen  = LR_ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN,
+    LrxpOriginExpiry       = LR_ROUTE_FIELD_LRXP_ORIGIN_EXPIRY,
+    RoaState               = LR_ROUTE_FIELD_ROA_STATE,
+};
+
+/// Kind-level truthiness for a filter Value: true when every value of
+/// the named kind is truthy (ip, prefix, asn, community-pattern,
+/// protocol, roa-state); false when truthiness depends on the value's
+/// contents (int: 0 is falsy; bool; string and the sequence kinds:
+/// empty is falsy).
+inline std::uint8_t policy_value_truthy(std::int32_t value_kind) {
+    return lr_policy_value_truthy(value_kind);
+}
+
+inline bool policy_value_truthy(FilterValueKind value_kind) {
+    return lr_policy_value_truthy(static_cast<std::int32_t>(value_kind)) != 0;
+}
+
+/// Precedence of a filter binary operator — higher binds tighter
+/// (BIRD grammar layering); 0 for an unknown id.
+inline std::uint8_t policy_binary_op_precedence(std::int32_t op) {
+    return lr_policy_binary_op_precedence(op);
+}
+
+inline std::uint8_t policy_binary_op_precedence(FilterBinaryOp op) {
+    return lr_policy_binary_op_precedence(static_cast<std::int32_t>(op));
+}
+
+/// True when the route field is assignable in the filter DSL
+/// (`bgp.local_pref = 100;`) — the exact predicate the parser
+/// enforces on assignment targets.
+inline std::uint8_t policy_route_field_is_settable(std::int32_t kind) {
+    return lr_policy_route_field_is_settable(kind);
+}
+
+inline bool policy_route_field_is_settable(RouteField kind) {
+    return lr_policy_route_field_is_settable(static_cast<std::int32_t>(kind)) != 0;
+}
+
 // ===== GENERATED ADDITIONS - do not edit by hand. =====
 
 namespace gen {
@@ -9885,18 +10009,6 @@ inline std::int32_t policy_lexer_tokenize(const char* src, struct lr_bytes_t* ou
 
 inline lr_filter_t policy_parse_filter(const char* name, const char* src) {
     return lr_policy_parse_filter(name, src);
-}
-
-inline std::uint8_t policy_value_truthy(std::int32_t value_kind) {
-    return lr_policy_value_truthy(value_kind);
-}
-
-inline std::uint8_t policy_binary_op_precedence(std::int32_t op) {
-    return lr_policy_binary_op_precedence(op);
-}
-
-inline std::uint8_t policy_route_field_is_settable(std::int32_t kind) {
-    return lr_policy_route_field_is_settable(kind);
 }
 
 inline std::int32_t ip_net_into_inner(const struct lr_prefix_t* net, struct lr_prefix_t* out) {

@@ -2979,6 +2979,33 @@ int main() {
         check(static_cast<bool>(sid), "gen::make_srv6sid_new returns non-null");
     }
 
+
+    // ---- policy introspection: FilterValueKind / FilterBinaryOp /
+    // RouteField enums and their query wrappers. These entry points
+    // were silent placeholders (answering 0 for every input) before
+    // the constants existed; pin the real contracts.
+    {
+        check(policy_value_truthy(FilterValueKind::Ip),
+              "policy_value_truthy(Ip) is true");
+        check(!policy_value_truthy(FilterValueKind::Int),
+              "policy_value_truthy(Int) is content-dependent (false)");
+        check(policy_binary_op_precedence(FilterBinaryOp::Or) == 1,
+              "policy_binary_op_precedence(Or) == 1");
+        check(policy_binary_op_precedence(FilterBinaryOp::And) == 2,
+              "policy_binary_op_precedence(And) == 2");
+        check(policy_binary_op_precedence(FilterBinaryOp::Mul)
+                  > policy_binary_op_precedence(FilterBinaryOp::Add),
+              "Mul binds tighter than Add");
+        check(policy_binary_op_precedence(FilterBinaryOp::Match) > 0,
+              "Match answers a precedence (was missing from the old mapping)");
+        check(policy_route_field_is_settable(RouteField::BgpLocalPref),
+              "RouteField::BgpLocalPref is settable");
+        check(!policy_route_field_is_settable(RouteField::Net),
+              "RouteField::Net is read-only");
+        check(!policy_route_field_is_settable(RouteField::RoaState),
+              "RouteField::RoaState is read-only");
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

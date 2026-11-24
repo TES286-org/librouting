@@ -2919,3 +2919,57 @@ func TestRtrClientStepRouterKeyAndAspaDataclassShape(t *testing.T) {
 		t.Fatalf("AspaDelta.Entry.CustomerASN = %d, want 65000", aspad.Entry.CustomerASN)
 	}
 }
+
+func TestPolicyIntrospectionConstants(t *testing.T) {
+	// The kind/operator constants feed the generated Policy
+	// ValueTruthy / BinaryOpPrecedence / RouteFieldIsSettable methods;
+	// pin one answer per family so a drift between the constants and
+	// the Rust enums surfaces here.
+	p := &Policy{}
+
+	// Settable fields answer 1, read-only fields answer 0.
+	if v, err := p.RouteFieldIsSettable(RouteFieldBgpLocalPref); err != nil || v != 1 {
+		t.Fatalf("RouteFieldIsSettable(BgpLocalPref) = (%d, %v), want (1, nil)", v, err)
+	}
+	if v, err := p.RouteFieldIsSettable(RouteFieldNet); err != nil || v != 0 {
+		t.Fatalf("RouteFieldIsSettable(Net) = (%d, %v), want (0, nil)", v, err)
+	}
+
+	// Operator precedence: BIRD grammar layering — `&&` binds
+	// tighter than `||`; `*` binds tighter than `+`.
+	orP, err := p.BinaryOpPrecedence(BinaryOpOr)
+	if err != nil {
+		t.Fatalf("BinaryOpPrecedence(Or): %v", err)
+	}
+	andP, err := p.BinaryOpPrecedence(BinaryOpAnd)
+	if err != nil {
+		t.Fatalf("BinaryOpPrecedence(And): %v", err)
+	}
+	mulP, err := p.BinaryOpPrecedence(BinaryOpMul)
+	if err != nil {
+		t.Fatalf("BinaryOpPrecedence(Mul): %v", err)
+	}
+	addP, err := p.BinaryOpPrecedence(BinaryOpAdd)
+	if err != nil {
+		t.Fatalf("BinaryOpPrecedence(Add): %v", err)
+	}
+	if !(andP > orP && mulP > addP) {
+		t.Fatalf("precedence order broken: and=%d or=%d mul=%d add=%d", andP, orP, mulP, addP)
+	}
+
+	// The seven operators the original mapping missed answer nonzero.
+	for _, op := range []int32{BinaryOpBitAnd, BinaryOpBitOr, BinaryOpBitXor, BinaryOpShl, BinaryOpShr, BinaryOpMatch, BinaryOpNotMatch} {
+		if v, err := p.BinaryOpPrecedence(op); err != nil || v == 0 {
+			t.Fatalf("BinaryOpPrecedence(%d) = (%d, %v), want nonzero", op, v, err)
+		}
+	}
+
+	// Kind-level truthiness: an `ip` is always truthy; an `int` is
+	// content-dependent.
+	if v, err := p.ValueTruthy(ValueIp); err != nil || v != 1 {
+		t.Fatalf("ValueTruthy(Ip) = (%d, %v), want (1, nil)", v, err)
+	}
+	if v, err := p.ValueTruthy(ValueInt); err != nil || v != 0 {
+		t.Fatalf("ValueTruthy(Int) = (%d, %v), want (0, nil)", v, err)
+	}
+}

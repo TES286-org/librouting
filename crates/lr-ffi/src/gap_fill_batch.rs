@@ -839,9 +839,171 @@ fn tcp_auth_error_to_i32(e: &TcpAuthError) -> i32 {
 // RouteFieldKind is_settable
 // ===========================================================================
 
-use lr_policy::filter::ast::BinaryOp;
+use lr_policy::filter::ast::{BinaryOp, RouteFieldKind};
 use lr_policy::filter::lexer::Lexer;
 use lr_policy::filter::parser::Parser;
+
+// `Value` kinds for `lr_policy_value_truthy`. The enum carries
+// payloads (an `Int` holds its integer, a `Str` its text), so the C
+// side cannot pass a whole `Value` — the constants name the KIND,
+// and the entry point answers the kind-level question.
+pub const LR_VALUE_INT: i32 = 0;
+pub const LR_VALUE_BOOL: i32 = 1;
+pub const LR_VALUE_STR: i32 = 2;
+pub const LR_VALUE_IP: i32 = 3;
+pub const LR_VALUE_PREFIX: i32 = 4;
+pub const LR_VALUE_ASN: i32 = 5;
+pub const LR_VALUE_AS_PATH: i32 = 6;
+pub const LR_VALUE_COMMUNITIES: i32 = 7;
+pub const LR_VALUE_COMM_PATTERN: i32 = 8;
+pub const LR_VALUE_LARGE_COMMUNITIES: i32 = 9;
+pub const LR_VALUE_EXT_COMMUNITIES: i32 = 10;
+pub const LR_VALUE_SET: i32 = 11;
+pub const LR_VALUE_PROTOCOL: i32 = 12;
+pub const LR_VALUE_ROA_STATE: i32 = 13;
+
+// `BinaryOp` ids for `lr_policy_binary_op_precedence`. 1–13 keep the
+// ids this entry point has answered since it landed (a C consumer
+// cannot have obtained them anywhere else — no constant was
+// published — but keeping them costs nothing); 14–20 publish ids for
+// the seven operators the original mapping silently left out.
+pub const LR_BINARY_OP_AND: i32 = 1;
+pub const LR_BINARY_OP_OR: i32 = 2;
+pub const LR_BINARY_OP_EQ: i32 = 3;
+pub const LR_BINARY_OP_NE: i32 = 4;
+pub const LR_BINARY_OP_LT: i32 = 5;
+pub const LR_BINARY_OP_LE: i32 = 6;
+pub const LR_BINARY_OP_GT: i32 = 7;
+pub const LR_BINARY_OP_GE: i32 = 8;
+pub const LR_BINARY_OP_ADD: i32 = 9;
+pub const LR_BINARY_OP_SUB: i32 = 10;
+pub const LR_BINARY_OP_MUL: i32 = 11;
+pub const LR_BINARY_OP_DIV: i32 = 12;
+pub const LR_BINARY_OP_MOD: i32 = 13;
+pub const LR_BINARY_OP_BIT_AND: i32 = 14;
+pub const LR_BINARY_OP_BIT_OR: i32 = 15;
+pub const LR_BINARY_OP_BIT_XOR: i32 = 16;
+pub const LR_BINARY_OP_SHL: i32 = 17;
+pub const LR_BINARY_OP_SHR: i32 = 18;
+pub const LR_BINARY_OP_MATCH: i32 = 19;
+pub const LR_BINARY_OP_NOT_MATCH: i32 = 20;
+
+// `RouteFieldKind` ids for `lr_policy_route_field_is_settable`, one
+// per variant in the Rust enum's declaration order. The enum is
+// `#[non_exhaustive]`: new variants append (and new constants follow
+// the same ordering rule), existing ids never shift.
+pub const LR_ROUTE_FIELD_NET: i32 = 0;
+pub const LR_ROUTE_FIELD_PROTO: i32 = 1;
+pub const LR_ROUTE_FIELD_SOURCE: i32 = 2;
+pub const LR_ROUTE_FIELD_BGP_LOCAL_PREF: i32 = 3;
+pub const LR_ROUTE_FIELD_BGP_MED: i32 = 4;
+pub const LR_ROUTE_FIELD_BGP_NEXT_HOP: i32 = 5;
+pub const LR_ROUTE_FIELD_BGP_AS_PATH: i32 = 6;
+pub const LR_ROUTE_FIELD_BGP_COMMUNITIES: i32 = 7;
+pub const LR_ROUTE_FIELD_BGP_EXT_COMMUNITIES: i32 = 8;
+pub const LR_ROUTE_FIELD_BGP_LARGE_COMMUNITIES: i32 = 9;
+pub const LR_ROUTE_FIELD_BGP_ORIGIN: i32 = 10;
+pub const LR_ROUTE_FIELD_BGP_ATOMIC_AGGREGATE: i32 = 11;
+pub const LR_ROUTE_FIELD_BGP_ORIGINATOR_ID: i32 = 12;
+pub const LR_ROUTE_FIELD_BGP_CLUSTER_LIST: i32 = 13;
+pub const LR_ROUTE_FIELD_BGP_OTC: i32 = 14;
+pub const LR_ROUTE_FIELD_BGP_AIGP: i32 = 15;
+pub const LR_ROUTE_FIELD_BGP_AGGREGATOR_ASN: i32 = 16;
+pub const LR_ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER: i32 = 17;
+pub const LR_ROUTE_FIELD_BGP_PMSI_TUNNEL: i32 = 18;
+pub const LR_ROUTE_FIELD_OSPF_METRIC1: i32 = 19;
+pub const LR_ROUTE_FIELD_OSPF_METRIC2: i32 = 20;
+pub const LR_ROUTE_FIELD_OSPF_TAG: i32 = 21;
+pub const LR_ROUTE_FIELD_OSPF_ROUTER_ID: i32 = 22;
+pub const LR_ROUTE_FIELD_BABEL_METRIC: i32 = 23;
+pub const LR_ROUTE_FIELD_BABEL_SEQNO: i32 = 24;
+pub const LR_ROUTE_FIELD_BABEL_ROUTER_ID: i32 = 25;
+pub const LR_ROUTE_FIELD_LRXP_VERIFIED: i32 = 26;
+pub const LR_ROUTE_FIELD_LRXP_PARTIAL_TRANSIT: i32 = 27;
+pub const LR_ROUTE_FIELD_LRXP_HINT_RANK: i32 = 28;
+pub const LR_ROUTE_FIELD_LRXP_HINT_DAMP_FOM: i32 = 29;
+pub const LR_ROUTE_FIELD_LRXP_HINT_IGP_COST: i32 = 30;
+pub const LR_ROUTE_FIELD_LRXP_POLICY_ROLE: i32 = 31;
+pub const LR_ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST: i32 = 32;
+pub const LR_ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST: i32 = 33;
+pub const LR_ROUTE_FIELD_LRXP_ORIGIN_AS: i32 = 34;
+pub const LR_ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN: i32 = 35;
+pub const LR_ROUTE_FIELD_LRXP_ORIGIN_EXPIRY: i32 = 36;
+pub const LR_ROUTE_FIELD_ROA_STATE: i32 = 37;
+
+/// Map a `LR_ROUTE_FIELD_*` constant to its `RouteFieldKind`.
+/// Returns `None` for any other value (an unknown or future kind).
+fn route_field_kind_from_const(kind: i32) -> Option<RouteFieldKind> {
+    Some(match kind {
+        LR_ROUTE_FIELD_NET => RouteFieldKind::Net,
+        LR_ROUTE_FIELD_PROTO => RouteFieldKind::Proto,
+        LR_ROUTE_FIELD_SOURCE => RouteFieldKind::Source,
+        LR_ROUTE_FIELD_BGP_LOCAL_PREF => RouteFieldKind::BgpLocalPref,
+        LR_ROUTE_FIELD_BGP_MED => RouteFieldKind::BgpMed,
+        LR_ROUTE_FIELD_BGP_NEXT_HOP => RouteFieldKind::BgpNextHop,
+        LR_ROUTE_FIELD_BGP_AS_PATH => RouteFieldKind::BgpAsPath,
+        LR_ROUTE_FIELD_BGP_COMMUNITIES => RouteFieldKind::BgpCommunities,
+        LR_ROUTE_FIELD_BGP_EXT_COMMUNITIES => RouteFieldKind::BgpExtCommunities,
+        LR_ROUTE_FIELD_BGP_LARGE_COMMUNITIES => RouteFieldKind::BgpLargeCommunities,
+        LR_ROUTE_FIELD_BGP_ORIGIN => RouteFieldKind::BgpOrigin,
+        LR_ROUTE_FIELD_BGP_ATOMIC_AGGREGATE => RouteFieldKind::BgpAtomicAggregate,
+        LR_ROUTE_FIELD_BGP_ORIGINATOR_ID => RouteFieldKind::BgpOriginatorId,
+        LR_ROUTE_FIELD_BGP_CLUSTER_LIST => RouteFieldKind::BgpClusterList,
+        LR_ROUTE_FIELD_BGP_OTC => RouteFieldKind::BgpOtc,
+        LR_ROUTE_FIELD_BGP_AIGP => RouteFieldKind::BgpAigp,
+        LR_ROUTE_FIELD_BGP_AGGREGATOR_ASN => RouteFieldKind::BgpAggregatorAsn,
+        LR_ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER => RouteFieldKind::BgpAggregatorSpeaker,
+        LR_ROUTE_FIELD_BGP_PMSI_TUNNEL => RouteFieldKind::BgpPmsiTunnel,
+        LR_ROUTE_FIELD_OSPF_METRIC1 => RouteFieldKind::OspfMetric1,
+        LR_ROUTE_FIELD_OSPF_METRIC2 => RouteFieldKind::OspfMetric2,
+        LR_ROUTE_FIELD_OSPF_TAG => RouteFieldKind::OspfTag,
+        LR_ROUTE_FIELD_OSPF_ROUTER_ID => RouteFieldKind::OspfRouterId,
+        LR_ROUTE_FIELD_BABEL_METRIC => RouteFieldKind::BabelMetric,
+        LR_ROUTE_FIELD_BABEL_SEQNO => RouteFieldKind::BabelSeqno,
+        LR_ROUTE_FIELD_BABEL_ROUTER_ID => RouteFieldKind::BabelRouterId,
+        LR_ROUTE_FIELD_LRXP_VERIFIED => RouteFieldKind::LrxpVerified,
+        LR_ROUTE_FIELD_LRXP_PARTIAL_TRANSIT => RouteFieldKind::LrxpPartialTransit,
+        LR_ROUTE_FIELD_LRXP_HINT_RANK => RouteFieldKind::LrxpHintRank,
+        LR_ROUTE_FIELD_LRXP_HINT_DAMP_FOM => RouteFieldKind::LrxpHintDampFom,
+        LR_ROUTE_FIELD_LRXP_HINT_IGP_COST => RouteFieldKind::LrxpHintIgpCost,
+        LR_ROUTE_FIELD_LRXP_POLICY_ROLE => RouteFieldKind::LrxpPolicyRole,
+        LR_ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST => RouteFieldKind::LrxpPolicyImportDigest,
+        LR_ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST => RouteFieldKind::LrxpPolicyExportDigest,
+        LR_ROUTE_FIELD_LRXP_ORIGIN_AS => RouteFieldKind::LrxpOriginAs,
+        LR_ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN => RouteFieldKind::LrxpOriginMaxValidLen,
+        LR_ROUTE_FIELD_LRXP_ORIGIN_EXPIRY => RouteFieldKind::LrxpOriginExpiry,
+        LR_ROUTE_FIELD_ROA_STATE => RouteFieldKind::RoaState,
+        _ => return None,
+    })
+}
+
+/// Map an `LR_BINARY_OP_*` constant to its `BinaryOp`. Returns `None`
+/// for any other value.
+fn binary_op_from_const(op: i32) -> Option<BinaryOp> {
+    Some(match op {
+        LR_BINARY_OP_AND => BinaryOp::And,
+        LR_BINARY_OP_OR => BinaryOp::Or,
+        LR_BINARY_OP_EQ => BinaryOp::Eq,
+        LR_BINARY_OP_NE => BinaryOp::Ne,
+        LR_BINARY_OP_LT => BinaryOp::Lt,
+        LR_BINARY_OP_LE => BinaryOp::Le,
+        LR_BINARY_OP_GT => BinaryOp::Gt,
+        LR_BINARY_OP_GE => BinaryOp::Ge,
+        LR_BINARY_OP_ADD => BinaryOp::Add,
+        LR_BINARY_OP_SUB => BinaryOp::Sub,
+        LR_BINARY_OP_MUL => BinaryOp::Mul,
+        LR_BINARY_OP_DIV => BinaryOp::Div,
+        LR_BINARY_OP_MOD => BinaryOp::Mod,
+        LR_BINARY_OP_BIT_AND => BinaryOp::BitAnd,
+        LR_BINARY_OP_BIT_OR => BinaryOp::BitOr,
+        LR_BINARY_OP_BIT_XOR => BinaryOp::BitXor,
+        LR_BINARY_OP_SHL => BinaryOp::Shl,
+        LR_BINARY_OP_SHR => BinaryOp::Shr,
+        LR_BINARY_OP_MATCH => BinaryOp::Match,
+        LR_BINARY_OP_NOT_MATCH => BinaryOp::NotMatch,
+        _ => return None,
+    })
+}
 
 /// Run the peephole optimizer on a flat `Vec<Instr>` (RFC: lr-policy
 /// `peephole::optimize`). Returns the optimized instruction stream as
@@ -975,66 +1137,74 @@ pub unsafe extern "C" fn lr_policy_parse_filter(
     )
 }
 
-/// Read the `truthy` flag of a `Value`. Returns 1 when the value is
-/// truthy, 0 when not. (Standalone entry — kept here because the
-/// Value type is internal and not exposed via a handle.)
+/// Kind-level truthiness for a filter `Value`: returns 1 when every
+/// value of the named kind is truthy, 0 when truthiness depends on
+/// the value's contents (or the kind is unknown). The always-truthy
+/// kinds are `ip`, `prefix`, `asn`, `community-pattern`, `protocol`
+/// and `roa-state`; for `int` (`0` is falsy), `bool`, `string` (empty
+/// is falsy) and the sequence kinds (`as-path`, `community-set`,
+/// `large-community-set`, `ext-community-set`, `set` — empty is
+/// falsy) the answer depends on the value a filter actually holds,
+/// which this kind-only entry point cannot see. `value_kind` is one
+/// of the `LR_VALUE_*` constants.
 #[no_mangle]
 pub extern "C" fn lr_policy_value_truthy(value_kind: i32) -> u8 {
     guarded(
         || {
-            // We don't have a C-side Value handle; this entry point is a
-            // placeholder for the API surface — actual Value truthiness
-            // requires the route-eval context, which lives in
-            // lr_filter_evaluate.
-            let _ = value_kind;
-            0
+            // The kind-level contract above is the only question a
+            // kind-only argument can answer honestly: the payload
+            // (which int, which string) lives in the filter's
+            // evaluation context, not at this boundary.
+            u8::from(matches!(
+                value_kind,
+                LR_VALUE_IP
+                    | LR_VALUE_PREFIX
+                    | LR_VALUE_ASN
+                    | LR_VALUE_COMM_PATTERN
+                    | LR_VALUE_PROTOCOL
+                    | LR_VALUE_ROA_STATE
+            ))
         },
         0,
     )
 }
 
-/// Read the precedence of a `BinaryOp` (1–7, mirroring Rust's
-/// `BinaryOp::precedence`). Stateless — given the operator's i32 id,
-/// returns its precedence.
+/// Read the precedence of a `BinaryOp` — higher binds tighter
+/// (BIRD's filter-grammar layering: `||` 1, `&&` 2, `==`/`!=` 3,
+/// comparisons and `~`/`!~` 4, `|` 5, `^` 6, `&` 7, shifts 8,
+/// `+`/`-` 9, `*`/`/`/`%` 10). Stateless — given one of the
+/// `LR_BINARY_OP_*` constants, returns its precedence, or 0 for an
+/// unknown id.
 #[no_mangle]
 pub extern "C" fn lr_policy_binary_op_precedence(op: i32) -> u8 {
     guarded(
         || {
-            // Reconstruct the BinaryOp from its i32 id; the mapping is
-            // 1=And, 2=Or, 3=Eq, 4=Ne, 5=Lt, 6=Le, 7=Gt, 8=Ge,
-            // 9=Add, 10=Sub, 11=Mul, 12=Div, 13=Mod.
-            let op = match op {
-                1 => BinaryOp::And,
-                2 => BinaryOp::Or,
-                3 => BinaryOp::Eq,
-                4 => BinaryOp::Ne,
-                5 => BinaryOp::Lt,
-                6 => BinaryOp::Le,
-                7 => BinaryOp::Gt,
-                8 => BinaryOp::Ge,
-                9 => BinaryOp::Add,
-                10 => BinaryOp::Sub,
-                11 => BinaryOp::Mul,
-                12 => BinaryOp::Div,
-                13 => BinaryOp::Mod,
-                _ => return 0,
-            };
-            op.precedence()
+            // Reconstruct the BinaryOp from its LR_BINARY_OP_*
+            // constant; every variant of the Rust enum is reachable
+            // (the original mapping covered thirteen of twenty — the
+            // seven it missed answered 0, "unknown").
+            match binary_op_from_const(op) {
+                Some(op) => op.precedence(),
+                None => 0,
+            }
         },
         0,
     )
 }
 
-/// True (1) when `kind` is settable (mirrors `RouteFieldKind::is_settable`).
-/// `kind` is one of the `LR_ROUTE_FIELD_*` constants.
+/// True (1) when `kind` names a route field the filter DSL can
+/// assign (`bgp.local_pref = 100;`) — the exact predicate the parser
+/// enforces on assignment targets. `kind` is one of the
+/// `LR_ROUTE_FIELD_*` constants; an unknown id answers 0.
 #[no_mangle]
 pub extern "C" fn lr_policy_route_field_is_settable(kind: i32) -> u8 {
     guarded(
         || {
-            let _ = kind;
-            // The RouteFieldKind enum is internal; the entry point is
-            // a placeholder for the API surface.
-            0
+            // Mirrors `RouteFieldKind::is_settable` — the same predicate
+            // `lr_policy::filter::parser` applies to assignment targets,
+            // so a binding building a filter UI shows exactly the fields
+            // the parser would accept.
+            u8::from(route_field_kind_from_const(kind).is_some_and(RouteFieldKind::is_settable))
         },
         0,
     )
@@ -1280,10 +1450,152 @@ mod tests {
 
     #[test]
     fn ffi_policy_binary_op_precedence() {
-        // Or has precedence 1 (lowest). And has precedence 2.
-        assert_eq!(lr_policy_binary_op_precedence(2), 1); // Or
-        assert_eq!(lr_policy_binary_op_precedence(1), 2); // And
-                                                          // Unknown op returns 0.
+        // Every LR_BINARY_OP_* constant answers its operator's
+        // precedence; the seven operators the original mapping left
+        // out (bitwise, shifts, ~ / !~) answer nonzero now.
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_OR), 1);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_AND), 2);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_EQ), 3);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_NE), 3);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_LT), 4);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_GE), 4);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_MATCH), 4);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_NOT_MATCH), 4);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_BIT_OR), 5);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_BIT_XOR), 6);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_BIT_AND), 7);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_SHL), 8);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_SHR), 8);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_ADD), 9);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_SUB), 9);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_MUL), 10);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_DIV), 10);
+        assert_eq!(lr_policy_binary_op_precedence(LR_BINARY_OP_MOD), 10);
+        // Unknown id returns 0.
+        assert_eq!(lr_policy_binary_op_precedence(0), 0);
+        assert_eq!(lr_policy_binary_op_precedence(21), 0);
         assert_eq!(lr_policy_binary_op_precedence(99), 0);
+    }
+
+    #[test]
+    fn ffi_policy_value_truthy() {
+        // Kinds whose every value is truthy.
+        for kind in [
+            LR_VALUE_IP,
+            LR_VALUE_PREFIX,
+            LR_VALUE_ASN,
+            LR_VALUE_COMM_PATTERN,
+            LR_VALUE_PROTOCOL,
+            LR_VALUE_ROA_STATE,
+        ] {
+            assert_eq!(
+                lr_policy_value_truthy(kind),
+                1,
+                "kind {kind} is always truthy"
+            );
+        }
+        // Kinds whose truthiness depends on the payload answer 0 —
+        // the documented kind-level contract.
+        for kind in [
+            LR_VALUE_INT,
+            LR_VALUE_BOOL,
+            LR_VALUE_STR,
+            LR_VALUE_AS_PATH,
+            LR_VALUE_COMMUNITIES,
+            LR_VALUE_LARGE_COMMUNITIES,
+            LR_VALUE_EXT_COMMUNITIES,
+            LR_VALUE_SET,
+        ] {
+            assert_eq!(
+                lr_policy_value_truthy(kind),
+                0,
+                "kind {kind} is content-dependent"
+            );
+        }
+        // Unknown kind.
+        assert_eq!(lr_policy_value_truthy(99), 0);
+        assert_eq!(lr_policy_value_truthy(-1), 0);
+    }
+
+    #[test]
+    fn ffi_policy_route_field_is_settable() {
+        // The settable set mirrors the parser's assignment gate.
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_BGP_LOCAL_PREF),
+            1
+        );
+        assert_eq!(lr_policy_route_field_is_settable(LR_ROUTE_FIELD_BGP_MED), 1);
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_BGP_NEXT_HOP),
+            1
+        );
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_BGP_COMMUNITIES),
+            1
+        );
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_BGP_EXT_COMMUNITIES),
+            1
+        );
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_BGP_LARGE_COMMUNITIES),
+            1
+        );
+        // Read-only fields answer 0.
+        assert_eq!(lr_policy_route_field_is_settable(LR_ROUTE_FIELD_NET), 0);
+        assert_eq!(lr_policy_route_field_is_settable(LR_ROUTE_FIELD_PROTO), 0);
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_BGP_AS_PATH),
+            0
+        );
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_ROA_STATE),
+            0
+        );
+        assert_eq!(
+            lr_policy_route_field_is_settable(LR_ROUTE_FIELD_LRXP_VERIFIED),
+            0
+        );
+        // Unknown id.
+        assert_eq!(lr_policy_route_field_is_settable(38), 0);
+        assert_eq!(lr_policy_route_field_is_settable(-1), 0);
+    }
+
+    /// The constants and the Rust enum must stay in lockstep: every
+    /// `LR_ROUTE_FIELD_*` maps to a distinct variant, and the count
+    /// matches, so a variant added to the enum without a constant (or
+    /// vice versa) fails here rather than drifting silently.
+    #[test]
+    fn ffi_route_field_constants_cover_every_kind() {
+        let ids = 0..=37i32;
+        let mut seen: Vec<RouteFieldKind> = Vec::new();
+        for id in ids {
+            let kind = route_field_kind_from_const(id)
+                .unwrap_or_else(|| panic!("id {id} has no RouteFieldKind"));
+            assert!(
+                !seen.contains(&kind),
+                "id {id} duplicates an earlier mapping"
+            );
+            seen.push(kind);
+        }
+        assert_eq!(seen.len(), 38);
+        // Every constant beyond the last is unknown.
+        assert!(route_field_kind_from_const(38).is_none());
+        assert!(route_field_kind_from_const(-1).is_none());
+    }
+
+    /// Same lockstep check for the operator constants.
+    #[test]
+    fn ffi_binary_op_constants_cover_every_op() {
+        let ids = 1..=20i32;
+        let mut seen: Vec<BinaryOp> = Vec::new();
+        for id in ids {
+            let op = binary_op_from_const(id).unwrap_or_else(|| panic!("id {id} has no BinaryOp"));
+            assert!(!seen.contains(&op), "id {id} duplicates an earlier mapping");
+            seen.push(op);
+        }
+        assert_eq!(seen.len(), 20);
+        assert!(binary_op_from_const(0).is_none());
+        assert!(binary_op_from_const(21).is_none());
     }
 }

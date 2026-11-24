@@ -43,6 +43,84 @@ __all__ = [
     "EVAL_FALLTHROUGH",
     "EVAL_DENY",
     "EVAL_PERMIT",
+    # filter Value kinds (LR_VALUE_*)
+    "VALUE_INT",
+    "VALUE_BOOL",
+    "VALUE_STR",
+    "VALUE_IP",
+    "VALUE_PREFIX",
+    "VALUE_ASN",
+    "VALUE_AS_PATH",
+    "VALUE_COMMUNITIES",
+    "VALUE_COMM_PATTERN",
+    "VALUE_LARGE_COMMUNITIES",
+    "VALUE_EXT_COMMUNITIES",
+    "VALUE_SET",
+    "VALUE_PROTOCOL",
+    "VALUE_ROA_STATE",
+    "value_truthy",
+    # filter BinaryOp ids (LR_BINARY_OP_*)
+    "BINARY_OP_AND",
+    "BINARY_OP_OR",
+    "BINARY_OP_EQ",
+    "BINARY_OP_NE",
+    "BINARY_OP_LT",
+    "BINARY_OP_LE",
+    "BINARY_OP_GT",
+    "BINARY_OP_GE",
+    "BINARY_OP_ADD",
+    "BINARY_OP_SUB",
+    "BINARY_OP_MUL",
+    "BINARY_OP_DIV",
+    "BINARY_OP_MOD",
+    "BINARY_OP_BIT_AND",
+    "BINARY_OP_BIT_OR",
+    "BINARY_OP_BIT_XOR",
+    "BINARY_OP_SHL",
+    "BINARY_OP_SHR",
+    "BINARY_OP_MATCH",
+    "BINARY_OP_NOT_MATCH",
+    "binary_op_precedence",
+    # route-field kinds (LR_ROUTE_FIELD_*)
+    "ROUTE_FIELD_NET",
+    "ROUTE_FIELD_PROTO",
+    "ROUTE_FIELD_SOURCE",
+    "ROUTE_FIELD_BGP_LOCAL_PREF",
+    "ROUTE_FIELD_BGP_MED",
+    "ROUTE_FIELD_BGP_NEXT_HOP",
+    "ROUTE_FIELD_BGP_AS_PATH",
+    "ROUTE_FIELD_BGP_COMMUNITIES",
+    "ROUTE_FIELD_BGP_EXT_COMMUNITIES",
+    "ROUTE_FIELD_BGP_LARGE_COMMUNITIES",
+    "ROUTE_FIELD_BGP_ORIGIN",
+    "ROUTE_FIELD_BGP_ATOMIC_AGGREGATE",
+    "ROUTE_FIELD_BGP_ORIGINATOR_ID",
+    "ROUTE_FIELD_BGP_CLUSTER_LIST",
+    "ROUTE_FIELD_BGP_OTC",
+    "ROUTE_FIELD_BGP_AIGP",
+    "ROUTE_FIELD_BGP_AGGREGATOR_ASN",
+    "ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER",
+    "ROUTE_FIELD_BGP_PMSI_TUNNEL",
+    "ROUTE_FIELD_OSPF_METRIC1",
+    "ROUTE_FIELD_OSPF_METRIC2",
+    "ROUTE_FIELD_OSPF_TAG",
+    "ROUTE_FIELD_OSPF_ROUTER_ID",
+    "ROUTE_FIELD_BABEL_METRIC",
+    "ROUTE_FIELD_BABEL_SEQNO",
+    "ROUTE_FIELD_BABEL_ROUTER_ID",
+    "ROUTE_FIELD_LRXP_VERIFIED",
+    "ROUTE_FIELD_LRXP_PARTIAL_TRANSIT",
+    "ROUTE_FIELD_LRXP_HINT_RANK",
+    "ROUTE_FIELD_LRXP_HINT_DAMP_FOM",
+    "ROUTE_FIELD_LRXP_HINT_IGP_COST",
+    "ROUTE_FIELD_LRXP_POLICY_ROLE",
+    "ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST",
+    "ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST",
+    "ROUTE_FIELD_LRXP_ORIGIN_AS",
+    "ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN",
+    "ROUTE_FIELD_LRXP_ORIGIN_EXPIRY",
+    "ROUTE_FIELD_ROA_STATE",
+    "route_field_is_settable",
 ]
 
 # Route-map match condition kinds (LR_MATCH_*).
@@ -70,6 +148,111 @@ VERDICT_DENY = 2
 EVAL_FALLTHROUGH = -1
 EVAL_DENY = 0
 EVAL_PERMIT = 1
+
+# Filter Value kinds (LR_VALUE_*): the payload-carrying types a
+# filter expression evaluates to.
+VALUE_INT = 0
+VALUE_BOOL = 1
+VALUE_STR = 2
+VALUE_IP = 3
+VALUE_PREFIX = 4
+VALUE_ASN = 5
+VALUE_AS_PATH = 6
+VALUE_COMMUNITIES = 7
+VALUE_COMM_PATTERN = 8
+VALUE_LARGE_COMMUNITIES = 9
+VALUE_EXT_COMMUNITIES = 10
+VALUE_SET = 11
+VALUE_PROTOCOL = 12
+VALUE_ROA_STATE = 13
+
+# Filter binary operators (LR_BINARY_OP_*).
+BINARY_OP_AND = 1
+BINARY_OP_OR = 2
+BINARY_OP_EQ = 3
+BINARY_OP_NE = 4
+BINARY_OP_LT = 5
+BINARY_OP_LE = 6
+BINARY_OP_GT = 7
+BINARY_OP_GE = 8
+BINARY_OP_ADD = 9
+BINARY_OP_SUB = 10
+BINARY_OP_MUL = 11
+BINARY_OP_DIV = 12
+BINARY_OP_MOD = 13
+BINARY_OP_BIT_AND = 14
+BINARY_OP_BIT_OR = 15
+BINARY_OP_BIT_XOR = 16
+BINARY_OP_SHL = 17
+BINARY_OP_SHR = 18
+BINARY_OP_MATCH = 19
+BINARY_OP_NOT_MATCH = 20
+
+# Route-field kinds (LR_ROUTE_FIELD_*), one per filter DSL field in
+# Rust enum declaration order; new fields append.
+ROUTE_FIELD_NET = 0
+ROUTE_FIELD_PROTO = 1
+ROUTE_FIELD_SOURCE = 2
+ROUTE_FIELD_BGP_LOCAL_PREF = 3
+ROUTE_FIELD_BGP_MED = 4
+ROUTE_FIELD_BGP_NEXT_HOP = 5
+ROUTE_FIELD_BGP_AS_PATH = 6
+ROUTE_FIELD_BGP_COMMUNITIES = 7
+ROUTE_FIELD_BGP_EXT_COMMUNITIES = 8
+ROUTE_FIELD_BGP_LARGE_COMMUNITIES = 9
+ROUTE_FIELD_BGP_ORIGIN = 10
+ROUTE_FIELD_BGP_ATOMIC_AGGREGATE = 11
+ROUTE_FIELD_BGP_ORIGINATOR_ID = 12
+ROUTE_FIELD_BGP_CLUSTER_LIST = 13
+ROUTE_FIELD_BGP_OTC = 14
+ROUTE_FIELD_BGP_AIGP = 15
+ROUTE_FIELD_BGP_AGGREGATOR_ASN = 16
+ROUTE_FIELD_BGP_AGGREGATOR_SPEAKER = 17
+ROUTE_FIELD_BGP_PMSI_TUNNEL = 18
+ROUTE_FIELD_OSPF_METRIC1 = 19
+ROUTE_FIELD_OSPF_METRIC2 = 20
+ROUTE_FIELD_OSPF_TAG = 21
+ROUTE_FIELD_OSPF_ROUTER_ID = 22
+ROUTE_FIELD_BABEL_METRIC = 23
+ROUTE_FIELD_BABEL_SEQNO = 24
+ROUTE_FIELD_BABEL_ROUTER_ID = 25
+ROUTE_FIELD_LRXP_VERIFIED = 26
+ROUTE_FIELD_LRXP_PARTIAL_TRANSIT = 27
+ROUTE_FIELD_LRXP_HINT_RANK = 28
+ROUTE_FIELD_LRXP_HINT_DAMP_FOM = 29
+ROUTE_FIELD_LRXP_HINT_IGP_COST = 30
+ROUTE_FIELD_LRXP_POLICY_ROLE = 31
+ROUTE_FIELD_LRXP_POLICY_IMPORT_DIGEST = 32
+ROUTE_FIELD_LRXP_POLICY_EXPORT_DIGEST = 33
+ROUTE_FIELD_LRXP_ORIGIN_AS = 34
+ROUTE_FIELD_LRXP_ORIGIN_MAX_VALID_LEN = 35
+ROUTE_FIELD_LRXP_ORIGIN_EXPIRY = 36
+ROUTE_FIELD_ROA_STATE = 37
+
+
+def value_truthy(value_kind: int) -> bool:
+    """Kind-level truthiness: True when every value of this kind is
+    truthy (``ip``, ``prefix``, ``asn``, ``community-pattern``,
+    ``protocol``, ``roa-state``). Content-dependent kinds (``int``:
+    0 is falsy; ``string`` and the sequence kinds: empty is falsy;
+    ``bool``) answer False — the value a filter actually holds is not
+    visible at this boundary. ``value_kind`` is one of the
+    ``VALUE_*`` constants."""
+    return bool(get_lib().lr_policy_value_truthy(int(value_kind)))
+
+
+def binary_op_precedence(op: int) -> int:
+    """Precedence of a filter binary operator (higher binds tighter;
+    BIRD grammar layering). ``op`` is one of the ``BINARY_OP_*``
+    constants; an unknown id returns 0."""
+    return int(get_lib().lr_policy_binary_op_precedence(int(op)))
+
+
+def route_field_is_settable(kind: int) -> bool:
+    """True when the route field is assignable in the filter DSL
+    (``bgp.local_pref = 100;``) — the exact predicate the parser
+    enforces. ``kind`` is one of the ``ROUTE_FIELD_*`` constants."""
+    return bool(get_lib().lr_policy_route_field_is_settable(int(kind)))
 
 
 def _prefix_spec(spec) -> ffi.CData:
