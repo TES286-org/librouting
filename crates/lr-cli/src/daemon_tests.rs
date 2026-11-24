@@ -2217,6 +2217,72 @@ mod damping_reload_toggle_tests {
         let _ = std::fs::remove_file(&cfg_path);
     }
 
+    /// on → on with a re-tuned `[damping]` block: the live table
+    /// re-points to the fresh parameters through
+    /// `DampingTable::update_config` — the figure-of-merit history
+    /// survives (a re-tune, not a reset) and every future
+    /// computation reads the fresh thresholds. The reload reports
+    /// the re-tune.
+    #[test]
+    fn reload_on_to_on_re_tunes_live_table() {
+        let cfg_path = temp_config_path("on-on-tuned");
+        // A tuned block: a raised suppress threshold and a shorter
+        // decay interval.
+        std::fs::write(
+            &cfg_path,
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+             [damping]\nenabled = true\nsuppress_threshold = 8000\n\
+             decay_interval_s = 15\n",
+        )
+        .expect("write temp config");
+        let (router, current_networks, damping_state) = setup(true);
+
+        // Seed figure-of-merit history on the live table so the
+        // "history preserved" half of the contract is observable:
+        // three flaps under the default tuning (FoM 3000).
+        {
+            let state = damping_state.lock().unwrap();
+            let controller = state.as_ref().expect("setup installed the controller");
+            let mut table = controller.table.lock().unwrap();
+            let prefix = "203.0.113.0/24".parse().unwrap();
+            table.on_withdraw(&prefix, 0);
+            table.on_withdraw(&prefix, 0);
+            table.on_withdraw(&prefix, 0);
+        }
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            None,
+            &[],
+            Some(&damping_state),
+            None,
+            &[],
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("damping re-tuned")),
+            "reload should report the re-tune: {lines:?}"
+        );
+        // The live table carries the fresh parameters AND the
+        // seeded history.
+        let state = damping_state.lock().unwrap();
+        let controller = state.as_ref().expect("controller survives on->on");
+        let table = controller.table.lock().unwrap();
+        assert_eq!(table.config().suppress_threshold, 8_000);
+        assert_eq!(table.config().decay_interval_s, 15);
+        let prefix: lr_core::addr::Prefix = "203.0.113.0/24".parse().unwrap();
+        let entry = table
+            .entries()
+            .find(|e| e.prefix == prefix)
+            .expect("the seeded entry survives the re-tune");
+        assert_eq!(entry.flap_count, 3, "FoM history is preserved");
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
     /// off → off: a SIGHUP that keeps damping disabled is a no-op.
     /// The damping_state stays `None` and the reload does not
     /// mention damping.

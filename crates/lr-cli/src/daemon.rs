@@ -9617,15 +9617,13 @@ fn reload_config(
     //   the installed hook pass-throughs on every import, signal
     //   the decay ticker to stop at its next iteration and drop
     //   the controller (so the next reload sees `None`).
-    // * **on → on** (config change): the table stays put (the FoM
-    //   state is preserved across reloads), but a fresh decay
-    //   ticker is spawned with the reloaded `decay_interval_s` so a
-    //   tuned interval takes effect immediately. Other DampingConfig
-    //   fields (`suppress_threshold`, `reuse_threshold`,
-    //   `additive_incr`, `decay_factor_*`) are baked into the
-    //   `DampingTable` at construction time and require a restart
-    //   to change — the reload reports this so the operator does
-    //   not silently keep the old tuning.
+    // * **on → on** (config change): the table re-points to the
+    //   fresh tuning through `DampingTable::update_config` — the
+    //   figure-of-merit history is preserved (a re-tune, not a
+    //   reset) and every future computation reads the fresh
+    //   parameters — and a fresh decay ticker is spawned with the
+    //   reloaded `decay_interval_s` so a tuned interval takes effect
+    //   immediately.
     // * **off → off**: no-op.
     //
     // The lock window is the field-swap on `damping_state`; the
@@ -9689,12 +9687,34 @@ fn reload_config(
                 );
             }
             (true, true) => {
-                // On → on: respawn the decay ticker so a tuned
-                // `decay_interval_s` takes effect immediately. Other
-                // DampingConfig fields are baked into the
-                // DampingTable at construction time; changing them
-                // requires a restart.
+                // On → on: the live table re-points to the fresh
+                // tuning (`update_config` keeps the figure-of-merit
+                // history — the reload is a re-tune, not a reset) and
+                // a fresh decay ticker spawns with the reloaded
+                // `decay_interval_s` so a tuned interval takes effect
+                // immediately.
                 if let Some(controller) = state.take() {
+                    let params_changed =
+                        controller.table.lock().unwrap().config() != &fresh.damping.config;
+                    if params_changed {
+                        controller
+                            .table
+                            .lock()
+                            .unwrap()
+                            .update_config(fresh.damping.config.clone());
+                        lines.push(format!(
+                            "reload: damping re-tuned (suppress={}, reuse={}, \
+                             additive={}, limit={}, decay-act={}, decay-wdr={}, \
+                             interval={}s; FoM history preserved)",
+                            fresh.damping.config.suppress_threshold,
+                            fresh.damping.config.reuse_threshold,
+                            fresh.damping.config.additive_incr,
+                            fresh.damping.config.upper_limit,
+                            fresh.damping.config.decay_factor_active,
+                            fresh.damping.config.decay_factor_withdrawn,
+                            fresh.damping.config.decay_interval_s,
+                        ));
+                    }
                     // Signal the old ticker to exit at its next
                     // iteration. A fresh ticker spawns with a new
                     // stop flag; the FoM table persists.
@@ -9710,10 +9730,12 @@ fn reload_config(
                         decay_stop: new_stop,
                         table: controller.table,
                     });
-                    lines.push(format!(
-                        "reload: damping decay interval -> {}s (other config changes require restart)",
-                        fresh.damping.config.decay_interval_s,
-                    ));
+                    if !params_changed {
+                        lines.push(format!(
+                            "reload: damping decay interval -> {}s",
+                            fresh.damping.config.decay_interval_s,
+                        ));
+                    }
                 }
             }
             (false, false) => {

@@ -691,14 +691,12 @@ pub(crate) struct FilterFunctionSpec {
 /// `enabled` to `false` mid-run flips the installed hook to
 /// pass-through (the FoM table state is preserved in memory) and
 /// signals the decay ticker to exit; flipping back to `true`
-/// re-installs a hook and respawns the decay ticker. Changing
-/// `decay_interval_s` on a live reload respawns the decay ticker
-/// so the new interval takes effect immediately; the other
-/// parameters (`suppress_threshold`, `reuse_threshold`,
-/// `additive_incr`, `decay_factor_*`, `upper_limit`) are baked
-/// into the `DampingTable` at construction time and require a
-/// restart to change — the reload reports this so the operator
-/// does not silently keep the old tuning.
+/// re-installs a hook and respawns the decay ticker. A kept-enabled
+/// reload re-points the live table to the fresh parameters through
+/// [`lr_damping::DampingTable::update_config`] — the figure-of-merit
+/// history is preserved (a re-tune, not a reset), every future
+/// computation reads the fresh parameters, and a fresh decay ticker
+/// runs at the reloaded `decay_interval_s`.
 ///
 /// The parameters mirror [`lr_damping::DampingConfig`] verbatim —
 /// no unit conversion is performed. RFC 2439 §4.7 documents the

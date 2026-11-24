@@ -74,6 +74,22 @@ under `lr-mrt::interpret::walk_attributes` (which is RFC-compliant),
 breaking the round-trip the new bench's `decode_attributes` relies
 on. Removed; the round-trip is now pinned by a test.
 
+### Changed — damping re-tune is live on reload (issue #101)
+
+A SIGHUP / runtime-API reload that keeps `[damping]` enabled now
+re-points the live table to the fresh tuning through the new
+`lr_damping::DampingTable::update_config`: the figure-of-merit
+history is preserved (a re-tune, not a reset — the same semantics
+FRR's `bgp dampening` re-tune carries) and every future
+computation reads the fresh `suppress_threshold` /
+`reuse_threshold` / `additive_incr` / `upper_limit` /
+`decay_factor_*`. Previously every `DampingConfig` field except
+`decay_interval_s` was baked into the table at construction and
+silently required a daemon restart to change. A raised
+`reuse_threshold` re-evaluates every suppressed entry on the next
+decay pass (at most one `decay_interval_s` later) and reactivates
+the ones whose figure-of-merit is already below the new threshold.
+
 ### Fixed — FFI policy introspection stubs answered 0 for every input
 (issue #101)
 
