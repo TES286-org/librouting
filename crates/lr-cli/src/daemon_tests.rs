@@ -1651,6 +1651,17 @@ mod babel_rtt_send_tests {
     /// every platform without needing a configured veth pair.
     fn iface_from_spec(spec: &BabelInterfaceSpec) -> BabelIface {
         let mut cfg = DaemonConfig::with_defaults();
+        // Ephemeral ports, matching `babel_router_id_tests`: the
+        // sibling tests in this module each build a full transport
+        // (a specific-address uc socket plus a wildcard mc socket),
+        // and nextest runs them as parallel processes. On Linux
+        // SO_REUSEADDR tolerates the wildcard/specific overlap across
+        // processes; on macOS it does not, and one test's uc bind
+        // raced another's live mc wildcard bind into
+        // `Address already in use` (the Native macos-latest flake).
+        // Port 0 gives every socket its own ephemeral port, so no
+        // cross-process bind can collide on any platform.
+        cfg.babel_port = 0;
         cfg.babel_interfaces.push(spec.clone());
         let _ = cfg.finalize();
         let entry = InterfaceEntry {
