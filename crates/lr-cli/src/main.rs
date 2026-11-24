@@ -33,6 +33,7 @@ use lr_core::buf::ReadBuf;
 use lr_core::codec::Decoder;
 
 mod bench;
+mod mrt_feed;
 mod parity;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");

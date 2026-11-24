@@ -202,9 +202,19 @@ const MAX_RECORD_BODY: usize = 65535;
 
 /// Streaming MRT decoder. Feed arbitrary chunks; complete records come
 /// out one at a time (the same contract as `lr_bmp::BmpCodec`).
+///
+/// Consumed bytes are tracked with a read offset rather than drained
+/// from the front on every record: a TABLE_DUMP_V2 RIB dump holds
+/// millions of length-framed records, and draining each one makes a
+/// full-file parse quadratic in the dump size (the 300 MiB RouteViews
+/// dump took minutes instead of seconds). The buffer is compacted in
+/// [`Self::feed`] once the consumed prefix is at least half the buffer,
+/// which keeps the streaming path amortized linear.
 #[derive(Default)]
 pub struct MrtReader {
     carryover: Vec<u8>,
+    /// Offset of the first unconsumed byte in `carryover`.
+    start: usize,
 }
 
 impl MrtReader {
@@ -212,33 +222,59 @@ impl MrtReader {
         Self::default()
     }
 
+    /// Adopt an already-buffered file without copying it. Used by
+    /// `parse_file`, which reads the dump once and then decodes from
+    /// the same allocation.
+    fn from_vec(bytes: Vec<u8>) -> Self {
+        Self {
+            carryover: bytes,
+            start: 0,
+        }
+    }
+
+    /// Drop the consumed prefix when it has grown large enough to pay
+    /// for the move. Called on `feed` only, so a caller that feeds one
+    /// whole file and drains it (the `parse_file` path) never moves the
+    /// buffer at all.
+    fn compact(&mut self) {
+        if self.start == 0 {
+            return;
+        }
+        if self.start == self.carryover.len() {
+            self.carryover.clear();
+            self.start = 0;
+        } else if self.start >= self.carryover.len() / 2 {
+            self.carryover.drain(..self.start);
+            self.start = 0;
+        }
+    }
+
     /// Buffer raw bytes.
     fn feed(&mut self, bytes: &[u8]) {
+        self.compact();
         self.carryover.extend_from_slice(bytes);
     }
 
     /// Decode the next complete buffered record, if any.
     fn next(&mut self) -> Result<Option<MrtRecord>, ParseError> {
-        if self.carryover.len() < HEADER_LEN {
+        let buf = &self.carryover[self.start..];
+        if buf.len() < HEADER_LEN {
             return Ok(None);
         }
-        let length = u32::from_be_bytes([
-            self.carryover[8],
-            self.carryover[9],
-            self.carryover[10],
-            self.carryover[11],
-        ]) as usize;
+        let length =
+            u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
         // A declared length beyond the record-size bound is malformed;
         // drop the buffer so one bad header cannot wedge the stream.
         if length > MAX_RECORD_BODY {
             self.carryover.clear();
+            self.start = 0;
             return Err(ParseError::bad_length(8, "mrt.length"));
         }
-        if self.carryover.len() < HEADER_LEN + length {
+        if buf.len() < HEADER_LEN + length {
             return Ok(None);
         }
-        let record = decode_record(&self.carryover[..HEADER_LEN + length])?;
-        self.carryover.drain(0..HEADER_LEN + length);
+        let record = decode_record(&buf[..HEADER_LEN + length])?;
+        self.start += HEADER_LEN + length;
         Ok(Some(record))
     }
 
@@ -865,8 +901,10 @@ mod file {
         let bytes = std::fs::read(path).map_err(|e| {
             lr_core::error::ParseError::truncated("mrt.file").with_detail(e.to_string())
         })?;
-        let mut reader = MrtReader::new();
-        reader.feed(&bytes);
+        // Hand the file buffer to the reader instead of copying it into
+        // the carryover: `next` advances a read offset, so a whole-file
+        // parse never moves or duplicates the dump.
+        let mut reader = MrtReader::from_vec(bytes);
         let mut records = Vec::new();
         while let Some(record) = reader.next()? {
             records.push(record);
@@ -877,7 +915,7 @@ mod file {
     impl MrtReader {
         /// Bytes buffered but not yet consumed (diagnostic helper).
         pub fn remaining(&self) -> usize {
-            self.carryover.len()
+            self.carryover.len() - self.start
         }
     }
 }

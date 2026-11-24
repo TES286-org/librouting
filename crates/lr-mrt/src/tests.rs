@@ -99,6 +99,53 @@ fn decodes_bird_rib_records() {
     assert_eq!(r2.prefix, "203.0.113.0/24".parse().unwrap());
 }
 
+/// A streaming reader must not lose or duplicate a record when the
+/// feed boundary falls inside one. The read-offset cursor advances in
+/// the buffer; compaction is only legal once the consumed prefix is
+/// safe to move.
+#[cfg(feature = "std")]
+#[test]
+fn reader_cursor_handles_chunk_boundaries() {
+    let mut wire = Vec::new();
+    for _ in 0..500 {
+        wire.extend_from_slice(BIRD_DUMP);
+    }
+    let mut reader = MrtReader::new();
+    let mut records = 0usize;
+    for chunk in wire.chunks(11) {
+        if reader.decode_slice(chunk).unwrap().is_some() {
+            records += 1;
+        }
+        while reader.decode_slice(&[]).unwrap().is_some() {
+            records += 1;
+        }
+    }
+    assert_eq!(records, 1500);
+    assert_eq!(reader.remaining(), 0);
+}
+
+/// A whole-file parse is linear: the reader owns the file buffer and
+/// advances a cursor instead of draining every record from the front.
+/// The test locks in the zero-loss/last-record behaviour on a dump
+/// large enough to exercise repeated record framing.
+#[cfg(feature = "std")]
+#[test]
+fn parse_file_handles_many_records() {
+    let mut wire = Vec::new();
+    for _ in 0..10_000 {
+        wire.extend_from_slice(BIRD_DUMP);
+    }
+    let path = std::env::temp_dir().join(format!(
+        "lr_mrt_many_{}.mrt",
+        std::process::id()
+    ));
+    std::fs::write(&path, &wire).unwrap();
+    let records = parse_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(records.len(), 30_000);
+    assert!(matches!(records.last(), Some(MrtRecord::Rib(_))));
+    std::fs::remove_file(&path).ok();
+}
+
 #[test]
 fn encode_matches_bird_layout() {
     // Round-trip the captured dump through our encoder: byte-equal

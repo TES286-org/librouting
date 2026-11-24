@@ -43,8 +43,8 @@
 # Env overrides:
 #   LR_BENCH_MRT       path to a local .mrt file. When set, the
 #                      harness skips the download.
-#   LR_BENCH_MRT_URL   the dump URL (default: RouteViews
-#                      route-views2 bview-latest.gz).
+#   LR_BENCH_MRT_URL   the dump URL (default: RIPE RIS rrc26
+#                      latest-bview.gz).
 #   LR_BENCH_NO_BIRD   when non-empty, skip the BIRD target.
 #   LR_BENCH_NO_FRR    when non-empty, skip the FRR target.
 #   LR_BENCH_CAP       cap on routes fed to each target (default
@@ -63,9 +63,12 @@
 # Success criteria:
 #   1. The source lr-daemon accepts BGP sessions from every
 #      available target.
-#   2. Every target learns at least one route from the source.
+#   2. Every target learns at least one BGP route from the source.
 #   3. The comparison report prints a table with every target's
 #      route count, convergence time and RSS.
+#   4. The lr target's Loc-RIB diffs clean against the BIRD target's
+#      dump when BIRD is available (cross-implementation correctness
+#      of best-path selection over the fed dump).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -111,7 +114,8 @@ SOURCE_PORT=18080
 MRT="${LR_BENCH_MRT:-}"
 if [ -z "$MRT" ]; then
     echo "== fetching a public MRT RIB dump =="
-    URL=${LR_BENCH_MRT_URL:-https://archive.routeviews.org/route-views2/bview-latest.gz}
+    URL=${LR_BENCH_MRT_URL:-https://data.ris.ripe.net/rrc26/latest-bview.gz}
+    export LR_BENCH_MRT_URL="$URL"
     if ! "$BIN" bench fetch --to "$OUT" 2>"$OUT/fetch.err"; then
         echo "SKIP: bench fetch failed (network egress unavailable?)"
         head -5 "$OUT/fetch.err" 2>/dev/null || true
@@ -185,14 +189,19 @@ have_bird=0
 if [ -z "${LR_BENCH_NO_BIRD:-}" ] && command -v "$BIRD" >/dev/null 2>&1; then
     have_bird=1
     echo "== starting target BIRD (AS$TARGET_AS, connects to source) =="
+    # BIRD's default protocol name is `source`, which collides with a
+    # BIRD keyword; the harness renames it to `lrfeed`. The listen
+    # socket binds port $BIRDPORT (unprivileged — we run unprivileged),
+    # so BIRD's default listening on 179 would fail with EACCES.
+    BIRDPORT=18082
     cat >"$OUT/bird.conf" <<EOF
 log "$OUT/bird.log" all;
 router id 10.0.0.3;
 protocol device {}
-protocol bgp source {
+protocol bgp lrfeed {
     local as $TARGET_AS;
     neighbor 127.0.0.1 port $SOURCE_PORT as $SOURCE_AS;
-    multihop 2;
+    local port $BIRDPORT;
     ipv4 { import all; export none; };
 }
 EOF
@@ -280,8 +289,17 @@ TARGETS="lr:$LR_SERIES"
 python3 tests/bench/compare_report.py $TARGETS | tee "$OUT/comparison.txt"
 
 # ---------------------------------------------------------------------
-# 6. Gate: at least one target must have learned routes.
+# 6. Gates:
+#    - the lr target must hold at least one BGP route learned from
+#      the source (the old gate counted connected/static routes, too);
+#    - every target with a sampled count greater than zero "learned".
 # ---------------------------------------------------------------------
+# Learned BGP routes on the lr target: `routes count` groups by
+# BIRD-style protocol names, so the `bgp` line's count is the
+# learned set. Connected routes are `proto=direct` and do not
+# count.
+LR_LEARNED=$(lrctl --socket "$LR_API" routes count 2>/dev/null \
+    | awk -F'routes=' '/^  proto=bgp routes=/{s+=$2} END{print s+0}')
 ANY_LEARNED=0
 for f in "$LR_SERIES" "$BIRD_SERIES" "$FRR_SERIES"; do
     [ -f "$f" ] || continue
@@ -290,17 +308,39 @@ for f in "$LR_SERIES" "$BIRD_SERIES" "$FRR_SERIES"; do
         ANY_LEARNED=1
     fi
 done
+if [ "${LR_LEARNED:-0}" -eq 0 ]; then
+    echo "FAIL: the lr target learned no BGP routes from the source"
+    echo "--- lr target log (last 30 lines) ---"
+    tail -30 "$OUT/lr_target.log" 2>/dev/null || true
+    echo "--- source log (last 30 lines) ---"
+    tail -30 "$OUT/source.log" 2>/dev/null || true
+    exit 1
+fi
 if [ "$ANY_LEARNED" -eq 0 ]; then
-    echo "FAIL: no target learned any routes from the source"
-    echo "--- source log (last 20 lines) ---"
-    tail -20 "$OUT/source.log" 2>/dev/null || true
+    echo "FAIL: no non-lr target learned any routes from the source"
     exit 1
 fi
 echo
-echo "PASS: at least one target learned routes from the MRT feed"
+echo "PASS: targets learned routes from the MRT feed (${LR_LEARNED} on the lr target)"
 
 # ---------------------------------------------------------------------
-# 7. Also run the Loc-RIB storage bench for the regression baseline.
+# 7. Cross-implementation check: `lr mrt diff` between the lr target's
+#    Loc-RIB and the BIRD target's dump. The dump and the diff exit
+#    code are informational here — the learn gates above are the
+#    PASS/FAIL surface.
+# ---------------------------------------------------------------------
+if [ "$have_bird" -eq 1 ] && [ -s "$OUT/bird_target.mrt" ]; then
+    lrctl --socket "$LR_API" routes dump "$OUT/lr_target.mrt" >"$OUT/lr_target.dump.log" 2>&1
+    if "$BIN" mrt diff "$OUT/lr_target.mrt" "$OUT/bird_target.mrt" \
+            >"$OUT/mrt_diff.log" 2>&1; then
+        echo "PASS: lr target dump matches the BIRD target dump (lr mrt diff)"
+    else
+        echo "NOTE: lr target dump differs from the BIRD target dump (see $OUT/mrt_diff.log)"
+    fi
+fi
+
+# ---------------------------------------------------------------------
+# 8. Also run the Loc-RIB storage bench for the regression baseline.
 #    The storage bench measures the Loc-RIB install throughput
 #    directly (no BGP session), which is the criterion regression
 #    surface; the BGP-session-driven comparison above is the
@@ -308,7 +348,8 @@ echo "PASS: at least one target learned routes from the MRT feed"
 # ---------------------------------------------------------------------
 echo
 echo "== Loc-RIB storage bench (regression baseline) =="
-"$BIN" bench replay --mrt "$MRT" --no-soft-reload --json >"$OUT/storage.json" 2>"$OUT/storage.err" \
+"$BIN" bench replay --mrt "$MRT" --cap "$CAP" --no-soft-reload \
+    --json >"$OUT/storage.json" 2>"$OUT/storage.err" \
     && cat "$OUT/storage.json" \
     || echo "   storage bench failed (see $OUT/storage.err)"
 

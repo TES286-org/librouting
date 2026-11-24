@@ -14,7 +14,7 @@
 #
 # <kind> is one of:
 #   lr    — lr-daemon; the 4th arg is the path to its API socket.
-#           `lrctl --api-socket <path> show routes count` returns
+#           `lrctl --socket <path> show routes count` returns
 #           `total N` lines; the sampler parses N.
 #   bird  — BIRD; the 4th arg is the path to its control socket.
 #           `birdc -s <path> show route count` returns a line with
@@ -51,8 +51,9 @@ extract_routes() {
             if [ -z "$ctl" ] || [ ! -S "$ctl" ]; then
                 echo null; return
             fi
-            # `lrctl show routes count` prints `total N` on the first
-            # line of its reply. Parse N.
+            # `lrctl --socket <path> routes count` /
+            # `show routes count` print `total N` on the first line
+            # of the reply. Parse N.
             lrctl --socket "$ctl" show routes count 2>/dev/null \
                 | grep -oP '^total\s+\K[0-9]+' \
                 | head -1 || echo null
