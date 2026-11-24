@@ -1019,6 +1019,19 @@ pub(crate) struct DaemonConfig {
     pub local_address: Option<String>,
     /// Locally originated networks.
     pub networks: Vec<String>,
+    /// Path to an MRT TABLE_DUMP_V2 RIB dump whose routes the daemon
+    /// installs into the Loc-RIB at startup (issue #101 "Benchmark
+    /// Based on Real Data" feed path). Each `(prefix, entry)` in the
+    /// dump becomes one `Route` installed through `LocRib::install`,
+    /// preserving the dump's path attributes; the daemon's existing
+    /// BGP export path advertises them to peers as if learned from a
+    /// session. `None` (the default) keeps the classic daemon shape.
+    pub mrt_feed: Option<String>,
+    /// Cap on the number of routes installed from [`Self::mrt_feed`].
+    /// `0` (the default) means no cap — install every route in the
+    /// dump. The harness uses a non-zero cap to keep the BIRD
+    /// comparison leg within a CI job's budget.
+    pub mrt_feed_cap: usize,
     /// Locally originated RFC 8277 labelled networks, in the form
     /// `"prefix label1[,label2,...]"`, e.g. `"203.0.113.0/24 100"` or
     /// `"10.0.0.0/8 100,200,3"`. Originated as IPv4 labelled-unicast
@@ -6402,6 +6415,14 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--network" if i + 1 < args.len() => {
                 cfg.networks.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--mrt-feed" if i + 1 < args.len() => {
+                cfg.mrt_feed = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--mrt-feed-cap" if i + 1 < args.len() => {
+                cfg.mrt_feed_cap = args[i + 1].parse().unwrap_or(0);
                 i += 2;
             }
             "--labeled-network" if i + 1 < args.len() => {

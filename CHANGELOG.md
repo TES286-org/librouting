@@ -14,7 +14,65 @@ changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel filter DSL, ROA,
-event bus, 2.x capability block, per-unit configuration reload
+event bus, 2.x capability block, per-unit configuration reload,
+real-data RIB replay benchmark
+
+### Added — real-data RIB replay benchmark (issue #101)
+
+The "Benchmark Based on Real Data" item from the 2.x release plan
+lands a system that imports MRT dumps into multiple BGP speakers via
+real BGP sessions, measures each during the feed, and compares them:
+
+- `lr-daemon --mrt-feed <file> [--mrt-feed-cap N]` loads a
+  TABLE_DUMP_V2 RIB dump into the daemon's Loc-RIB at startup,
+  preserving the dump's path attributes. The daemon's existing BGP
+  export path advertises the routes to connected peers — the same
+  path a production deployment uses. `--mrt-feed-cap N` truncates the
+  feed for CI budgets.
+- `tests/bench/real_data.sh` orchestrates the multi-speaker
+  comparison: a source lr-daemon (`--mrt-feed`) listens; targets
+  (lr-daemon, BIRD, FRR bgpd — each optional) connect and learn the
+  routes via real BGP sessions. Per-target samplers
+  (`tests/bench/sample_metrics.sh`) write one JSONL line per second
+  (`{t, routes, rss_kb}`); `tests/bench/compare_report.py` computes
+  routes_final, convergence_s, routes_per_sec, rss_peak_kb and
+  rss_final_kb per target and prints a comparison table + JSON.
+  Targets use `--local-address 192.0.2.x` (TEST-NET) so the RFC 4271
+  §6.3 NEXT_HOP safety check does not reject routes whose next hop
+  matches the peer's loopback address.
+- `lr bench replay --mrt <file>` is the Loc-RIB storage bench
+  (regression baseline): parses the dump, installs every route into
+  a fresh `LocRib` directly (no BGP session), and reports
+  `parse_ms`, `install_ms`, `routes_per_sec`, `rss_peak_kb` /
+  `rss_final_kb`, `soft_reload_ms` / `soft_reload_peak_rss_kb`,
+  `steady_state_drift_kb` and per-prefix
+  `correctness.{matched, mismatched, missing, extra}`. `--json`
+  emits the same fields as one JSON object.
+- `lr bench fetch --to <dir>` downloads a small public RIB dump
+  (RouteViews route-views2 `bview-latest.gz` by default,
+  overridable through `LR_BENCH_MRT_URL`). SKIPs cleanly (exit 0)
+  when the network egress is unavailable.
+- A criterion bench `cargo bench -p lr-mrt --bench mrt_replay`
+  measures the `LocRib::install` throughput against either a real
+  dump (`LR_BENCH_MRT` env) or a synthetic 1000-prefix fallback.
+- A nightly CI job `bench-real-data` runs the harness against a
+  RouteViews dump (with `LR_BENCH_CAP=1000`) and uploads the report
+  and criterion artifacts.
+- New docs page
+  [`docs/examples/real_data_benchmark.md`](docs/examples/real_data_benchmark.md)
+  is the operator walkthrough.
+
+### Fixed — `lr-mrt::encode_attributes` extended-length form is RFC 4271 §4.3 compliant
+
+`encode_attributes` wrote a `0xff` marker byte before the 2-octet
+length when an attribute's value exceeded 255 octets. RFC 4271 §4.3
+specifies no such marker — the Extended-Length flag bit (`0x10`) in
+the flags octet is the selector between the 1- and 2-octet length
+forms. BIRD, FRR and every MRT-reading tool emit and consume the
+RFC-compliant layout. The marker made lr's own MRT dumps misparse
+under `lr-mrt::interpret::walk_attributes` (which is RFC-compliant),
+breaking the round-trip the new bench's `decode_attributes` relies
+on. Removed; the round-trip is now pinned by a test.
 
 ### Added — atomic configuration reload with minimal-unit restart
 (issue #101)

@@ -53,6 +53,12 @@ and [`../filter_dsl_grammar.md`](../filter_dsl_grammar.md).
 | ------- | -------------- |
 | [`os_integration.md`](os_integration.md) | Kernel route installation and the `OsRouteTable` trait |
 
+## Benchmark
+
+| Example | What it covers |
+| ------- | -------------- |
+| [`real_data_benchmark.md`](real_data_benchmark.md) | Replay a public MRT RIB dump into the Loc-RIB; processing efficiency, memory, path-selection correctness; BIRD comparison leg |
+
 ## Conventions
 
 - A `Cargo.toml` snippet writes the crate version as `<version>`. That

@@ -373,3 +373,65 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  # Real-data benchmark — issue #101 "Benchmark Based on Real Data".
+  #
+  # Pulls a public MRT RIB dump (RouteViews route-views2), replays it
+  # into librouting's Loc-RIB through `lr bench replay`, and reports
+  # processing efficiency, memory usage and path-selection
+  # correctness. The BIRD comparison leg feeds the same routes to
+  # BIRD via the daemon's `--mrt-feed` flag and confirms BIRD learns
+  # them; the prefix-by-prefix diff against lr's Loc-RIB dump is the
+  # follow-up the harness prints counts for today.
+  #
+  # The job is non-blocking: a failed download or a transient
+  # network issue SKIPs the job (exit 0 from the harness) so the
+  # nightly run stays green when RouteViews is unavailable. The
+  # criterion bench under `crates/lr-mrt/benches/mrt_replay.rs` is
+  # the regression-detection surface; this job is the real-data
+  # point that proves the bench against a non-synthetic workload.
+  bench-real-data:
+    name: Bench real-data (RouteViews MRT replay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "bench-real-data"
+      - name: Install BIRD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bird birdc
+      - name: Build lr + lr-daemon (release)
+        run: cargo build --release -p lr-cli --bin lr --bin lr-daemon
+      - name: Run the real-data bench harness
+        env:
+          LR_BENCH_BIRD_CAP: "1000"
+        run: |
+          bash tests/bench/real_data.sh
+      - name: Upload bench report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-real-data-report
+          path: /tmp/lr_bench/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Run the criterion replay bench (synthetic fallback)
+        run: |
+          cargo bench -p lr-mrt --bench mrt_replay -- \
+            --sample-size 10 \
+            --warm-up-time 1 \
+            --measurement-time 3 \
+            --noplot
+      - name: Upload criterion reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-real-data-criterion
+          path: target/criterion/
+          if-no-files-found: ignore
+          retention-days: 30
+

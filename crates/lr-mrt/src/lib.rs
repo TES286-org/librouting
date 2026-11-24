@@ -667,8 +667,11 @@ fn put_prefix(out: &mut Vec<u8>, prefix: &Prefix) {
 const ATTR_FLAG_EXT_LEN: u8 = 0x10;
 
 /// Encode core [`Attributes`] as the raw path-attribute TLV sequence
-/// RIB entries carry: each attribute is `flags | type | len[1|3] |
-/// value` on the wire already.
+/// RIB entries carry: each attribute is `flags | type | len[1|2] |
+/// value` per RFC 4271 §4.3 (extended-length bit `0x10` in the flags
+/// octet selects the 2-octet length form; otherwise the length is one
+/// octet). No `0xff` marker precedes the 2-octet length — the flag bit
+/// is the selector, as the RFC specifies.
 pub fn encode_attributes(attrs: &lr_core::attr::Attributes) -> Vec<u8> {
     let mut out = Vec::new();
     for a in attrs.iter() {
@@ -681,9 +684,9 @@ pub fn encode_attributes(attrs: &lr_core::attr::Attributes) -> Vec<u8> {
             continue;
         }
         // RFC 4271 §4.3: values longer than 255 octets use the
-        // extended-length form — a 3-octet length AND the extended-length
-        // flag bit (0x10) set in the flags octet. A decoder honoring the
-        // flag would otherwise read the 0xff marker as a 1-byte length.
+        // extended-length form — the Extended-Length flag bit (0x10)
+        // set in the flags octet, plus a 2-octet length field. The
+        // 1-octet length stays in use for values that fit.
         let extended = a.value.len() > 255;
         out.push(if extended {
             a.flags | ATTR_FLAG_EXT_LEN
@@ -692,12 +695,59 @@ pub fn encode_attributes(attrs: &lr_core::attr::Attributes) -> Vec<u8> {
         });
         out.push(a.tag.0);
         if extended {
-            out.push(0xff); // extended-length marker
             out.extend_from_slice(&(a.value.len() as u16).to_be_bytes());
         } else {
             out.push(a.value.len() as u8);
         }
         out.extend_from_slice(&a.value);
+    }
+    out
+}
+
+/// Decode a raw `flags | type | len | value` path-attribute sequence
+/// into an [`Attributes`](lr_core::attr::Attributes) set — the inverse
+/// of [`encode_attributes`].
+///
+/// Each entry in `bytes` is parsed per RFC 4271 §4.3: a one-octet
+/// flags field, a one-octet attribute type, a one- or two-octet
+/// length (the two-octet form is selected by the extended-length
+/// flag bit `0x10` in the flags octet), and `len` value octets. A
+/// truncated trailing attribute is dropped: a dump tool must not die
+/// on one bad entry, matching the [`interpret::walk_attributes`]
+/// posture and BIRD/FRR's own MRT readers.
+///
+/// Used by the real-data benchmark
+/// (`lr bench replay`), which builds Loc-RIB routes from a public
+/// MRT RIB dump's raw attribute bytes without round-tripping through
+/// the typed `lr-bgp::PathAttributes` projection.
+pub fn decode_attributes(bytes: &[u8]) -> lr_core::attr::Attributes {
+    use lr_core::attr::{AttrTag, Attribute};
+    let mut out = lr_core::attr::Attributes::new();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let flags = bytes[i];
+        let ty = bytes[i + 1];
+        let extended = (flags & ATTR_FLAG_EXT_LEN) != 0;
+        let len_size = if extended { 2 } else { 1 };
+        let len_start = i + 2;
+        if len_start + len_size > bytes.len() {
+            break;
+        }
+        let len = if extended {
+            u16::from_be_bytes([bytes[len_start], bytes[len_start + 1]]) as usize
+        } else {
+            bytes[len_start] as usize
+        };
+        let value_start = len_start + len_size;
+        if value_start + len > bytes.len() {
+            break;
+        }
+        out.insert(Attribute {
+            tag: AttrTag(ty),
+            flags,
+            value: bytes[value_start..value_start + len].to_vec(),
+        });
+        i = value_start + len;
     }
     out
 }

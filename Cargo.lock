@@ -774,8 +774,10 @@ version = "1.8.0"
 name = "lr-mrt"
 version = "1.8.0"
 dependencies = [
+ "criterion",
  "lr-bgp",
  "lr-core",
+ "lr-rib",
 ]
 
 [[package]]
