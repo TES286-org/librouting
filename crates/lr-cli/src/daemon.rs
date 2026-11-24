@@ -7964,8 +7964,11 @@ enum BabelIfOp {
     /// re-advertisements) and closed, its sockets dropped from the
     /// poll table.
     Remove(String),
-    /// Update a kept interface's §A.2 parameters in place.
-    Retune(String, BabelIfRetune),
+    /// Update a kept interface's §A.2 parameters in place. The retune
+    /// record is boxed: it is by far the largest variant (a dozen
+    /// Option fields plus the freshly built auth interface), and the
+    /// ops vector allocates anyway.
+    Retune(String, Box<BabelIfRetune>),
 }
 
 /// One validated reload plan: everything the engine loop's apply pass
@@ -8265,7 +8268,7 @@ fn plan_babel_reload(
         }
         if !retune.is_empty() {
             let summary = retune.summary();
-            ops.push(BabelIfOp::Retune(eff.name.clone(), retune));
+            ops.push(BabelIfOp::Retune(eff.name.clone(), Box::new(retune)));
             lines.push(format!(
                 "babel: interface {} re-tuned ({})",
                 eff.name, summary
@@ -8433,6 +8436,7 @@ fn drain_babel_reload(
                     ifaces.push(*iface);
                 }
                 BabelIfOp::Retune(name, retune) => {
+                    let retune = *retune;
                     let Some(iface) = ifaces.iter_mut().find(|i| i.name == name) else {
                         continue;
                     };

@@ -696,15 +696,21 @@ struct Ospf3ReloadCoord {
     /// Startup snapshot for the restart-required diffs: router-id,
     /// SRv6 locators, extended-LSA mode, area specs, graceful-restart
     /// role + grace period.
-    identity: (
-        String,
-        Vec<OspfSrv6LocatorSpec>,
-        bool,
-        Vec<crate::daemon_config::OspfAreaSpec>,
-        (bool, u32),
-    ),
+    identity: Ospf3IdentitySnapshot,
     queue: Mutex<Vec<Ospf3ReloadPlan>>,
 }
+
+/// The startup identity/origination snapshot behind
+/// [`Ospf3ReloadCoord::identity`] — a tuple alias so the field's type
+/// stays a single name (a struct would buy nothing: every consumer
+/// destructures positionally).
+type Ospf3IdentitySnapshot = (
+    String,
+    Vec<OspfSrv6LocatorSpec>,
+    bool,
+    Vec<crate::daemon_config::OspfAreaSpec>,
+    (bool, u32),
+);
 
 impl Ospf3ReloadCoord {
     fn new(cfg: &DaemonConfig) -> Self {
@@ -820,8 +826,8 @@ fn plan_ospf3_reload(
             rxmt_interval_ms: (old.rxmt_interval_ms != eff.rxmt_interval_ms)
                 .then_some(eff.rxmt_interval_ms),
             priority: (old.priority != eff.priority).then_some(eff.priority),
-            end_x_sid: (old.end_x_sid != eff.end_x_sid).then(|| eff.end_x_sid),
-            end_x_lan: (old.end_x_lan != eff.end_x_lan).then(|| eff.end_x_lan),
+            end_x_sid: (old.end_x_sid != eff.end_x_sid).then_some(eff.end_x_sid),
+            end_x_lan: (old.end_x_lan != eff.end_x_lan).then_some(eff.end_x_lan),
         };
         if !retune.is_empty() {
             ops.push(Ospf3IfOp::Retune(eff.name.clone(), retune));
@@ -1944,7 +1950,7 @@ impl Ospf3Daemon {
         {
             let router_arc = Arc::clone(&self.router);
             let mut router = router_arc.write().unwrap();
-            for (area, _) in &touched_areas {
+            for area in touched_areas.keys() {
                 if self.anchors.contains_key(area) {
                     continue;
                 }

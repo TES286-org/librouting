@@ -475,17 +475,23 @@ struct OspfReloadCoord {
     /// restart-required diff lines: router-id string, SRGB, prefix-SID
     /// specs, mapping-server specs, area specs, graceful-restart role
     /// and grace period.
-    identity: (
-        String,
-        Option<(u32, u32)>,
-        Vec<crate::daemon_config::OspfPrefixSidSpec>,
-        Vec<crate::daemon_config::OspfMappingServerSpec>,
-        Vec<crate::daemon_config::OspfAreaSpec>,
-        (bool, u32),
-    ),
+    identity: OspfIdentitySnapshot,
     /// Queued plans, drained by the engine pump in order.
     queue: Mutex<Vec<OspfReloadPlan>>,
 }
+
+/// The startup identity/origination snapshot behind
+/// [`OspfReloadCoord::identity`] — a tuple alias so the field's type
+/// stays a single name (a struct would buy nothing: every consumer
+/// destructures positionally).
+type OspfIdentitySnapshot = (
+    String,
+    Option<(u32, u32)>,
+    Vec<crate::daemon_config::OspfPrefixSidSpec>,
+    Vec<crate::daemon_config::OspfMappingServerSpec>,
+    Vec<crate::daemon_config::OspfAreaSpec>,
+    (bool, u32),
+);
 
 impl OspfReloadCoord {
     /// Snapshot the startup configuration's reload surface.
@@ -619,7 +625,7 @@ fn plan_ospf_reload(fresh: &DaemonConfig, coord: &OspfReloadCoord) -> Result<Vec
             rxmt_interval_ms: (old.rxmt_interval_ms != eff.rxmt_interval_ms)
                 .then_some(eff.rxmt_interval_ms),
             priority: (old.priority != eff.priority).then_some(eff.priority),
-            adj_sid: (old.adj_sid != eff.adj_sid).then(|| eff.adj_sid),
+            adj_sid: (old.adj_sid != eff.adj_sid).then_some(eff.adj_sid),
         };
         if !retune.is_empty() {
             ops.push(OspfIfOp::Retune(eff.name.clone(), retune));
@@ -1847,7 +1853,7 @@ impl OspfDaemon {
         {
             let router_arc = Arc::clone(&self.router);
             let mut router = router_arc.write().unwrap();
-            for (area, _) in &touched_areas {
+            for area in touched_areas.keys() {
                 if self.anchors.contains_key(area) {
                     continue;
                 }
