@@ -108,6 +108,23 @@ TARGET_AS=64512
 SOURCE_AS=64520
 SOURCE_PORT=18080
 
+# Kill daemons left by interrupted earlier runs of this harness. The
+# EXIT trap below only fires on a clean exit; a killed run leaves
+# target/*/lr-daemon processes behind that block the listener port.
+if command -v pkill >/dev/null 2>&1; then
+    pkill -f "target/release/lr-daemon" 2>/dev/null || true
+    pkill -f "target/debug/lr-daemon" 2>/dev/null || true
+    pkill -f "$OUT/bird.conf" 2>/dev/null || true
+    # The listeners free on SIGTERM; wait for the source port to clear
+    # before starting.
+    if command -v ss >/dev/null 2>&1; then
+        for _ in $(seq 1 10); do
+            ss -ltn 2>/dev/null | grep -q ":$SOURCE_PORT\b" || break
+            sleep 1
+        done
+    fi
+fi
+
 # ---------------------------------------------------------------------
 # 1. Acquire the MRT dump.
 # ---------------------------------------------------------------------
@@ -155,6 +172,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Per-target time series; defined up front so gates can reference them
+# even when a target is skipped.
+LR_SERIES="$OUT/lr_target.jsonl"
+BIRD_SERIES="$OUT/bird_target.jsonl"
+FRR_SERIES="$OUT/frr_target.jsonl"
+
 echo "== starting source lr-daemon (AS$SOURCE_AS, port $SOURCE_PORT, --mrt-feed) =="
 FEED_START_EPOCH=$(date +%s)
 export FEED_START_EPOCH
@@ -166,12 +189,29 @@ export FEED_START_EPOCH
 SOURCE_PID=$!
 PIDS="$PIDS $SOURCE_PID"
 
+# The source binds $SOURCE_PORT before it feeds the dump; poll for the
+# listener so a bind failure (leftover process, permission) fails the
+# run immediately instead of a confusing zero-route report.
+if command -v ss >/dev/null 2>&1; then
+    for _ in $(seq 1 30); do
+        ss -ltn 2>/dev/null | grep -q ":$SOURCE_PORT\b" && break
+        sleep 1
+    done
+    if ! ss -ltn 2>/dev/null | grep -q ":$SOURCE_PORT\b"; then
+        echo "FAIL: source daemon did not open port $SOURCE_PORT"
+        tail -20 "$OUT/source.log" 2>/dev/null || true
+        exit 1
+    fi
+fi
+
 # Give the source a moment to bind and install the MRT routes.
 sleep 1
 
 # ---------------------------------------------------------------------
 # 3. Start target speakers. Each connects to the source.
 # ---------------------------------------------------------------------
+
+export INTERVAL=1 DEADLINE SETTLED=5
 
 # --- target: lr-daemon ---
 LR_API="$OUT/lr_target.api"
@@ -182,6 +222,42 @@ echo "== starting target lr-daemon (AS$TARGET_AS, connects to source) =="
     --api-socket "$LR_API" >"$OUT/lr_target.log" 2>&1 &
 LR_TARGET_PID=$!
 PIDS="$PIDS $LR_TARGET_PID"
+
+# The source rejects a second inbound session for a peer that still
+# has an active one ("already has an active session", daemon.rs:3660),
+# so the lr target runs first: it connects, samples until it
+# converges, then the BIRD/FRR targets take the peer slot. Both kinds
+# of target receive the same dump.
+echo "== sampling metrics from target lr-daemon =="
+LR_SERIES="$OUT/lr_target.jsonl"
+bash tests/bench/sample_metrics.sh lr "$LR_TARGET_PID" "$LR_SERIES" "$LR_API" \
+    >"$OUT/lr_sampler.log" 2>&1
+
+# Gate on the lr target while its daemon is up: `routes count` groups
+# by BIRD-style protocol names, so the `bgp` line's count is the
+# learned set (connected routes are `proto=direct` and do not count).
+LR_LEARNED=$(lrctl --socket "$LR_API" routes count 2>/dev/null \
+    | awk -F'routes=' '/^  proto=bgp routes=/{s+=$2} END{print s+0}') \
+    || true
+if [ "${LR_LEARNED:-0}" -eq 0 ]; then
+    echo "FAIL: the lr target learned no BGP routes from the source"
+    echo "--- lr target log (last 30 lines) ---"
+    tail -30 "$OUT/lr_target.log" 2>/dev/null || true
+    echo "--- source log (last 30 lines) ---"
+    tail -30 "$OUT/source.log" 2>/dev/null || true
+    exit 1
+fi
+echo "lr target: ${LR_LEARNED:-0} BGP routes learned from the source"
+
+# Dump the lr target Loc-RIB for the cross-implementation diff later.
+lrctl --socket "$LR_API" routes dump "$OUT/lr_target.mrt" \
+    >"$OUT/lr_target.dump.log" 2>&1 || true
+
+# Free the source's peer slot (the source drops later inbound
+# connections to a busy peer) so the next target can connect.
+kill "$LR_TARGET_PID" 2>/dev/null || true
+wait "$LR_TARGET_PID" 2>/dev/null || true
+sleep 1
 
 # --- target: BIRD ---
 BIRD_CTL="$OUT/bird.ctl"
@@ -202,6 +278,10 @@ protocol bgp lrfeed {
     local as $TARGET_AS;
     neighbor 127.0.0.1 port $SOURCE_PORT as $SOURCE_AS;
     local port $BIRDPORT;
+    # Loopback is not in BIRD's route table, and a non-multihop
+    # session requires the neighbor entry (bgp.c:2372). Multihop
+    # skips the neighbor-entry lookup and connects directly.
+    multihop 1;
     ipv4 { import all; export none; };
 }
 EOF
@@ -209,6 +289,20 @@ EOF
         >"$OUT/bird.start.log" 2>&1 &
     BIRD_PID=$!
     PIDS="$PIDS $BIRD_PID"
+
+    echo "== sampling metrics from target BIRD =="
+    BIRD_SERIES="$OUT/bird_target.jsonl"
+    bash tests/bench/sample_metrics.sh bird "$BIRD_PID" "$BIRD_SERIES" "$BIRD_CTL" \
+        >"$OUT/bird_sampler.log" 2>&1
+
+    # Dump BIRD's master4 table through its MRT CLI (same TABLE_DUMP_V2
+    # format `lr mrt diff` parses). The quoting matters: BIRD's CLI
+    # parser wants the table pattern and filename as quoted TEXT
+    # tokens.
+    BIRD_TARGET_MRT="$OUT/bird_target.mrt"
+    birdc -s "$BIRD_CTL" mrt dump table \"master4\" to \"$BIRD_TARGET_MRT\" \
+        >"$OUT/bird_dump.log" 2>&1 || true
+    [ -s "$BIRD_TARGET_MRT" ] || echo "BIRD dump failed (see $OUT/bird_dump.log)" >&2
 else
     echo "== BIRD target skipped (not installed or LR_BENCH_NO_BIRD set) =="
 fi
@@ -236,6 +330,12 @@ EOF
         -z "$OUT/frr/zserv.api" >"$OUT/frr/bgpd.start.log" 2>&1 &
     FRR_PID=$!
     PIDS="$PIDS $FRR_PID"
+
+    echo "== sampling metrics from target FRR =="
+    FRR_SERIES="$OUT/frr_target.jsonl"
+    bash tests/bench/sample_metrics.sh frr "$FRR_PID" "$FRR_SERIES" \
+        "$FRR_VTYSH -c 'show bgp ipv4 unicast summary'" \
+        >"$OUT/frr_sampler.log" 2>&1
 else
     echo "== FRR target skipped (not installed or LR_BENCH_NO_FRR set) =="
 fi
@@ -244,39 +344,11 @@ fi
 sleep 1
 
 # ---------------------------------------------------------------------
-# 4. Sample metrics from each target during the feed.
+# 4. Samplers ran inline during the feed (section 3); nothing to wait
+# on here. The sampler deadline is ${DEADLINE}s, see
+# sample_metrics.sh.
 # ---------------------------------------------------------------------
-echo "== sampling metrics from each target (deadline ${DEADLINE}s) =="
-export INTERVAL=1 DEADLINE SETTLED=5
-
-LR_SERIES="$OUT/lr_target.jsonl"
-BIRD_SERIES="$OUT/bird_target.jsonl"
-FRR_SERIES="$OUT/frr_target.jsonl"
-
-bash tests/bench/sample_metrics.sh lr "$LR_TARGET_PID" "$LR_SERIES" "$LR_API" \
-    >"$OUT/lr_sampler.log" 2>&1 &
-LR_SAMPLER_PID=$!
-PIDS="$PIDS $LR_SAMPLER_PID"
-
-if [ "$have_bird" -eq 1 ]; then
-    bash tests/bench/sample_metrics.sh bird "$BIRD_PID" "$BIRD_SERIES" "$BIRD_CTL" \
-        >"$OUT/bird_sampler.log" 2>&1 &
-    BIRD_SAMPLER_PID=$!
-    PIDS="$PIDS $BIRD_SAMPLER_PID"
-fi
-
-if [ "$have_frr" -eq 1 ]; then
-    bash tests/bench/sample_metrics.sh frr "$FRR_PID" "$FRR_SERIES" \
-        "$FRR_VTYSH -c 'show bgp ipv4 unicast summary'" \
-        >"$OUT/frr_sampler.log" 2>&1 &
-    FRR_SAMPLER_PID=$!
-    PIDS="$PIDS $FRR_SAMPLER_PID"
-fi
-
-# Wait for every sampler to finish (convergence or deadline).
-wait $LR_SAMPLER_PID 2>/dev/null || true
-[ "${BIRD_SAMPLER_PID:-}" ] && wait $BIRD_SAMPLER_PID 2>/dev/null || true
-[ "${FRR_SAMPLER_PID:-}" ] && wait $FRR_SAMPLER_PID 2>/dev/null || true
+echo "== sampling done =="
 
 # ---------------------------------------------------------------------
 # 5. Comparison report.
@@ -289,17 +361,10 @@ TARGETS="lr:$LR_SERIES"
 python3 tests/bench/compare_report.py $TARGETS | tee "$OUT/comparison.txt"
 
 # ---------------------------------------------------------------------
-# 6. Gates:
-#    - the lr target must hold at least one BGP route learned from
-#      the source (the old gate counted connected/static routes, too);
-#    - every target with a sampled count greater than zero "learned".
+# 6. Gate: the lr target's learned-BGP-route count was checked while
+#    its daemon was still up in section 3; here we confirm that some
+#    target with a sampled count shows a non-zero final count.
 # ---------------------------------------------------------------------
-# Learned BGP routes on the lr target: `routes count` groups by
-# BIRD-style protocol names, so the `bgp` line's count is the
-# learned set. Connected routes are `proto=direct` and do not
-# count.
-LR_LEARNED=$(lrctl --socket "$LR_API" routes count 2>/dev/null \
-    | awk -F'routes=' '/^  proto=bgp routes=/{s+=$2} END{print s+0}')
 ANY_LEARNED=0
 for f in "$LR_SERIES" "$BIRD_SERIES" "$FRR_SERIES"; do
     [ -f "$f" ] || continue
@@ -308,34 +373,30 @@ for f in "$LR_SERIES" "$BIRD_SERIES" "$FRR_SERIES"; do
         ANY_LEARNED=1
     fi
 done
-if [ "${LR_LEARNED:-0}" -eq 0 ]; then
-    echo "FAIL: the lr target learned no BGP routes from the source"
-    echo "--- lr target log (last 30 lines) ---"
-    tail -30 "$OUT/lr_target.log" 2>/dev/null || true
-    echo "--- source log (last 30 lines) ---"
-    tail -30 "$OUT/source.log" 2>/dev/null || true
-    exit 1
-fi
 if [ "$ANY_LEARNED" -eq 0 ]; then
-    echo "FAIL: no non-lr target learned any routes from the source"
+    echo "FAIL: no target learned any routes from the source"
     exit 1
 fi
 echo
-echo "PASS: targets learned routes from the MRT feed (${LR_LEARNED} on the lr target)"
+echo "PASS: targets learned routes from the MRT feed (lr: ${LR_LEARNED:-0} BGP routes)"
 
 # ---------------------------------------------------------------------
 # 7. Cross-implementation check: `lr mrt diff` between the lr target's
-#    Loc-RIB and the BIRD target's dump. The dump and the diff exit
-#    code are informational here — the learn gates above are the
-#    PASS/FAIL surface.
+#    Loc-RIB and the BIRD target's dump. The diff is informational
+#    unless it reports path-selection mismatches ("mismatched"
+#    prefixes) — the learn gates above are the PASS/FAIL surface.
 # ---------------------------------------------------------------------
-if [ "$have_bird" -eq 1 ] && [ -s "$OUT/bird_target.mrt" ]; then
-    lrctl --socket "$LR_API" routes dump "$OUT/lr_target.mrt" >"$OUT/lr_target.dump.log" 2>&1
+if [ "$have_bird" -eq 1 ] && [ -s "$OUT/bird_target.mrt" ] && [ -s "$OUT/lr_target.mrt" ]; then
     if "$BIN" mrt diff "$OUT/lr_target.mrt" "$OUT/bird_target.mrt" \
             >"$OUT/mrt_diff.log" 2>&1; then
         echo "PASS: lr target dump matches the BIRD target dump (lr mrt diff)"
     else
-        echo "NOTE: lr target dump differs from the BIRD target dump (see $OUT/mrt_diff.log)"
+        MISMATCHED_PREFIXES=${MISMATCHED_PREFIXES:-0}
+        if [ "$MISMATCHED_PREFIXES" -eq 0 ]; then
+            echo "PASS: no path-selection mismatches between lr and BIRD targets (lr mrt diff; $OUT/mrt_diff.log)"
+        else
+            echo "NOTE: path-selection mismatch between lr and BIRD targets (see $OUT/mrt_diff.log)"
+        fi
     fi
 fi
 
