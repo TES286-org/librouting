@@ -192,6 +192,7 @@ mod daemon_policy;
 mod daemon_roa_loader;
 mod daemon_rpki;
 mod metrics;
+mod mrt_feed;
 mod ospf_engine_loop;
 mod peer_health_view;
 mod pipe_name;
@@ -2152,30 +2153,18 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // public routing table to a reference implementation for
         // cross-implementation comparison.
         if let Some(mrt_path) = cfg.mrt_feed.as_deref() {
-            match load_mrt_feed(mrt_path) {
-                Ok(mut routes) => {
-                    if cfg.mrt_feed_cap > 0 && routes.len() > cfg.mrt_feed_cap {
-                        log_info!(
-                            Component::Daemon,
-                            "mrt-feed: capping {} route(s) to {} (LR_BENCH_BIRD_CAP)",
-                            routes.len(),
-                            cfg.mrt_feed_cap
-                        );
-                        routes.truncate(cfg.mrt_feed_cap);
-                    }
+            match crate::mrt_feed::load(mrt_path, cfg.mrt_feed_cap, 1) {
+                Ok(feed) => {
                     let rib = r.rib_handle();
-                    let mut installed = 0usize;
-                    for route in &routes {
-                        if rib.install(route.clone()) {
-                            installed += 1;
-                        }
-                    }
+                    let installed = crate::mrt_feed::install(&rib, &feed);
                     log_info!(
                         Component::Daemon,
-                        "mrt-feed: {} route(s) installed from {} ({} in dump)",
+                        "mrt-feed: {} prefix(es), {} path(s) installed from {} \
+                         ({} entries in dump)",
+                        feed.sets.len(),
                         installed,
                         mrt_path,
-                        routes.len()
+                        feed.dump_paths
                     );
                 }
                 Err(e) => {
@@ -6209,34 +6198,22 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         }
         // MRT feed (issue #101 bench feed path) — the BGP daemon's
         // startup path carries the canonical install site; the Babel
-        // daemon shares the same `--mrt-feed` flag through the
-        // `load_mrt_feed` helper but installs here when running in
+        // daemon shares the same `--mrt-feed` flag through
+        // `crate::mrt_feed` but installs here when running in
         // standalone Babel mode.
         if let Some(mrt_path) = cfg.mrt_feed.as_deref() {
-            match load_mrt_feed(mrt_path) {
-                Ok(mut routes) => {
-                    if cfg.mrt_feed_cap > 0 && routes.len() > cfg.mrt_feed_cap {
-                        log_info!(
-                            Component::Daemon,
-                            "mrt-feed: capping {} route(s) to {} (LR_BENCH_BIRD_CAP)",
-                            routes.len(),
-                            cfg.mrt_feed_cap
-                        );
-                        routes.truncate(cfg.mrt_feed_cap);
-                    }
+            match crate::mrt_feed::load(mrt_path, cfg.mrt_feed_cap, 1) {
+                Ok(feed) => {
                     let rib = r.rib_handle();
-                    let mut installed = 0usize;
-                    for route in &routes {
-                        if rib.install(route.clone()) {
-                            installed += 1;
-                        }
-                    }
+                    let installed = crate::mrt_feed::install(&rib, &feed);
                     log_info!(
                         Component::Daemon,
-                        "mrt-feed: {} route(s) installed from {} ({} in dump)",
+                        "mrt-feed: {} prefix(es), {} path(s) installed from {} \
+                         ({} entries in dump)",
+                        feed.sets.len(),
                         installed,
                         mrt_path,
-                        routes.len()
+                        feed.dump_paths
                     );
                 }
                 Err(e) => {
@@ -9577,63 +9554,6 @@ fn originate_next_hop(cfg: &DaemonConfig, family: NlriFamily) -> Option<IpAddr> 
             }),
         _ => None,
     }
-}
-
-/// Load every route from a TABLE_DUMP_V2 MRT RIB dump. Each
-/// `(prefix, entry)` becomes one `Route` with the dump's raw path
-/// attributes decoded into an `Attributes` set, the peer index as
-/// the route's origin peer, and LOCAL_PREF (or 100 when absent) as
-/// the metric. Used by the `--mrt-feed` flag to seed the Loc-RIB
-/// from a real public routing table (issue #101 bench feed path).
-fn load_mrt_feed(path: &str) -> Result<Vec<lr_core::rib::Route>, String> {
-    use lr_core::attr::Attributes;
-    use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
-    use lr_mrt::{decode_attributes, walk_attributes, MrtRecord, PeerIndexTable};
-
-    let records = lr_mrt::parse_file(path).map_err(|e| format!("parse {path}: {e}"))?;
-    let mut peers: Option<PeerIndexTable> = None;
-    let mut routes: Vec<Route> = Vec::new();
-    for record in &records {
-        match record {
-            MrtRecord::PeerIndexTable(pit) => peers = Some(pit.clone()),
-            MrtRecord::Rib(table) => {
-                let family = if table.prefix.is_ipv4() {
-                    NlriFamily::IPV4_UNICAST
-                } else {
-                    NlriFamily::IPV6_UNICAST
-                };
-                for entry in &table.entries {
-                    let attrs: Attributes = decode_attributes(&entry.attributes);
-                    let summary = walk_attributes(entry);
-                    let local_pref = summary.local_pref.unwrap_or(100);
-                    let _peer_bgp_id = peers
-                        .as_ref()
-                        .and_then(|p| p.peers.get(entry.peer_index as usize))
-                        .map(|p| p.bgp_id)
-                        .unwrap_or(0);
-                    routes.push(Route {
-                        key: RouteKey::new(table.prefix, family),
-                        origin: RouteOrigin {
-                            proto: 1,
-                            peer: entry.peer_index as u64,
-                        },
-                        protocol: Protocol::Bgp,
-                        preference: Preference::new(
-                            Protocol::Bgp.default_admin_distance(),
-                            local_pref,
-                        ),
-                        next_hop: summary.next_hop,
-                        attributes: attrs,
-                        age_ms: (entry.originated_time as u64) * 1000,
-                        path_id: entry.path_id,
-                        tag: None,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(routes)
 }
 
 /// Shared daemon state threaded through the I/O loops.
