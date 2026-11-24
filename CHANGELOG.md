@@ -110,6 +110,66 @@ silently required a daemon restart to change. A raised
 decay pass (at most one `decay_interval_s` later) and reactivates
 the ones whose figure-of-merit is already below the new threshold.
 
+### Added — OSPF / OSPFv3 / Babel interface-set reload (issue #101)
+
+The reload gap the tracker lists for the three non-BGP engines closes:
+the OSPF, OSPFv3 and Babel standalone daemons reload their interface
+sets on SIGHUP / runtime-API `reload` with the same per-unit atomicity
+the BGP engine's peer reload carries. The reload closure (signal / API
+thread) validates the fresh configuration, resolves every new unit
+against the kernel (addresses, raw-socket or UDP binds) and queues the
+plan; the engine loop applies it on its next pass — the apply pass is
+infallible by construction, so a validation failure keeps the running
+configuration entirely unchanged.
+
+- **OSPF (v2 and v3): one configured interface is one unit.** A
+  removal closes its adjacencies and flushes its LSAs (v2: the
+  Network-LSA and Extended-Link LSA; v3: the Link-LSA, Network-LSA and
+  network-referenced Intra-Area-Prefix-LSA) with flush-before-close
+  ordering so the MaxAge instances reach the wire, then re-originates
+  the area's Router-LSA without its links; when it was the area's last
+  interface the area's LSAs flush (MaxAge) and the anchor session
+  closes. An add resolves against the kernel and starts from
+  interface-down. A re-tune updates cost / timers / priority (and the
+  v2 `adj_sid`, the v3 `srv6_end_x` / `srv6_end_x_lan`) in place with
+  the adjacencies kept; a cost change re-originates the Router-LSA,
+  a priority change re-enters the DR election. An area or network-type
+  change restarts the unit (Remove + Add, the FRR behaviour).
+- **OSPF daemon-wide policy swaps in place**: the RFC 2328 §D auth
+  strategy (v3: the RFC 7166 trailer) and the RFC 3623 §3 / RFC 5187
+  §3 graceful-restart helper policy. Router-id, SR origination
+  config (SRGB / prefix-SIDs / mapping-server; v3: SRv6 locators,
+  extended-LSA mode), area types and the graceful-restart role are
+  reported as requiring a restart, honestly.
+- **Babel: one resolved interface is one unit.** A removal flushes its
+  session (`babel_flush_session` — the learned routes leave the
+  Loc-RIB and the other interfaces' re-advertisements) and closes it;
+  an add binds fresh transports and starts announcing from a fresh
+  source identity (RFC 8966 §3.3 — a bind failure skips the unit and
+  is retried on the next SIGHUP, the startup skip-with-warning
+  semantics). A re-tune updates hello / update / rxcost / RTT bounds /
+  `check_link` / `extended_next_hop` / next hops in place with the
+  session, neighbour state and route cache kept; the RTT cost
+  parameters re-point the session's link-cost model. A port or group
+  change restarts the unit. The interface-scoped RFC 8967 auth surface
+  (`[[babel.key]]` sets plus the `[babel]` auth globals) rebuilds in
+  place with a fresh outbound Index (§3.1). The interface mode
+  (manual ↔ `[[babel.interface]]`), the manual path's transport
+  surface and the configured router-id are reported as requiring a
+  restart. The engine loop rewrites its poll registry in place:
+  removals kill the removed unit's socket-table slots (their
+  registered clones drop) and shift later indices, adds append at the
+  tail — no socket is ever re-registered.
+- **The reload posture note is per daemon.** Each daemon appends its
+  own honest summary line (the BGP peer-unit note, the babel
+  interface-set note, the supervisor's engine registry note) instead
+  of one shared BGP-shaped line.
+
+Planner-level tests pin the diff surface for all three engines
+(retunes, removals, rejection with nothing queued, the auth swaps,
+the restart-required reports and the chaining contract that makes a
+repeat SIGHUP a no-op).
+
 ### Fixed — FFI policy introspection stubs answered 0 for every input
 (issue #101)
 

@@ -323,9 +323,10 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                 // The engines registered their reload closures on the
                 // shared runtime (the BGP engine's peer-set reload:
                 // peer add/remove/replace, policy swap, BFD
-                // membership, listener replacement).
+                // membership, listener replacement; the OSPF, LDP and
+                // Babel engines: their interface sets per unit).
                 let engines = engine_reloads.lock().unwrap().clone();
-                crate::reload_config(
+                let mut lines = crate::reload_config(
                     config_path.as_deref(),
                     config_dialect.as_deref(),
                     &router,
@@ -337,7 +338,17 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                     None,
                     None,
                     &engines,
-                )
+                );
+                // The supervisor's engine-level posture: every
+                // registered engine reloads its own unit surface; the
+                // daemon-level sections above report their diffs.
+                lines.push(
+                    "reload: note: engine reloads apply peer and interface-set changes \
+                     per unit; a daemon-wide identity change restarts the affected \
+                     sessions with the fresh identity"
+                        .into(),
+                );
+                lines
             }
         }),
         router: Arc::clone(&router),

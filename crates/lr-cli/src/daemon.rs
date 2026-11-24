@@ -2416,7 +2416,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let engine_reloads = Arc::clone(&engine_reloads_cell);
                     move || {
                         let engines = engine_reloads.lock().unwrap().clone();
-                        reload_config(
+                        let mut lines = reload_config(
                             config_path.as_deref(),
                             config_dialect.as_deref(),
                             &router,
@@ -2428,7 +2428,22 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                             Some(&damping_state),
                             peer_health_table_reload.as_ref(),
                             &engines,
-                        )
+                        );
+                        // The BGP engine reloads the peer set per unit
+                        // (add / remove / replace with an RFC 4486 §4.1
+                        // Cease; policy swaps in place), and a
+                        // speaker-identity change (local AS / router-id)
+                        // is applied as one daemon-wide unit: every
+                        // session restarts with the fresh identity, the
+                        // safety net re-points and the BGP-LS driver
+                        // follows — the daemon process keeps running.
+                        lines.push(
+                            "reload: note: peer, auth, BFD and policy changes applied per unit; \
+                             a local AS or router-id change restarts every session with the \
+                             fresh identity"
+                                .into(),
+                        );
+                        lines
                     }
                 }),
                 router,
@@ -6321,12 +6336,37 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         return ExitCode::from(1);
     }
 
+    // The reload coordination (issue #101): built from the startup
+    // config's interface table and the LIVE unit set (a unit skipped
+    // at startup — a bind failure — stays out, so a later SIGHUP
+    // retries it); shared between the reload closure (standalone:
+    // `runtime.reload`; embedded: the supervisor's engine-reload
+    // registry) and the engine loop's drain.
+    let babel_reload_coord = Arc::new(BabelReloadCoord::new(cfg, &ifaces));
+    // The engine-reload closure (issue #101): validates the fresh
+    // configuration, enumerates the system interfaces, builds every
+    // new unit (the UDP binds) and queues the plan the loop applies.
+    let babel_engine_reload: crate::EngineReloadFn = {
+        let coord = Arc::clone(&babel_reload_coord);
+        Arc::new(move |fresh: &DaemonConfig| plan_babel_reload(fresh, &coord))
+    };
     // Standalone: own running flag, own runtime, own API socket and
     // ticker. Embedded: the supervisor's shared runtime (one running
     // flag, one reload closure, one status registry, one ticker), and
     // a startup gate between the UDP binds above and the main loop.
     let runtime = match &host {
-        Some(h) => Arc::clone(&h.runtime),
+        Some(h) => {
+            // Embedded: register the engine reload onto the
+            // supervisor's registry — the supervisor loads and
+            // finalizes the fresh configuration itself and hands every
+            // engine its slice.
+            h.runtime
+                .engine_reloads
+                .lock()
+                .unwrap()
+                .push(Arc::clone(&babel_engine_reload));
+            Arc::clone(&h.runtime)
+        }
         None => Arc::new(Runtime {
             event_bus: lr_router::event_bus::EventBus::new(),
             kernel_mirror: std::sync::OnceLock::new(),
@@ -6335,13 +6375,17 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 let config_path = cfg.config_path.clone();
                 let config_dialect = cfg.config_dialect.clone();
                 let current_networks = Arc::new(Mutex::new(network_reload_state(cfg)));
+                let engine_reload = Arc::clone(&babel_engine_reload);
                 // Babel does not install a damping hook (the `[damping]`
                 // block is a BGP-only construct). Pass `None` so
                 // `reload_config`'s damping toggle is skipped entirely
                 // — the Babel daemon never has a `DampingController`
-                // to flip.
+                // to flip. The engine-reload slice carries the babel
+                // interface-set closure (issue #101): it runs before
+                // the daemon-level sections and an `Err` from it
+                // aborts the whole reload (nothing half-applied).
                 move || {
-                    reload_config(
+                    let mut lines = reload_config(
                         config_path.as_deref(),
                         config_dialect.as_deref(),
                         &router,
@@ -6352,8 +6396,22 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         &[],
                         None,
                         None,
-                        &[],
-                    )
+                        std::slice::from_ref(&engine_reload),
+                    );
+                    // The babel engine reloads the interface set per
+                    // unit (add / remove / re-tune; port or group
+                    // changes restart the unit), the RFC 8967 auth
+                    // surface swaps in place; the manual single-socket
+                    // path, its transport surface and the configured
+                    // router-id require a restart (reported honestly —
+                    // see `plan_babel_reload`).
+                    lines.push(
+                        "reload: note: interface-set changes applied per unit; \
+                         auth key changes swap in place; mode, manual-path and \
+                         router-id changes require a restart"
+                            .into(),
+                    );
+                    lines
                 }
             }),
             router: Arc::clone(&router),
@@ -6428,7 +6486,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // Our own addresses: a datagram from any of them is ours (multicast
     // loop is on, and same-host veth pairs deliver our own multicasts to
     // our other interfaces' sockets).
-    let locals: std::collections::HashSet<std::net::IpAddr> = ifaces
+    let mut locals: std::collections::HashSet<std::net::IpAddr> = ifaces
         .iter()
         .flat_map(|i| i.transports().map(|t| t.local).collect::<Vec<_>>())
         .collect();
@@ -6471,8 +6529,14 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         }
     };
     // (iface index, transport index, multicast?) — the token demux.
+    // The reload (issue #101) rewrites this table in place: a removed
+    // unit's slots die ([`BABEL_SOCK_TABLE_DEAD`], their registered
+    // clones dropped) and added units append at the tail, so every
+    // token's registration stays valid. `registered` mirrors the
+    // table slot-for-slot; the `Option` carries the clone a removal
+    // drops.
     let mut sock_table: Vec<(usize, usize, bool)> = Vec::new();
-    let mut registered: Vec<mio::net::UdpSocket> = Vec::new();
+    let mut registered: Vec<Option<mio::net::UdpSocket>> = Vec::new();
     for (ii, iface) in ifaces.iter().enumerate() {
         for (ti, t) in iface.transports.iter().enumerate() {
             for (sock, is_mc) in
@@ -6487,7 +6551,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     log_error!(Component::Babel, "mio register: {e}");
                     continue;
                 }
-                registered.push(mio_sock);
+                registered.push(Some(mio_sock));
                 sock_table.push((ii, ti, is_mc));
             }
         }
@@ -6519,6 +6583,19 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         if !running.load(Ordering::Relaxed) {
             break;
         }
+        // Reload plans (issue #101): the closure validated the fresh
+        // configuration and queued the unit ops; apply them before the
+        // receive sweep so a newly added interface joins the same pass.
+        // See [`drain_babel_reload`] for the socket-table contract.
+        drain_babel_reload(
+            &babel_reload_coord,
+            &mut ifaces,
+            &registry,
+            &mut sock_table,
+            &mut registered,
+            &mut locals,
+            &router,
+        );
         let now_ms = start.elapsed().as_millis() as u64;
         // Sleep until the earliest periodic deadline (or a datagram).
         let timeout = babel_poll_timeout(&ifaces, last_link_poll_ms, last_babel_gc_ms, now_ms);
@@ -6540,6 +6617,11 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             let Some(&(ii, ti, is_multicast)) = sock_table.get(event.token().0) else {
                 continue;
             };
+            if ii == BABEL_SOCK_TABLE_DEAD {
+                // A removed unit's dead slot: its registered clone is
+                // dropped, the fd closed — an in-flight event at most.
+                continue;
+            }
             if !event.is_readable() {
                 continue;
             }
@@ -7617,6 +7699,819 @@ fn babel_iface_from_spec(
         link_up: entry.up && entry.running,
     })
 }
+
+// ---------------------------------------------------------------------
+// Configuration reload — the interface set as units (issue #101).
+//
+// The unit model mirrors the OSPF daemons' interface reload:
+//
+// - **One resolved interface is one unit.** An interface added,
+//   removed or re-tuned costs exactly that interface: a removal
+//   flushes its session (`babel_flush_session` — the learned routes
+//   leave the Loc-RIB and the other interfaces' re-advertisements)
+//   and closes it; an add resolves against the kernel and starts
+//   announcing from a fresh source identity (RFC 8966 §3.3 — a new
+//   unit is a new speaker, the same semantics a restart carries); a
+//   re-tune updates the §A.2 wire parameters in place with the
+//   session, its neighbour state and its route cache kept. Every
+//   other interface keeps running.
+// - **Identity fields (port, multicast group) change = unit restart**
+//   — a Remove + Add pair: they reshape the transports, and nothing
+//   about the adjacency is worth preserving across a transport move.
+// - **The interface-scoped auth surface (`[[babel.key]]` sets plus
+//   the `[babel]` auth globals) swaps in place** — the fresh
+//   `BabelAuthInterface` carries a fresh outbound Index (RFC 8967
+//   §3.1), exactly what a restart would produce; peers must be
+//   reconfigured in lockstep either way.
+// - **Not reloadable (reported as requiring a restart, honestly)**:
+//   the interface *mode* (manual single-socket ↔ `[[babel.interface]]`
+//   blocks) and the configured router-id (it seeds every session's
+//   source identity).
+//
+// Threading matches the OSPF shape: the reload closure (signal / API
+// thread) validates the fresh configuration, enumerates the system
+// interfaces, builds every new unit (the kernel work: address
+// enumeration + UDP binds — a bind failure skips the unit and is
+// retried on the next SIGHUP, the startup skip-with-warning
+// semantics) and queues the plan; the engine loop drains it at the
+// top of its next pass. The loop owns the poll registry: removals
+// rewrite the socket table in place (tokens stay stable — the dead
+// slots keep their mio registrations harmless, their clones dropped)
+// and adds append their transports at the table's tail.
+// ---------------------------------------------------------------------
+
+/// The effective (resolved) parameters of one Babel interface unit —
+/// the diff surface of the interface-set reload. The pure half of
+/// [`babel_iface_from_spec`]: the first matching `[[babel.interface]]`
+/// spec for one enumerated system interface (BIRD semantics) with the
+/// §A.2 defaults filled. No kernel work beyond the enumeration the
+/// caller already did — the same resolution the live interface was
+/// built from, so an unchanged configuration diffs to an empty plan.
+#[derive(Debug, Clone, PartialEq)]
+struct BabelIfEffective {
+    name: String,
+    port: u16,
+    group: Option<std::net::IpAddr>,
+    hello_interval_ms: u64,
+    update_interval_ms: u64,
+    rxcost: u16,
+    rtt_cost: u16,
+    rtt_send: bool,
+    rtt_min_us: u32,
+    rtt_max_us: u32,
+    check_link: bool,
+    extended_next_hop: bool,
+    next_hop_v4: Option<std::net::IpAddr>,
+    next_hop_v6: Option<std::net::IpAddr>,
+    /// The interface-scoped auth surface: the key specs whose
+    /// `interface` pattern matches (unscoped included) plus the
+    /// `[babel]` auth globals — all of it feeds
+    /// `BabelAuthConfig` at build time, so any part changing is an
+    /// auth retune. `None` = the unit runs unauthenticated (no key
+    /// matches — the startup warn's shape).
+    auth: Option<BabelAuthEffective>,
+}
+
+/// The auth diff surface (see [`BabelIfEffective::auth`]).
+#[derive(Debug, Clone, PartialEq)]
+struct BabelAuthEffective {
+    keys: Vec<crate::daemon_config::BabelKeySpec>,
+    accept_unauthenticated: bool,
+    split_unicast_multicast: bool,
+    pc_window: usize,
+}
+
+impl BabelIfEffective {
+    /// Resolve one enumerated system interface against the config's
+    /// `[[babel.interface]]` table (the caller has matched the pattern).
+    fn resolve(cfg: &DaemonConfig, entry: &lr_osroute::ospf_transport::InterfaceEntry) -> Self {
+        let spec = cfg
+            .babel_interfaces
+            .iter()
+            .find(|s| {
+                crate::daemon_config::glob_match(s.name.as_deref().unwrap_or(""), &entry.name)
+            })
+            .expect("caller matched the pattern");
+        let hello = u64::from(spec.hello_interval_ms.unwrap_or(1_000));
+        let update = u64::from(
+            spec.update_interval_ms
+                .unwrap_or(3 * hello.min(u32::MAX as u64) as u32),
+        );
+        let is_tunnel = spec.kind.as_deref() == Some("tunnel");
+        let rtt_cost = spec.rtt_cost.unwrap_or(if is_tunnel { 96 } else { 0 });
+        let is_ll = |a: &std::net::Ipv6Addr| (a.segments()[0] & 0xffc0) == 0xfe80;
+        // The extended_next_hop reconciliation mirrors
+        // `babel_iface_from_spec` (the topology inputs are the
+        // enumerated address families; the transport-bind outcomes can
+        // only narrow them at build time).
+        let extended_next_hop = match spec.extended_next_hop {
+            Some(true) => true,
+            _ => entry.v6.len() > entry.v4.len() && entry.v4.is_empty() && is_tunnel,
+        };
+        let next_hop_v4 = match spec.next_hop_ipv4.as_deref() {
+            Some(s) => s.parse::<std::net::IpAddr>().ok(),
+            None => entry.v4.first().map(|a| std::net::IpAddr::V4(*a)),
+        };
+        let next_hop_v6 = match spec.next_hop_ipv6.as_deref() {
+            Some(s) => s.parse::<std::net::IpAddr>().ok(),
+            None => entry
+                .v6
+                .iter()
+                .find(|a| is_ll(a))
+                .or_else(|| entry.v6.first())
+                .map(|a| std::net::IpAddr::V6(*a)),
+        };
+        let keys: Vec<crate::daemon_config::BabelKeySpec> = cfg
+            .babel_keys
+            .iter()
+            .filter(|k| match k.interface.as_deref() {
+                None => true,
+                Some(pat) => crate::daemon_config::glob_match(pat, &entry.name),
+            })
+            .cloned()
+            .collect();
+        let auth = if keys.is_empty() {
+            None
+        } else {
+            Some(BabelAuthEffective {
+                keys,
+                accept_unauthenticated: cfg.babel_accept_unauthenticated,
+                split_unicast_multicast: cfg.babel_split_unicast_multicast,
+                pc_window: cfg.babel_pc_window,
+            })
+        };
+        Self {
+            name: entry.name.clone(),
+            port: spec.port.unwrap_or(cfg.babel_port),
+            group: spec.group.as_deref().and_then(|g| g.parse().ok()),
+            hello_interval_ms: hello,
+            update_interval_ms: update,
+            rxcost: spec.rxcost.unwrap_or(96),
+            rtt_cost,
+            rtt_send: spec.rtt_send.unwrap_or(rtt_cost > 0),
+            rtt_min_us: spec.rtt_min_us.unwrap_or(10_000),
+            rtt_max_us: spec.rtt_max_us.unwrap_or(120_000),
+            check_link: spec.check_link.unwrap_or(true),
+            extended_next_hop,
+            next_hop_v4,
+            next_hop_v6,
+            auth,
+        }
+    }
+}
+
+/// In-place parameter deltas for one kept interface (identity — name,
+/// port, group — unchanged): `None` fields keep the live value.
+///
+/// Not `Clone`/`PartialEq`: the auth delta carries the prebuilt
+/// [`lr_babel::BabelAuthInterface`] (a nonce-seeded state machine —
+/// neither clonable nor comparable). Equality matters only for
+/// [`BabelIfRetune::is_empty`], which is field-wise.
+#[derive(Debug, Default)]
+struct BabelIfRetune {
+    hello_interval_ms: Option<u64>,
+    update_interval_ms: Option<u64>,
+    rxcost: Option<u16>,
+    rtt_cost: Option<u16>,
+    rtt_send: Option<bool>,
+    rtt_min_us: Option<u32>,
+    rtt_max_us: Option<u32>,
+    check_link: Option<bool>,
+    extended_next_hop: Option<bool>,
+    next_hop_v4: Option<Option<std::net::IpAddr>>,
+    next_hop_v6: Option<Option<std::net::IpAddr>>,
+    /// The freshly built auth interface (`None` inside = drop auth —
+    /// the fresh key set no longer matches). Built by the planner, so
+    /// the apply pass stays infallible.
+    auth: Option<(Option<lr_babel::BabelAuthInterface>, String)>,
+}
+
+impl BabelIfRetune {
+    fn is_empty(&self) -> bool {
+        self.hello_interval_ms.is_none()
+            && self.update_interval_ms.is_none()
+            && self.rxcost.is_none()
+            && self.rtt_cost.is_none()
+            && self.rtt_send.is_none()
+            && self.rtt_min_us.is_none()
+            && self.rtt_max_us.is_none()
+            && self.check_link.is_none()
+            && self.extended_next_hop.is_none()
+            && self.next_hop_v4.is_none()
+            && self.next_hop_v6.is_none()
+            && self.auth.is_none()
+    }
+
+    /// Whether the retune touches the session-side RTT cost parameters
+    /// (they ride `set_babel_link_cost_params`, not the iface struct).
+    fn rtt_params_changed(&self) -> bool {
+        self.rtt_cost.is_some() || self.rtt_min_us.is_some() || self.rtt_max_us.is_some()
+    }
+
+    /// One operator-facing summary of the changed fields.
+    fn summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(v) = self.hello_interval_ms {
+            parts.push(format!("hello -> {v}ms"));
+        }
+        if let Some(v) = self.update_interval_ms {
+            parts.push(format!("update -> {v}ms"));
+        }
+        if let Some(v) = self.rxcost {
+            parts.push(format!("rxcost -> {v}"));
+        }
+        if let Some(v) = self.rtt_cost {
+            parts.push(format!("rtt-cost -> {v}"));
+        }
+        if let Some(v) = self.rtt_send {
+            parts.push(format!("rtt-send -> {v}"));
+        }
+        if let Some(v) = self.rtt_min_us {
+            parts.push(format!("rtt-min -> {v}us"));
+        }
+        if let Some(v) = self.rtt_max_us {
+            parts.push(format!("rtt-max -> {v}us"));
+        }
+        if let Some(v) = self.check_link {
+            parts.push(format!("check-link -> {v}"));
+        }
+        if let Some(v) = self.extended_next_hop {
+            parts.push(format!("extended-next-hop -> {v}"));
+        }
+        if self.next_hop_v4.is_some() {
+            parts.push("next-hop-v4 -> fresh".into());
+        }
+        if self.next_hop_v6.is_some() {
+            parts.push("next-hop-v6 -> fresh".into());
+        }
+        if self.auth.is_some() {
+            parts.push("auth -> fresh keys".into());
+        }
+        parts.join(", ")
+    }
+}
+
+/// One planned interface-set operation, in apply order (removals and
+/// replace-teardowns first, retunes next, installs last).
+enum BabelIfOp {
+    /// Install a newly built interface. The transports are already
+    /// bound (the planner's fallible half); the apply pass creates the
+    /// session, seeds the source identity and registers the sockets
+    /// with the poll loop.
+    Add(Box<BabelIface>),
+    /// Tear one interface down by name: its session is flushed (the
+    /// learned routes leave the Loc-RIB and the other interfaces'
+    /// re-advertisements) and closed, its sockets dropped from the
+    /// poll table.
+    Remove(String),
+    /// Update a kept interface's §A.2 parameters in place.
+    Retune(String, BabelIfRetune),
+}
+
+/// One validated reload plan: everything the engine loop's apply pass
+/// needs, with the fallible work already done. Queued by the planner,
+/// drained in order by [`drain_babel_reload`].
+struct BabelReloadPlan {
+    ops: Vec<BabelIfOp>,
+}
+
+/// The reload coordination state shared between the reload closure
+/// (signal / API thread) and the engine loop: the closure validates
+/// the fresh configuration, enumerates the system interfaces, builds
+/// every new unit and queues the plan; the loop applies it on its next
+/// pass.
+///
+/// The target table is the diff base for the NEXT reload and is
+/// updated at queue time, so consecutive SIGHUPs chain correctly even
+/// when the loop has not drained the earlier plan yet (the same
+/// contract the LDP daemon's `current_binds` and the OSPF daemons'
+/// target tables carry).
+struct BabelReloadCoord {
+    /// Interface table the last queued reload targeted (name → effective).
+    target: Mutex<std::collections::BTreeMap<String, BabelIfEffective>>,
+    /// Whether the last targeted configuration was the manual
+    /// single-socket path (`[[babel.interface]]` blocks absent).
+    target_manual: Mutex<bool>,
+    /// The startup manual-path surface, for the restart-required diff
+    /// lines: local address, port, group, key set.
+    manual_identity: (
+        Option<String>,
+        u16,
+        Option<String>,
+        Vec<crate::daemon_config::BabelKeySpec>,
+    ),
+    /// The startup configured router-id (the BIRD-derived IPv4) — its
+    /// change re-seeds every session's source identity: restart.
+    configured_router_id: Option<std::net::Ipv4Addr>,
+    /// Queued plans, drained by the engine loop in order.
+    queue: Mutex<Vec<BabelReloadPlan>>,
+}
+
+impl BabelReloadCoord {
+    /// Snapshot the startup configuration's reload surface, keyed off
+    /// the LIVE interface set (a unit skipped at startup — a bind
+    /// failure — is not in the table, so the next reload retries it).
+    /// The values resolve from the startup config so the planner's
+    /// diff derives both sides through the same path.
+    fn new(cfg: &DaemonConfig, ifaces: &[BabelIface]) -> Self {
+        let manual = ifaces.len() == 1 && ifaces[0].manual;
+        let mut target = std::collections::BTreeMap::new();
+        if !manual {
+            if let Ok(sys) = lr_osroute::ospf_transport::list_interfaces() {
+                for iface in ifaces {
+                    if let Some(entry) = sys.iter().find(|e| e.name == iface.name) {
+                        target.insert(
+                            iface.name.clone(),
+                            BabelIfEffective::resolve(cfg, entry),
+                        );
+                    }
+                }
+            }
+        }
+        Self {
+            target: Mutex::new(target),
+            target_manual: Mutex::new(manual),
+            manual_identity: (
+                cfg.local_address.clone(),
+                cfg.babel_port,
+                cfg.babel_group.clone(),
+                cfg.babel_keys.clone(),
+            ),
+            configured_router_id: babel_router_id_from_config(cfg),
+            queue: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Take every queued plan (the loop's drain side).
+    fn take_plans(&self) -> Vec<BabelReloadPlan> {
+        std::mem::take(&mut *self.queue.lock().unwrap())
+    }
+}
+
+/// Build one reload-time interface unit (the planner's fallible half):
+/// a fresh per-boot nonce seeds the new unit's source identity and
+/// sequence numbers (RFC 8966 §3.3 — a new unit is a new speaker),
+/// then the same construction the startup path uses.
+fn build_babel_iface_unit(
+    cfg: &DaemonConfig,
+    entry: &lr_osroute::ospf_transport::InterfaceEntry,
+) -> Result<BabelIface, String> {
+    let spec = cfg
+        .babel_interfaces
+        .iter()
+        .find(|s| {
+            crate::daemon_config::glob_match(s.name.as_deref().unwrap_or(""), &entry.name)
+        })
+        .ok_or_else(|| format!("interface {}: no [[babel.interface]] pattern matches", entry.name))?;
+    let mut nonce = lr_babel::SystemNonceSource::new();
+    use lr_babel::NonceSource;
+    let mut boot = [0u8; 8];
+    nonce.fill(&mut boot);
+    babel_iface_from_spec(cfg, spec, entry, boot)
+}
+
+/// Validate the fresh configuration against the live target and queue
+/// the plan. Everything fallible happens here (enumeration, the new
+/// units' UDP binds); an `Err` aborts the whole reload with nothing
+/// queued (the running configuration keeps running). A unit whose
+/// build fails is skipped with a report line and stays out of the
+/// target table — the next SIGHUP retries it (the startup
+/// skip-with-warning semantics). Returns the operator-facing lines.
+fn plan_babel_reload(fresh: &DaemonConfig, coord: &BabelReloadCoord) -> Result<Vec<String>, String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut ops: Vec<BabelIfOp> = Vec::new();
+
+    // The configured router-id seeds every unit's source identity; its
+    // change is a daemon-wide restart in both modes.
+    if babel_router_id_from_config(fresh) != coord.configured_router_id {
+        lines.push(
+            "babel: router-id change requires a restart (every session's \
+             RFC 8966 §3.3 source identity re-seeds)"
+                .into(),
+        );
+    }
+
+    let target_manual = *coord.target_manual.lock().unwrap();
+    if fresh.babel_interfaces.is_empty() || target_manual {
+        // The manual single-socket path (or a mode switch): no unit
+        // ops. A mode switch and a manual-surface change are reported
+        // as requiring a restart, honestly.
+        if fresh.babel_interfaces.is_empty() != target_manual {
+            lines.push(
+                "babel: interface mode change (manual single-socket <-> \
+                 [[babel.interface]] blocks) requires a restart"
+                    .into(),
+            );
+        } else {
+            let (old_local, old_port, old_group, old_keys) = &coord.manual_identity;
+            if *old_local != fresh.local_address {
+                lines.push(
+                    "babel: local-address change requires a restart (the manual \
+                     path's transport binds it)"
+                        .into(),
+                );
+            }
+            if *old_port != fresh.babel_port {
+                lines.push(
+                    "babel: [babel] port change requires a restart (the manual \
+                     path's transport binds it)"
+                        .into(),
+                );
+            }
+            if *old_group != fresh.babel_group {
+                lines.push(
+                    "babel: [babel] group change requires a restart (the manual \
+                     path's transport joins it)"
+                        .into(),
+                );
+            }
+            if *old_keys != fresh.babel_keys {
+                lines.push(
+                    "babel: key-set change requires a restart (the manual path \
+                     builds its auth state once)"
+                        .into(),
+                );
+            }
+            // The targets advance so a repeat SIGHUP stays a no-op.
+            *coord.target_manual.lock().unwrap() = true;
+        }
+        return Ok(lines);
+    }
+
+    // ---- per-interface path ----
+    let sys = lr_osroute::ospf_transport::list_interfaces().map_err(|e| {
+        format!(
+            "babel: interface enumeration unavailable ({e}); \
+             cannot reload the interface set"
+        )
+    })?;
+    let mut fresh_eff: Vec<BabelIfEffective> = Vec::new();
+    for entry in &sys {
+        if fresh
+            .babel_interfaces
+            .iter()
+            .any(|s| crate::daemon_config::glob_match(s.name.as_deref().unwrap_or(""), &entry.name))
+        {
+            fresh_eff.push(BabelIfEffective::resolve(fresh, entry));
+        }
+    }
+
+    let target = coord.target.lock().unwrap().clone();
+    // Removals (and the teardown half of a replace) first, so a unit
+    // restarted under the same name lands in a clean slot.
+    for name in target.keys() {
+        if !fresh_eff.iter().any(|f| f.name == *name) {
+            ops.push(BabelIfOp::Remove(name.clone()));
+            lines.push(format!(
+                "babel: interface {name} removed (session flushed, routes withdrawn)"
+            ));
+        }
+    }
+
+    // Adds, identity restarts and retunes. `accepted` names the units
+    // the plan will actually carry — a skipped build stays out of the
+    // target so the next reload retries it.
+    let mut accepted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for eff in &fresh_eff {
+        let entry = sys
+            .iter()
+            .find(|e| e.name == eff.name)
+            .expect("fresh_eff was built from this enumeration");
+        let Some(old) = target.get(&eff.name) else {
+            match build_babel_iface_unit(fresh, entry) {
+                Ok(iface) => {
+                    ops.push(BabelIfOp::Add(Box::new(iface)));
+                    accepted.insert(eff.name.clone());
+                    lines.push(format!(
+                        "babel: interface {} added (hello {}ms rxcost {})",
+                        eff.name, eff.hello_interval_ms, eff.rxcost,
+                    ));
+                }
+                Err(e) => {
+                    lines.push(format!(
+                        "babel: interface {} skipped ({e}) — retried on the next reload",
+                        eff.name
+                    ));
+                }
+            }
+            continue;
+        };
+        if old.port != eff.port || old.group != eff.group {
+            // Identity change: restart the unit. The teardown half
+            // rides the same Remove op shape (a replace under one
+            // name is a Remove followed by an Add).
+            let teardown = matches!(
+                ops.last(),
+                Some(BabelIfOp::Remove(n)) if n == &eff.name
+            );
+            if !teardown {
+                ops.push(BabelIfOp::Remove(eff.name.clone()));
+            }
+            match build_babel_iface_unit(fresh, entry) {
+                Ok(iface) => {
+                    ops.push(BabelIfOp::Add(Box::new(iface)));
+                    accepted.insert(eff.name.clone());
+                    lines.push(format!(
+                        "babel: interface {} restarted (transport identity change \
+                         — port/group)",
+                        eff.name
+                    ));
+                }
+                Err(e) => {
+                    lines.push(format!(
+                        "babel: interface {} skipped ({e}) — retried on the next reload",
+                        eff.name
+                    ));
+                }
+            }
+            continue;
+        }
+        // Same unit identity: diff the parameters.
+        let mut retune = BabelIfRetune {
+            hello_interval_ms: (old.hello_interval_ms != eff.hello_interval_ms)
+                .then_some(eff.hello_interval_ms),
+            update_interval_ms: (old.update_interval_ms != eff.update_interval_ms)
+                .then_some(eff.update_interval_ms),
+            rxcost: (old.rxcost != eff.rxcost).then_some(eff.rxcost),
+            rtt_cost: (old.rtt_cost != eff.rtt_cost).then_some(eff.rtt_cost),
+            rtt_send: (old.rtt_send != eff.rtt_send).then_some(eff.rtt_send),
+            rtt_min_us: (old.rtt_min_us != eff.rtt_min_us).then_some(eff.rtt_min_us),
+            rtt_max_us: (old.rtt_max_us != eff.rtt_max_us).then_some(eff.rtt_max_us),
+            check_link: (old.check_link != eff.check_link).then_some(eff.check_link),
+            extended_next_hop: (old.extended_next_hop != eff.extended_next_hop)
+                .then_some(eff.extended_next_hop),
+            next_hop_v4: (old.next_hop_v4 != eff.next_hop_v4).then_some(eff.next_hop_v4),
+            next_hop_v6: (old.next_hop_v6 != eff.next_hop_v6).then_some(eff.next_hop_v6),
+            auth: None,
+        };
+        if old.auth != eff.auth {
+            // The fresh auth surface: rebuild the interface's auth
+            // state the same way the startup path did. A fresh
+            // `BabelAuthInterface` carries a fresh outbound Index
+            // (RFC 8967 §3.1) — the same surface a restart produces.
+            let keys: Vec<&crate::daemon_config::BabelKeySpec> = fresh
+                .babel_keys
+                .iter()
+                .filter(|k| match k.interface.as_deref() {
+                    None => true,
+                    Some(pat) => crate::daemon_config::glob_match(pat, &eff.name),
+                })
+                .collect();
+            let (auth, debug) = build_babel_auth_interface_for(fresh, &keys, &eff.name);
+            retune.auth = Some((auth, debug));
+        }
+        if !retune.is_empty() {
+            let summary = retune.summary();
+            ops.push(BabelIfOp::Retune(eff.name.clone(), retune));
+            lines.push(format!(
+                "babel: interface {} re-tuned ({})",
+                eff.name, summary
+            ));
+        }
+        accepted.insert(eff.name.clone());
+    }
+
+    // Queue the plan and advance the target tables: accepted units to
+    // their fresh effective values, so the next reload diffs against
+    // what this one will produce (chaining — see the struct doc). A
+    // unit whose build was skipped stays on the old (absent) slot and
+    // is retried.
+    if !ops.is_empty() {
+        coord.queue.lock().unwrap().push(BabelReloadPlan { ops });
+        lines.push(format!(
+            "babel: interface-set reload queued ({} unit(s) — applied on the next loop pass)",
+            // Count from the last plan's ops.
+            match coord.queue.lock().unwrap().last() {
+                Some(p) => p.ops.len(),
+                None => 0,
+            }
+        ));
+    }
+    let mut new_target = target;
+    for eff in &fresh_eff {
+        if accepted.contains(&eff.name) {
+            new_target.insert(eff.name.clone(), eff.clone());
+        } else {
+            new_target.remove(&eff.name);
+        }
+    }
+    *coord.target.lock().unwrap() = new_target;
+    *coord.target_manual.lock().unwrap() = false;
+    Ok(lines)
+}
+
+/// Apply every reload plan the reload closure queued since the last
+/// pass, in order (issue #101). The plans were fully validated and
+/// built by [`plan_babel_reload`]; this pass is infallible by
+/// construction.
+///
+/// Runs on the engine loop's thread (the loop owns `ifaces`, the poll
+/// registry clones and the socket table). The withdrawal deltas a
+/// teardown flushes are NOT drained here — the ticker thread owns
+/// `poll_events` in this daemon (the OSPFv3 inbound path's rationale:
+/// a racing drain would steal `RouteInstalled` events before the
+/// kernel mirror sees them); the ticker's next pass publishes them
+/// within its one-second cadence.
+fn drain_babel_reload(
+    coord: &BabelReloadCoord,
+    ifaces: &mut Vec<BabelIface>,
+    registry: &mio::Registry,
+    sock_table: &mut Vec<(usize, usize, bool)>,
+    registered: &mut Vec<Option<mio::net::UdpSocket>>,
+    locals: &mut std::collections::HashSet<std::net::IpAddr>,
+    router: &Arc<RwLock<DefaultRouter>>,
+) {
+    for plan in coord.take_plans() {
+        for op in plan.ops {
+            match op {
+                BabelIfOp::Remove(name) => {
+                    let Some(pos) = ifaces.iter().position(|i| i.name == name) else {
+                        continue;
+                    };
+                    let iface = ifaces.remove(pos);
+                    log_info!(
+                        Component::Babel,
+                        "babel interface {} removed — flushing its session",
+                        name
+                    );
+                    {
+                        let mut r = router.write().unwrap();
+                        r.babel_flush_session(iface.session);
+                        if let Err(e) = r.remove_session(iface.session) {
+                            log_warn!(Component::Babel, "babel remove_session: {e}");
+                        }
+                    }
+                    // Rewrite the socket table in place: the removed
+                    // unit's slots die (their registered clones drop,
+                    // closing the fds), later units' indices shift
+                    // down. Tokens index the table, not the units —
+                    // the mio registrations stay valid.
+                    for (idx, entry) in sock_table.iter_mut().enumerate() {
+                        if entry.0 == pos {
+                            *entry = (BABEL_SOCK_TABLE_DEAD, usize::MAX, false);
+                            registered[idx] = None;
+                        } else if entry.0 != BABEL_SOCK_TABLE_DEAD && entry.0 > pos {
+                            entry.0 -= 1;
+                        }
+                    }
+                }
+                BabelIfOp::Add(mut iface) => {
+                    // Session + source identity + link-cost params —
+                    // the same sequence the startup path runs.
+                    let sc = SessionConfig::babel(lr_ip(iface.transports[0].local));
+                    let h = {
+                        let mut r = router.write().unwrap();
+                        match r.add_session(sc) {
+                            Ok(h) => {
+                                if let Err(e) = r.start_session(h) {
+                                    log_error!(
+                                        Component::Babel,
+                                        "babel reload start_session: {e}"
+                                    );
+                                    continue;
+                                }
+                                h
+                            }
+                            Err(e) => {
+                                log_error!(Component::Babel, "babel add_session failed: {e}");
+                                continue;
+                            }
+                        }
+                    };
+                    iface.session = h;
+                    router
+                        .write()
+                        .unwrap()
+                        .set_babel_own_router_id(h, iface.router_id);
+                    router.write().unwrap().set_babel_link_cost_params(
+                        h,
+                        iface.rtt_min_us,
+                        iface.rtt_max_us,
+                        iface.rtt_cost,
+                    );
+                    if !iface.auth_debug_line.is_empty() {
+                        log_info!(Component::Daemon, "{}", iface.auth_debug_line);
+                    }
+                    log_info!(
+                        Component::Babel,
+                        "babel interface {} session {} — {} hello {}ms update {}ms rxcost {} \
+                         router-id {} (reload)",
+                        iface.name,
+                        h.0,
+                        match iface.transports[0].local {
+                            std::net::IpAddr::V4(_) => "v4",
+                            std::net::IpAddr::V6(_) => "v6",
+                        },
+                        iface.hello_interval_ms,
+                        iface.update_interval_ms,
+                        iface.rxcost,
+                        format_router_id(iface.router_id),
+                    );
+                    // Register the new unit's transports at the
+                    // socket table's tail: tokens are append-only, so
+                    // the existing registrations keep their demux.
+                    let ii = ifaces.len();
+                    for (ti, t) in iface.transports.iter().enumerate() {
+                        for (sock, is_mc) in
+                            std::iter::once((&t.uc, false)).chain(t.mc.as_ref().map(|s| (s, true)))
+                        {
+                            let Ok(dup) = sock.try_clone() else {
+                                continue;
+                            };
+                            let mut mio_sock = mio::net::UdpSocket::from_std(dup);
+                            let token = mio::Token(sock_table.len());
+                            if let Err(e) =
+                                registry.register(&mut mio_sock, token, mio::Interest::READABLE)
+                            {
+                                log_error!(Component::Babel, "babel reload register: {e}");
+                                continue;
+                            }
+                            registered.push(Some(mio_sock));
+                            sock_table.push((ii, ti, is_mc));
+                        }
+                    }
+                    ifaces.push(*iface);
+                }
+                BabelIfOp::Retune(name, retune) => {
+                    let Some(iface) = ifaces.iter_mut().find(|i| i.name == name) else {
+                        continue;
+                    };
+                    if let Some(v) = retune.hello_interval_ms {
+                        iface.hello_interval_ms = v;
+                    }
+                    if let Some(v) = retune.update_interval_ms {
+                        iface.update_interval_ms = v;
+                    }
+                    if let Some(v) = retune.rxcost {
+                        iface.rxcost = v;
+                    }
+                    if let Some(v) = retune.rtt_cost {
+                        iface.rtt_cost = v;
+                    }
+                    if let Some(v) = retune.rtt_send {
+                        iface.rtt_send = v;
+                    }
+                    if let Some(v) = retune.rtt_min_us {
+                        iface.rtt_min_us = v;
+                    }
+                    if let Some(v) = retune.rtt_max_us {
+                        iface.rtt_max_us = v;
+                    }
+                    if let Some(v) = retune.check_link {
+                        iface.check_link = v;
+                    }
+                    if let Some(v) = retune.extended_next_hop {
+                        iface.extended_next_hop = v;
+                    }
+                    if let Some(v) = retune.next_hop_v4 {
+                        iface.next_hop_v4 = v;
+                    }
+                    if let Some(v) = retune.next_hop_v6 {
+                        iface.next_hop_v6 = v;
+                    }
+                    if retune.rtt_params_changed() {
+                        router.write().unwrap().set_babel_link_cost_params(
+                            iface.session,
+                            iface.rtt_min_us,
+                            iface.rtt_max_us,
+                            iface.rtt_cost,
+                        );
+                    }
+                    // Announce the fresh parameters promptly: the next
+                    // pass re-renders the announcement content (the
+                    // signature covers the interface's parameters) and
+                    // bumps the seqno.
+                    iface.last_sig = String::new();
+                    iface.last_announce_ms = 0;
+                    let summary = retune.summary();
+                    if let Some((auth, debug)) = retune.auth {
+                        iface.auth = auth;
+                        if !debug.is_empty() {
+                            log_info!(Component::Daemon, "{debug}");
+                        }
+                    }
+                    log_info!(
+                        Component::Babel,
+                        "babel interface {} re-tuned ({})",
+                        name,
+                        summary
+                    );
+                }
+            }
+        }
+        // Recompute the own-address set: a removed unit's addresses
+        // must stop filtering its peers' datagrams once another unit
+        // could legitimately receive from them, and an added unit's
+        // must start.
+        *locals = ifaces
+            .iter()
+            .flat_map(|i| i.transports.iter().map(|t| t.local))
+            .collect();
+    }
+}
+
+/// The socket-table slot of a removed unit (the demux skips it).
+const BABEL_SOCK_TABLE_DEAD: usize = usize::MAX;
 
 /// Bind one transport's socket pair: the unicast socket on the local
 /// address (TTL 255, multicast loopback on) and the multicast socket on
@@ -9837,22 +10732,12 @@ fn reload_config(
     if lines.is_empty() {
         lines.push("reload: no network changes".into());
     }
-    if engine_reloads.is_empty() {
-        lines.push("reload: note: peer and auth changes require a restart".into());
-    } else {
-        // The BGP engine reloads the peer set per unit (add / remove /
-        // replace with an RFC 4486 §4.1 Cease; policy swaps in place),
-        // and a speaker-identity change (local AS / router-id) is
-        // applied as one daemon-wide unit: every session restarts
-        // with the fresh identity, the safety net re-points and the
-        // BGP-LS driver follows — the daemon process keeps running.
-        lines.push(
-            "reload: note: peer, auth, BFD and policy changes applied per unit; \
-             a local AS or router-id change restarts every session with the \
-             fresh identity"
-                .into(),
-        );
-    }
+    // The per-daemon reload-surface note lives with the CALLER (each
+    // daemon appends its own honest summary — the same function serves
+    // the BGP daemon, the Babel daemon and the multi-protocol
+    // supervisor, and their reload surfaces differ). The daemon-level
+    // sections above report their own diffs; what the caller adds is
+    // the engine-level posture.
     lines
 }
 
