@@ -2646,28 +2646,30 @@ mod babel_reload_tests {
     use crate::daemon_config::{BabelInterfaceSpec, DaemonConfig};
     use std::sync::Mutex;
 
-    /// A startup-shaped per-interface config: one spec matching `lo`.
+    /// A startup-shaped per-interface config: one spec matching the
+    /// loopback interface (by its real name — see [`real_lo_entry`]).
     fn babel_cfg() -> DaemonConfig {
         let mut cfg = DaemonConfig::with_defaults();
         cfg.babel_port = 0; // ephemeral
         cfg.babel_interfaces.push(BabelInterfaceSpec {
-            name: Some("lo".to_string()),
+            name: Some(lo_name()),
             ..Default::default()
         });
         cfg
     }
 
-    /// A coord whose target table carries one resolved `lo` unit — the
-    /// shape `BabelReloadCoord::new` produces for a live daemon running
-    /// that interface. Built directly (the live unit set needs bound
-    /// sockets, which the pure planner tests do not exercise) from the
-    /// REAL enumerated `lo` entry — the planner enumerates the system
-    /// itself, so both diff sides must see the same addresses.
+    /// A coord whose target table carries one resolved loopback unit —
+    /// the shape `BabelReloadCoord::new` produces for a live daemon
+    /// running that interface. Built directly (the live unit set needs
+    /// bound sockets, which the pure planner tests do not exercise)
+    /// from the REAL enumerated loopback entry — the planner enumerates
+    /// the system itself, so both diff sides must see the same
+    /// addresses under the same name.
     fn coord_with_lo(cfg: &DaemonConfig) -> BabelReloadCoord {
         let entry = real_lo_entry();
         let eff = BabelIfEffective::resolve(cfg, &entry);
         BabelReloadCoord {
-            target: Mutex::new(std::collections::BTreeMap::from([("lo".to_string(), eff)])),
+            target: Mutex::new(std::collections::BTreeMap::from([(entry.name, eff)])),
             target_manual: Mutex::new(false),
             manual_identity: (None, 6696, None, Vec::new()),
             configured_router_id: babel_router_id_from_config(cfg),
@@ -2675,40 +2677,53 @@ mod babel_reload_tests {
         }
     }
 
-    /// The real enumerated `lo` entry (the sandbox always has it; the
-    /// planner's pure paths re-enumerate the same set).
+    /// The real enumerated loopback entry (Linux names it `lo`, macOS
+    /// and the BSDs `lo0`; the planner's pure paths re-enumerate the
+    /// same set).
     fn real_lo_entry() -> lr_osroute::ospf_transport::InterfaceEntry {
-        lr_osroute::ospf_transport::list_interfaces()
-            .expect("interface enumeration works unprivileged")
+        let entries = lr_osroute::ospf_transport::list_interfaces()
+            .expect("interface enumeration works unprivileged");
+        let name = entries
+            .iter()
+            .map(|e| e.name.clone())
+            .find(|n| n == "lo" || n == "lo0")
+            .expect("a loopback interface exists in the test environment");
+        entries
             .into_iter()
-            .find(|e| e.name == "lo")
-            .expect("lo exists in the test environment")
+            .find(|e| e.name == name)
+            .expect("the loopback entry is in the enumeration")
+    }
+
+    /// The loopback unit's name (see [`real_lo_entry`]).
+    fn lo_name() -> String {
+        real_lo_entry().name
     }
 
     /// A hello-interval retune is one unit: the kept interface's
     /// parameter diff lands in a Retune op and the report names it.
     #[test]
     fn babel_reload_plan_retunes_a_kept_interface() {
+        let lo = lo_name();
         let cfg = babel_cfg();
         let coord = coord_with_lo(&cfg);
         let mut fresh = cfg.clone();
         fresh.babel_interfaces[0].hello_interval_ms = Some(4_000);
         let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("lo re-tuned (hello -> 4000ms")
+            lines.iter().any(|l| {
+                l.contains(&format!("{lo} re-tuned (hello -> 4000ms"))
                     // The update interval derives from the hello
                     // interval (3×) — it rides the same retune.
-                    && l.contains("update -> 12000ms")),
+                    && l.contains("update -> 12000ms")
+            }),
             "the retune line names the interface and the fields: {lines:?}"
         );
         let plans = coord.take_plans();
         assert_eq!(plans.len(), 1, "one plan queued");
         assert!(
             matches!(&plans[0].ops[0], BabelIfOp::Retune(name, retune)
-                if name == "lo" && retune.hello_interval_ms == Some(4_000)),
-            "the op is a hello retune on lo"
+                if name == &lo && retune.hello_interval_ms == Some(4_000)),
+            "the op is a hello retune on the loopback unit"
         );
     }
 
@@ -2716,6 +2731,7 @@ mod babel_reload_tests {
     /// no longer matches) tears its unit down.
     #[test]
     fn babel_reload_plan_removes_a_dropped_interface() {
+        let lo = lo_name();
         let cfg = babel_cfg();
         let coord = coord_with_lo(&cfg);
         let mut fresh = cfg.clone();
@@ -2724,14 +2740,14 @@ mod babel_reload_tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("lo removed (session flushed, routes withdrawn)")),
+                .any(|l| l.contains(&format!("{lo} removed (session flushed, routes withdrawn)"))),
             "the removal line names the interface: {lines:?}"
         );
         let plans = coord.take_plans();
         assert_eq!(plans.len(), 1);
         assert!(
-            matches!(&plans[0].ops[0], BabelIfOp::Remove(name) if name == "lo"),
-            "the op is a teardown of lo"
+            matches!(&plans[0].ops[0], BabelIfOp::Remove(name) if name == &lo),
+            "the op is a teardown of the loopback unit"
         );
     }
 
@@ -2740,19 +2756,20 @@ mod babel_reload_tests {
     /// interface and the report says fresh keys.
     #[test]
     fn babel_reload_plan_swaps_auth_in_place() {
+        let lo = lo_name();
         let cfg = babel_cfg();
         let coord = coord_with_lo(&cfg);
         let mut fresh = cfg.clone();
         fresh.babel_keys.push(crate::daemon_config::BabelKeySpec {
             secret: Some("a-thirty-two-octet-secret-for-hmac".to_string()),
             algorithm: Some("hmac-sha256".to_string()),
-            interface: Some("lo".to_string()),
+            interface: Some(lo.clone()),
         });
         let lines = plan_babel_reload(&fresh, &coord).expect("valid fresh config");
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("lo re-tuned (") && l.contains("auth -> fresh keys")),
+            lines.iter().any(
+                |l| l.contains(&format!("{lo} re-tuned (")) && l.contains("auth -> fresh keys")
+            ),
             "the retune line carries the auth swap: {lines:?}"
         );
         let plans = coord.take_plans();
