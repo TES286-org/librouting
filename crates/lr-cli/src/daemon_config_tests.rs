@@ -3405,3 +3405,49 @@ fn orf_prefix_entries_reject_malformed() {
     assert!(parse_orf_prefix_entries("1 10 permit 10.0.0.0/16 0 0").is_err());
     assert!(parse_orf_prefix_entries("1:1 x permit 10.0.0.0/16 0 0").is_err());
 }
+
+// --------------------------------------------------------------
+// draft-abraitis-bgp-version-capability-18 Software Version
+// encoding selection.
+// --------------------------------------------------------------
+
+#[test]
+fn software_version_encoding_parses_globally_and_per_peer() {
+    use lr_bgp::capabilities_extra::SoftwareVersionEncoding;
+
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nsoftware_version = \"lr/2.0\"\n\
+         software_version_encoding = \"draft-11\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n\
+         software_version_encoding = \"latest\"\n\n\
+         [[peer]]\nremote = \"192.0.2.3:179\"\npeer_as = 64514\n",
+        &mut cfg,
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.software_version_encoding,
+        SoftwareVersionEncoding::Draft11
+    );
+    assert_eq!(
+        cfg.peers[0].software_version_encoding,
+        Some(SoftwareVersionEncoding::Latest)
+    );
+    assert_eq!(
+        cfg.peers[1].software_version_encoding, None,
+        "an unset peer key inherits the router-wide encoding"
+    );
+}
+
+#[test]
+fn software_version_encoding_rejects_unknown_spellings() {
+    for bad in ["draft-18", "old", "11", ""] {
+        let mut cfg = DaemonConfig::with_defaults();
+        let text = format!("[bgp]\nlocal_as = 64512\nsoftware_version_encoding = \"{bad}\"\n");
+        let err = parse_toml_subset(&text, &mut cfg).unwrap_err();
+        assert!(
+            err.contains("software_version_encoding"),
+            "expected the key name in {err:?}"
+        );
+    }
+}

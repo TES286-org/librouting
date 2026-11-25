@@ -79,13 +79,13 @@ pub enum BgpEvent {
     TimerKeepalive,
     TimerIdleHold,
     /// BFD liveness changed for a session with BFD configured
-    /// (draft-ietf-idr-bgp-bfd-strict-mode-13 §4). The FSM holds the
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-19 §4). The FSM holds the
     /// OpenConfirm transition while strict-mode is negotiated and the
     /// state is Down, and a Down in OpenConfirm/Established tears the
     /// session down with Cease / BFD Down (6/10).
     Bfd(BfdState),
     /// The BfdHoldTimer expired while waiting for BFD to come Up
-    /// (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.3.3). Applies only
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-19 §8.3.3). Applies only
     /// when the negotiated BGP hold time is zero.
     TimerBfdHoldExpired,
 }
@@ -228,7 +228,7 @@ pub struct BgpPeer {
     /// (intersection of our advertised tuples and the peer's). Empty when
     /// the capability was not advertised by either side.
     extended_next_hop: Vec<ExtNextHopTuple>,
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13: the BFD liveness last
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19: the BFD liveness last
     /// reported by the embedder. `None` means BFD is not configured for
     /// the session (the draft's `BfdEnabled` is false). The value
     /// survives [`BgpPeer::reset`] — BFD belongs to the transport
@@ -307,7 +307,7 @@ pub mod timer_ids {
     pub const HOLD: TimerId = TimerId(2);
     pub const KEEPALIVE: TimerId = TimerId(3);
     pub const IDLE_HOLD: TimerId = TimerId(4);
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13 §3 `BfdHoldTimer`: bounds
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19 §3 `BfdHoldTimer`: bounds
     /// the wait for BFD Up when the negotiated BGP hold time is zero.
     pub const BFD_HOLD: TimerId = TimerId(5);
 }
@@ -595,7 +595,7 @@ impl BgpPeer {
     }
 
     /// The peer's FQDN/hostname capability value
-    /// (draft-walton-bgp-hostname-capability-01), as `(hostname,
+    /// (draft-walton-bgp-hostname-capability-02), as `(hostname,
     /// domain)`. `None` when the peer did not advertise the capability
     /// or its value is malformed.
     pub fn peer_fqdn(&self) -> Option<(String, String)> {
@@ -603,7 +603,7 @@ impl BgpPeer {
     }
 
     /// The peer's Software Version capability value
-    /// (draft-abraitis-bgp-version-capability-11). `None` when the peer
+    /// (draft-abraitis-bgp-version-capability-18). `None` when the peer
     /// did not advertise it or its value is malformed.
     pub fn peer_software_version(&self) -> Option<String> {
         crate::extensions::software_version::peer_software_version(&self.peer_capabilities)
@@ -1231,7 +1231,7 @@ impl BgpPeer {
         self.keepalive_remaining =
             u64::from(keepalive.min((self.negotiated_hold_time / 3).max(1))) * 1000;
 
-        // draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5: when BFD is
+        // draft-ietf-idr-bgp-bfd-strict-mode-19 §8.5: when BFD is
         // enabled and strict-mode was negotiated, the FSM must not send
         // KEEPALIVE or advance to OpenConfirm until BFD is Up (or
         // AdminDown, which the draft treats as an acceptable non-Down
@@ -1274,7 +1274,7 @@ impl BgpPeer {
 
     /// Advance out of `OpenSentBfdUpPending` once BFD is no longer
     /// Down: send the KEEPALIVE the OPEN path deferred and start the
-    /// negotiated timers (draft-ietf-idr-bgp-bfd-strict-mode-13
+    /// negotiated timers (draft-ietf-idr-bgp-bfd-strict-mode-19
     /// §8.5.1).
     fn leave_bfd_pending(&mut self) -> Vec<BgpAction> {
         self.bfd_pending = false;
@@ -1294,7 +1294,7 @@ impl BgpPeer {
     }
 
     /// Queue Cease / BFD Down (6/10) and latch the deliberate
-    /// teardown (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5.2,
+    /// teardown (draft-ietf-idr-bgp-bfd-strict-mode-19 §8.5.2,
     /// §8.6.2, §8.7.2; the subcode is RFC 9384 §4.1).
     fn bfd_down_close(&mut self) -> Vec<BgpAction> {
         self.enqueue_notification(BgpErrorCode::Cease, BgpCeaseSubcode::BfdDown as u8);
@@ -1467,7 +1467,7 @@ impl BgpPeer {
                 my_actions.push(BgpAction::Close);
                 BgpState::Idle
             }
-            // draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5: the OPEN
+            // draft-ietf-idr-bgp-bfd-strict-mode-19 §8.5: the OPEN
             // exchange is complete but the KEEPALIVE was withheld
             // because BFD was Down. Any non-Down state (Up, AdminDown,
             // Disabled) releases the pending transition.
@@ -1596,7 +1596,7 @@ impl BgpPeer {
     }
 
     /// Report the BFD liveness for this session
-    /// (draft-ietf-idr-bgp-bfd-strict-mode-13 §4). `None` clears it
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-19 §4). `None` clears it
     /// (BFD not configured / disabled). Seeding the state before
     /// [`BgpPeer::step`] with `ManualStart` lets the OPEN-time gate
     /// see it; later transitions go through [`BgpEvent::Bfd`].

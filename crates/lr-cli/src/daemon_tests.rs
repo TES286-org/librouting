@@ -2932,3 +2932,43 @@ mod babel_reload_tests {
         );
     }
 }
+
+/// draft-abraitis-bgp-version-capability-18: the router-wide
+/// `[bgp] software_version_encoding` is the default every peer
+/// inherits; a per-peer value overrides it. The wire selection must
+/// reach `lr_router::SessionConfig` so `lr_bgp::PeerConfig` emits the
+/// chosen draft encoding.
+#[test]
+fn build_session_config_inherits_and_overrides_software_version_encoding() {
+    use lr_bgp::capabilities_extra::SoftwareVersionEncoding;
+
+    let mut g = DaemonConfig::with_defaults();
+    g.local_as = 64512;
+    g.software_version = Some("lr/2.0".to_string());
+    g.software_version_encoding = SoftwareVersionEncoding::Draft11;
+    let rid = RouterId::from_v4([10, 0, 0, 1]);
+
+    let inherit = PeerSpec {
+        remote: Some("192.0.2.2:179".to_string()),
+        peer_as: 64513,
+        ..PeerSpec::default()
+    };
+    let sc = build_session_config(&g, &inherit, rid);
+    assert_eq!(sc.software_version.as_deref(), Some("lr/2.0"));
+    assert_eq!(
+        sc.software_version_encoding,
+        SoftwareVersionEncoding::Draft11,
+        "an unset peer key inherits the router-wide encoding"
+    );
+
+    let override_latest = PeerSpec {
+        software_version_encoding: Some(SoftwareVersionEncoding::Latest),
+        ..inherit
+    };
+    let sc = build_session_config(&g, &override_latest, rid);
+    assert_eq!(
+        sc.software_version_encoding,
+        SoftwareVersionEncoding::Latest,
+        "the per-peer key overrides the router-wide encoding"
+    );
+}

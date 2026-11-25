@@ -1,9 +1,9 @@
 //! BGP extensions (RFC 4724 graceful restart, RFC 7911 AddPath, RFC 7313
 //! enhanced route refresh, RFC 4893 4-byte AS, RFC 5549 extended next-hop,
 //! RFC 9494 long-lived, RFC 5291 ORF, RFC 8654 Extended Message, RFC 9234
-//! BGP Role, draft-walton-bgp-hostname-capability-01 FQDN,
-//! draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode,
-//! draft-abraitis-bgp-version-capability-11 Software Version,
+//! BGP Role, draft-walton-bgp-hostname-capability-02 FQDN,
+//! draft-ietf-idr-bgp-bfd-strict-mode-19 BFD Strict-Mode,
+//! draft-abraitis-bgp-version-capability-18 Software Version,
 //! draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT,
 //! draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop, and the
 //! Exchange plane behind the `exchange-plane` feature).

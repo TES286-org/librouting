@@ -1714,7 +1714,7 @@ fn route_refresh_normal_subtype_still_dispatched_without_enhanced_rr() {
 }
 
 // ---------------------------------------------------------------------------
-// BFD Strict-Mode (draft-ietf-idr-bgp-bfd-strict-mode-13).
+// BFD Strict-Mode (draft-ietf-idr-bgp-bfd-strict-mode-19).
 // ---------------------------------------------------------------------------
 
 /// A peer pair with BFD enabled and strict-mode configured on both
@@ -2371,4 +2371,38 @@ fn peer_fqdn_and_software_version_are_surfaced() {
         Some(("edge-a".to_string(), "example.net".to_string()))
     );
     assert_eq!(b.peer_software_version(), Some("lr/2.0-a".to_string()));
+}
+
+/// A speaker on the latest draft encoding and one on the draft-11
+/// encoding still exchange the version string: the sender selects
+/// the wire form, the receiver accepts both.
+#[test]
+fn software_version_mixed_draft_encodings_surface_both_sides() {
+    use crate::capabilities_extra::SoftwareVersionEncoding;
+
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.software_version = Some("lr/2.0-a".into());
+    cfg_a.software_version_encoding = SoftwareVersionEncoding::Latest;
+    let mut cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    cfg_b.software_version = Some("bird/2.16".into());
+    cfg_b.software_version_encoding = SoftwareVersionEncoding::Draft11;
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+
+    assert_eq!(a.peer_software_version(), Some("bird/2.16".to_string()));
+    assert_eq!(b.peer_software_version(), Some("lr/2.0-a".to_string()));
+}
+
+/// The latest draft defines a zero-length Software Version value as
+/// an encoding error, so an empty configured string must not produce
+/// a capability at all.
+#[test]
+fn software_version_empty_string_is_not_advertised() {
+    let mut cfg_a = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg_a.software_version = Some(String::new());
+    let cfg_b = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+
+    assert!(b.peer_software_version().is_none());
 }

@@ -2,9 +2,9 @@
 //! RFC 7911 AddPath + RFC 4724 Graceful Restart + RFC 7313 Enhanced RR +
 //! RFC 5549 Extended Next-Hop + RFC 9494 Long-Lived Graceful Restart +
 //! the 2.x capability block: RFC 5291 ORF, RFC 8654 Extended Message,
-//! RFC 9234 BGP Role, draft-walton-bgp-hostname-capability-01 FQDN,
-//! draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode,
-//! draft-abraitis-bgp-version-capability-11 Software Version,
+//! RFC 9234 BGP Role, draft-walton-bgp-hostname-capability-02 FQDN,
+//! draft-ietf-idr-bgp-bfd-strict-mode-19 BFD Strict-Mode,
+//! draft-abraitis-bgp-version-capability-18 Software Version,
 //! draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT and
 //! draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop).
 //!
@@ -40,11 +40,11 @@ pub enum CapabilityCode {
     EnhancedRouteRefresh = 70,
     /// RFC 9494: Long-Lived Graceful Restart
     LongLivedGracefulRestart = 71,
-    /// draft-walton-bgp-hostname-capability-01: FQDN/Hostname
+    /// draft-walton-bgp-hostname-capability-02: FQDN/Hostname
     Fqdn = 73,
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13: BFD Strict-Mode
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19: BFD Strict-Mode
     BfdStrictMode = 74,
-    /// draft-abraitis-bgp-version-capability-11: Software Version
+    /// draft-abraitis-bgp-version-capability-18: Software Version
     SoftwareVersion = 75,
     /// draft-ietf-idr-addpath-paths-limit-00: PATHS-LIMIT
     PathsLimit = 76,

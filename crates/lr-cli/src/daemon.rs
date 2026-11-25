@@ -631,7 +631,7 @@ struct PeerEntry {
     /// connector; turning it off clears the gate and spawns the
     /// connector again.
     admin_down: bool,
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13: when `true` and the peer
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19: when `true` and the peer
     /// has `bfd` enabled, the connector blocks session establishment
     /// until BFD reports Up — not just re-establishment after a BFD
     /// Down-to-Up-to-Down cycle. Resolved from
@@ -2911,7 +2911,7 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     if hostname.is_some() || domain.is_some() {
         sc.fqdn = Some((hostname.unwrap_or_default(), domain.unwrap_or_default()));
     }
-    // draft-ietf-idr-bgp-bfd-strict-mode-13 §3: `BfdStrictEnabled`
+    // draft-ietf-idr-bgp-bfd-strict-mode-19 §3: `BfdStrictEnabled`
     // has no impact unless `BfdEnabled` is true, so strict-mode only
     // advertises and gates when BFD is actually configured for this
     // peer.
@@ -2921,6 +2921,9 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         .software_version
         .clone()
         .or_else(|| g.software_version.clone());
+    sc.software_version_encoding = p
+        .software_version_encoding
+        .unwrap_or(g.software_version_encoding);
     sc.paths_limit = p
         .paths_limit
         .clone()
@@ -4191,7 +4194,7 @@ fn spawn_connector(
     let collision_backoff_ms =
         (entry.spec.hold_time.unwrap_or(cfg.hold_time) as u64).clamp(10, 120) * 1_000;
     let bfd = entry.bfd.clone();
-    // draft-ietf-idr-bgp-bfd-strict-mode-13: captured into the
+    // draft-ietf-idr-bgp-bfd-strict-mode-19: captured into the
     // connector's closure so the BFD hold-off check can apply the
     // strict-mode gate (block establishment whenever BFD is down,
     // not just after the first Up-to-Down transition).
@@ -4246,7 +4249,7 @@ fn spawn_connector(
                 // BFD hold-off. The default `bfd = true` behaviour
                 // blocks re-establishment after the session has been
                 // Up at least once (the typical fast-fail gate).
-                // draft-ietf-idr-bgp-bfd-strict-mode-13: when the
+                // draft-ietf-idr-bgp-bfd-strict-mode-19: when the
                 // peer advertises strict-mode, the gate also blocks
                 // the first establishment — the session does not come
                 // up until BFD reports Up, with no hold-timer

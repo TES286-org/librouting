@@ -777,7 +777,7 @@ fn register_session(
         let mut r = router.write().unwrap();
         // Seed the BFD liveness before the FSM emits its OPEN: the
         // strict-mode gate must see the current state when the peer's
-        // OPEN arrives (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5).
+        // OPEN arrives (draft-ietf-idr-bgp-bfd-strict-mode-19 §8.5).
         r.set_bfd_state(handle, bfd.as_ref().map(bfd_state_of));
         if let Err(e) = r.start_session(handle) {
             // The old path: run_peer_session's `?` returned the error
@@ -1034,7 +1034,7 @@ fn check_bfd_transition(
 /// Map the shared BFD liveness flags to the FSM's event state.
 /// AdminDown is distinct from Down: the strict-mode gate accepts it
 /// while Established sessions ignore it
-/// (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5.1, §8.7.1).
+/// (draft-ietf-idr-bgp-bfd-strict-mode-19 §8.5.1, §8.7.1).
 fn bfd_state_of(flags: &BfdFlags) -> BfdState {
     if flags.admin_down.load(Ordering::Relaxed) {
         BfdState::AdminDown

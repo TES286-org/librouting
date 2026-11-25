@@ -4,6 +4,7 @@
 
 use lr_core::addr::{Asn, RouterId};
 
+use crate::capabilities_extra::SoftwareVersionEncoding;
 use crate::role::{
     ConfederationConfig, OtcRole, PeerRole, PeerTopology, RouteReflectorConfig, RouteServerConfig,
 };
@@ -150,7 +151,7 @@ pub struct PeerConfig {
     /// still runs when `otc_role` is set, but the peer does not learn
     /// the role from the OPEN).
     pub bgp_role: Option<(crate::role::OtcRole, bool)>,
-    /// draft-walton-bgp-hostname-capability-01 FQDN capability
+    /// draft-walton-bgp-hostname-capability-02 FQDN capability
     /// (code 73). When `Some((hostname, domain))` the OPEN advertises
     /// the strings; `None` does not advertise. Either string may be
     /// empty — the encoder handles the empty case.
@@ -163,7 +164,7 @@ pub struct PeerConfig {
     /// it together with [`Self::bfd_strict_mode`] and feed
     /// [`crate::BgpEvent::Bfd`]. Default `false`.
     pub bfd_enabled: bool,
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode capability
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19 BFD Strict-Mode capability
     /// (code 74). When `true` (and [`Self::bfd_enabled`] is also
     /// `true`) the OPEN advertises the capability. When the peer
     /// advertised it too, the FSM holds the KEEPALIVE and the
@@ -171,16 +172,25 @@ pub struct PeerConfig {
     /// a BFD Down in OpenSent/OpenConfirm tears the session down with
     /// Cease / BFD Down (6/10). Default `false`.
     pub bfd_strict_mode: bool,
-    /// `BfdHoldTime` in seconds (draft-ietf-idr-bgp-bfd-strict-mode-13
+    /// `BfdHoldTime` in seconds (draft-ietf-idr-bgp-bfd-strict-mode-19
     /// §3): how long the FSM waits for BFD to come Up while the
     /// negotiated BGP hold time is zero. A non-zero BGP hold time
     /// bounds the wait instead, matching the draft. Default 30.
     pub bfd_hold_time: u16,
-    /// draft-abraitis-bgp-version-capability-11 Software Version
+    /// draft-abraitis-bgp-version-capability-18 Software Version
     /// capability (code 75). When `Some(version)` the OPEN advertises
     /// the UTF-8 string (the draft recommends `product/version` form,
-    /// e.g. `lr/2.0`); `None` does not advertise.
+    /// e.g. `lr/2.0`); `None` does not advertise. An empty string is
+    /// treated as not configured, because the latest draft calls a
+    /// zero-length value an encoding error.
     pub software_version: Option<String>,
+    /// Wire encoding for the Software Version capability. The default
+    /// is [`SoftwareVersionEncoding::Latest`], matching
+    /// draft-abraitis-bgp-version-capability-18 and later;
+    /// [`SoftwareVersionEncoding::Draft11`] emits the older
+    /// length-prefixed value for peers that still expect it. The
+    /// decoder accepts both regardless of this setting.
+    pub software_version_encoding: SoftwareVersionEncoding,
     /// draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT
     /// capability (code 76). The list carries `(afi, safi, limit)`
     /// triples the local speaker advertises as the maximum number of
@@ -282,6 +292,7 @@ impl PeerConfig {
             bfd_strict_mode: false,
             bfd_hold_time: 30,
             software_version: None,
+            software_version_encoding: SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),

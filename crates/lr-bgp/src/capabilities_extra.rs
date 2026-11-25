@@ -1,9 +1,9 @@
 //! Codec methods for the BGP capability codes added in the 2.x
 //! capability block (issue #101): ORF (RFC 5291), Extended Message
 //! (RFC 8654), BGP Role (RFC 9234), FQDN/Hostname
-//! (draft-walton-bgp-hostname-capability-01), BFD Strict-Mode
-//! (draft-ietf-idr-bgp-bfd-strict-mode-13), Software Version
-//! (draft-abraitis-bgp-version-capability-11), PATHS-LIMIT
+//! (draft-walton-bgp-hostname-capability-02), BFD Strict-Mode
+//! (draft-ietf-idr-bgp-bfd-strict-mode-19), Software Version
+//! (draft-abraitis-bgp-version-capability-18), PATHS-LIMIT
 //! (draft-ietf-idr-addpath-paths-limit-00) and Link-Local Next
 //! Hop (draft-ietf-idr-linklocal-capability-06).
 //!
@@ -20,6 +20,58 @@ use crate::capabilities::{Capability, CapabilityCode};
 /// receive ORF entries from peer), 2 = SEND (wants to send ORF
 /// entries), 3 = BOTH.
 pub type OrfEntry = (u16, u8, Vec<(u8, u8)>);
+
+/// Wire encoding of the Software Version capability (code 75).
+///
+/// The draft changed the value layout between revisions. The
+/// encoder follows the selected variant; the decoder accepts both,
+/// because a peer may run either implementation.
+///
+/// - [`Draft11`](Self::Draft11): draft-abraitis-bgp-version-capability-11
+///   and earlier prepend a one-octet length to the UTF-8 string.
+/// - [`Latest`](Self::Latest): draft-abraitis-bgp-version-capability-18
+///   and later carry the UTF-8 string as the whole value; the
+///   capability length already gives its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SoftwareVersionEncoding {
+    /// draft-abraitis-bgp-version-capability-11: one-octet length
+    /// prefix followed by the UTF-8 string.
+    Draft11,
+    /// draft-abraitis-bgp-version-capability-18 and later: the value
+    /// is the UTF-8 string itself. This is the default, matching the
+    /// latest draft.
+    #[default]
+    Latest,
+}
+
+impl SoftwareVersionEncoding {
+    /// The configuration spelling: `"latest"` or `"draft-11"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft11 => "draft-11",
+            Self::Latest => "latest",
+        }
+    }
+}
+
+impl core::str::FromStr for SoftwareVersionEncoding {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "latest" => Ok(Self::Latest),
+            "draft-11" => Ok(Self::Draft11),
+            _ => Err("expected 'latest' or 'draft-11'"),
+        }
+    }
+}
+
+impl core::fmt::Display for SoftwareVersionEncoding {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 impl Capability {
     /// RFC 5291 §3 ORF capability (code 3). The value is a sequence of
@@ -140,7 +192,7 @@ impl Capability {
         Some(self.value[0] & 0x0f)
     }
 
-    /// draft-walton-bgp-hostname-capability-01 FQDN capability (code
+    /// draft-walton-bgp-hostname-capability-02 FQDN capability (code
     /// 73). The value is two length-prefixed UTF-8 strings:
     ///
     /// ```text
@@ -192,7 +244,7 @@ impl Capability {
         Some((hostname.to_string(), domain.to_string()))
     }
 
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode capability
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19 BFD Strict-Mode capability
     /// (code 74). The value is empty — presence alone signals that the
     /// speaker does not fall back to the hold timer when BFD is down:
     /// the session stays down until BFD reports Up.
@@ -206,34 +258,60 @@ impl Capability {
         self.code == CapabilityCode::BfdStrictMode
     }
 
-    /// draft-abraitis-bgp-version-capability-11 Software Version
-    /// capability (code 75). The value is one length-prefixed UTF-8
-    /// string. The draft recommends the identifier format
+    /// draft-abraitis-bgp-version-capability-18 Software Version
+    /// capability (code 75) in the latest encoding. The value is the
+    /// UTF-8 string itself; the capability length carries its size.
+    /// The draft recommends the identifier format
     /// `product/product-version` (e.g. `frrouting/8.4.2`, `lr/2.0`).
-    /// Strings longer than 255 bytes are truncated to fit the 1-octet
-    /// length; the draft's SHOULD clause caps the value at 64 bytes.
+    ///
+    /// The draft's SHOULD clause caps the value at 64 bytes; a longer
+    /// string is truncated on a UTF-8 character boundary. An empty
+    /// string produces an empty value, which the draft says a receiver
+    /// MUST treat as an encoding error and ignore; the FSM helper
+    /// [`crate::extensions::software_version::open_capability`] does
+    /// not advertise such a capability.
     pub fn software_version(version: &str) -> Self {
-        let v = truncate_u8(version.as_bytes());
+        Self::software_version_with(version, SoftwareVersionEncoding::Latest)
+    }
+
+    /// Build the Software Version capability with an explicit draft
+    /// encoding. See [`SoftwareVersionEncoding`] for the two layouts.
+    pub fn software_version_with(version: &str, encoding: SoftwareVersionEncoding) -> Self {
+        let v = truncate_utf8(version.as_bytes(), 64);
         let mut out = Vec::with_capacity(1 + v.len());
-        out.push(v.len() as u8);
+        if encoding == SoftwareVersionEncoding::Draft11 {
+            out.push(v.len() as u8);
+        }
         out.extend_from_slice(v);
         Self::new(CapabilityCode::SoftwareVersion, out)
     }
 
     /// Decode the Software Version capability into a UTF-8 string.
-    /// Returns `None` when the length byte does not match the
-    /// remaining bytes, or when the string is not valid UTF-8.
+    ///
+    /// Both draft encodings are accepted, because the draft's
+    /// implementations coexist:
+    ///
+    /// - When the first octet plus one equals the value length, the
+    ///   value is the draft-11 length-prefixed form.
+    /// - Otherwise the whole value is the latest form's UTF-8 string.
+    ///
+    /// Returns `None` for an empty value (the latest draft calls this
+    /// an encoding error and says to ignore the capability) or when
+    /// the selected slice is not valid UTF-8. The ambiguous case — a
+    /// latest-form string whose first octet happens to equal
+    /// `len - 1` — is resolved in favour of the draft-11 form, the
+    /// same tie-break FRR uses.
     pub fn as_software_version(&self) -> Option<String> {
         if self.code != CapabilityCode::SoftwareVersion || self.value.is_empty() {
             return None;
         }
-        let len = self.value[0] as usize;
-        if 1 + len != self.value.len() {
-            return None;
-        }
-        core::str::from_utf8(&self.value[1..])
-            .ok()
-            .map(String::from)
+        let first = self.value[0] as usize;
+        let bytes = if first + 1 == self.value.len() {
+            &self.value[1..]
+        } else {
+            &self.value[..]
+        };
+        core::str::from_utf8(bytes).ok().map(String::from)
     }
 
     /// draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT capability
@@ -291,10 +369,31 @@ impl Capability {
 }
 
 /// Truncate a byte slice to the maximum length a 1-octet capability
-/// field can carry. Used by the FQDN and Software Version encoders so
-/// a long operator-supplied string cannot overflow the value field.
+/// field can carry. Used by the FQDN encoder so a long
+/// operator-supplied string cannot overflow the value field.
 fn truncate_u8(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(u8::MAX as usize)]
+}
+
+/// Truncate a UTF-8 byte slice to at most `max` bytes without
+/// splitting a character. The Software Version capability is capped
+/// at 64 bytes by a SHOULD, and a mid-character cut would turn a
+/// valid string into an invalid one.
+fn truncate_utf8(bytes: &[u8], max: usize) -> &[u8] {
+    if bytes.len() <= max {
+        return bytes;
+    }
+    let mut end = max;
+    while end > 0 && !is_utf8_boundary(bytes, end) {
+        end -= 1;
+    }
+    &bytes[..end]
+}
+
+/// True when `index` starts a UTF-8 character (or is the end of the
+/// slice): the byte at `index` is not a continuation byte.
+fn is_utf8_boundary(bytes: &[u8], index: usize) -> bool {
+    index == bytes.len() || (bytes[index] & 0xc0) != 0x80
 }
 
 #[cfg(test)]
@@ -449,13 +548,12 @@ mod tests {
     }
 
     #[test]
-    fn software_version_roundtrip() {
+    fn software_version_latest_encoding_roundtrip() {
         let cap = Capability::software_version("lr/2.0");
         assert_eq!(cap.code.to_u8(), 75);
-        let mut expected = Vec::new();
-        expected.push(6);
-        expected.extend_from_slice(b"lr/2.0");
-        assert_eq!(cap.value, expected);
+        // draft-18: the value is the UTF-8 string, with no inner
+        // length byte.
+        assert_eq!(cap.value, b"lr/2.0");
         let v = Capability::encode_set(&[cap]);
         let dec = Capability::decode_set(&v);
         assert_eq!(dec.len(), 1);
@@ -463,40 +561,100 @@ mod tests {
     }
 
     #[test]
-    fn software_version_roundtrip_empty_string() {
+    fn software_version_draft11_encoding_roundtrip() {
+        let cap = Capability::software_version_with("lr/2.0", SoftwareVersionEncoding::Draft11);
+        assert_eq!(cap.value, b"\x06lr/2.0");
+        let v = Capability::encode_set(&[cap]);
+        let dec = Capability::decode_set(&v);
+        assert_eq!(dec.len(), 1);
+        assert_eq!(dec[0].as_software_version(), Some("lr/2.0".to_string()));
+    }
+
+    /// The decoder accepts the latest form and the draft-11 form,
+    /// so two implementations on different revisions still exchange
+    /// the version string.
+    #[test]
+    fn software_version_decodes_both_encodings() {
+        let latest = Capability::new(
+            CapabilityCode::SoftwareVersion,
+            b"frrouting/10.5.1".to_vec(),
+        );
+        assert_eq!(
+            latest.as_software_version(),
+            Some("frrouting/10.5.1".to_string())
+        );
+        let old = Capability::new(
+            CapabilityCode::SoftwareVersion,
+            b"\x0efrrouting/10.5".to_vec(),
+        );
+        assert_eq!(
+            old.as_software_version(),
+            Some("frrouting/10.5".to_string())
+        );
+    }
+
+    /// draft-18 §3: the length must be greater than zero; a zero
+    /// length is an encoding error and the capability is ignored.
+    #[test]
+    fn software_version_empty_value_is_ignored() {
         let cap = Capability::software_version("");
-        assert_eq!(cap.value, vec![0]);
-        assert_eq!(cap.as_software_version(), Some(String::new()));
-    }
-
-    #[test]
-    fn software_version_truncates_to_255() {
-        let long = "x".repeat(300);
-        let cap = Capability::software_version(&long);
-        assert_eq!(cap.value.len(), 1 + 255);
-        assert_eq!(cap.value[0], 255);
-    }
-
-    #[test]
-    fn software_version_rejects_bad_length_and_utf8() {
-        // Empty value — at least the length byte is required.
+        assert!(cap.value.is_empty());
+        assert!(cap.as_software_version().is_none());
         let cap = Capability::new(CapabilityCode::SoftwareVersion, vec![]);
         assert!(cap.as_software_version().is_none());
+    }
 
-        // length byte 5 but only 3 bytes follow.
-        let cap = Capability::new(CapabilityCode::SoftwareVersion, vec![5, b'a', b'b', b'c']);
+    /// The draft's SHOULD caps the value at 64 bytes. A longer
+    /// string is truncated at a character boundary, so the encoded
+    /// value stays valid UTF-8.
+    #[test]
+    fn software_version_truncates_to_64_bytes_on_a_char_boundary() {
+        let long = "x".repeat(300);
+        let cap = Capability::software_version(&long);
+        assert_eq!(cap.value.len(), 64);
+
+        // A 2-byte character straddling the 64-byte limit must be
+        // dropped whole, leaving 63 bytes of valid UTF-8.
+        let mut s = "a".repeat(63);
+        s.push('é'); // 2 bytes in UTF-8
+        let cap = Capability::software_version(&s);
+        assert_eq!(cap.value.len(), 63);
+        assert_eq!(cap.as_software_version(), Some("a".repeat(63)));
+    }
+
+    #[test]
+    fn software_version_rejects_invalid_utf8() {
+        // Latest form with invalid UTF-8.
+        let cap = Capability::new(CapabilityCode::SoftwareVersion, vec![0xff, 0xfe]);
         assert!(cap.as_software_version().is_none());
 
-        // Trailing bytes after the declared length.
-        let cap = Capability::new(
-            CapabilityCode::SoftwareVersion,
-            vec![3, b'a', b'b', b'c', b'd'],
-        );
-        assert!(cap.as_software_version().is_none());
-
-        // Invalid UTF-8.
+        // Draft-11 form whose declared body is invalid UTF-8.
         let cap = Capability::new(CapabilityCode::SoftwareVersion, vec![2, 0xff, 0xfe]);
         assert!(cap.as_software_version().is_none());
+    }
+
+    /// A latest-form string whose first octet happens to be
+    /// `len - 1` is indistinguishable from draft-11. The decoder
+    /// follows FRR and reads it as draft-11.
+    #[test]
+    fn software_version_ambiguous_value_prefers_draft11() {
+        let cap = Capability::new(CapabilityCode::SoftwareVersion, vec![2, b'A', b'B']);
+        assert_eq!(cap.as_software_version(), Some("AB".to_string()));
+    }
+
+    #[test]
+    fn software_version_encoding_parses_config_spelling() {
+        assert_eq!(
+            "latest".parse::<SoftwareVersionEncoding>(),
+            Ok(SoftwareVersionEncoding::Latest)
+        );
+        assert_eq!(
+            "draft-11".parse::<SoftwareVersionEncoding>(),
+            Ok(SoftwareVersionEncoding::Draft11)
+        );
+        assert!("draft-18".parse::<SoftwareVersionEncoding>().is_err());
+        assert_eq!(SoftwareVersionEncoding::Latest.to_string(), "latest");
+        assert_eq!(SoftwareVersionEncoding::Draft11.to_string(), "draft-11");
     }
 
     #[test]

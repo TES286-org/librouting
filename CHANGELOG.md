@@ -545,13 +545,13 @@ daemon-config + DSL key:
   (OPEN error 2/11). The role is reconciled with the existing
   `otc_role` field at finalize time so the OTC attribute path and
   the capability share one source of truth.
-- **draft-walton-bgp-hostname-capability-01 FQDN** (capability
+- **draft-walton-bgp-hostname-capability-02 FQDN** (capability
   code 73) — two length-prefixed UTF-8 strings; the daemon's
   config accepts `hostname = "..."` and `domain_name = "..."`.
   The peer's pair is exposed through `BgpPeer::peer_fqdn` and
   `SessionSummary::peer_fqdn`, and `show session <h>` renders it
   as `peer-fqdn`.
-- **draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode**
+- **draft-ietf-idr-bgp-bfd-strict-mode-19 BFD Strict-Mode**
   (capability code 74) — advertised only when BFD is enabled.
   When both speakers offer it, the FSM holds the KEEPALIVE and
   the OpenConfirm transition until BFD is Up/AdminDown/Disabled
@@ -559,10 +559,16 @@ daemon-config + DSL key:
   when the BGP hold time is zero). BFD Down in
   OpenConfirm/Established sends Cease / BFD Down (6/10) and
   purges the peer's routes.
-- **draft-abraitis-bgp-version-capability-11 Software Version**
-  (capability code 75) — length-prefixed UTF-8 string; the
-  daemon's config accepts `software_version = "lr/2.0"`. The
-  peer's version is exposed through
+- **draft-abraitis-bgp-version-capability-18 Software Version**
+  (capability code 75) — the value is the raw UTF-8 string, capped
+  at the draft's 64-byte SHOULD on a character boundary; an empty
+  value is not advertised (the draft treats zero length as an
+  encoding error). The daemon's config accepts
+  `software_version = "lr/2.0"` and
+  `software_version_encoding = "latest" | "draft-11"`; the
+  `draft-11` setting emits the older one-octet-length-prefixed
+  value for a peer that has not updated, while the decoder accepts
+  both encodings regardless. The peer's version is exposed through
   `BgpPeer::peer_software_version` and
   `SessionSummary::peer_software_version`, rendered by
   `show session <h>` as `peer-software-version`.
@@ -595,6 +601,29 @@ module surfaces: `RouteRefresh` carries an optional
 and `RouterInstance` gains a default `set_bfd_state` no-op plus
 `DefaultRouter::send_orf` / `set_orf_tx`. Pre-2.0 semver debt the
 `api-surface` CI job already tracks. C ABI untouched.
+
+### Added — RFC 9072 Extended Optional Parameters Length
+
+The Software Version capability's latest draft requires RFC 9072,
+and the OPEN encoder previously cast both the Optional Parameters
+Length and each parameter length to one octet, silently corrupting
+an OPEN whose capabilities exceeded 255 octets. The codec now:
+
+- emits the base RFC 4271 encoding while the parameters fit in
+  255 octets, and the RFC 9072 extended encoding above that
+  (Non-Ext OP Len 255, Non-Ext OP Type 255, a two-octet Optional
+  Parameters Length and two-octet per-parameter lengths);
+- accepts the extended encoding on receipt regardless of size, as
+  §2 requires, and keeps the base encoding at the exact 255-octet
+  boundary (the decision is on the type code, not the length);
+- rejects an overrunning extended region or parameter with a
+  Bad OPEN Length NOTIFICATION instead of truncating it;
+- keeps OPEN and KEEPALIVE at the RFC 4271 §4.1 4096-octet ceiling
+  after Extended Message negotiation, per RFC 8654 §4.
+
+The capability block above is unchanged on the wire for the
+common case: an OPEN whose capabilities fit in 255 octets still
+uses the base encoding.
 
 ### Fixed — Link-Local next-hop on a link-local transport (CI regression)
 

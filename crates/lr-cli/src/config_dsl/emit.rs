@@ -657,6 +657,12 @@ fn bgp_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Result<Vec<(String, Str
     if let Some(x) = &cfg.software_version {
         v.push(("software_version".into(), fmt_string(x)));
     }
+    if cfg.software_version_encoding != base.software_version_encoding {
+        v.push((
+            "software_version_encoding".into(),
+            fmt_string(cfg.software_version_encoding.as_str()),
+        ));
+    }
     if !cfg.paths_limit.is_empty() {
         // Quoted so commas inside the `afi:safi:limit,...` list
         // survive the DSL parser's value tokeniser.
@@ -953,6 +959,9 @@ fn peer_block(peer: &crate::daemon_config::PeerSpec) -> Result<Vec<(String, Stri
     }
     if let Some(x) = &peer.software_version {
         v.push(("software_version".into(), fmt_string(x)));
+    }
+    if let Some(x) = peer.software_version_encoding {
+        v.push(("software_version_encoding".into(), fmt_string(x.as_str())));
     }
     if let Some(x) = &peer.paths_limit {
         if !x.is_empty() {
