@@ -34,6 +34,7 @@ bgp {
     hostname "border-a";
     domain_name "example.net";
     software_version "lr/2.0";
+    software_version_encoding "draft-11";
     link_local_next_hop true;
     orf "1:1:64:both";
 }
@@ -51,6 +52,7 @@ bgp {
     hostname "border-b";
     domain_name "example.net";
     software_version "lr/2.0";
+    software_version_encoding "latest";
     link_local_next_hop true;
     orf "1:1:64:both";
 }

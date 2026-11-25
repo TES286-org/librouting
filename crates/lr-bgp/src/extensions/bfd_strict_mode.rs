@@ -1,5 +1,5 @@
 //! BFD Strict-Mode capability
-//! (draft-ietf-idr-bgp-bfd-strict-mode-13) orchestration helper.
+//! (draft-ietf-idr-bgp-bfd-strict-mode-19) orchestration helper.
 //!
 //! The wire-level capability lives in
 //! [`crate::capabilities::Capability::bfd_strict_mode`] (code 74,
@@ -35,7 +35,7 @@ use crate::peer::PeerConfig;
 
 /// BFD session liveness as reported to the BGP FSM.
 ///
-/// The draft's event set (draft-ietf-idr-bgp-bfd-strict-mode-13 §4)
+/// The draft's event set (draft-ietf-idr-bgp-bfd-strict-mode-19 §4)
 /// also carries a `BfdStrict_ConfigChanged` event; configuration
 /// changes are applied by starting a fresh session, so the FSM only
 /// consumes the liveness states below.
