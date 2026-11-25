@@ -189,6 +189,7 @@ pub(super) fn classify_peer_change(old: &PeerSpec, new: &PeerSpec) -> PeerAction
     differs!(fqdn);
     differs!(bfd_strict_mode);
     differs!(software_version);
+    differs!(software_version_encoding);
     differs!(paths_limit);
     differs!(link_local_next_hop);
     differs!(orf);
@@ -1263,6 +1264,10 @@ mod tests {
             |p: &mut PeerSpec| p.max_prefixes = Some(1000),
             |p: &mut PeerSpec| p.gtsm_hops = Some(2),
             |p: &mut PeerSpec| p.paths_limit = Some(vec![(1, 0, 8)]),
+            |p: &mut PeerSpec| {
+                p.software_version_encoding =
+                    Some(lr_bgp::capabilities_extra::SoftwareVersionEncoding::Draft11)
+            },
         ] {
             let a = spec(Some("1.2.3.4:179"), None);
             let mut b = a.clone();

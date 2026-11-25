@@ -1,5 +1,5 @@
 //! BFD Strict-Mode end-to-end tests
-//! (draft-ietf-idr-bgp-bfd-strict-mode-13).
+//! (draft-ietf-idr-bgp-bfd-strict-mode-19).
 //!
 //! The wire capability is inert on its own: the session must hold its
 //! KEEPALIVE and OpenConfirm transition until BFD reports Up when both

@@ -181,10 +181,11 @@ bgp {
     # 2.x capability block (issue #101):
     extended_message true;              # RFC 8654
     bgp_role "provider strict";         # RFC 9234 (role + optional strict)
-    hostname "border-r1";               # draft-walton-bgp-hostname-capability-01
+    hostname "border-r1";               # draft-walton-bgp-hostname-capability-02
     domain_name "example.net";
-    bfd_strict_mode true;               # requires bfd true (draft-ietf-idr-bgp-bfd-strict-mode-13)
-    software_version "lr/2.0";          # draft-abraitis-bgp-version-capability-11
+    bfd_strict_mode true;               # requires bfd true (draft-ietf-idr-bgp-bfd-strict-mode-19)
+    software_version "lr/2.0";          # draft-abraitis-bgp-version-capability-18
+    software_version_encoding "latest"; # "latest" (default) | "draft-11"
     paths_limit "1:1:16,2:1:32";        # draft-ietf-idr-addpath-paths-limit-00
     link_local_next_hop true;           # draft-ietf-idr-linklocal-capability-06
     orf "1:1:64:both,2:1:64:receive";   # RFC 5291 capability modes

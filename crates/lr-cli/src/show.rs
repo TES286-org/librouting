@@ -281,8 +281,8 @@ fn render_session_detail(out: &mut String, s: &SessionSummary) {
         "  last-keepalive-rx-ms={}",
         s.stats.last_keepalive_received_ms,
     );
-    // draft-walton-bgp-hostname-capability-01 and
-    // draft-abraitis-bgp-version-capability-11: name the peer and its
+    // draft-walton-bgp-hostname-capability-02 and
+    // draft-abraitis-bgp-version-capability-18: name the peer and its
     // software so an operator can audit the mix without packet capture.
     if let Some((hostname, domain)) = &s.peer_fqdn {
         let fqdn = if domain.is_empty() {

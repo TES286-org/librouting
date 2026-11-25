@@ -104,7 +104,7 @@ pub trait RouterInstance {
     /// TransportOpen). Call once the transport is connected.
     fn start_session(&mut self, h: SessionHandle) -> Result<(), String>;
     /// Report the BFD liveness for a BGP session
-    /// (draft-ietf-idr-bgp-bfd-strict-mode-13 §4). `None` means BFD is
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-19 §4). `None` means BFD is
     /// not configured for the session. Seeding the state before
     /// [`Self::start_session`] lets the OPEN-time strict-mode gate see
     /// it; later calls drive the FSM's `Bfd` events. A Down transition
@@ -4976,6 +4976,7 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.bfd_enabled = cfg.bfd_enabled;
                 p_cfg.bfd_strict_mode = cfg.bfd_strict_mode;
                 p_cfg.software_version = cfg.software_version.clone();
+                p_cfg.software_version_encoding = cfg.software_version_encoding;
                 p_cfg.paths_limit = cfg.paths_limit.clone();
                 p_cfg.link_local_next_hop = cfg.link_local_next_hop;
                 p_cfg.orf = cfg.orf.clone();
@@ -5243,7 +5244,7 @@ impl RouterInstance for DefaultRouter {
                 None => {
                     // `Bfd_Disabled`: releases an OpenSentBfdUpPending
                     // handshake, ignored elsewhere (draft
-                    // draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5.1).
+                    // draft-ietf-idr-bgp-bfd-strict-mode-19 §8.5.1).
                     // The event sets the FSM's state to Disabled, so
                     // clear it afterwards to keep "not configured"
                     // distinct.

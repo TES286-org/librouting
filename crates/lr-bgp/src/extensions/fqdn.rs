@@ -1,4 +1,4 @@
-//! FQDN/Hostname capability (draft-walton-bgp-hostname-capability-01)
+//! FQDN/Hostname capability (draft-walton-bgp-hostname-capability-02)
 //! orchestration helper.
 //!
 //! The wire-level capability lives in

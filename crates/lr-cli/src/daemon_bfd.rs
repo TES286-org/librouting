@@ -78,7 +78,7 @@ pub(crate) struct BfdFlags {
     pub up: Arc<AtomicBool>,
     /// True while the BFD session is administratively down. The BGP
     /// strict-mode gate treats AdminDown like Up (draft
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13 §8.5.1) while Established
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19 §8.5.1) while Established
     /// sessions ignore it (§8.7.1), so the reactor needs the
     /// distinction rather than folding it into `up`.
     pub admin_down: Arc<AtomicBool>,

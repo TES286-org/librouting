@@ -336,7 +336,7 @@ pub struct SessionConfig {
     /// finalize time from the same config). `None` does not
     /// advertise the capability.
     pub bgp_role: Option<(lr_bgp::role::OtcRole, bool)>,
-    /// FQDN capability (draft-walton-bgp-hostname-capability-01).
+    /// FQDN capability (draft-walton-bgp-hostname-capability-02).
     /// Propagated to [`lr_bgp::PeerConfig::fqdn`].
     pub fqdn: Option<(String, String)>,
     /// Whether BFD is configured and enabled for the session (the
@@ -346,15 +346,19 @@ pub struct SessionConfig {
     /// both true.
     pub bfd_enabled: bool,
     /// BFD Strict-Mode capability
-    /// (draft-ietf-idr-bgp-bfd-strict-mode-13). Propagated to
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-19). Propagated to
     /// [`lr_bgp::PeerConfig::bfd_strict_mode`]. The FSM gates the
     /// KEEPALIVE/OpenConfirm transition on BFD Up when the peer also
     /// advertised the capability.
     pub bfd_strict_mode: bool,
     /// Software Version capability
-    /// (draft-abraitis-bgp-version-capability-11). Propagated to
+    /// (draft-abraitis-bgp-version-capability-18). Propagated to
     /// [`lr_bgp::PeerConfig::software_version`].
     pub software_version: Option<String>,
+    /// Wire encoding for the Software Version capability. Propagated
+    /// to [`lr_bgp::PeerConfig::software_version_encoding`]; the
+    /// decoder accepts both encodings regardless.
+    pub software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding,
     /// PATHS-LIMIT capability
     /// (draft-ietf-idr-addpath-paths-limit-00). The triples are the
     /// local receive limits per AFI/SAFI; the router enforces them on
@@ -448,6 +452,7 @@ impl SessionConfig {
             bfd_enabled: false,
             bfd_strict_mode: false,
             software_version: None,
+            software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),
@@ -465,11 +470,23 @@ impl SessionConfig {
     }
 
     /// Enable the BFD Strict-Mode capability
-    /// (draft-ietf-idr-bgp-bfd-strict-mode-13). Implies
+    /// (draft-ietf-idr-bgp-bfd-strict-mode-19). Implies
     /// [`Self::with_bfd`]: strict-mode has no effect without BFD.
     pub fn with_bfd_strict_mode(mut self) -> Self {
         self.bfd_enabled = true;
         self.bfd_strict_mode = true;
+        self
+    }
+
+    /// Select the outgoing Software Version capability encoding
+    /// (draft-abraitis-bgp-version-capability-18). The default is the
+    /// latest encoding; `Draft11` emits the older length-prefixed
+    /// value for a peer that has not updated.
+    pub fn with_software_version_encoding(
+        mut self,
+        encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding,
+    ) -> Self {
+        self.software_version_encoding = encoding;
         self
     }
 
@@ -769,6 +786,7 @@ impl SessionConfig {
             bfd_enabled: false,
             bfd_strict_mode: false,
             software_version: None,
+            software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),
@@ -836,6 +854,7 @@ impl SessionConfig {
             bfd_enabled: false,
             bfd_strict_mode: false,
             software_version: None,
+            software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
             link_local_next_hop: false,
             orf: Vec::new(),
@@ -949,7 +968,7 @@ pub enum SessionErrorKind {
     /// sends Cease / BFD Down (6/10, RFC 9384 §4.1) and the peer's
     /// routes are purged rather than retained under graceful restart:
     /// the forwarding path failed, so keeping them would blackhole
-    /// traffic (draft-ietf-idr-bgp-bfd-strict-mode-13 §8.7.2).
+    /// traffic (draft-ietf-idr-bgp-bfd-strict-mode-19 §8.7.2).
     BfdDown = 10,
 }
 
@@ -1054,12 +1073,12 @@ pub struct SessionSummary {
     /// transition count, last error kind + time.
     pub stats: SessionStats,
     /// The peer's FQDN/hostname capability value
-    /// (draft-walton-bgp-hostname-capability-01), `(hostname, domain)`.
+    /// (draft-walton-bgp-hostname-capability-02), `(hostname, domain)`.
     /// `None` when the peer did not advertise it (or the session is not
     /// BGP).
     pub peer_fqdn: Option<(String, String)>,
     /// The peer's Software Version capability value
-    /// (draft-abraitis-bgp-version-capability-11). `None` when the peer
+    /// (draft-abraitis-bgp-version-capability-18). `None` when the peer
     /// did not advertise it (or the session is not BGP).
     pub peer_software_version: Option<String>,
 }

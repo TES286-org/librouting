@@ -165,6 +165,10 @@ pub(crate) struct PeerSpec {
     /// Software Version capability — per-peer override of the
     /// router-wide `[bgp] software_version`. `None` inherits.
     pub software_version: Option<String>,
+    /// Software Version capability encoding — per-peer override of
+    /// the router-wide `[bgp] software_version_encoding`. `None`
+    /// inherits.
+    pub software_version_encoding: Option<lr_bgp::capabilities_extra::SoftwareVersionEncoding>,
     /// PATHS-LIMIT capability — per-peer override of the router-wide
     /// `[bgp] paths_limit`. `None` inherits.
     pub paths_limit: Option<Vec<(u16, u8, u16)>>,
@@ -1107,7 +1111,7 @@ pub(crate) struct DaemonConfig {
     /// capability is not advertised but the OTC attribute path
     /// still runs.
     pub bgp_role: Option<(String, bool)>,
-    /// FQDN capability (draft-walton-bgp-hostname-capability-01) —
+    /// FQDN capability (draft-walton-bgp-hostname-capability-02) —
     /// advertised as `(hostname, domain)` from the peer-level
     /// `fqdn` field. The router-wide `[bgp] hostname` /
     /// `[bgp] domain_name` keys set the defaults peers inherit.
@@ -1115,16 +1119,23 @@ pub(crate) struct DaemonConfig {
     /// Domain name component of the FQDN capability. See
     /// [`Self::hostname`].
     pub domain_name: Option<String>,
-    /// draft-ietf-idr-bgp-bfd-strict-mode-13 BFD Strict-Mode capability.
+    /// draft-ietf-idr-bgp-bfd-strict-mode-19 BFD Strict-Mode capability.
     /// Per-peer override (`PeerSpec::bfd_strict_mode`) inherits this
     /// when unset. Default off. Requires `bfd_enabled` for the
     /// strict-mode gate to fire.
     pub bfd_strict_mode: bool,
-    /// draft-abraitis-bgp-version-capability-11 Software Version
+    /// draft-abraitis-bgp-version-capability-18 Software Version
     /// capability — advertised as a UTF-8 string from the
     /// peer-level `software_version` field. The router-wide
     /// `[bgp] software_version` key sets the default peers inherit.
     pub software_version: Option<String>,
+    /// Software Version capability wire encoding. `"latest"` (the
+    /// default) follows draft-abraitis-bgp-version-capability-18 and
+    /// later; `"draft-11"` emits the older length-prefixed value for
+    /// a peer that has not updated. The receiver accepts both
+    /// encodings regardless. The per-peer
+    /// `PeerSpec::software_version_encoding` overrides this.
+    pub software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding,
     /// draft-ietf-idr-addpath-paths-limit-00 PATHS-LIMIT
     /// capability — the router-wide default `(afi, safi, limit)`
     /// triples peers inherit. Empty (the default) does not
@@ -3435,6 +3446,20 @@ fn parse_bgp_role_value(value: &str) -> Result<(String, bool), String> {
     Ok((canonical, strict))
 }
 
+/// Parse a Software Version capability encoding
+/// (draft-abraitis-bgp-version-capability-18) for the `[bgp]
+/// software_version_encoding` and `peer.software_version_encoding`
+/// keys. `"latest"` follows draft-15 and later; `"draft-11"` emits
+/// the older length-prefixed value. The parser is strict so a typo
+/// does not silently select the wrong wire format.
+fn parse_software_version_encoding(
+    value: &str,
+) -> Result<lr_bgp::capabilities_extra::SoftwareVersionEncoding, String> {
+    value.trim().parse().map_err(|_| {
+        format!("bad software_version_encoding '{value}' (expected 'latest' or 'draft-11')")
+    })
+}
+
 /// Parse a PATHS-LIMIT capability value
 /// (draft-ietf-idr-addpath-paths-limit-00) for the `[bgp]
 /// paths_limit` and `peer.paths_limit` keys. The accepted shape is a
@@ -4085,6 +4110,9 @@ pub(crate) fn apply_config_key(
         "bgp.domain_name" => cfg.domain_name = Some(value.to_string()),
         "bgp.bfd_strict_mode" => cfg.bfd_strict_mode = parse_bool(value),
         "bgp.software_version" => cfg.software_version = Some(value.to_string()),
+        "bgp.software_version_encoding" => {
+            cfg.software_version_encoding = parse_software_version_encoding(value)?;
+        }
         "bgp.paths_limit" => cfg.paths_limit = parse_paths_limit(value)?,
         "bgp.link_local_next_hop" => cfg.link_local_next_hop = parse_bool(value),
         "bgp.orf" => cfg.orf = parse_orf_entries(value)?,
@@ -6249,6 +6277,9 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         }
         "bfd_strict_mode" => peer.bfd_strict_mode = Some(parse_bool(value)),
         "software_version" => peer.software_version = Some(value.to_string()),
+        "software_version_encoding" => {
+            peer.software_version_encoding = Some(parse_software_version_encoding(value)?);
+        }
         "paths_limit" => peer.paths_limit = Some(parse_paths_limit(value)?),
         "link_local_next_hop" => peer.link_local_next_hop = Some(parse_bool(value)),
         "orf" => peer.orf = Some(parse_orf_entries(value)?),
