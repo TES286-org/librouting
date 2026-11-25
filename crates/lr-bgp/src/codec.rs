@@ -208,7 +208,16 @@ fn try_decode_frame(
         )));
     }
     let len = u16::from_be_bytes([buf[16], buf[17]]);
-    if !(MIN_LEN..=max_len).contains(&len) {
+    let kind = buf[18];
+    // RFC 8654 §4: the Extended Message ceiling applies to every
+    // message except OPEN and KEEPALIVE, which keep the RFC 4271
+    // §4.1 4096-octet limit even after the capability is negotiated.
+    let ceiling = if kind == BgpMessageType::Open as u8 || kind == BgpMessageType::Keepalive as u8 {
+        MAX_LEN
+    } else {
+        max_len
+    };
+    if !(MIN_LEN..=ceiling).contains(&len) {
         return Err(BgpError::Notification(BgpNotification::new(
             crate::error::BgpErrorCode::Header as u8,
             crate::error::BgpHeaderErrorSubcode::BadMessageLength as u8,
@@ -218,7 +227,6 @@ fn try_decode_frame(
     if buf.len() < len as usize {
         return Ok(None);
     }
-    let kind = buf[18];
     let body_len = (len as usize) - BgpHeader::LEN;
     let body = &buf[BgpHeader::LEN..BgpHeader::LEN + body_len];
     let msg = decode_body(kind, body, rx_v4_add_path)?;
@@ -245,6 +253,15 @@ impl Encoder<BgpMessage> for BgpCodec {
             BgpMessage::RouteRefresh(r) => encode_route_refresh(r, out)?,
         }
         let total = out.position() - start;
+        // RFC 8654 §4: Extended Message does not raise the OPEN or
+        // KEEPALIVE ceiling. Refuse rather than emit a frame a
+        // conforming peer would reject with Bad Message Length.
+        if total > MAX_LEN as usize && matches!(msg, BgpMessage::Open(_) | BgpMessage::Keepalive(_))
+        {
+            return Err(EncodeError::InvalidValue(
+                "OPEN and KEEPALIVE must not exceed 4096 octets",
+            ));
+        }
         out.patch(len_pos, &(total as u16).to_be_bytes())
             .ok_or(EncodeError::BufferFull)?;
         Ok(total)
@@ -314,42 +331,62 @@ fn decode_body(kind: u8, body: &[u8], rx_v4_add_path: bool) -> Result<BgpMessage
     }
 }
 
+fn bad_open_length() -> BgpError {
+    BgpError::Notification(BgpNotification::new(
+        crate::error::BgpErrorCode::Open as u8,
+        crate::error::BgpOpenErrorSubcode::BadOpenLength as u8,
+        vec![],
+    ))
+}
+
 fn decode_open(body: &[u8]) -> Result<Open, BgpError> {
     if body.len() < 10 {
-        return Err(BgpError::Notification(BgpNotification::new(
-            crate::error::BgpErrorCode::Open as u8,
-            crate::error::BgpOpenErrorSubcode::BadOpenLength as u8,
-            vec![],
-        )));
+        return Err(bad_open_length());
     }
     let version = body[0];
     let my_as = lr_core::addr::Asn(u16::from_be_bytes([body[1], body[2]]) as u32);
     let hold_time = u16::from_be_bytes([body[3], body[4]]);
     let bgp_id = lr_core::addr::RouterId(u32::from_be_bytes([body[5], body[6], body[7], body[8]]));
     let params_len = body[9] as usize;
-    if body.len() < 10 + params_len {
-        return Err(BgpError::Notification(BgpNotification::new(
-            crate::error::BgpErrorCode::Open as u8,
-            crate::error::BgpOpenErrorSubcode::BadOpenLength as u8,
-            vec![],
-        )));
+
+    // RFC 9072 §2: when the one-octet Optional Parameters Length is
+    // non-zero, the octet after it decides the encoding. Type code 255
+    // marks the extended format: a two-octet Optional Parameters
+    // Length follows, and every parameter carries a two-octet length.
+    // The one-octet length is ignored in that case. A speaker MUST
+    // accept the extended format even when the parameters fit in 255
+    // octets, so the decision is on the type code alone.
+    let extended = params_len != 0 && body.get(10) == Some(&OpenParam::PARAM_TYPE_EXTENDED_LENGTH);
+    let (mut i, end) = if extended {
+        if body.len() < 13 {
+            return Err(bad_open_length());
+        }
+        let ext_len = u16::from_be_bytes([body[11], body[12]]) as usize;
+        (13, 13 + ext_len)
+    } else {
+        (10, 10 + params_len)
+    };
+    if body.len() < end {
+        return Err(bad_open_length());
     }
     let mut params = Vec::new();
-    let mut i = 10;
-    let end = 10 + params_len;
-    while i + 2 <= end {
-        let pt = body[i];
-        let pl = body[i + 1] as usize;
-        i += 2;
-        // A parameter value must fit inside the declared
+    while i < end {
+        let header_len = if extended { 3 } else { 2 };
+        // A parameter header and its value must fit inside the declared
         // Optional-Parameters-Length region; extending past it is a
         // Bad OPEN Length error, not silently accepted (RFC 4271 §6.2).
+        if i + header_len > end {
+            return Err(bad_open_length());
+        }
+        let pt = body[i];
+        let pl = if extended {
+            u16::from_be_bytes([body[i + 1], body[i + 2]]) as usize
+        } else {
+            body[i + 1] as usize
+        };
+        i += header_len;
         if i + pl > end {
-            return Err(BgpError::Notification(BgpNotification::new(
-                crate::error::BgpErrorCode::Open as u8,
-                crate::error::BgpOpenErrorSubcode::BadOpenLength as u8,
-                vec![],
-            )));
+            return Err(bad_open_length());
         }
         params.push(OpenParam {
             param_type: pt,
@@ -679,17 +716,64 @@ fn encode_open(o: &Open, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
     out.put_u16_be(o.hold_time).ok_or(EncodeError::BufferFull)?;
     out.put_bytes(&o.bgp_id.to_v4_bytes())
         .ok_or(EncodeError::BufferFull)?;
-    let params_pos = out.reserve(1).ok_or(EncodeError::BufferFull)?;
-    let start = out.position();
+
+    // RFC 9072 §2: the base encoding caps the Optional Parameters
+    // field at 255 octets; past that the extended encoding is
+    // mandatory. Compute the size first so the choice is made before
+    // any length field is written — the base encoder used to cast the
+    // total to `u8` and silently corrupt an oversized OPEN.
+    let mut base_len = 0usize;
+    let mut extended_len = 0usize;
     for p in &o.params {
-        out.put_u8(p.param_type).ok_or(EncodeError::BufferFull)?;
-        out.put_u8(p.value.len() as u8)
-            .ok_or(EncodeError::BufferFull)?;
-        out.put_bytes(&p.value).ok_or(EncodeError::BufferFull)?;
+        if p.value.len() > u16::MAX as usize {
+            return Err(EncodeError::InvalidValue(
+                "OPEN optional parameter value exceeds 65535 octets",
+            ));
+        }
+        // The base format has a one-octet, the extended format a
+        // two-octet per-parameter length field.
+        base_len = base_len
+            .checked_add(2 + p.value.len())
+            .ok_or(EncodeError::InvalidValue(
+                "OPEN optional parameters overflow",
+            ))?;
+        extended_len =
+            extended_len
+                .checked_add(3 + p.value.len())
+                .ok_or(EncodeError::InvalidValue(
+                    "OPEN optional parameters overflow",
+                ))?;
     }
-    let plen = (out.position() - start) as u8;
-    out.patch(params_pos, &[plen])
-        .ok_or(EncodeError::BufferFull)?;
+    if base_len > u8::MAX as usize {
+        if extended_len > u16::MAX as usize {
+            return Err(EncodeError::InvalidValue(
+                "OPEN optional parameters exceed 65535 octets",
+            ));
+        }
+        // Non-Ext OP Len SHOULD be 255 and MUST NOT be zero; the
+        // receiver ignores it once the type code says extended.
+        out.put_u8(u8::MAX).ok_or(EncodeError::BufferFull)?;
+        out.put_u8(OpenParam::PARAM_TYPE_EXTENDED_LENGTH)
+            .ok_or(EncodeError::BufferFull)?;
+        out.put_u16_be(extended_len as u16)
+            .ok_or(EncodeError::BufferFull)?;
+        for p in &o.params {
+            out.put_u8(p.param_type).ok_or(EncodeError::BufferFull)?;
+            out.put_u16_be(p.value.len() as u16)
+                .ok_or(EncodeError::BufferFull)?;
+            out.put_bytes(&p.value).ok_or(EncodeError::BufferFull)?;
+        }
+    } else {
+        let params_pos = out.reserve(1).ok_or(EncodeError::BufferFull)?;
+        for p in &o.params {
+            out.put_u8(p.param_type).ok_or(EncodeError::BufferFull)?;
+            out.put_u8(p.value.len() as u8)
+                .ok_or(EncodeError::BufferFull)?;
+            out.put_bytes(&p.value).ok_or(EncodeError::BufferFull)?;
+        }
+        out.patch(params_pos, &[base_len as u8])
+            .ok_or(EncodeError::BufferFull)?;
+    }
     Ok(())
 }
 

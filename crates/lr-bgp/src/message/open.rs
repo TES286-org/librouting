@@ -37,6 +37,11 @@ impl Open {
 
 /// One OPEN optional parameter (RFC 4271 §4.2). Parameter type 2 is
 /// capabilities (RFC 5492).
+///
+/// RFC 9072 reserves type code 255 as the marker that switches the
+/// OPEN to the extended encoding. The codec chooses the encoding from
+/// the total parameter size on transmit and accepts both on receipt;
+/// this struct holds only the decoded parameters, not the framing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenParam {
     pub param_type: u8,
@@ -45,4 +50,8 @@ pub struct OpenParam {
 
 impl OpenParam {
     pub const PARAM_TYPE_CAPABILITY: u8 = 2;
+    /// RFC 9072 §2: "Extended Length" type code that introduces the
+    /// two-octet Optional Parameters Length and the two-octet
+    /// per-parameter lengths.
+    pub const PARAM_TYPE_EXTENDED_LENGTH: u8 = 255;
 }

@@ -99,6 +99,170 @@ fn open_roundtrip() {
     }
 }
 
+/// RFC 9072 §2: when the Optional Parameters field exceeds 255
+/// octets the OPEN switches to the extended encoding — Non-Ext OP Len
+/// 255, Non-Ext OP Type 255, a two-octet Optional Parameters Length,
+/// and a two-octet length for every parameter. Both sides must
+/// round-trip the parameters unchanged.
+#[test]
+fn open_extended_optional_parameters_roundtrip() {
+    let mut open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 1]));
+    open.params.push(OpenParam {
+        param_type: OpenParam::PARAM_TYPE_CAPABILITY,
+        value: vec![0xaa; 300],
+    });
+    open.params.push(OpenParam {
+        param_type: OpenParam::PARAM_TYPE_CAPABILITY,
+        value: vec![0xbb; 100],
+    });
+    let msg = BgpMessage::Open(open.clone());
+    let bytes = BgpCodec::new().encode_vec(&msg).unwrap();
+    let body = &bytes[19..];
+    assert_eq!(body[9], 255, "Non-Ext OP Len");
+    assert_eq!(
+        body[10],
+        OpenParam::PARAM_TYPE_EXTENDED_LENGTH,
+        "Non-Ext OP Type"
+    );
+    // Extended parameters carry 3 octets of overhead each: one type
+    // and a two-octet length.
+    assert_eq!(
+        u16::from_be_bytes([body[11], body[12]]) as usize,
+        3 + 300 + 3 + 100
+    );
+    assert_eq!(
+        &body[13..16],
+        &[OpenParam::PARAM_TYPE_CAPABILITY, 0x01, 0x2c]
+    );
+
+    match roundtrip(msg, false) {
+        BgpMessage::Open(o) => assert_eq!(o.params, open.params),
+        other => panic!("expected OPEN, got {other:?}"),
+    }
+}
+
+/// RFC 9072 §2: the base encoding stays in use while the parameters
+/// fit in 255 octets, even when the one-octet length field itself is
+/// 255. The decoder must key on the type code, not on the length.
+#[test]
+fn open_uses_base_encoding_at_the_255_octet_boundary() {
+    let mut open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 1]));
+    open.params.push(OpenParam {
+        param_type: OpenParam::PARAM_TYPE_CAPABILITY,
+        value: vec![0xaa; 253],
+    });
+    let msg = BgpMessage::Open(open.clone());
+    let bytes = BgpCodec::new().encode_vec(&msg).unwrap();
+    let body = &bytes[19..];
+    assert_eq!(body[9], 255, "base encoding fits exactly");
+    assert_eq!(
+        body[10],
+        OpenParam::PARAM_TYPE_CAPABILITY,
+        "first parameter type, not the extended marker"
+    );
+    match roundtrip(msg, false) {
+        BgpMessage::Open(o) => assert_eq!(o.params, open.params),
+        other => panic!("expected OPEN, got {other:?}"),
+    }
+}
+
+/// RFC 9072 §2: a receiver MUST accept the extended format even when
+/// the parameters would fit in the base format. Hand-build a short
+/// extended OPEN and decode it.
+#[test]
+fn open_decodes_extended_encoding_below_255_octets() {
+    let body = [
+        4, // version
+        0xfc, 0x00, // my AS 64512
+        0x00, 90, // hold time
+        10, 0, 0, 1,   // BGP identifier
+        255, // Non-Ext OP Len (ignored)
+        255, // Non-Ext OP Type: extended
+        0, 5, // Extended Optional Parameters Length
+        2, 0, 2, 0xaa, 0xbb, // one capability parameter
+    ];
+    let mut frame = vec![0xffu8; 16];
+    frame.extend_from_slice(&(19 + body.len() as u16).to_be_bytes());
+    frame.push(crate::message::BgpMessageType::Open as u8);
+    frame.extend_from_slice(&body);
+
+    let mut codec = BgpCodec::new();
+    match codec.decode_slice(&frame).unwrap().unwrap() {
+        BgpMessage::Open(o) => {
+            assert_eq!(o.params.len(), 1);
+            assert_eq!(o.params[0].param_type, OpenParam::PARAM_TYPE_CAPABILITY);
+            assert_eq!(o.params[0].value, vec![0xaa, 0xbb]);
+        }
+        other => panic!("expected OPEN, got {other:?}"),
+    }
+}
+
+/// A declared extended parameter region that runs past the message is
+/// a Bad OPEN Length error, not a silent truncation.
+#[test]
+fn open_rejects_truncated_extended_parameters() {
+    let body = [
+        4, 0xfc, 0x00, 0x00, 90, 10, 0, 0, 1, //
+        255, 255, 0, 5, // extended length 5
+        2, 0, 2, 0xaa, // only four parameter bytes follow
+    ];
+    let mut frame = vec![0xffu8; 16];
+    frame.extend_from_slice(&(19 + body.len() as u16).to_be_bytes());
+    frame.push(crate::message::BgpMessageType::Open as u8);
+    frame.extend_from_slice(&body);
+
+    let err = BgpCodec::new().decode_slice(&frame).unwrap_err();
+    match err {
+        BgpError::Notification(n) => {
+            assert_eq!(n.error_code, crate::error::BgpErrorCode::Open as u8);
+            assert_eq!(
+                n.error_subcode,
+                crate::error::BgpOpenErrorSubcode::BadOpenLength as u8
+            );
+        }
+        other => panic!("expected a NOTIFICATION, got {other:?}"),
+    }
+}
+
+/// A parameter whose extended length overruns the declared region is a
+/// Bad OPEN Length error.
+#[test]
+fn open_rejects_extended_parameter_overrunning_the_region() {
+    let body = [
+        4, 0xfc, 0x00, 0x00, 90, 10, 0, 0, 1, //
+        255, 255, 0, 4, // extended length 4
+        2, 0, 5, 0xaa, // parameter claims 5 bytes, only 1 present
+    ];
+    let mut frame = vec![0xffu8; 16];
+    frame.extend_from_slice(&(19 + body.len() as u16).to_be_bytes());
+    frame.push(crate::message::BgpMessageType::Open as u8);
+    frame.extend_from_slice(&body);
+
+    let err = BgpCodec::new().decode_slice(&frame).unwrap_err();
+    assert!(
+        matches!(err, BgpError::Notification(_)),
+        "expected a NOTIFICATION, got {err:?}"
+    );
+}
+
+/// The encoder refuses a parameter value that cannot fit the
+/// two-octet extended length field instead of truncating it.
+#[test]
+fn open_rejects_parameter_value_above_65535_octets() {
+    let mut open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 1]));
+    open.params.push(OpenParam {
+        param_type: OpenParam::PARAM_TYPE_CAPABILITY,
+        value: vec![0u8; 65536],
+    });
+    let err = BgpCodec::new()
+        .encode_vec(&BgpMessage::Open(open))
+        .unwrap_err();
+    assert!(
+        matches!(err, EncodeError::InvalidValue(_)),
+        "expected InvalidValue, got {err:?}"
+    );
+}
+
 #[test]
 fn update_with_attributes() {
     let mut u = Update::new();
@@ -480,6 +644,44 @@ fn extended_message_raises_and_lowers_the_length_ceiling() {
     assert!(
         matches!(msg, crate::message::BgpMessage::Update(_)),
         "expected an UPDATE, got {msg:?}"
+    );
+}
+
+/// RFC 8654 §4: Extended Message applies to every message except
+/// OPEN and KEEPALIVE, which keep the RFC 4271 §4.1 4096-octet
+/// ceiling even after negotiation. RFC 9072 extends the optional
+/// parameter length fields, not the OPEN message size.
+#[test]
+fn extended_message_does_not_raise_open_or_keepalive_ceiling() {
+    let mut codec = BgpCodec::new();
+    codec.set_extended_message(true);
+
+    for kind in [
+        crate::message::BgpMessageType::Open as u8,
+        crate::message::BgpMessageType::Keepalive as u8,
+    ] {
+        let mut big = vec![0xffu8; 16];
+        big.extend_from_slice(&5000u16.to_be_bytes());
+        big.push(kind);
+        big.resize(5000, 0);
+        let err = codec.decode_slice(&big).unwrap_err();
+        assert!(
+            matches!(err, BgpError::Notification(_)),
+            "message type {kind} must keep the 4096-octet ceiling"
+        );
+    }
+
+    // An OPEN whose extended parameters push the frame past 4096 is
+    // refused by the encoder, even with the negotiated ceiling.
+    let mut open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 1]));
+    open.params.push(OpenParam {
+        param_type: OpenParam::PARAM_TYPE_CAPABILITY,
+        value: vec![0u8; 4096],
+    });
+    let err = codec.encode_vec(&BgpMessage::Open(open)).unwrap_err();
+    assert!(
+        matches!(err, EncodeError::InvalidValue(_)),
+        "expected InvalidValue, got {err:?}"
     );
 }
 
