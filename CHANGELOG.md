@@ -36,6 +36,25 @@ regressions (issue #101)
   the intentional debt and on the post-baseline `lr-peer-health`
   crate the tool cannot find in the v1.8.0 checkout. Aligned with
   ci.yml; both gates return to blocking at the 2.0.0 cut.
+### Fixed — two timing-sensitive CI tests read arrival order instead
+of the settled state (issue #101)
+
+- **`accept_reactor::tests::accept_retries_a_connection_queued_by_a_failed_accept`**
+  (`lr-cli`): the test slept a fixed 450 ms and then asserted the
+  reactor had attempted the accept at least twice; on a loaded CI
+  runner the reactor thread's first attempt can land past any fixed
+  sleep, which failed the Coverage job on the d1b57f57 nightly run.
+  The test now polls for the retried-and-served outcome within a
+  5 s budget and fails with the live counters if it never settles.
+- **The `daemon_collision` convergence asserts** (`lr-cli`): the
+  tests asserted "exactly one of session #1/#2 ever logged
+  Established", but a collision loser that completes its handshake
+  inside the same poll batch as the winner legitimately logs
+  Established before the resolver closes it — the CI run on the SRH
+  wire-order PR failed with "got #1=true #2=true". The asserts now
+  wait (bounded) for the loser's teardown and require exactly one
+  session whose LAST logged state is Established, which is the
+  RFC 4271 §6.8 convergence invariant.
 
 ### Fixed — the C ABI header actually contains every export, with the
 right shapes and values (issue #101; BREAKING CHANGE for symbols that
