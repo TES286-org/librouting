@@ -406,10 +406,16 @@ impl BabelRuntime {
             return;
         }
         // AE 0 = wildcard retraction; AE 1 = IPv4; AE 2 = IPv6;
-        // AE 4 = IPv4-via-IPv6 (RFC 9229 §2.4).
+        // AE 4 = IPv4-via-IPv6 (RFC 9229 §2.4). The Update has been
+        // through `PrefixCache::expand`, so `prefix.len() ==
+        // ceil(plen/8)` always holds: an empty prefix means Plen=0 —
+        // the default route, whose in-band octets are "(Plen/8 -
+        // Omitted) rounded upwards" = 0 with "the remaining octets
+        // set to 0" (RFC 8966 §4.6.9) — not a malformed Update. The
+        // length caps stay as a defensive bound on the family width.
         let prefix = match u.ae {
             1 | 4 => {
-                if u.prefix.is_empty() || u.prefix.len() > 4 {
+                if u.prefix.len() > 4 {
                     return;
                 }
                 let mut addr = [0u8; 4];
@@ -417,7 +423,7 @@ impl BabelRuntime {
                 Prefix::new_v4(addr, u.prefix_len)
             }
             2 => {
-                if u.prefix.is_empty() || u.prefix.len() > 16 {
+                if u.prefix.len() > 16 {
                     return;
                 }
                 let mut addr = [0u8; 16];
