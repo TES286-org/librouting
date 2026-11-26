@@ -41939,35 +41939,35 @@
       "value": "5"
     },
     {
-      "name": "LR_COMMUNITY_KIND_CUSTOM",
+      "name": "LR_COMMUNITY_KIND_NO_EXPORT",
       "value": "0"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_EXPORT",
+      "name": "LR_COMMUNITY_KIND_NO_ADVERTISE",
       "value": "1"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_ADVERTISE",
+      "name": "LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED",
       "value": "2"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED",
+      "name": "LR_COMMUNITY_KIND_NO_PEER",
       "value": "3"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_PEER",
+      "name": "LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN",
       "value": "4"
     },
     {
-      "name": "LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN",
+      "name": "LR_COMMUNITY_KIND_LLGR_STALE",
       "value": "5"
     },
     {
-      "name": "LR_COMMUNITY_KIND_LLGR_STALE",
+      "name": "LR_COMMUNITY_KIND_NO_LLGR",
       "value": "6"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_LLGR",
+      "name": "LR_COMMUNITY_KIND_CUSTOM",
       "value": "7"
     },
     {
@@ -43471,24 +43471,28 @@
       "value": "6"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV4_UNICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_GEO_PEER_TABLE",
       "value": "7"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV4_MULTICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV4_UNICAST_ADDPATH",
       "value": "8"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV6_UNICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV4_MULTICAST_ADDPATH",
       "value": "9"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV6_MULTICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV6_UNICAST_ADDPATH",
       "value": "10"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_GENERIC_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV6_MULTICAST_ADDPATH",
       "value": "11"
+    },
+    {
+      "name": "LR_MRT_TDV2_RIB_GENERIC_ADDPATH",
+      "value": "12"
     },
     {
       "name": "LR_MRT_BGP4MP_STATE_CHANGE",

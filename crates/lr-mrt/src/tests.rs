@@ -680,18 +680,20 @@ fn decodes_rib_generic_v4() {
 
 #[test]
 fn decodes_rib_generic_v6_addpath() {
-    // RFC 6396 §4.3.3 + RFC 8050: RIB_GENERIC_ADDPATH with AFI=2
-    // (IPv6), SAFI=2 (multicast). The entry carries a path id.
+    // RFC 6396 §4.3.3 + RFC 8050 §4.2: RIB_GENERIC_ADDPATH (subtype
+    // 12) keeps the plain RIB_GENERIC entry layout — the Path
+    // Identifier rides in the record's Add-Path NLRI, before the
+    // prefix (RFC 7911 §3). Every entry of the record shares it.
     let body = &[
         0x00, 0x00, 0x00, 0x11, // sequence 0x11
         0x00, 0x02, // AFI = IPv6
         0x02, // SAFI = multicast
+        0x00, 0x00, 0x00, 0x05, // NLRI path identifier 5
         0x40, // prefix length 64
         0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, // 2001:db8::
         0x00, 0x01, // entry count 1
         0x00, 0x04, // peer index 4
         0x6a, 0x91, 0xc8, 0x5f, // originated time
-        0x00, 0x00, 0x00, 0x05, // path identifier 5
         0x00, 0x00, // attribute length 0
     ];
     let mut wire = mrt_header(tdv2_subtype::RIB_GENERIC_ADDPATH, body.len() as u32).to_vec();
@@ -731,4 +733,294 @@ fn rib_generic_unknown_afi_stays_unknown() {
         matches!(&records[0], MrtRecord::Unknown { subtype, .. } if *subtype == tdv2_subtype::RIB_GENERIC),
         "unknown AFI must surface as Unknown, not as a misparsed Rib"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Audit H65 batch: RFC 8050 subtype numbering, RIB_GENERIC_ADDPATH
+// NLRI path id, BGP4MP _LOCAL subtypes, header timestamps, the
+// reduced MP_REACH form, prefix trailing-bit masking and truncation
+// reporting.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tdv2_subtype_values_match_the_registries() {
+    // RFC 6396 §4.3, RFC 6397 §8 and RFC 8050 §5.2 literal values.
+    // The pre-correction constants started the Add-Path block at 7,
+    // colliding with GEO_PEER_TABLE and shifting the rest down.
+    assert_eq!(tdv2_subtype::GEO_PEER_TABLE, 7);
+    assert_eq!(tdv2_subtype::RIB_IPV4_UNICAST_ADDPATH, 8);
+    assert_eq!(tdv2_subtype::RIB_IPV4_MULTICAST_ADDPATH, 9);
+    assert_eq!(tdv2_subtype::RIB_IPV6_UNICAST_ADDPATH, 10);
+    assert_eq!(tdv2_subtype::RIB_IPV6_MULTICAST_ADDPATH, 11);
+    assert_eq!(tdv2_subtype::RIB_GENERIC_ADDPATH, 12);
+}
+
+#[test]
+fn geo_peer_table_subtype_7_is_unknown() {
+    // RFC 6397 §4.1 peer entries carry geo coordinates this crate
+    // does not model — the record must stay opaque, not misparse as
+    // an add-path RIB table (the old numbering's collision).
+    let mut wire = mrt_header(tdv2_subtype::GEO_PEER_TABLE, 8).to_vec();
+    wire.extend_from_slice(&[0x02, 0x02, 0x02, 0x02, 0, 0, 0, 0]);
+    let records = reader_drain(&wire);
+    assert_eq!(records.len(), 1);
+    assert!(
+        matches!(&records[0], MrtRecord::Unknown { subtype, .. } if *subtype == 7),
+        "GEO_PEER_TABLE must surface as Unknown"
+    );
+}
+
+#[test]
+fn bgp4mp_message_local_subtype_6_decodes_as_message() {
+    // RFC 6396 §4.4.5: the fields are identical to BGP4MP_MESSAGE —
+    // 2-byte AS, ifindex, AF, IPv4 peer/local, then the BGP PDU.
+    let mut body = Vec::new();
+    body.extend_from_slice(&65010u16.to_be_bytes());
+    body.extend_from_slice(&65000u16.to_be_bytes());
+    body.extend_from_slice(&9u16.to_be_bytes());
+    body.extend_from_slice(&1u16.to_be_bytes());
+    body.extend_from_slice(&[192, 0, 2, 2]);
+    body.extend_from_slice(&[192, 0, 2, 1]);
+    let mut msg = vec![0xff; 16];
+    msg.extend_from_slice(&19u16.to_be_bytes());
+    msg.push(4); // KEEPALIVE
+    body.extend_from_slice(&msg);
+
+    let mut record = Vec::new();
+    record.extend_from_slice(&0x6a91_c861u32.to_be_bytes()); // timestamp
+    record.extend_from_slice(&msg_type::BGP4MP.to_be_bytes());
+    record.extend_from_slice(&bgp4mp_subtype::MESSAGE_LOCAL.to_be_bytes());
+    record.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    record.extend_from_slice(&body);
+
+    let mut reader = MrtReader::new();
+    let decoded = reader.decode_slice(&record).unwrap().unwrap();
+    let MrtRecord::Bgp4MpMessage(m) = decoded else {
+        panic!("expected a BGP4MP message, got {:?}", decoded);
+    };
+    assert_eq!(m.common.peer_as, Asn(65010));
+    assert_eq!(m.common.ifindex, 9);
+    assert_eq!(m.message.len(), 19);
+    assert_eq!(m.timestamp_s, 0x6a91_c861, "header timestamp must surface");
+    assert_eq!(m.timestamp_us, None, "plain BGP4MP has no microsecond field");
+}
+
+#[test]
+fn bgp4mp_et_timestamp_micros_surface() {
+    // RFC 6396 §3: the ET types insert a 4-byte microsecond field
+    // between the common header and the body.
+    let mut body = Vec::new();
+    body.extend_from_slice(&65010u16.to_be_bytes());
+    body.extend_from_slice(&65000u16.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.extend_from_slice(&1u16.to_be_bytes());
+    body.extend_from_slice(&[10, 0, 0, 2]);
+    body.extend_from_slice(&[10, 0, 0, 1]);
+    body.extend_from_slice(&1u16.to_be_bytes()); // Idle
+    body.extend_from_slice(&6u16.to_be_bytes()); // Established
+
+    let mut record = Vec::new();
+    record.extend_from_slice(&77u32.to_be_bytes()); // timestamp secs
+    record.extend_from_slice(&msg_type::BGP4MP_ET.to_be_bytes());
+    record.extend_from_slice(&bgp4mp_subtype::STATE_CHANGE.to_be_bytes());
+    record.extend_from_slice(&((4 + body.len()) as u32).to_be_bytes());
+    record.extend_from_slice(&500_000u32.to_be_bytes()); // micros
+    record.extend_from_slice(&body);
+
+    let mut reader = MrtReader::new();
+    let decoded = reader.decode_slice(&record).unwrap().unwrap();
+    let MrtRecord::Bgp4MpStateChange(sc) = decoded else {
+        panic!("expected a state change");
+    };
+    assert_eq!(sc.timestamp_s, 77);
+    assert_eq!(sc.timestamp_us, Some(500_000));
+    assert_eq!(sc.new_state, 6);
+}
+
+#[test]
+fn mp_reach_reduced_rfc_6396_form_interprets() {
+    // RFC 6396 §4.3.4: inside a RIB entry the MP_REACH_NLRI value is
+    // `next_hop_length + next hop` — AFI/SAFI/Reserved omitted. This
+    // is the form conformant dumps (and this crate's encoder) write.
+    let mut attrs = Vec::new();
+    attrs.extend_from_slice(&[0x80, 0x0e, 17]); // flags, type 14, len 17
+    attrs.push(16); // next-hop length
+    attrs.extend_from_slice(&[0; 15]);
+    attrs.push(1); // ::1
+
+    let entry = RibEntry {
+        peer_index: 0,
+        originated_time: 0,
+        path_id: 0,
+        attributes: attrs,
+    };
+    let summary = walk_attributes(&entry);
+    assert_eq!(
+        summary.next_hop,
+        Some(IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]))
+    );
+}
+
+#[test]
+fn encode_attributes_reduces_mp_reach_to_rib_entry_form() {
+    // The encoder must write the RFC 6396 §4.3.4 reduced form into RIB
+    // entries, not the full RFC 4760 UPDATE form.
+    use lr_core::attr::{AttrTag, Attribute};
+    let mut mp = Vec::new();
+    mp.extend_from_slice(&[0, 2]); // AFI 2
+    mp.push(1); // SAFI 1
+    mp.push(16); // next-hop length
+    mp.extend_from_slice(&[0; 15]);
+    mp.push(1); // ::1
+    mp.push(0); // reserved
+    let mut attrs = lr_core::attr::Attributes::new();
+    attrs.insert(Attribute {
+        tag: AttrTag(14),
+        flags: 0x80,
+        value: mp,
+    });
+    let wire = encode_attributes(&attrs);
+    assert_eq!(
+        wire,
+        vec![
+            0x80, 0x0e, 17, // flags | type 14 | len
+            16, // reduced: next-hop length
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, // ::1
+        ],
+        "the AFI/SAFI/Reserved fields must be dropped"
+    );
+    // The reduced bytes re-interpret to the same next hop.
+    let decoded = decode_attributes(&wire);
+    let a = decoded.get(AttrTag(14)).unwrap();
+    let _ = a;
+    let entry = RibEntry {
+        peer_index: 0,
+        originated_time: 0,
+        path_id: 0,
+        attributes: wire.clone(),
+    };
+    let summary = walk_attributes(&entry);
+    assert_eq!(summary.next_hop, Some("::1".parse().unwrap()));
+}
+
+#[test]
+fn encode_attributes_drops_all_private_tags_from_243() {
+    // The private block starts at 243 (peer-health stale/tier, source
+    // address, IGP metric, protocol router ids) — not at 254.
+    use lr_core::attr::{AttrTag, Attribute};
+    let mut attrs = lr_core::attr::Attributes::new();
+    attrs.insert(Attribute {
+        tag: AttrTag(1),
+        flags: 0x40,
+        value: vec![0],
+    });
+    attrs.insert(Attribute {
+        tag: AttrTag(243),
+        flags: 0x80,
+        value: vec![1, 2, 3],
+    });
+    attrs.insert(Attribute {
+        tag: AttrTag(253),
+        flags: 0x80,
+        value: vec![4, 5, 6],
+    });
+    let wire = encode_attributes(&attrs);
+    assert_eq!(wire, vec![0x40, 0x01, 0x01, 0x00]);
+}
+
+#[test]
+fn prefix_decode_masks_irrelevant_trailing_bits() {
+    // RFC 6396 §4.3.2: "The value of trailing bits is irrelevant."
+    // The same prefix with different padding must decode equal.
+    // A /22 packs 3 octets with the last 2 bits irrelevant.
+    let body_a = &[
+        0x00, 0x00, 0x00, 0x01, // sequence
+        0x16, // prefix length 22
+        0xc6, 0x33, 0x64, // 198.51.100 (last octet masked to 0x64)
+        0x00, 0x01, // entry count
+        0x00, 0x00, // peer index
+        0x6a, 0x91, 0xc8, 0x5f, // originated time
+        0x00, 0x00, // attribute length 0
+    ];
+    let mut body_b = body_a.to_vec();
+    // body layout: sequence(4) prefix_len(1) prefix(3) — flip the two
+    // irrelevant trailing bits of the third prefix octet (0x64 ->
+    // 0x66: same /22 network, different padding).
+    body_b[7] = 0x66;
+    let mut wire_a = mrt_header(tdv2_subtype::RIB_IPV4_UNICAST, body_a.len() as u32).to_vec();
+    wire_a.extend_from_slice(body_a);
+    let mut wire_b = mrt_header(tdv2_subtype::RIB_IPV4_UNICAST, body_b.len() as u32).to_vec();
+    wire_b.extend_from_slice(&body_b);
+    let MrtRecord::Rib(a) = reader_drain(&wire_a).remove(0) else {
+        panic!("expected RIB record");
+    };
+    let MrtRecord::Rib(b) = reader_drain(&wire_b).remove(0) else {
+        panic!("expected RIB record");
+    };
+    assert_eq!(a.prefix, b.prefix);
+    assert_eq!(
+        b.prefix, "198.51.100.0/22".parse::<Prefix>().unwrap(),
+        "the two irrelevant trailing bits must be masked (0x66 -> 0x64)"
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn parse_file_reports_trailing_truncation() {
+    let wire = encode_peer_index_table(1, 5, "", &[]).unwrap();
+    let path = std::env::temp_dir().join(format!("lr_mrt_trunc_{}.mrt", std::process::id()));
+    std::fs::write(&path, &wire[..wire.len() - 3]).unwrap();
+    let err = parse_file(path.to_str().unwrap()).unwrap_err();
+    assert!(
+        err.detail.as_deref().unwrap_or_default().contains("truncation"),
+        "expected a truncation error, got {err:?}"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn rib_table_over_sixtyfour_kib_total_attributes_encodes() {
+    // The record length is a 32-bit field and each entry has its own
+    // 16-bit Attribute Length: a 90 KiB aggregate across 300 entries
+    // is legal and must encode (the old sum-bound rejected it).
+    let entries: Vec<RibEntry> = (0..300)
+        .map(|i| RibEntry {
+            peer_index: i as u16,
+            originated_time: 0,
+            path_id: 0,
+            attributes: vec![0u8; 300],
+        })
+        .collect();
+    let table = RibTable {
+        sequence: 0,
+        prefix: "198.51.100.0/24".parse().unwrap(),
+        add_path: false,
+        entries,
+    };
+    let wire = encode_rib_table(1, &table).unwrap();
+    // Round-trips.
+    let mut reader = MrtReader::new();
+    let MrtRecord::Rib(decoded) = reader.decode_slice(&wire).unwrap().unwrap() else {
+        panic!("expected RIB record");
+    };
+    assert_eq!(decoded.entries.len(), 300);
+    assert_eq!(decoded.entries[0].attributes.len(), 300);
+}
+
+#[test]
+fn rib_entry_attribute_set_over_u16_errors() {
+    // A SINGLE entry whose attribute set exceeds 65 535 octets cannot
+    // be expressed in the 16-bit Attribute Length.
+    let table = RibTable {
+        sequence: 0,
+        prefix: "198.51.100.0/24".parse().unwrap(),
+        add_path: false,
+        entries: vec![RibEntry {
+            peer_index: 0,
+            originated_time: 0,
+            path_id: 0,
+            attributes: vec![0u8; 65_536],
+        }],
+    };
+    assert!(encode_rib_table(1, &table).is_err());
 }

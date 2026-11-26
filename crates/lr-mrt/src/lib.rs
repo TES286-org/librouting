@@ -52,7 +52,8 @@ pub mod msg_type {
     pub const BGP4MP_ET: u16 = 17;
 }
 
-/// TABLE_DUMP_V2 subtypes (RFC 6396 §4.3).
+/// TABLE_DUMP_V2 subtypes (RFC 6396 §4.3; Add-Path values per
+/// RFC 8050 §5.2, geo value per RFC 6397 §8).
 pub mod tdv2_subtype {
     pub const PEER_INDEX_TABLE: u16 = 1;
     pub const RIB_IPV4_UNICAST: u16 = 2;
@@ -60,28 +61,38 @@ pub mod tdv2_subtype {
     pub const RIB_IPV6_UNICAST: u16 = 4;
     pub const RIB_IPV6_MULTICAST: u16 = 5;
     pub const RIB_GENERIC: u16 = 6;
-    pub const RIB_IPV4_UNICAST_ADDPATH: u16 = 7;
-    pub const RIB_IPV4_MULTICAST_ADDPATH: u16 = 8;
-    pub const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
-    pub const RIB_IPV6_MULTICAST_ADDPATH: u16 = 10;
-    pub const RIB_GENERIC_ADDPATH: u16 = 11;
+    /// RFC 6397 §4.1 geo-located peer table. The peer entries carry
+    /// latitude/longitude floats this crate does not model, so the
+    /// subtype decodes as [`MrtRecord::Unknown`].
+    pub const GEO_PEER_TABLE: u16 = 7;
+    /// RFC 8050 §4.1: the per-entry layout gains a 4-octet Path
+    /// Identifier.
+    pub const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
+    pub const RIB_IPV4_MULTICAST_ADDPATH: u16 = 9;
+    pub const RIB_IPV6_UNICAST_ADDPATH: u16 = 10;
+    pub const RIB_IPV6_MULTICAST_ADDPATH: u16 = 11;
+    /// RFC 8050 §4.2: entries keep the RFC 6396 §4.3.3 layout; the
+    /// Path Identifier rides in the record's Add-Path NLRI.
+    pub const RIB_GENERIC_ADDPATH: u16 = 12;
 }
 
 /// BGP4MP subtypes (RFC 6396 §4.4).
 pub mod bgp4mp_subtype {
     pub const STATE_CHANGE: u16 = 0;
     pub const MESSAGE: u16 = 1;
-    /// Deprecated pre-publication layout (Zebra `BGP4MP_ENTRY`) — decodes
-    /// as [`MrtRecord::Unknown`].
+    /// Deprecated pre-publication layout (Zebra `BGP4MP_ENTRY`,
+    /// RFC 6396 §B.2.6) — decodes as [`MrtRecord::Unknown`].
     pub const ENTRY: u16 = 2;
-    /// Deprecated pre-publication layout (Zebra `BGP4MP_SNAPSHOT`) —
-    /// decodes as [`MrtRecord::Unknown`].
+    /// Deprecated pre-publication layout (Zebra `BGP4MP_SNAPSHOT`,
+    /// RFC 6396 §B.2.6) — decodes as [`MrtRecord::Unknown`].
     pub const SNAPSHOT: u16 = 3;
     pub const MESSAGE_AS4: u16 = 4;
     pub const STATE_CHANGE_AS4: u16 = 5;
-    /// Deprecated — decodes as [`MrtRecord::Unknown`].
+    /// RFC 6396 §4.4.5: a locally generated message; the layout is
+    /// identical to [`MESSAGE`](Self::MESSAGE).
     pub const MESSAGE_LOCAL: u16 = 6;
-    /// Deprecated — decodes as [`MrtRecord::Unknown`].
+    /// RFC 6396 §4.4.6: a locally generated message; the layout is
+    /// identical to [`MESSAGE_AS4`](Self::MESSAGE_AS4).
     pub const MESSAGE_AS4_LOCAL: u16 = 7;
 }
 
@@ -157,6 +168,13 @@ pub struct Bgp4MpStateChange {
     pub common: Bgp4MpCommon,
     pub old_state: u16,
     pub new_state: u16,
+    /// MRT common-header timestamp (RFC 6396 §2), seconds. BGP4MP
+    /// records carry no other temporal data, so the decode path
+    /// surfaces it here instead of dropping it.
+    pub timestamp_s: u32,
+    /// Microsecond fraction, `Some` only for `BGP4MP_ET` (type 17,
+    /// RFC 6396 §3) records.
+    pub timestamp_us: Option<u32>,
 }
 
 /// `BGP4MP_MESSAGE[_AS4]`: a complete BGP message (marker included)
@@ -166,6 +184,11 @@ pub struct Bgp4MpMessage {
     pub common: Bgp4MpCommon,
     /// Complete BGP message — 16-byte marker + length + type + body.
     pub message: Vec<u8>,
+    /// MRT common-header timestamp (RFC 6396 §2), seconds.
+    pub timestamp_s: u32,
+    /// Microsecond fraction, `Some` only for `BGP4MP_ET` (type 17,
+    /// RFC 6396 §3) records.
+    pub timestamp_us: Option<u32>,
 }
 
 /// One decoded MRT record.
@@ -194,11 +217,15 @@ impl MrtRecord {
 /// length(4).
 const HEADER_LEN: usize = 12;
 
-/// Upper bound on a single MRT record body (RFC 6396 §3). A RIB record
-/// carries one BGP UPDATE per entry (≤ 4096 bytes), so 64 KiB is
-/// generous; a malicious declared length must not grow the carryover
-/// unboundedly.
-const MAX_RECORD_BODY: usize = 65535;
+/// Upper bound on a single MRT record body. RFC 6396 §2 puts no
+/// maximum on the 4-octet Length field, and legitimate records
+/// exceed 64 KiB (a busy prefix held by hundreds of peers; a
+/// PEER_INDEX_TABLE with more than ~2 600 peers; an entry whose
+/// attributes fill most of the 16-bit Attribute Length). The bound
+/// below is a sanity fence against a hostile declared length growing
+/// the carryover without limit — four orders above the largest
+/// records seen in public dumps.
+const MAX_RECORD_BODY: usize = 16 * 1024 * 1024;
 
 /// Streaming MRT decoder. Feed arbitrary chunks; complete records come
 /// out one at a time (the same contract as `lr_bmp::BmpCodec`).
@@ -305,20 +332,28 @@ impl Decoder<MrtRecord> for MrtReader {
 
 /// Decode one complete record (header + body).
 fn decode_record(buf: &[u8]) -> Result<MrtRecord, ParseError> {
+    let timestamp_s = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
     let msg_type = u16::from_be_bytes([buf[4], buf[5]]);
     let subtype = u16::from_be_bytes([buf[6], buf[7]]);
     let body = &buf[HEADER_LEN..];
     match msg_type {
         msg_type::TABLE_DUMP_V2 => decode_tdv2(subtype, body),
         msg_type::TABLE_DUMP => Ok(MrtRecord::Unknown { msg_type, subtype }),
-        msg_type::BGP4MP => decode_bgp4mp(subtype, body, false),
+        msg_type::BGP4MP => decode_bgp4mp(subtype, body, timestamp_s, None),
         msg_type::BGP4MP_ET => {
             // Same layout with a microsecond timestamp: the extra 4
-            // bytes sit between the MRT header and the body.
+            // bytes sit between the MRT header and the body (RFC
+            // 6396 §3).
             if body.len() < 4 {
                 return Ok(MrtRecord::Unknown { msg_type, subtype });
             }
-            decode_bgp4mp(subtype, &body[4..], true)
+            let timestamp_us = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+            decode_bgp4mp(
+                subtype,
+                &body[4..],
+                timestamp_s,
+                Some(timestamp_us),
+            )
         }
         _ => Ok(MrtRecord::Unknown { msg_type, subtype }),
     }
@@ -339,10 +374,11 @@ fn decode_tdv2(subtype: u16, body: &[u8]) -> Result<MrtRecord, ParseError> {
     );
     match subtype {
         // RFC 6396 §4.3.2: AFI/SAFI-specific RIB subtypes. The
-        // multicast variants (3, 5, 8, 10) share the entry layout
-        // with their unicast counterparts; only the implicit AFI/SAFI
-        // differs. The decoder dispatches on the prefix family the
-        // same way for both.
+        // multicast variants share the entry layout with their
+        // unicast counterparts; only the implicit AFI/SAFI differs.
+        // The decoder dispatches on the prefix family the same way
+        // for both. RFC 8050 §4.1 Figure 1: the Add-Path subtypes
+        // insert a 4-octet Path Identifier into every entry.
         tdv2_subtype::RIB_IPV4_UNICAST
         | tdv2_subtype::RIB_IPV4_UNICAST_ADDPATH
         | tdv2_subtype::RIB_IPV4_MULTICAST
@@ -456,6 +492,13 @@ fn decode_rib_table(body: &[u8], add_path: bool, ipv6: bool) -> Result<RibTable,
 /// given AFI is the same shape across SAFIs (unicast, multicast,
 /// MPLS-labeled, ...). A future caller that needs to surface the
 /// AFI/SAFI can extend [`RibTable`] with a separate field.
+///
+/// RFC 8050 §4.2: the Add-Path generic subtype does NOT redefine
+/// the entries — the Path Identifier rides in the record's Add-Path
+/// NLRI (a 4-octet path id before the prefix, RFC 7911 §3), and the
+/// entries keep the RFC 6396 §4.3.3 layout. Every entry of the
+/// record shares that NLRI path id, so it is copied into each
+/// decoded entry's `path_id`.
 fn decode_rib_generic(body: &[u8], add_path: bool) -> Result<MrtRecord, ParseError> {
     let ctx = "mrt.rib_generic";
     let mut r = Reader::new(body);
@@ -476,6 +519,8 @@ fn decode_rib_generic(body: &[u8], add_path: bool) -> Result<MrtRecord, ParseErr
             });
         }
     };
+    // RFC 8050 §4.2: the add-path NLRI is `path_id(4) + prefix`.
+    let path_id = if add_path { r.u32(ctx)? } else { 0 };
     let prefix = r.prefix(ipv6, ctx)?;
     let entry_count = r.u16(ctx)? as usize;
     let mut entries = Vec::with_capacity(entry_count.min(4096));
@@ -483,7 +528,6 @@ fn decode_rib_generic(body: &[u8], add_path: bool) -> Result<MrtRecord, ParseErr
         let ectx = "mrt.rib_generic.entry";
         let peer_index = r.u16(ectx)?;
         let originated_time = r.u32(ectx)?;
-        let path_id = if add_path { r.u32(ectx)? } else { 0 };
         let attr_len = r.u16(ectx)? as usize;
         let attributes = r.bytes(attr_len, ectx)?.to_vec();
         entries.push(RibEntry {
@@ -501,12 +545,24 @@ fn decode_rib_generic(body: &[u8], add_path: bool) -> Result<MrtRecord, ParseErr
     }))
 }
 
-/// BGP4MP body decoder (header already consumed for `_ET` variants).
-fn decode_bgp4mp(subtype: u16, body: &[u8], _et: bool) -> Result<MrtRecord, ParseError> {
+/// BGP4MP body decoder (header already consumed; `timestamp_us` is
+/// `Some` only for the `BGP4MP_ET` type, whose extra 4 bytes the
+/// caller strips before handing over the body).
+fn decode_bgp4mp(
+    subtype: u16,
+    body: &[u8],
+    timestamp_s: u32,
+    timestamp_us: Option<u32>,
+) -> Result<MrtRecord, ParseError> {
     let ctx = "mrt.bgp4mp";
+    // RFC 6396 §4.4.5/§4.4.6: the _LOCAL subtypes (6, 7) use the
+    // MESSAGE / MESSAGE_AS4 layouts unchanged — they only mark the
+    // message as locally generated.
     let asn4 = matches!(
         subtype,
-        bgp4mp_subtype::MESSAGE_AS4 | bgp4mp_subtype::STATE_CHANGE_AS4
+        bgp4mp_subtype::MESSAGE_AS4
+            | bgp4mp_subtype::STATE_CHANGE_AS4
+            | bgp4mp_subtype::MESSAGE_AS4_LOCAL
     );
     let mut r = Reader::new(body);
     let common = read_bgp4mp_common(&mut r, asn4, ctx)?;
@@ -518,14 +574,19 @@ fn decode_bgp4mp(subtype: u16, body: &[u8], _et: bool) -> Result<MrtRecord, Pars
                 common,
                 old_state,
                 new_state,
+                timestamp_s,
+                timestamp_us,
             }))
         }
-        bgp4mp_subtype::MESSAGE | bgp4mp_subtype::MESSAGE_AS4 => {
-            Ok(MrtRecord::Bgp4MpMessage(Bgp4MpMessage {
-                common,
-                message: r.rest().to_vec(),
-            }))
-        }
+        bgp4mp_subtype::MESSAGE
+        | bgp4mp_subtype::MESSAGE_AS4
+        | bgp4mp_subtype::MESSAGE_LOCAL
+        | bgp4mp_subtype::MESSAGE_AS4_LOCAL => Ok(MrtRecord::Bgp4MpMessage(Bgp4MpMessage {
+            common,
+            message: r.rest().to_vec(),
+            timestamp_s,
+            timestamp_us,
+        })),
         _ => Ok(MrtRecord::Unknown {
             msg_type: msg_type::BGP4MP,
             subtype,
@@ -588,7 +649,9 @@ impl MrtRibDump {
         }
     }
 
-    /// Append a peer and return its index.
+    /// Append a peer and return its index. Indices wrap silently past
+    /// 65 535 peers; the encoder refuses to emit a peer table that
+    /// large, so the wrap cannot reach the wire.
     pub fn add_peer(&mut self, peer: PeerEntry) -> u16 {
         self.peers.push(peer);
         (self.peers.len() - 1) as u16
@@ -600,7 +663,8 @@ impl MrtRibDump {
     }
 
     /// Encode the whole dump: `PEER_INDEX_TABLE` first, then one
-    /// `RIB_*` record per table (sequence numbers assigned in order).
+    /// `RIB_*` record per table, each stamped with `timestamp` and
+    /// keeping the `sequence` the caller put on the table.
     pub fn encode(&self, timestamp: u32) -> Result<Vec<u8>, EncodeError> {
         let mut out = Vec::new();
         out.extend_from_slice(&encode_peer_index_table(
@@ -636,6 +700,11 @@ pub fn encode_peer_index_table(
 ) -> Result<Vec<u8>, EncodeError> {
     let mut body = Vec::new();
     body.extend_from_slice(&collector_bgp_id.to_be_bytes());
+    if peers.len() > u16::MAX as usize {
+        return Err(EncodeError::InvalidValue(
+            "peer index table exceeds 65535 peers",
+        ));
+    }
     let name = view_name.as_bytes();
     let name = &name[..name.len().min(65535)];
     body.extend_from_slice(&(name.len() as u16).to_be_bytes());
@@ -662,7 +731,14 @@ pub fn encode_peer_index_table(
 }
 
 /// Encode one `RIB_*` record. The subtype is derived from the prefix
-/// family and `table.add_path`.
+/// family and `table.add_path` (the AFI/SAFI-specific Add-Path
+/// subtypes of RFC 8050 §5.2; the generic Add-Path subtype's NLRI
+/// framing is not expressible here, so it is never selected).
+///
+/// Each entry carries its own 16-bit Attribute Length (RFC 6396
+/// §4.3.4) and the record length is a 32-bit field, so a table with
+/// many entries or a large aggregate attribute total is legal; only
+/// a single entry whose attribute set exceeds 65 535 octets is not.
 pub fn encode_rib_table(timestamp: u32, table: &RibTable) -> Result<Vec<u8>, EncodeError> {
     let subtype = match (table.prefix.is_ipv4(), table.add_path) {
         (true, false) => tdv2_subtype::RIB_IPV4_UNICAST,
@@ -670,10 +746,17 @@ pub fn encode_rib_table(timestamp: u32, table: &RibTable) -> Result<Vec<u8>, Enc
         (false, false) => tdv2_subtype::RIB_IPV6_UNICAST,
         (false, true) => tdv2_subtype::RIB_IPV6_UNICAST_ADDPATH,
     };
-    if table.attributes_len() > u16::MAX as usize {
+    if table.entries.len() > u16::MAX as usize {
         return Err(EncodeError::InvalidValue(
-            "RIB entry attribute set exceeds 65535 bytes",
+            "RIB table exceeds 65535 entries",
         ));
+    }
+    for entry in &table.entries {
+        if entry.attributes.len() > u16::MAX as usize {
+            return Err(EncodeError::InvalidValue(
+                "RIB entry attribute set exceeds 65535 bytes",
+            ));
+        }
     }
     let mut body = Vec::new();
     body.extend_from_slice(&table.sequence.to_be_bytes());
@@ -718,19 +801,33 @@ const ATTR_FLAG_EXT_LEN: u8 = 0x10;
 pub fn encode_attributes(attrs: &lr_core::attr::Attributes) -> Vec<u8> {
     let mut out = Vec::new();
     for a in attrs.iter() {
-        // librouting-private tags (the RFC 8277 label stack and the W6.3
-        // exchange-plane record store) live in the Loc-RIB only and must
-        // never appear in a dump: MRT attribute sets hold wire-form path
-        // attributes, and a dump is byte-compared against reference
-        // implementations by the parity harness.
-        if a.tag.0 >= 254 {
+        // librouting-private tags (the RFC 8277 label stack, the W6.3
+        // exchange-plane record store, and the Loc-RIB-only metadata
+        // tags the router stamps — peer-health tier/stale, source
+        // address, IGP metric, protocol router ids) live in the
+        // Loc-RIB only and must never appear in a dump: MRT attribute
+        // sets hold wire-form path attributes, and a dump is
+        // byte-compared against reference implementations by the
+        // parity harness. The private block starts at 243.
+        if a.tag.0 >= 243 {
             continue;
         }
+        // RFC 6396 §4.3.4: inside a RIB entry the MP_REACH_NLRI
+        // attribute drops the AFI, SAFI and Reserved fields (they are
+        // implied by the record header) and carries only the Next Hop
+        // Address Length and Next Hop Address.
+        let value;
+        let value: &[u8] = if a.tag.0 == 14 {
+            value = reduce_mp_reach(&a.value);
+            &value
+        } else {
+            &a.value
+        };
         // RFC 4271 §4.3: values longer than 255 octets use the
         // extended-length form — the Extended-Length flag bit (0x10)
         // set in the flags octet, plus a 2-octet length field. The
         // 1-octet length stays in use for values that fit.
-        let extended = a.value.len() > 255;
+        let extended = value.len() > 255;
         out.push(if extended {
             a.flags | ATTR_FLAG_EXT_LEN
         } else {
@@ -738,12 +835,32 @@ pub fn encode_attributes(attrs: &lr_core::attr::Attributes) -> Vec<u8> {
         });
         out.push(a.tag.0);
         if extended {
-            out.extend_from_slice(&(a.value.len() as u16).to_be_bytes());
+            out.extend_from_slice(&(value.len() as u16).to_be_bytes());
         } else {
-            out.push(a.value.len() as u8);
+            out.push(value.len() as u8);
         }
-        out.extend_from_slice(&a.value);
+        out.extend_from_slice(value);
     }
+    out
+}
+
+/// Reduce an MP_REACH_NLRI value to the RFC 6396 §4.3.4 RIB-entry
+/// form: `next_hop_length + next_hop(s)`, with the AFI, SAFI,
+/// Reserved and NLRI removed. A value that does not parse as the full
+/// UPDATE form (AFI/SAFI/len/nh) is passed through unchanged — a
+/// caller that already stored a reduced form must not lose its next
+/// hop.
+fn reduce_mp_reach(value: &[u8]) -> Vec<u8> {
+    if value.len() < 4 {
+        return value.to_vec();
+    }
+    let nh_len = value[3] as usize;
+    if value.len() < 4 + nh_len {
+        return value.to_vec();
+    }
+    let mut out = Vec::with_capacity(1 + nh_len);
+    out.push(nh_len as u8);
+    out.extend_from_slice(&value[4..4 + nh_len]);
     out
 }
 
@@ -849,7 +966,11 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Read `prefix_len` + packed octets into a [`Prefix`].
+    /// Read `prefix_len` + packed octets into a [`Prefix`]. The
+    /// trailing bits of the last octet are irrelevant per RFC 6396
+    /// §4.3.2 ("The value of trailing bits is irrelevant"), so they
+    /// are masked off — two encoders emitting the same prefix with
+    /// different padding decode to equal `Prefix` values.
     fn prefix(&mut self, ipv6: bool, ctx: &'static str) -> Result<Prefix, ParseError> {
         let len = self.u8(ctx)?;
         let max = if ipv6 { 128 } else { 32 };
@@ -862,10 +983,12 @@ impl<'a> Reader<'a> {
         if ipv6 {
             let mut o = [0u8; 16];
             o[..n].copy_from_slice(b);
+            mask_host_bits(&mut o, len);
             Ok(Prefix::new_v6(o, len))
         } else {
             let mut o = [0u8; 4];
             o[..n].copy_from_slice(b);
+            mask_host_bits(&mut o, len);
             Ok(Prefix::new_v4(o, len))
         }
     }
@@ -877,11 +1000,15 @@ impl<'a> Reader<'a> {
     }
 }
 
-impl RibTable {
-    /// Total encoded size of all entry attribute sets (bounds check).
-    fn attributes_len(&self) -> usize {
-        self.entries.iter().map(|e| e.attributes.len()).sum()
+/// Zero the bits of `octets` past `prefix_len` (within the leading
+/// `div_ceil(prefix_len, 8)` octets; the rest are already zero).
+fn mask_host_bits(octets: &mut [u8], prefix_len: u8) {
+    let rem = prefix_len % 8;
+    if rem == 0 {
+        return;
     }
+    let last = (prefix_len as usize).div_ceil(8) - 1;
+    octets[last] &= !((1u8 << (8 - rem)) - 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -903,7 +1030,9 @@ mod file {
     use super::{MrtReader, MrtRecord};
 
     /// Parse a complete MRT file (any chunking is fine — records are
-    /// length-framed). Trailing truncation is reported as an error.
+    /// length-framed). Trailing truncation is reported as an error: a
+    /// trailing partial record means the dump was cut short, which a
+    /// tool must not mistake for a clean parse.
     pub fn parse_file(path: &str) -> Result<Vec<MrtRecord>, lr_core::error::ParseError> {
         let bytes = std::fs::read(path).map_err(|e| {
             lr_core::error::ParseError::truncated("mrt.file").with_detail(e.to_string())
@@ -915,6 +1044,15 @@ mod file {
         let mut records = Vec::new();
         while let Some(record) = reader.next_record()? {
             records.push(record);
+        }
+        // `next_record` only returns `None` once the unconsumed tail
+        // cannot hold a complete record; any leftover bytes are a
+        // truncated trailing record.
+        if reader.remaining() > 0 {
+            return Err(lr_core::error::ParseError::truncated("mrt.file").with_detail(format!(
+                "trailing truncation: {} undecoded bytes",
+                reader.remaining()
+            )));
         }
         Ok(records)
     }

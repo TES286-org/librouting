@@ -100,8 +100,23 @@ fn read_len(bytes: &[u8], extended: bool) -> Option<usize> {
 }
 
 /// The MP_REACH_NLRI (type 14) next hop, when NEXT_HOP is absent.
+///
+/// RFC 6396 §4.3.4 defines a RIB-entry-specific encoding for this
+/// attribute: "Since the AFI, SAFI, and NLRI information is already
+/// encoded in the RIB Entry Header or RIB_GENERIC Entry Header, only
+/// the Next Hop Address Length and Next Hop Address fields are
+/// included. The Reserved field is omitted." The reduced form is what
+/// conformant dumps carry, but some writers keep the full RFC 4760
+/// UPDATE form, so both are accepted: a value whose length exactly
+/// matches `1 + value[0]` is reduced, anything else is decoded as the
+/// full form.
 fn mp_reach_next_hop(attrs: &PathAttributes) -> Option<IpAddr> {
     let a = attrs.get(AttrType::MpReachNlri)?;
+    if a.value.len() == 1 + a.value[0] as usize {
+        // Reduced form: `next_hop_length + next hop(s)`.
+        let nh_len = a.value[0] as usize;
+        return reduced_next_hop(&a.value[1..1 + nh_len]);
+    }
     let reach = lr_bgp::path::MpReach::decode(&a.value)?;
     // `reach.next_hop` is an `MpNextHop`; binding it explicitly here
     // keeps the `MpNextHop` import honest (the type never appears by
@@ -112,4 +127,25 @@ fn mp_reach_next_hop(attrs: &PathAttributes) -> Option<IpAddr> {
     // defects.txt L106 as dead code.
     let nh: &MpNextHop = &reach.next_hop;
     Some(nh.primary())
+}
+
+/// Decode a bare next-hop blob from the reduced RFC 6396 §4.3.4
+/// form. The length names the family: 4 = IPv4, 16 = IPv6 global,
+/// 32 = IPv6 global followed by link-local (RFC 8950 §3) — the
+/// global address is the one the summary reports.
+fn reduced_next_hop(bytes: &[u8]) -> Option<IpAddr> {
+    match bytes.len() {
+        4 => Some(IpAddr::V4([bytes[0], bytes[1], bytes[2], bytes[3]])),
+        16 => {
+            let mut o = [0u8; 16];
+            o.copy_from_slice(bytes);
+            Some(IpAddr::V6(o))
+        }
+        32 => {
+            let mut o = [0u8; 16];
+            o.copy_from_slice(&bytes[..16]);
+            Some(IpAddr::V6(o))
+        }
+        _ => None,
+    }
 }

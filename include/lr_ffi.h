@@ -1393,15 +1393,26 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_MRT_TDV2_RIB_GENERIC 6
 
-#define LR_MRT_TDV2_RIB_IPV4_UNICAST_ADDPATH 7
+/**
+ * RFC 6397 §8: geo-located peer table (not modeled; `Unknown`).
+ */
+#define LR_MRT_TDV2_GEO_PEER_TABLE 7
 
-#define LR_MRT_TDV2_RIB_IPV4_MULTICAST_ADDPATH 8
+/**
+ * RFC 8050 §4.1: per-entry Path Identifier.
+ */
+#define LR_MRT_TDV2_RIB_IPV4_UNICAST_ADDPATH 8
 
-#define LR_MRT_TDV2_RIB_IPV6_UNICAST_ADDPATH 9
+#define LR_MRT_TDV2_RIB_IPV4_MULTICAST_ADDPATH 9
 
-#define LR_MRT_TDV2_RIB_IPV6_MULTICAST_ADDPATH 10
+#define LR_MRT_TDV2_RIB_IPV6_UNICAST_ADDPATH 10
 
-#define LR_MRT_TDV2_RIB_GENERIC_ADDPATH 11
+#define LR_MRT_TDV2_RIB_IPV6_MULTICAST_ADDPATH 11
+
+/**
+ * RFC 8050 §4.2: entries unchanged; path id in the Add-Path NLRI.
+ */
+#define LR_MRT_TDV2_RIB_GENERIC_ADDPATH 12
 
 #define LR_MRT_BGP4MP_STATE_CHANGE 0
 
@@ -1424,12 +1435,12 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_MRT_BGP4MP_STATE_CHANGE_AS4 5
 
 /**
- * Deprecated — decodes as `MrtRecord::Unknown`.
+ * RFC 6396 §4.4.5: locally generated message; MESSAGE layout.
  */
 #define LR_MRT_BGP4MP_MESSAGE_LOCAL 6
 
 /**
- * Deprecated — decodes as `MrtRecord::Unknown`.
+ * RFC 6396 §4.4.6: locally generated message; MESSAGE_AS4 layout.
  */
 #define LR_MRT_BGP4MP_MESSAGE_AS4_LOCAL 7
 
