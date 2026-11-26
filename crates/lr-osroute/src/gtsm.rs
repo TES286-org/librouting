@@ -314,7 +314,7 @@ mod imp {
                 s.__pad[0..2].copy_from_slice(&port);
                 // __pad[2..6] is sin6_flowinfo, left zeroed.
                 s.__pad[6..22].copy_from_slice(&v6.ip().octets());
-                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
+                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_ne_bytes());
                 (s, 28)
             }
         }
@@ -340,7 +340,7 @@ mod imp {
                 // __pad[0..2] is sin6_port, left zeroed.
                 // __pad[2..6] is sin6_flowinfo, left zeroed.
                 s.__pad[6..22].copy_from_slice(&v6.ip().octets());
-                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
+                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_ne_bytes());
                 (s, 28)
             }
         }

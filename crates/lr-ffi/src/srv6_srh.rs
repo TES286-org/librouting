@@ -335,8 +335,10 @@ pub unsafe extern "C" fn lr_srv6_srh_tlvs(srh: lr_srv6_srh_t, out: *mut lr_bytes
     )
 }
 
-/// Read the first segment (the destination address at the sender per
-/// RFC 8754 §4.2) into `*out` (16 bytes). Returns 0 on success,
+/// Read the first segment (the destination address the sender puts on
+/// the outer IPv6 header — RFC 8754 §4.1; on the wire it sits at
+/// Segment List[Last Entry], §2) into `*out` (16 bytes). Returns 0 on
+/// success,
 /// `LR_ERR_NULL` on a NULL handle or NULL `out`, `LR_ERR_INVALID_HANDLE`
 /// when the SRH has no segments.
 ///
