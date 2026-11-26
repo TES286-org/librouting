@@ -53,6 +53,27 @@ advertisement, the §2.5.3 establishment window (issue #101)
 
 Each fix ships with a regression test verified to fail on the
 previous code.
+
+### Fixed — the nightly workflow failed on three CI-infrastructure
+regressions (issue #101)
+
+- **Supply-chain: RUSTSEC-2026-0592 in `url`** — the advisory
+  database flagged the pinned `url` 2.5.8 (stack overflow in
+  `Url::origin()` on nested `blob:` URLs); the lockfile moves to the
+  patched 2.5.9, so the `cargo audit` gate is green again.
+- **Bench real-data: the BIRD install step** — the Ubuntu 26.04
+  runner image dropped the unversioned `bird`/`birdc` package names
+  ("Package 'bird' has no installation candidate"); the step now
+  installs `bird2`, the same package the interop jobs install on the
+  same image (the binaries are the same `bird` + `birdc`).
+- **API surface: the nightly `cargo semver-checks` gate** — the
+  nightly copy of the gate never received the `continue-on-error`
+  treatment the PR-level gate in ci.yml carries while the workspace
+  accumulates the 2.0 breaking changes, so every nightly failed on
+  the intentional debt and on the post-baseline `lr-peer-health`
+  crate the tool cannot find in the v1.8.0 checkout. Aligned with
+  ci.yml; both gates return to blocking at the 2.0.0 cut.
+
 ### Fixed — two timing-sensitive CI tests read arrival order instead
 of the settled state (issue #101)
 
@@ -72,6 +93,50 @@ of the settled state (issue #101)
   wait (bounded) for the loser's teardown and require exactly one
   session whose LAST logged state is Established, which is the
   RFC 4271 §6.8 convergence invariant.
+
+### Fixed — the SRH segment list is encoded in RFC 8754 §2 wire order
+(issue #101; BREAKING CHANGE for multi-segment SRH consumers)
+
+`crates/lr-srv6` stored the segment list in "index 0 = first
+visited" order and emitted it on the wire **without the reversal**
+RFC 8754 §2 mandates ("The Segment List is encoded starting from the
+last segment of the SR Policy. That is, the first element of the
+Segment List (Segment List[0]) contains the last segment of the SR
+Policy, the second element contains the penultimate segment of the
+SR Policy, and so on."). A compliant receiver — or the Linux kernel
+(`seg6_do_srh` arms the outer DA from `segments[segments_left]` of
+the wire list) — read the FINAL segment out of
+`Segment List[Segments Left]` and forwarded the packet straight to
+the end of the path, skipping every intermediate hop. Seg6 /
+seg6local routes installed through `lr-osroute` carried the same
+reversed bytes into the kernel. Only single-segment SRHs (the sole
+shape the test suite exercised) happened to work.
+
+- `Srh::encode_vec` now writes the list reversed (wire position 0 =
+  the final segment, wire Last Entry = the first visited); `decode`
+  reverses back. The Rust API keeps the builder-friendly visit
+  order (`Srh::new([A, B, C])` = visit A first — the order `ip
+  route ... encap seg6 segs A,B,C` uses); only the wire bytes
+  change.
+- `current_destination()` follows the wire index semantics
+  (RFC 8754 §4.3.1 S16): `Segment List[Segments Left]` on the
+  reversed list = `segments[len - 1 - SL]` in visit order. At the
+  source (`SL = n - 1`) it returns the first segment — the same
+  address `first_segment()` names — instead of the final one; the
+  two accessors' docs no longer contradict each other.
+- New tests pin the RFC order at every layer: the Rust codec
+  (two-segment wire bytes against the §2 rule, the §4.3.1 hop walk),
+  the netlink builder (byte-level parity with what iproute2's
+  `parse_encap_seg6` puts in `SEG6_IPTUNNEL_SRH`), the FFI accessors
+  and the Python/Go bindings.
+- The `lr-tests` smoke test and the Python/Go binding tests that
+  pinned the old (broken) order are updated to the corrected
+  semantics; the C++ harness now asserts the §4.1 source view
+  (`current_destination` = the first visited SID at `SL = Last
+  Entry`, the final one at `SL = 0`) and gains an `SL = 0` hop
+  assertion; the C++ header, the regenerated `lr_ffi.h` and the
+  FFI/Go/Python wrapper doc comments carry the corrected field
+  description.
 
 ### Fixed — the C ABI header actually contains every export, with the
 right shapes and values (issue #101; BREAKING CHANGE for symbols that
@@ -169,6 +234,56 @@ re-baselines it; the new `abi-export` job is blocking from day one).
 The C harness (`tests/ffi/harness.c`) now compiles and runs the
 previously broken surfaces: the `lr_bgp_ls_tlv_*` handle API, the
 ten LDP engine entry points, and the constant values.
+### Fixed — five FFI contract violations: out-of-bounds reads and
+mislaid numberings (issue #101)
+
+- **`lr_ospf_walk_e_lsa_tlvs` reported absolute heap addresses as
+  `value_offset`** (`lr-ffi`): the field is documented — and consumed
+  by the C header — as "the offset of the value bytes inside the
+  body slice", but the writer stored `t.value.as_ptr() as usize`. A
+  consumer following the documented `data + value_offset` contract
+  read out of bounds immediately (and learned an ASLR address). The
+  offset is now the distance from the body base; a regression test
+  walks a two-TLV body and pins both offsets and the `data +
+  offset` contract.
+- **`lr_bgp_ext_community_decode_set` wrote a different stride than
+  its doc and its own encoder** (`lr-ffi`): the doc promises "a flat
+  `uint32_t` array, 3 entries per extended community" (12 bytes) and
+  `lr_bgp_ext_community_encode_set` takes exactly that stride — but
+  the decoder emitted `local` as a bare `u16`, 10 bytes per
+  community. A consumer sizing its buffer by the documented stride
+  read past the allocation from the second community on, and the
+  output could not round-trip through the encoder. The decoder now
+  writes `local` as a full `u32` (12 bytes per community), symmetric
+  with the encoder; the round-trip test pins both communities at the
+  12-byte stride.
+- **The `LR_COMMUNITY_KIND_*` constants numbered every kind
+  differently than the helpers** (`lr-ffi`): the `#define`s had
+  `CUSTOM = 0, NO_EXPORT = 1, …` while `lr_bgp_community_kind_from_u8`
+  / `_name` (and the Rust enum) number `NO_EXPORT = 0, …, CUSTOM =
+  7`. A consumer switching on the constants — or calling
+  `kind_name` on a `kind()` result — misidentified every kind. The
+  constants now carry the enum's discriminant order; a pinned test
+  asserts constants, enum and `kind_to_c` agree.
+- **`lr_mpls_label_stack_error_name` answered "unknown" for every
+  real error** (`lr-ffi`): the name table matched 1..=4 while
+  `lr_mpls_stack_last_err_code` (and the `LR_MPLS_STACK_ERR_*`
+  constants) use 0..=3, so `error_name(last_err_code())` never hit.
+  The table now matches on the constants; the test pins the pairing
+  for all four codes.
+- **`lr_bgp_decode_ipv4_nlri`'s layout contract said 17 bytes per
+  prefix, the writer emits 18** (`lr-ffi`): each entry is 16
+  zero-padded address octets + 1 prefix-length byte + 1 family flag
+  byte (the in-crate test already pinned 18). The doc — and the
+  header doc comment — now state the 18-byte layout.
+- **`sin6_scope_id` was written big-endian** (`lr-osroute`): the
+  field is a host-order `__u32` in the kernel uapi (unlike
+  `sin6_port`, `__be16`). The TCP-MD5/TCP-AO and GTSM sockaddr
+  builders byte-swapped it, so on every little-endian target a
+  link-local peer with scope id 42 armed its key against scope
+  704643072 — key matching silently failed for link-local peers.
+  All four writers now use native byte order; a layout test reads
+  the field back through `from_ne_bytes`.
 
 ### Fixed — kernel FIB mirror sees the default route; BFD AdminDown
 restarts (issue #101)

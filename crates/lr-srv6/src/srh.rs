@@ -12,7 +12,7 @@
 //! | Last Entry    |    Flags      |           Tag                |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |                                                               |
-//! |            Segment List[0] (16 octets, DA at send)            |
+//! |    Segment List[0] (16 octets — the LAST segment, §2)         |
 //! |                                                               |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |                                                               |
@@ -24,7 +24,7 @@
 //! |                                                               |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |                                                               |
-//! |            Segment List[Last Entry] (16 octets, DA at recv)   |
+//! | Segment List[Last Entry] (16 octets — FIRST segment, DA send) |
 //! |                                                               |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! //                                                             //
@@ -48,23 +48,37 @@
 //!   type byte is not 4 — writing 43 there makes every seg6 route
 //!   install fail with EINVAL and every decoded SRH of real traffic
 //!   fail parsing.
-//! - **Segments Left** (1 octet): the index into the segment list
-//!   that names the *current* destination. Decremented by each
-//!   SR-capable hop. RFC 8754 §4.2.
-//! - **Last Entry** (1 octet): the index of the last entry in the
-//!   segment list (i.e. `n - 1` for `n` segments). The segment list
-//!   is reversed on the wire: position 0 is the *first* segment to
-//!   visit (it ends up as the destination address at the sender).
+//! - **Segments Left** (1 octet): the index into the WIRE segment
+//!   list that names the *current* destination. Decremented by each
+//!   SR-capable hop (RFC 8754 §4.3.1 S15/S16: SL = SL - 1, DA =
+//!   Segment List[SL]). The source sets SL = n - 1 (§4.1).
+//! - **Last Entry** (1 octet): contains the index (zero based), in
+//!   the Segment List, of the last element of the list — `n - 1`
+//!   for `n` segments (RFC 8754 §2).
 //! - **Flags** (1 octet): RFC 8754 §2.1 — only the low two bits are
 //!   defined: `O` (octet 5, bit 0x80 — "OAM packet") and `H` (octet
 //!   5, bit 0x40 — "HMAC present"). All other bits MUST be 0 on
 //!   send and ignored on receive (RFC 8754 §2.3).
 //! - **Tag** (2 octets): a tag the sender sets to group packets for
 //!   management / OAM (RFC 8754 §2.4). Not used in forwarding.
-//! - **Segment List**: array of 16-octet SIDs in reverse traversal
-//!   order (RFC 8754 §2.5). The destination address at the sender is
-//!   Segment List[0]; the destination address at the receiver after
-//!   the last hop is Segment List[Last Entry].
+//! - **Segment List**: array of 16-octet SIDs, **encoded starting
+//!   from the last segment of the SR Policy** (RFC 8754 §2): "the
+//!   first element of the Segment List (Segment List[0]) contains
+//!   the last segment of the SR Policy, the second element contains
+//!   the penultimate segment of the SR Policy, and so on." The
+//!   destination address at the sender is therefore Segment
+//!   List[Last Entry] (the first segment visited); the packet's
+//!   final destination is Segment List[0].
+//!
+//! This crate stores the list in **visit order** (index 0 = the
+//! first segment visited) — the order `ip route ... encap seg6 segs
+//! A,B,C` uses on its command line — and reverses it on the wire:
+//! [`Srh::encode_vec`] writes `segments[n-1]` at wire position 0,
+//! and [`Srh::decode`] reverses back. Linux's `seg6_do_srh` arms
+//! the outer DA from `segments[segments_left]` of the wire list
+//! (`net/ipv6/seg6_iptunnel.c`), so a multi-segment SRH encoded
+//! without the reversal is forwarded straight to its final segment,
+//! skipping every intermediate hop.
 //! - **TLVs**: optional variable-length attributes (RFC 8754 §2.6).
 //!   The HMAC TLV (type 5) is the only one currently assigned (RFC
 //!   8754 §2.6.1). The crate parses the TLV bytes back to the caller
@@ -143,10 +157,14 @@ pub const MAX_SEGMENTS: usize = 127;
 
 /// The Segment Routing Header (RFC 8754 §2).
 ///
-/// The segment list is stored in *wire order*: index 0 is the first
-/// segment to visit (it becomes the destination address at the
-/// sender), index `last_entry` is the last segment. The segments-left
-/// pointer is the index of the *current* destination.
+/// The segment list is stored in **visit order**: index 0 is the
+/// first segment to visit (it becomes the destination address at the
+/// sender), index `last_entry` is the final segment. The wire order
+/// is the reverse (RFC 8754 §2 — Segment List[0] carries the *last*
+/// segment of the SR Policy); [`Srh::encode_vec`] /
+/// [`Srh::decode`] do the reversal in both directions. The
+/// segments-left pointer is a WIRE index — the index into the
+/// reversed list — exactly as it appears on the wire.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Srh {
     /// The Next Header protocol number (RFC 8200 §2). Stored as-is —
@@ -166,9 +184,11 @@ pub struct Srh {
     /// Tag (RFC 8754 §2.4). A 16-bit value the sender sets for OAM /
     /// management grouping.
     pub tag: u16,
-    /// The segment list, wire order: index 0 is the first segment to
-    /// visit. Length is `last_entry + 1` (or 0 for an empty SRH, which
-    /// is not valid on the wire but is useful as a builder start).
+    /// The segment list, visit order: index 0 is the first segment to
+    /// visit (the DA at the sender), the last element is the final
+    /// segment. Length is `last_entry + 1` (or 0 for an empty SRH,
+    /// which is not valid on the wire but is useful as a builder
+    /// start). The wire order is the reverse (RFC 8754 §2).
     pub segments: Vec<Sid>,
     /// Optional TLV bytes following the segment list (RFC 8754 §2.6).
     /// The crate passes them through verbatim — TLV interpretation is
@@ -253,11 +273,14 @@ impl fmt::Display for SrhError {
 impl std::error::Error for SrhError {}
 
 impl Srh {
-    /// Build an SRH from a segment list. `segments_left` defaults to
-    /// `segments.len() - 1` (the sender's view: the first segment is
-    /// the destination address, `segments_left` points at the last
-    /// segment to visit). `next_header`, `flags` and `tag` default to
-    /// `0` — the caller sets them for actual packets.
+    /// Build an SRH from a segment list in visit order (index 0 =
+    /// the first segment to visit, the DA at the sender — the same
+    /// order `ip route ... encap seg6 segs A,B,C` takes on its
+    /// command line). `segments_left` defaults to `segments.len() -
+    /// 1` (RFC 8754 §4.1 — the source sets SL = n - 1, which names
+    /// the first segment on the wire list). `next_header`, `flags`
+    /// and `tag` default to `0` — the caller sets them for actual
+    /// packets.
     ///
     /// Returns `Err` if the segment list is empty, has more than
     /// [`MAX_SEGMENTS`] entries, or `segments_left` is out of range.
@@ -265,10 +288,11 @@ impl Srh {
         Self::with_segments_left(segments, None)
     }
 
-    /// Like [`Srh::new`] but with an explicit `segments_left` (the
-    /// index of the current destination in the segment list). Pass
-    /// `None` to default to `segments.len() - 1` (RFC 8754 §4.2 —
-    /// the sender's view).
+    /// Like [`Srh::new`] but with an explicit `segments_left` — a
+    /// WIRE index (RFC 8754 §2: the index into the reversed on-wire
+    /// list; SL names the current destination). Pass `None` to
+    /// default to `segments.len() - 1` (RFC 8754 §4.1 — the source
+    /// view, naming the first segment).
     pub fn with_segments_left(
         segments: Vec<Sid>,
         segments_left: Option<u8>,
@@ -338,16 +362,36 @@ impl Srh {
         self.segments.is_empty()
     }
 
-    /// The destination address the sender should put on the outer
-    /// IPv6 header (RFC 8754 §4.1 — Segment List[0]).
+    /// The destination address the sender puts on the outer IPv6
+    /// header: the first segment to visit (RFC 8754 §4.1 — "The DA
+    /// of the packet is set with the value of the first segment").
+    /// On the wire that value sits at `Segment List[Last Entry]`
+    /// (§2); in this crate's visit-order storage it is simply
+    /// `segments[0]`.
     pub fn first_segment(&self) -> Option<Sid> {
         self.segments.first().copied()
     }
 
-    /// The current destination address (RFC 8754 §4.1 —
-    /// `Segment List[Segments Left]`).
+    /// The current destination address: the segment the packet is
+    /// being sent to right now. RFC 8754 §4.3.1 S16 —
+    /// `Segment List[Segments Left]` on the WIRE (reversed) list —
+    /// which in visit-order storage is
+    /// `segments[len - 1 - segments_left]`. At the source
+    /// (`segments_left == len - 1`) this is the first segment, same
+    /// as [`Srh::first_segment`]; each SR-capable hop decrements
+    /// `segments_left`, advancing the destination one segment
+    /// further down the visit order.
     pub fn current_destination(&self) -> Option<Sid> {
-        self.segments.get(self.segments_left as usize).copied()
+        let len = self.segments.len();
+        if len == 0 {
+            return None;
+        }
+        // `segments_left <= last_entry = len - 1` is enforced by the
+        // constructors and `decode`, so `len - 1 - segments_left`
+        // cannot underflow for a well-formed value; the saturating
+        // form only guards a struct built by direct field mutation.
+        let idx = (len - 1).saturating_sub(self.segments_left as usize);
+        self.segments.get(idx).copied()
     }
 
     /// Encode the SRH into a freshly-allocated `Vec<u8>`.
@@ -400,7 +444,18 @@ impl Srh {
         out.push(self.last_entry);
         out.push(self.flags);
         out.extend_from_slice(&self.tag.to_be_bytes());
-        for s in &self.segments {
+        // RFC 8754 §2: the wire list is encoded starting from the
+        // LAST segment of the SR Policy — Segment List[0] carries
+        // the final destination, Segment List[Last Entry] the first
+        // segment visited. The crate stores visit order (index 0 =
+        // first visited), so the encode walk emits the segments in
+        // reverse. Emitting them in storage order put the first
+        // visited segment at wire position 0, so a compliant
+        // receiver (or the Linux kernel, `seg6_do_srh`) read the
+        // FINAL segment out of `Segment List[Segments Left]` and
+        // forwarded the packet straight to the end of the path,
+        // skipping every intermediate hop.
+        for s in self.segments.iter().rev() {
             out.extend_from_slice(s.as_bytes());
         }
         out.extend_from_slice(&self.tlvs);
@@ -454,6 +509,11 @@ impl Srh {
         if SRH_FIXED_LEN + seg_bytes > total_len {
             return Err(SrhError::LastEntryOutOfRange);
         }
+        // RFC 8754 §2: wire position 0 carries the LAST segment of
+        // the SR Policy. Reverse into visit order (index 0 = the
+        // first segment visited = the DA at the sender) so the
+        // decoded struct round-trips through `encode_vec` and reads
+        // the way the builder wrote it.
         let mut segments = Vec::with_capacity(n);
         for i in 0..n {
             let off = SRH_FIXED_LEN + i * SRH_SEGMENT_LEN;
@@ -461,6 +521,7 @@ impl Srh {
             octets.copy_from_slice(&bytes[off..off + SRH_SEGMENT_LEN]);
             segments.push(Sid::from_octets(octets));
         }
+        segments.reverse();
         // The TLV bytes are whatever remains after the segment list.
         let tlv_end = total_len;
         let tlv_start = SRH_FIXED_LEN + seg_bytes;
@@ -560,7 +621,10 @@ mod tests {
         assert_eq!(srh.segments_left, 2, "segments_left defaults to last_entry");
         assert_eq!(srh.segments.len(), 3);
         assert_eq!(srh.first_segment(), Some(sid("fcbb:bb00::1")));
-        assert_eq!(srh.current_destination(), Some(sid("fcbb:bb02::1")));
+        // RFC 8754 §4.1: at the source (SL = n-1) the current
+        // destination is the FIRST segment — the same address the
+        // sender puts on the outer IPv6 header.
+        assert_eq!(srh.current_destination(), Some(sid("fcbb:bb00::1")));
     }
 
     #[test]
@@ -611,13 +675,82 @@ mod tests {
         assert_eq!(enc[4], 2, "last_entry = 3 - 1");
         assert_eq!(enc[5], FLAG_OAM);
         assert_eq!(&enc[6..8], &0x1234u16.to_be_bytes());
-        // First segment at offset 8, second at 24, third at 40.
-        assert_eq!(&enc[8..24], segs[0].as_bytes());
+        // RFC 8754 §2: "The Segment List is encoded starting from
+        // the last segment of the SR Policy" — wire position 0 (offset
+        // 8) carries the FINAL segment, wire position Last Entry
+        // (offset 40) carries the FIRST segment visited. The builder's
+        // visit order [segs[0], segs[1], segs[2]] therefore lands on
+        // the wire as [segs[2], segs[1], segs[0]].
+        assert_eq!(&enc[8..24], segs[2].as_bytes(), "wire [0] = final segment");
         assert_eq!(&enc[24..40], segs[1].as_bytes());
-        assert_eq!(&enc[40..56], segs[2].as_bytes());
+        assert_eq!(
+            &enc[40..56],
+            segs[0].as_bytes(),
+            "wire [Last Entry] = first visited (the DA at the sender)"
+        );
 
         let dec = Srh::decode(&enc).unwrap();
         assert_eq!(dec, srh);
+    }
+
+    #[test]
+    fn srh_wire_bytes_match_rfc_8754_two_segment_example() {
+        // The exact wire shape a compliant sender produces for the
+        // two-segment path 2001:db8:a::1 (first visited) ->
+        // 2001:db8:b::1 (final). Pinned against the RFC 8754 §2
+        // encoding rule and Linux/iproute2: `ip -6 route add ...
+        // encap seg6 mode encap segs 2001:db8:a::1,2001:db8:b::1`
+        // builds this SRH (iproute2's parse_encap_seg6 reverses the
+        // user-given visit order into the wire list).
+        let first = sid("2001:db8:a::1");
+        let last = sid("2001:db8:b::1");
+        let srh = Srh::new(vec![first, last]).unwrap();
+        let enc = srh.encode_vec().unwrap();
+        assert_eq!(enc.len(), 40, "8 fixed + 2 segments");
+        assert_eq!(enc[0], 0, "next header");
+        assert_eq!(enc[1], 4, "hdr ext len = (40/8) - 1");
+        assert_eq!(enc[2], ROUTING_TYPE_SRH);
+        assert_eq!(enc[3], 1, "segments left = n - 1");
+        assert_eq!(enc[4], 1, "last entry = n - 1");
+        // Wire list: [last, first] — Segment List[0] is the FINAL
+        // segment (RFC 8754 §2), Segment List[Last Entry] is the
+        // first visited (the DA at the sender).
+        assert_eq!(&enc[8..24], last.as_bytes());
+        assert_eq!(&enc[24..40], first.as_bytes());
+
+        // A compliant receiver decodes back to visit order.
+        let dec = Srh::decode(&enc).unwrap();
+        assert_eq!(dec.segments, vec![first, last]);
+        assert_eq!(dec.current_destination(), Some(first));
+        // SL = 0 names the wire Segment List[0] — the final segment.
+        let done = Srh::with_segments_left(vec![first, last], Some(0)).unwrap();
+        assert_eq!(done.current_destination(), Some(last));
+    }
+
+    #[test]
+    fn srh_hop_walk_advances_the_destination() {
+        // Simulate the per-hop processing of RFC 8754 §4.3.1
+        // (S15/S16): each SR-capable hop decrements Segments Left and
+        // sets DA = wire Segment List[SL]. With visit-order storage
+        // the walk must visit the segments in builder order and end
+        // at the final segment.
+        let segs = vec![
+            sid("fcbb:bb00::1"),
+            sid("fcbb:bb01::1"),
+            sid("fcbb:bb02::1"),
+        ];
+        let mut srh = Srh::new(segs.clone()).unwrap();
+        let mut hop = 0;
+        loop {
+            let da = srh.current_destination().expect("a live destination");
+            assert_eq!(da, segs[hop], "hop {hop} heads for the right segment");
+            if srh.segments_left == 0 {
+                break;
+            }
+            srh.segments_left -= 1; // S15
+            hop += 1;
+        }
+        assert_eq!(hop, 2, "three segments = two intermediate hops");
     }
 
     #[test]
@@ -756,12 +889,21 @@ mod tests {
             sid("fcbb:bb01::1"),
             sid("fcbb:bb02::1"),
         ];
-        let srh = Srh::with_segments_left(segs.clone(), Some(0)).unwrap();
-        // segments_left = 0 means the current destination is the first segment.
+        // segments_left is a WIRE index (RFC 8754 §2: the reversed
+        // list). SL = 2 = Last Entry names the wire Segment
+        // List[Last Entry] — the first segment visited, the DA at
+        // the sender.
+        let srh = Srh::with_segments_left(segs.clone(), Some(2)).unwrap();
         assert_eq!(srh.current_destination(), Some(segs[0]));
         assert_eq!(srh.first_segment(), Some(segs[0]));
-        let srh = Srh::with_segments_left(segs, Some(1)).unwrap();
+        // SL = 1 names the wire Segment List[1] — the middle segment.
+        let srh = Srh::with_segments_left(segs.clone(), Some(1)).unwrap();
         assert_eq!(srh.current_destination(), Some(sid("fcbb:bb01::1")));
+        // SL = 0 names the wire Segment List[0] — the FINAL segment
+        // (RFC 8754 §2: wire position 0 carries the last segment of
+        // the SR Policy).
+        let srh = Srh::with_segments_left(segs, Some(0)).unwrap();
+        assert_eq!(srh.current_destination(), Some(sid("fcbb:bb02::1")));
     }
 
     #[test]
