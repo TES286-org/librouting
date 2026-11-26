@@ -802,7 +802,10 @@ fn bgp4mp_message_local_subtype_6_decodes_as_message() {
     assert_eq!(m.common.ifindex, 9);
     assert_eq!(m.message.len(), 19);
     assert_eq!(m.timestamp_s, 0x6a91_c861, "header timestamp must surface");
-    assert_eq!(m.timestamp_us, None, "plain BGP4MP has no microsecond field");
+    assert_eq!(
+        m.timestamp_us, None,
+        "plain BGP4MP has no microsecond field"
+    );
 }
 
 #[test]
@@ -959,7 +962,8 @@ fn prefix_decode_masks_irrelevant_trailing_bits() {
     };
     assert_eq!(a.prefix, b.prefix);
     assert_eq!(
-        b.prefix, "198.51.100.0/22".parse::<Prefix>().unwrap(),
+        b.prefix,
+        "198.51.100.0/22".parse::<Prefix>().unwrap(),
         "the two irrelevant trailing bits must be masked (0x66 -> 0x64)"
     );
 }
@@ -972,7 +976,10 @@ fn parse_file_reports_trailing_truncation() {
     std::fs::write(&path, &wire[..wire.len() - 3]).unwrap();
     let err = parse_file(path.to_str().unwrap()).unwrap_err();
     assert!(
-        err.detail.as_deref().unwrap_or_default().contains("truncation"),
+        err.detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("truncation"),
         "expected a truncation error, got {err:?}"
     );
     std::fs::remove_file(&path).ok();

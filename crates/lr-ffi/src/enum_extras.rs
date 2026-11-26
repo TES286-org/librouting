@@ -516,7 +516,7 @@ fn _silence_unused_imports() {
         State::Down,
         BmpMsgType::RouteMonitoring,
         PeerType::Global,
-        PeerDownReason::LocalClose,
+        PeerDownReason::LocalCloseNoNotification,
         AdvertisementMode::DownstreamUnsolicited,
         MessageType::Hello,
         TlvType::Fec,

@@ -504,15 +504,36 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_BMP_PEER_TYPE_LOCAL 2
 
-#define LR_BMP_PEER_DOWN_LOCAL_CLOSE 1
+/**
+ * Loc-RIB instance peer (RFC 9069 §4.1).
+ */
+#define LR_BMP_PEER_TYPE_LOC_RIB 3
 
-#define LR_BMP_PEER_DOWN_REMOTE_CLOSE 2
+/**
+ * Local close; the data is the NOTIFICATION PDU (RFC 7854 §4.9).
+ */
+#define LR_BMP_PEER_DOWN_LOCAL_CLOSE_NOTIFICATION 1
 
+/**
+ * Local close without a notification; the data is the 2-byte FSM
+ * event code.
+ */
+#define LR_BMP_PEER_DOWN_LOCAL_CLOSE 2
+
+/**
+ * Remote close with a NOTIFICATION; the data is the received PDU.
+ */
 #define LR_BMP_PEER_DOWN_REMOTE_NOTIFICATION 3
 
-#define LR_BMP_PEER_DOWN_DEPLETED_RESOURCE 4
+/**
+ * Remote close without a notification; no data.
+ */
+#define LR_BMP_PEER_DOWN_REMOTE_CLOSE 4
 
-#define LR_BMP_PEER_DOWN_ADMIN_RESET 5
+/**
+ * Peer removed from the reporting set for configuration reasons.
+ */
+#define LR_BMP_PEER_DOWN_PEER_CONFIG_REMOVED 5
 
 #define LR_BMP_MSG_ROUTE_MONITORING 0
 
@@ -642,8 +663,10 @@ typedef struct OpaqueIpAddr IpAddr;
 
 /**
  * Maximum BMP message size (RFC 7854 §4.1 — 65535 bytes).
+ * Largest BMP message: an RFC 8654 extended UPDATE (65 535 octets)
+ * plus the common and per-peer headers.
  */
-#define LR_BMP_MAX_MESSAGE 65535
+#define LR_BMP_MAX_MESSAGE ((65535 + 6) + 42)
 
 /**
  * Node Descriptor TLV (RFC 7752 §3.3.1) — appears under a Node NLRI.
@@ -9402,11 +9425,15 @@ lr_bmp_message_t lr_bmp_message_initiation(const struct lr_bmp_tlv_t *info, uint
 
 /**
  * Build a Peer Down message (type 2). `reason` is one of the
- * `LR_BMP_PEER_DOWN_*` constants (1=LocalClose, 2=RemoteClose,
- * 3=RemoteNotification, 4=DepletedResource, 5=AdminReset); values
- * outside that range are clamped to LocalClose. `peer` MUST be
- * non-NULL. `data` is the optional reason-specific payload (NULL when
- * `data_len == 0`).
+ * `LR_BMP_PEER_DOWN_*` constants — the wire values of RFC 7854
+ * §4.9: 1 = local close with the NOTIFICATION PDU in `data`,
+ * 2 = local close without notification (`data` = the 2-byte FSM
+ * event code), 3 = remote close with the received NOTIFICATION in
+ * `data`, 4 = remote close without notification (no data),
+ * 5 = peer removed for configuration reasons (no data); values
+ * outside that range are clamped to 2 (local close, no notification).
+ * `peer` MUST be non-NULL. `data` is the optional reason-specific
+ * payload (NULL when `data_len == 0`).
  *
  * # Safety
  * `peer` must point to a `lr_bmp_peer_header_t`. `data` must point to

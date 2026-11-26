@@ -348,12 +348,7 @@ fn decode_record(buf: &[u8]) -> Result<MrtRecord, ParseError> {
                 return Ok(MrtRecord::Unknown { msg_type, subtype });
             }
             let timestamp_us = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
-            decode_bgp4mp(
-                subtype,
-                &body[4..],
-                timestamp_s,
-                Some(timestamp_us),
-            )
+            decode_bgp4mp(subtype, &body[4..], timestamp_s, Some(timestamp_us))
         }
         _ => Ok(MrtRecord::Unknown { msg_type, subtype }),
     }
@@ -747,9 +742,7 @@ pub fn encode_rib_table(timestamp: u32, table: &RibTable) -> Result<Vec<u8>, Enc
         (false, true) => tdv2_subtype::RIB_IPV6_UNICAST_ADDPATH,
     };
     if table.entries.len() > u16::MAX as usize {
-        return Err(EncodeError::InvalidValue(
-            "RIB table exceeds 65535 entries",
-        ));
+        return Err(EncodeError::InvalidValue("RIB table exceeds 65535 entries"));
     }
     for entry in &table.entries {
         if entry.attributes.len() > u16::MAX as usize {
@@ -1049,10 +1042,12 @@ mod file {
         // cannot hold a complete record; any leftover bytes are a
         // truncated trailing record.
         if reader.remaining() > 0 {
-            return Err(lr_core::error::ParseError::truncated("mrt.file").with_detail(format!(
-                "trailing truncation: {} undecoded bytes",
-                reader.remaining()
-            )));
+            return Err(
+                lr_core::error::ParseError::truncated("mrt.file").with_detail(format!(
+                    "trailing truncation: {} undecoded bytes",
+                    reader.remaining()
+                )),
+            );
         }
         Ok(records)
     }

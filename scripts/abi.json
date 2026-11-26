@@ -42311,11 +42311,15 @@
       "value": "2"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_LOCAL_CLOSE",
+      "name": "LR_BMP_PEER_TYPE_LOC_RIB",
+      "value": "3"
+    },
+    {
+      "name": "LR_BMP_PEER_DOWN_LOCAL_CLOSE_NOTIFICATION",
       "value": "1"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_REMOTE_CLOSE",
+      "name": "LR_BMP_PEER_DOWN_LOCAL_CLOSE",
       "value": "2"
     },
     {
@@ -42323,11 +42327,11 @@
       "value": "3"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_DEPLETED_RESOURCE",
+      "name": "LR_BMP_PEER_DOWN_REMOTE_CLOSE",
       "value": "4"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_ADMIN_RESET",
+      "name": "LR_BMP_PEER_DOWN_PEER_CONFIG_REMOVED",
       "value": "5"
     },
     {
@@ -42496,7 +42500,7 @@
     },
     {
       "name": "LR_BMP_MAX_MESSAGE",
-      "value": "65535"
+      "value": "((65535"
     },
     {
       "name": "LR_BGP_LS_TLV_LOCAL_NODE_DESCRIPTOR",

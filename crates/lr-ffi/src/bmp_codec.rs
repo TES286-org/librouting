@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn ffi_codec_feed_then_next_message() {
-        let msg = BmpMessage::initiation(&[(1, b"hello")]);
+        let msg = BmpMessage::initiation(&[(1, b"hello")]).unwrap();
         let codec = BmpCodec::new();
         let bytes = codec.encode_vec(&msg).unwrap();
         assert!(bytes.len() >= 6);
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn ffi_codec_encode_vec_round_trip() {
-        let msg = BmpMessage::initiation(&[(1, b"hi")]);
+        let msg = BmpMessage::initiation(&[(1, b"hi")]).unwrap();
         let codec = BmpCodec::new();
         let bytes = codec.encode_vec(&msg).unwrap();
         let m = box_message(msg);
