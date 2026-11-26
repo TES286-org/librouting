@@ -887,9 +887,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                             .checked_neg()
                             .map(Value::Int)
                             .ok_or_else(|| self.err(*span, EvalErrorKind::Overflow)),
-                        other => {
-                            Err(type_mismatch("neg", &other, "int", *span, self.line_index))
-                        }
+                        other => Err(type_mismatch("neg", &other, "int", *span, self.line_index)),
                     },
                 }
             }
@@ -2797,10 +2795,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                             match n.checked_neg() {
                                 Some(m) => stack.push(Value::Int(m)),
                                 None => {
-                                    return Err(self.err(
-                                        span,
-                                        EvalErrorKind::Overflow,
-                                    ));
+                                    return Err(self.err(span, EvalErrorKind::Overflow));
                                 }
                             }
                         }

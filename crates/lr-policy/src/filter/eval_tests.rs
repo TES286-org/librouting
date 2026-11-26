@@ -1279,7 +1279,11 @@ fn neg_of_i64_min_overflows_not_panics() {
         va, vb,
         "the interpreter and the VM agree on the overflow verdict"
     );
-    assert_eq!(va, EvalResult::Fallthrough, "overflow is fatal for the route, not the process");
+    assert_eq!(
+        va,
+        EvalResult::Fallthrough,
+        "overflow is fatal for the route, not the process"
+    );
     // The non-overflowing negation still works on both engines.
     let src = "let x = -(0 - 5); if x == 5 then accept; reject;";
     assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);

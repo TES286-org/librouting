@@ -251,7 +251,7 @@ impl MrtReader {
 
     /// Buffer raw bytes without decoding anything. Every byte fed is
     /// retained until a later [`Self::decode_slice`] or
-    /// [`Self::next`] consumes it — unlike `decode_slice`, a chunk
+    /// [`Self::next_record`] consumes it — unlike `decode_slice`, a chunk
     /// holding exactly one complete record does not pop that record
     /// out of the buffer.
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -259,8 +259,11 @@ impl MrtReader {
         self.carryover.extend_from_slice(bytes);
     }
 
-    /// Decode the next complete buffered record, if any.
-    pub fn next(&mut self) -> Result<Option<MrtRecord>, ParseError> {
+    /// Decode the next complete buffered record, if any — the drain
+    /// side of a [`Self::feed`] / `next_record` loop. (Named
+    /// `next_record`, not `next`, so the reader is not mistaken for
+    /// an [`std::iter::Iterator`].)
+    pub fn next_record(&mut self) -> Result<Option<MrtRecord>, ParseError> {
         let buf = &self.carryover[self.start..];
         if buf.len() < HEADER_LEN {
             return Ok(None);
@@ -283,10 +286,10 @@ impl MrtReader {
 
     /// Feed `bytes` and try to decode the next complete record.
     /// `Ok(None)` = need more bytes. Equivalent to [`Self::feed`]
-    /// followed by [`Self::next`].
+    /// followed by [`Self::next_record`].
     pub fn decode_slice(&mut self, bytes: &[u8]) -> Result<Option<MrtRecord>, ParseError> {
         self.feed(bytes);
-        self.next()
+        self.next_record()
     }
 }
 
@@ -910,7 +913,7 @@ mod file {
         // parse never moves or duplicates the dump.
         let mut reader = MrtReader::from_vec(bytes);
         let mut records = Vec::new();
-        while let Some(record) = reader.next()? {
+        while let Some(record) = reader.next_record()? {
             records.push(record);
         }
         Ok(records)

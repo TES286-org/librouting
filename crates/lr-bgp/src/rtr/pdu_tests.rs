@@ -187,7 +187,13 @@ fn end_of_data_short_length_is_rejected_not_panicked() {
         }
     }
     // The exact declared lengths still decode for both versions.
-    let v0 = [&[0u8, 7u8][..], &0x0001u16.to_be_bytes(), &u32b(12), &u32b(42)].concat();
+    let v0 = [
+        &[0u8, 7u8][..],
+        &0x0001u16.to_be_bytes(),
+        &u32b(12),
+        &u32b(42),
+    ]
+    .concat();
     assert!(decode(&v0).unwrap().is_some());
     let v1 = [
         &[1u8, 7u8][..],

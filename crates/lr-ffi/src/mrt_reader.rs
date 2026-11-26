@@ -113,7 +113,7 @@ pub unsafe extern "C" fn lr_mrt_reader_next_record(
             if out.is_null() {
                 return LR_ERR_NULL;
             }
-            match reader.next() {
+            match reader.next_record() {
                 Ok(Some(rec)) => {
                     unsafe { *out = box_record(rec) }
                     0
@@ -240,7 +240,10 @@ mod tests {
         record.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
         let r = lr_mrt_reader_new();
-        assert_eq!(unsafe { lr_mrt_reader_feed(r, record.as_ptr(), record.len()) }, 0);
+        assert_eq!(
+            unsafe { lr_mrt_reader_feed(r, record.as_ptr(), record.len()) },
+            0
+        );
 
         let mut out: lr_mrt_record_t = std::ptr::null_mut();
         let rc = unsafe { lr_mrt_reader_next_record(r, &mut out) };

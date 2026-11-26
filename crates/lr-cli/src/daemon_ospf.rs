@@ -2309,16 +2309,16 @@ impl OspfDaemon {
                                 );
                                 continue;
                             }
-                            if ospf.len() >= lr_ospf::packet::OspfHeader::LEN {
-                                if ospf_debug_enabled() {
-                                    log_debug!(
-                                        Component::Ospf,
-                                        "dbg-recv kind={} len={} rid={:08x}",
-                                        ospf.get(1).copied().unwrap_or(0),
-                                        u16::from_be_bytes([ospf[2], ospf[3]]),
-                                        ospf_router_id(ospf)
-                                    );
-                                }
+                            if ospf.len() >= lr_ospf::packet::OspfHeader::LEN
+                                && ospf_debug_enabled()
+                            {
+                                log_debug!(
+                                    Component::Ospf,
+                                    "dbg-recv kind={} len={} rid={:08x}",
+                                    ospf.get(1).copied().unwrap_or(0),
+                                    u16::from_be_bytes([ospf[2], ospf[3]]),
+                                    ospf_router_id(ospf)
+                                );
                             }
                             // §10.5: parse Hellos for the interface's
                             // neighbor table (election + Hello lists).
