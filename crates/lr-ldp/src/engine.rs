@@ -48,7 +48,17 @@ use alloc::vec::Vec;
 use lr_core::addr::{IpAddr, Prefix};
 use lr_core::buf::{ReadBuf, WriteBuf};
 use lr_core::codec::{Decoder, Encoder};
-use lr_core::time::Instant;
+use lr_core::time::{Duration, Instant};
+
+/// The §2.5.3 establishment window: a session that never completes its
+/// Init/KeepAlive handshake — an Init sent to a silent peer, a lost
+/// KeepAlive on the passive side, an accepted connection whose peer
+/// never speaks — holds the TCP transport and its buffers forever.
+/// Tear such a session down after this long; the peer gets an explicit
+/// Shutdown instead of silence, and the next Hello re-runs the §2.5.2
+/// role decision (natural reconnect). FRR's ldpd uses the same 15 s
+/// window; RFC 5036 leaves establishment timing to the implementation.
+const ESTABLISHMENT_TIMEOUT: Duration = Duration(15_000);
 
 /// Engine configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +389,12 @@ struct LdpSessionState {
     /// The peer advertised the RFC 7552 §6.1.1 Dual-Stack capability
     /// in its Hellos.
     peer_dual_stack: bool,
+    /// When the session was registered (the Init arrived, or the
+    /// active connection came up). Anchors the §2.5.3 establishment
+    /// window: a session still pre-Operational after
+    /// [`ESTABLISHMENT_TIMEOUT`] is torn down instead of holding the
+    /// transport forever.
+    since: Instant,
 }
 
 /// One LDP speaker engine.
@@ -390,7 +406,7 @@ pub struct LdpEngine {
     /// yet (the peer is unknown until the Initialization arrives,
     /// §2.5.3), remembering which address family the accepted socket
     /// rides on (RFC 7552 §7.1 address-distribution rules).
-    awaiting_init: BTreeMap<u64, (crate::session::LdpSession, bool)>,
+    awaiting_init: BTreeMap<u64, (crate::session::LdpSession, bool, Option<Instant>)>,
     /// Active-role establishments awaiting a successful connect.
     pending_connect: Vec<LdpId>,
     /// Peers found noncompliant with RFC 7552 §6.1.1 (both address
@@ -790,7 +806,7 @@ impl LdpEngine {
             path_vector_limit: self.cfg.path_vector_limit,
             graceful_restart: self.gr_advise(),
         });
-        self.awaiting_init.insert(conn, (session, af_v6));
+        self.awaiting_init.insert(conn, (session, af_v6, None));
         self.in_bufs.entry(conn).or_default();
         self.out_bufs.entry(conn).or_default();
     }
@@ -862,7 +878,7 @@ impl LdpEngine {
 
     fn handle_session_pdu(&mut self, now: Instant, conn: u64, pdu: LdpPdu, pdu_len: usize) {
         // Passive sessions waiting for their first PDU: bind the peer.
-        if let Some((session, af_v6)) = self.awaiting_init.remove(&conn) {
+        if let Some((session, af_v6, _)) = self.awaiting_init.remove(&conn) {
             // §2.5.3: the passive LSR matches the sender's label space
             // against a Hello adjacency; without one, reject.
             if self.discovery.adjacency_for_peer(pdu.sender).is_none() {
@@ -899,6 +915,60 @@ impl LdpEngine {
                 .map(|a| a.dual_stack.is_some())
                 .unwrap_or(false);
             self.register_session(peer, conn, session, af_v6, peer_dual_stack, now);
+        }
+
+        // RFC 5036 §2.5.3: a TCP connection carries exactly one LDP
+        // session — the one established over it. Route the PDU by the
+        // CONNECTION it arrived on, not by the sender LDP-ID the PDU
+        // header claims: routing by the claimed sender let a peer on
+        // connection 1 feed PDUs stamped with peer 2's LDP-ID into
+        // peer 2's session — label mappings and withdraws injected
+        // into the wrong LIB, with the responses flushed to peer 2's
+        // real connection (§2.5.3: PDUs on a connection belong to the
+        // session the connection was established for). A PDU whose
+        // sender does not match the session bound to this connection
+        // is a fatal protocol error: answer Bad LDP Identifier
+        // (§3.9, E=1) on this connection and take the bound session
+        // down. A PDU arriving on a connection with no session — and
+        // not awaiting Init, which the block above consumed — has no
+        // session context to answer with; close the connection.
+        let bound = self
+            .sessions
+            .iter()
+            .find(|(_, st)| st.conn == conn)
+            .map(|(k, _)| *k);
+        match bound {
+            Some(bound_peer) if bound_peer != pdu.sender => {
+                let outgoing = self
+                    .sessions
+                    .get_mut(&bound_peer)
+                    .map(|st| {
+                        st.session.enqueue_notification(Status {
+                            code: StatusCode::BAD_LDP_IDENTIFIER,
+                            message_id: 0,
+                            message_type: 0,
+                        });
+                        st.session.drain_outgoing()
+                    })
+                    .unwrap_or_default();
+                self.encode_outgoing(conn, outgoing, crate::pdu::DEFAULT_MAX_PDU_LEN);
+                self.sessions.remove(&bound_peer);
+                self.events.push_back(EngineEvent::CloseConnection(conn));
+                self.events.push_back(EngineEvent::SessionDown {
+                    peer_id: bound_peer,
+                    reason: SessionDownReason::ProtocolError,
+                    graceful: false,
+                });
+                self.gr_stale.remove(&bound_peer);
+                self.gr_recovering.remove(&bound_peer);
+                self.lib.unlearn_peer(bound_peer);
+                return;
+            }
+            Some(_) => {}
+            None => {
+                self.events.push_back(EngineEvent::CloseConnection(conn));
+                return;
+            }
         }
 
         let peer = pdu.sender;
@@ -970,6 +1040,7 @@ impl LdpEngine {
                 conn,
                 af_v6,
                 peer_dual_stack,
+                since: now,
             },
         );
         self.in_bufs.entry(conn).or_default();
@@ -1009,22 +1080,40 @@ impl LdpEngine {
                     // only addresses of its own transport family (a
                     // legacy IPv4-only peer must never receive IPv6
                     // addresses).
+                    //
+                    // An Address List TLV is single-family (RFC 5036
+                    // §3.4.3): a dual-stack session therefore sends one
+                    // Address message per family — the transport family
+                    // first. A single mixed-family message was either
+                    // encoded with AF=2 followed by raw 4-octet IPv4
+                    // bodies (IPv6-first — illegal on the wire) or
+                    // dropped wholesale by the encoder (IPv4-first).
                     if !self.cfg.interface_addresses.is_empty() {
                         let (af_v6, peer_dual_stack) = match self.sessions.get(&peer) {
                             Some(st) => (st.af_v6, st.peer_dual_stack),
                             None => (false, false),
                         };
-                        let addresses: Vec<IpAddr> = self
-                            .cfg
-                            .interface_addresses
-                            .iter()
-                            .filter(|a| match a {
+                        let (mut v4, mut v6): (Vec<IpAddr>, Vec<IpAddr>) = Default::default();
+                        for a in &self.cfg.interface_addresses {
+                            let allowed = match a {
                                 IpAddr::V6(_) => af_v6 || peer_dual_stack,
                                 IpAddr::V4(_) => !af_v6 || peer_dual_stack,
-                            })
-                            .copied()
-                            .collect();
-                        if !addresses.is_empty() {
+                            };
+                            if !allowed {
+                                continue;
+                            }
+                            if a.is_ipv6() {
+                                v6.push(*a);
+                            } else {
+                                v4.push(*a);
+                            }
+                        }
+                        let lists: Vec<Vec<IpAddr>> =
+                            if af_v6 { vec![v6, v4] } else { vec![v4, v6] };
+                        for addresses in lists {
+                            if addresses.is_empty() {
+                                continue;
+                            }
                             if let Some(st) = self.sessions.get_mut(&peer) {
                                 st.session.send_address_message(AddressList { addresses });
                             }
@@ -1423,7 +1512,7 @@ impl LdpEngine {
             let bytes = self.encode_pdu(&pdu);
             self.out_udp.push((dest, bytes));
         }
-        // Sessions: keepalive timers.
+        // Sessions: keepalive timers + the §2.5.3 establishment window.
         let peers: Vec<LdpId> = self.sessions.keys().copied().collect();
         for peer in peers {
             let (events, conn) = match self.sessions.get_mut(&peer) {
@@ -1438,6 +1527,59 @@ impl LdpEngine {
                 }
             } else {
                 self.flush_session(peer, conn);
+            }
+        }
+        // The §2.5.3 establishment window (see [`ESTABLISHMENT_TIMEOUT`]):
+        // a registered session still short of Operational, and an
+        // accepted connection whose peer never sent an Initialization,
+        // are torn down here. `LdpSession::tick` only services
+        // Operational sessions, so nothing below covers the handshake
+        // phase on its own.
+        let stuck: Vec<(LdpId, u64)> = self
+            .sessions
+            .iter()
+            .filter(|(_, st)| {
+                !st.session.is_operational()
+                    && now.saturating_sub(st.since) >= ESTABLISHMENT_TIMEOUT
+            })
+            .map(|(k, st)| (*k, st.conn))
+            .collect();
+        for (peer, conn) in stuck {
+            if let Some(st) = self.sessions.get_mut(&peer) {
+                let events = st.session.shutdown(now);
+                let down = self.absorb_session_events(now, peer, conn, events);
+                if down {
+                    if let Some(mut st) = self.sessions.remove(&peer) {
+                        let max_pdu_len = Self::effective_max_pdu(&st.session);
+                        self.encode_outgoing(conn, st.session.drain_outgoing(), max_pdu_len);
+                    }
+                } else {
+                    self.flush_session(peer, conn);
+                }
+            }
+        }
+        // Awaiting-init connections: stamp the first tick that saw the
+        // connection (`on_accepted` has no engine clock) and close the
+        // ones whose peer never sent an Initialization within the
+        // window — each holds a session struct plus the connection's
+        // buffer entries for as long as the embedder keeps the socket.
+        let conns: Vec<u64> = self.awaiting_init.keys().copied().collect();
+        for conn in conns {
+            if let Some((_, _, stamped)) = self.awaiting_init.get_mut(&conn) {
+                if stamped.is_none() {
+                    *stamped = Some(now);
+                    continue;
+                }
+            }
+            let expired = match self.awaiting_init.get(&conn) {
+                Some((_, _, Some(t))) => now.saturating_sub(*t) >= ESTABLISHMENT_TIMEOUT,
+                _ => false,
+            };
+            if expired {
+                self.awaiting_init.remove(&conn);
+                self.in_bufs.remove(&conn);
+                self.out_bufs.remove(&conn);
+                self.events.push_back(EngineEvent::CloseConnection(conn));
             }
         }
     }

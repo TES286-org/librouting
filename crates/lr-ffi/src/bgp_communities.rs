@@ -96,17 +96,27 @@ unsafe fn borrow_ext(c: lr_bgp_ext_community_t) -> Option<&'static ExtendedCommu
     Some(unsafe { &*(c as *const ExtendedCommunity) })
 }
 
-/// Well-known community kind constants — mirror
-/// `CommunityKind::*`. Published as `#define`s in `lr_ffi.h` so
-/// pre-C23 consumers can switch on them.
-pub const LR_COMMUNITY_KIND_CUSTOM: i32 = 0;
-pub const LR_COMMUNITY_KIND_NO_EXPORT: i32 = 1;
-pub const LR_COMMUNITY_KIND_NO_ADVERTISE: i32 = 2;
-pub const LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED: i32 = 3;
-pub const LR_COMMUNITY_KIND_NO_PEER: i32 = 4;
-pub const LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN: i32 = 5;
-pub const LR_COMMUNITY_KIND_LLGR_STALE: i32 = 6;
-pub const LR_COMMUNITY_KIND_NO_LLGR: i32 = 7;
+/// Well-known community kind constants — mirror `CommunityKind::*`,
+/// in the ENUM's discriminant order (RFC 1997 §4 well-known
+/// communities first, RFC 8326 §4 GRACEFUL_SHUTDOWN, RFC 9494 §3
+/// LLGR_STALE / NO_LLGR, `Custom` last). Published as `#define`s in
+/// `lr_ffi.h` so pre-C23 consumers can switch on them.
+///
+/// The values MUST match the numbering
+/// [`crate::bgp_enums::lr_bgp_community_kind_from_u8`] /
+/// [`crate::bgp_enums::lr_bgp_community_kind_name`] interpret. The
+/// previous set numbered `Custom = 0` while the helpers numbered
+/// `NoExport = 0`, so a consumer switching on the constants (or
+/// calling `kind_name` on a `kind()` result) misidentified every
+/// kind.
+pub const LR_COMMUNITY_KIND_NO_EXPORT: i32 = 0;
+pub const LR_COMMUNITY_KIND_NO_ADVERTISE: i32 = 1;
+pub const LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED: i32 = 2;
+pub const LR_COMMUNITY_KIND_NO_PEER: i32 = 3;
+pub const LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN: i32 = 4;
+pub const LR_COMMUNITY_KIND_LLGR_STALE: i32 = 5;
+pub const LR_COMMUNITY_KIND_NO_LLGR: i32 = 6;
+pub const LR_COMMUNITY_KIND_CUSTOM: i32 = 7;
 
 fn kind_to_c(k: CommunityKind) -> i32 {
     match k {
@@ -642,12 +652,20 @@ pub unsafe extern "C" fn lr_bgp_ext_community_decode_set(
             let slice = unsafe { std::slice::from_raw_parts(data, len) };
             let comms = ExtendedCommunity::decode_set(slice);
             let n = comms.len();
+            // 3 u32 entries per community — the SAME shape
+            // [`lr_bgp_ext_community_encode_set`] takes as input
+            // (count multiple of 3, chunks of 3 u32s). The previous
+            // writer emitted `local` as a bare u16 (10 bytes per
+            // community), so the output could not round-trip through
+            // the encoder without repacking, and a consumer sizing
+            // its buffer by the documented 3-u32 stride read past
+            // the allocation from the second community on.
             let mut raw = Vec::with_capacity(n * 12);
             for c in comms {
                 let combined = ((c.kind as u32) << 8) | (c.subtype as u32);
                 raw.extend_from_slice(&combined.to_be_bytes());
                 raw.extend_from_slice(&c.global.to_be_bytes());
-                raw.extend_from_slice(&c.local.to_be_bytes());
+                raw.extend_from_slice(&(c.local as u32).to_be_bytes());
             }
             unsafe {
                 *out_values = lr_bytes_t::from_vec(raw);
@@ -663,6 +681,33 @@ pub unsafe extern "C" fn lr_bgp_ext_community_decode_set(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ffi_community_kind_constants_match_the_helpers() {
+        use super::*;
+        // The #define numbering and the *_from_u8/_name helper
+        // numbering must be the same numbering — they previously
+        // disagreed on every value (Custom=0 vs NoExport=0).
+        assert_eq!(LR_COMMUNITY_KIND_NO_EXPORT, 0);
+        assert_eq!(LR_COMMUNITY_KIND_NO_ADVERTISE, 1);
+        assert_eq!(LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED, 2);
+        assert_eq!(LR_COMMUNITY_KIND_NO_PEER, 3);
+        assert_eq!(LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN, 4);
+        assert_eq!(LR_COMMUNITY_KIND_LLGR_STALE, 5);
+        assert_eq!(LR_COMMUNITY_KIND_NO_LLGR, 6);
+        assert_eq!(LR_COMMUNITY_KIND_CUSTOM, 7);
+        // kind_to_c is the bridge a kind() result flows through; it
+        // must return exactly the constants above.
+        assert_eq!(
+            kind_to_c(CommunityKind::NoExport),
+            LR_COMMUNITY_KIND_NO_EXPORT
+        );
+        assert_eq!(kind_to_c(CommunityKind::Custom), LR_COMMUNITY_KIND_CUSTOM);
+        // And the enum-cast numbering agrees (CommunityKind::NoExport
+        // is discriminant 0 — the same value the constant carries).
+        assert_eq!(CommunityKind::NoExport as i32, LR_COMMUNITY_KIND_NO_EXPORT);
+        assert_eq!(CommunityKind::Custom as i32, LR_COMMUNITY_KIND_CUSTOM);
+    }
+
     use super::*;
 
     unsafe fn bytes_to_vec(b: &mut lr_bytes_t) -> Vec<u8> {
@@ -876,17 +921,27 @@ mod tests {
         assert_eq!(rc, 0);
         assert_eq!(count, 2);
         let raw = unsafe { bytes_to_vec(&mut dec) };
-        // Per ext community: combined (u32 = 4) + global (u32 = 4) + local (u16 = 2) = 10 bytes.
-        // 2 ext communities = 20 bytes.
-        assert_eq!(raw.len(), 20);
+        // Per ext community: combined (u32) + global (u32) + local
+        // (u32) = 12 bytes — the same 3-u32 stride the encoder takes.
+        // 2 ext communities = 24 bytes.
+        assert_eq!(raw.len(), 24);
 
         // Decode the first ext community back from the raw bytes.
         let combined_0 = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
         let global_0 = u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
-        let local_0 = u16::from_be_bytes([raw[8], raw[9]]);
+        let local_0 = u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]);
         assert_eq!(combined_0, 0x0002);
         assert_eq!(global_0, 64512);
         assert_eq!(local_0, 100);
+
+        // The second community starts at the next 12-byte stride —
+        // the documented layout a C consumer walks.
+        let combined_1 = u32::from_be_bytes([raw[12], raw[13], raw[14], raw[15]]);
+        let global_1 = u32::from_be_bytes([raw[16], raw[17], raw[18], raw[19]]);
+        let local_1 = u32::from_be_bytes([raw[20], raw[21], raw[22], raw[23]]);
+        assert_eq!(combined_1, 0x0103);
+        assert_eq!(global_1, 0xdeadbeef);
+        assert_eq!(local_1, 0xbeef);
     }
 
     #[test]

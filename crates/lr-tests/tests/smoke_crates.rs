@@ -269,26 +269,34 @@ mod srv6 {
         );
 
         let decoded = Srh::decode(&bytes).expect("decode accepts the encoded SRH");
-        // `Srh::new` defaults `segments_left` to `n - 1` (RFC 8754
-        // §4.1 — the source's view). `current_destination()` returns
-        // `Segment List[Segments Left]`, the address the source puts
-        // on the outer IPv6 header — i.e. the last element of the
-        // Rust segment vector (the source builds the list in reverse
-        // order of visitation).
+        // The Rust vector is in VISIT order: seg1 is the first
+        // segment visited (the DA at the sender), seg2 the final
+        // segment. RFC 8754 §4.1: the source sets `segments_left =
+        // n - 1`, which names the wire Segment List[Last Entry] —
+        // the first segment. At the source both accessors therefore
+        // return seg1.
         assert_eq!(
             decoded.current_destination(),
-            Some(seg2),
-            "current_destination() is the destination (seg2, the last Rust element)"
+            Some(seg1),
+            "current_destination() at SL=n-1 is the first visited segment (seg1)"
         );
-        // `first_segment()` is the segment at position 0 in the
-        // Rust vector — i.e. `Segment List[0]`, the last segment
-        // the packet visits. Pinning both accessors is the
-        // smoke-grade guarantee that the encode/decode round-trip
-        // preserves the source's view of the segment list.
         assert_eq!(
             decoded.first_segment(),
             Some(seg1),
-            "first_segment() is Segment List[0] (seg1, the first Rust element)"
+            "first_segment() is the first Rust element (seg1, the DA at the sender)"
+        );
+        // RFC 8754 §2: the wire list is encoded starting from the
+        // LAST segment — wire position 0 carries seg2. Pin the
+        // reversal the encode walk performs.
+        assert_eq!(
+            &bytes[8..24],
+            seg2.as_bytes(),
+            "wire Segment List[0] carries the final segment (seg2)"
+        );
+        assert_eq!(
+            &bytes[24..40],
+            seg1.as_bytes(),
+            "wire Segment List[Last Entry] carries the first visited segment (seg1)"
         );
     }
 

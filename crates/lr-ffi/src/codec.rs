@@ -1681,10 +1681,11 @@ pub unsafe extern "C" fn lr_bgp_encode_ipv4_nlri(
 
 /// Decode RFC 4271 §4.3 NLRI bytes into a list of IPv4 prefixes.
 /// On success writes a freshly-allocated `lr_bytes_t` to `*out`
-/// carrying `n * 17` bytes (each prefix occupies 16 bytes of address
-/// octets + 1 byte of prefix length — the address octets are
-/// zero-padded to 16 bytes so the caller can re-use `lr_prefix_t`
-/// regardless of family). Returns 0 on success, `LR_ERR_NULL` on
+/// carrying `n * 18` bytes: each prefix occupies 16 bytes of address
+/// octets (zero-padded so the caller can re-use `lr_prefix_t`
+/// regardless of family) + 1 byte of prefix length + 1 byte family
+/// flag (always 0 here — IPv4; the IPv6 decoder writes 1). Returns
+/// 0 on success, `LR_ERR_NULL` on
 /// NULL pointers, `LR_ERR_OTHER` (-6) on a malformed NLRI stream
 /// (prefix length > 32, or trailing bytes shorter than the prefix
 /// length demands).
