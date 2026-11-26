@@ -17,6 +17,28 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — kernel FIB mirror sees the default route; BFD AdminDown
+restarts (issue #101)
+
+- **`list_routes()` dropped the default route** (`lr-osroute`): the
+  kernel omits `RTA_DST` entirely when `dst_len == 0` (iproute2 prints
+  those rows as the default route and never encodes the attribute), so
+  the dump parser's `prefix_addr = None` fell into the reject arm and
+  a FIB mirror never saw `0.0.0.0/0` or `::/0`. A missing `RTA_DST`
+  with a zero `dst_len` now decodes as the default route; the
+  mock-socket unit test pins both families' kernel dump shape.
+- **BFD `admin_down` wedged the session** (`lr-bfd`): `start()` is
+  guarded by `if !self.started`, and `admin_down()` did not reset the
+  flag — an operator who downed a session and later called `start()`
+  got a no-op, and the session stayed in AdminDown until it was
+  destroyed and rebuilt, contradicting the documented "received
+  packets are discarded until `start` again" (RFC 5880 §6.8.16).
+  `admin_down()` now resets the flag, so a later `start()` re-transitions
+  AdminDown → Down and queues the initial control packet; the new
+  `started_flag()` accessor exposes the lifecycle state. The daemon's
+  own supervisor path (which never calls `BfdSession::admin_down`) is
+  unaffected.
+
 ### Added — PATHS-LIMIT "Maximum Number of Paths Reached" Cease subcode
 (draft-ietf-idr-addpath-paths-limit-00 §4, issue #101)
 
