@@ -17,6 +17,65 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — the policy-engine batch: filter verdicts, VM/interpreter
+agreement, AS comparisons, safety knobs, prefix-list semantics
+(issue #101)
+
+Six defects in the policy engine, each confirmed against the primary
+references before fixing:
+
+- **A `reject` latched by the last statement was dropped** — the
+  tree-walking interpreter consumed the pending verdict only at the
+  start of the next loop iteration, so `function deny() { reject; }
+  deny();` fell through (fail-open) instead of rejecting. After a
+  nested function latched a verdict the outer function also kept
+  executing, mutating route attributes on an already-rejected route.
+  The interpreter now treats every statement and sub-expression after
+  a latch as a no-op and consumes the verdict after each statement;
+  the VM gains the matching check for its tree-walking fallbacks
+  (`EvalTree`, dynamic `Match` items, `Defined` over a dynamic
+  expression).
+- **The bytecode VM resolved no user functions from tree-walking
+  fallbacks** — `execute` built its evaluator with an empty function
+  table, so `if defined(f()) then accept; reject;` accepted on the
+  interpreter and rejected on the VM, contradicting the module's
+  bit-identical contract. `CompiledFilter` now carries the function
+  table (built once at compile time); the evaluator borrows it, which
+  also removes the per-call deep clone of each declaration.
+- **`first(bgp.as_path) == 64500` was unconditionally false** — AS
+  numbers parse as integers but `value_eq` had no `(Asn, Int)` arm,
+  the ordering forms were swallowed type errors, and scalar
+  `int ~ set` membership never matched (the grammar doc's `any ~ set`
+  row promised it, then disclaimed it in a note). The cross-type
+  equality, the `Asn` coercion in `as_int`, and the scalar membership
+  arms land in `value_eq` / `as_int` / `value_match`, shared by both
+  engines.
+- **The grammar doc's §7.6 flagship example errored at runtime** —
+  `bgp.as_path.first` (the BIRD `bgp.path.first` spelling) hit
+  `UnknownMethod` because only mutating methods were registered. The
+  read-only accessors (`first`, `last`, `len`, `count`, `empty`) now
+  exist on `bgp.as_path` and the three community sets; §3.3 documents
+  them as a separate non-mutating table.
+- **The ORIGIN and LOCAL_PREF safety knobs did nothing** — the
+  `reject_invalid_origin`, `reject_oversized_local_pref` and
+  `max_local_pref` config surface existed end to end (daemon table,
+  `.lr` emitter, FFI accessors) but `SafetyNet::check` never read
+  them. ORIGIN (RFC 4271 §4.3: one octet, 0/1/2, well-known
+  mandatory — missing on a BGP-flavored route is a §6.3 error) and
+  the LOCAL_PREF ceiling are now enforced; the module doc's "by
+  default all checks are enabled" claim is corrected to name the two
+  that default to off.
+- **A prefix-list entry without `ge`/`le` matched every longer
+  prefix** — `PrefixListEntry::new` defaulted `le` to 255, so
+  `permit 10.0.0.0/8` silently admitted `10.1.2.0/24`; FRR and Cisco
+  treat a bare entry as an exact-length match. `new` is exact now
+  (BREAKING CHANGE for Rust embedders that relied on the covering
+  match), the daemon computes the FRR defaults (`ge` alone widens to
+  the family maximum, 32/128) and rejects impossible windows
+  (`ge`/`le` below the prefix length, `le` above the family maximum,
+  `ge > le`) at startup. The FFI entry point keeps its explicit
+  `ge`/`le` parameters and the `le = 255` sentinel.
+
 ### Fixed — the `lr bench replay` memory metrics measured the wrong
 counter (issue #101)
 
