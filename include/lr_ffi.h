@@ -224,25 +224,35 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_BFD_EVENT_OUTBOUND_QUEUED 5
 
 /**
- * Well-known community kind constants — mirror
- * `CommunityKind::*`. Published as `#define`s in `lr_ffi.h` so
- * pre-C23 consumers can switch on them.
+ * Well-known community kind constants — mirror `CommunityKind::*`,
+ * in the ENUM's discriminant order (RFC 1997 §4 well-known
+ * communities first, RFC 8326 §4 GRACEFUL_SHUTDOWN, RFC 9494 §3
+ * LLGR_STALE / NO_LLGR, `Custom` last). Published as `#define`s in
+ * `lr_ffi.h` so pre-C23 consumers can switch on them.
+ *
+ * The values MUST match the numbering
+ * [`crate::bgp_enums::lr_bgp_community_kind_from_u8`] /
+ * [`crate::bgp_enums::lr_bgp_community_kind_name`] interpret. The
+ * previous set numbered `Custom = 0` while the helpers numbered
+ * `NoExport = 0`, so a consumer switching on the constants (or
+ * calling `kind_name` on a `kind()` result) misidentified every
+ * kind.
  */
-#define LR_COMMUNITY_KIND_CUSTOM 0
+#define LR_COMMUNITY_KIND_NO_EXPORT 0
 
-#define LR_COMMUNITY_KIND_NO_EXPORT 1
+#define LR_COMMUNITY_KIND_NO_ADVERTISE 1
 
-#define LR_COMMUNITY_KIND_NO_ADVERTISE 2
+#define LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED 2
 
-#define LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED 3
+#define LR_COMMUNITY_KIND_NO_PEER 3
 
-#define LR_COMMUNITY_KIND_NO_PEER 4
+#define LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN 4
 
-#define LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN 5
+#define LR_COMMUNITY_KIND_LLGR_STALE 5
 
-#define LR_COMMUNITY_KIND_LLGR_STALE 6
+#define LR_COMMUNITY_KIND_NO_LLGR 6
 
-#define LR_COMMUNITY_KIND_NO_LLGR 7
+#define LR_COMMUNITY_KIND_CUSTOM 7
 
 /**
  * Well-known community wire constants — mirror `Community::*`
@@ -10328,10 +10338,11 @@ int32_t lr_bgp_encode_ipv4_nlri(const struct lr_prefix_t *prefixes,
 /**
  * Decode RFC 4271 §4.3 NLRI bytes into a list of IPv4 prefixes.
  * On success writes a freshly-allocated `lr_bytes_t` to `*out`
- * carrying `n * 17` bytes (each prefix occupies 16 bytes of address
- * octets + 1 byte of prefix length — the address octets are
- * zero-padded to 16 bytes so the caller can re-use `lr_prefix_t`
- * regardless of family). Returns 0 on success, `LR_ERR_NULL` on
+ * carrying `n * 18` bytes: each prefix occupies 16 bytes of address
+ * octets (zero-padded so the caller can re-use `lr_prefix_t`
+ * regardless of family) + 1 byte of prefix length + 1 byte family
+ * flag (always 0 here — IPv4; the IPv6 decoder writes 1). Returns
+ * 0 on success, `LR_ERR_NULL` on
  * NULL pointers, `LR_ERR_OTHER` (-6) on a malformed NLRI stream
  * (prefix length > 32, or trailing bytes shorter than the prefix
  * length demands).

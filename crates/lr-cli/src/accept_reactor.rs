@@ -364,8 +364,26 @@ mod tests {
         // Queue one connection; the first accept for it fails.
         let _client = std::net::TcpStream::connect(addr).unwrap();
         // Four backoff windows: enough for the re-armed registration to
-        // deliver the same connection again.
-        thread::sleep(Duration::from_millis(450));
+        // deliver the same connection again. Poll for the outcome
+        // instead of sleeping a fixed window: on a loaded CI runner the
+        // reactor thread's first accept attempt (and the 100 ms backoff
+        // deadline) can land past any fixed sleep, which failed the
+        // retry assert spuriously (the d1b57f57 Coverage run).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let served_count = served.load(Ordering::Relaxed);
+            let attempt_count = attempts.load(Ordering::Relaxed);
+            if served_count == 1 && attempt_count >= 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the accept was never retried: attempts={} served={}",
+                attempt_count,
+                served_count
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
         let served_count = served.load(Ordering::Relaxed);
         let attempt_count = attempts.load(Ordering::Relaxed);
         running.store(false, Ordering::Relaxed);

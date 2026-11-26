@@ -590,7 +590,9 @@ mod imp {
     /// `__pad` (which starts at absolute offset 2):
     /// `sockaddr_in`  — port `0..2`, address `2..6`.
     /// `sockaddr_in6` — port `0..2`, flowinfo `2..6`, address `6..22`,
-    /// scope-id `22..26`.
+    /// scope-id `22..26` (host byte order — `sin6_scope_id` is a
+    /// `__u32`, NOT `__be32`; only `sin6_port` and `sin6_flowinfo`'s
+    /// flow label bits are wire-order).
     fn sock_addr(addr: SocketAddr) -> (SockaddrStorage, u32) {
         let mut s: SockaddrStorage = unsafe { zeroed() };
         let port = addr.port().to_be_bytes();
@@ -606,7 +608,7 @@ mod imp {
                 s.__pad[0..2].copy_from_slice(&port);
                 // __pad[2..6] is sin6_flowinfo, left zeroed.
                 s.__pad[6..22].copy_from_slice(&v6.ip().octets());
-                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
+                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_ne_bytes());
                 (s, 28)
             }
         }
@@ -632,7 +634,7 @@ mod imp {
                 // __pad[0..2] is sin6_port, left zeroed.
                 // __pad[2..6] is sin6_flowinfo, left zeroed.
                 s.__pad[6..22].copy_from_slice(&v6.ip().octets());
-                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_be_bytes());
+                s.__pad[22..26].copy_from_slice(&v6.scope_id().to_ne_bytes());
                 (s, 28)
             }
         }
@@ -1026,6 +1028,33 @@ mod imp {
     mod layout_tests {
         use super::*;
         use std::mem::{offset_of, size_of};
+
+        #[test]
+        fn sock_addr_writes_scope_id_in_host_byte_order() {
+            // `sin6_scope_id` is a plain `__u32` in the kernel uapi —
+            // host byte order, unlike `sin6_port` (`__be16`). The
+            // sockaddr builder previously wrote it big-endian, so on
+            // every little-endian target a link-local peer with scope
+            // id 42 armed its key against scope 0x2A000000
+            // (704643072) — a scope that does not exist, so
+            // TCP-MD5/AO key matching silently failed for link-local
+            // peers.
+            use std::net::{Ipv6Addr, SocketAddrV6};
+            let sa = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 179, 0, 42);
+            let (storage, len) = sock_addr(std::net::SocketAddr::V6(sa));
+            assert_eq!(len, 28, "sockaddr_in6 length");
+            // scope id sits at __pad[22..26] (absolute 24..28).
+            assert_eq!(
+                u32::from_ne_bytes([
+                    storage.__pad[22],
+                    storage.__pad[23],
+                    storage.__pad[24],
+                    storage.__pad[25],
+                ]),
+                42,
+                "scope id reads back as 42 in native byte order"
+            );
+        }
 
         #[test]
         fn struct_sizes_match_uapi() {
