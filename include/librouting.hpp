@@ -6874,12 +6874,12 @@ public:
         ptr_.reset(p);
     }
     std::array<std::uint8_t, 8> bytes() const {
-        // The C ABI copies 10 bytes out (2 reserved + 8 router_id).
-        std::array<std::uint8_t, 10> buf{};
-        int rc = lr_babel_router_id_bytes(ptr_.get(), buf.data());
-        if (rc != 0) throw Error(std::string("lr_babel_router_id_bytes: ") + lr_last_error());
+        // The C ABI copies the 8-byte Router-ID proper (the two
+        // reserved octets of the RFC 8966 wire form are not part of
+        // the contract).
         std::array<std::uint8_t, 8> out{};
-        std::copy(buf.begin() + 2, buf.end(), out.begin());
+        int rc = lr_babel_router_id_bytes(ptr_.get(), out.data());
+        if (rc != 0) throw Error(std::string("lr_babel_router_id_bytes: ") + lr_last_error());
         return out;
     }
 

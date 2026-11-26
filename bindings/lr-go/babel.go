@@ -1451,15 +1451,14 @@ func NewBabelRouterID(routerID []byte) (*BabelRouterID, error) {
 
 // Bytes returns the 8-byte router identifier.
 func (r *BabelRouterID) Bytes() ([]byte, error) {
-	// The C ABI copies 10 bytes out (2 reserved + 8 router_id).
-	out := make([]byte, 10)
+	// The C ABI copies the 8-byte Router-ID proper (the two reserved
+	// octets of the RFC 8966 wire form are not part of the contract).
+	out := make([]byte, 8)
 	rc := C.lr_babel_router_id_bytes(r.ptr, (*C.uint8_t)(unsafe.Pointer(&out[0])))
 	if rc != 0 {
 		return nil, babelErr("lr_babel_router_id_bytes", rc)
 	}
-	// The router_id occupies bytes 2..10 (RFC 8966 §4.4.10 — the
-	// first 2 bytes are reserved/zero).
-	return out[2:10], nil
+	return out, nil
 }
 
 // Free releases the underlying handle.
