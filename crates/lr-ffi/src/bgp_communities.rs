@@ -697,7 +697,10 @@ mod tests {
         assert_eq!(LR_COMMUNITY_KIND_CUSTOM, 7);
         // kind_to_c is the bridge a kind() result flows through; it
         // must return exactly the constants above.
-        assert_eq!(kind_to_c(CommunityKind::NoExport), LR_COMMUNITY_KIND_NO_EXPORT);
+        assert_eq!(
+            kind_to_c(CommunityKind::NoExport),
+            LR_COMMUNITY_KIND_NO_EXPORT
+        );
         assert_eq!(kind_to_c(CommunityKind::Custom), LR_COMMUNITY_KIND_CUSTOM);
         // And the enum-cast numbering agrees (CommunityKind::NoExport
         // is discriminant 0 — the same value the constant carries).

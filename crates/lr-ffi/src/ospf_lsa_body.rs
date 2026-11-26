@@ -757,14 +757,24 @@ mod tests {
         assert_eq!(tlvs[0].value_offset, 4, "TLV A value sits at body offset 4");
         assert_eq!(tlvs[1].tlv_type, 2);
         assert_eq!(tlvs[1].length, 5);
-        assert_eq!(tlvs[1].value_offset, 12, "TLV B value sits at body offset 12");
+        assert_eq!(
+            tlvs[1].value_offset, 12,
+            "TLV B value sits at body offset 12"
+        );
         // The documented contract: data + value_offset addresses the
         // value bytes.
-        assert_eq!(&body[tlvs[0].value_offset..tlvs[0].value_offset + 4], &[0xAA; 4]);
-        assert_eq!(&body[tlvs[1].value_offset..tlvs[1].value_offset + 5], &[0xBB; 5]);
+        assert_eq!(
+            &body[tlvs[0].value_offset..tlvs[0].value_offset + 4],
+            &[0xAA; 4]
+        );
+        assert_eq!(
+            &body[tlvs[1].value_offset..tlvs[1].value_offset + 5],
+            &[0xBB; 5]
+        );
         unsafe { lr_ospf_e_lsa_tlv_array_free(arr, count) };
     }
 
+    #[test]
     fn ffi_clamp_grace_period() {
         assert_eq!(lr_ospf_clamp_grace_period(60), 60);
         assert_eq!(lr_ospf_clamp_grace_period(0), 1, "below floor clamps to 1");

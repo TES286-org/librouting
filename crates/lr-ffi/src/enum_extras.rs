@@ -723,14 +723,26 @@ mod tests {
             LR_MPLS_STACK_ERR_MID_STACK_BOTTOM, LR_MPLS_STACK_ERR_TOO_SHORT,
             LR_MPLS_STACK_ERR_UNEVEN_LENGTH, LR_MPLS_STACK_ERR_VALUE_OUT_OF_RANGE,
         };
-        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_TOO_SHORT)) };
-        assert_eq!(name, "TooShort");
-        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_UNEVEN_LENGTH)) };
-        assert_eq!(name, "UnevenLength");
-        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_MID_STACK_BOTTOM)) };
-        assert_eq!(name, "MidStackBottom");
         let name =
-            unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_VALUE_OUT_OF_RANGE)) };
+            unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_TOO_SHORT)) };
+        assert_eq!(name, "TooShort");
+        let name = unsafe {
+            name_to_string(lr_mpls_label_stack_error_name(
+                LR_MPLS_STACK_ERR_UNEVEN_LENGTH,
+            ))
+        };
+        assert_eq!(name, "UnevenLength");
+        let name = unsafe {
+            name_to_string(lr_mpls_label_stack_error_name(
+                LR_MPLS_STACK_ERR_MID_STACK_BOTTOM,
+            ))
+        };
+        assert_eq!(name, "MidStackBottom");
+        let name = unsafe {
+            name_to_string(lr_mpls_label_stack_error_name(
+                LR_MPLS_STACK_ERR_VALUE_OUT_OF_RANGE,
+            ))
+        };
         assert_eq!(name, "ValueOutOfRange");
         let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(99)) };
         assert_eq!(name, "unknown");
