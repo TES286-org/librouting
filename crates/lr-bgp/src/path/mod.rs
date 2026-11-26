@@ -724,9 +724,35 @@ impl PathAttributes {
         let a = self.get(AttrType::MpReachNlri)?;
         MpReach::decode(&a.value)
     }
+
+    /// The (AFI, SAFI) carried by MP_REACH_NLRI, without decoding the
+    /// NLRI. Unlike [`Self::mp_reach`], this works for families whose
+    /// NLRI the plain decoder does not understand (RFC 8277 labelled
+    /// unicast, RFC 7752 BGP-LS).
+    pub fn mp_reach_family(&self) -> Option<NlriFamily> {
+        let a = self.get(AttrType::MpReachNlri)?;
+        read_family_prefix(&a.value)
+    }
+
+    /// Decode only the MP_REACH_NLRI header (family + next-hop), leaving
+    /// the NLRI list empty. Use this for inspection that must also work
+    /// for labelled families; decode their NLRI with the labelled-unicast
+    /// helpers when the `labeled_unicast` feature is enabled.
+    pub fn mp_reach_header(&self) -> Option<MpReach> {
+        let a = self.get(AttrType::MpReachNlri)?;
+        MpReach::decode_header(&a.value)
+    }
+
     pub fn mp_unreach(&self) -> Option<MpUnreach> {
         let a = self.get(AttrType::MpUnreachNlri)?;
         MpUnreach::decode(&a.value)
+    }
+
+    /// The (AFI, SAFI) carried by MP_UNREACH_NLRI, without decoding the
+    /// NLRI. See [`Self::mp_reach_family`].
+    pub fn mp_unreach_family(&self) -> Option<NlriFamily> {
+        let a = self.get(AttrType::MpUnreachNlri)?;
+        read_family_prefix(&a.value)
     }
 
     /// Attach an MPLS label stack to this attribute set under the private

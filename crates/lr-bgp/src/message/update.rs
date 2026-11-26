@@ -81,13 +81,17 @@ impl Update {
         self.attributes.is_empty() && self.nlri.is_empty() && !self.withdrawn.is_empty()
     }
 
-    /// True if this UPDATE is a route refresh marker for a specific AF.
+    /// The address family this UPDATE carries. Defaults to IPv4 unicast
+    /// for the legacy NLRI section; MP-BGP overrides it via the
+    /// MP_REACH_NLRI / MP_UNREACH_NLRI attribute header. Reading the
+    /// header rather than decoding the NLRI keeps this correct for
+    /// families whose NLRI need a specialised decoder (RFC 8277
+    /// labelled unicast, RFC 7752 BGP-LS).
     pub fn family(&self) -> NlriFamily {
-        // Default to IPv4 unicast for legacy NLRI. MP-BGP overrides via attributes.
-        if let Some(mp) = self.attributes.mp_reach() {
-            return mp.family;
-        }
-        NlriFamily::IPV4_UNICAST
+        self.attributes
+            .mp_reach_family()
+            .or_else(|| self.attributes.mp_unreach_family())
+            .unwrap_or(NlriFamily::IPV4_UNICAST)
     }
 }
 
@@ -100,3 +104,7 @@ impl Default for Update {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "update_tests.rs"]
+mod tests;
