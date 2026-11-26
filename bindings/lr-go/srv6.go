@@ -720,8 +720,11 @@ func (s *SRv6Srh) FirstSegment() ([]byte, error) {
 	return out, nil
 }
 
-// CurrentDestination returns Segment List[Segments Left] — the
-// current destination address (RFC 8754 §4.1).
+// CurrentDestination returns the current destination address: the
+// wire Segment List[Segments Left] (RFC 8754 §4.3.1 S16), which in
+// the builder's visit-order storage is segments[len-1-SL]. At the
+// source (SL = n-1) it is the first segment visited — the outer DA
+// at the sender (§4.1).
 func (s *SRv6Srh) CurrentDestination() ([]byte, error) {
 	out := make([]byte, 16)
 	rc := C.lr_srv6_srh_current_destination(s.ptr, (*C.uint8_t)(unsafe.Pointer(&out[0])))

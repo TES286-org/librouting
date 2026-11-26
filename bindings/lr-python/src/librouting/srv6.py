@@ -520,9 +520,12 @@ class Srh:
         """Build an SRH from a segment list.
 
         `segments` is a list of `Sid` instances or 16-byte `bytes`/`bytearray`
-        values. `segments_left` defaults to `len(segments) - 1` (RFC 8754
-        §4.2 — the sender's view: the first segment is the destination
-        address, `segments_left` points at the last segment to visit).
+        values in VISIT ORDER — index 0 is the first segment visited (the
+        destination address at the sender), the last element is the final
+        segment. The wire order is the reverse (RFC 8754 §2: Segment
+        List[0] carries the last segment of the SR Policy); encode/decode
+        do the reversal in both directions. `segments_left` defaults to
+        `len(segments) - 1` (RFC 8754 §4.1 — the source view).
         Raises `SrhError` on an empty list, a too-long list, or an
         out-of-range `segments_left`.
         """

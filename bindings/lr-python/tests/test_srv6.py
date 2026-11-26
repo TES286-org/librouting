@@ -289,7 +289,10 @@ class TestSrh:
         s2 = Sid.from_str("fcbb:bb00::2")
         srh = Srh.with_segments_left([s1, s2], 0)
         assert srh.segments_left() == 0
-        assert srh.current_destination() == s1.octets()
+        # segments_left is a WIRE index (RFC 8754 §2): SL=0 names wire
+        # Segment List[0], which carries the FINAL segment of the SR
+        # Policy — s2 in visit order.
+        assert srh.current_destination() == s2.octets()
 
     def test_new_rejects_empty(self):
         with pytest.raises(SrhError) as ei:
@@ -325,8 +328,28 @@ class TestSrh:
     def test_current_destination(self):
         s1 = Sid.from_str("fcbb:bb00::1")
         s2 = Sid.from_str("fcbb:bb00::2")
-        srh = Srh.new([s1, s2])  # segments_left defaults to 1
-        assert srh.current_destination() == s2.octets()
+        srh = Srh.new([s1, s2])  # segments_left defaults to n-1 = 1
+        # RFC 8754 §4.1: at the source (SL = n-1) the current
+        # destination is the FIRST segment — the outer DA at the
+        # sender, which is also first_segment().
+        assert srh.current_destination() == s1.octets()
+        assert srh.first_segment() == s1.octets()
+
+    def test_wire_order_is_reversed_rfc_8754(self):
+        # RFC 8754 §2: "The Segment List is encoded starting from the
+        # last segment of the SR Policy" — Segment List[0] on the wire
+        # carries the final segment; Segment List[Last Entry] carries
+        # the first visited (the outer DA at the sender). This is the
+        # order iproute2's `encap seg6 segs A,B` puts on the wire.
+        s1 = Sid.from_str("fcbb:bb00::1")
+        s2 = Sid.from_str("fcbb:bb00::2")
+        srh = Srh.new([s1, s2])
+        wire = srh.encode()
+        assert len(wire) == 40
+        assert wire[3] == 1  # Segments Left = n-1
+        assert wire[4] == 1  # Last Entry = n-1
+        assert wire[8:24] == s2.octets()  # wire[0] = final segment
+        assert wire[24:40] == s1.octets()  # wire[Last Entry] = first
 
     def test_segment_at(self):
         s1 = Sid.from_str("fcbb:bb00::1")
