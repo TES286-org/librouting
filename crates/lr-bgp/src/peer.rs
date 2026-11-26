@@ -202,6 +202,25 @@ pub struct PeerConfig {
     /// capability is ignored when AddPath is not negotiated for the
     /// family (the draft's mandatory gating).
     pub paths_limit: Vec<(u16, u8, u16)>,
+    /// What the router does when an inbound Add-Path path exceeds the
+    /// local PATHS-LIMIT for its family
+    /// (draft-ietf-idr-addpath-paths-limit-00 §4/§5). The default,
+    /// [`PathsLimitAction::Discard`], is the graceful handling §5
+    /// recommends (excess paths are dropped, the session survives);
+    /// [`PathsLimitAction::Teardown`] terminates the peering with the
+    /// Cease / "Maximum Number of Paths Reached" NOTIFICATION §4
+    /// defines.
+    pub paths_limit_action: PathsLimitAction,
+    /// The wire value for the "Maximum Number of Paths Reached" Cease
+    /// subcode (draft-ietf-idr-addpath-paths-limit-00 §4/§7.2). The
+    /// draft's IANA request is still TBD, so an implementation cannot
+    /// pick a number on its own — an operator running the `Teardown`
+    /// action sets the value both peers of a session agreed on, and
+    /// the default flips to the IANA-assigned number once the registry
+    /// entry lands. `None` (the default) keeps the enforcement on the
+    /// §5 graceful path regardless of
+    /// [`Self::paths_limit_action`].
+    pub paths_limit_cease_subcode: Option<u8>,
     /// draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop
     /// capability (code 77). When `true` the OPEN advertises the
     /// capability and the codec accepts a link-local IPv6 next-hop in
@@ -245,6 +264,35 @@ impl MaxPrefixAction {
             Self::Warn => "warn",
             Self::Teardown => "teardown",
             Self::Restart => "restart",
+        }
+    }
+}
+
+/// Action taken when an inbound Add-Path path exceeds the locally
+/// advertised PATHS-LIMIT for its family
+/// (draft-ietf-idr-addpath-paths-limit-00 §4/§5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PathsLimitAction {
+    /// The graceful handling §5 recommends: discard the excess paths
+    /// and keep the session. Terminating the peering over one prefix
+    /// would discard every path for every prefix, so §5 prefers this
+    /// wherever it is feasible.
+    #[default]
+    Discard,
+    /// Terminate the peering with a NOTIFICATION Cease / "Maximum
+    /// Number of Paths Reached" (§4). Requires
+    /// [`PeerConfig::paths_limit_cease_subcode`] to carry the wire
+    /// value — the subcode's IANA registration is still TBD (§7.2),
+    /// so without an operator-chosen value the enforcement stays on
+    /// the [`Self::Discard`] path.
+    Teardown,
+}
+
+impl PathsLimitAction {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Discard => "discard",
+            Self::Teardown => "teardown",
         }
     }
 }
@@ -294,6 +342,8 @@ impl PeerConfig {
             software_version: None,
             software_version_encoding: SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
+            paths_limit_action: PathsLimitAction::Discard,
+            paths_limit_cease_subcode: None,
             link_local_next_hop: false,
             orf: Vec::new(),
         }

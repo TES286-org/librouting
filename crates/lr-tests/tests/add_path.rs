@@ -387,6 +387,211 @@ fn paths_limit_caps_ingress_from_noncompliant_sender() {
     );
 }
 
+/// Locate a NOTIFICATION frame in a drained byte stream and return
+/// `(code, subcode, data)`. BGP header: 16 marker octets, length (2),
+/// type (1); type 3 carries code, subcode and the Data field.
+fn find_notification_with_data(bytes: &[u8]) -> Option<(u8, u8, &[u8])> {
+    let mut i = 0;
+    while i + 19 <= bytes.len() {
+        let len = u16::from_be_bytes([bytes[i + 16], bytes[i + 17]]) as usize;
+        if len < 19 || i + len > bytes.len() {
+            return None;
+        }
+        if bytes[i + 18] == 3 {
+            return Some((bytes[i + 19], bytes[i + 20], &bytes[i + 21..i + len]));
+        }
+        i += len;
+    }
+    None
+}
+
+/// draft-ietf-idr-addpath-paths-limit-00 §4: with the `Teardown`
+/// action and an operator-chosen subcode, the excess path triggers a
+/// Cease / "Maximum Number of Paths Reached" NOTIFICATION whose Data
+/// field is the Figure 2 layout — AFI (2), SAFI (1), the advertised
+/// limit (2) — and the NOTIFICATION fires once per session lifetime.
+#[test]
+fn paths_limit_teardown_sends_cease_with_figure_2_data() {
+    use lr_bgp::{BgpEvent, BgpPeer, PathsLimitAction, PeerConfig};
+    use lr_core::attr::{AttrTag, Attribute, Attributes};
+    use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
+
+    let prefix = Prefix::new_v4([198, 51, 100, 0], 24);
+    let mut r = DefaultRouter::new();
+    let h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_local_address(IpAddr::V4([192, 0, 2, 1]))
+                .with_add_path()
+                .with_paths_limit(NlriFamily::IPV4_UNICAST, 1)
+                .with_paths_limit_action(PathsLimitAction::Teardown)
+                .with_paths_limit_cease_subcode(64),
+        )
+        .unwrap();
+    r.start_session(h).unwrap();
+
+    // The same hand-driven noncompliant partner the §5 ingress test
+    // uses: it advertises Add-Path and ignores the receiver's
+    // PATHS-LIMIT.
+    let mut partner_cfg = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    partner_cfg.add_path = true;
+    partner_cfg.default_ipv4_unicast = true;
+    partner_cfg.local_address = Some(IpAddr::V4([192, 0, 2, 2]));
+    let mut partner = BgpPeer::new(partner_cfg);
+    partner.step(BgpEvent::ManualStart);
+    partner.step(BgpEvent::TransportOpen);
+    let partner_open = partner.drain_outgoing();
+    r.feed_input(h, &partner_open).unwrap();
+    let our_open = r.drain_output(h);
+    partner.feed_bytes(&our_open).unwrap();
+    let partner_keepalive = partner.drain_outgoing();
+    r.feed_input(h, &partner_keepalive).unwrap();
+    let _ = r.drain_output(h);
+    assert!(partner.is_established(), "partner handshake must complete");
+
+    fn advertise(
+        r: &mut DefaultRouter,
+        partner: &mut BgpPeer,
+        h: SessionHandle,
+        prefix: Prefix,
+        path_id: u32,
+    ) {
+        let mut attrs = Attributes::new();
+        attrs.insert(Attribute {
+            tag: AttrTag(1), // ORIGIN, IGP
+            flags: 0x40,
+            value: vec![0],
+        });
+        let route = Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: Some(IpAddr::V4([192, 0, 2, 2])),
+            attributes: attrs,
+            age_ms: 0,
+            path_id,
+            tag: None,
+        };
+        assert!(partner.advertise(&route), "advertise path {path_id}");
+        let bytes = partner.drain_outgoing();
+        r.feed_input(h, &bytes).unwrap();
+    }
+
+    // The first path is within the limit of 1.
+    advertise(&mut r, &mut partner, h, prefix, 1);
+    let _ = r.poll_events();
+    // The second path exceeds it: the Cease fires.
+    advertise(&mut r, &mut partner, h, prefix, 2);
+    let out = r.drain_output(h);
+    let (code, sub, data) = find_notification_with_data(&out).expect("Cease NOTIFICATION queued");
+    assert_eq!(code, 6, "Cease error code");
+    assert_eq!(
+        sub, 64,
+        "the operator-chosen Maximum Number of Paths Reached subcode"
+    );
+    assert_eq!(
+        data,
+        &[0x00, 0x01, 0x01, 0x00, 0x01],
+        "§4 Figure 2: AFI=1, SAFI=1, advertised Paths Limit=1"
+    );
+
+    // A third path stays on the discard path — the teardown latched
+    // after the first NOTIFICATION (one per session lifetime).
+    advertise(&mut r, &mut partner, h, prefix, 3);
+    let out = r.drain_output(h);
+    assert!(
+        find_notification_with_data(&out).is_none(),
+        "the teardown NOTIFICATION fires once"
+    );
+
+    let retained: Vec<_> = r
+        .rib_paths_snapshot()
+        .into_iter()
+        .filter(|rt| rt.key.prefix == prefix)
+        .collect();
+    assert_eq!(retained.len(), 1, "only the permitted path was retained");
+}
+
+/// draft-ietf-idr-addpath-paths-limit-00 §4/§7.2: the subcode's IANA
+/// registration is still TBD, so `Teardown` without an
+/// operator-chosen wire value must NOT invent one — the enforcement
+/// stays on the §5 graceful discard path.
+#[test]
+fn paths_limit_teardown_without_subcode_stays_graceful() {
+    use lr_bgp::{BgpEvent, BgpPeer, PathsLimitAction, PeerConfig};
+    use lr_core::attr::{AttrTag, Attribute, Attributes};
+    use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
+
+    let prefix = Prefix::new_v4([198, 51, 100, 0], 24);
+    let mut r = DefaultRouter::new();
+    let h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_local_address(IpAddr::V4([192, 0, 2, 1]))
+                .with_add_path()
+                .with_paths_limit(NlriFamily::IPV4_UNICAST, 1)
+                .with_paths_limit_action(PathsLimitAction::Teardown),
+        )
+        .unwrap();
+    r.start_session(h).unwrap();
+
+    let mut partner_cfg = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    partner_cfg.add_path = true;
+    partner_cfg.default_ipv4_unicast = true;
+    partner_cfg.local_address = Some(IpAddr::V4([192, 0, 2, 2]));
+    let mut partner = BgpPeer::new(partner_cfg);
+    partner.step(BgpEvent::ManualStart);
+    partner.step(BgpEvent::TransportOpen);
+    let partner_open = partner.drain_outgoing();
+    r.feed_input(h, &partner_open).unwrap();
+    let our_open = r.drain_output(h);
+    partner.feed_bytes(&our_open).unwrap();
+    let partner_keepalive = partner.drain_outgoing();
+    r.feed_input(h, &partner_keepalive).unwrap();
+    let _ = r.drain_output(h);
+    assert!(partner.is_established(), "partner handshake must complete");
+
+    for path_id in [1u32, 2] {
+        let mut attrs = Attributes::new();
+        attrs.insert(Attribute {
+            tag: AttrTag(1), // ORIGIN, IGP
+            flags: 0x40,
+            value: vec![0],
+        });
+        let route = Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: Some(IpAddr::V4([192, 0, 2, 2])),
+            attributes: attrs,
+            age_ms: 0,
+            path_id,
+            tag: None,
+        };
+        assert!(partner.advertise(&route), "advertise path {path_id}");
+        let bytes = partner.drain_outgoing();
+        r.feed_input(h, &bytes).unwrap();
+    }
+    let out = r.drain_output(h);
+    assert!(
+        find_notification_with_data(&out).is_none(),
+        "no subcode value configured — no NOTIFICATION, the §5 graceful path runs"
+    );
+
+    let retained: Vec<_> = r
+        .rib_paths_snapshot()
+        .into_iter()
+        .filter(|rt| rt.key.prefix == prefix)
+        .collect();
+    assert_eq!(
+        retained.len(),
+        1,
+        "the excess path is still discarded (§5 graceful handling)"
+    );
+}
+
 /// A single-path downstream peer of a multi-path router still sees only
 /// the best path (RFC 7911 peers and plain peers coexist).
 #[test]

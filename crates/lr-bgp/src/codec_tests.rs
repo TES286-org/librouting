@@ -334,6 +334,28 @@ fn notification_roundtrip() {
     }
 }
 
+/// RFC 4271 §4.5: the Data field rides the NOTIFICATION body verbatim
+/// — the PATHS-LIMIT Cease (draft-ietf-idr-addpath-paths-limit-00 §4
+/// Figure 2) is the carrier this pins.
+#[test]
+fn notification_roundtrip_with_data() {
+    let n = BgpNotification::new(6, 64, vec![0x00, 0x01, 0x01, 0x00, 0x10]);
+    let m = BgpMessage::Notification(n);
+    let dec = roundtrip(m, false);
+    match dec {
+        BgpMessage::Notification(d) => {
+            assert_eq!(d.error_code, 6);
+            assert_eq!(d.error_subcode, 64);
+            assert_eq!(
+                d.data,
+                vec![0x00, 0x01, 0x01, 0x00, 0x10],
+                "the Figure 2 Data field (AFI=1, SAFI=1, limit=16) survives the wire"
+            );
+        }
+        _ => panic!("expected NOTIFICATION"),
+    }
+}
+
 #[test]
 fn route_refresh_roundtrip() {
     let r = RouteRefresh::new(NlriFamily::IPV4_UNICAST);

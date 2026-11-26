@@ -1081,7 +1081,22 @@ impl BgpPeer {
     }
 
     pub fn enqueue_notification(&mut self, code: BgpErrorCode, subcode: u8) {
-        let n = BgpNotification::new(code as u8, subcode, vec![]);
+        self.enqueue_notification_with_data(code, subcode, Vec::new());
+    }
+
+    /// Queue a NOTIFICATION with a Data field (RFC 4271 §4.5). The
+    /// router-side teardown paths whose subcode carries structured
+    /// data — e.g. the PATHS-LIMIT "Maximum Number of Paths Reached"
+    /// Cease (draft-ietf-idr-addpath-paths-limit-00 §4 Figure 2) —
+    /// use this; everything else keeps the empty-data
+    /// [`Self::enqueue_notification`].
+    pub fn enqueue_notification_with_data(
+        &mut self,
+        code: BgpErrorCode,
+        subcode: u8,
+        data: Vec<u8>,
+    ) {
+        let n = BgpNotification::new(code as u8, subcode, data);
         self.send_msg(&BgpMessage::Notification(n));
     }
 

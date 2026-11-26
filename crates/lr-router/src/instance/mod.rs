@@ -789,6 +789,11 @@ struct SessionPolicy {
     /// Latched after the first PATHS-LIMIT ingress discard is logged
     /// for this session (draft-ietf-idr-addpath-paths-limit-00 §5).
     warned_paths_limit: bool,
+    /// Latched after the PATHS-LIMIT §4 teardown NOTIFICATION was
+    /// queued for this session, so the Cease fires once per session
+    /// lifetime. Cleared in `teardown_bgp_session` — a re-established
+    /// session that exceeds again tears down again.
+    torndown_paths_limit: bool,
 }
 
 /// Per-session maximum-prefix bookkeeping.
@@ -2681,18 +2686,29 @@ impl DefaultRouter {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
         // draft-ietf-idr-addpath-paths-limit-00 §3/§5: cap the number
         // of Add-Path paths retained for one prefix at the locally
-        // advertised receive limit. Excess paths are discarded — the
-        // graceful handling §5 recommends over tearing the session
-        // down. Re-announcing an existing path_id replaces in place
-        // and is always admitted.
-        if let Some(limit) = self
+        // advertised receive limit. The default action discards the
+        // excess paths — the graceful handling §5 recommends over
+        // tearing the session down; the §4 `Teardown` action
+        // terminates the peering with the "Maximum Number of Paths
+        // Reached" Cease NOTIFICATION (see below). Re-announcing an
+        // existing path_id replaces in place and is always admitted.
+        //
+        // `paths_limit_rx_for` already applies the §4 MUST NOT gates:
+        // it answers `Some` only for a family with a non-zero locally
+        // advertised limit AND Add-Path receive negotiated, so the
+        // subcode can never fire where the draft forbids it.
+        let paths_limit = self
             .sessions
             .get(&route.origin.peer)
             .and_then(|state| match state {
-                SessionState::Bgp { peer, .. } => peer.paths_limit_rx_for(route.key.family),
+                SessionState::Bgp { peer, .. } => {
+                    let limit = peer.paths_limit_rx_for(route.key.family)?;
+                    let cfg = peer.config();
+                    Some((limit, cfg.paths_limit_action, cfg.paths_limit_cease_subcode))
+                }
                 _ => None,
-            })
-        {
+            });
+        if let Some((limit, action, cease_subcode)) = paths_limit {
             let known = self
                 .adj_rib_in
                 .get(route.origin, &route.key, route.path_id)
@@ -2709,6 +2725,51 @@ impl DefaultRouter {
                          discarding excess Add-Path paths",
                         route.key.prefix
                     )));
+                }
+                // §4: when the operator chose to terminate the peering
+                // over the excess (and supplied a wire value for the
+                // still-TBD subcode — §7.2), send the Cease /
+                // "Maximum Number of Paths Reached" NOTIFICATION with
+                // the Figure 2 Data field (AFI, SAFI, the advertised
+                // limit). Like the max-prefix teardown, the message
+                // is queued and flushed; the peer closes on receipt
+                // (RFC 4271 §6.5) and the ordinary teardown path
+                // purges or retains the session's routes.
+                if action == lr_bgp::PathsLimitAction::Teardown {
+                    if let Some(subcode) = cease_subcode {
+                        // One NOTIFICATION per session lifetime; a
+                        // re-established session re-arms (the latch
+                        // clears in `teardown_bgp_session`).
+                        let fire = {
+                            let st = self.session_policy.entry(session).or_default();
+                            if st.torndown_paths_limit {
+                                false
+                            } else {
+                                st.torndown_paths_limit = true;
+                                true
+                            }
+                        };
+                        if fire {
+                            if let Some(SessionState::Bgp { peer, .. }) =
+                                self.sessions.get_mut(&session)
+                            {
+                                peer.enqueue_notification_with_data(
+                                    lr_bgp::BgpErrorCode::Cease,
+                                    subcode,
+                                    lr_bgp::extensions::paths_limit::cease_data(
+                                        route.key.family,
+                                        limit,
+                                    ),
+                                );
+                            }
+                            self.pending_events.push(RouterEvent::Log(format!(
+                                "session {session}: PATHS-LIMIT {limit} exceeded for {}; \
+                                 tearing down (Cease/{subcode} Maximum Number of Paths Reached)",
+                                route.key.prefix
+                            )));
+                            self.flush_peer_output(session);
+                        }
+                    }
                 }
                 return;
             }
@@ -4508,6 +4569,13 @@ impl DefaultRouter {
             state.exceeded = false;
             state.threshold_warned = false;
         }
+        // The PATHS-LIMIT latches follow the same rule: a
+        // re-established session starts with a fresh §5 discard log
+        // and a fresh §4 teardown arm.
+        if let Some(state) = self.session_policy.get_mut(&session) {
+            state.warned_paths_limit = false;
+            state.torndown_paths_limit = false;
+        }
         // Exchange plane: the record sets a session sent leave with
         // it; the partial-transit counter resets too (feature
         // `exchange-plane`).
@@ -4978,6 +5046,8 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.software_version = cfg.software_version.clone();
                 p_cfg.software_version_encoding = cfg.software_version_encoding;
                 p_cfg.paths_limit = cfg.paths_limit.clone();
+                p_cfg.paths_limit_action = cfg.paths_limit_action;
+                p_cfg.paths_limit_cease_subcode = cfg.paths_limit_cease_subcode;
                 p_cfg.link_local_next_hop = cfg.link_local_next_hop;
                 p_cfg.orf = cfg.orf.clone();
                 // RFC 9234: when the daemon resolved a BGP Role
