@@ -878,8 +878,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 match op {
                     UnaryOp::Not => Ok(Value::Bool(!v.truthy())),
                     UnaryOp::Neg => match v {
-                        Value::Int(n) => Ok(Value::Int(-n)),
-                        other => Err(type_mismatch("neg", &other, "int", *span, self.line_index)),
+                        // checked_neg mirrors eval_binary's checked
+                        // arithmetic: -i64::MIN does not exist, and the
+                        // module contract says the evaluator never
+                        // panics (the peephole already refuses to fold
+                        // that case).
+                        Value::Int(n) => n
+                            .checked_neg()
+                            .map(Value::Int)
+                            .ok_or_else(|| self.err(*span, EvalErrorKind::Overflow)),
+                        other => {
+                            Err(type_mismatch("neg", &other, "int", *span, self.line_index))
+                        }
                     },
                 }
             }
@@ -2780,7 +2790,20 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                         .pop()
                         .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     match v {
-                        Value::Int(n) => stack.push(Value::Int(-n)),
+                        // Same checked semantics as the interpreter's
+                        // UnaryOp::Neg — the two engines must agree.
+                        Value::Int(n) => {
+                            let span = spans[ip];
+                            match n.checked_neg() {
+                                Some(m) => stack.push(Value::Int(m)),
+                                None => {
+                                    return Err(self.err(
+                                        span,
+                                        EvalErrorKind::Overflow,
+                                    ));
+                                }
+                            }
+                        }
                         other => {
                             let span = spans[ip];
                             return Err(type_mismatch("neg", &other, "int", span, self.line_index));

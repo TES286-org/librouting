@@ -1265,6 +1265,27 @@ fn run_vm(filter_src: &str, route: &mut Route) -> EvalResult {
     crate::filter::bytecode::execute(&compiled, route, &StubCtx)
 }
 
+/// Negating i64::MIN overflows. The module contract says the
+/// evaluator never panics; both engines must surface the same
+/// Overflow error (mapped to Fallthrough) instead — the previous
+/// `-n` panicked in debug builds and wrapped in release.
+#[test]
+fn neg_of_i64_min_overflows_not_panics() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "let x = -(-9223372036854775807 - 1); let y = -x; accept;";
+    let va = run(src, &mut r.clone());
+    let vb = run_vm(src, &mut r);
+    assert_eq!(
+        va, vb,
+        "the interpreter and the VM agree on the overflow verdict"
+    );
+    assert_eq!(va, EvalResult::Fallthrough, "overflow is fatal for the route, not the process");
+    // The non-overflowing negation still works on both engines.
+    let src = "let x = -(0 - 5); if x == 5 then accept; reject;";
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
 /// Every source in the equivalence table must produce identical
 /// verdicts AND identical post-evaluation route state under both
 /// engines.
