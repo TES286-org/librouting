@@ -35,10 +35,10 @@ files of the `lr-cli` binary crate, which is not a library.
 | --- | --- | --- |
 | FSM, hold and keepalive timers (RFC 4271) | yes | `lr-bgp::fsm` |
 | OPEN, UPDATE, KEEPALIVE, NOTIFICATION codec | yes | `lr-bgp::message`, `lr-bgp::codec` |
-| Capability advertisement (RFC 5492) | yes | `lr-bgp::capabilities` |
+| Capability advertisement (RFC 5492) | yes | `lr-bgp::capabilities`; oversized values are omitted, never truncated (`try_encode_set` reports them), and partial tuple tails are refused |
 | Four-octet AS and AS4_PATH reconstruction (RFC 6793) | yes | `lr-bgp::extensions::asn4`, `lr-bgp::path::as_path` |
-| MP-BGP NLRI, IPv4 and IPv6 unicast (RFC 4760) | yes | `lr-bgp::path::mp_nlri` |
-| Extended next hop (RFC 8950) | yes | `lr-bgp::extensions::extended_next_hop` |
+| MP-BGP NLRI, IPv4 and IPv6 unicast (RFC 4760) | yes | `lr-bgp::path::mp_nlri`, `lr-bgp::path::PathAttributes::{mp_reach_family, mp_unreach_family, mp_reach_header}`; plain decoders refuse labelled SAFI |
+| Extended next hop (RFC 8950) | yes | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::advertise`; IPv4 NLRI with an IPv6 next-hop goes out via MP_REACH only when (1,1,2) is negotiated, otherwise the route is withheld |
 | Add-Path send, receive and path-id framing (RFC 7911) | yes | `lr-bgp::extensions::addpath` |
 | Route refresh (RFC 2918) and BoRR/EoRR (RFC 7313) | yes | `lr-bgp::message::route_refresh`, `lr-bgp::extensions::enhanced_rr` |
 | Graceful restart and End-of-RIB (RFC 4724) | yes | `lr-bgp::extensions::graceful_restart` |
@@ -50,7 +50,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Extended Message capability and codec gate (RFC 8654) | yes | `lr-bgp::extensions::extended_message`, `lr-bgp::codec::BgpCodec::set_extended_message`, `lr-bgp::advertise` |
 | Extended Optional Parameters Length for OPEN (RFC 9072) | yes | `lr-bgp::codec`, `lr-bgp::message::open`; both encodings decoded, the extended encoding emitted when the parameters exceed 255 octets |
 | Outbound Route Filtering capability and egress filter (RFC 5291/5292) | yes | `lr-bgp::extensions::orf`, `lr-bgp::message::route_refresh`, `lr-router::instance::{apply_orf, send_orf}` |
-| FQDN/Hostname capability (draft-walton-bgp-hostname-capability-02) | yes | `lr-bgp::extensions::fqdn`, `lr-router::session::SessionSummary::peer_fqdn`, `show session <h>` |
+| FQDN/Hostname capability (draft-walton-bgp-hostname-capability-02) | yes | `lr-bgp::extensions::fqdn`, `lr-router::session::SessionSummary::peer_fqdn`, `show session <h>`; total value capped at 255 octets with UTF-8-safe truncation |
 | BFD Strict-Mode capability and establishment gate (draft-ietf-idr-bgp-bfd-strict-mode-19) | yes | `lr-bgp::extensions::bfd_strict_mode`, `lr-bgp::fsm`, `lr-router::instance`, `lr-cli::bgp_reactor` |
 | Software Version capability (draft-abraitis-bgp-version-capability-18) | yes | `lr-bgp::extensions::software_version`, `lr-bgp::capabilities_extra::SoftwareVersionEncoding`, `lr-router::session::SessionSummary::peer_software_version`, `show session <h>`; raw UTF-8 by default, draft-11 length-prefixed encoding selectable per peer, both decoded |
 | PATHS-LIMIT capability and per-prefix ingress/egress caps (draft-ietf-idr-addpath-paths-limit-00) | yes | `lr-bgp::extensions::paths_limit`, `lr-bgp::capabilities::Capability::paths_limit`, `lr-router::instance` |
@@ -61,7 +61,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | ATOMIC_AGGREGATE, AGGREGATOR, ORIGINATOR_ID, CLUSTER_LIST typed accessors (RFC 4271 §5.1.6/§5.1.7, RFC 4456 §7/§8) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::{OriginatorId, ClusterList}` |
 | AIGP typed accessor and TLV codec (RFC 7311) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::Aigp` |
 | PMSI Tunnel typed accessor and codec (RFC 6514 §5) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::PmsiTunnel` |
-| Labelled-unicast NLRI and MP helpers (RFC 8277) | yes | `lr-bgp::path::labeled_nlri` |
+| Labelled-unicast NLRI and MP helpers (RFC 8277) | yes | `lr-bgp::path::labeled_nlri`, `lr-bgp::path::mp_nlri`; SAFI 4 dispatch, plain decoders reject it, header readers still report family/next-hop |
 | NLRI types and prefix encoding | yes | `lr-bgp::nlri` |
 | Egress rewrite rules, iBGP split horizon, next-hop-self | yes | `lr-bgp::advertise` |
 | Per-peer configuration: hold time, families, max-prefix, GTSM | yes | `lr-bgp::peer` |

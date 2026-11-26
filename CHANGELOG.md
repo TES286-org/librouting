@@ -602,6 +602,31 @@ and `RouterInstance` gains a default `set_bfd_state` no-op plus
 `DefaultRouter::send_orf` / `set_orf_tx`. Pre-2.0 semver debt the
 `api-surface` CI job already tracks. C ABI untouched.
 
+### Fixed — BGP capability wire-format correctness (issue #101)
+
+- `Capability::encode_set` cast each value length to one octet,
+  wrapping a value over 255 bytes into a corrupt OPEN. It now omits
+  capabilities the wire form cannot carry, and the additive
+  `Capability::try_encode_set` returns `CapabilityLengthError`
+  (also re-exported at the crate root) so embedders can detect the
+  case. The FQDN constructor shares a 253-octet budget between its
+  two length-prefixed UTF-8 strings instead of allowing a 512-octet
+  value; cuts stay on character boundaries and the hostname wins.
+  The Add-Path and Graceful Restart tuple decoders now refuse a
+  partial trailing tuple instead of silently dropping it.
+- Egress no longer emits a 16-octet IPv6 well-known NEXT_HOP for
+  IPv4 unicast when RFC 5549 / RFC 8950 Extended Next-Hop (1,1,2)
+  was not negotiated; it withholds the route. With the capability,
+  the next-hop stays in MP_REACH_NLRI. A route with no next-hop is
+  withheld rather than sent without the mandatory NEXT_HOP.
+- The plain MP_REACH / MP_UNREACH decoders explicitly refuse
+  RFC 8277 labelled SAFI instead of reading label octets as prefix
+  bits. `PathAttributes::mp_reach_family` / `mp_unreach_family` /
+  `mp_reach_header` and `MpReach::decode_header` read only the
+  fixed header, so `Update::family()` and the C MP presence,
+  family, next-hop and raw-byte readers keep working for labelled
+  families. The C ABI surface (symbols and header) is unchanged.
+
 ### Added — RFC 9072 Extended Optional Parameters Length
 
 The Software Version capability's latest draft requires RFC 9072,
