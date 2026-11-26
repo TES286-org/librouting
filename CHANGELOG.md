@@ -210,8 +210,40 @@ corpus.
   and used.
 - **`lr_mrt_reader_feed`** ran the reader's feed+decode pair and
   discarded the decoded record, silently losing every chunk's first
-  record; `MrtReader::feed`/`next` are public now and the FFI entry
-  buffers only.
+  record; `MrtReader::feed`/`next_record` are public now and the FFI
+  entry buffers only.
+
+### Fixed — four more wire-and-policy defects (issue #101)
+
+- **IPv4 NLRI with an IPv6 next hop toward a non-ENH peer**
+  (`lr-bgp::advertise`): RFC 4271 §5.1.3 fixes the well-known NEXT_HOP
+  of legacy IPv4 NLRI at 4 octets. A route learned with an IPv6 next
+  hop that reached the legacy egress branch without the (1, 1, 2)
+  Extended Next-Hop tuple negotiated injected a 16-byte value every
+  compliant peer rejects; the route is now withheld
+  (treat-as-withdraw, the link-local branch's posture) and the
+  negotiated form still rides MP_REACH.
+- **Capability values above the one-octet RFC 5492 length**
+  (`lr-bgp::capabilities`): `encode_set` wrote `value.len() as u8`,
+  so a 512-byte FQDN value (the builder capped each string at 255)
+  wrapped to a zero length byte and mis-framed every following
+  capability. The FQDN builder keeps the whole value inside 255
+  octets (domain trimmed first, then the hostname) and `encode_set`
+  omits a hand-built capability that cannot be represented.
+- **`-i64::MIN` in the filter DSL** (`lr-policy::eval`): unary
+  negation ran unchecked in both engines; the value is constructible
+  as `-(-9223372036854775807 - 1)` and negating it panicked in debug
+  builds (the module contract says the evaluator never panics).
+  Both engines now use `checked_neg` and surface the same Overflow
+  error the binary operators already use.
+- **Step-10 tiebreak for routes without ORIGINATOR_ID**
+  (`lr-bgp::best_path`): every such route compared as identifier 0
+  and beat every real router id in the RFC 5004 deterministic-mode
+  tiebreak. The advertising peer's BGP Identifier (the FRR/BIRD
+  substitution) now rides the route bag under the private
+  `LrPeerBgpId` tag, stamped at InstallRoute time next to
+  `LrPeerSourceAddress`, and the comparator reads
+  ORIGINATOR_ID → `LrPeerBgpId` → 0.
 
 ### Fixed — the real-data benchmark now measures a real dump's selection
 
