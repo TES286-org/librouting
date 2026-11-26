@@ -238,7 +238,16 @@ impl AddressList {
                 }
                 Ok(1)
             }
-            Some(IpAddr::V6(_)) => Ok(2),
+            Some(IpAddr::V6(_)) => {
+                // Symmetric with the IPv4 branch: an Address List TLV is
+                // single-family (RFC 5036 §3.4.3), and an IPv6-first
+                // mixed list would otherwise encode AF=2 followed by
+                // raw 4-octet IPv4 bodies — illegal on the wire.
+                if self.addresses.iter().any(|a| a.is_ipv4()) {
+                    return Err(EncodeError::InvalidValue("mixed-family address list"));
+                }
+                Ok(2)
+            }
             None => Err(EncodeError::InvalidValue("empty address list")),
         }
     }
