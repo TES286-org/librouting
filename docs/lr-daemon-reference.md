@@ -881,8 +881,8 @@ radius is one peer. Off by default.
 | `min_recovery_interval_s` | int | 60 | Recovery cooldown (separate from above) |
 | `max_stale_age_s` | int | 300 | Max age before a stale prefix is swept |
 | `tick_interval_s` | int | 5 | Peer-health ticker period |
-| `soft_degraded` | int | 10 | Freeze recovery at this many degraded sessions |
-| `hard_degraded` | int | 20 | Force every session to ≥ L1 at this many |
+| `soft_degraded` | int | 10 | Rate-limit recovery to one transition per tick at/above this many degraded sessions |
+| `hard_degraded` | int | 20 | Force every healthy session to ≥ L1 at this many (no stale marking) |
 
 Rollout modes gate how far the mechanism reaches:
 
