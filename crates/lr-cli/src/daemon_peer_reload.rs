@@ -191,6 +191,8 @@ pub(super) fn classify_peer_change(old: &PeerSpec, new: &PeerSpec) -> PeerAction
     differs!(software_version);
     differs!(software_version_encoding);
     differs!(paths_limit);
+    differs!(paths_limit_action);
+    differs!(paths_limit_cease_subcode);
     differs!(link_local_next_hop);
     differs!(orf);
     differs!(orf_entries);
@@ -1264,6 +1266,8 @@ mod tests {
             |p: &mut PeerSpec| p.max_prefixes = Some(1000),
             |p: &mut PeerSpec| p.gtsm_hops = Some(2),
             |p: &mut PeerSpec| p.paths_limit = Some(vec![(1, 0, 8)]),
+            |p: &mut PeerSpec| p.paths_limit_action = Some(lr_bgp::PathsLimitAction::Teardown),
+            |p: &mut PeerSpec| p.paths_limit_cease_subcode = Some(64),
             |p: &mut PeerSpec| {
                 p.software_version_encoding =
                     Some(lr_bgp::capabilities_extra::SoftwareVersionEncoding::Draft11)

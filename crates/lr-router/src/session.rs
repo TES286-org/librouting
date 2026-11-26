@@ -365,6 +365,18 @@ pub struct SessionConfig {
     /// ingress and caps egress at the peer's advertised limit.
     /// Propagated to [`lr_bgp::PeerConfig::paths_limit`].
     pub paths_limit: Vec<(u16, u8, u16)>,
+    /// What to do when an inbound Add-Path path exceeds the local
+    /// PATHS-LIMIT (draft-ietf-idr-addpath-paths-limit-00 §4/§5).
+    /// Propagated to
+    /// [`lr_bgp::PeerConfig::paths_limit_action`].
+    pub paths_limit_action: lr_bgp::PathsLimitAction,
+    /// Wire value for the "Maximum Number of Paths Reached" Cease
+    /// subcode (draft-ietf-idr-addpath-paths-limit-00 §4/§7.2 — the
+    /// IANA value is still TBD, so the operator picks it). `None`
+    /// keeps the §5 graceful handling even with the `Teardown`
+    /// action. Propagated to
+    /// [`lr_bgp::PeerConfig::paths_limit_cease_subcode`].
+    pub paths_limit_cease_subcode: Option<u8>,
     /// Link-Local Next Hop capability
     /// (draft-ietf-idr-linklocal-capability-06). Propagated to
     /// [`lr_bgp::PeerConfig::link_local_next_hop`].
@@ -454,6 +466,8 @@ impl SessionConfig {
             software_version: None,
             software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
+            paths_limit_action: lr_bgp::PathsLimitAction::Discard,
+            paths_limit_cease_subcode: None,
             link_local_next_hop: false,
             orf: Vec::new(),
             orf_entries: Vec::new(),
@@ -527,6 +541,30 @@ impl SessionConfig {
         if limit != 0 && !self.paths_limit.contains(&(family.afi, family.safi, limit)) {
             self.paths_limit.push((family.afi, family.safi, limit));
         }
+        self
+    }
+
+    /// Set what happens when an inbound Add-Path path exceeds the
+    /// local PATHS-LIMIT (draft-ietf-idr-addpath-paths-limit-00
+    /// §4/§5): the default discards the excess paths (§5 graceful
+    /// handling); `Teardown` terminates the peering with the
+    /// §4 "Maximum Number of Paths Reached" Cease NOTIFICATION. The
+    /// teardown needs a wire value for the subcode —
+    /// [`Self::with_paths_limit_cease_subcode`] — because the draft's
+    /// IANA registration is still TBD (§7.2); without one the
+    /// enforcement stays on the graceful path.
+    pub fn with_paths_limit_action(mut self, action: lr_bgp::PathsLimitAction) -> Self {
+        self.paths_limit_action = action;
+        self
+    }
+
+    /// Set the wire value for the "Maximum Number of Paths Reached"
+    /// Cease subcode (draft-ietf-idr-addpath-paths-limit-00 §4).
+    /// Operators on the `Teardown` action set the value their peer
+    /// and lr agreed on; the default flips to the IANA-assigned
+    /// number once the registry entry lands (§7.2).
+    pub fn with_paths_limit_cease_subcode(mut self, subcode: u8) -> Self {
+        self.paths_limit_cease_subcode = Some(subcode);
         self
     }
 
@@ -788,6 +826,8 @@ impl SessionConfig {
             software_version: None,
             software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
+            paths_limit_action: lr_bgp::PathsLimitAction::Discard,
+            paths_limit_cease_subcode: None,
             link_local_next_hop: false,
             orf: Vec::new(),
             orf_entries: Vec::new(),
@@ -856,6 +896,8 @@ impl SessionConfig {
             software_version: None,
             software_version_encoding: lr_bgp::capabilities_extra::SoftwareVersionEncoding::Latest,
             paths_limit: Vec::new(),
+            paths_limit_action: lr_bgp::PathsLimitAction::Discard,
+            paths_limit_cease_subcode: None,
             link_local_next_hop: false,
             orf: Vec::new(),
             orf_entries: Vec::new(),

@@ -57,7 +57,7 @@ pub use error::{
 pub use extensions::bfd_strict_mode::BfdState;
 pub use fsm::{BgpAction, BgpEvent, BgpPeer, BgpState, PeerMessageStats};
 pub use message::{BgpHeader, BgpMessage, BgpMessageType};
-pub use peer::{MaxPrefixAction, PeerConfig};
+pub use peer::{MaxPrefixAction, PathsLimitAction, PeerConfig};
 pub use roa::{RoaBuildError, RoaEntry, RoaError, RoaState, RoaTable, RoaTableBuilder};
 pub use roa_loader::{parse as parse_roa, RoaFormat, RoaLoaderError};
 pub use roa_store::{RoaProvenance, RoaStore};

@@ -3451,3 +3451,180 @@ fn software_version_encoding_rejects_unknown_spellings() {
         );
     }
 }
+
+/// A typo'd `max_prefix_action` is a hard error, not a silent
+/// downgrade to `warn` — the max-prefix ceiling is a protection the
+/// operator asked for, and FRR rejects an unknown action word the
+/// same way. Regression: the parser used to store the raw string and
+/// `build_session_config` matched only the three legal spellings,
+/// falling through to `warn` for everything else.
+#[test]
+fn max_prefix_action_rejects_unknown_spellings() {
+    for bad in ["shutdown", "teardwon", "warning-only", ""] {
+        let mut cfg = DaemonConfig::with_defaults();
+        let text = format!("[bgp]\nlocal_as = 64512\nmax_prefix_action = \"{bad}\"\n");
+        let err = parse_toml_subset(&text, &mut cfg).unwrap_err();
+        assert!(
+            err.contains("max_prefix_action"),
+            "expected the key name in {err:?}"
+        );
+    }
+    // The three legal spellings parse (and normalise to the enum's
+    // own names).
+    for good in ["warn", "teardown", "restart"] {
+        let mut cfg = DaemonConfig::with_defaults();
+        let text = format!("[bgp]\nlocal_as = 64512\nmax_prefix_action = \"{good}\"\n");
+        parse_toml_subset(&text, &mut cfg).unwrap();
+        assert_eq!(cfg.max_prefix_action, good);
+    }
+    // The per-peer key follows the same rule.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\n\n[[peer]]\nremote = \"192.0.2.2:179\"\n\
+         peer_as = 64513\nmax_prefix_action = \"explode\"\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+}
+
+/// draft-ietf-idr-addpath-paths-limit-00 §4/§5: the enforcement
+/// action and the still-TBD Cease subcode parse globally and per
+/// peer, with the per-peer key overriding the router-wide one.
+#[test]
+fn paths_limit_action_and_subcode_parse_globally_and_per_peer() {
+    use lr_bgp::PathsLimitAction;
+
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nadd_path = true\n\
+         paths_limit = \"1:1:16\"\npaths_limit_action = \"teardown\"\n\
+         paths_limit_cease_subcode = 64\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n\
+         paths_limit_action = \"discard\"\n\n\
+         [[peer]]\nremote = \"192.0.2.3:179\"\npeer_as = 64514\n",
+        &mut cfg,
+    )
+    .unwrap();
+    assert_eq!(cfg.paths_limit_action, PathsLimitAction::Teardown);
+    assert_eq!(cfg.paths_limit_cease_subcode, Some(64));
+    assert_eq!(
+        cfg.peers[0].paths_limit_action,
+        Some(PathsLimitAction::Discard)
+    );
+    assert_eq!(cfg.peers[0].paths_limit_cease_subcode, None);
+    assert_eq!(
+        cfg.peers[1].paths_limit_action, None,
+        "an unset peer key inherits the router-wide action"
+    );
+}
+
+#[test]
+fn paths_limit_action_rejects_unknown_spellings() {
+    for bad in ["drop", "warn", "reset", ""] {
+        let mut cfg = DaemonConfig::with_defaults();
+        let text = format!("[bgp]\nlocal_as = 64512\npaths_limit_action = \"{bad}\"\n");
+        let err = parse_toml_subset(&text, &mut cfg).unwrap_err();
+        assert!(
+            err.contains("paths_limit_action"),
+            "expected the key name in {err:?}"
+        );
+    }
+}
+
+#[test]
+fn paths_limit_cease_subcode_rejects_out_of_range() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\npaths_limit_cease_subcode = 256\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\npaths_limit_cease_subcode = -1\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+}
+
+/// draft-ietf-idr-addpath-paths-limit-00 §7.2: the subcode's IANA
+/// registration is still TBD, so the `teardown` action over a live
+/// limit without an operator-chosen value is a config-time error —
+/// the §4 NOTIFICATION cannot name its subcode.
+#[test]
+fn paths_limit_teardown_without_subcode_fails_finalize() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nadd_path = true\npaths_limit = \"1:1:16\"\n\
+         paths_limit_action = \"teardown\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(
+        err.contains("paths_limit_cease_subcode"),
+        "expected the missing-key name in {err:?}"
+    );
+}
+
+/// A per-peer subcode satisfies the teardown requirement even when
+/// the router-wide value is unset, and a teardown action with no live
+/// limit is inert (nothing advertised, nothing can fire) and passes.
+#[test]
+fn paths_limit_teardown_subcode_resolution_and_inert_case() {
+    use lr_bgp::PathsLimitAction;
+
+    // Per-peer subcode covers a global teardown action.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nadd_path = true\npaths_limit = \"1:1:16\"\n\
+         paths_limit_action = \"teardown\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n\
+         paths_limit_cease_subcode = 64\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+
+    // Teardown with no non-zero limit never fires — no subcode
+    // needed.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\npaths_limit_action = \"teardown\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.paths_limit_action, PathsLimitAction::Teardown);
+}
+
+/// A peer extending a template inherits the template's capability
+/// knobs — the 2.x capability block (issue #101) must flow through
+/// `extends` like every other peer field, not silently fall to the
+/// router-wide defaults.
+#[test]
+fn peer_template_inherits_capability_block() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\n\n\
+         [peer-template.upstream]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n\
+         add_path = true\npaths_limit = \"1:1:16\"\n\
+         paths_limit_action = \"teardown\"\npaths_limit_cease_subcode = 64\n\
+         software_version = \"lr/2.0\"\nbfd_strict_mode = true\n\n\
+         [[peer]]\nextends = \"upstream\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    let peer = &cfg.peers[0];
+    assert_eq!(peer.paths_limit.as_deref(), Some(&[(1u16, 1u8, 16u16)][..]));
+    assert_eq!(
+        peer.paths_limit_action,
+        Some(lr_bgp::PathsLimitAction::Teardown)
+    );
+    assert_eq!(peer.paths_limit_cease_subcode, Some(64));
+    assert_eq!(peer.software_version.as_deref(), Some("lr/2.0"));
+    assert_eq!(peer.bfd_strict_mode, Some(true));
+}

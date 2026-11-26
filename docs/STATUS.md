@@ -53,7 +53,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | FQDN/Hostname capability (draft-walton-bgp-hostname-capability-02) | yes | `lr-bgp::extensions::fqdn`, `lr-router::session::SessionSummary::peer_fqdn`, `show session <h>` |
 | BFD Strict-Mode capability and establishment gate (draft-ietf-idr-bgp-bfd-strict-mode-19) | yes | `lr-bgp::extensions::bfd_strict_mode`, `lr-bgp::fsm`, `lr-router::instance`, `lr-cli::bgp_reactor` |
 | Software Version capability (draft-abraitis-bgp-version-capability-18) | yes | `lr-bgp::extensions::software_version`, `lr-bgp::capabilities_extra::SoftwareVersionEncoding`, `lr-router::session::SessionSummary::peer_software_version`, `show session <h>`; raw UTF-8 by default, draft-11 length-prefixed encoding selectable per peer, both decoded |
-| PATHS-LIMIT capability and per-prefix ingress/egress caps (draft-ietf-idr-addpath-paths-limit-00) | yes | `lr-bgp::extensions::paths_limit`, `lr-bgp::capabilities::Capability::paths_limit`, `lr-router::instance` |
+| PATHS-LIMIT capability, per-prefix ingress/egress caps and the §4 teardown action (draft-ietf-idr-addpath-paths-limit-00) | yes | `lr-bgp::extensions::paths_limit`, `lr-bgp::capabilities::Capability::paths_limit`, `lr-router::instance` |
 | Link-Local Next Hop capability and MP next-hop handling (draft-ietf-idr-linklocal-capability-06) | yes | `lr-bgp::extensions::link_local_next_hop`, `lr-bgp::path::mp_nlri`, `lr-bgp::fsm`, `lr-bgp::advertise` |
 | Best-path selection and the router-id tiebreak | yes | `lr-bgp::best_path` |
 | Standard, extended and large communities | yes | `lr-bgp::path::communities` |

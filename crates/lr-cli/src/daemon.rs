@@ -2928,6 +2928,8 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         .paths_limit
         .clone()
         .unwrap_or_else(|| g.paths_limit.clone());
+    sc.paths_limit_action = p.paths_limit_action.unwrap_or(g.paths_limit_action);
+    sc.paths_limit_cease_subcode = p.paths_limit_cease_subcode.or(g.paths_limit_cease_subcode);
     sc.link_local_next_hop = p.link_local_next_hop.unwrap_or(g.link_local_next_hop);
     // ORF: resolve each OrfEntrySpec to its wire form. A malformed
     // mode string is dropped with a warning rather than refusing the

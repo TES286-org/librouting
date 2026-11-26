@@ -162,8 +162,10 @@ flag's parser is only the fallback for an unparseable argument.
 | `--max-prefix-restart-time S` | `[bgp] max_prefix_restart_time` / `[[peer]] max_prefix_restart_time` | 0 | Cooldown (seconds) before re-establishing after a `restart` action. When 0, `restart` behaves as an alias for `teardown` (no cooldown). |
 
 `warn` only logs; a session is torn down only with `--max-prefix-action
-teardown` or `restart`. The daemon does not validate the action string —
-anything that is not `teardown` or `restart` is treated as `warn`.
+teardown` or `restart`. The action string is validated at parse time —
+config load, `config check` and the CLI flag reject any other spelling
+(an unknown word would otherwise silently strip the protection the
+operator asked for).
 `restart` carries its own cooldown via `--max-prefix-restart-time`
 (or `max_prefix_restart_time` per-peer); when the cooldown is 0, `restart`
 behaves as an alias for `teardown`.
@@ -491,6 +493,19 @@ warning, not a value.
 | `bfd_min_tx_ms` | int | 100 | |
 | `bfd_min_rx_ms` | int | 100 | |
 | `bfd_multiplier` | int | 3 | |
+| `extended_message` | bool | false | RFC 8654 |
+| `bgp_role` | string | — | RFC 9234: `provider`, `customer`, `rs`, `rs-client`, `peer`; append ` strict` for the strict bit |
+| `hostname` | string | — | draft-walton-bgp-hostname-capability-02; pairs with `domain_name` |
+| `domain_name` | string | — | Pairs with `hostname` |
+| `bfd_strict_mode` | bool | false | Requires `bfd`; draft-ietf-idr-bgp-bfd-strict-mode-19 |
+| `software_version` | string | — | draft-abraitis-bgp-version-capability-18 |
+| `software_version_encoding` | enum | `latest` | Or `draft-11` (length-prefixed) |
+| `paths_limit` | string | — | draft-ietf-idr-addpath-paths-limit-00 `afi:safi:limit` list |
+| `paths_limit_action` | enum | `discard` | Or `teardown` (the §4 Cease teardown) |
+| `paths_limit_cease_subcode` | int | — | Wire value for the §4 subcode; the IANA registration is still TBD (§7.2), so a `teardown` peer with a live limit must set it |
+| `link_local_next_hop` | bool | false | draft-ietf-idr-linklocal-capability-06 |
+| `orf` | string | — | RFC 5291 `afi:safi:type:mode` list |
+| `orf_entries` | string | — | RFC 5291 §6 address-prefix entries to send |
 | `roa_validate` | bool | false | |
 | `roa_invalid_action` | enum | `reject` | `warn`, `accept` |
 
@@ -562,6 +577,18 @@ template it is a hard error. A peer with `remote` dials out; one with
 | `max_prefix_threshold` | int | global | |
 | `bfd` | bool | global | |
 | `bfd_multihop` | bool | global | |
+| `extended_message` | bool | global | RFC 8654 |
+| `bgp_role` | string | global | RFC 9234 |
+| `fqdn` | string | global | `"hostname,domain"` pair |
+| `bfd_strict_mode` | bool | global | draft-ietf-idr-bgp-bfd-strict-mode-19 |
+| `software_version` | string | global | draft-abraitis-bgp-version-capability-18 |
+| `software_version_encoding` | enum | global | `latest` or `draft-11` |
+| `paths_limit` | string | global | draft-ietf-idr-addpath-paths-limit-00 |
+| `paths_limit_action` | enum | global | `discard` or `teardown` |
+| `paths_limit_cease_subcode` | int | global | The §4 subcode wire value |
+| `link_local_next_hop` | bool | global | draft-ietf-idr-linklocal-capability-06 |
+| `orf` | string | global | RFC 5291 |
+| `orf_entries` | string | global | RFC 5291 §6 |
 | `route_reflector_client` | bool | global | `true` marks an RFC 4456 RR client |
 | `shutdown` | bool | `false` | `true` keeps the connector passive and refuses inbound SYNs (FRR `neighbor X shutdown` / BIRD `disabled`; RFC 4486 §3 + RFC 8203 §2). `false` is the explicit un-shutdown (FRR `no neighbor X shutdown` / BIRD `disabled no`). |
 

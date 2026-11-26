@@ -153,6 +153,19 @@ pub fn open_capability(cfg: &PeerConfig) -> Option<Capability> {
     Some(Capability::paths_limit(&families))
 }
 
+/// The NOTIFICATION Data field for the "Maximum Number of Paths
+/// Reached" Cease (§4 Figure 2): `AFI` (2 octets), `SAFI` (1 octet)
+/// and the advertised `Paths Limit` (2 octets) that was exceeded. The
+/// sender includes the tuple for any one of the families that tripped
+/// — the caller passes the family of the path that crossed the limit.
+pub fn cease_data(family: NlriFamily, limit: u16) -> Vec<u8> {
+    let mut data = Vec::with_capacity(5);
+    data.extend_from_slice(&family.afi.to_be_bytes());
+    data.push(family.safi);
+    data.extend_from_slice(&limit.to_be_bytes());
+    data
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +316,19 @@ mod tests {
         assert_eq!(local_limit(&c, NlriFamily::IPV4_UNICAST), None);
         let c = cfg_with_paths_limit(true, &[(1, 1, 16), (1, 1, 32)]);
         assert_eq!(local_limit(&c, NlriFamily::IPV4_UNICAST), Some(16));
+    }
+
+    /// §4 Figure 2: the Data field is AFI (2) + SAFI (1) + the
+    /// advertised Paths Limit (2), network byte order.
+    #[test]
+    fn cease_data_is_the_figure_2_layout() {
+        assert_eq!(
+            cease_data(NlriFamily::IPV4_UNICAST, 16),
+            vec![0x00, 0x01, 0x01, 0x00, 0x10]
+        );
+        assert_eq!(
+            cease_data(NlriFamily::IPV6_UNICAST, 4095),
+            vec![0x00, 0x02, 0x01, 0x0f, 0xff]
+        );
     }
 }

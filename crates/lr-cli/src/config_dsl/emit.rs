@@ -671,6 +671,17 @@ fn bgp_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Result<Vec<(String, Str
             fmt_string(&paths_limit_value(&cfg.paths_limit)),
         ));
     }
+    if cfg.paths_limit_action != base.paths_limit_action {
+        v.push((
+            "paths_limit_action".into(),
+            fmt_string(cfg.paths_limit_action.name()),
+        ));
+    }
+    if cfg.paths_limit_cease_subcode != base.paths_limit_cease_subcode {
+        if let Some(subcode) = cfg.paths_limit_cease_subcode {
+            v.push(("paths_limit_cease_subcode".into(), subcode.to_string()));
+        }
+    }
     if cfg.link_local_next_hop != base.link_local_next_hop {
         v.push((
             "link_local_next_hop".into(),
@@ -967,6 +978,12 @@ fn peer_block(peer: &crate::daemon_config::PeerSpec) -> Result<Vec<(String, Stri
         if !x.is_empty() {
             v.push(("paths_limit".into(), fmt_string(&paths_limit_value(x))));
         }
+    }
+    if let Some(x) = peer.paths_limit_action {
+        v.push(("paths_limit_action".into(), fmt_string(x.name())));
+    }
+    if let Some(x) = peer.paths_limit_cease_subcode {
+        v.push(("paths_limit_cease_subcode".into(), x.to_string()));
     }
     if let Some(x) = peer.link_local_next_hop {
         v.push(("link_local_next_hop".into(), x.to_string()));

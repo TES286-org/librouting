@@ -17,6 +17,60 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Added — PATHS-LIMIT "Maximum Number of Paths Reached" Cease subcode
+(draft-ietf-idr-addpath-paths-limit-00 §4, issue #101)
+
+The PATHS-LIMIT enforcement gains the §4 teardown path alongside the
+§5 graceful default:
+
+- `[bgp] paths_limit_action` (`discard` (default) | `teardown`) and
+  the per-peer `paths_limit_action` override choose what happens when
+  an inbound Add-Path path exceeds the locally advertised limit.
+  `discard` keeps the §5 behaviour (excess paths are dropped, the
+  session survives); `teardown` terminates the peering with the §4
+  Cease NOTIFICATION.
+- `[bgp] paths_limit_cease_subcode` (and the per-peer override)
+  carries the subcode's wire value. The draft's IANA registration is
+  still TBD (§7.2), so an implementation cannot pick a number on its
+  own: an operator choosing `teardown` sets the value both peers
+  agreed on, and `finalize` rejects a `teardown` peer with a live
+  limit but no subcode. The default flips to the assigned number once
+  the registry entry lands.
+- The NOTIFICATION carries the §4 Figure 2 Data field (AFI, SAFI,
+  the advertised Paths Limit) and fires once per session lifetime —
+  a re-established session that exceeds again tears down again. The
+  §4 MUST NOT gates ride the existing negotiation gating: the subcode
+  never fires for a family without a non-zero advertised limit and
+  Add-Path receive negotiated.
+- `lr_bgp::PathsLimitAction`,
+  `lr_bgp::PeerConfig::{paths_limit_action, paths_limit_cease_subcode}`,
+  `lr_bgp::BgpPeer::enqueue_notification_with_data` and
+  `lr_router::SessionConfig::{with_paths_limit_action,
+  with_paths_limit_cease_subcode}` are the embedder surface.
+
+### Fixed — a typo'd `max_prefix_action` silently downgraded to `warn`
+
+The `[bgp]` / per-peer `max_prefix_action` key and the
+`--max-prefix-action` flag accepted any string and mapped everything
+but the three legal spellings to `warn` — a typo like `teardwon`
+silently stripped the maximum-prefix protection the operator asked
+for. All three surfaces now validate the word at parse time
+(`warn`, `teardown`, `restart`) and reject anything else, matching the
+fail-closed posture of every other protocol knob (FRR rejects an
+unknown `maximum-prefix` action word the same way).
+
+### Fixed — peer templates did not inherit the capability block
+
+`peer extends` silently skipped every 2.x capability field
+(`extended_message`, `bgp_role`, `fqdn`, `bfd_strict_mode`,
+`software_version`, `software_version_encoding`, `paths_limit`,
+`paths_limit_action`, `paths_limit_cease_subcode`,
+`link_local_next_hop`, `orf`, `orf_entries`): a peer extending a
+template fell back to the router-wide defaults instead of the
+template's values. `merge_spec` now carries the whole block, so a
+named template with capability knobs works the way every other
+template field does.
+
 ### Added — real-data RIB replay benchmark (issue #101)
 
 The "Benchmark Based on Real Data" item from the 2.x release plan

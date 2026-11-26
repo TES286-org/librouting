@@ -512,9 +512,9 @@ peer start retaining.
 
 **`--max-prefixes` did not tear the session down.**
 The default action is `warn`, which only logs. Use
-`--max-prefix-action teardown` (or `restart`). Any other value silently
-falls back to `warn`, because the daemon does not validate the string
-before mapping it.
+`--max-prefix-action teardown` (or `restart`). An unknown action word
+is rejected at parse time — the flag errors out instead of silently
+running the `warn` action.
 
 **The MRT dump grows the disk.**
 The runtime API `mrt PATH` writes a `TABLE_DUMP_V2` file of the whole
