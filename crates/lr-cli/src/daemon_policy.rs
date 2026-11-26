@@ -92,11 +92,50 @@ pub(crate) fn build_policy_set(cfg: &DaemonConfig) -> Result<PolicySet, String> 
                 spec.name, spec.prefix, e
             )
         })?;
+        let pl = prefix.prefix_len;
+        let family_max: u8 = if prefix.is_ipv4() { 32 } else { 128 };
+        // FRR `ip prefix-list` semantics: with neither `ge` nor `le`
+        // the entry matches the prefix length exactly; with `ge`
+        // alone the window is [ge, family max]; with `le` alone it is
+        // [plen, le]. (The old default — `le = 255` unconditionally —
+        // made `permit 10.0.0.0/8` silently admit 10.1.2.0/24.)
+        let ge = spec.ge.unwrap_or(pl);
+        let le = match (spec.ge, spec.le) {
+            (_, Some(le)) => le,
+            (Some(_), None) => family_max,
+            (None, None) => pl,
+        };
+        // FRR vty validation: an impossible window is a config error,
+        // not a silently-never-matching entry. Fail closed.
+        if ge < pl {
+            return Err(format!(
+                "prefix-list '{}': ge {ge} is below the prefix length {pl}",
+                spec.name
+            ));
+        }
+        if le < pl {
+            return Err(format!(
+                "prefix-list '{}': le {le} is below the prefix length {pl}",
+                spec.name
+            ));
+        }
+        if le > family_max {
+            return Err(format!(
+                "prefix-list '{}': le {le} exceeds the {}-bit family maximum",
+                spec.name, family_max
+            ));
+        }
+        if ge > le {
+            return Err(format!(
+                "prefix-list '{}': ge {ge} is greater than le {le}",
+                spec.name
+            ));
+        }
         let mut list = PrefixList::new();
         list.push(PrefixListEntry {
             prefix,
-            ge: spec.ge.unwrap_or(prefix.prefix_len),
-            le: spec.le.unwrap_or(255),
+            ge,
+            le,
             permit: spec.permit.unwrap_or(true),
         });
         set.add_prefix_list(spec.name.clone(), list);

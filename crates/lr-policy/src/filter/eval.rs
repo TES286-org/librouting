@@ -598,7 +598,14 @@ pub const MAX_CALL_DEPTH: u32 = 64;
 struct Evaluator<'a, C: FilterContext + ?Sized> {
     ctx: &'a C,
     scopes: Vec<Scope>,
-    functions: std::collections::BTreeMap<String, FunctionDecl>,
+    /// User functions by name — shared with the tree-walking
+    /// fallbacks the VM runs (`EvalTree`, dynamic `Match` items,
+    /// `Defined` over a dynamic expression), so both engines resolve
+    /// the same declarations. Borrowed, not owned: the table is built
+    /// once per filter (by `evaluate` locally, by `compile` into
+    /// `CompiledFilter::function_table`) instead of deep-cloned per
+    /// route.
+    functions: &'a std::collections::BTreeMap<String, FunctionDecl>,
     call_depth: u32,
     /// Verdict latched by `accept` / `reject` inside a user-function
     /// body (BIRD: terminates the whole filter). Consumed by the
@@ -623,27 +630,27 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 }
 
 /// Evaluate a compiled filter against a route.
+///
+/// A verdict latched by `accept` / `reject` inside a user-function
+/// body (BIRD: terminates the whole filter) is consumed after the
+/// statement that caused it — including when that statement is the
+/// last one, which previously dropped the verdict and fell through
+/// (fail-open).
 pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> EvalResult {
+    let functions: std::collections::BTreeMap<String, FunctionDecl> = filter
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
     let mut ev = Evaluator {
         ctx,
         scopes: vec![Scope::new()],
-        functions: filter
-            .functions
-            .iter()
-            .map(|f| (f.name.clone(), f.clone()))
-            .collect(),
+        functions: &functions,
         call_depth: 0,
         pending_verdict: None,
         line_index: &filter.line_index,
     };
     for stmt in &filter.body.stmts {
-        if let Some(v) = ev.pending_verdict.take() {
-            return match v {
-                ControlFlow::Accept => EvalResult::Accept,
-                ControlFlow::Reject(reason) => EvalResult::Reject(reason),
-                _ => EvalResult::Fallthrough,
-            };
-        }
         match ev.eval_stmt(stmt, route) {
             Ok(ControlFlow::Continue) => {}
             Ok(ControlFlow::Accept) => return EvalResult::Accept,
@@ -659,6 +666,16 @@ pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> 
                 tracing::debug!("filter '{}' eval error: {}", filter.name, e);
                 return EvalResult::Fallthrough;
             }
+        }
+        // A user-function call inside this statement may have
+        // latched a verdict; consume it now so the last statement
+        // cannot drop it. Mirrors the VM's post-`CallFn` check.
+        if let Some(v) = ev.pending_verdict.take() {
+            return match v {
+                ControlFlow::Accept => EvalResult::Accept,
+                ControlFlow::Reject(reason) => EvalResult::Reject(reason),
+                _ => EvalResult::Fallthrough,
+            };
         }
     }
     EvalResult::Fallthrough
@@ -696,6 +713,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     }
 
     fn eval_stmt(&mut self, stmt: &Stmt, route: &mut Route) -> Result<ControlFlow, EvalError> {
+        // A verdict latched earlier (a user-function body hit
+        // `accept` / `reject`) terminates the whole filter — every
+        // later statement is a no-op. Mirrors the VM, whose
+        // `run_code` returns as soon as a `CallFn` latches, so the
+        // instructions after it never execute (in particular, no
+        // route mutation can follow a `reject`).
+        if self.pending_verdict.is_some() {
+            return Ok(ControlFlow::Continue);
+        }
         match stmt {
             Stmt::Return(value, _) => {
                 let v = match value {
@@ -780,11 +806,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
             Stmt::AssignRouteField { field, value, span } => {
                 let v = self.eval_expr(value, route)?;
+                // The RHS may have called a user function that
+                // latched a verdict — the write must not land after
+                // a `reject` (VM parity: the `AssignField`
+                // instruction after a latching `CallFn` never runs).
+                if self.pending_verdict.is_some() {
+                    return Ok(ControlFlow::Continue);
+                }
                 self.assign_route_field(field, v, route, *span)?;
                 Ok(ControlFlow::Continue)
             }
             Stmt::AppendRouteField { field, value, span } => {
                 let v = self.eval_expr(value, route)?;
+                if self.pending_verdict.is_some() {
+                    return Ok(ControlFlow::Continue);
+                }
                 self.append_route_field(field, v, route, *span)?;
                 Ok(ControlFlow::Continue)
             }
@@ -810,6 +846,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     }
 
     fn eval_expr(&mut self, expr: &Expr, route: &mut Route) -> Result<Value, EvalError> {
+        // Sub-expressions after a latched verdict evaluate to a
+        // placeholder without side effects — the VM returns from
+        // `run_code` the moment a `CallFn` latches, so the rest of
+        // the enclosing expression's instructions never run; the
+        // value produced here is unobservable because the verdict
+        // is consumed right after the enclosing statement.
+        if self.pending_verdict.is_some() {
+            return Ok(Value::Bool(false));
+        }
         match expr {
             Expr::Lit(v, _) => Ok(v.clone()),
             Expr::Var(name, span) => self.lookup(name, *span),
@@ -1858,8 +1903,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         // D3.1: user-defined functions shadow nothing (the parser
         // rejects shadowing a built-in), so look the name up first
         // and fall through to the built-ins otherwise.
-        if let Some(f) = self.functions.get(name).cloned() {
-            return self.call_user_function(&f, args, route, span);
+        if let Some(f) = self.functions.get(name) {
+            return self.call_user_function(f, args, route, span);
         }
         match name {
             "len" => {
@@ -2054,7 +2099,153 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         route: &mut Route,
         span: Span,
     ) -> Result<Value, EvalError> {
+        // Methods mutate the route; an argument's user-function call
+        // may have latched a verdict, and the mutation must not land
+        // after it (VM parity — see `eval_stmt`).
+        if self.pending_verdict.is_some() {
+            return Ok(Value::Bool(false));
+        }
         match (field.kind, method) {
+            // Read-only accessors — the BIRD `bgp.path.first` spelling.
+            // They mirror the §3.2 built-ins (first/last/len/empty/count)
+            // but read the receiver field directly, so the method form
+            // works without binding the attribute to a variable first.
+            // Pure: no route mutation, so the §3.3 mutation rule does not
+            // apply to these arms.
+            (RouteFieldKind::BgpAsPath, "first") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.first",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(self
+                    .ctx
+                    .bgp_as_path(route)
+                    .first()
+                    .map(|a| Value::Asn(*a))
+                    .unwrap_or(Value::Bool(false)))
+            }
+            (RouteFieldKind::BgpAsPath, "last") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.last",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(self
+                    .ctx
+                    .bgp_as_path(route)
+                    .last()
+                    .map(|a| Value::Asn(*a))
+                    .unwrap_or(Value::Bool(false)))
+            }
+            (RouteFieldKind::BgpAsPath, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(self.ctx.bgp_as_path(route).len() as i64))
+            }
+            (RouteFieldKind::BgpAsPath, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(self.ctx.bgp_as_path(route).is_empty()))
+            }
+            (RouteFieldKind::BgpCommunities, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.communities.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(self.ctx.bgp_communities(route).len() as i64))
+            }
+            (RouteFieldKind::BgpCommunities, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.communities.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(self.ctx.bgp_communities(route).is_empty()))
+            }
+            (RouteFieldKind::BgpLargeCommunities, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.large_communities.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(
+                    self.ctx.bgp_large_communities(route).len() as i64
+                ))
+            }
+            (RouteFieldKind::BgpLargeCommunities, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.large_communities.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(
+                    self.ctx.bgp_large_communities(route).is_empty(),
+                ))
+            }
+            (RouteFieldKind::BgpExtCommunities, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.ext_communities.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(self.ctx.bgp_ext_communities(route).len() as i64))
+            }
+            (RouteFieldKind::BgpExtCommunities, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.ext_communities.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(self.ctx.bgp_ext_communities(route).is_empty()))
+            }
             (RouteFieldKind::BgpAsPath, "prepend") => {
                 if args.len() != 1 {
                     return Err(bad_arg_count(
@@ -2377,6 +2568,10 @@ fn as_int(v: &Value) -> Option<i64> {
         Value::Int(n) => Some(*n),
         Value::Bool(true) => Some(1),
         Value::Bool(false) => Some(0),
+        // AS numbers participate in ordering and arithmetic —
+        // `first(bgp.as_path) < 64501` must not be a type error.
+        // u32 widens to i64 without loss.
+        Value::Asn(a) => Some(a.0 as i64),
         _ => None,
     }
 }
@@ -2448,6 +2643,16 @@ fn value_eq(a: &Value, b: &Value) -> bool {
         (Value::Ip(x), Value::Ip(y)) => x == y,
         (Value::Prefix(x), Value::Prefix(y)) => x == y,
         (Value::Asn(x), Value::Asn(y)) => x == y,
+        // Asn vs Int — `first(bgp.as_path) == 64500`: AS numbers are
+        // not first-class literals (they parse as ints), so every
+        // scalar comparison against an AS-valued expression crosses
+        // this arm. u32 always fits i64, so the widening is exact.
+        (Value::Asn(x), Value::Int(y)) => x.0 as i64 == *y,
+        (Value::Int(x), Value::Asn(y)) => *x == y.0 as i64,
+        // Asn vs Bool mirrors the Int/Bool pair above: an AS number
+        // is truthy when non-zero.
+        (Value::Asn(x), Value::Bool(y)) => (x.0 != 0) == *y,
+        (Value::Bool(x), Value::Asn(y)) => *x == (y.0 != 0),
         (Value::AsPath(x), Value::AsPath(y)) => x == y,
         (Value::Communities(x), Value::Communities(y)) => x == y,
         (Value::RoaState(x), Value::RoaState(y)) => x == y,
@@ -2477,6 +2682,14 @@ fn value_match(l: &Value, r: &Value) -> bool {
         (Value::AsPath(path), Value::Communities(cs)) => {
             cs.iter().any(|(a, _)| path.iter().any(|x| x == a))
         }
+        // Scalar membership — `bgp.local_pref ~ [100, 200]` and
+        // `first(bgp.as_path) ~ [64500]`. AS numbers parse as ints,
+        // so both spellings of an AS-valued item must match an Asn
+        // scrutinee.
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Asn(x), Value::Asn(y)) => x == y,
+        (Value::Asn(x), Value::Int(y)) => x.0 as i64 == *y,
+        (Value::Int(x), Value::Asn(y)) => *x == y.0 as i64,
         (Value::Communities(route_cs), Value::Communities(set_cs)) => {
             set_cs.iter().any(|c| route_cs.contains(c))
         }
@@ -2668,7 +2881,13 @@ pub fn execute(cf: &CompiledFilter, route: &mut Route, ctx: &dyn FilterContext) 
     let mut ev = Evaluator {
         ctx,
         scopes: vec![Scope::new()],
-        functions: std::collections::BTreeMap::new(),
+        // The tree-walking fallbacks (`EvalTree`, dynamic `Match`
+        // items, `Defined` over a dynamic expression) dispatch
+        // through `eval_call`, which resolves user functions from
+        // this table — an empty one made the VM error with
+        // UnknownFunction on programs the interpreter accepts,
+        // flipping the verdict on the same source.
+        functions: &cf.function_table,
         call_depth: 0,
         pending_verdict: None,
         line_index: &cf.line_index,
@@ -2715,6 +2934,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         let mut stack: Vec<Value> = Vec::new();
         let mut tmp: Option<Value> = None;
         while ip < code.len() {
+            // A tree-walking fallback (`EvalTree`, dynamic `Match`
+            // items, `Defined` over a dynamic expression) can call a
+            // user function whose body latched a verdict. The flat
+            // instructions after it must not run — the same rule the
+            // `Call` / `CallFn` arms enforce inline. The `is_some`
+            // probe keeps the common case (no latch) a load + branch;
+            // `take` would store `None` back on every instruction.
+            if self.pending_verdict.is_some() {
+                let verdict = self.pending_verdict.take().expect("checked above");
+                return Ok(match verdict {
+                    ControlFlow::Accept => VmFlow::Accept,
+                    ControlFlow::Reject(reason) => VmFlow::Reject(reason),
+                    _ => VmFlow::Continue,
+                });
+            }
             // GitHub #19 P7: the source span is read lazily inside
             // the fallible arms, not at the dispatch top. The spans
             // table is parallel to `code` (verified by the

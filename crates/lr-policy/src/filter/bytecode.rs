@@ -473,6 +473,13 @@ pub struct CompiledFilter {
     /// Name → index map for `functions`. Built so the
     /// compiler can resolve call names to indices at compile time.
     pub function_index: BTreeMap<String, usize>,
+    /// User functions by name, in AST form. The tree-walking
+    /// fallbacks the VM runs (`EvalTree`, dynamic `Match` items,
+    /// `Defined` over a dynamic expression) dispatch through
+    /// `eval_call`, which resolves user functions from this table —
+    /// building it at compile time keeps the per-route `execute`
+    /// free of the deep clone the interpreter pays in `evaluate`.
+    pub function_table: BTreeMap<String, crate::filter::ast::FunctionDecl>,
 }
 
 impl CompiledFilter {
@@ -527,6 +534,11 @@ pub fn compile(filter: &Filter) -> CompiledFilter {
             spans: fspans,
         });
     }
+    let function_table = filter
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
     CompiledFilter {
         name: filter.name.clone(),
         code,
@@ -534,6 +546,7 @@ pub fn compile(filter: &Filter) -> CompiledFilter {
         line_index: filter.line_index.clone(),
         functions,
         function_index,
+        function_table,
     }
 }
 

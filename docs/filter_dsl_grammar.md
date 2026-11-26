@@ -395,7 +395,10 @@ community attribute, not one with an empty list.
 
 ### 3.3 Route-field methods
 
-Method dispatch is keyed on `(RouteFieldKind, method_name)`:
+Method dispatch is keyed on `(RouteFieldKind, method_name)`. Two kinds exist:
+mutating methods, and read-only accessors.
+
+The mutating methods:
 
 | Receiver                | Method                      | Args  | Effect                                       |
 | ----------------------- | --------------------------- | ----- | -------------------------------------------- |
@@ -408,8 +411,8 @@ Method dispatch is keyed on `(RouteFieldKind, method_name)`:
 | `bgp.large_communities` | `add` / `delete` / `filter` | set   | Same shape as `bgp.communities`              |
 | `bgp.ext_communities`   | `add` / `delete` / `filter` | set   | Same shape as `bgp.communities`              |
 
-Every method mutates the route's attribute in place and also returns the new
-value, so the statement form is enough:
+Every mutating method writes the route's attribute in place and also returns
+the new value, so the statement form is enough:
 `bgp.as_path.prepend(65001);` and
 `bgp.communities.delete([ 64512:* ]);` both write through. That is the
 difference from the `delete` / `filter` _built-ins_ of §3.2, which are pure and
@@ -418,6 +421,18 @@ return a new value that a `=` assignment has to store back:
 ```text
 bgp.communities = delete(bgp.communities, [ 64512:* ]);
 ```
+
+The read-only accessors (no parentheses needed — BIRD's `bgp.path.first`
+spelling; they are the §3.2 built-ins reading the receiver field directly):
+
+| Receiver                | Method                    | Returns |
+| ----------------------- | ------------------------- | ------- |
+| `bgp.as_path`           | `first`, `last`           | `asn`, or `false` when the path is empty |
+| `bgp.as_path`           | `len`, `count`            | `int`   |
+| `bgp.as_path`           | `empty`                   | `bool`  |
+| `bgp.communities`       | `len`, `count`, `empty`   | `int` / `bool` |
+| `bgp.large_communities` | `len`, `count`, `empty`   | `int` / `bool` |
+| `bgp.ext_communities`   | `len`, `count`, `empty`   | `int` / `bool` |
 
 Any other `(field, method)` pair — including any method on a non-route-field
 receiver — is a runtime `UnknownMethod` error.
@@ -433,18 +448,17 @@ The match operator `~` is overloaded on the type of its left-hand side:
 | `community-set`       | `community-set` / community pattern    | Any pattern matches any community             |
 | `large-community-set` | `large-community-set`                 | Exact triple membership                       |
 | `ext-community-set`   | `ext-community-set`                   | Exact record membership                       |
+| `int` / `asn`         | the same scalar type, or a set of them | Equality / membership; an `asn` and an `int` of the same value match |
 | `string`              | `string`                              | Equality                                      |
 | `ip`                  | `ip` / a set of `ip`                  | Equality / membership                         |
 | `roa-state`           | `string`                              | Equality with `"valid"` / `"invalid"` / `"not-found"` |
 | any                   | `set`                                 | The match succeeds when any element matches   |
 
 A `set` RHS is walked element by element, so the type of each element decides
-which row applies. Two combinations do not match and do not error:
-
-- `int ~ set of int` — there is no integer arm in `value_match`, so the test is
-  always false. Compare integers with `==` or dispatch with `case`.
-- A `prefix` on the left only matches `prefix` elements; an element of another
-  type in the same set is simply skipped.
+which row applies. An `int` and an `asn` of the same numeric value are equal
+(AS numbers have no literal form, so `first(bgp.as_path) ~ [ 64500 ]` matches
+through the integer element). A `prefix` on the left only matches `prefix`
+elements; an element of another type in the same set is simply skipped.
 
 The AS-path row is a flat membership test, not BIRD's AS-path regex: there is no
 `_` separator pattern, no `*` any-AS and no `..` range. Write

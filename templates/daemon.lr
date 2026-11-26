@@ -302,7 +302,8 @@ bgp {
 # entry after applying the sets.
 #
 #   prefix-list NAME    — prefix, ge (default: prefix len),
-#                         le (default: unbounded), permit (default true)
+#                         le (default: prefix len — exact match;
+#                         family max when ge is set), permit (default true)
 #   as-path-list NAME   — pattern, permit; pattern tokens: ^ start,
 #                         $ end, _ any separator; e.g. "_65000$" =
 #                         learned from AS65000

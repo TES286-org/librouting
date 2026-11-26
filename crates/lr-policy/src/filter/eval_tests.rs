@@ -1290,6 +1290,72 @@ fn neg_of_i64_min_overflows_not_panics() {
     assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
 }
 
+/// A `reject` latched by the LAST top-level statement must be the
+/// filter's verdict. The interpreter used to consume `pending_verdict`
+/// only at the START of the next loop iteration, so a latch on the
+/// final statement was dropped and the filter fell through — the
+/// daemon maps Fallthrough to Keep, the exact fail-open a `reject`
+/// must never produce.
+#[test]
+fn verdict_from_last_statement_is_consumed() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "function deny() { reject with \"policy\"; } deny();";
+    assert_eq!(
+        run(src, &mut r.clone()),
+        EvalResult::Reject(Some("policy".into()))
+    );
+    assert_eq!(
+        run_vm(src, &mut r),
+        EvalResult::Reject(Some("policy".into()))
+    );
+    // Same shape with accept.
+    let src = "function admit() { accept; } admit();";
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
+/// A verdict latched by a nested user function stops the OUTER
+/// function's remaining statements: the route below must keep its
+/// original LOCAL_PREF and the verdict must be the reject. The
+/// interpreter used to keep executing the outer body (mutating the
+/// route after the reject); the VM already returned.
+#[test]
+fn nested_verdict_stops_outer_function_mutations() {
+    let src = "function inner() { reject; } \
+               function outer() { inner(); bgp.local_pref = 999; } \
+               outer(); accept;";
+    let mut a = route_with("203.0.113.0/24", 100, 0);
+    let mut b = a.clone();
+    assert_eq!(run(src, &mut a), EvalResult::Reject(None));
+    assert_eq!(run_vm(src, &mut b), EvalResult::Reject(None));
+    let keep = |r: &Route| {
+        r.attributes
+            .get_u32_be(AttrTag::raw(TAG_LOCAL_PREF))
+            .unwrap()
+    };
+    assert_eq!(keep(&a), 100, "interpreter must not mutate after the latch");
+    assert_eq!(keep(&b), 100, "VM must not mutate after the latch");
+}
+
+/// The mutation sink itself may call the latching function: the write
+/// must not land on either engine.
+#[test]
+fn assignment_rhs_latch_does_not_mutate() {
+    let src = "function deny() { reject; } bgp.local_pref = 4242; bgp.local_pref = deny(); accept;";
+    let mut a = route_with("203.0.113.0/24", 100, 0);
+    let mut b = a.clone();
+    assert_eq!(run(src, &mut a), EvalResult::Reject(None));
+    assert_eq!(run_vm(src, &mut b), EvalResult::Reject(None));
+    let keep = |r: &Route| {
+        r.attributes
+            .get_u32_be(AttrTag::raw(TAG_LOCAL_PREF))
+            .unwrap()
+    };
+    assert_eq!(keep(&a), 4242, "the pre-latch write lands");
+    assert_eq!(keep(&b), 4242);
+}
+
 /// Every source in the equivalence table must produce identical
 /// verdicts AND identical post-evaluation route state under both
 /// engines.
@@ -1325,6 +1391,19 @@ fn vm_matches_interpreter_on_policy_table() {
             "function double(n) { return n * 2; } if bgp.local_pref == double(50) then accept; reject;",
             "function tag() { bgp.local_pref = 7; return true; } if tag() then accept; reject;",
             "function gated() { if bgp.local_pref > 50 then accept; return false; } gated(); reject;",
+            // A verdict latched inside a user function must survive
+            // even when the call is the LAST top-level statement
+            // (the interpreter used to drop it and fall through).
+            "function deny() { reject with \"policy\"; } deny();",
+            "function admit() { accept; } admit();",
+            // A nested function's verdict stops the outer function's
+            // remaining statements — no route mutation after a latch.
+            "function inner() { reject; } function outer() { inner(); bgp.local_pref = 999; } outer(); accept;",
+            "function inner() { accept; } function outer() { inner(); bgp.local_pref = 999; } outer(); reject;",
+            // The mutation sink itself calls the latching function:
+            // the write must not land.
+            "function deny() { reject; } bgp.local_pref = 4242; bgp.local_pref = deny(); accept;",
+            "function deny() { reject; } bgp.communities += deny(); accept;",
             "function spin() { return spin(); } spin(); accept;",
             "return true;",
             "let n = 65000; if bgp.as_path ~ [n] then accept; reject;",
@@ -1645,6 +1724,215 @@ fn p2_callfn_matches_interpreter_on_user_functions() {
     }
 }
 
+/// User functions must resolve from the VM's tree-walking fallbacks.
+/// `execute` used to build the evaluator with an EMPTY function
+/// table, so `defined(f())`, a dynamic `~` set item and any
+/// `EvalTree` subtree that called a user function errored with
+/// UnknownFunction — the VM fell through on programs the interpreter
+/// accepts, flipping the verdict on the same source (the opposite
+/// verdict for `if defined(f()) then accept; reject;`).
+#[test]
+fn vm_resolves_user_functions_from_tree_fallbacks() {
+    // defined() over a dynamic expression containing a user call.
+    let src = "function f() { return true; } if defined(f()) then accept; reject;";
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+
+    // A dynamic set item: the pattern is not liftable at compile
+    // time, so `~` walks the tree and eval_call resolves the
+    // function (as-path membership: any AS in the path is 65000).
+    let src = "function n() { return 65000; } if bgp.as_path ~ [n()] then accept; reject;";
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_AS_PATH),
+        flags: 0x40,
+        value: vec![2u8, 1, 0, 0, 0xFD, 0xE8], // AS_SEQUENCE [65000]
+    });
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
+/// AS numbers must compare against integer literals. `first(...)` /
+/// `last(...)` return `asn` values while AS numbers parse as `int`
+/// literals, so `first(bgp.as_path) == 64500` used to be
+/// unconditionally false (no (Asn, Int) arm in `value_eq`) and the
+/// ordering forms were a swallowed type error. Both engines must
+/// agree on every shape.
+#[test]
+fn asn_values_compare_against_int_literals() {
+    fn with_path() -> Route {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_AS_PATH),
+            flags: 0x40,
+            // AS_SEQUENCE [64500]
+            value: vec![2u8, 1, 0, 0, 0xFB, 0xF4],
+        });
+        r
+    }
+
+    let cases: &[(&str, EvalResult)] = &[
+        (
+            "if first(bgp.as_path) == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) == 65000 then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if 64500 == first(bgp.as_path) then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) != 65000 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) < 64501 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) >= 64501 then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if last(bgp.as_path) == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        // Scalar membership on ints and ASNs (the doc's `any ~ set`
+        // row must hold for every scalar type).
+        (
+            "if bgp.local_pref ~ [42, 100] then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.local_pref ~ [42, 200] then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if first(bgp.as_path) ~ [65000, 64500] then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) ~ [65001] then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+    ];
+    for (src, want) in cases {
+        let mut a = with_path();
+        let mut b = with_path();
+        assert_eq!(run(src, &mut a), *want, "interpreter: {src}");
+        assert_eq!(run_vm(src, &mut b), *want, "VM: {src}");
+    }
+}
+
+/// The read-only accessor methods on route fields — the BIRD
+/// `bgp.path.first` spelling. The grammar doc's flagship example
+/// (§7.6) uses `bgp.as_path.first`, which used to be a runtime
+/// UnknownMethod error. Both engines must agree on every accessor.
+#[test]
+fn readonly_accessor_methods_read_the_field() {
+    fn with_path() -> Route {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_AS_PATH),
+            flags: 0x40,
+            // AS_SEQUENCE [64500]
+            value: vec![2u8, 1, 0, 0, 0xFB, 0xF4],
+        });
+        r
+    }
+
+    let cases: &[(&str, EvalResult)] = &[
+        // The doc §7.6 flagship shape.
+        (
+            "if bgp.as_path.first == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.as_path.first == 65000 then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if bgp.as_path.last == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.as_path.len == 1 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.as_path.count == 1 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if !bgp.as_path.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.communities.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.communities.len == 0 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.large_communities.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.ext_communities.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        // The function form still works and agrees with the method
+        // form on the same route.
+        (
+            "if first(bgp.as_path) == bgp.as_path.first then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if len(bgp.as_path) == bgp.as_path.len then accept; reject;",
+            EvalResult::Accept,
+        ),
+    ];
+    for (src, want) in cases {
+        let mut a = with_path();
+        let mut b = with_path();
+        assert_eq!(run(src, &mut a), *want, "interpreter: {src}");
+        assert_eq!(run_vm(src, &mut b), *want, "VM: {src}");
+    }
+}
+
+/// The doc §7.6 example, verbatim shape: a user function taking the
+/// first AS as its parameter.
+#[test]
+fn doc_76_flagship_example_runs() {
+    let src = "function is_internal(asn) => bool {\n    return asn == 64500;\n}\n\
+               if is_internal(bgp.as_path.first) then {\n    bgp.local_pref = 200;\n    accept;\n}\n\
+               reject;";
+    let mut a = route_with("203.0.113.0/24", 100, 0);
+    a.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_AS_PATH),
+        flags: 0x40,
+        // AS_SEQUENCE [64500]
+        value: vec![2u8, 1, 0, 0, 0xFB, 0xF4],
+    });
+    let mut b = a.clone();
+    assert_eq!(run(src, &mut a), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut b), EvalResult::Accept);
+    assert_eq!(
+        a.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF)),
+        Some(200)
+    );
+    assert_eq!(
+        b.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF)),
+        Some(200)
+    );
+}
+
 // ----- #18 Phase 0: evaluation errors carry real positions -----
 
 /// Drive the tree-walking evaluator directly and surface the
@@ -1652,14 +1940,15 @@ fn p2_callfn_matches_interpreter_on_user_functions() {
 fn run_err(filter_src: &str) -> EvalError {
     let mut r = route_with("203.0.113.0/24", 100, 0);
     let f = compile("test", filter_src).unwrap_or_else(|e| panic!("{e}"));
+    let functions: std::collections::BTreeMap<String, _> = f
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
     let mut ev = Evaluator {
         ctx: &StubCtx,
         scopes: vec![Scope::new()],
-        functions: f
-            .functions
-            .iter()
-            .map(|f| (f.name.clone(), f.clone()))
-            .collect(),
+        functions: &functions,
         call_depth: 0,
         pending_verdict: None,
         line_index: &f.line_index,
@@ -1680,7 +1969,7 @@ fn run_vm_err(filter_src: &str) -> EvalError {
     let mut ev = Evaluator {
         ctx: &StubCtx,
         scopes: vec![Scope::new()],
-        functions: std::collections::BTreeMap::new(),
+        functions: &compiled.function_table,
         call_depth: 0,
         pending_verdict: None,
         line_index: &compiled.line_index,
@@ -1710,6 +1999,7 @@ fn vm_stack_underflow_carries_real_instruction_span() {
     // should land at line 1 col 5.
     let src = "abc!xyz";
     let line_index = LineIndex::new(src);
+    let empty_table = std::collections::BTreeMap::new();
     let cf = CompiledFilter {
         name: "synthetic".to_string(),
         code: vec![Instr::Not],
@@ -1717,12 +2007,13 @@ fn vm_stack_underflow_carries_real_instruction_span() {
         line_index: LineIndex::new(src),
         functions: Vec::new(),
         function_index: std::collections::BTreeMap::new(),
+        function_table: empty_table.clone(),
     };
     let mut r = route_with("203.0.113.0/24", 100, 0);
     let mut ev = Evaluator {
         ctx: &StubCtx,
         scopes: vec![Scope::new()],
-        functions: std::collections::BTreeMap::new(),
+        functions: &empty_table,
         call_depth: 0,
         pending_verdict: None,
         line_index: &line_index,

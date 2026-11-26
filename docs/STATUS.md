@@ -165,7 +165,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | --- | --- | --- |
 | Route maps, prefix lists, AS-path filters, community lists | yes | `lr-policy::route_map`, `lr-policy::prefix_list`, `lr-policy::as_path_filter`, `lr-policy::community_list` |
 | Import, selection and export hooks | yes | `lr-policy::hooks` |
-| Safety net: AS loops, next-hop sanity, martians | yes | `lr-policy::safety` |
+| Safety net: AS loops, next-hop sanity, martians, ORIGIN validity, LOCAL_PREF ceiling | yes | `lr-policy::safety` |
 | Safety net granular overrides: global kill switch, per-AFI martian, per-rule exceptions | yes | `lr-policy::safety::SafetyConfig` |
 | Policy chains and verdicts | yes | `lr-policy::policy` |
 | Named policy sets and per-route actions | yes | `lr-policy::set`, `lr-policy::action` |

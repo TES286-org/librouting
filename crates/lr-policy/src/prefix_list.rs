@@ -1,4 +1,5 @@
-//! Prefix-list semantics (RFC-like; ge/le range matching).
+//! Prefix-list semantics (FRR/Cisco: exact match unless a `ge`/`le`
+//! window is given).
 
 use lr_core::addr::Prefix;
 use std::collections::BTreeMap;
@@ -8,19 +9,26 @@ pub struct PrefixListEntry {
     pub prefix: Prefix,
     /// Greater-or-equal: minimum prefix length.
     pub ge: u8,
-    /// Less-or-equal: maximum prefix length. 255 = no upper bound.
+    /// Less-or-equal: maximum prefix length. 255 = no upper bound
+    /// (the FFI spelling; the daemon uses the family maximum instead).
     pub le: u8,
     /// True: permit, False: deny.
     pub permit: bool,
 }
 
 impl PrefixListEntry {
+    /// Exact-match entry: only the prefix itself matches. This is the
+    /// FRR/Cisco default when neither `ge` nor `le` is configured
+    /// (`ip prefix-list NAME permit 10.0.0.0/8` never admits
+    /// `10.1.2.0/24`). Callers wanting a window set `ge`/`le`
+    /// explicitly — `ge` alone widens `le` to the family maximum
+    /// (32 for IPv4, 128 for IPv6).
     pub fn new(prefix: Prefix, permit: bool) -> Self {
         let pl = prefix.prefix_len;
         Self {
             prefix,
             ge: pl,
-            le: 255,
+            le: pl,
             permit,
         }
     }
@@ -106,7 +114,12 @@ mod tests {
         let mut list = PrefixList::new();
         list.push(PrefixListEntry::new(Prefix::new_v4([10, 0, 0, 0], 8), true));
         assert!(list.evaluate(&Prefix::new_v4([10, 1, 0, 0], 8)));
-        assert!(list.evaluate(&Prefix::new_v4([10, 0, 0, 0], 16)));
+        // FRR/Cisco semantics: without ge/le the entry matches the
+        // prefix length exactly — a longer prefix under 10/8 does
+        // NOT match (it used to, which made every `permit 10/8`
+        // silently admit the covering space).
+        assert!(!list.evaluate(&Prefix::new_v4([10, 0, 0, 0], 16)));
+        assert!(!list.evaluate(&Prefix::new_v4([10, 0, 0, 0], 9)));
         assert!(!list.evaluate(&Prefix::new_v4([11, 0, 0, 0], 8)));
     }
 
@@ -117,10 +130,14 @@ mod tests {
             Prefix::new_v4([10, 0, 0, 0], 24),
             false,
         ));
-        list.push(PrefixListEntry::new(Prefix::new_v4([10, 0, 0, 0], 8), true));
+        // A permit that means "the /8 or anything under it" spells
+        // the window explicitly (FRR: `permit 10.0.0.0/8 le 32`).
+        let mut permit = PrefixListEntry::new(Prefix::new_v4([10, 0, 0, 0], 8), true);
+        permit.le = 32;
+        list.push(permit);
         // 10.0.0.0/24 is denied explicitly.
         assert!(!list.evaluate(&Prefix::new_v4([10, 0, 0, 0], 24)));
-        // 10.0.1.0/24 falls through to the /8 permit.
+        // 10.0.1.0/24 falls through to the widened /8 permit.
         assert!(list.evaluate(&Prefix::new_v4([10, 0, 1, 0], 24)));
     }
 

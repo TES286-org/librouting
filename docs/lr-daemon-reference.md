@@ -1068,9 +1068,14 @@ spelling is `filter-function "name" { … }`.
 | --- | --- | --- | --- |
 | `name` | string | — | Referenced by a route-map |
 | `prefix` | string | — | CIDR |
-| `ge` | int | prefix length | |
-| `le` | int | 255 | |
+| `ge` | int | prefix length | Minimum matching prefix length |
+| `le` | int | prefix length | Exact match unless `ge` is set, in which case 32/128 |
 | `permit` | bool | true | |
+
+FRR semantics: without `ge`/`le` the entry matches the prefix length
+exactly; `ge` alone widens the window to the family maximum; `le` alone
+lowers it. An impossible window (`ge` or `le` below the prefix length,
+`le` above 32/128, `ge > le`) is a startup error.
 
 ### `[[as-path-list]]`
 
