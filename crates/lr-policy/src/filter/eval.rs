@@ -2428,6 +2428,10 @@ fn as_int(v: &Value) -> Option<i64> {
         Value::Int(n) => Some(*n),
         Value::Bool(true) => Some(1),
         Value::Bool(false) => Some(0),
+        // AS numbers participate in ordering and arithmetic —
+        // `first(bgp.as_path) < 64501` must not be a type error.
+        // u32 widens to i64 without loss.
+        Value::Asn(a) => Some(a.0 as i64),
         _ => None,
     }
 }
@@ -2499,6 +2503,16 @@ fn value_eq(a: &Value, b: &Value) -> bool {
         (Value::Ip(x), Value::Ip(y)) => x == y,
         (Value::Prefix(x), Value::Prefix(y)) => x == y,
         (Value::Asn(x), Value::Asn(y)) => x == y,
+        // Asn vs Int — `first(bgp.as_path) == 64500`: AS numbers are
+        // not first-class literals (they parse as ints), so every
+        // scalar comparison against an AS-valued expression crosses
+        // this arm. u32 always fits i64, so the widening is exact.
+        (Value::Asn(x), Value::Int(y)) => x.0 as i64 == *y,
+        (Value::Int(x), Value::Asn(y)) => *x == y.0 as i64,
+        // Asn vs Bool mirrors the Int/Bool pair above: an AS number
+        // is truthy when non-zero.
+        (Value::Asn(x), Value::Bool(y)) => (x.0 != 0) == *y,
+        (Value::Bool(x), Value::Asn(y)) => *x == (y.0 != 0),
         (Value::AsPath(x), Value::AsPath(y)) => x == y,
         (Value::Communities(x), Value::Communities(y)) => x == y,
         (Value::RoaState(x), Value::RoaState(y)) => x == y,
@@ -2528,6 +2542,14 @@ fn value_match(l: &Value, r: &Value) -> bool {
         (Value::AsPath(path), Value::Communities(cs)) => {
             cs.iter().any(|(a, _)| path.iter().any(|x| x == a))
         }
+        // Scalar membership — `bgp.local_pref ~ [100, 200]` and
+        // `first(bgp.as_path) ~ [64500]`. AS numbers parse as ints,
+        // so both spellings of an AS-valued item must match an Asn
+        // scrutinee.
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Asn(x), Value::Asn(y)) => x == y,
+        (Value::Asn(x), Value::Int(y)) => x.0 as i64 == *y,
+        (Value::Int(x), Value::Asn(y)) => *x == y.0 as i64,
         (Value::Communities(route_cs), Value::Communities(set_cs)) => {
             set_cs.iter().any(|c| route_cs.contains(c))
         }

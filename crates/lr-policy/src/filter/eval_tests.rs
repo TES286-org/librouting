@@ -1753,6 +1753,81 @@ fn vm_resolves_user_functions_from_tree_fallbacks() {
     assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
 }
 
+/// AS numbers must compare against integer literals. `first(...)` /
+/// `last(...)` return `asn` values while AS numbers parse as `int`
+/// literals, so `first(bgp.as_path) == 64500` used to be
+/// unconditionally false (no (Asn, Int) arm in `value_eq`) and the
+/// ordering forms were a swallowed type error. Both engines must
+/// agree on every shape.
+#[test]
+fn asn_values_compare_against_int_literals() {
+    fn with_path() -> Route {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_AS_PATH),
+            flags: 0x40,
+            // AS_SEQUENCE [64500]
+            value: vec![2u8, 1, 0, 0, 0xFB, 0xF4],
+        });
+        r
+    }
+
+    let cases: &[(&str, EvalResult)] = &[
+        (
+            "if first(bgp.as_path) == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) == 65000 then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if 64500 == first(bgp.as_path) then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) != 65000 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) < 64501 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) >= 64501 then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if last(bgp.as_path) == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        // Scalar membership on ints and ASNs (the doc's `any ~ set`
+        // row must hold for every scalar type).
+        (
+            "if bgp.local_pref ~ [42, 100] then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.local_pref ~ [42, 200] then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if first(bgp.as_path) ~ [65000, 64500] then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if first(bgp.as_path) ~ [65001] then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+    ];
+    for (src, want) in cases {
+        let mut a = with_path();
+        let mut b = with_path();
+        assert_eq!(run(src, &mut a), *want, "interpreter: {src}");
+        assert_eq!(run_vm(src, &mut b), *want, "VM: {src}");
+    }
+}
+
 // ----- #18 Phase 0: evaluation errors carry real positions -----
 
 /// Drive the tree-walking evaluator directly and surface the
