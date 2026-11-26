@@ -85,6 +85,98 @@ int main(void) {
     uint32_t v = lr_abi_version();
     check(v != 0, "abi_version > 0");
 
+    /* ------------------------------------------------------------------
+     * ABI correctness section (issue #101): surfaces whose header
+     * declarations were previously broken. These compile against the
+     * header and run against the library — a regression in the
+     * cbindgen emission (a dropped function, a struct-by-value where
+     * the implementation takes a pointer, a wrong constant value)
+     * fails here at compile or run time. */
+
+    /* LR_BMP_VERSION / LR_LDP_VERSION / LR_LDP_PORT / OSPF + auth
+     * constants were emitted as undefined bare identifiers
+     * (#define LR_BMP_VERSION VERSION) or dropped entirely; using
+     * them in an expression is the compile-side check. */
+    check(LR_BMP_VERSION == 3, "LR_BMP_VERSION == 3 (RFC 7854 v3)");
+    check(LR_LDP_VERSION == 1, "LR_LDP_VERSION == 1 (RFC 5036 v1)");
+    check(LR_LDP_PORT == 646, "LR_LDP_PORT == 646");
+    check(LR_OSPF_VERSION_V2 == 2 && LR_OSPF_VERSION_V3 == 3,
+          "LR_OSPF_VERSION_V2/V3 == 2/3");
+    check(LR_OSPF_PACKET_HELLO == 1 && LR_OSPF_PACKET_LS_UPDATE == 4,
+          "LR_OSPF_PACKET_HELLO/LS_UPDATE == 1/4");
+    check(LR_OSPF_AU_TYPE_NULL == 0 && LR_OSPF_AU_TYPE_MD5 == 2,
+          "LR_OSPF_AU_TYPE_NULL/MD5 == 0/2");
+    check(LR_OSPF_V3_AUTH_TYPE_HMAC == 1, "LR_OSPF_V3_AUTH_TYPE_HMAC == 1");
+    check(LR_BMP_MSG_ROUTE_MONITORING == 0 && LR_BMP_MSG_TERMINATION == 5,
+          "LR_BMP_MSG_ROUTE_MONITORING/TERMINATION == 0/5");
+    check(LR_BMP_PEER_TYPE_GLOBAL == 0 && LR_BMP_PEER_TYPE_LOCAL == 2,
+          "LR_BMP_PEER_TYPE_GLOBAL/LOCAL == 0/2");
+    check(LR_BABEL_MAGIC == 0x2A && LR_BABEL_VERSION == 2,
+          "LR_BABEL_MAGIC/VERSION == 0x2A/2");
+
+    /* The LDP status constants must carry the RFC 5036 wire values
+     * (0x8000_xxxx), not sequential small numbers: the engine writes
+     * the wire codes into lr_ldp_engine_event_t.status_code. */
+    check(LR_LDP_STATUS_SHUTDOWN == 0x8000000Au,
+          "LR_LDP_STATUS_SHUTDOWN == 0x8000000A (RFC 5036 wire value)");
+    check(LR_LDP_STATUS_KEEPALIVE_TIMER_EXPIRED == 0x80000012u,
+          "LR_LDP_STATUS_KEEPALIVE_TIMER_EXPIRED == 0x80000012");
+    check(LR_LDP_STATUS_UNKNOWN_FEC == 0x8000000Cu,
+          "LR_LDP_STATUS_UNKNOWN_FEC == 0x8000000C");
+    check(LR_LDP_DISCOVERY_KIND_LINK == 0 && LR_LDP_DISCOVERY_KIND_TARGETED == 1,
+          "LR_LDP_DISCOVERY_KIND_LINK/TARGETED == 0/1");
+
+    /* lr_bgp_ls_tlv_t is the opaque single-TLV handle (pointer); the
+     * flat-array decode API fills lr_bgp_ls_tlv_entry_t arrays. The
+     * header previously declared the handle functions with a 40-byte
+     * struct passed by value — these calls would not link/run. */
+    {
+        lr_bgp_ls_tlv_t tl = lr_bgp_ls_tlv_new(1024, (const uint8_t*)"abcd", 4);
+        check(tl != NULL, "lr_bgp_ls_tlv_new returns a handle");
+        check(lr_bgp_ls_tlv_type(tl) == 1024, "lr_bgp_ls_tlv_type == 1024");
+        check(lr_bgp_ls_tlv_value_len(tl) == 4, "lr_bgp_ls_tlv_value_len == 4");
+        uint8_t buf[4] = {0, 0, 0, 0};
+        check(lr_bgp_ls_tlv_value(tl, buf, 4) == 4 && memcmp(buf, "abcd", 4) == 0,
+              "lr_bgp_ls_tlv_value round-trips");
+        lr_bgp_ls_tlv_free(tl);
+    }
+
+    /* The ten LDP engine entry points were entirely absent from the
+     * header (cbindgen drops functions with by-value [u8;4]
+     * parameters). Construct, configure and drive one engine. */
+    {
+        const uint8_t lsr4[4] = {1, 2, 3, 4};
+        const uint8_t ifaddr[4] = {10, 0, 0, 1};
+        const uint8_t peer4[4] = {192, 0, 2, 1};
+        const uint8_t prefix4[4] = {10, 1, 0, 0};
+        lr_ldp_engine_config_t c = lr_ldp_engine_config_new(0x01020304u, 0, lsr4);
+        check(c != NULL, "lr_ldp_engine_config_new");
+        check(lr_ldp_engine_config_add_interface_address(c, ifaddr, NULL) == 0,
+              "lr_ldp_engine_config_add_interface_address");
+        check(lr_ldp_engine_config_add_targeted_peer(c, peer4, NULL) == 0,
+              "lr_ldp_engine_config_add_targeted_peer");
+        lr_ldp_engine_t e = lr_ldp_engine_new(c);
+        check(e != NULL, "lr_ldp_engine_new");
+        check(lr_ldp_engine_advertise_mapping(e, prefix4, NULL, 24, 100) == 0,
+              "lr_ldp_engine_advertise_mapping");
+        uint32_t label = 0;
+        (void)lr_ldp_engine_transit_label_count(e); /* callable: usize return */
+        check(lr_ldp_engine_transit_label_of(e, prefix4, NULL, 24, &label) >= 0,
+              "lr_ldp_engine_transit_label_of");
+        check(lr_ldp_engine_send_link_hello(e, peer4, NULL) == 0,
+              "lr_ldp_engine_send_link_hello");
+        uint32_t lsr = 0; uint16_t ls = 0; uint32_t lbl = 0;
+        check(lr_ldp_engine_transit_next_hop(e, prefix4, NULL, 24, &lsr, &ls, &lbl) >= 0,
+              "lr_ldp_engine_transit_next_hop");
+        check(lr_ldp_engine_withdraw_mapping(e, prefix4, NULL, 24) == 0,
+              "lr_ldp_engine_withdraw_mapping");
+        check(lr_ldp_engine_feed_udp(e, 0, NULL, NULL, NULL, 0) == -1,
+              "lr_ldp_engine_feed_udp rejects a source-less datagram");
+        check(lr_ldp_engine_feed_udp(e, 0, peer4, NULL, NULL, 0) == 0,
+              "lr_ldp_engine_feed_udp accepts an empty datagram");
+        lr_ldp_engine_free(e);
+    }
+
     /* Router lifecycle */
     lr_router_t r = lr_router_new();
     check(r != NULL, "router_new");
