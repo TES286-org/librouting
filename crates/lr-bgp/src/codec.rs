@@ -800,9 +800,9 @@ fn encode_update(
         // The private LrMplsLabelStack / LrExchangePlaneRecords /
         // LrOspfMetric2 / LrOspfRouterId / LrBabelSeqno /
         // LrBabelRouterId / LrIgpMetric / LrPeerSourceAddress /
-        // LrPeerHealthTier / LrPeerHealthStale tags carry
-        // router-internal state and are never sent on the wire.
-        // Skip all ten during encode.
+        // LrPeerBgpId / LrPeerHealthTier / LrPeerHealthStale tags
+        // carry router-internal state and are never sent on the
+        // wire. Skip all eleven during encode.
         if matches!(
             a.attr_type,
             crate::path::AttrType::LrMplsLabelStack
@@ -813,6 +813,7 @@ fn encode_update(
                 | crate::path::AttrType::LrBabelRouterId
                 | crate::path::AttrType::LrIgpMetric
                 | crate::path::AttrType::LrPeerSourceAddress
+                | crate::path::AttrType::LrPeerBgpId
                 | crate::path::AttrType::LrPeerHealthTier
                 | crate::path::AttrType::LrPeerHealthStale
         ) {

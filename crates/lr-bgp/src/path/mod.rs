@@ -320,6 +320,20 @@ pub enum AttrType {
     /// discriminator byte; the address family is implied by the
     /// length).
     LrPeerSourceAddress = 245,
+    /// librouting-private advertising peer's BGP Identifier (RFC 4271
+    /// §4.2 / RFC 4456 §9). The best-path comparator's step 10
+    /// (RFC 5004 deterministic mode) uses the ORIGINATOR_ID when a
+    /// route carries one; FRR and BIRD substitute the advertising
+    /// peer's BGP Identifier when it does not — without this tag
+    /// every route lacking ORIGINATOR_ID compared as identifier 0
+    /// and won the tiebreak against every real router id. *Never*
+    /// transmitted on the wire; the codec strips it at encode.
+    /// Attached to every BGP route the embedder learns from a peer
+    /// whose BGP Identifier is known; absent when it is not (the
+    /// comparator then falls back to 0).
+    ///
+    /// Value layout: 4 bytes, big-endian (the RouterId octets).
+    LrPeerBgpId = 247,
     /// librouting-private peer-health tier. Carries the
     /// per-`(peer, AFI/SAFI)` flap-suppression tier the peer-health
     /// import hook computed — `0..=3` (L0 = normal, L3 = severe).
@@ -374,6 +388,7 @@ impl AttrType {
             249 => Self::LrBabelSeqno,
             246 => Self::LrIgpMetric,
             245 => Self::LrPeerSourceAddress,
+            247 => Self::LrPeerBgpId,
             244 => Self::LrPeerHealthTier,
             243 => Self::LrPeerHealthStale,
             255 => Self::LrMplsLabelStack,
@@ -412,6 +427,7 @@ impl AttrType {
             Self::LrBabelSeqno => 249,
             Self::LrIgpMetric => 246,
             Self::LrPeerSourceAddress => 245,
+            Self::LrPeerBgpId => 247,
             Self::LrPeerHealthTier => 244,
             Self::LrPeerHealthStale => 243,
             Self::LrMplsLabelStack => 255,
@@ -1043,6 +1059,18 @@ impl PathAttributes {
         ));
     }
 
+    /// Attach the advertising peer's BGP Identifier (the
+    /// `LrPeerBgpId` private tag). The best-path comparator's step 10
+    /// reads it back via [`Self::peer_bgp_id`] when the route carries
+    /// no ORIGINATOR_ID.
+    pub fn set_peer_bgp_id(&mut self, id: u32) {
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrPeerBgpId,
+            id.to_be_bytes().to_vec(),
+        ));
+    }
+
     /// Read back the peer's transport source address previously
     /// attached with [`Self::set_peer_source_address`]. Returns `None`
     /// when the route carries no peer source attribute (FFI sessions
@@ -1063,6 +1091,21 @@ impl PathAttributes {
             }
             _ => None,
         }
+    }
+
+    /// The advertising peer's BGP Identifier (the `LrPeerBgpId`
+    /// private tag), when the embedder knows it. The best-path
+    /// comparator's step 10 substitutes this for a missing
+    /// ORIGINATOR_ID — the FRR/BIRD behaviour for the RFC 5004
+    /// router-id tiebreak.
+    pub fn peer_bgp_id(&self) -> Option<u32> {
+        let a = self.get(AttrType::LrPeerBgpId)?;
+        if a.value.len() != 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([
+            a.value[0], a.value[1], a.value[2], a.value[3],
+        ]))
     }
 
     /// True when an `LrPeerSourceAddress` attribute is physically
