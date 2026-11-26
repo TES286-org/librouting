@@ -113,6 +113,56 @@ re-baselines it; the new `abi-export` job is blocking from day one).
 The C harness (`tests/ffi/harness.c`) now compiles and runs the
 previously broken surfaces: the `lr_bgp_ls_tlv_*` handle API, the
 ten LDP engine entry points, and the constant values.
+### Fixed — five FFI contract violations: out-of-bounds reads and
+mislaid numberings (issue #101)
+
+- **`lr_ospf_walk_e_lsa_tlvs` reported absolute heap addresses as
+  `value_offset`** (`lr-ffi`): the field is documented — and consumed
+  by the C header — as "the offset of the value bytes inside the
+  body slice", but the writer stored `t.value.as_ptr() as usize`. A
+  consumer following the documented `data + value_offset` contract
+  read out of bounds immediately (and learned an ASLR address). The
+  offset is now the distance from the body base; a regression test
+  walks a two-TLV body and pins both offsets and the `data +
+  offset` contract.
+- **`lr_bgp_ext_community_decode_set` wrote a different stride than
+  its doc and its own encoder** (`lr-ffi`): the doc promises "a flat
+  `uint32_t` array, 3 entries per extended community" (12 bytes) and
+  `lr_bgp_ext_community_encode_set` takes exactly that stride — but
+  the decoder emitted `local` as a bare `u16`, 10 bytes per
+  community. A consumer sizing its buffer by the documented stride
+  read past the allocation from the second community on, and the
+  output could not round-trip through the encoder. The decoder now
+  writes `local` as a full `u32` (12 bytes per community), symmetric
+  with the encoder; the round-trip test pins both communities at the
+  12-byte stride.
+- **The `LR_COMMUNITY_KIND_*` constants numbered every kind
+  differently than the helpers** (`lr-ffi`): the `#define`s had
+  `CUSTOM = 0, NO_EXPORT = 1, …` while `lr_bgp_community_kind_from_u8`
+  / `_name` (and the Rust enum) number `NO_EXPORT = 0, …, CUSTOM =
+  7`. A consumer switching on the constants — or calling
+  `kind_name` on a `kind()` result — misidentified every kind. The
+  constants now carry the enum's discriminant order; a pinned test
+  asserts constants, enum and `kind_to_c` agree.
+- **`lr_mpls_label_stack_error_name` answered "unknown" for every
+  real error** (`lr-ffi`): the name table matched 1..=4 while
+  `lr_mpls_stack_last_err_code` (and the `LR_MPLS_STACK_ERR_*`
+  constants) use 0..=3, so `error_name(last_err_code())` never hit.
+  The table now matches on the constants; the test pins the pairing
+  for all four codes.
+- **`lr_bgp_decode_ipv4_nlri`'s layout contract said 17 bytes per
+  prefix, the writer emits 18** (`lr-ffi`): each entry is 16
+  zero-padded address octets + 1 prefix-length byte + 1 family flag
+  byte (the in-crate test already pinned 18). The doc — and the
+  header doc comment — now state the 18-byte layout.
+- **`sin6_scope_id` was written big-endian** (`lr-osroute`): the
+  field is a host-order `__u32` in the kernel uapi (unlike
+  `sin6_port`, `__be16`). The TCP-MD5/TCP-AO and GTSM sockaddr
+  builders byte-swapped it, so on every little-endian target a
+  link-local peer with scope id 42 armed its key against scope
+  704643072 — key matching silently failed for link-local peers.
+  All four writers now use native byte order; a layout test reads
+  the field back through `from_ne_bytes`.
 
 ### Fixed — kernel FIB mirror sees the default route; BFD AdminDown
 restarts (issue #101)
