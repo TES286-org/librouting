@@ -949,6 +949,14 @@ fn parse_route_message(buf: &[u8]) -> Option<KernelRoute> {
             }
             Prefix::new_v6(b, rtm_dst_len)
         }
+        // The kernel omits RTA_DST entirely when dst_len == 0 —
+        // iproute2's `ip route` prints those as the default route and
+        // never encodes the attribute (fib_dump skips zero-length
+        // destinations). Treat the missing attribute with a zero
+        // dst_len as the default route instead of dropping the
+        // message, so a FIB mirror sees 0.0.0.0/0 and ::/0.
+        (AF_INET, None) if rtm_dst_len == 0 => Prefix::new_v4([0, 0, 0, 0], 0),
+        (AF_INET6, None) if rtm_dst_len == 0 => Prefix::new_v6([0; 16], 0),
         _ => return None,
     };
     let next_hop = gateway.and_then(|d| IpAddr::from_bytes(&d));
@@ -1354,6 +1362,49 @@ mod tests {
         let buf = nlmsg(NLMSG_ERROR, &[]); // 16-byte message, no payload
         let e = parse_dump_response(&buf).unwrap_err();
         assert!(e.0.contains("short error"), "{}", e.0);
+    }
+
+    /// The kernel omits RTA_DST entirely when dst_len == 0 (iproute2
+    /// prints those as the default route and never encodes the
+    /// attribute) — a dump of a default route carries only the
+    /// gateway. Pre-fix the missing attribute fell into the reject
+    /// arm and the FIB mirror never saw 0.0.0.0/0 or ::/0.
+    #[test]
+    fn parse_dump_decodes_default_route_without_rta_dst() {
+        fn default_msg(family: u8) -> Vec<u8> {
+            let mut payload = vec![0u8; 12];
+            payload[0] = family; // rtm_family
+            payload[1] = 0; // rtm_dst_len — the default route
+            payload[5] = RTPROT_STATIC;
+            payload[7] = 1; // RTN_UNICAST
+            match family {
+                f if f == AF_INET => payload.extend_from_slice(&RtNetlink::build_rta_attribute(
+                    RTA_GATEWAY,
+                    &[198, 51, 100, 1],
+                )),
+                _ => payload.extend_from_slice(&RtNetlink::build_rta_attribute(
+                    RTA_GATEWAY,
+                    &[0xfd, 0, 0, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                )),
+            }
+            // No RTA_DST — that is the whole point.
+            nlmsg(RTM_NEWROUTE, &payload)
+        }
+
+        let mut buf = default_msg(AF_INET);
+        buf.extend_from_slice(&default_msg(AF_INET6));
+        buf.extend_from_slice(&nlmsg(NLMSG_DONE, &[]));
+        let routes = parse_dump_response(&buf).unwrap();
+        assert_eq!(routes.len(), 2, "both default routes must decode");
+        assert_eq!(routes[0].prefix.to_string(), "0.0.0.0/0");
+        assert_eq!(routes[0].next_hop, Some(IpAddr::V4([198, 51, 100, 1])));
+        assert_eq!(routes[1].prefix.to_string(), "::/0");
+        assert_eq!(
+            routes[1].next_hop,
+            Some(IpAddr::V6([
+                0xfd, 0, 0, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+            ]))
+        );
     }
 
     /// A normal 20-byte NLMSG_ERROR with error=0 is not an error.
