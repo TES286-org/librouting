@@ -45,10 +45,9 @@
 //! model), and the REPLACE-CSID family at 101-141 (RFC 9800's
 //! second flavor — same structure as NEXT-CSID but a separate
 //! container layout) are not yet modelled here. Unassigned values
-//! are `None` from [`Behavior::from_wire`]; RFC 8986 §4.19 says the
-//! data plane treats them as "End.Un" (count and drop), which is a
-//! *policy*, not a registry value, so no variant is synthesized for
-//! it.
+//! are `None` from [`Behavior::from_wire`] — an unassigned codepoint
+//! is a count-and-drop policy decision at the data plane, not a
+//! registry value, so no variant is synthesized for it.
 //!
 //! ## PSP / USP / USD flavors
 //!
@@ -317,8 +316,8 @@ impl Behavior {
     /// 0 is invalid, 25 is Reserved; the draft-only assignments at
     /// 42 / 51 / 60-68 / 73-75 / 79-84 / 98-100 and the REPLACE-CSID
     /// family at 101-141 / RFC 9801 family at 158-160 are not yet
-    /// modelled here, and per §4.19 the data plane treats them as
-    /// `End.Un` — the crate leaves that decision to the caller).
+    /// modelled here — an unassigned codepoint is a count-and-drop
+    /// policy decision the crate leaves to the caller).
     pub fn from_wire(v: u16) -> Option<Self> {
         // Match on the literal value so the mapping stays a
         // reviewable transcript of the registry itself.
@@ -754,11 +753,15 @@ mod tests {
             if v == 25 {
                 assert!(!has, "25 is Reserved by IANA — must have no variant");
             } else {
-                assert!(has, "RFC 8986 assignment {v} is missing a variant");
+                assert!(has, "registry assignment {v} is missing a variant");
                 assigned += 1;
             }
         }
-        assert_eq!(assigned, 38, "RFC 8986 assigned 38 values (1-24, 26-39)");
+        // RFC 8986 Table 6 assigns 1-12 and 14-24 plus 27-39 (36
+        // values); 13 and 26 come from
+        // draft-filsfils-spring-srv6-net-pgm-insertion via the live
+        // registry (RFC 8986 itself lists them Unassigned).
+        assert_eq!(assigned, 38, "the registry assigns 38 values (1-24, 26-39)");
     }
 
     #[test]
