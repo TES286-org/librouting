@@ -113,68 +113,11 @@ typedef struct OpaqueIpAddr IpAddr;
         }
     }
 
-    println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rerun-if-changed=src/handle.rs");
-    println!("cargo:rerun-if-changed=src/error.rs");
-    println!("cargo:rerun-if-changed=src/bytes.rs");
-    println!("cargo:rerun-if-changed=src/router.rs");
-    println!("cargo:rerun-if-changed=src/router_runtime.rs");
-    println!("cargo:rerun-if-changed=src/policy.rs");
-    println!("cargo:rerun-if-changed=src/codec.rs");
-    println!("cargo:rerun-if-changed=src/events.rs");
-    println!("cargo:rerun-if-changed=src/inspection.rs");
-    println!("cargo:rerun-if-changed=src/mpls.rs");
-    println!("cargo:rerun-if-changed=src/bfd.rs");
-    println!("cargo:rerun-if-changed=src/bmp.rs");
-    println!("cargo:rerun-if-changed=src/mrt.rs");
-    println!("cargo:rerun-if-changed=src/core.rs");
-    println!("cargo:rerun-if-changed=src/ldp.rs");
-    println!("cargo:rerun-if-changed=src/ospf.rs");
-    println!("cargo:rerun-if-changed=src/babel.rs");
-    println!("cargo:rerun-if-changed=src/best_path.rs");
-    println!("cargo:rerun-if-changed=src/capabilities.rs");
-    println!("cargo:rerun-if-changed=src/bgp_path.rs");
-    println!("cargo:rerun-if-changed=src/roa_table.rs");
-    println!("cargo:rerun-if-changed=src/ospf_spf.rs");
-    println!("cargo:rerun-if-changed=src/rtr_client.rs");
-    println!("cargo:rerun-if-changed=src/ldp_transit.rs");
-    println!("cargo:rerun-if-changed=src/ospf_db_exchange.rs");
-    println!("cargo:rerun-if-changed=src/ldp_label_store.rs");
-    println!("cargo:rerun-if-changed=src/ospf_retransmit.rs");
-    println!("cargo:rerun-if-changed=src/role_topology.rs");
-    println!("cargo:rerun-if-changed=src/bfd_session.rs");
-    println!("cargo:rerun-if-changed=src/constants_batch.rs");
-    println!("cargo:rerun-if-changed=src/babel_batch.rs");
-    println!("cargo:rerun-if-changed=src/babel_neighbor.rs");
-    println!("cargo:rerun-if-changed=src/ldp_discovery.rs");
-    println!("cargo:rerun-if-changed=src/bgp_message_constructors.rs");
-    println!("cargo:rerun-if-changed=src/srv6_srh.rs");
-    println!("cargo:rerun-if-changed=src/policy_batch.rs");
-    println!("cargo:rerun-if-changed=src/ospf_interface.rs");
-    println!("cargo:rerun-if-changed=src/bgp_communities.rs");
-    println!("cargo:rerun-if-changed=src/ospf_external.rs");
-    println!("cargo:rerun-if-changed=src/ospf_origination.rs");
-    println!("cargo:rerun-if-changed=src/ospf_abr_nssa.rs");
-    println!("cargo:rerun-if-changed=src/bgp_ls.rs");
-    println!("cargo:rerun-if-changed=src/ospf_constants.rs");
-    println!("cargo:rerun-if-changed=src/babel_messages.rs");
-    println!("cargo:rerun-if-changed=src/ldp_tlv.rs");
-    println!("cargo:rerun-if-changed=src/damping.rs");
-    println!("cargo:rerun-if-changed=src/osroute.rs");
-    println!("cargo:rerun-if-changed=src/attributes.rs");
-    println!("cargo:rerun-if-changed=src/ospf_lsdb.rs");
-    println!("cargo:rerun-if-changed=src/ospf_auth.rs");
-    println!("cargo:rerun-if-changed=src/mrt_constants.rs");
-    println!("cargo:rerun-if-changed=src/srv6_constants.rs");
-    println!("cargo:rerun-if-changed=src/mpls_constants.rs");
-    println!("cargo:rerun-if-changed=src/damping_constants.rs");
-    println!("cargo:rerun-if-changed=src/ospf_enums.rs");
-    println!("cargo:rerun-if-changed=src/ldp_engine.rs");
-    println!("cargo:rerun-if-changed=src/route_attrs.rs");
-    println!("cargo:rerun-if-changed=src/ospf_lsa_body.rs");
-    println!("cargo:rerun-if-changed=src/bgp_role_helpers.rs");
-    println!("cargo:rerun-if-changed=src/osroute_helpers.rs");
-    println!("cargo:rerun-if-changed=src/bgp_codec_helpers.rs");
-    println!("cargo:rerun-if-changed=src/misc_helpers.rs");
-    println!("cargo:rerun-if-changed=src/seg6_route.rs");
+    // Watch the whole source tree: a per-file list drifts as modules are
+    // added (38 export-defining modules were missing from the old list,
+    // which let stale headers ship — the root cause of the ABI drift
+    // the export cross-check now guards against). Directory watches
+    // cover every current and future module under src/.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=build.rs")
 }
