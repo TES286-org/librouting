@@ -34,6 +34,31 @@ fn strip_ipv4_header_extracts_ospf() {
     assert!(strip_ipv4_header(&dg[..12]).is_none());
 }
 
+/// The auth-drop warning reads the sender's router id out of the
+/// packet it is about to report. `verify_ospf_auth` rejects payloads
+/// shorter than the OSPF header, and the IP header only guarantees a
+/// 20-byte datagram — so a 4..7-byte OSPF payload reaches the warn
+/// block and the id read must not index past the buffer. The v3
+/// daemon length-gates its inbound path; this pins the v2 guard.
+#[test]
+fn ospf_router_id_read_never_panics_on_short_payloads() {
+    // A SimplePassword config is what makes verify_ospf_auth return
+    // false for a short payload in the first place.
+    let mut auth = OspfAuthState::Simple(lr_ospf::auth::SimplePassword::new(b"secret12"));
+    for len in 0..8 {
+        let short = vec![0u8; len];
+        assert!(
+            !verify_ospf_auth(&mut auth, &short),
+            "short payload is rejected before the warn block"
+        );
+        assert_eq!(ospf_router_id(&short), 0, "no id to read at len {len}");
+    }
+    // A full header carries the id at 4..8.
+    let mut pkt = vec![0u8; 24];
+    pkt[4..8].copy_from_slice(&0x0a00_0001u32.to_be_bytes());
+    assert_eq!(ospf_router_id(&pkt), 0x0a00_0001);
+}
+
 #[test]
 fn demux_header_parses_and_rejects() {
     let pkt = build_hello(

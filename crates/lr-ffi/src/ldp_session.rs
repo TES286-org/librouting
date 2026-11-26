@@ -233,12 +233,17 @@ pub unsafe extern "C" fn lr_ldp_session_drain_outgoing(
             // can decode) and concatenate the resulting bytes. An
             // embedder that wants per-message granularity can use the
             // existing lr_ldp_decode reader to walk the PDU stream.
+            // The PDU header's sender is *this* session's LDP-ID
+            // (RFC 5036 §3.1) — the engine's own egress uses
+            // cfg.local_id; the previous peer()-based value put the
+            // peer's identifier on the wire.
             let codec = LdpCodec;
+            let sender = s.local_id();
             let mut bytes = Vec::new();
             for msg in messages {
                 let pdu = LdpPdu {
                     version: LDP_VERSION,
-                    sender: s.peer().unwrap_or(LdpId::new([0, 0, 0, 0], 0)),
+                    sender,
                     messages: vec![msg],
                 };
                 let mut buf = vec![0u8; 4096];
@@ -694,6 +699,33 @@ mod tests {
             unsafe { crate::bytes::lr_bytes_free(&raw mut out) };
         }
 
+        unsafe { lr_ldp_session_free(s) };
+    }
+
+    /// RFC 5036 §3.1: the PDU header's LDP identifier is the sender's
+    /// own. `drain_outgoing` used to stamp the *peer's* identifier
+    /// there, making every PDU it produced invalid on the wire.
+    #[test]
+    fn ffi_ldp_session_drain_outgoing_pdu_sender_is_local_id() {
+        let s = lr_ldp_session_new(0x0a000001, 3, 0x0a000002, 7, 0, 0);
+        let _ = unsafe { lr_ldp_session_start(s, 0) };
+        let mut out = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let rc = unsafe { lr_ldp_session_drain_outgoing(s, &raw mut out) };
+        assert_eq!(rc, 0);
+        assert!(out.len >= 10, "at least one PDU header came back");
+        let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) };
+        // PDU header: version(2) | PDU length(2) | LDP identifier(6).
+        assert_eq!(&bytes[..2], &[0, 1], "version 1");
+        assert_eq!(
+            &bytes[4..10],
+            &[10, 0, 0, 1, 0, 3],
+            "the PDU sender is the local LDP-ID (10.0.0.1:3), not the peer's"
+        );
+        unsafe { crate::bytes::lr_bytes_free(&raw mut out) };
         unsafe { lr_ldp_session_free(s) };
     }
 

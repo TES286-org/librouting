@@ -1390,13 +1390,13 @@ class BabelRouterId:
 
     @property
     def bytes_(self) -> bytes:
-        # The C ABI copies 10 bytes out (2 reserved + 8 router_id).
-        out = ffi.new("uint8_t[10]")
+        # The C ABI copies the 8-byte Router-ID proper (the two
+        # reserved octets of the RFC 8966 wire form are not part of
+        # the contract).
+        out = ffi.new("uint8_t[8]")
         rc = get_lib().lr_babel_router_id_bytes(self._r, out)
         _check_rc(rc, "BabelRouterId.bytes")
-        # The router_id occupies bytes 2..10 (RFC 8966 §4.4.10 — the
-        # first 2 bytes are reserved/zero).
-        return bytes(out[i] for i in range(2, 10))
+        return bytes(out[i] for i in range(8))
 
     def close(self) -> None:
         if not self._freed and getattr(self, "_r", None) is not None:

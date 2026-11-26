@@ -220,6 +220,197 @@ fn as4_downgrades_when_peer_lacks_capability() {
     );
 }
 
+/// A route bag for the AS4 wire tests: ORIGIN + AS_PATH (canonical
+/// 4-byte, as the router stores it) + NEXT_HOP.
+fn as4_route(as_path: &[u32]) -> Route {
+    use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
+    let mut attrs = PathAttributes::new();
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        AsPath::from_sequence(as_path.iter().copied().map(Asn)).encode_4(),
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::NextHop,
+        vec![192, 0, 2, 1],
+    ));
+    Route {
+        key: RouteKey::new(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        ),
+        origin: lr_core::rib::RouteOrigin { proto: 0, peer: 7 },
+        protocol: lr_core::rib::Protocol::Bgp,
+        preference: lr_core::rib::Preference::new(20, as_path.len() as u32),
+        next_hop: Some(IpAddr::V4([192, 0, 2, 1])),
+        attributes: attrs.into(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+/// RFC 6793 §4.2.2 + §4.2.3, both directions on the wire: a NEW
+/// speaker (asn4 configured) paired with an OLD peer (no capability
+/// in the OPEN) exchanges 2-byte AS_PATHs. The OLD side's UPDATE
+/// decodes on the NEW side (the previous config-driven decode read
+/// the 4-byte width and dropped every announcement), the non-mappable
+/// AS rides AS_TRANS in the AS_PATH and AS4_PATH recovers it, and the
+/// NEW side's egress carries the same pair.
+#[test]
+fn as4_old_peer_session_wire_bytes() {
+    let mut a = BgpPeer::new(PeerConfig::new(
+        Asn(64512),
+        Asn(64513),
+        RouterId::from_v4([10, 0, 0, 1]),
+    ));
+    let mut b_cfg = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+    b_cfg.asn4 = false; // OLD speaker: no capability in the OPEN
+    let mut b = BgpPeer::new(b_cfg);
+    establish(&mut a, &mut b);
+    assert!(!a.codec.asn4_active(), "session downgraded on the NEW side");
+    assert!(!b.codec.asn4_active());
+
+    // OLD → NEW: a 2-byte AS_PATH with AS_TRANS where 70000 does not
+    // fit, plus the AS4_PATH that carries the real value.
+    assert!(b.advertise(&as4_route(&[70000])));
+    let wire = b.drain_outgoing();
+    // The 2-byte AS_PATH segment: Seq(64513 prepended, 23456).
+    let as_trans = 23_456u16.to_be_bytes();
+    assert!(
+        window_contains(&wire, &as_trans),
+        "the non-mappable AS is represented by AS_TRANS on the 2-byte path"
+    );
+    let actions = a.feed_bytes(&wire).unwrap();
+    let installed: Vec<_> = actions
+        .iter()
+        .filter_map(|x| match x {
+            BgpAction::InstallRoute(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(installed.len(), 1, "the announcement must not be dropped");
+    let path = {
+        let bag: crate::path::PathAttributes = installed[0].attributes.clone().into();
+        bag.as_path()
+            .expect("canonical 4-byte AS_PATH in the route bag")
+    };
+    assert_eq!(
+        path,
+        AsPath::from_sequence([Asn(64513), Asn(70000)]),
+        "the local AS was prepended and the AS4_PATH recovered 70000"
+    );
+
+    // NEW → OLD: the same pair in the other direction.
+    assert!(a.advertise(&as4_route(&[70000])));
+    let wire_a = a.drain_outgoing();
+    assert!(
+        window_contains(&wire_a, &as_trans),
+        "egress to the OLD peer encodes AS_TRANS in the AS_PATH"
+    );
+    assert!(
+        wire_a.windows(3).any(|w| w == [0xc0, 17, 10].as_slice()),
+        "the optional-transitive AS4_PATH attribute (flags 0xc0, type 17, \
+         10-octet value) is attached"
+    );
+    let actions_b = b.feed_bytes(&wire_a).unwrap();
+    let installed_b: Vec<_> = actions_b
+        .iter()
+        .filter_map(|x| match x {
+            BgpAction::InstallRoute(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(installed_b.len(), 1, "the OLD-configured side also accepts");
+    let bag_b: crate::path::PathAttributes = installed_b[0].attributes.clone().into();
+    assert_eq!(
+        bag_b.as_path().unwrap(),
+        AsPath::from_sequence([Asn(64512), Asn(70000)])
+    );
+}
+
+/// RFC 6793 §4.1: between NEW speakers the AS_PATH is 4-byte in both
+/// directions and an AS4_PATH that arrives anyway is discarded — the
+/// wire AS_PATH is the canonical path, not overridable by the
+/// attribute the RFC forbids on this session type.
+#[test]
+fn as4_new_peer_session_discards_as4_path() {
+    use crate::path::{AttrType, PathAttrFlags, PathAttribute};
+    let (mut a, mut b) = make_peer_pair();
+    establish(&mut a, &mut b);
+    assert!(a.codec.asn4_active() && b.codec.asn4_active());
+
+    // Hand-craft b's UPDATE: a legitimate 4-byte AS_PATH plus a
+    // forged AS4_PATH that would override it if reconciled.
+    let mut attrs = crate::path::PathAttributes::new();
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        AsPath::from_sequence([Asn(64513), Asn(100)]).encode_4(),
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_optional(true).set_transitive(true),
+        AttrType::As4Path,
+        AsPath::from_sequence([Asn(64513), Asn(66_000_000)]).encode_4(),
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::NextHop,
+        vec![192, 0, 2, 1],
+    ));
+    let mut u = crate::message::update::Update::new();
+    u.attributes = attrs;
+    u.nlri
+        .push(Nlri::plain(Prefix::new_v4([203, 0, 113, 0], 24)));
+    let tx = crate::codec::BgpCodec::new().with_asn4(true);
+    let bytes = tx
+        .encode_vec(&crate::message::BgpMessage::Update(u))
+        .unwrap();
+    let actions = a.feed_bytes(&bytes).unwrap();
+    let installed: Vec<_> = actions
+        .iter()
+        .filter_map(|x| match x {
+            BgpAction::InstallRoute(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(installed.len(), 1);
+    let bag: crate::path::PathAttributes = installed[0].attributes.clone().into();
+    assert_eq!(
+        bag.as_path().unwrap(),
+        AsPath::from_sequence([Asn(64513), Asn(100)]),
+        "§4.1: the AS4_PATH from a NEW speaker is discarded, not merged"
+    );
+
+    // Egress on a negotiated session never attaches AS4_PATH.
+    assert!(a.advertise(&as4_route(&[70000])));
+    let wire = a.drain_outgoing();
+    assert!(
+        !wire.windows(2).any(|w| w == [0xc0, 17].as_slice()),
+        "no AS4_PATH attribute toward a NEW peer"
+    );
+    assert!(
+        wire.windows(4).any(|w| w == 70000u32.to_be_bytes()),
+        "the AS_PATH itself is 4-byte encoded"
+    );
+}
+
+/// True when `hay` contains `needle` at any 2-byte alignment.
+fn window_contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
 /// RFC 4271 §6.8: a NOTIFICATION received in Established tears the
 /// session down to Idle instead of being ignored.
 #[test]

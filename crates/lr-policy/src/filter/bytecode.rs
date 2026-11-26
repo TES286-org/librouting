@@ -620,23 +620,45 @@ impl<'a> Compiler<'a> {
                         emit!(Instr::Jump(usize::MAX), *span);
                         continue;
                     }
-                    let mut pattern_jumps = Vec::new();
-                    for p in &arm.patterns {
-                        // Only jump into pattern i when the previous
-                        // ones did not match — chained by fall-through.
+                    if arm.patterns.len() == 1 {
+                        // One pattern: fall into the body when it
+                        // matches, skip past it when it does not.
                         emit!(Instr::LoadTmp, *span);
-                        self.compile_expr(p, out, spans);
+                        self.compile_expr(&arm.patterns[0], out, spans);
                         emit!(Instr::Bin(BinaryOp::Eq), *span);
                         let jf = out.len();
                         emit!(Instr::JumpIfFalse(usize::MAX), *span);
-                        pattern_jumps.push(jf);
+                        self.compile_stmts(&arm.body, out, spans);
+                        arm_jumps.push(out.len());
+                        emit!(Instr::Jump(usize::MAX), *span);
+                        out[jf] = Instr::JumpIfFalse(out.len());
+                        continue;
+                    }
+                    // Multiple patterns: the arm matches when *any*
+                    // pattern equals the scrutinee (the tree-walking
+                    // interpreter's OR, eval.rs `Stmt::Case`). Each
+                    // comparison jumps into the body on success; the
+                    // fall-through jump after the chain lands on the
+                    // next arm when nothing matched.
+                    let mut pattern_jumps = Vec::new();
+                    for p in &arm.patterns {
+                        emit!(Instr::LoadTmp, *span);
+                        self.compile_expr(p, out, spans);
+                        emit!(Instr::Bin(BinaryOp::Eq), *span);
+                        let jt = out.len();
+                        emit!(Instr::JumpIfTrue(usize::MAX), *span);
+                        pattern_jumps.push(jt);
+                    }
+                    // No pattern matched — skip to the next arm.
+                    let skip = out.len();
+                    emit!(Instr::Jump(usize::MAX), *span);
+                    for j in pattern_jumps {
+                        out[j] = Instr::JumpIfTrue(out.len());
                     }
                     self.compile_stmts(&arm.body, out, spans);
                     arm_jumps.push(out.len());
                     emit!(Instr::Jump(usize::MAX), *span);
-                    for j in pattern_jumps {
-                        out[j] = Instr::JumpIfFalse(out.len());
-                    }
+                    out[skip] = Instr::Jump(out.len());
                 }
                 let end = out.len();
                 for j in arm_jumps {

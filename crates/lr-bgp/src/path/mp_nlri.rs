@@ -124,9 +124,11 @@ impl MpReach {
         let mut nlri = Vec::new();
         while i < b.len() {
             // Prefix-length (1) + ceil(pl / 8) bytes, optionally after a
-            // 4-octet Add-Path identifier (RFC 7911 §4.3).
+            // 4-octet Add-Path identifier (RFC 7911 §4.3). The entry
+            // needs the path-id *plus* the length byte; a path-id that
+            // ends the buffer is a truncated entry, not a length byte.
             let path_id = if add_path {
-                if i + 4 > b.len() {
+                if i + 5 > b.len() {
                     return None;
                 }
                 let id = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
@@ -249,8 +251,10 @@ impl MpUnreach {
         let mut i = 3;
         let mut nlri = Vec::new();
         while i < b.len() {
+            // See `MpReach::decode_ex`: the Add-Path entry needs the
+            // 4-byte path-id plus the prefix-length byte after it.
             let path_id = if add_path {
-                if i + 4 > b.len() {
+                if i + 5 > b.len() {
                     return None;
                 }
                 let id = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);

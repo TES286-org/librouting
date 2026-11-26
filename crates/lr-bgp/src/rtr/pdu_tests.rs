@@ -165,6 +165,49 @@ fn end_of_data_v0_form_omits_intervals() {
     assert_eq!(&v1[12..16], &u32b(3600));
 }
 
+/// §5.8: the declared length is validated before any field read. A
+/// short End-of-Data (8..11 bytes — session/serial cut short) must
+/// surface as `InvalidLength`, not read past the buffer. Both the v0
+/// and the v1+ form are guarded.
+#[test]
+fn end_of_data_short_length_is_rejected_not_panicked() {
+    for (ver, len) in [
+        (RTR_VERSION_0, 8u32),
+        (RTR_VERSION_0, 11),
+        (RTR_VERSION_1, 8),
+        (RTR_VERSION_1, 23),
+    ] {
+        // The buffer carries the full declared length so the framing
+        // layer hands the whole PDU to the decoder.
+        let mut wire = [&[ver, 7u8][..], &0x0001u16.to_be_bytes(), &u32b(len)].concat();
+        wire.resize(len as usize, 0);
+        match decode(&wire) {
+            Err(RtrDecodeError::BadFixedLength { len: l, .. }) => assert_eq!(l, len),
+            other => panic!("ver {ver} len {len}: expected BadFixedLength, got {other:?}"),
+        }
+    }
+    // The exact declared lengths still decode for both versions.
+    let v0 = [
+        &[0u8, 7u8][..],
+        &0x0001u16.to_be_bytes(),
+        &u32b(12),
+        &u32b(42),
+    ]
+    .concat();
+    assert!(decode(&v0).unwrap().is_some());
+    let v1 = [
+        &[1u8, 7u8][..],
+        &0x0001u16.to_be_bytes(),
+        &u32b(24),
+        &u32b(9),
+        &u32b(3600),
+        &u32b(600),
+        &u32b(7200),
+    ]
+    .concat();
+    assert!(decode(&v1).unwrap().is_some());
+}
+
 #[test]
 fn cache_reset_wire_form() {
     // §5.9: ver=1, type=8, zero, len=8.

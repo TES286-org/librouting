@@ -270,13 +270,18 @@ impl BabelNeighbor {
         let state = self.rtt.get_or_insert_with(RttState::default);
         state.rtt_us = Some(match (state.rtt_us, state.sample_ms) {
             // Running exponential average over a valid previous sample.
+            // The fixed-point mix runs in u64: RTT_DECAY * sample
+            // overflows u32 once the sample passes ~102 s (both are
+            // u32 microseconds), and the samples here can legitimately
+            // reach the RTT_SANITY_US ceiling.
             (Some(prev), Some(t)) if prev > 0 && now_ms.saturating_sub(t) < RTT_VALIDITY_MS => {
-                let smoothed = RTT_DECAY * sample + (256 - RTT_DECAY) * prev;
+                let smoothed =
+                    RTT_DECAY as u64 * sample as u64 + (256 - RTT_DECAY) as u64 * prev as u64;
                 // Rounding toward the sample (babeld parity).
                 if prev >= sample {
-                    smoothed / 256
+                    (smoothed / 256) as u32
                 } else {
-                    smoothed.div_ceil(256)
+                    (smoothed.div_ceil(256)) as u32
                 }
             }
             // First sample for this neighbor: be conservative (double).

@@ -133,6 +133,99 @@ fn reconcile_as4_without_as4_returns_wire() {
     assert_eq!(reconcile_as4(&wire, None), wire);
 }
 
+/// RFC 6793 §4.2.3: the `need` boundary can fall inside a wire
+/// segment. The split takes the head of the *next* segment — the
+/// previous implementation restarted the walk at the first segment
+/// and duplicated its ASes ([Seq(1), Seq(1)] instead of
+/// [Seq(1), Seq(2)]).
+#[test]
+fn reconcile_as4_mid_segment_split_takes_continuation() {
+    let wire = AsPath {
+        segments: vec![
+            AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(1)],
+            },
+            AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(2), Asn(3), Asn(4)],
+            },
+        ],
+    };
+    let as4 = AsPath::from_sequence([Asn(4), Asn(5)]);
+    // wire_count 4, as4_count 2 → need 2: Seq(1) whole + the head of
+    // Seq(2,3,4). The segments stay split; the AS sequence is
+    // 1, 2, 4, 5.
+    let merged = reconcile_as4(&wire, Some(&as4));
+    assert_eq!(merged.length(), 4);
+    assert_eq!(
+        merged.segments,
+        vec![
+            AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(1)]
+            },
+            AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(2)]
+            },
+            AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(4), Asn(5)]
+            },
+        ],
+        "the continuation takes AS 2 (not a duplicate of AS 1)"
+    );
+}
+
+/// RFC 6793 §4.2.2: in a 2-byte AS_PATH a non-mappable AS number is
+/// represented by AS_TRANS (23456), never by truncating the value to
+/// its low 16 bits — the path length and the reconstruction anchor
+/// both depend on the marker.
+#[test]
+fn encode_2_maps_non_mappable_to_as_trans() {
+    let p = AsPath::from_sequence([Asn(64512), Asn(70000), Asn(100)]);
+    let enc = p.encode_2();
+    let dec = AsPath::decode(&enc).unwrap();
+    assert_eq!(
+        dec,
+        AsPath::from_sequence([Asn(64512), Asn(AS_TRANS), Asn(100)]),
+        "70000 is encoded as AS_TRANS, not as its low 16 bits (4464)"
+    );
+    // Fully mappable paths encode verbatim and report mappable.
+    let plain = AsPath::from_sequence([Asn(64512), Asn(100)]);
+    assert!(plain.all_mappable());
+    assert_eq!(AsPath::decode(&plain.encode_2()).unwrap(), plain);
+    assert!(!p.all_mappable());
+}
+
+/// RFC 6793 §4.2.2: the AS4_PATH a NEW speaker constructs for an OLD
+/// peer excludes every AS_CONFED_* segment; the other segments stay
+/// verbatim.
+#[test]
+fn without_confed_segments_keeps_external_path_verbatim() {
+    let p = AsPath {
+        segments: vec![
+            AsPathSegment {
+                kind: AsPathType::ConfedSequence,
+                ases: vec![Asn(65001)],
+            },
+            AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(64512), Asn(70000)],
+            },
+            AsPathSegment {
+                kind: AsPathType::ConfedSet,
+                ases: vec![Asn(65002), Asn(65003)],
+            },
+        ],
+    };
+    assert_eq!(
+        p.without_confed_segments(),
+        AsPath::from_sequence([Asn(64512), Asn(70000)])
+    );
+}
+
 /// RFC 5065 §4.1(b): advertising to a confederation-external peer
 /// (another Member-AS) prepends the local AS into an
 /// AS_CONFED_SEQUENCE, extending the leftmost one when it exists.
