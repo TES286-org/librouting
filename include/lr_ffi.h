@@ -11493,9 +11493,13 @@ int32_t lr_bgp_peer_config_set_rr_client(lr_bgp_peer_config_t c, uint8_t enabled
 int32_t lr_bgp_peer_config_set_graceful_restart(lr_bgp_peer_config_t c, uint8_t enabled);
 
 /**
- * Read the SRH's `current_destination` — the SID at
- * `segments_left` (the destination the packet is currently
- * forwarded to). Writes the 16-byte SID to `*out`. Returns 0 on
+ * Read the SRH's `current_destination` — the SID the packet is
+ * currently forwarded to: the WIRE `Segment List[Segments Left]`
+ * (RFC 8754 §4.3.1 S16), which in the builder's visit-order storage
+ * is `segments[len - 1 - segments_left]`. At the source
+ * (`segments_left == last_entry`) that is the first segment visited —
+ * the outer DA at the sender (§4.1). Writes the 16-byte SID to
+ * `*out`. Returns 0 on
  * success, 1 when the SRH has no segments, `LR_ERR_NULL` on a NULL
  * handle / pointer.
  *
@@ -21974,8 +21978,10 @@ int32_t lr_srv6_srh_segment_at(lr_srv6_srh_t srh, uintptr_t index, uint8_t *out)
 int32_t lr_srv6_srh_tlvs(lr_srv6_srh_t srh, struct lr_bytes_t *out);
 
 /**
- * Read the first segment (the destination address at the sender per
- * RFC 8754 §4.2) into `*out` (16 bytes). Returns 0 on success,
+ * Read the first segment (the destination address the sender puts on
+ * the outer IPv6 header — RFC 8754 §4.1; on the wire it sits at
+ * Segment List[Last Entry], §2) into `*out` (16 bytes). Returns 0 on
+ * success,
  * `LR_ERR_NULL` on a NULL handle or NULL `out`, `LR_ERR_INVALID_HANDLE`
  * when the SRH has no segments.
  *

@@ -642,7 +642,8 @@ class Srh:
         return out
 
     def first_segment(self) -> bytes | None:
-        """Segment List[0] — the destination address at the sender (RFC 8754 §4.1)."""
+        """The first segment visited — the outer DA at the sender (RFC 8754
+        §4.1); on the wire it sits at Segment List[Last Entry] (§2)."""
         out = _u8_buf(16)
         rc = get_lib().lr_srv6_srh_first_segment(self._ptr, out)
         if rc != 0:

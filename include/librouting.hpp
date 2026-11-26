@@ -3412,8 +3412,13 @@ inline std::string srv6_locator_to_string(const Srv6Locator& l) {
 
 // ---- Srv6Srh construction ----
 
-/// Build an SRH from a segment list. `segments_left` defaults to
-/// `segments.size() - 1` (RFC 8754 §4.2 — the sender's view).
+/// Build an SRH from a segment list in visit order (index 0 = the
+/// first segment visited — the same order `ip route ... encap seg6
+/// segs A,B,C` takes on its command line). `segments_left` defaults
+/// to `segments.size() - 1` (RFC 8754 §4.1 — the source sets SL =
+/// n - 1, which names the first segment on the wire list); it is a
+/// WIRE index (§2 — the wire list is the reverse of the visit order,
+/// Segment List[0] carries the last segment of the SR Policy).
 inline Srv6Srh make_srv6_srh(const std::vector<std::array<std::uint8_t, 16>>& segments) {
     if (segments.empty()) {
         throw Srv6SrhErrorException(Srv6SrhError::EmptySegmentList, "segment list is empty");
@@ -3541,7 +3546,8 @@ inline std::vector<std::array<std::uint8_t, 16>> srv6_srh_segments(const Srv6Srh
     return out;
 }
 
-/// Segment List[0] — the destination address at the sender (RFC 8754 §4.1).
+/// The first segment visited — the outer DA at the sender (RFC 8754
+/// §4.1); on the wire it sits at Segment List[Last Entry] (§2).
 inline std::array<std::uint8_t, 16> srv6_srh_first_segment(const Srv6Srh& s) {
     std::array<std::uint8_t, 16> out{};
     if (lr_srv6_srh_first_segment(s.get(), out.data()) != 0) {
@@ -3550,7 +3556,10 @@ inline std::array<std::uint8_t, 16> srv6_srh_first_segment(const Srv6Srh& s) {
     return out;
 }
 
-/// Segment List[Segments Left] — the current destination (RFC 8754 §4.1).
+/// The current destination — the WIRE Segment List[Segments Left]
+/// (RFC 8754 §4.3.1 S16); at the source (`segments_left == last_entry`)
+/// this is the first segment visited, the same SID the sender puts on
+/// the outer IPv6 header (§4.1).
 inline std::array<std::uint8_t, 16> srv6_srh_current_destination(const Srv6Srh& s) {
     std::array<std::uint8_t, 16> out{};
     if (lr_srv6_srh_current_destination(s.get(), out.data()) != 0) {
