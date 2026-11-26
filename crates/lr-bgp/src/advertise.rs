@@ -429,10 +429,22 @@ impl BgpPeer {
         } else {
             match family {
                 NlriFamily::IPV4_UNICAST => {
-                    if let Some(nh) = next_hop {
-                        if attrs.get(AttrType::NextHop).is_none() {
-                            attrs.insert(Self::next_hop_attr(nh));
+                    // RFC 4271 §5.1.3: NEXT_HOP is four octets for IPv4
+                    // NLRI. A 16-octet IPv6 next-hop is legal only with
+                    // RFC 5549 / RFC 8950 Extended Next-Hop (1,1,2)
+                    // negotiated — that case took the MP_REACH branch
+                    // above. Without it we must not emit a 16-octet
+                    // well-known NEXT_HOP (BIRD and FRR reject it), nor
+                    // an UPDATE with no NEXT_HOP at all (RFC 4271 §6.3).
+                    // Withhold the route; the caller then skips the
+                    // Adj-RIB-Out entry.
+                    match next_hop {
+                        Some(lr_core::addr::IpAddr::V4(b)) => {
+                            if attrs.get(AttrType::NextHop).is_none() {
+                                attrs.insert(Self::next_hop_attr(lr_core::addr::IpAddr::V4(b)));
+                            }
                         }
+                        Some(lr_core::addr::IpAddr::V6(_)) | None => return false,
                     }
                     update.nlri.push(Nlri::new(route.path_id, route.key.prefix));
                 }
