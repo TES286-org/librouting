@@ -37,6 +37,50 @@ of the settled state (issue #101)
   session whose LAST logged state is Established, which is the
   RFC 4271 §6.8 convergence invariant.
 
+### Fixed — the SRH segment list is encoded in RFC 8754 §2 wire order
+(issue #101; BREAKING CHANGE for multi-segment SRH consumers)
+
+`crates/lr-srv6` stored the segment list in "index 0 = first
+visited" order and emitted it on the wire **without the reversal**
+RFC 8754 §2 mandates ("The Segment List is encoded starting from the
+last segment of the SR Policy. That is, the first element of the
+Segment List (Segment List[0]) contains the last segment of the SR
+Policy, the second element contains the penultimate segment of the
+SR Policy, and so on."). A compliant receiver — or the Linux kernel
+(`seg6_do_srh` arms the outer DA from `segments[segments_left]` of
+the wire list) — read the FINAL segment out of
+`Segment List[Segments Left]` and forwarded the packet straight to
+the end of the path, skipping every intermediate hop. Seg6 /
+seg6local routes installed through `lr-osroute` carried the same
+reversed bytes into the kernel. Only single-segment SRHs (the sole
+shape the test suite exercised) happened to work.
+
+- `Srh::encode_vec` now writes the list reversed (wire position 0 =
+  the final segment, wire Last Entry = the first visited); `decode`
+  reverses back. The Rust API keeps the builder-friendly visit
+  order (`Srh::new([A, B, C])` = visit A first — the order `ip
+  route ... encap seg6 segs A,B,C` uses); only the wire bytes
+  change.
+- `current_destination()` follows the wire index semantics
+  (RFC 8754 §4.3.1 S16): `Segment List[Segments Left]` on the
+  reversed list = `segments[len - 1 - SL]` in visit order. At the
+  source (`SL = n - 1`) it returns the first segment — the same
+  address `first_segment()` names — instead of the final one; the
+  two accessors' docs no longer contradict each other.
+- New tests pin the RFC order at every layer: the Rust codec
+  (two-segment wire bytes against the §2 rule, the §4.3.1 hop walk),
+  the netlink builder (byte-level parity with what iproute2's
+  `parse_encap_seg6` puts in `SEG6_IPTUNNEL_SRH`), the FFI accessors
+  and the Python/Go bindings.
+- The `lr-tests` smoke test and the Python/Go binding tests that
+  pinned the old (broken) order are updated to the corrected
+  semantics; the C++ harness now asserts the §4.1 source view
+  (`current_destination` = the first visited SID at `SL = Last
+  Entry`, the final one at `SL = 0`) and gains an `SL = 0` hop
+  assertion; the C++ header, the regenerated `lr_ffi.h` and the
+  FFI/Go/Python wrapper doc comments carry the corrected field
+  description.
+
 ### Fixed — the C ABI header actually contains every export, with the
 right shapes and values (issue #101; BREAKING CHANGE for symbols that
 never worked)

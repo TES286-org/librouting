@@ -558,16 +558,21 @@ func TestSRv6SrhCurrentDestination(t *testing.T) {
 	defer s1.Free()
 	s2, _ := ParseSRv6Sid("fcbb:bb00::2")
 	defer s2.Free()
-	srh, _ := NewSRv6Srh([]any{s1, s2}) // segments_left defaults to 1
+	srh, _ := NewSRv6Srh([]any{s1, s2}) // segments_left defaults to n-1
 	defer srh.Free()
 	cur, err := srh.CurrentDestination()
 	if err != nil {
 		t.Fatalf("CurrentDestination: %v", err)
 	}
-	oct, _ := s2.Octets()
+	// RFC 8754 §4.1: at the source (SL = n-1) the current destination
+	// is the FIRST segment visited — the outer DA at the sender, the
+	// same address FirstSegment returns. The wire list is reversed
+	// (§2), so the old "SL indexes the builder's vector" reading sent
+	// packets straight to the final segment.
+	oct, _ := s1.Octets()
 	for i, b := range oct {
 		if cur[i] != b {
-			t.Fatalf("byte %d: got %02x, want %02x", i, cur[i], b)
+			t.Fatalf("byte %d: got %02x, want %02x (first visited segment)", i, cur[i], b)
 		}
 	}
 }
