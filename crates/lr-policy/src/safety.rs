@@ -4,8 +4,10 @@
 //! (e.g. AS path loops, NEXT_HOP collisions, malformed AS_PATH).
 //!
 //! Each check can be **disabled** individually by the embedder via
-//! [`SafetyConfig`]. Disabled checks return `Ok(())` immediately. By default
-//! all checks are enabled.
+//! [`SafetyConfig`]. Disabled checks return `Ok(())` immediately. Every
+//! check is enabled by default except `reject_empty_as_path_ebgp` and
+//! `reject_oversized_local_pref`, which default to `false` (see the
+//! field docs for why).
 //!
 //! Violations are surfaced via [`SafetyViolation`] so the embedder can log
 //! them, send them to a syslog/telemetry sink, or merely discard.
@@ -262,6 +264,40 @@ impl SafetyNet {
                 }
             }
         }
+        // ORIGIN check (RFC 4271 §4.3): ORIGIN is a well-known
+        // mandatory attribute — one octet, 0 (IGP), 1 (EGP) or 2
+        // (INCOMPLETE). The check applies to BGP-flavored routes only
+        // (an AS_PATH or ORIGIN attribute present — presence test,
+        // no decode), so an OSPF or Babel route an embedder feeds
+        // through the same net is untouched. A BGP route carrying an
+        // AS_PATH but no ORIGIN violates §6.3 ("the UPDATE message
+        // is erroneous"); the wire codec is the first line of
+        // defense, this is the second for routes that reach the net
+        // by other paths.
+        if self.cfg.reject_invalid_origin {
+            let origin = route.attributes.get(lr_core::attr::AttrTag(1));
+            let bgp_flavored = origin.is_some()
+                || route.attributes.get(lr_core::attr::AttrTag(2)).is_some()
+                || route.attributes.get(lr_core::attr::AttrTag(17)).is_some();
+            if bgp_flavored && !matches!(origin, Some(a) if a.value.len() == 1 && a.value[0] <= 2) {
+                return Err(SafetyViolation::InvalidOrigin { route_key: key });
+            }
+        }
+        // LOCAL_PREF ceiling (RFC 4271 §4.3: a 4-octet
+        // non-negative integer). Only applies when the attribute is
+        // present; an operator lowers `max_local_pref` below
+        // u32::MAX to keep a peer from DoS-ing the best-path
+        // selection with enormous LOCAL_PREF values.
+        if self.cfg.reject_oversized_local_pref {
+            if let Some(lp) = route.attributes.get_u32_be(lr_core::attr::AttrTag(5)) {
+                if lp > self.cfg.max_local_pref {
+                    return Err(SafetyViolation::OversizedLocalPref {
+                        route_key: key,
+                        value: lp,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -514,6 +550,15 @@ mod tests {
             tag: lr_core::attr::AttrTag(2),
             flags: 0,
             value: as_path_bytes,
+        });
+        // RFC 4271 §4.3: ORIGIN is well-known mandatory. The fixtures
+        // model well-formed BGP routes, so every one carries a valid
+        // ORIGIN (2 = INCOMPLETE); the missing/invalid shapes get
+        // their own tests below.
+        attrs.insert(Attribute {
+            tag: lr_core::attr::AttrTag(1),
+            flags: 0,
+            value: vec![2],
         });
         Route {
             key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
@@ -843,5 +888,129 @@ mod tests {
                 128
             ),
         ));
+    }
+
+    // ---- ORIGIN and LOCAL_PREF checks (RFC 4271 §4.3) ----
+
+    fn strip_origin(route: &mut Route) {
+        route.attributes.remove(lr_core::attr::AttrTag(1));
+    }
+
+    #[test]
+    fn rejects_missing_origin_on_bgp_route() {
+        let safety = SafetyNet::new(Asn(100));
+        let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
+        let mut route = make_route(prefix, as_path_2byte(&[200, 300]));
+        strip_origin(&mut route);
+        // An AS_PATH without an ORIGIN: RFC 4271 §6.3 says the whole
+        // UPDATE is erroneous.
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::InvalidOrigin { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_range_origin_value() {
+        let safety = SafetyNet::new(Asn(100));
+        let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
+        let mut route = make_route(prefix, as_path_2byte(&[200]));
+        route.attributes.insert(Attribute {
+            tag: lr_core::attr::AttrTag(1),
+            flags: 0,
+            value: vec![3], // not 0 (IGP), 1 (EGP) or 2 (INCOMPLETE)
+        });
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::InvalidOrigin { .. })
+        ));
+        // Wrong length is equally invalid: ORIGIN is one octet.
+        route.attributes.insert(Attribute {
+            tag: lr_core::attr::AttrTag(1),
+            flags: 0,
+            value: vec![0, 1],
+        });
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::InvalidOrigin { .. })
+        ));
+        // Every legal value passes.
+        for legal in [0u8, 1, 2] {
+            route.attributes.insert(Attribute {
+                tag: lr_core::attr::AttrTag(1),
+                flags: 0,
+                value: vec![legal],
+            });
+            assert!(safety.check(&route, true).is_ok(), "origin {legal}");
+        }
+    }
+
+    #[test]
+    fn origin_check_skips_non_bgp_routes() {
+        let safety = SafetyNet::new(Asn(100));
+        // No AS_PATH, no ORIGIN, no LOCAL_PREF: an OSPF- or
+        // Babel-shaped route an embedder feeds through the same net
+        // must not trip the BGP-attribute checks.
+        let mut route = make_route(Prefix::new_v4([8, 0, 0, 0], 8), Vec::new());
+        strip_origin(&mut route);
+        route.attributes.remove(lr_core::attr::AttrTag(2));
+        route.protocol = Protocol::Ospfv2;
+        assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn origin_check_can_be_disabled() {
+        let mut safety = SafetyNet::new(Asn(100));
+        safety.cfg.reject_invalid_origin = false;
+        let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
+        let mut route = make_route(prefix, as_path_2byte(&[200, 300]));
+        strip_origin(&mut route);
+        assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_local_pref_when_enabled() {
+        let mut safety = SafetyNet::new(Asn(100));
+        safety.cfg.reject_oversized_local_pref = true;
+        safety.cfg.max_local_pref = 500;
+        let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
+        let mut route = make_route(prefix, as_path_2byte(&[200, 300]));
+        route.attributes.insert(Attribute {
+            tag: lr_core::attr::AttrTag(5),
+            flags: 0,
+            value: 501u32.to_be_bytes().to_vec(),
+        });
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::OversizedLocalPref { value: 501, .. })
+        ));
+        // At the ceiling exactly: admitted (the limit is inclusive).
+        route.attributes.insert(Attribute {
+            tag: lr_core::attr::AttrTag(5),
+            flags: 0,
+            value: 500u32.to_be_bytes().to_vec(),
+        });
+        assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn local_pref_check_off_by_default_and_absent_safe() {
+        // Default config: the ceiling is off, so an enormous
+        // LOCAL_PREF passes (documented default).
+        let safety = SafetyNet::new(Asn(100));
+        let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
+        let mut route = make_route(prefix, as_path_2byte(&[200, 300]));
+        route.attributes.insert(Attribute {
+            tag: lr_core::attr::AttrTag(5),
+            flags: 0,
+            value: u32::MAX.to_be_bytes().to_vec(),
+        });
+        assert!(safety.check(&route, true).is_ok());
+        // Enabled but the attribute is absent (e.g. a route from a
+        // peer that never sets LOCAL_PREF): nothing to check.
+        let mut safety = SafetyNet::new(Asn(100));
+        safety.cfg.reject_oversized_local_pref = true;
+        let route = make_route(prefix, as_path_2byte(&[200, 300]));
+        assert!(safety.check(&route, true).is_ok());
     }
 }
