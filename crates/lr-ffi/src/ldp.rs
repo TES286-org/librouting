@@ -23,7 +23,7 @@
 use lr_core::buf::{ReadBuf, WriteBuf};
 use lr_core::codec::{Decoder, Encoder};
 use lr_ldp::message::HelloMsg;
-use lr_ldp::pdu::{LdpId, LDP_PORT, LDP_VERSION};
+use lr_ldp::pdu::{LdpId, LDP_VERSION};
 use lr_ldp::tlv::HelloParams;
 use lr_ldp::{LdpCodec, LdpMessage, LdpPdu};
 
@@ -36,8 +36,13 @@ const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
 // ---- Constants (mirrors lr_ldp pub consts) ----
 
-pub const LR_LDP_VERSION: u16 = LDP_VERSION;
-pub const LR_LDP_PORT: u16 = LDP_PORT;
+// Literals, not cross-crate re-exports: cbindgen cannot evaluate
+// `lr_ldp::pdu::LDP_VERSION` and previously emitted the header as
+// `#define LR_LDP_VERSION LDP_VERSION` — an undefined bare identifier
+// in C. The pinned test below fails if lr_ldp ever moves off these
+// values.
+pub const LR_LDP_VERSION: u16 = 1;
+pub const LR_LDP_PORT: u16 = 646;
 
 // ---- LdpId ----
 
@@ -354,18 +359,19 @@ pub unsafe extern "C" fn lr_ldp_pdu_free(pdu: lr_ldp_pdu_t) {
 }
 
 // ---- Message-type constants ----
-
-pub const LR_LDP_MSG_NOTIFICATION: u16 = 0x0001;
-pub const LR_LDP_MSG_HELLO: u16 = 0x0100;
-pub const LR_LDP_MSG_INITIALIZATION: u16 = 0x0200;
-pub const LR_LDP_MSG_KEEPALIVE: u16 = 0x0201;
-pub const LR_LDP_MSG_CAPABILITY: u16 = 0x0202;
-pub const LR_LDP_MSG_ADDRESS: u16 = 0x0300;
-pub const LR_LDP_MSG_ADDRESS_WITHDRAW: u16 = 0x0301;
-pub const LR_LDP_MSG_LABEL_MAPPING: u16 = 0x0400;
-pub const LR_LDP_MSG_LABEL_REQUEST: u16 = 0x0401;
-pub const LR_LDP_MSG_LABEL_WITHDRAW: u16 = 0x0402;
-pub const LR_LDP_MSG_LABEL_RELEASE: u16 = 0x0403;
+//
+// Single crate-level definition in [`crate::ldp_constants`]; a second
+// definition here (even identical) made cbindgen's header emission
+// order-dependent. `LR_LDP_MSG_LABEL_ABORT` is this module's spelling
+// of `LABEL_ABORT_REQUEST` (both 0x0404, both historically in the
+// header), so it stays a local definition.
+pub use crate::ldp_constants::{
+    LR_LDP_MSG_ADDRESS, LR_LDP_MSG_ADDRESS_WITHDRAW, LR_LDP_MSG_CAPABILITY, LR_LDP_MSG_HELLO,
+    LR_LDP_MSG_INITIALIZATION, LR_LDP_MSG_KEEPALIVE, LR_LDP_MSG_LABEL_MAPPING,
+    LR_LDP_MSG_LABEL_RELEASE, LR_LDP_MSG_LABEL_REQUEST, LR_LDP_MSG_LABEL_WITHDRAW,
+    LR_LDP_MSG_NOTIFICATION,
+};
+/// Label Abort Request (RFC 5036 §3.5.5) — short spelling.
 pub const LR_LDP_MSG_LABEL_ABORT: u16 = 0x0404;
 
 fn message_type_code(m: &LdpMessage) -> u16 {
@@ -404,6 +410,8 @@ fn message_id(m: &LdpMessage) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use lr_ldp::pdu::LDP_PORT;
+
     use super::*;
 
     unsafe fn bytes_to_vec(b: &mut lr_bytes_t) -> Vec<u8> {
@@ -419,6 +427,11 @@ mod tests {
 
     #[test]
     fn ffi_constants_match_rfc_5036() {
+        // The literals must track lr_ldp's own values — the literals
+        // exist only because cbindgen cannot evaluate cross-crate
+        // paths.
+        assert_eq!(LR_LDP_VERSION, LDP_VERSION);
+        assert_eq!(LR_LDP_PORT, LDP_PORT);
         assert_eq!(LR_LDP_VERSION, 1);
         assert_eq!(LR_LDP_PORT, 646);
         assert_eq!(LR_LDP_MSG_NOTIFICATION, 0x0001);

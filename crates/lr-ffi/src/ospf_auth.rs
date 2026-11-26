@@ -24,7 +24,6 @@
 
 #![allow(unused_unsafe)]
 
-use lr_ospf::auth::v3_auth::V3_AUTH_TYPE_HMAC;
 use lr_ospf::auth::{AuType, CryptoAlgorithm, CryptoAuth, SimplePassword, V3Auth};
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
@@ -35,10 +34,17 @@ const LR_ERR_NULL: i32 = LrError::Null as i32;
 const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
 // ---- AuType enum constants (RFC 2328 §D.1) ----
+//
+// Literal values, not enum casts: cbindgen cannot evaluate
+// `AuType::Null as u16` and previously dropped the set from
+// `lr_ffi.h`. Pinned tests below fail on drift.
 
-pub const LR_OSPF_AU_TYPE_NULL: u16 = AuType::Null as u16;
-pub const LR_OSPF_AU_TYPE_SIMPLE_PASSWORD: u16 = AuType::SimplePassword as u16;
-pub const LR_OSPF_AU_TYPE_MD5: u16 = AuType::Md5 as u16;
+/// No authentication (RFC 2328 §D.1).
+pub const LR_OSPF_AU_TYPE_NULL: u16 = 0;
+/// Simple password authentication (RFC 2328 §D.1).
+pub const LR_OSPF_AU_TYPE_SIMPLE_PASSWORD: u16 = 1;
+/// Cryptographic authentication (RFC 2328 §D.1; MD5 per RFC 5709).
+pub const LR_OSPF_AU_TYPE_MD5: u16 = 2;
 
 /// Convert a wire `AuType` value (RFC 2328 §D.1) to its
 /// `LR_OSPF_AU_TYPE_*` constant. Unknown values map to NULL (0) —
@@ -513,8 +519,12 @@ unsafe fn borrow_v3_mut(v: lr_ospf_v3_auth_t) -> Option<&'static mut V3Auth> {
     Some(unsafe { &mut *(v as *mut V3Auth) })
 }
 
-/// The OSPFv3 authentication type for HMAC trailers (RFC 7166).
-pub const LR_OSPF_V3_AUTH_TYPE_HMAC: u16 = V3_AUTH_TYPE_HMAC;
+/// The OSPFv3 authentication type for HMAC trailers (RFC 7166 §2.2 —
+/// type 1). Literal, not a re-export of `lr_ospf::auth::V3_AUTH_TYPE_HMAC`:
+/// a cross-crate path is a value cbindgen cannot evaluate, and it
+/// previously reached the header as the undefined bare identifier
+/// `#define LR_OSPF_V3_AUTH_TYPE_HMAC V3_AUTH_TYPE_HMAC`.
+pub const LR_OSPF_V3_AUTH_TYPE_HMAC: u16 = 1;
 
 /// Construct a `V3Auth` with HMAC-SHA-256 (the RFC 7166 default) and
 /// the given Security Association ID + shared secret.
@@ -678,6 +688,24 @@ pub unsafe extern "C" fn lr_ospf_v3_auth_free(v: lr_ospf_v3_auth_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn au_type_literals_match_rust_enum() {
+        assert_eq!(LR_OSPF_AU_TYPE_NULL, AuType::Null as u16);
+        assert_eq!(
+            LR_OSPF_AU_TYPE_SIMPLE_PASSWORD,
+            AuType::SimplePassword as u16
+        );
+        assert_eq!(LR_OSPF_AU_TYPE_MD5, AuType::Md5 as u16);
+    }
+
+    #[test]
+    fn v3_auth_hmac_literal_matches_rust() {
+        assert_eq!(
+            LR_OSPF_V3_AUTH_TYPE_HMAC,
+            lr_ospf::auth::v3_auth::V3_AUTH_TYPE_HMAC
+        );
+    }
 
     #[test]
     fn ffi_au_type_roundtrip() {

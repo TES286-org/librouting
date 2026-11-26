@@ -56,6 +56,103 @@ shape the test suite exercised) happened to work.
   pinned the old (broken) order are updated to the corrected
   semantics; the C++ header and the FFI doc comments carry the
   corrected field description.
+  
+### Fixed — the C ABI header actually contains every export, with the
+right shapes and values (issue #101; BREAKING CHANGE for symbols that
+never worked)
+
+A new `scripts/abi_export_check.py` gate walks the Rust sources for
+every `#[no_mangle] pub extern "C"` function and every `pub const
+LR_*` item and cross-checks them against `include/lr_ffi.h`; the CI
+`abi-export` job runs it on every push. The classes it now blocks:
+
+- **The `lr_bgp_ls_tlv_t` name collision** (`lr-ffi`): the opaque
+  single-TLV handle type (a pointer) and the flat-array decode entry
+  struct (40 bytes, `#[repr(C)]`) shared one C name, so cbindgen
+  emitted the handle API — `lr_bgp_ls_tlv_new` / `_type` /
+  `_value_len` / `_value` / `_free` / `_vec_at` — with the struct
+  passed by value where the Rust side takes/returns an 8-byte
+  pointer. Every C/C++/Go/Python caller of the handle API passed
+  arguments in the wrong registers/stack slots. The flat-array entry
+  is now `lr_bgp_ls_tlv_entry_t`; the handle keeps
+  `lr_bgp_ls_tlv_t` and the header declares it as the pointer it
+  always was.
+- **Ten LDP engine entry points were entirely absent from the
+  header** (`lr-ffi`): cbindgen silently drops a function whose
+  signature carries a by-value `[u8; 4]` parameter, so
+  `lr_ldp_engine_config_new`, `_config_add_interface_address`,
+  `_config_add_targeted_peer`, `_feed_udp`, `_on_accepted`,
+  `_send_link_hello`, `_advertise_mapping`, `_withdraw_mapping`,
+  `_transit_label_of` and `_transit_next_hop` never reached
+  `lr_ffi.h` — the LDP engine was unusable from every binding
+  language. The IPv4 address parameters are now `*const u8` (4
+  readable bytes), the shape every other address-taking entry point
+  already uses; both address pointers NULL returns `LR_ERR_NULL`.
+- **Four header `#define`s were undefined bare identifiers**
+  (`lr-ffi`): `#define LR_BMP_VERSION VERSION`,
+  `LR_LDP_VERSION LDP_VERSION`, `LR_LDP_PORT LDP_PORT` and
+  `LR_OSPF_V3_AUTH_TYPE_HMAC V3_AUTH_TYPE_HMAC` — cross-crate
+  constant paths cbindgen cannot evaluate, so any C consumer using
+  them failed to compile. All four are now literals (3, 1, 646, 1)
+  with pinned tests that fail if the underlying crate moves.
+- **Twenty-five constants were dropped from the header** by
+  same-name duplication across modules (`lr-ffi`): the whole
+  `LR_BMP_MSG_*` (7) and `LR_BMP_PEER_TYPE_*` (3) sets,
+  `LR_OSPF_PACKET_*` (5), `LR_OSPF_AU_TYPE_*` (3),
+  `LR_OSPF_VERSION_V2/V3`, `LR_OSPF_ROUTER_LSA_FLAG_*_BIT` (3) and
+  `LR_BABEL_MAGIC/VERSION` — while the `LR_LDP_MSG_*` /
+  `LR_LDP_TLV_*` / `LR_LDP_SESSION_STATE_*` sets emitted
+  order-dependently (whichever module cbindgen reached first won).
+  Every constant now has exactly one crate-level definition (the
+  duplicated module `pub use`s it); the value-sets carry pinned
+  tests against the enums they mirror.
+- **The LDP status constants advertised the wrong numbers**
+  (`lr-ffi`): `ldp_constants` re-declared `LR_LDP_STATUS_*` with
+  sequential small values (SHUTDOWN = 11) which cbindgen picked for
+  the header, while the engine writes the RFC 5036 wire codes
+  (`status.code.0`, SHUTDOWN = 0x8000_000A) into
+  `lr_ldp_engine_event_t.status_code` — a consumer matching events
+  against the constants got the wrong answer for every code. The
+  wire-value set (in `ldp_tlv`, the module that owns the wire
+  encoding) is now the single definition the header publishes.
+- **The LDP discovery-kind constants conflicted** (`lr-ffi`): the
+  header said `LINK = 0 / TARGETED = 1` (from `ldp_discovery`) while
+  the engine wrote `1 / 2` (from `ldp_engine`) into
+  `lr_ldp_engine_event_t.discovery_kind` and
+  `lr_ldp_engine_adjacency_at`'s output — every Link adjacency read
+  as Targeted. The engine now writes the canonical numbering.
+- **The build script only watched 64 of 102 source files**
+  (`lr-ffi/build.rs`): `cargo:rerun-if-changed` listed modules
+  individually and 38 export-defining modules (`bgp_peer.rs`,
+  `filters.rs`, `rib.rs`, `rtr_pdu.rs`, …) were missing, so an
+  incremental build could regenerate a stale header — the root cause
+  the above drift rode in on. The build script now watches the whole
+  `src/` tree.
+
+The Python binding declarations for
+`lr_babel_codec_decode_authenticated_slice` (5 declared vs 8 actual
+parameters) and `lr_babel_codec_encode_authenticated` (a key array
+vs the single key handle + packet-counter handle the Rust side
+takes) described a different function than the implementation — the
+trailing arguments read garbage registers; `decode_authenticated`
+now returns the decoded `BabelFrame` the C side actually writes, and
+the wrappers take the key set + replay-protection handle. The
+`lr_srv6_srh_new_with_segments_left` declaration was missing its
+`segments_left_present` argument and
+`lr_babel_hello_timestamp` its `present` out-parameter; both
+wrappers pass them. Five Go encode paths (`MPLSLabelStack.Encode*`,
+`SRv6Srh.Tlvs/Encode`, `BfdPacket.Encode`) now `defer
+C.lr_bytes_free` like every other `lr_bytes_t` consumer instead of
+leaking the Rust vector on each call.
+
+The previously broken symbols change shape in the header — a
+corrective breaking change recorded against the 2.0 window (the
+`abi-freeze` job carries the same documented `continue-on-error`
+debt as the Rust `api-surface` job until the 2.0.0 release cut
+re-baselines it; the new `abi-export` job is blocking from day one).
+The C harness (`tests/ffi/harness.c`) now compiles and runs the
+previously broken surfaces: the `lr_bgp_ls_tlv_*` handle API, the
+ten LDP engine entry points, and the constant values.
 
 ### Fixed — kernel FIB mirror sees the default route; BFD AdminDown
 restarts (issue #101)

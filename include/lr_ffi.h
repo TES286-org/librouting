@@ -75,10 +75,6 @@ typedef struct lr_afi_safi_t lr_nlri_family_t;
 typedef struct OpaqueIpAddr IpAddr;
 
 
-
-
-
-
 #define LR_BABEL_TLV_PAD1 0
 
 #define LR_BABEL_TLV_PADN 1
@@ -486,33 +482,17 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_BGP_STATE_ESTABLISHED 6
 
-#define LR_BMP_VERSION VERSION
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #define LR_BMP_PEER_FLAG_V 128
 
 #define LR_BMP_PEER_FLAG_L 64
 
 #define LR_BMP_PEER_FLAG_A 32
+
+#define LR_BMP_PEER_TYPE_GLOBAL 0
+
+#define LR_BMP_PEER_TYPE_RD 1
+
+#define LR_BMP_PEER_TYPE_LOCAL 2
 
 #define LR_BMP_PEER_DOWN_LOCAL_CLOSE 1
 
@@ -523,6 +503,22 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_BMP_PEER_DOWN_DEPLETED_RESOURCE 4
 
 #define LR_BMP_PEER_DOWN_ADMIN_RESET 5
+
+#define LR_BMP_MSG_ROUTE_MONITORING 0
+
+#define LR_BMP_MSG_STATISTICS_REPORT 1
+
+#define LR_BMP_MSG_PEER_DOWN 2
+
+#define LR_BMP_MSG_PEER_UP 3
+
+#define LR_BMP_MSG_INITIATION 4
+
+#define LR_BMP_MSG_TERMINATION 5
+
+#define LR_BMP_MSG_ROUTE_MIRRORING 6
+
+#define LR_BMP_VERSION 3
 
 #define LR_BGP_CAP_MULTIPROTOCOL_EXTENSIONS 1
 
@@ -568,6 +564,16 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_BGP_RR_SUBTYPE_BORR 1
 
 #define LR_BGP_RR_SUBTYPE_EORR 2
+
+/**
+ * Babel packet magic byte (RFC 8966 §4.1).
+ */
+#define LR_BABEL_MAGIC 42
+
+/**
+ * Babel protocol version (RFC 8966 §4.1).
+ */
+#define LR_BABEL_VERSION 2
 
 /**
  * Body offset inside a Babel frame — magic + version + body length (2).
@@ -1058,9 +1064,14 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_SESSION_KIND_BABEL 4
 
-#define LR_LDP_VERSION LDP_VERSION
+#define LR_LDP_VERSION 1
 
-#define LR_LDP_PORT LDP_PORT
+#define LR_LDP_PORT 646
+
+/**
+ * Label Abort Request (RFC 5036 §3.5.5) — short spelling.
+ */
+#define LR_LDP_MSG_LABEL_ABORT 1028
 
 #define LR_LDP_MSG_NOTIFICATION 1
 
@@ -1083,8 +1094,6 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_LDP_MSG_LABEL_WITHDRAW 1026
 
 #define LR_LDP_MSG_LABEL_RELEASE 1027
-
-#define LR_LDP_MSG_LABEL_ABORT 1028
 
 #define LR_LDP_MSG_LABEL_ABORT_REQUEST 1028
 
@@ -1124,38 +1133,6 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_LDP_TLV_LDP_CAPABILITY 1537
 
-#define LR_LDP_STATUS_SUCCESS 0
-
-#define LR_LDP_STATUS_BAD_LDP_IDENTIFIER 1
-
-#define LR_LDP_STATUS_BAD_PROTOCOL_VERSION 2
-
-#define LR_LDP_STATUS_BAD_PDU_LENGTH 3
-
-#define LR_LDP_STATUS_UNKNOWN_MESSAGE_TYPE 4
-
-#define LR_LDP_STATUS_BAD_MESSAGE_LENGTH 5
-
-#define LR_LDP_STATUS_UNKNOWN_TLV 6
-
-#define LR_LDP_STATUS_BAD_TLV_LENGTH 7
-
-#define LR_LDP_STATUS_MALFORMED_TLV_VALUE 8
-
-#define LR_LDP_STATUS_HOLD_TIMER_EXPIRED 9
-
-#define LR_LDP_STATUS_KEEPALIVE_TIMER_EXPIRED 10
-
-#define LR_LDP_STATUS_SHUTDOWN 11
-
-#define LR_LDP_STATUS_LOOP_DETECTED 12
-
-#define LR_LDP_STATUS_TRANSPORT_CONNECTION_MISMATCH 13
-
-#define LR_LDP_STATUS_DUAL_STACK_NONCOMPLIANCE 14
-
-#define LR_LDP_STATUS_KEEP_ALIVE_MISSED 15
-
 /**
  * Link Hello (RFC 5036 §3.5.2 — multicast on a shared segment).
  */
@@ -1170,6 +1147,14 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_LDP_ADVERTISEMENT_DOWNSTREAM_ON_DEMAND 2
 
+/**
+ * Maximum text length carried in one event (peer-state names, log
+ * lines, protocol-error messages, prefixes, reasons). Longer
+ * strings are truncated to `LR_LDP_ENGINE_EVENT_TEXT_MAX - 1`
+ * bytes plus the NUL terminator.
+ */
+#define LR_LDP_ENGINE_EVENT_TEXT_MAX 128
+
 #define LR_LDP_SESSION_STATE_NON_EXISTENT 1
 
 #define LR_LDP_SESSION_STATE_INITIALIZED 2
@@ -1179,14 +1164,6 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_LDP_SESSION_STATE_OPEN_SENT 4
 
 #define LR_LDP_SESSION_STATE_OPERATIONAL 5
-
-/**
- * Maximum text length carried in one event (peer-state names, log
- * lines, protocol-error messages, prefixes, reasons). Longer
- * strings are truncated to `LR_LDP_ENGINE_EVENT_TEXT_MAX - 1`
- * bytes plus the NUL terminator.
- */
-#define LR_LDP_ENGINE_EVENT_TEXT_MAX 128
 
 /**
  * Well-known Generic Label constants — mirror
@@ -1200,6 +1177,35 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_LDP_LABEL_IMPLICIT_NULL 3
 
+/**
+ * Well-known LDP status codes — mirror the `StatusCode::*` constants
+ * in `lr_ldp::tlv`. Each is a raw 32-bit value the embedder passes to
+ * [`lr_ldp_status_code_new`] / `_is_fatal` / `_is_forward`.
+ */
+#define LR_LDP_STATUS_SUCCESS 0
+
+#define LR_LDP_STATUS_BAD_LDP_IDENTIFIER 2147483649
+
+#define LR_LDP_STATUS_BAD_PROTOCOL_VERSION 2147483650
+
+#define LR_LDP_STATUS_BAD_PDU_LENGTH 2147483651
+
+#define LR_LDP_STATUS_UNKNOWN_MESSAGE_TYPE 2147483652
+
+#define LR_LDP_STATUS_BAD_MESSAGE_LENGTH 2147483653
+
+#define LR_LDP_STATUS_UNKNOWN_TLV 2147483654
+
+#define LR_LDP_STATUS_BAD_TLV_LENGTH 2147483655
+
+#define LR_LDP_STATUS_MALFORMED_TLV_VALUE 2147483656
+
+#define LR_LDP_STATUS_HOLD_TIMER_EXPIRED 2147483657
+
+#define LR_LDP_STATUS_SHUTDOWN 2147483658
+
+#define LR_LDP_STATUS_LOOP_DETECTED 2147483659
+
 #define LR_LDP_STATUS_UNKNOWN_FEC 2147483660
 
 #define LR_LDP_STATUS_NO_ROUTE 2147483661
@@ -1210,22 +1216,52 @@ typedef struct OpaqueIpAddr IpAddr;
 
 #define LR_LDP_STATUS_SESSION_REJECTED 2147483664
 
+#define LR_LDP_STATUS_TRANSPORT_CONNECTION_MISMATCH 2147483665
+
+#define LR_LDP_STATUS_KEEPALIVE_TIMER_EXPIRED 2147483666
+
+#define LR_LDP_STATUS_DUAL_STACK_NONCOMPLIANCE 2147483667
+
 #define LR_LDP_STATUS_LABEL_WITHDRAW 40
 
+/**
+ * Keepalive — long spelling of `LR_LDP_MSG_KEEPALIVE`.
+ */
 #define LR_LDP_MSG_KEEP_ALIVE 513
 
+/**
+ * Address message — long spelling of `LR_LDP_MSG_ADDRESS`.
+ */
 #define LR_LDP_MSG_ADDRESS_MESSAGE 768
 
+/**
+ * Common Hello Parameters — short spelling.
+ */
 #define LR_LDP_TLV_COMMON_HELLO_PARAMS 1024
 
+/**
+ * IPv4 Transport Address (RFC 5036 §3.4.1).
+ */
 #define LR_LDP_TLV_IPV4_TRANSPORT_ADDR 1025
 
+/**
+ * Configuration Sequence Number — short spelling.
+ */
 #define LR_LDP_TLV_CONFIG_SEQ_NUMBER 1026
 
+/**
+ * IPv6 Transport Address (RFC 7552 §6.1.1).
+ */
 #define LR_LDP_TLV_IPV6_TRANSPORT_ADDR 1027
 
+/**
+ * Dual-Stack Capability (RFC 7552 §6.1.1).
+ */
 #define LR_LDP_TLV_DUAL_STACK_CAPABILITY 1028
 
+/**
+ * Common Session Parameters — short spelling.
+ */
 #define LR_LDP_TLV_COMMON_SESSION_PARAMS 1280
 
 /**
@@ -1387,19 +1423,40 @@ typedef struct OpaqueIpAddr IpAddr;
  */
 #define LR_MRT_BGP4MP_MESSAGE_AS4_LOCAL 7
 
+/**
+ * OSPFv2 version number (RFC 2328 Appendix A).
+ */
+#define LR_OSPF_VERSION_V2 2
 
+/**
+ * OSPFv3 version number (RFC 5340 Appendix A).
+ */
+#define LR_OSPF_VERSION_V3 3
 
+/**
+ * Hello packet type (RFC 2328 Appendix A.1).
+ */
+#define LR_OSPF_PACKET_HELLO 1
 
+/**
+ * Database Description packet type (RFC 2328 Appendix A.3).
+ */
+#define LR_OSPF_PACKET_DB_DESC 2
 
+/**
+ * Link State Request packet type (RFC 2328 Appendix A.4).
+ */
+#define LR_OSPF_PACKET_LS_REQUEST 3
 
+/**
+ * Link State Update packet type (RFC 2328 Appendix A.5).
+ */
+#define LR_OSPF_PACKET_LS_UPDATE 4
 
-
-
-
-
-
-
-
+/**
+ * Link State Acknowledgment packet type (RFC 2328 Appendix A.6).
+ */
+#define LR_OSPF_PACKET_LS_ACK 5
 
 #define LR_OSPF_BODY_HELLO 1
 
@@ -1414,25 +1471,32 @@ typedef struct OpaqueIpAddr IpAddr;
 #define LR_OSPF_BODY_RAW 6
 
 /**
- * NSSA P-bit (RFC 3101 §2.4) — set on type-7 LSAs that ask border
- * routers to translate them into type-5s.
+ * No authentication (RFC 2328 §D.1).
  */
-#define LR_OSPF_NSSA_N_P_BIT 8
+#define LR_OSPF_AU_TYPE_NULL 0
 
+/**
+ * Simple password authentication (RFC 2328 §D.1).
+ */
+#define LR_OSPF_AU_TYPE_SIMPLE_PASSWORD 1
 
-
-
-
-
+/**
+ * Cryptographic authentication (RFC 2328 §D.1; MD5 per RFC 5709).
+ */
+#define LR_OSPF_AU_TYPE_MD5 2
 
 #define LR_OSPF_CRYPTO_ALG_HMAC_SHA1 1
 
 #define LR_OSPF_CRYPTO_ALG_HMAC_SHA256 2
 
 /**
- * The OSPFv3 authentication type for HMAC trailers (RFC 7166).
+ * The OSPFv3 authentication type for HMAC trailers (RFC 7166 §2.2 —
+ * type 1). Literal, not a re-export of `lr_ospf::auth::V3_AUTH_TYPE_HMAC`:
+ * a cross-crate path is a value cbindgen cannot evaluate, and it
+ * previously reached the header as the undefined bare identifier
+ * `#define LR_OSPF_V3_AUTH_TYPE_HMAC V3_AUTH_TYPE_HMAC`.
  */
-#define LR_OSPF_V3_AUTH_TYPE_HMAC V3_AUTH_TYPE_HMAC
+#define LR_OSPF_V3_AUTH_TYPE_HMAC 1
 
 /**
  * OSPFv2 Router-LSA (RFC 2328 §A.4.2).
@@ -1623,6 +1687,8 @@ typedef struct OpaqueIpAddr IpAddr;
  * LSRefreshTime — refresh interval (RFC 2328 §14.1).
  */
 #define LR_OSPF_LS_REFRESH_TIME_SECS 1800
+
+#define LR_OSPF_NSSA_N_P_BIT 8
 
 #define LR_OSPF_OPAQUE_TYPE_GRACE 3
 
@@ -2562,8 +2628,18 @@ typedef struct OpaqueBgpMessage *lr_bgp_message_t;
  * One BGP-LS TLV (RFC 7752 §3.2). The value bytes are owned by the
  * array — the caller must not free `value_ptr` directly; free the
  * whole array with [`lr_bgp_ls_tlv_array_free`].
+ *
+ * Named `lr_bgp_ls_tlv_entry_t`, NOT `lr_bgp_ls_tlv_t`: the latter is
+ * the opaque single-TLV handle type in [`crate::bgp_ls`]. Two Rust
+ * items sharing one C name made cbindgen emit the handle-based
+ * functions (`lr_bgp_ls_tlv_new` / `_type` / `_value_len` / `_value`
+ * / `_free` / `_vec_at`) with a 40-byte struct passed by value where
+ * the implementation takes/returns an 8-byte pointer — corrupted
+ * register/stack arguments for every C, Go and Python caller. The
+ * flat-array entry keeps the `_entry_t` name; the handle keeps
+ * `lr_bgp_ls_tlv_entry_t`.
  */
-typedef struct lr_bgp_ls_tlv_t {
+typedef struct lr_bgp_ls_tlv_entry_t {
   uint16_t tlv_type;
   uintptr_t value_offset;
   uint16_t value_len;
@@ -2572,7 +2648,7 @@ typedef struct lr_bgp_ls_tlv_t {
    * Reserved for future per-entry ownership; currently unused.
    */
   void *_owned;
-} lr_bgp_ls_tlv_t;
+} lr_bgp_ls_tlv_entry_t;
 
 /**
  * Opaque BGP-standard-community handle (RFC 1997).
@@ -2600,6 +2676,15 @@ typedef struct OpaqueBgpExtCommunity {
 } OpaqueBgpExtCommunity;
 
 typedef struct OpaqueBgpExtCommunity *lr_bgp_ext_community_t;
+
+/**
+ * Opaque `Tlv` handle.
+ */
+typedef struct OpaqueBgpLsTlv {
+  uint8_t _private[0];
+} OpaqueBgpLsTlv;
+
+typedef struct OpaqueBgpLsTlv *lr_bgp_ls_tlv_t;
 
 /**
  * Opaque `Vec<Tlv>` handle (the decoded TLV stream).
@@ -7089,7 +7174,7 @@ int32_t lr_bgp_reconcile_as4(uint8_t wire_present,
 
 /**
  * Decode a BGP-LS TLV stream (RFC 7752 §3.2 — the body of a BGP-LS
- * NLRI or attribute). Writes one `lr_bgp_ls_tlv_t` per decoded TLV
+ * NLRI or attribute). Writes one `lr_bgp_ls_tlv_entry_t` per decoded TLV
  * to `*out_array`; the caller frees the array with
  * [`lr_bgp_ls_tlv_array_free`]. Returns the count through
  * `*out_count`.
@@ -7101,21 +7186,21 @@ int32_t lr_bgp_reconcile_as4(uint8_t wire_present,
 int32_t lr_bgp_decode_tlv_stream(const uint8_t *data,
                                  uintptr_t len,
                                  uintptr_t *out_count,
-                                 struct lr_bgp_ls_tlv_t **out_array);
+                                 struct lr_bgp_ls_tlv_entry_t **out_array);
 
 /**
  * Encode a slice of BGP-LS TLVs (RFC 7752 §3.2). `tlvs` is a flat
- * array of `lr_bgp_ls_tlv_t` (the same shape
+ * array of `lr_bgp_ls_tlv_entry_t` (the same shape
  * [`lr_bgp_decode_tlv_stream`] produces); the encode walk reads
  * `value_len` bytes from each `value_ptr`. Writes the wire bytes to
  * `*out`.
  *
  * # Safety
- * `tlvs` must point to `count` readable `lr_bgp_ls_tlv_t` entries;
+ * `tlvs` must point to `count` readable `lr_bgp_ls_tlv_entry_t` entries;
  * each `value_ptr` must point to `value_len` readable bytes; `out`
  * must point to a writable `lr_bytes_t`.
  */
-int32_t lr_bgp_encode_tlv_stream(const struct lr_bgp_ls_tlv_t *tlvs,
+int32_t lr_bgp_encode_tlv_stream(const struct lr_bgp_ls_tlv_entry_t *tlvs,
                                  uintptr_t count,
                                  struct lr_bytes_t *out);
 
@@ -7128,7 +7213,7 @@ int32_t lr_bgp_encode_tlv_stream(const struct lr_bgp_ls_tlv_t *tlvs,
  * already freed; `count` must match the count returned by the decode
  * call.
  */
-void lr_bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_t *arr, uintptr_t count);
+void lr_bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_entry_t *arr, uintptr_t count);
 
 /**
  * Encode a list of RFC 8277 labelled NLRI entries as the NLRI bytes
@@ -7496,9 +7581,7 @@ const char *lr_bgp_route_refresh_subtype_name(uint8_t v);
  * # Safety
  * `value` must point to `value_len` readable bytes.
  */
-struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(uint16_t tlv_type,
-                                         const uint8_t *value,
-                                         uintptr_t value_len);
+lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(uint16_t tlv_type, const uint8_t *value, uintptr_t value_len);
 
 /**
  * Read the 16-bit TLV type.
@@ -7506,7 +7589,7 @@ struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(uint16_t tlv_type,
  * # Safety
  * `t` must be a valid handle.
  */
-uint16_t lr_bgp_ls_tlv_type(struct lr_bgp_ls_tlv_t t);
+uint16_t lr_bgp_ls_tlv_type(lr_bgp_ls_tlv_t t);
 
 /**
  * Read the value length.
@@ -7514,7 +7597,7 @@ uint16_t lr_bgp_ls_tlv_type(struct lr_bgp_ls_tlv_t t);
  * # Safety
  * `t` must be a valid handle.
  */
-uintptr_t lr_bgp_ls_tlv_value_len(struct lr_bgp_ls_tlv_t t);
+uintptr_t lr_bgp_ls_tlv_value_len(lr_bgp_ls_tlv_t t);
 
 /**
  * Copy the TLV value bytes into `out` (caller-allocated buffer of
@@ -7525,7 +7608,7 @@ uintptr_t lr_bgp_ls_tlv_value_len(struct lr_bgp_ls_tlv_t t);
  * `t` must be a valid handle; `out` must point to writable memory of
  * at least `cap` bytes.
  */
-int32_t lr_bgp_ls_tlv_value(struct lr_bgp_ls_tlv_t t, uint8_t *out, uintptr_t cap);
+int32_t lr_bgp_ls_tlv_value(lr_bgp_ls_tlv_t t, uint8_t *out, uintptr_t cap);
 
 /**
  * Drop a boxed `Tlv`. Safe to call with `NULL`.
@@ -7534,7 +7617,7 @@ int32_t lr_bgp_ls_tlv_value(struct lr_bgp_ls_tlv_t t, uint8_t *out, uintptr_t ca
  * `t` must have been produced by [`lr_bgp_ls_tlv_new`] and not
  * already freed.
  */
-void lr_bgp_ls_tlv_free(struct lr_bgp_ls_tlv_t t);
+void lr_bgp_ls_tlv_free(lr_bgp_ls_tlv_t t);
 
 /**
  * Decode a TLV stream (RFC 7752 §3.1 — concatenation of 4-byte-header
@@ -7571,7 +7654,7 @@ uintptr_t lr_bgp_ls_tlv_vec_len(lr_bgp_ls_tlv_vec_t vec);
  * # Safety
  * `vec` must be a valid handle; `index` must be in range.
  */
-struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
+lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
 
 /**
  * Drop a boxed `Vec<Tlv>`. Safe to call with `NULL`.
@@ -12331,6 +12414,29 @@ uintptr_t lr_ldp_discovery_outgoing_count(lr_ldp_discovery_t d);
 void lr_ldp_discovery_free(lr_ldp_discovery_t d);
 
 /**
+ * Construct an `LdpEngineConfig` with the local LDP identifier and
+ * transport address. The remaining fields default to the
+ * `LdpEngineConfig::new` values (single-stack IPv4, 180 s
+ * keepalive, 4096 max PDU, downstream-unsolicited, no targeted
+ * peers, link hold 15 s, targeted hold 45 s, no loop detection, no
+ * GR, label range 16..=0xfffff, no reserved labels).
+ *
+ * `local_id_lsr` is the 4-byte LSR Id as a `u32` in host byte
+ * order (e.g. `0x01020304` for 1.2.3.4). `local_id_label_space`
+ * is the 16-bit label space (0 for platform-wide).
+ * `transport_addr_v4` points to the 4-byte IPv4 transport address
+ * (must not be 0.0.0.0 in production; the FFI accepts it for tests).
+ *
+ * Returns NULL on a NULL `transport_addr_v4` or a panic.
+ *
+ * # Safety
+ * `transport_addr_v4` must point to 4 readable bytes.
+ */
+lr_ldp_engine_config_t lr_ldp_engine_config_new(uint32_t local_id_lsr,
+                                                uint16_t local_id_label_space,
+                                                const uint8_t *transport_addr_v4);
+
+/**
  * Drop a config. Safe on NULL.
  *
  * # Safety
@@ -12407,6 +12513,34 @@ int32_t lr_ldp_engine_config_set_label_range(lr_ldp_engine_config_t c,
                                              uint32_t label_max);
 
 /**
+ * Append a peer to which periodic Targeted Hellos are sent.
+ * `addr_v4` carries the IPv4 target (4 bytes); pass `addr_v6`
+ * non-NULL for an IPv6 target (16 bytes). When both are non-NULL,
+ * `addr_v6` wins.
+ *
+ * # Safety
+ * At least one of `addr_v4` / `addr_v6` must be non-NULL.
+ * `addr_v4` must point to 4 readable bytes when non-NULL;
+ * `addr_v6` must point to 16 readable bytes when non-NULL.
+ */
+int32_t lr_ldp_engine_config_add_targeted_peer(lr_ldp_engine_config_t c,
+                                               const uint8_t *addr_v4,
+                                               const uint8_t *addr_v6);
+
+/**
+ * Append a local interface address advertised in the Address
+ * message (RFC 5036 §3.5.6).
+ *
+ * # Safety
+ * At least one of `addr_v4` / `addr_v6` must be non-NULL.
+ * `addr_v4` must point to 4 readable bytes when non-NULL;
+ * `addr_v6` must point to 16 readable bytes when non-NULL.
+ */
+int32_t lr_ldp_engine_config_add_interface_address(lr_ldp_engine_config_t c,
+                                                   const uint8_t *addr_v4,
+                                                   const uint8_t *addr_v6);
+
+/**
  * Append a reserved label that must not be allocated as a transit
  * label (RFC 3032 §2.1 reserves 0..=15; the operator may reserve
  * additional labels).
@@ -12433,6 +12567,22 @@ lr_ldp_engine_t lr_ldp_engine_new(lr_ldp_engine_config_t c);
 void lr_ldp_engine_free(lr_ldp_engine_t e);
 
 /**
+ * Feed a received UDP datagram (Hellos only on the LDP UDP port).
+ * `now_ms` is the embedder's wall-clock time in milliseconds.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes. `from_v6` must point to
+ * 16 readable bytes when non-NULL (IPv6 source); otherwise `from_v4`
+ * must point to 4 readable bytes (the IPv4 source).
+ */
+int32_t lr_ldp_engine_feed_udp(lr_ldp_engine_t e,
+                               uint64_t now_ms,
+                               const uint8_t *from_v4,
+                               const uint8_t *from_v6,
+                               const uint8_t *data,
+                               uintptr_t len);
+
+/**
  * Notify the engine that an active-role TCP connection succeeded.
  * `conn` is the embedder's connection id (opaque to the library).
  *
@@ -12453,6 +12603,21 @@ int32_t lr_ldp_engine_on_connected(lr_ldp_engine_t e,
 int32_t lr_ldp_engine_on_connect_failed(lr_ldp_engine_t e,
                                         uint32_t peer_lsr,
                                         uint16_t peer_label_space);
+
+/**
+ * Notify the engine that a passive-role connection was accepted.
+ * `local_addr` fixes the session's address family for the RFC 7552
+ * §7.1 rules.
+ *
+ * # Safety
+ * At least one of `local_addr_v4` / `local_addr_v6` must be non-NULL.
+ * `local_addr_v4` must point to 4 readable bytes when non-NULL;
+ * `local_addr_v6` must point to 16 readable bytes when non-NULL.
+ */
+int32_t lr_ldp_engine_on_accepted(lr_ldp_engine_t e,
+                                  uint64_t conn,
+                                  const uint8_t *local_addr_v4,
+                                  const uint8_t *local_addr_v6);
 
 /**
  * Feed TCP stream bytes received on a connection.
@@ -12476,6 +12641,48 @@ int32_t lr_ldp_engine_on_closed(lr_ldp_engine_t e, uint64_t now_ms, uint64_t con
  * loop with the current wall-clock time.
  */
 int32_t lr_ldp_engine_tick(lr_ldp_engine_t e, uint64_t now_ms);
+
+/**
+ * Locally originate a label binding (egress side): advertise the
+ * FEC-to-label mapping to every operational peer. `prefix_v4`
+ * points to the 4 IPv4 prefix bytes; pass `prefix_v6` non-NULL for
+ * IPv6.
+ *
+ * # Safety
+ * At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+ * `prefix_v4` must point to 4 readable bytes when non-NULL;
+ * `prefix_v6` must point to 16 readable bytes when non-NULL.
+ */
+int32_t lr_ldp_engine_advertise_mapping(lr_ldp_engine_t e,
+                                        const uint8_t *prefix_v4,
+                                        const uint8_t *prefix_v6,
+                                        uint8_t prefix_len,
+                                        uint32_t label_value);
+
+/**
+ * Withdraw a previously advertised label binding.
+ *
+ * # Safety
+ * At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+ * `prefix_v4` must point to 4 readable bytes when non-NULL;
+ * `prefix_v6` must point to 16 readable bytes when non-NULL.
+ */
+int32_t lr_ldp_engine_withdraw_mapping(lr_ldp_engine_t e,
+                                       const uint8_t *prefix_v4,
+                                       const uint8_t *prefix_v6,
+                                       uint8_t prefix_len);
+
+/**
+ * Emit one Link Hello to the given destination.
+ *
+ * # Safety
+ * At least one of `dest_v4` / `dest_v6` must be non-NULL.
+ * `dest_v4` must point to 4 readable bytes when non-NULL;
+ * `dest_v6` must point to 16 readable bytes when non-NULL.
+ */
+int32_t lr_ldp_engine_send_link_hello(lr_ldp_engine_t e,
+                                      const uint8_t *dest_v4,
+                                      const uint8_t *dest_v6);
 
 /**
  * Gracefully shut down one peer (RFC 5036 §3.5.1.2). The engine
@@ -12519,9 +12726,47 @@ int32_t lr_ldp_engine_drain_tcp(lr_ldp_engine_t e, uint64_t conn, struct lr_byte
 int32_t lr_ldp_engine_drain_tcp_all(lr_ldp_engine_t e, struct lr_bytes_t *out);
 
 /**
+ * The locally allocated transit label for a FEC, when the engine
+ * allocated one (§3.5.7.1.1). Writes the label value to
+ * `*out_label` and returns 1 when present, 0 when absent, negative
+ * on error.
+ *
+ * # Safety
+ * At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+ * `prefix_v4` must point to 4 readable bytes when non-NULL;
+ * `prefix_v6` must point to 16 readable bytes when non-NULL.
+ * `out_label` must point to writable u32 memory.
+ */
+int32_t lr_ldp_engine_transit_label_of(lr_ldp_engine_t e,
+                                       const uint8_t *prefix_v4,
+                                       const uint8_t *prefix_v6,
+                                       uint8_t prefix_len,
+                                       uint32_t *out_label);
+
+/**
  * Number of FECs currently holding a transit label.
  */
 uintptr_t lr_ldp_engine_transit_label_count(lr_ldp_engine_t e);
+
+/**
+ * The current transit next hop for a FEC. Writes the next hop's LSR
+ * Id (4 bytes) + label space (2 bytes) + advertised label (4 bytes)
+ * to the out-pointers and returns 1 when present, 0 when absent,
+ * negative on error.
+ *
+ * # Safety
+ * At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+ * `prefix_v4` must point to 4 readable bytes when non-NULL;
+ * `prefix_v6` must point to 16 readable bytes when non-NULL.
+ * All out-pointers must point to writable memory.
+ */
+int32_t lr_ldp_engine_transit_next_hop(lr_ldp_engine_t e,
+                                       const uint8_t *prefix_v4,
+                                       const uint8_t *prefix_v6,
+                                       uint8_t prefix_len,
+                                       uint32_t *out_nh_lsr,
+                                       uint16_t *out_nh_label_space,
+                                       uint32_t *out_out_label);
 
 /**
  * Number of live adjacencies.

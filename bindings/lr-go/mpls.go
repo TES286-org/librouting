@@ -384,6 +384,7 @@ func (s *MPLSLabelStack) Encode4Octet() ([]byte, error) {
 	if rc != 0 {
 		return nil, fmt.Errorf("lr_mpls_label_stack_encode_4octet: %s (rc=%d)", LastError(), int(rc))
 	}
+	defer C.lr_bytes_free(&out)
 	return copyBytes(&out), nil
 }
 
@@ -395,5 +396,6 @@ func (s *MPLSLabelStack) Encode3Octet() ([]byte, error) {
 	if rc != 0 {
 		return nil, fmt.Errorf("lr_mpls_label_stack_encode_3octet: %s (rc=%d)", LastError(), int(rc))
 	}
+	defer C.lr_bytes_free(&out)
 	return copyBytes(&out), nil
 }

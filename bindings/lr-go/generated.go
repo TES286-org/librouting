@@ -447,6 +447,31 @@ func (x *BgpLsAttr) Closed() bool {
 	return x == nil || x.ptr == nil
 }
 
+type BgpLsTlv struct {
+	ptr C.lr_bgp_ls_tlv_t
+}
+
+func (x *BgpLsTlv) destroy() {
+	if x != nil && x.ptr != nil {
+		C.lr_bgp_ls_tlv_free(x.ptr)
+		x.ptr = nil
+	}
+}
+
+// Free releases the underlying lr_bgp_ls_tlv_t handle. Safe to call multiple times.
+func (x *BgpLsTlv) Free() {
+	if x == nil {
+		return
+	}
+	runtime.SetFinalizer(x, nil)
+	x.destroy()
+}
+
+// Closed reports whether the handle has been freed.
+func (x *BgpLsTlv) Closed() bool {
+	return x == nil || x.ptr == nil
+}
+
 type BgpLsTlvVec struct {
 	ptr C.lr_bgp_ls_tlv_vec_t
 }
@@ -2172,6 +2197,16 @@ func NewBgpLsAttr() (*BgpLsAttr, error) {
 	return x, nil
 }
 
+func NewBgpLsTlv(tlv_type uint16, value *C.uint8_t, value_len uintptr) (*BgpLsTlv, error) {
+	p := C.lr_bgp_ls_tlv_new(C.uint16_t(tlv_type), value, C.uintptr_t(value_len))
+	if p == nil {
+		return nil, fmt.Errorf("lr_bgp_ls_tlv_new: %s", LastError())
+	}
+	x := &BgpLsTlv{ptr: p}
+	runtime.SetFinalizer(x, (*BgpLsTlv).destroy)
+	return x, nil
+}
+
 func NewBgpOtc(asn uint32) (*BgpOtc, error) {
 	p := C.lr_bgp_otc_new(C.uint32_t(asn))
 	if p == nil {
@@ -2259,6 +2294,16 @@ func NewLdpDiscoveryConfig(local_lsr_id uint32, local_label_space uint16) (*LdpD
 	}
 	x := &LdpDiscoveryConfig{ptr: p}
 	runtime.SetFinalizer(x, (*LdpDiscoveryConfig).destroy)
+	return x, nil
+}
+
+func NewLdpEngineConfig(local_id_lsr uint32, local_id_label_space uint16, transport_addr_v4 *C.uint8_t) (*LdpEngineConfig, error) {
+	p := C.lr_ldp_engine_config_new(C.uint32_t(local_id_lsr), C.uint16_t(local_id_label_space), transport_addr_v4)
+	if p == nil {
+		return nil, fmt.Errorf("lr_ldp_engine_config_new: %s", LastError())
+	}
+	x := &LdpEngineConfig{ptr: p}
+	runtime.SetFinalizer(x, (*LdpEngineConfig).destroy)
 	return x, nil
 }
 
@@ -3374,6 +3419,28 @@ func (x *BgpLsAttr) Find(ty uint16, out_index *C.uintptr_t) (int32, error) {
 	return int32(rc), nil
 }
 
+func (x *BgpLsTlv) ArrayFree(arr *C.lr_bgp_ls_tlv_entry_t, count uintptr) {
+	C.lr_bgp_ls_tlv_array_free(arr, C.uintptr_t(count))
+}
+
+func (x *BgpLsTlv) Type() (uint16, error) {
+	res := C.lr_bgp_ls_tlv_type(x.ptr)
+	return uint16(res), nil
+}
+
+func (x *BgpLsTlv) ValueLen() (uintptr, error) {
+	res := C.lr_bgp_ls_tlv_value_len(x.ptr)
+	return uintptr(res), nil
+}
+
+func (x *BgpLsTlv) Value(out *C.uint8_t, cap uintptr) (int32, error) {
+	rc := C.lr_bgp_ls_tlv_value(x.ptr, out, C.uintptr_t(cap))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_bgp_ls_tlv_value: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
 func (x *BgpLsTlvVec) BgpLsEncodeTlvStream(out *C.lr_bytes_t) (int32, error) {
 	rc := C.lr_bgp_ls_encode_tlv_stream(x.ptr, out)
 	if rc < 0 {
@@ -3387,9 +3454,14 @@ func (x *BgpLsTlvVec) Len() (uintptr, error) {
 	return uintptr(res), nil
 }
 
-func (x *BgpLsTlvVec) At(index uintptr) (C.lr_bgp_ls_tlv_t, error) {
-	res := C.lr_bgp_ls_tlv_vec_at(x.ptr, C.uintptr_t(index))
-	return res, nil
+func (x *BgpLsTlvVec) At(index uintptr) (*BgpLsTlv, error) {
+	p := C.lr_bgp_ls_tlv_vec_at(x.ptr, C.uintptr_t(index))
+	if p == nil {
+		return nil, fmt.Errorf("lr_bgp_ls_tlv_vec_at: %s", LastError())
+	}
+	wrapped := &BgpLsTlv{ptr: p}
+	runtime.SetFinalizer(wrapped, (*BgpLsTlv).destroy)
+	return wrapped, nil
 }
 
 func (x *BgpMessage) TypeFromU8(v uint8) (uint8, error) {
@@ -4451,6 +4523,22 @@ func (x *LdpEngineConfig) SetLabelRange(label_min uint32, label_max uint32) (int
 	return int32(rc), nil
 }
 
+func (x *LdpEngineConfig) AddTargetedPeer(addr_v4 *C.uint8_t, addr_v6 *C.uint8_t) (int32, error) {
+	rc := C.lr_ldp_engine_config_add_targeted_peer(x.ptr, addr_v4, addr_v6)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_config_add_targeted_peer: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
+func (x *LdpEngineConfig) AddInterfaceAddress(addr_v4 *C.uint8_t, addr_v6 *C.uint8_t) (int32, error) {
+	rc := C.lr_ldp_engine_config_add_interface_address(x.ptr, addr_v4, addr_v6)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_config_add_interface_address: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
 func (x *LdpEngineConfig) AddReservedLabel(label uint32) (int32, error) {
 	rc := C.lr_ldp_engine_config_add_reserved_label(x.ptr, C.uint32_t(label))
 	if rc < 0 {
@@ -4469,6 +4557,14 @@ func (x *LdpEngineConfig) LdpEngineNew() (*LdpEngine, error) {
 	return wrapped, nil
 }
 
+func (x *LdpEngine) FeedUdp(now_ms uint64, from_v4 *C.uint8_t, from_v6 *C.uint8_t, data *C.uint8_t, len uintptr) (int32, error) {
+	rc := C.lr_ldp_engine_feed_udp(x.ptr, C.uint64_t(now_ms), from_v4, from_v6, data, C.uintptr_t(len))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_feed_udp: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
 func (x *LdpEngine) OnConnected(now_ms uint64, conn uint64, peer_lsr uint32, peer_label_space uint16) (int32, error) {
 	rc := C.lr_ldp_engine_on_connected(x.ptr, C.uint64_t(now_ms), C.uint64_t(conn), C.uint32_t(peer_lsr), C.uint16_t(peer_label_space))
 	if rc < 0 {
@@ -4481,6 +4577,14 @@ func (x *LdpEngine) OnConnectFailed(peer_lsr uint32, peer_label_space uint16) (i
 	rc := C.lr_ldp_engine_on_connect_failed(x.ptr, C.uint32_t(peer_lsr), C.uint16_t(peer_label_space))
 	if rc < 0 {
 		return 0, fmt.Errorf("lr_ldp_engine_on_connect_failed: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
+func (x *LdpEngine) OnAccepted(conn uint64, local_addr_v4 *C.uint8_t, local_addr_v6 *C.uint8_t) (int32, error) {
+	rc := C.lr_ldp_engine_on_accepted(x.ptr, C.uint64_t(conn), local_addr_v4, local_addr_v6)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_on_accepted: %s", LastError())
 	}
 	return int32(rc), nil
 }
@@ -4505,6 +4609,30 @@ func (x *LdpEngine) Tick(now_ms uint64) (int32, error) {
 	rc := C.lr_ldp_engine_tick(x.ptr, C.uint64_t(now_ms))
 	if rc < 0 {
 		return 0, fmt.Errorf("lr_ldp_engine_tick: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
+func (x *LdpEngine) AdvertiseMapping(prefix_v4 *C.uint8_t, prefix_v6 *C.uint8_t, prefix_len uint8, label_value uint32) (int32, error) {
+	rc := C.lr_ldp_engine_advertise_mapping(x.ptr, prefix_v4, prefix_v6, C.uint8_t(prefix_len), C.uint32_t(label_value))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_advertise_mapping: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
+func (x *LdpEngine) WithdrawMapping(prefix_v4 *C.uint8_t, prefix_v6 *C.uint8_t, prefix_len uint8) (int32, error) {
+	rc := C.lr_ldp_engine_withdraw_mapping(x.ptr, prefix_v4, prefix_v6, C.uint8_t(prefix_len))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_withdraw_mapping: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
+func (x *LdpEngine) SendLinkHello(dest_v4 *C.uint8_t, dest_v6 *C.uint8_t) (int32, error) {
+	rc := C.lr_ldp_engine_send_link_hello(x.ptr, dest_v4, dest_v6)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_send_link_hello: %s", LastError())
 	}
 	return int32(rc), nil
 }
@@ -4541,9 +4669,25 @@ func (x *LdpEngine) DrainTcpAll(out *C.lr_bytes_t) (int32, error) {
 	return int32(rc), nil
 }
 
+func (x *LdpEngine) TransitLabelOf(prefix_v4 *C.uint8_t, prefix_v6 *C.uint8_t, prefix_len uint8, out_label *C.uint32_t) (int32, error) {
+	rc := C.lr_ldp_engine_transit_label_of(x.ptr, prefix_v4, prefix_v6, C.uint8_t(prefix_len), out_label)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_transit_label_of: %s", LastError())
+	}
+	return int32(rc), nil
+}
+
 func (x *LdpEngine) TransitLabelCount() (uintptr, error) {
 	res := C.lr_ldp_engine_transit_label_count(x.ptr)
 	return uintptr(res), nil
+}
+
+func (x *LdpEngine) TransitNextHop(prefix_v4 *C.uint8_t, prefix_v6 *C.uint8_t, prefix_len uint8, out_nh_lsr *C.uint32_t, out_nh_label_space *C.uint16_t, out_out_label *C.uint32_t) (int32, error) {
+	rc := C.lr_ldp_engine_transit_next_hop(x.ptr, prefix_v4, prefix_v6, C.uint8_t(prefix_len), out_nh_lsr, out_nh_label_space, out_out_label)
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_ldp_engine_transit_next_hop: %s", LastError())
+	}
+	return int32(rc), nil
 }
 
 func (x *LdpEngine) AdjacencyCount() (uintptr, error) {
@@ -7146,7 +7290,7 @@ func BgpReconcileAs4(wire_present uint8, wire_data *C.uint8_t, wire_len uintptr,
 	return int32(rc), nil
 }
 
-func BgpDecodeTlvStream(data *C.uint8_t, len uintptr, out_count *C.uintptr_t, out_array **C.lr_bgp_ls_tlv_t) (int32, error) {
+func BgpDecodeTlvStream(data *C.uint8_t, len uintptr, out_count *C.uintptr_t, out_array **C.lr_bgp_ls_tlv_entry_t) (int32, error) {
 	rc := C.lr_bgp_decode_tlv_stream(data, C.uintptr_t(len), out_count, out_array)
 	if rc < 0 {
 		return 0, fmt.Errorf("lr_bgp_decode_tlv_stream: %s", LastError())
@@ -7154,7 +7298,7 @@ func BgpDecodeTlvStream(data *C.uint8_t, len uintptr, out_count *C.uintptr_t, ou
 	return int32(rc), nil
 }
 
-func BgpEncodeTlvStream(tlvs *C.lr_bgp_ls_tlv_t, count uintptr, out *C.lr_bytes_t) (int32, error) {
+func BgpEncodeTlvStream(tlvs *C.lr_bgp_ls_tlv_entry_t, count uintptr, out *C.lr_bytes_t) (int32, error) {
 	rc := C.lr_bgp_encode_tlv_stream(tlvs, C.uintptr_t(count), out)
 	if rc < 0 {
 		return 0, fmt.Errorf("lr_bgp_encode_tlv_stream: %s", LastError())
@@ -7162,7 +7306,7 @@ func BgpEncodeTlvStream(tlvs *C.lr_bgp_ls_tlv_t, count uintptr, out *C.lr_bytes_
 	return int32(rc), nil
 }
 
-func BgpLsTlvArrayFree(arr *C.lr_bgp_ls_tlv_t, count uintptr) {
+func BgpLsTlvArrayFree(arr *C.lr_bgp_ls_tlv_entry_t, count uintptr) {
 	C.lr_bgp_ls_tlv_array_free(arr, C.uintptr_t(count))
 }
 
@@ -7456,33 +7600,6 @@ func BgpRouteRefreshSubtypeName(v uint8) (string, error) {
 		return "", nil
 	}
 	return C.GoString(cp), nil
-}
-
-func BgpLsTlvNew(tlv_type uint16, value *C.uint8_t, value_len uintptr) (C.lr_bgp_ls_tlv_t, error) {
-	res := C.lr_bgp_ls_tlv_new(C.uint16_t(tlv_type), value, C.uintptr_t(value_len))
-	return res, nil
-}
-
-func BgpLsTlvType(t C.lr_bgp_ls_tlv_t) (uint16, error) {
-	res := C.lr_bgp_ls_tlv_type(t)
-	return uint16(res), nil
-}
-
-func BgpLsTlvValueLen(t C.lr_bgp_ls_tlv_t) (uintptr, error) {
-	res := C.lr_bgp_ls_tlv_value_len(t)
-	return uintptr(res), nil
-}
-
-func BgpLsTlvValue(t C.lr_bgp_ls_tlv_t, out *C.uint8_t, cap uintptr) (int32, error) {
-	rc := C.lr_bgp_ls_tlv_value(t, out, C.uintptr_t(cap))
-	if rc < 0 {
-		return 0, fmt.Errorf("lr_bgp_ls_tlv_value: %s", LastError())
-	}
-	return int32(rc), nil
-}
-
-func BgpLsTlvFree(t C.lr_bgp_ls_tlv_t) {
-	C.lr_bgp_ls_tlv_free(t)
 }
 
 func BgpLsDecodeTlvStream(data *C.uint8_t, len uintptr, out *C.lr_bgp_ls_tlv_vec_t) (int32, error) {

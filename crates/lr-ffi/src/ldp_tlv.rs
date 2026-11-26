@@ -295,38 +295,44 @@ pub const LR_LDP_STATUS_DUAL_STACK_NONCOMPLIANCE: u32 = 0x8000_0013;
 pub const LR_LDP_STATUS_LABEL_WITHDRAW: u32 = 0x0000_0028;
 
 // ---- LDP message-type constants (RFC 5036 §3.5) ----
-
-pub const LR_LDP_MSG_NOTIFICATION: u16 = 0x0001;
-pub const LR_LDP_MSG_HELLO: u16 = 0x0100;
-pub const LR_LDP_MSG_INITIALIZATION: u16 = 0x0200;
+//
+// The names this module shares with [`crate::ldp_constants`] are
+// defined there (single crate-level definition); only this module's
+// unique spellings are defined here.
+pub use crate::ldp_constants::{
+    LR_LDP_MSG_ADDRESS_WITHDRAW, LR_LDP_MSG_CAPABILITY, LR_LDP_MSG_HELLO,
+    LR_LDP_MSG_INITIALIZATION, LR_LDP_MSG_LABEL_MAPPING, LR_LDP_MSG_LABEL_RELEASE,
+    LR_LDP_MSG_LABEL_REQUEST, LR_LDP_MSG_LABEL_WITHDRAW, LR_LDP_MSG_NOTIFICATION,
+};
+/// Keepalive — long spelling of `LR_LDP_MSG_KEEPALIVE`.
 pub const LR_LDP_MSG_KEEP_ALIVE: u16 = 0x0201;
-pub const LR_LDP_MSG_CAPABILITY: u16 = 0x0202;
+/// Address message — long spelling of `LR_LDP_MSG_ADDRESS`.
 pub const LR_LDP_MSG_ADDRESS_MESSAGE: u16 = 0x0300;
-pub const LR_LDP_MSG_ADDRESS_WITHDRAW: u16 = 0x0301;
-pub const LR_LDP_MSG_LABEL_MAPPING: u16 = 0x0400;
-pub const LR_LDP_MSG_LABEL_REQUEST: u16 = 0x0401;
-pub const LR_LDP_MSG_LABEL_WITHDRAW: u16 = 0x0402;
-pub const LR_LDP_MSG_LABEL_RELEASE: u16 = 0x0403;
-pub const LR_LDP_MSG_LABEL_ABORT_REQUEST: u16 = 0x0404;
+/// Label Abort Request — the spelling shared with `ldp_constants`.
+pub use crate::ldp_constants::LR_LDP_MSG_LABEL_ABORT_REQUEST;
 
 // ---- LDP TLV-type constants (RFC 5036 §3.4) ----
-
-pub const LR_LDP_TLV_FEC: u16 = 0x0100;
-pub const LR_LDP_TLV_ADDRESS_LIST: u16 = 0x0101;
-pub const LR_LDP_TLV_HOP_COUNT: u16 = 0x0103;
-pub const LR_LDP_TLV_PATH_VECTOR: u16 = 0x0104;
-pub const LR_LDP_TLV_GENERIC_LABEL: u16 = 0x0200;
-pub const LR_LDP_TLV_STATUS: u16 = 0x0300;
-pub const LR_LDP_TLV_EXTENDED_STATUS: u16 = 0x0301;
-pub const LR_LDP_TLV_RETURNED_PDU: u16 = 0x0302;
-pub const LR_LDP_TLV_RETURNED_MESSAGE: u16 = 0x0303;
+//
+// Shared names are defined in [`crate::ldp_constants`]; only this
+// module's unique names (the short spellings and the RFC 7552
+// dual-stack set) are defined here.
+pub use crate::ldp_constants::{
+    LR_LDP_TLV_ADDRESS_LIST, LR_LDP_TLV_EXTENDED_STATUS, LR_LDP_TLV_FEC, LR_LDP_TLV_GENERIC_LABEL,
+    LR_LDP_TLV_HOP_COUNT, LR_LDP_TLV_LABEL_REQUEST_MESSAGE_ID, LR_LDP_TLV_PATH_VECTOR,
+    LR_LDP_TLV_RETURNED_MESSAGE, LR_LDP_TLV_RETURNED_PDU, LR_LDP_TLV_STATUS,
+};
+/// Common Hello Parameters — short spelling.
 pub const LR_LDP_TLV_COMMON_HELLO_PARAMS: u16 = 0x0400;
+/// IPv4 Transport Address (RFC 5036 §3.4.1).
 pub const LR_LDP_TLV_IPV4_TRANSPORT_ADDR: u16 = 0x0401;
+/// Configuration Sequence Number — short spelling.
 pub const LR_LDP_TLV_CONFIG_SEQ_NUMBER: u16 = 0x0402;
+/// IPv6 Transport Address (RFC 7552 §6.1.1).
 pub const LR_LDP_TLV_IPV6_TRANSPORT_ADDR: u16 = 0x0403;
+/// Dual-Stack Capability (RFC 7552 §6.1.1).
 pub const LR_LDP_TLV_DUAL_STACK_CAPABILITY: u16 = 0x0404;
+/// Common Session Parameters — short spelling.
 pub const LR_LDP_TLV_COMMON_SESSION_PARAMS: u16 = 0x0500;
-pub const LR_LDP_TLV_LABEL_REQUEST_MESSAGE_ID: u16 = 0x0600;
 
 #[cfg(test)]
 mod tests {

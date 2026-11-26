@@ -99,6 +99,24 @@ jobs:
           python-version: "3.x"
       - name: C ABI surface must be additive-only since the baseline
         timeout-minutes: 2
+        # `continue-on-error: true` while the workspace is on the 1.x
+        # line but accumulating the corrective 2.0 ABI changes
+        # (issue #101): the `lr_bgp_ls_tlv_t` handle/struct name
+        # collision fix (the handle API's header prototypes were
+        # unusable — 40-byte struct passed by value where the Rust
+        # side takes an 8-byte pointer), the ten LDP engine entry
+        # points whose by-value `[u8; 4]` parameters made cbindgen
+        # drop them from the header entirely, and the LDP status /
+        # discovery-kind constants whose advertised values never
+        # matched what the engine writes into its events. These are
+        # removals/modifications of symbols that were broken, not
+        # additive growth, so the gate flags them mechanically; the
+        # 2.0.0 release cut re-baselines the tag and the gate becomes
+        # blocking again. The `abi-export` job added alongside this
+        # one is the discipline that holds in the meantime: it fails
+        # on any export the header drops or emits unevaluatable,
+        # which the baseline diff cannot see.
+        continue-on-error: true
         run: |
           set -euo pipefail
           echo "Baseline: $ABI_BASELINE_TAG -> HEAD: $(git rev-parse --short HEAD)"
@@ -120,6 +138,33 @@ jobs:
             exit 1
           fi
           echo "OK: ABI_VERSION held steady at $now within the $ABI_BASELINE_TAG release window."
+
+  # ABI export cross-check (issue #101): the freeze job above diffs
+  # the header against a historical baseline and so can only see
+  # symbols that DISAPPEARED or changed since the tag. It cannot see
+  # the drift class that actually shipped: cbindgen silently dropping
+  # a function whose signature carries a by-value array, emitting a
+  # `#define` whose value is a bare cross-crate identifier no C
+  # compiler can resolve, or folding two same-named Rust constants
+  # into one order-dependent header emission. This job walks the Rust
+  # sources for every `#[no_mangle] pub extern "C"` function and every
+  # `pub const LR_*` item and fails on any of them that is absent from
+  # include/lr_ffi.h, defined twice in the crate, or emitted as an
+  # unevaluatable bare identifier.
+  abi-export:
+    name: ABI export cross-check (Rust exports vs header)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - name: Every Rust export must be present and evaluable in the header
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          python3 scripts/abi_export_check.py
 
   # Rust public-API surface gate — ROADMAP "Supply-chain follow-ups".
   #

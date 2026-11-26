@@ -456,6 +456,54 @@ def test_replay_protection_accept_strictly_higher():
     assert rp.accept(b"idx", 6) is True
     rp.close()
 
+def test_authenticated_codec_round_trip():
+    """RFC 8967 §3 — encode with a MAC key + packet counter, decode
+    back with the same key + replay protection. Regression test for
+    the cdef drift: the Python declarations previously described a
+    DIFFERENT parameter list than the Rust entry points (a key array
+    where Rust takes a single key handle + packet-counter handle; a
+    bytes out where Rust writes a frame handle), which passed garbage
+    in the trailing register slots."""
+    codec = BabelCodec.new()
+    frame = BabelFrame.empty()
+    hello = Hello.new(seqno=7, interval_cs=400)
+    frame.push_tlv(Tlv.new(TLV_HELLO, hello.encode()))
+    hello.close()
+
+    ph = PseudoHeader.new_v4(
+        bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2]), 6696, 6696
+    )
+    key = MacKey.hmac_sha256(b"my-secret")
+    pc = PacketCounter.new(b"index", initial=100)
+
+    wire = codec.encode_authenticated(frame, ph, key, pc)
+    assert len(wire) > 0
+
+    rp = ReplayProtection.new()
+    inner = codec.decode_authenticated_slice(wire, ph, [key], rp)
+    assert inner is not None
+    assert inner.tlv_count >= 1
+    assert inner.tlv_type_at(0) == TLV_HELLO
+    inner.close()
+
+    pc.close()
+    key.close()
+    ph.close()
+    frame.close()
+    codec.close()
+
+
+def test_hello_timestamp_absent():
+    """The Hello timestamp accessor writes (present, ts) — the cdef
+    previously declared a single `uint32_t *out`, shifting the
+    register slots: the present byte landed in the ts pointer and the
+    timestamp itself in an uninitialized register. A freshly built
+    Hello carries no Timestamp sub-TLV, so the two-arg call must
+    report None (present == 0)."""
+    h = librouting.Hello.new(seqno=1, interval_cs=100)
+    assert h.timestamp is None
+    h.close()
+
 
 # ---- Message constructors (Hello / Ihu / AckReq / Ack / NextHop / ...) ----
 

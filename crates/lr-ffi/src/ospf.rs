@@ -15,7 +15,7 @@
 // the crate's `-D warnings` clippy gate.
 #![allow(unused_unsafe)]
 
-use lr_ospf::packet::{OspfBody, OspfPacket, OspfPacketType, OspfVersion};
+use lr_ospf::packet::{OspfBody, OspfPacket, OspfVersion};
 use lr_ospf::OspfCodec;
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
@@ -61,15 +61,27 @@ unsafe fn borrow_packet(p: lr_ospf_packet_t) -> Option<&'static OspfPacket> {
 }
 
 // ---- Version / packet-type constants ----
+//
+// Literal values, not enum casts: cbindgen cannot evaluate
+// `OspfVersion::V2 as u8` and previously dropped the whole set from
+// `lr_ffi.h`. The pinned test below fails if the Rust enum ever
+// moves off the RFC 2328/5340 numbering.
 
-pub const LR_OSPF_VERSION_V2: u8 = OspfVersion::V2 as u8;
-pub const LR_OSPF_VERSION_V3: u8 = OspfVersion::V3 as u8;
+/// OSPFv2 version number (RFC 2328 Appendix A).
+pub const LR_OSPF_VERSION_V2: u8 = 2;
+/// OSPFv3 version number (RFC 5340 Appendix A).
+pub const LR_OSPF_VERSION_V3: u8 = 3;
 
-pub const LR_OSPF_PACKET_HELLO: u8 = OspfPacketType::Hello as u8;
-pub const LR_OSPF_PACKET_DB_DESC: u8 = OspfPacketType::DatabaseDescription as u8;
-pub const LR_OSPF_PACKET_LS_REQUEST: u8 = OspfPacketType::LinkStateRequest as u8;
-pub const LR_OSPF_PACKET_LS_UPDATE: u8 = OspfPacketType::LinkStateUpdate as u8;
-pub const LR_OSPF_PACKET_LS_ACK: u8 = OspfPacketType::LinkStateAck as u8;
+/// Hello packet type (RFC 2328 Appendix A.1).
+pub const LR_OSPF_PACKET_HELLO: u8 = 1;
+/// Database Description packet type (RFC 2328 Appendix A.3).
+pub const LR_OSPF_PACKET_DB_DESC: u8 = 2;
+/// Link State Request packet type (RFC 2328 Appendix A.4).
+pub const LR_OSPF_PACKET_LS_REQUEST: u8 = 3;
+/// Link State Update packet type (RFC 2328 Appendix A.5).
+pub const LR_OSPF_PACKET_LS_UPDATE: u8 = 4;
+/// Link State Acknowledgment packet type (RFC 2328 Appendix A.6).
+pub const LR_OSPF_PACKET_LS_ACK: u8 = 5;
 
 // ---- Decode / encode ----
 
@@ -465,7 +477,27 @@ pub unsafe extern "C" fn lr_ospf_finalize_v3_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lr_ospf::packet::{HelloBody, OspfHeader};
+    use lr_ospf::packet::{HelloBody, OspfHeader, OspfPacketType, OspfVersion};
+
+    #[test]
+    fn version_and_packet_literals_match_rust_enum() {
+        assert_eq!(LR_OSPF_VERSION_V2, OspfVersion::V2 as u8);
+        assert_eq!(LR_OSPF_VERSION_V3, OspfVersion::V3 as u8);
+        assert_eq!(LR_OSPF_PACKET_HELLO, OspfPacketType::Hello as u8);
+        assert_eq!(
+            LR_OSPF_PACKET_DB_DESC,
+            OspfPacketType::DatabaseDescription as u8
+        );
+        assert_eq!(
+            LR_OSPF_PACKET_LS_REQUEST,
+            OspfPacketType::LinkStateRequest as u8
+        );
+        assert_eq!(
+            LR_OSPF_PACKET_LS_UPDATE,
+            OspfPacketType::LinkStateUpdate as u8
+        );
+        assert_eq!(LR_OSPF_PACKET_LS_ACK, OspfPacketType::LinkStateAck as u8);
+    }
 
     unsafe fn bytes_to_vec(b: &mut lr_bytes_t) -> Vec<u8> {
         if b.ptr.is_null() {

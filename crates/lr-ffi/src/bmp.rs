@@ -26,9 +26,7 @@
 // the crate's `-D warnings` clippy gate.
 #![allow(unused_unsafe)]
 
-use lr_bmp::{
-    BmpCodec, BmpMessage, BmpMsgType, PeerDownReason, PeerFlags, PeerHeader, PeerType, VERSION,
-};
+use lr_bmp::{BmpCodec, BmpMessage, PeerDownReason, PeerFlags, PeerHeader, PeerType};
 use lr_core::buf::WriteBuf;
 use lr_core::codec::Encoder;
 
@@ -74,20 +72,20 @@ unsafe fn borrow_message(m: lr_bmp_message_t) -> Option<&'static BmpMessage> {
     Some(unsafe { &*(m as *const BmpMessage) })
 }
 
-// ---- Constants (mirrors lr_bmp pub consts) ----
-
-pub const LR_BMP_VERSION: u8 = VERSION;
-pub const LR_BMP_MSG_ROUTE_MONITORING: u8 = BmpMsgType::RouteMonitoring as u8;
-pub const LR_BMP_MSG_STATISTICS_REPORT: u8 = BmpMsgType::StatisticsReport as u8;
-pub const LR_BMP_MSG_PEER_DOWN: u8 = BmpMsgType::PeerDown as u8;
-pub const LR_BMP_MSG_PEER_UP: u8 = BmpMsgType::PeerUp as u8;
-pub const LR_BMP_MSG_INITIATION: u8 = BmpMsgType::Initiation as u8;
-pub const LR_BMP_MSG_TERMINATION: u8 = BmpMsgType::Termination as u8;
-pub const LR_BMP_MSG_ROUTE_MIRRORING: u8 = BmpMsgType::RouteMirroring as u8;
-
-pub const LR_BMP_PEER_TYPE_GLOBAL: u8 = PeerType::Global as u8;
-pub const LR_BMP_PEER_TYPE_RD: u8 = PeerType::Rd as u8;
-pub const LR_BMP_PEER_TYPE_LOCAL: u8 = PeerType::Local as u8;
+// ---- Constants ----
+//
+// `LR_BMP_VERSION` / `LR_BMP_MSG_*` / `LR_BMP_PEER_TYPE_*` live in
+// [`crate::bmp_constants`] as the single definition — this module
+// re-uses them from there. A second definition here (enum-cast or
+// cross-crate values) makes cbindgen's header emission
+// order-dependent and previously dropped the whole set from
+// `lr_ffi.h`.
+pub use crate::bmp_constants::LR_BMP_VERSION;
+pub use crate::bmp_constants::{
+    LR_BMP_MSG_INITIATION, LR_BMP_MSG_PEER_DOWN, LR_BMP_MSG_PEER_UP, LR_BMP_MSG_ROUTE_MIRRORING,
+    LR_BMP_MSG_ROUTE_MONITORING, LR_BMP_MSG_STATISTICS_REPORT, LR_BMP_MSG_TERMINATION,
+    LR_BMP_PEER_TYPE_GLOBAL, LR_BMP_PEER_TYPE_LOCAL, LR_BMP_PEER_TYPE_RD,
+};
 
 pub const LR_BMP_PEER_FLAG_V: u8 = 0x80; // IPv6 address
 pub const LR_BMP_PEER_FLAG_L: u8 = 0x40; // post-policy

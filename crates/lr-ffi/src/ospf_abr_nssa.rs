@@ -37,7 +37,7 @@ const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
 /// NSSA P-bit (RFC 3101 §2.4) — set on type-7 LSAs that ask border
 /// routers to translate them into type-5s.
-pub const LR_OSPF_NSSA_N_P_BIT: u8 = 0x08;
+pub use crate::ospf_constants::LR_OSPF_NSSA_N_P_BIT;
 
 /// NSSA translator-mode calculation options — mirrors
 /// `NssaCalcOpts`.
