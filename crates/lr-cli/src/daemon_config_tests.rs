@@ -3451,3 +3451,117 @@ fn software_version_encoding_rejects_unknown_spellings() {
         );
     }
 }
+
+/// draft-ietf-idr-addpath-paths-limit-00 §4/§5: the enforcement
+/// action and the still-TBD Cease subcode parse globally and per
+/// peer, with the per-peer key overriding the router-wide one.
+#[test]
+fn paths_limit_action_and_subcode_parse_globally_and_per_peer() {
+    use lr_bgp::PathsLimitAction;
+
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nadd_path = true\n\
+         paths_limit = \"1:1:16\"\npaths_limit_action = \"teardown\"\n\
+         paths_limit_cease_subcode = 64\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n\
+         paths_limit_action = \"discard\"\n\n\
+         [[peer]]\nremote = \"192.0.2.3:179\"\npeer_as = 64514\n",
+        &mut cfg,
+    )
+    .unwrap();
+    assert_eq!(cfg.paths_limit_action, PathsLimitAction::Teardown);
+    assert_eq!(cfg.paths_limit_cease_subcode, Some(64));
+    assert_eq!(
+        cfg.peers[0].paths_limit_action,
+        Some(PathsLimitAction::Discard)
+    );
+    assert_eq!(cfg.peers[0].paths_limit_cease_subcode, None);
+    assert_eq!(
+        cfg.peers[1].paths_limit_action, None,
+        "an unset peer key inherits the router-wide action"
+    );
+}
+
+#[test]
+fn paths_limit_action_rejects_unknown_spellings() {
+    for bad in ["drop", "warn", "reset", ""] {
+        let mut cfg = DaemonConfig::with_defaults();
+        let text = format!("[bgp]\nlocal_as = 64512\npaths_limit_action = \"{bad}\"\n");
+        let err = parse_toml_subset(&text, &mut cfg).unwrap_err();
+        assert!(
+            err.contains("paths_limit_action"),
+            "expected the key name in {err:?}"
+        );
+    }
+}
+
+#[test]
+fn paths_limit_cease_subcode_rejects_out_of_range() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\npaths_limit_cease_subcode = 256\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\npaths_limit_cease_subcode = -1\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+}
+
+/// draft-ietf-idr-addpath-paths-limit-00 §7.2: the subcode's IANA
+/// registration is still TBD, so the `teardown` action over a live
+/// limit without an operator-chosen value is a config-time error —
+/// the §4 NOTIFICATION cannot name its subcode.
+#[test]
+fn paths_limit_teardown_without_subcode_fails_finalize() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nadd_path = true\npaths_limit = \"1:1:16\"\n\
+         paths_limit_action = \"teardown\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n",
+        &mut cfg,
+    )
+    .unwrap();
+    let err = cfg.finalize().unwrap_err();
+    assert!(
+        err.contains("paths_limit_cease_subcode"),
+        "expected the missing-key name in {err:?}"
+    );
+}
+
+/// A per-peer subcode satisfies the teardown requirement even when
+/// the router-wide value is unset, and a teardown action with no live
+/// limit is inert (nothing advertised, nothing can fire) and passes.
+#[test]
+fn paths_limit_teardown_subcode_resolution_and_inert_case() {
+    use lr_bgp::PathsLimitAction;
+
+    // Per-peer subcode covers a global teardown action.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\nadd_path = true\npaths_limit = \"1:1:16\"\n\
+         paths_limit_action = \"teardown\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n\
+         paths_limit_cease_subcode = 64\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+
+    // Teardown with no non-zero limit never fires — no subcode
+    // needed.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\npaths_limit_action = \"teardown\"\n\n\
+         [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    assert_eq!(cfg.paths_limit_action, PathsLimitAction::Teardown);
+}
+

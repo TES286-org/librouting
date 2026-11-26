@@ -172,6 +172,15 @@ pub(crate) struct PeerSpec {
     /// PATHS-LIMIT capability — per-peer override of the router-wide
     /// `[bgp] paths_limit`. `None` inherits.
     pub paths_limit: Option<Vec<(u16, u8, u16)>>,
+    /// PATHS-LIMIT enforcement action — per-peer override of the
+    /// router-wide `[bgp] paths_limit_action`. `None` inherits.
+    pub paths_limit_action: Option<lr_bgp::PathsLimitAction>,
+    /// Wire value for the "Maximum Number of Paths Reached" Cease
+    /// subcode (draft-ietf-idr-addpath-paths-limit-00 §4/§7.2 — the
+    /// IANA registration is still TBD). Per-peer override of the
+    /// router-wide `[bgp] paths_limit_cease_subcode`; `None`
+    /// inherits.
+    pub paths_limit_cease_subcode: Option<u8>,
     /// Link-Local Next Hop capability — per-peer override of the
     /// router-wide `[bgp] link_local_next_hop`. `None` inherits.
     pub link_local_next_hop: Option<bool>,
@@ -1141,6 +1150,21 @@ pub(crate) struct DaemonConfig {
     /// triples peers inherit. Empty (the default) does not
     /// advertise the capability.
     pub paths_limit: Vec<(u16, u8, u16)>,
+    /// What happens when an inbound Add-Path path exceeds the local
+    /// PATHS-LIMIT (draft-ietf-idr-addpath-paths-limit-00 §4/§5):
+    /// `"discard"` (the default) drops the excess paths and keeps
+    /// the session; `"teardown"` terminates the peering with the
+    /// §4 Cease NOTIFICATION. The per-peer `PeerSpec::paths_limit_action`
+    /// overrides this.
+    pub paths_limit_action: lr_bgp::PathsLimitAction,
+    /// Wire value for the "Maximum Number of Paths Reached" Cease
+    /// subcode (draft-ietf-idr-addpath-paths-limit-00 §4). The
+    /// subcode's IANA registration is still TBD (§7.2), so an
+    /// operator choosing the `teardown` action supplies the value
+    /// both peers agreed on; the default flips to the assigned
+    /// number once the registry entry lands. `None` (the default)
+    /// keeps the §5 graceful handling.
+    pub paths_limit_cease_subcode: Option<u8>,
     /// draft-ietf-idr-linklocal-capability-06 Link-Local Next Hop
     /// capability. Per-peer override (`PeerSpec::link_local_next_hop`)
     /// inherits this when unset. Default off.
@@ -2057,7 +2081,45 @@ impl DaemonConfig {
         self.finalize_aggregates()?;
         self.finalize_network_route_maps()?;
         self.finalize_shutdown()?;
+        self.finalize_paths_limit()?;
         self.finalize_exchange_plane()?;
+        Ok(())
+    }
+
+    /// Validate the PATHS-LIMIT enforcement surface
+    /// (draft-ietf-idr-addpath-paths-limit-00 §4/§7.2): a peer that
+    /// resolves to the `teardown` action with a live limit must also
+    /// resolve to a cease subcode. The subcode's IANA registration is
+    /// still TBD, so no default exists — without an operator-chosen
+    /// value the §4 NOTIFICATION cannot be sent, and failing at
+    /// config time beats silently running the §5 graceful path under
+    /// a `teardown` label. A `teardown` action with no non-zero limit
+    /// is inert (nothing is advertised, nothing can fire) and passes.
+    fn finalize_paths_limit(&mut self) -> Result<(), String> {
+        for peer in &self.peers {
+            let action = peer.paths_limit_action.unwrap_or(self.paths_limit_action);
+            if action != lr_bgp::PathsLimitAction::Teardown {
+                continue;
+            }
+            let limits = peer
+                .paths_limit
+                .clone()
+                .unwrap_or_else(|| self.paths_limit.clone());
+            if !limits.iter().any(|(_, _, limit)| *limit != 0) {
+                continue;
+            }
+            let subcode = peer
+                .paths_limit_cease_subcode
+                .or(self.paths_limit_cease_subcode);
+            if subcode.is_none() {
+                return Err(format!(
+                    "peer {}: paths_limit_action = teardown needs \
+                     paths_limit_cease_subcode (the draft's IANA value is still \
+                     TBD, so the value must be agreed with the peer)",
+                    peer.label()
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -3500,6 +3562,37 @@ fn parse_paths_limit(value: &str) -> Result<Vec<(u16, u8, u16)>, String> {
     Ok(out)
 }
 
+/// Parse a PATHS-LIMIT enforcement action
+/// (draft-ietf-idr-addpath-paths-limit-00 §4/§5) for the `[bgp]
+/// paths_limit_action` and `peer.paths_limit_action` keys.
+/// `"discard"` (the default) drops excess Add-Path paths and keeps
+/// the session — the graceful handling §5 recommends; `"teardown"`
+/// terminates the peering with the §4 Cease NOTIFICATION. The parser
+/// is strict so a typo does not silently select the graceful path
+/// over the enforcement the operator asked for.
+fn parse_paths_limit_action(value: &str) -> Result<lr_bgp::PathsLimitAction, String> {
+    match value.trim() {
+        "discard" => Ok(lr_bgp::PathsLimitAction::Discard),
+        "teardown" => Ok(lr_bgp::PathsLimitAction::Teardown),
+        other => Err(format!(
+            "bad paths_limit_action '{other}' (expected 'discard' or 'teardown')"
+        )),
+    }
+}
+
+/// Parse the wire value for the "Maximum Number of Paths Reached"
+/// Cease subcode (draft-ietf-idr-addpath-paths-limit-00 §4/§7.2) for
+/// the `[bgp] paths_limit_cease_subcode` and
+/// `peer.paths_limit_cease_subcode` keys. The IANA registration is
+/// still TBD, so the value is whatever both peers of a session agreed
+/// on — an unsigned byte.
+fn parse_paths_limit_cease_subcode(value: &str) -> Result<u8, String> {
+    value
+        .trim()
+        .parse::<u8>()
+        .map_err(|_| format!("bad paths_limit_cease_subcode '{value}' (expected 0..=255)"))
+}
+
 /// Parse an RFC 5291 §3 ORF capability value for the `[bgp] orf` and
 /// `peer.orf` keys. The accepted shape is a comma-separated list of
 /// `afi:safi:type:mode` quadruples (e.g. `"1:1:64:both,2:1:64:receive"`).
@@ -4114,6 +4207,12 @@ pub(crate) fn apply_config_key(
             cfg.software_version_encoding = parse_software_version_encoding(value)?;
         }
         "bgp.paths_limit" => cfg.paths_limit = parse_paths_limit(value)?,
+        "bgp.paths_limit_action" => {
+            cfg.paths_limit_action = parse_paths_limit_action(value)?;
+        }
+        "bgp.paths_limit_cease_subcode" => {
+            cfg.paths_limit_cease_subcode = Some(parse_paths_limit_cease_subcode(value)?);
+        }
         "bgp.link_local_next_hop" => cfg.link_local_next_hop = parse_bool(value),
         "bgp.orf" => cfg.orf = parse_orf_entries(value)?,
         "bgp.orf_entries" => cfg.orf_entries = parse_orf_prefix_entries(value)?,
@@ -6281,6 +6380,12 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
             peer.software_version_encoding = Some(parse_software_version_encoding(value)?);
         }
         "paths_limit" => peer.paths_limit = Some(parse_paths_limit(value)?),
+        "paths_limit_action" => {
+            peer.paths_limit_action = Some(parse_paths_limit_action(value)?);
+        }
+        "paths_limit_cease_subcode" => {
+            peer.paths_limit_cease_subcode = Some(parse_paths_limit_cease_subcode(value)?);
+        }
         "link_local_next_hop" => peer.link_local_next_hop = Some(parse_bool(value)),
         "orf" => peer.orf = Some(parse_orf_entries(value)?),
         "orf_entries" => peer.orf_entries = Some(parse_orf_prefix_entries(value)?),
