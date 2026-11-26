@@ -32,11 +32,13 @@ pub const LR_OSPF_ROUTER_LSA_LINK_POINT_TO_POINT: i32 = 1;
 pub const LR_OSPF_ROUTER_LSA_LINK_TRANSIT: i32 = 2;
 pub const LR_OSPF_ROUTER_LSA_LINK_RAW: i32 = 3;
 
-/// Router-LSA body flag bits (RFC 2328 §A.4.2) — `V` (virtual link
-/// endpoint), `E` (ASBR), `B` (ABR).
-pub const LR_OSPF_ROUTER_LSA_FLAG_V: u8 = 0x04;
-pub const LR_OSPF_ROUTER_LSA_FLAG_E: u8 = 0x02;
-pub const LR_OSPF_ROUTER_LSA_FLAG_B: u8 = 0x01;
+// Router-LSA body flag bits (RFC 2328 §A.4.2) — `V` (virtual link
+// endpoint), `E` (ASBR), `B` (ABR). Single crate-level definition in
+// [`crate::ospf_constants`]; a second definition here (even identical)
+// made cbindgen's header emission order-dependent.
+pub use crate::ospf_constants::{
+    LR_OSPF_ROUTER_LSA_FLAG_B, LR_OSPF_ROUTER_LSA_FLAG_E, LR_OSPF_ROUTER_LSA_FLAG_V,
+};
 
 /// Opaque `RouterLsaLink` handle.
 #[repr(C)]

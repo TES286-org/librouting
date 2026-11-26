@@ -48,11 +48,13 @@ use lr_router::{OspfAreaType, OspfNetworkType, RouterInstance, SessionConfig, Se
 /// default route, RFC 2328 §3.6 / RFC 3101 §2.7); the `*_NO_SUMMARY`
 /// variants suppress inter-area summaries ("totally stubby / totally
 /// NSSA").
-pub const LR_AREA_NORMAL: i32 = 0;
-pub const LR_AREA_STUB: i32 = 1;
-pub const LR_AREA_STUB_NO_SUMMARY: i32 = 2;
-pub const LR_AREA_NSSA: i32 = 3;
-pub const LR_AREA_NSSA_NO_SUMMARY: i32 = 4;
+///
+/// Single crate-level definition in [`crate::router`]; a second
+/// definition here (even identical) made cbindgen's header emission
+/// order-dependent.
+pub use crate::router::{
+    LR_AREA_NORMAL, LR_AREA_NSSA, LR_AREA_NSSA_NO_SUMMARY, LR_AREA_STUB, LR_AREA_STUB_NO_SUMMARY,
+};
 
 /// Interface network-type ids (RFC 2328 §9.1), shared by
 /// `lr_router_add_ospf_session_ext`.
