@@ -1278,6 +1278,13 @@ fn vm_matches_interpreter_on_policy_table() {
             "if bgp.local_pref > 200 then accept; else reject;",
             "case proto { \"bgp\" => accept; default => reject; }",
             "case bgp.local_pref { 100 => accept; 200 => reject; default => accept; }",
+            // Multi-pattern arms: any pattern may match (OR). The VM
+            // used to compile these as AND — a two-pattern arm of
+            // literals never fired.
+            "case bgp.local_pref { 42, 100 => accept; default => reject; }",
+            "case bgp.local_pref { 7, 42, 200 => accept; default => reject; }",
+            "case bgp.med { 1 => reject; 5, 100 => accept; default => reject; }",
+            "case proto { \"bgp\", \"ospf\" => accept; default => reject; }",
             "if bgp.local_pref > 50 && bgp.med < 10 then accept; reject;",
             "if bgp.local_pref > 500 || bgp.med < 10 then accept; reject;",
             "let x = bgp.local_pref * 2 + 1; if x == 201 then accept; reject;",
