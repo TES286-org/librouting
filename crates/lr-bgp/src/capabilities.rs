@@ -115,6 +115,21 @@ pub struct Capability {
     pub value: Vec<u8>,
 }
 
+/// A capability whose value exceeds the one-octet length field
+/// (255 octets) of the RFC 5492 §3 wire form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "capability {} value is {} octets; the RFC 5492 §3 length field caps it at 255",
+    self.code,
+    self.len
+)]
+pub struct CapabilityLengthError {
+    /// The capability code that could not be encoded.
+    pub code: CapabilityCode,
+    /// The capability value length in octets (greater than 255).
+    pub len: usize,
+}
+
 impl Capability {
     pub fn new(code: CapabilityCode, value: Vec<u8>) -> Self {
         Self { code, value }
@@ -231,7 +246,13 @@ impl Capability {
     /// 2 = send, 3 = both (RFC 7911 §4.4). Returns `(afi, safi, send,
     /// recv)` per family.
     pub fn as_add_path(&self) -> Option<Vec<(u16, u8, bool, bool)>> {
-        if self.code != CapabilityCode::AddPath || self.value.is_empty() {
+        // RFC 7911 §4.4 fixes each tuple at four octets. A trailing
+        // partial tuple is malformed; ignoring it would silently
+        // negotiate a direction the peer never advertised.
+        if self.code != CapabilityCode::AddPath
+            || self.value.is_empty()
+            || !self.value.len().is_multiple_of(4)
+        {
             return None;
         }
         let mut out = Vec::new();
@@ -283,7 +304,13 @@ impl Capability {
     /// forwarding_state)`. An empty list means GR was negotiated without
     /// retaining any family (RFC 4724 §4.2: nothing is retained).
     pub fn as_graceful_restart_families(&self) -> Option<Vec<(u16, u8, bool)>> {
-        if self.code != CapabilityCode::GracefulRestart || self.value.len() < 2 {
+        // RFC 4724 §3: two octets of restart flags/time followed by
+        // four-octet per-family tuples. Reject a partial tail rather
+        // than silently retaining fewer families than advertised.
+        if self.code != CapabilityCode::GracefulRestart
+            || self.value.len() < 2
+            || !(self.value.len() - 2).is_multiple_of(4)
+        {
             return None;
         }
         let mut out = Vec::new();
@@ -338,14 +365,40 @@ impl Capability {
     /// Encode all capabilities as the OPEN optional-parameter value
     /// (param_type=2). Each capability is encoded as
     /// `(code:1, len:1, value:0..)` per RFC 5492 §3.
+    ///
+    /// Capabilities whose value exceeds the one-octet length field (255
+    /// octets) are omitted rather than truncated. Use
+    /// [`Capability::try_encode_set`] to detect that case; all the
+    /// constructors bound their values to what the wire format can
+    /// carry.
     pub fn encode_set(set: &[Capability]) -> Vec<u8> {
         let mut out = Vec::new();
         for c in set {
+            if c.value.len() > u8::MAX as usize {
+                continue;
+            }
             out.push(c.code.to_u8());
             out.push(c.value.len() as u8);
             out.extend_from_slice(&c.value);
         }
         out
+    }
+
+    /// Like [`Capability::encode_set`], but returns
+    /// [`CapabilityLengthError`] for the first capability whose value
+    /// exceeds the one-octet length field of RFC 5492 §3.
+    pub fn try_encode_set(set: &[Capability]) -> Result<Vec<u8>, CapabilityLengthError> {
+        let mut out = Vec::new();
+        for c in set {
+            let len = c.value.len();
+            if len > u8::MAX as usize {
+                return Err(CapabilityLengthError { code: c.code, len });
+            }
+            out.push(c.code.to_u8());
+            out.push(len as u8);
+            out.extend_from_slice(&c.value);
+        }
+        Ok(out)
     }
 
     /// Decode the value field of an OPEN optional parameter of type 2.
@@ -369,6 +422,33 @@ impl Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 5492 §3 fixes the capability length at one octet. An
+    /// oversized value cannot be represented: `encode_set` must drop
+    /// it rather than write a wrapped length and corrupt the OPEN.
+    #[test]
+    fn encode_set_omits_oversized_capability() {
+        let ok1 = Capability::four_octet_as(64512);
+        let oversized = Capability::new(CapabilityCode::Other(200), vec![0xab; 256]);
+        let ok2 = Capability::extended_message();
+        let wire = Capability::encode_set(&[ok1.clone(), oversized.clone(), ok2.clone()]);
+        let decoded = Capability::decode_set(&wire);
+        assert_eq!(decoded, vec![ok1.clone(), ok2.clone()]);
+
+        let err = Capability::try_encode_set(&[ok1, oversized.clone(), ok2]).unwrap_err();
+        assert_eq!(err.code, CapabilityCode::Other(200));
+        assert_eq!(err.len, 256);
+        assert!(err.to_string().contains("256"));
+    }
+
+    #[test]
+    fn encode_set_accepts_the_255_octet_boundary() {
+        let cap = Capability::new(CapabilityCode::Other(201), vec![7; 255]);
+        let wire = Capability::try_encode_set(std::slice::from_ref(&cap)).unwrap();
+        assert_eq!(wire.len(), 257); // code + length + value
+        assert_eq!(wire[1], 255);
+        assert_eq!(Capability::decode_set(&wire), vec![cap]);
+    }
 
     #[test]
     fn four_octet_as_roundtrip() {
@@ -515,5 +595,26 @@ mod tests {
         let cap = Capability::graceful_restart(0, 90, &[]);
         assert_eq!(cap.value.len(), 2);
         assert_eq!(cap.as_graceful_restart_families(), Some(vec![]));
+    }
+
+    #[test]
+    fn add_path_rejects_partial_tuple() {
+        let cap = Capability::add_path(&[(1, 1, true, true)]);
+        let mut value = cap.value.clone();
+        value.push(0); // a fifth octet cannot start a tuple
+        let malformed = Capability::new(CapabilityCode::AddPath, value);
+        assert!(malformed.as_add_path().is_none());
+        assert!(Capability::new(CapabilityCode::AddPath, vec![])
+            .as_add_path()
+            .is_none());
+    }
+
+    #[test]
+    fn graceful_restart_families_reject_partial_tuple() {
+        let mut value = vec![0, 90]; // restart flags + time
+        value.extend_from_slice(&[0, 1, 1, 0x80]); // one family
+        value.push(0); // partial second tuple
+        let cap = Capability::new(CapabilityCode::GracefulRestart, value);
+        assert!(cap.as_graceful_restart_families().is_none());
     }
 }
