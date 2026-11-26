@@ -68,6 +68,16 @@ pub unsafe extern "C" fn lr_mrt_reader_decode_slice(
     )
 }
 
+/// Buffer raw chunk bytes without decoding anything. The records
+/// stay buffered; `lr_mrt_reader_decode_slice` and
+/// `lr_mrt_reader_next_record` pop them one at a time. Feeding a
+/// chunk that holds exactly one complete record keeps that record
+/// buffered — nothing is decoded or discarded here. Returns 0, or
+/// `LR_ERR_NULL` on a NULL handle / null data pointer.
+///
+/// # Safety
+/// `r` must be a valid reader handle; `data` must point to `len`
+/// readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn lr_mrt_reader_feed(
     r: lr_mrt_reader_t,
@@ -83,7 +93,7 @@ pub unsafe extern "C" fn lr_mrt_reader_feed(
                 return LR_ERR_NULL;
             }
             let slice = unsafe { std::slice::from_raw_parts(data, len) };
-            let _ = reader.decode_slice(slice);
+            reader.feed(slice);
             0
         },
         LR_ERR_PANIC,
@@ -103,7 +113,7 @@ pub unsafe extern "C" fn lr_mrt_reader_next_record(
             if out.is_null() {
                 return LR_ERR_NULL;
             }
-            match reader.decode_slice(&[]) {
+            match reader.next() {
                 Ok(Some(rec)) => {
                     unsafe { *out = box_record(rec) }
                     0
@@ -208,6 +218,40 @@ mod tests {
             unsafe { lr_mrt_reader_feed(r, std::ptr::null(), 0) },
             LR_ERR_NULL
         );
+        unsafe { lr_mrt_reader_free(r) };
+    }
+
+    /// `feed` buffers; `next_record` pops. A chunk holding exactly
+    /// one complete record must survive the feed and come back out
+    /// of the drain — the previous implementation ran the
+    /// feed+decode pair and discarded the decoded record, silently
+    /// losing every chunk's first record.
+    #[test]
+    fn ffi_reader_feed_then_next_record_round_trips() {
+        // One TABLE_DUMP record: header (ts, type, subtype, len) + 4
+        // body bytes. TABLE_DUMP decodes to `MrtRecord::Unknown`
+        // regardless of the body, so the shape is guaranteed to pop
+        // out as a record.
+        let mut record = Vec::new();
+        record.extend_from_slice(&0u32.to_be_bytes()); // timestamp
+        record.extend_from_slice(&12u16.to_be_bytes()); // TABLE_DUMP
+        record.extend_from_slice(&0u16.to_be_bytes()); // subtype
+        record.extend_from_slice(&4u32.to_be_bytes()); // body length
+        record.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let r = lr_mrt_reader_new();
+        assert_eq!(unsafe { lr_mrt_reader_feed(r, record.as_ptr(), record.len()) }, 0);
+
+        let mut out: lr_mrt_record_t = std::ptr::null_mut();
+        let rc = unsafe { lr_mrt_reader_next_record(r, &mut out) };
+        assert_eq!(rc, 0, "the fed record is buffered and pops back out");
+        assert!(!out.is_null(), "a record handle came back");
+
+        // Nothing else is buffered.
+        let mut out2: lr_mrt_record_t = std::ptr::null_mut();
+        assert_eq!(unsafe { lr_mrt_reader_next_record(r, &mut out2) }, 1);
+        assert!(out2.is_null());
+        unsafe { crate::mrt::lr_mrt_record_free(out) };
         unsafe { lr_mrt_reader_free(r) };
     }
 }

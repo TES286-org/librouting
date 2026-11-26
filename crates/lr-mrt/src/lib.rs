@@ -249,14 +249,18 @@ impl MrtReader {
         }
     }
 
-    /// Buffer raw bytes.
-    fn feed(&mut self, bytes: &[u8]) {
+    /// Buffer raw bytes without decoding anything. Every byte fed is
+    /// retained until a later [`Self::decode_slice`] or
+    /// [`Self::next`] consumes it — unlike `decode_slice`, a chunk
+    /// holding exactly one complete record does not pop that record
+    /// out of the buffer.
+    pub fn feed(&mut self, bytes: &[u8]) {
         self.compact();
         self.carryover.extend_from_slice(bytes);
     }
 
     /// Decode the next complete buffered record, if any.
-    fn next(&mut self) -> Result<Option<MrtRecord>, ParseError> {
+    pub fn next(&mut self) -> Result<Option<MrtRecord>, ParseError> {
         let buf = &self.carryover[self.start..];
         if buf.len() < HEADER_LEN {
             return Ok(None);
@@ -278,7 +282,8 @@ impl MrtReader {
     }
 
     /// Feed `bytes` and try to decode the next complete record.
-    /// `Ok(None)` = need more bytes.
+    /// `Ok(None)` = need more bytes. Equivalent to [`Self::feed`]
+    /// followed by [`Self::next`].
     pub fn decode_slice(&mut self, bytes: &[u8]) -> Result<Option<MrtRecord>, ParseError> {
         self.feed(bytes);
         self.next()
