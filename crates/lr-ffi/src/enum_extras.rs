@@ -485,11 +485,17 @@ pub extern "C" fn lr_srv6_locator_parse_error_name(v: i32) -> *const std::os::ra
 pub extern "C" fn lr_mpls_label_stack_error_name(v: i32) -> *const std::os::raw::c_char {
     guarded(
         || {
+            // Match the LR_MPLS_STACK_ERR_* constants
+            // (mpls_constants.rs — the values in `lr_ffi.h` and the
+            // ones `lr_mpls_stack_last_err_code` returns), NOT a
+            // 1-based count: the two numberings previously disagreed,
+            // so `error_name(last_err_code())` answered "unknown"
+            // for every real error.
             let s = match v {
-                1 => "TooShort",
-                2 => "UnevenLength",
-                3 => "MidStackBottom",
-                4 => "ValueOutOfRange",
+                crate::mpls_constants::LR_MPLS_STACK_ERR_TOO_SHORT => "TooShort",
+                crate::mpls_constants::LR_MPLS_STACK_ERR_UNEVEN_LENGTH => "UnevenLength",
+                crate::mpls_constants::LR_MPLS_STACK_ERR_MID_STACK_BOTTOM => "MidStackBottom",
+                crate::mpls_constants::LR_MPLS_STACK_ERR_VALUE_OUT_OF_RANGE => "ValueOutOfRange",
                 _ => "unknown",
             };
             name_ptr(s)
@@ -709,9 +715,22 @@ mod tests {
 
     #[test]
     fn mpls_label_stack_error_name() {
-        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(1)) };
+        // The name lookup and lr_mpls_stack_last_err_code share the
+        // LR_MPLS_STACK_ERR_* numbering (0-based) — pin the pairing
+        // the mismatch previously broke (name(last_err_code()) was
+        // "unknown" for every real error).
+        use crate::mpls_constants::{
+            LR_MPLS_STACK_ERR_MID_STACK_BOTTOM, LR_MPLS_STACK_ERR_TOO_SHORT,
+            LR_MPLS_STACK_ERR_UNEVEN_LENGTH, LR_MPLS_STACK_ERR_VALUE_OUT_OF_RANGE,
+        };
+        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_TOO_SHORT)) };
         assert_eq!(name, "TooShort");
-        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(4)) };
+        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_UNEVEN_LENGTH)) };
+        assert_eq!(name, "UnevenLength");
+        let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_MID_STACK_BOTTOM)) };
+        assert_eq!(name, "MidStackBottom");
+        let name =
+            unsafe { name_to_string(lr_mpls_label_stack_error_name(LR_MPLS_STACK_ERR_VALUE_OUT_OF_RANGE)) };
         assert_eq!(name, "ValueOutOfRange");
         let name = unsafe { name_to_string(lr_mpls_label_stack_error_name(99)) };
         assert_eq!(name, "unknown");

@@ -643,12 +643,20 @@ pub unsafe extern "C" fn lr_ospf_walk_e_lsa_tlvs(
                 }
                 return 0;
             }
+            // The value slices borrow from `slice` (the caller's
+            // body), so the offset each descriptor must carry is the
+            // distance from the body base — NOT the absolute pointer
+            // value. The absolute form handed C a heap address (and
+            // leaked ASLR information); a consumer following the
+            // documented `data + value_offset` contract read out of
+            // bounds immediately.
+            let base = slice.as_ptr() as usize;
             let mut c_arr: Vec<lr_ospf_e_lsa_tlv_t> = tlvs
                 .into_iter()
                 .map(|t| lr_ospf_e_lsa_tlv_t {
                     tlv_type: t.tlv_type,
                     length: t.value.len() as u16,
-                    value_offset: t.value.as_ptr() as usize,
+                    value_offset: t.value.as_ptr() as usize - base,
                 })
                 .collect();
             let ptr = c_arr.as_mut_ptr();
@@ -723,6 +731,40 @@ mod tests {
     }
 
     #[test]
+    fn ffi_walk_e_lsa_tlv_offsets_are_body_relative() {
+        // RFC 8362 §3 TLV region: two TLVs, 4-byte aligned.
+        // TLV A: type 1, len 4 -> value at body offset 4.
+        // TLV B: type 2, len 5 -> padded to 8, value at offset 12.
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes());
+        body.extend_from_slice(&4u16.to_be_bytes());
+        body.extend_from_slice(&[0xAA; 4]);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&5u16.to_be_bytes());
+        body.extend_from_slice(&[0xBB; 5]);
+        body.extend_from_slice(&[0u8; 3]); // 4-octet padding
+
+        let mut count = 0usize;
+        let mut arr: *mut lr_ospf_e_lsa_tlv_t = core::ptr::null_mut();
+        let rc = unsafe {
+            lr_ospf_walk_e_lsa_tlvs(body.as_ptr(), body.len(), &raw mut count, &raw mut arr)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 2);
+        let tlvs = unsafe { core::slice::from_raw_parts(arr, count) };
+        assert_eq!(tlvs[0].tlv_type, 1);
+        assert_eq!(tlvs[0].length, 4);
+        assert_eq!(tlvs[0].value_offset, 4, "TLV A value sits at body offset 4");
+        assert_eq!(tlvs[1].tlv_type, 2);
+        assert_eq!(tlvs[1].length, 5);
+        assert_eq!(tlvs[1].value_offset, 12, "TLV B value sits at body offset 12");
+        // The documented contract: data + value_offset addresses the
+        // value bytes.
+        assert_eq!(&body[tlvs[0].value_offset..tlvs[0].value_offset + 4], &[0xAA; 4]);
+        assert_eq!(&body[tlvs[1].value_offset..tlvs[1].value_offset + 5], &[0xBB; 5]);
+        unsafe { lr_ospf_e_lsa_tlv_array_free(arr, count) };
+    }
+
     fn ffi_clamp_grace_period() {
         assert_eq!(lr_ospf_clamp_grace_period(60), 60);
         assert_eq!(lr_ospf_clamp_grace_period(0), 1, "below floor clamps to 1");
