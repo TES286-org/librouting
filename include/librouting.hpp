@@ -8687,6 +8687,11 @@ struct BgpLsAttrDeleter {
 };
 using BgpLsAttrHandle = std::unique_ptr<OpaqueBgpLsAttr, BgpLsAttrDeleter>;
 
+struct BgpLsTlvDeleter {
+    void operator()(lr_bgp_ls_tlv_t h) const noexcept { if (h) lr_bgp_ls_tlv_free(h); }
+};
+using BgpLsTlvHandle = std::unique_ptr<OpaqueBgpLsTlv, BgpLsTlvDeleter>;
+
 struct BgpLsTlvVecDeleter {
     void operator()(lr_bgp_ls_tlv_vec_t h) const noexcept { if (h) lr_bgp_ls_tlv_vec_free(h); }
 };
@@ -9189,19 +9194,19 @@ inline std::int32_t bgp_reconcile_as4(std::uint8_t wire_present, const std::uint
     return rc;
 }
 
-inline std::int32_t bgp_decode_tlv_stream(const std::uint8_t* data, std::uintptr_t len, std::uintptr_t* out_count, struct lr_bgp_ls_tlv_t ** out_array) {
+inline std::int32_t bgp_decode_tlv_stream(const std::uint8_t* data, std::uintptr_t len, std::uintptr_t* out_count, struct lr_bgp_ls_tlv_entry_t ** out_array) {
     std::int32_t rc = lr_bgp_decode_tlv_stream(data, len, out_count, out_array);
     if (rc < 0) throw Error(std::string("lr_bgp_decode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
     return rc;
 }
 
-inline std::int32_t bgp_encode_tlv_stream(const struct lr_bgp_ls_tlv_t* tlvs, std::uintptr_t count, struct lr_bytes_t* out) {
+inline std::int32_t bgp_encode_tlv_stream(const struct lr_bgp_ls_tlv_entry_t* tlvs, std::uintptr_t count, struct lr_bytes_t* out) {
     std::int32_t rc = lr_bgp_encode_tlv_stream(tlvs, count, out);
     if (rc < 0) throw Error(std::string("lr_bgp_encode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
     return rc;
 }
 
-inline void bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_t* arr, std::uintptr_t count) {
+inline void bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_entry_t* arr, std::uintptr_t count) {
     lr_bgp_ls_tlv_array_free(arr, count);
 }
 
@@ -9397,28 +9402,6 @@ inline std::uint8_t bgp_route_refresh_subtype_to_u8(std::uint8_t v) {
 
 inline const char* bgp_route_refresh_subtype_name(std::uint8_t v) {
     return lr_bgp_route_refresh_subtype_name(v);
-}
-
-inline struct lr_bgp_ls_tlv_t bgp_ls_tlv_new(std::uint16_t tlv_type, const std::uint8_t* value, std::uintptr_t value_len) {
-    return lr_bgp_ls_tlv_new(tlv_type, value, value_len);
-}
-
-inline std::uint16_t bgp_ls_tlv_type(struct lr_bgp_ls_tlv_t t) {
-    return lr_bgp_ls_tlv_type(t);
-}
-
-inline std::uintptr_t bgp_ls_tlv_value_len(struct lr_bgp_ls_tlv_t t) {
-    return lr_bgp_ls_tlv_value_len(t);
-}
-
-inline std::int32_t bgp_ls_tlv_value(struct lr_bgp_ls_tlv_t t, std::uint8_t* out, std::uintptr_t cap) {
-    std::int32_t rc = lr_bgp_ls_tlv_value(t, out, cap);
-    if (rc < 0) throw Error(std::string("lr_bgp_ls_tlv_value failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
-    return rc;
-}
-
-inline void bgp_ls_tlv_free(struct lr_bgp_ls_tlv_t t) {
-    lr_bgp_ls_tlv_free(t);
 }
 
 inline std::int32_t bgp_ls_decode_tlv_stream(const std::uint8_t* data, std::uintptr_t len, lr_bgp_ls_tlv_vec_t* out) {
@@ -11291,6 +11274,12 @@ inline BgpLsAttrHandle make_bgplsattr_new() {
     return BgpLsAttrHandle(p);
 }
 
+inline BgpLsTlvHandle make_bgplstlv_new(std::uint16_t tlv_type, const std::uint8_t* value, std::uintptr_t value_len) {
+    auto p = lr_bgp_ls_tlv_new(tlv_type, value, value_len);
+    if (!p) throw Error(std::string("lr_bgp_ls_tlv_new returned null"));
+    return BgpLsTlvHandle(p);
+}
+
 inline BgpOtcHandle make_bgpotc_new(std::uint32_t asn) {
     auto p = lr_bgp_otc_new(asn);
     if (!p) throw Error(std::string("lr_bgp_otc_new returned null"));
@@ -11349,6 +11338,12 @@ inline LdpDiscoveryConfigHandle make_ldpdiscoveryconfig_new(std::uint32_t local_
     auto p = lr_ldp_discovery_config_new(local_lsr_id, local_label_space);
     if (!p) throw Error(std::string("lr_ldp_discovery_config_new returned null"));
     return LdpDiscoveryConfigHandle(p);
+}
+
+inline LdpEngineConfigHandle make_ldpengineconfig_new(std::uint32_t local_id_lsr, std::uint16_t local_id_label_space, const std::uint8_t* transport_addr_v4) {
+    auto p = lr_ldp_engine_config_new(local_id_lsr, local_id_label_space, transport_addr_v4);
+    if (!p) throw Error(std::string("lr_ldp_engine_config_new returned null"));
+    return LdpEngineConfigHandle(p);
 }
 
 inline LdpLabelStoreHandle make_ldplabelstore_new() {
@@ -12145,6 +12140,20 @@ inline std::int32_t find(BgpLsAttrHandle const& h, std::uint16_t ty, std::uintpt
     return rc;
 }
 
+inline std::uint16_t type(BgpLsTlvHandle const& h) {
+    return lr_bgp_ls_tlv_type(h.get());
+}
+
+inline std::uintptr_t value_len(BgpLsTlvHandle const& h) {
+    return lr_bgp_ls_tlv_value_len(h.get());
+}
+
+inline std::int32_t value(BgpLsTlvHandle const& h, std::uint8_t* out, std::uintptr_t cap) {
+    std::int32_t rc = lr_bgp_ls_tlv_value(h.get(), out, cap);
+    if (rc < 0) throw Error(std::string("lr_bgp_ls_tlv_value failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
 inline std::int32_t bgp_ls_encode_tlv_stream(BgpLsTlvVecHandle const& h, struct lr_bytes_t* out) {
     std::int32_t rc = lr_bgp_ls_encode_tlv_stream(h.get(), out);
     if (rc < 0) throw Error(std::string("lr_bgp_ls_encode_tlv_stream failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
@@ -12155,7 +12164,7 @@ inline std::uintptr_t len(BgpLsTlvVecHandle const& h) {
     return lr_bgp_ls_tlv_vec_len(h.get());
 }
 
-inline struct lr_bgp_ls_tlv_t at(BgpLsTlvVecHandle const& h, std::uintptr_t index) {
+inline lr_bgp_ls_tlv_t at(BgpLsTlvVecHandle const& h, std::uintptr_t index) {
     return lr_bgp_ls_tlv_vec_at(h.get(), index);
 }
 
@@ -12805,6 +12814,18 @@ inline std::int32_t set_label_range(LdpEngineConfigHandle const& h, std::uint32_
     return rc;
 }
 
+inline std::int32_t add_targeted_peer(LdpEngineConfigHandle const& h, const std::uint8_t* addr_v4, const std::uint8_t* addr_v6) {
+    std::int32_t rc = lr_ldp_engine_config_add_targeted_peer(h.get(), addr_v4, addr_v6);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_add_targeted_peer failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t add_interface_address(LdpEngineConfigHandle const& h, const std::uint8_t* addr_v4, const std::uint8_t* addr_v6) {
+    std::int32_t rc = lr_ldp_engine_config_add_interface_address(h.get(), addr_v4, addr_v6);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_config_add_interface_address failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
 inline std::int32_t add_reserved_label(LdpEngineConfigHandle const& h, std::uint32_t label) {
     std::int32_t rc = lr_ldp_engine_config_add_reserved_label(h.get(), label);
     if (rc < 0) throw Error(std::string("lr_ldp_engine_config_add_reserved_label failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
@@ -12813,6 +12834,12 @@ inline std::int32_t add_reserved_label(LdpEngineConfigHandle const& h, std::uint
 
 inline lr_ldp_engine_t ldp_engine_new(LdpEngineConfigHandle const& h) {
     return lr_ldp_engine_new(h.get());
+}
+
+inline std::int32_t feed_udp(LdpEngineHandle const& h, std::uint64_t now_ms, const std::uint8_t* from_v4, const std::uint8_t* from_v6, const std::uint8_t* data, std::uintptr_t len) {
+    std::int32_t rc = lr_ldp_engine_feed_udp(h.get(), now_ms, from_v4, from_v6, data, len);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_feed_udp failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
 }
 
 inline std::int32_t on_connected(LdpEngineHandle const& h, std::uint64_t now_ms, std::uint64_t conn, std::uint32_t peer_lsr, std::uint16_t peer_label_space) {
@@ -12824,6 +12851,12 @@ inline std::int32_t on_connected(LdpEngineHandle const& h, std::uint64_t now_ms,
 inline std::int32_t on_connect_failed(LdpEngineHandle const& h, std::uint32_t peer_lsr, std::uint16_t peer_label_space) {
     std::int32_t rc = lr_ldp_engine_on_connect_failed(h.get(), peer_lsr, peer_label_space);
     if (rc < 0) throw Error(std::string("lr_ldp_engine_on_connect_failed failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t on_accepted(LdpEngineHandle const& h, std::uint64_t conn, const std::uint8_t* local_addr_v4, const std::uint8_t* local_addr_v6) {
+    std::int32_t rc = lr_ldp_engine_on_accepted(h.get(), conn, local_addr_v4, local_addr_v6);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_on_accepted failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
     return rc;
 }
 
@@ -12842,6 +12875,24 @@ inline std::int32_t on_closed(LdpEngineHandle const& h, std::uint64_t now_ms, st
 inline std::int32_t tick(LdpEngineHandle const& h, std::uint64_t now_ms) {
     std::int32_t rc = lr_ldp_engine_tick(h.get(), now_ms);
     if (rc < 0) throw Error(std::string("lr_ldp_engine_tick failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t advertise_mapping(LdpEngineHandle const& h, const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint32_t label_value) {
+    std::int32_t rc = lr_ldp_engine_advertise_mapping(h.get(), prefix_v4, prefix_v6, prefix_len, label_value);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_advertise_mapping failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t withdraw_mapping(LdpEngineHandle const& h, const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len) {
+    std::int32_t rc = lr_ldp_engine_withdraw_mapping(h.get(), prefix_v4, prefix_v6, prefix_len);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_withdraw_mapping failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
+inline std::int32_t send_link_hello(LdpEngineHandle const& h, const std::uint8_t* dest_v4, const std::uint8_t* dest_v6) {
+    std::int32_t rc = lr_ldp_engine_send_link_hello(h.get(), dest_v4, dest_v6);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_send_link_hello failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
     return rc;
 }
 
@@ -12869,8 +12920,20 @@ inline std::int32_t drain_tcp_all(LdpEngineHandle const& h, struct lr_bytes_t* o
     return rc;
 }
 
+inline std::int32_t transit_label_of(LdpEngineHandle const& h, const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint32_t* out_label) {
+    std::int32_t rc = lr_ldp_engine_transit_label_of(h.get(), prefix_v4, prefix_v6, prefix_len, out_label);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_transit_label_of failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
 inline std::uintptr_t transit_label_count(LdpEngineHandle const& h) {
     return lr_ldp_engine_transit_label_count(h.get());
+}
+
+inline std::int32_t transit_next_hop(LdpEngineHandle const& h, const std::uint8_t* prefix_v4, const std::uint8_t* prefix_v6, std::uint8_t prefix_len, std::uint32_t* out_nh_lsr, std::uint16_t* out_nh_label_space, std::uint32_t* out_out_label) {
+    std::int32_t rc = lr_ldp_engine_transit_next_hop(h.get(), prefix_v4, prefix_v6, prefix_len, out_nh_lsr, out_nh_label_space, out_out_label);
+    if (rc < 0) throw Error(std::string("lr_ldp_engine_transit_next_hop failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
 }
 
 inline std::uintptr_t adjacency_count(LdpEngineHandle const& h) {

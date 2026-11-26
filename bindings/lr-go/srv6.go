@@ -738,6 +738,7 @@ func (s *SRv6Srh) Tlvs() ([]byte, error) {
 	if rc != 0 {
 		return nil, fmt.Errorf("lr_srv6_srh_tlvs: %s (rc=%d)", LastError(), int(rc))
 	}
+	defer C.lr_bytes_free(&out)
 	return copyBytes(&out), nil
 }
 
@@ -752,6 +753,7 @@ func (s *SRv6Srh) Encode() ([]byte, error) {
 		}
 		return nil, fmt.Errorf("lr_srv6_srh_encode: %s (rc=%d)", LastError(), int(rc))
 	}
+	defer C.lr_bytes_free(&out)
 	return copyBytes(&out), nil
 }
 

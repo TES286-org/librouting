@@ -5428,11 +5428,11 @@
         },
         {
           "name": "out_array",
-          "type": "struct lr_bgp_ls_tlv_t **",
+          "type": "struct lr_bgp_ls_tlv_entry_t **",
           "is_const": false,
           "is_ptr": true,
           "is_struct": true,
-          "pointee": "lr_bgp_ls_tlv_t"
+          "pointee": "lr_bgp_ls_tlv_entry_t"
         }
       ]
     },
@@ -5442,11 +5442,11 @@
       "params": [
         {
           "name": "tlvs",
-          "type": "const struct lr_bgp_ls_tlv_t *",
+          "type": "const struct lr_bgp_ls_tlv_entry_t *",
           "is_const": true,
           "is_ptr": true,
           "is_struct": true,
-          "pointee": "lr_bgp_ls_tlv_t"
+          "pointee": "lr_bgp_ls_tlv_entry_t"
         },
         {
           "name": "count",
@@ -5471,11 +5471,11 @@
       "params": [
         {
           "name": "arr",
-          "type": "struct lr_bgp_ls_tlv_t *",
+          "type": "struct lr_bgp_ls_tlv_entry_t *",
           "is_const": false,
           "is_ptr": true,
           "is_struct": true,
-          "pointee": "lr_bgp_ls_tlv_t"
+          "pointee": "lr_bgp_ls_tlv_entry_t"
         },
         {
           "name": "count",
@@ -6479,7 +6479,7 @@
     },
     {
       "name": "lr_bgp_ls_tlv_new",
-      "return_type": "struct lr_bgp_ls_tlv_t",
+      "return_type": "lr_bgp_ls_tlv_t",
       "params": [
         {
           "name": "tlv_type",
@@ -6511,10 +6511,10 @@
       "params": [
         {
           "name": "t",
-          "type": "struct lr_bgp_ls_tlv_t",
+          "type": "lr_bgp_ls_tlv_t",
           "is_const": false,
           "is_ptr": false,
-          "is_struct": true
+          "is_struct": false
         }
       ]
     },
@@ -6524,10 +6524,10 @@
       "params": [
         {
           "name": "t",
-          "type": "struct lr_bgp_ls_tlv_t",
+          "type": "lr_bgp_ls_tlv_t",
           "is_const": false,
           "is_ptr": false,
-          "is_struct": true
+          "is_struct": false
         }
       ]
     },
@@ -6537,10 +6537,10 @@
       "params": [
         {
           "name": "t",
-          "type": "struct lr_bgp_ls_tlv_t",
+          "type": "lr_bgp_ls_tlv_t",
           "is_const": false,
           "is_ptr": false,
-          "is_struct": true
+          "is_struct": false
         },
         {
           "name": "out",
@@ -6565,10 +6565,10 @@
       "params": [
         {
           "name": "t",
-          "type": "struct lr_bgp_ls_tlv_t",
+          "type": "lr_bgp_ls_tlv_t",
           "is_const": false,
           "is_ptr": false,
-          "is_struct": true
+          "is_struct": false
         }
       ]
     },
@@ -6637,7 +6637,7 @@
     },
     {
       "name": "lr_bgp_ls_tlv_vec_at",
-      "return_type": "struct lr_bgp_ls_tlv_t",
+      "return_type": "lr_bgp_ls_tlv_t",
       "params": [
         {
           "name": "vec",
@@ -16755,6 +16755,34 @@
       ]
     },
     {
+      "name": "lr_ldp_engine_config_new",
+      "return_type": "lr_ldp_engine_config_t",
+      "params": [
+        {
+          "name": "local_id_lsr",
+          "type": "uint32_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "local_id_label_space",
+          "type": "uint16_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "transport_addr_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        }
+      ]
+    },
+    {
       "name": "lr_ldp_engine_config_free",
       "return_type": "void",
       "params": [
@@ -16983,6 +17011,64 @@
       ]
     },
     {
+      "name": "lr_ldp_engine_config_add_targeted_peer",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "c",
+          "type": "lr_ldp_engine_config_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "addr_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "addr_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "lr_ldp_engine_config_add_interface_address",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "c",
+          "type": "lr_ldp_engine_config_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "addr_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "addr_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        }
+      ]
+    },
+    {
       "name": "lr_ldp_engine_config_add_reserved_label",
       "return_type": "int32_t",
       "params": [
@@ -17022,6 +17108,57 @@
         {
           "name": "e",
           "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ldp_engine_feed_udp",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "e",
+          "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "now_ms",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "from_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "from_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "data",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "len",
+          "type": "uintptr_t",
           "is_const": false,
           "is_ptr": false,
           "is_struct": false
@@ -17093,6 +17230,42 @@
           "is_const": false,
           "is_ptr": false,
           "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ldp_engine_on_accepted",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "e",
+          "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "conn",
+          "type": "uint64_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "local_addr_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "local_addr_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
         }
       ]
     },
@@ -17182,6 +17355,114 @@
           "is_const": false,
           "is_ptr": false,
           "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ldp_engine_advertise_mapping",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "e",
+          "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "label_value",
+          "type": "uint32_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ldp_engine_withdraw_mapping",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "e",
+          "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ldp_engine_send_link_hello",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "e",
+          "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "dest_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "dest_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
         }
       ]
     },
@@ -17290,6 +17571,50 @@
       ]
     },
     {
+      "name": "lr_ldp_engine_transit_label_of",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "e",
+          "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out_label",
+          "type": "uint32_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint32_t"
+        }
+      ]
+    },
+    {
       "name": "lr_ldp_engine_transit_label_count",
       "return_type": "uintptr_t",
       "params": [
@@ -17299,6 +17624,66 @@
           "is_const": false,
           "is_ptr": false,
           "is_struct": false
+        }
+      ]
+    },
+    {
+      "name": "lr_ldp_engine_transit_next_hop",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "e",
+          "type": "lr_ldp_engine_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "prefix_v4",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_v6",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "prefix_len",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "out_nh_lsr",
+          "type": "uint32_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint32_t"
+        },
+        {
+          "name": "out_nh_label_space",
+          "type": "uint16_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint16_t"
+        },
+        {
+          "name": "out_out_label",
+          "type": "uint32_t *",
+          "is_const": false,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint32_t"
         }
       ]
     },
@@ -38868,6 +39253,10 @@
       "c_struct": "OpaqueBgpExtCommunity",
       "handle_name": "lr_bgp_ext_community_t"
     },
+    "lr_bgp_ls_tlv_t": {
+      "c_struct": "OpaqueBgpLsTlv",
+      "handle_name": "lr_bgp_ls_tlv_t"
+    },
     "lr_bgp_ls_tlv_vec_t": {
       "c_struct": "OpaqueBgpLsTlvVec",
       "handle_name": "lr_bgp_ls_tlv_vec_t"
@@ -39333,8 +39722,8 @@
         }
       ]
     },
-    "lr_bgp_ls_tlv_t": {
-      "c_struct": "lr_bgp_ls_tlv_t",
+    "lr_bgp_ls_tlv_entry_t": {
+      "c_struct": "lr_bgp_ls_tlv_entry_t",
       "fields": [
         {
           "name": "tlv_type",
@@ -41898,10 +42287,6 @@
       "value": "6"
     },
     {
-      "name": "LR_BMP_VERSION",
-      "value": "VERSION"
-    },
-    {
       "name": "LR_BMP_PEER_FLAG_V",
       "value": "128"
     },
@@ -41912,6 +42297,18 @@
     {
       "name": "LR_BMP_PEER_FLAG_A",
       "value": "32"
+    },
+    {
+      "name": "LR_BMP_PEER_TYPE_GLOBAL",
+      "value": "0"
+    },
+    {
+      "name": "LR_BMP_PEER_TYPE_RD",
+      "value": "1"
+    },
+    {
+      "name": "LR_BMP_PEER_TYPE_LOCAL",
+      "value": "2"
     },
     {
       "name": "LR_BMP_PEER_DOWN_LOCAL_CLOSE",
@@ -41932,6 +42329,38 @@
     {
       "name": "LR_BMP_PEER_DOWN_ADMIN_RESET",
       "value": "5"
+    },
+    {
+      "name": "LR_BMP_MSG_ROUTE_MONITORING",
+      "value": "0"
+    },
+    {
+      "name": "LR_BMP_MSG_STATISTICS_REPORT",
+      "value": "1"
+    },
+    {
+      "name": "LR_BMP_MSG_PEER_DOWN",
+      "value": "2"
+    },
+    {
+      "name": "LR_BMP_MSG_PEER_UP",
+      "value": "3"
+    },
+    {
+      "name": "LR_BMP_MSG_INITIATION",
+      "value": "4"
+    },
+    {
+      "name": "LR_BMP_MSG_TERMINATION",
+      "value": "5"
+    },
+    {
+      "name": "LR_BMP_MSG_ROUTE_MIRRORING",
+      "value": "6"
+    },
+    {
+      "name": "LR_BMP_VERSION",
+      "value": "3"
     },
     {
       "name": "LR_BGP_CAP_MULTIPROTOCOL_EXTENSIONS",
@@ -41999,6 +42428,14 @@
     },
     {
       "name": "LR_BGP_RR_SUBTYPE_EORR",
+      "value": "2"
+    },
+    {
+      "name": "LR_BABEL_MAGIC",
+      "value": "42"
+    },
+    {
+      "name": "LR_BABEL_VERSION",
       "value": "2"
     },
     {
@@ -42611,11 +43048,15 @@
     },
     {
       "name": "LR_LDP_VERSION",
-      "value": "LDP_VERSION"
+      "value": "1"
     },
     {
       "name": "LR_LDP_PORT",
-      "value": "LDP_PORT"
+      "value": "646"
+    },
+    {
+      "name": "LR_LDP_MSG_LABEL_ABORT",
+      "value": "1028"
     },
     {
       "name": "LR_LDP_MSG_NOTIFICATION",
@@ -42660,10 +43101,6 @@
     {
       "name": "LR_LDP_MSG_LABEL_RELEASE",
       "value": "1027"
-    },
-    {
-      "name": "LR_LDP_MSG_LABEL_ABORT",
-      "value": "1028"
     },
     {
       "name": "LR_LDP_MSG_LABEL_ABORT_REQUEST",
@@ -42742,70 +43179,6 @@
       "value": "1537"
     },
     {
-      "name": "LR_LDP_STATUS_SUCCESS",
-      "value": "0"
-    },
-    {
-      "name": "LR_LDP_STATUS_BAD_LDP_IDENTIFIER",
-      "value": "1"
-    },
-    {
-      "name": "LR_LDP_STATUS_BAD_PROTOCOL_VERSION",
-      "value": "2"
-    },
-    {
-      "name": "LR_LDP_STATUS_BAD_PDU_LENGTH",
-      "value": "3"
-    },
-    {
-      "name": "LR_LDP_STATUS_UNKNOWN_MESSAGE_TYPE",
-      "value": "4"
-    },
-    {
-      "name": "LR_LDP_STATUS_BAD_MESSAGE_LENGTH",
-      "value": "5"
-    },
-    {
-      "name": "LR_LDP_STATUS_UNKNOWN_TLV",
-      "value": "6"
-    },
-    {
-      "name": "LR_LDP_STATUS_BAD_TLV_LENGTH",
-      "value": "7"
-    },
-    {
-      "name": "LR_LDP_STATUS_MALFORMED_TLV_VALUE",
-      "value": "8"
-    },
-    {
-      "name": "LR_LDP_STATUS_HOLD_TIMER_EXPIRED",
-      "value": "9"
-    },
-    {
-      "name": "LR_LDP_STATUS_KEEPALIVE_TIMER_EXPIRED",
-      "value": "10"
-    },
-    {
-      "name": "LR_LDP_STATUS_SHUTDOWN",
-      "value": "11"
-    },
-    {
-      "name": "LR_LDP_STATUS_LOOP_DETECTED",
-      "value": "12"
-    },
-    {
-      "name": "LR_LDP_STATUS_TRANSPORT_CONNECTION_MISMATCH",
-      "value": "13"
-    },
-    {
-      "name": "LR_LDP_STATUS_DUAL_STACK_NONCOMPLIANCE",
-      "value": "14"
-    },
-    {
-      "name": "LR_LDP_STATUS_KEEP_ALIVE_MISSED",
-      "value": "15"
-    },
-    {
       "name": "LR_LDP_DISCOVERY_KIND_LINK",
       "value": "0"
     },
@@ -42820,6 +43193,10 @@
     {
       "name": "LR_LDP_ADVERTISEMENT_DOWNSTREAM_ON_DEMAND",
       "value": "2"
+    },
+    {
+      "name": "LR_LDP_ENGINE_EVENT_TEXT_MAX",
+      "value": "128"
     },
     {
       "name": "LR_LDP_SESSION_STATE_NON_EXISTENT",
@@ -42842,10 +43219,6 @@
       "value": "5"
     },
     {
-      "name": "LR_LDP_ENGINE_EVENT_TEXT_MAX",
-      "value": "128"
-    },
-    {
       "name": "LR_LDP_LABEL_IPV4_EXPLICIT_NULL",
       "value": "0"
     },
@@ -42860,6 +43233,54 @@
     {
       "name": "LR_LDP_LABEL_IMPLICIT_NULL",
       "value": "3"
+    },
+    {
+      "name": "LR_LDP_STATUS_SUCCESS",
+      "value": "0"
+    },
+    {
+      "name": "LR_LDP_STATUS_BAD_LDP_IDENTIFIER",
+      "value": "2147483649"
+    },
+    {
+      "name": "LR_LDP_STATUS_BAD_PROTOCOL_VERSION",
+      "value": "2147483650"
+    },
+    {
+      "name": "LR_LDP_STATUS_BAD_PDU_LENGTH",
+      "value": "2147483651"
+    },
+    {
+      "name": "LR_LDP_STATUS_UNKNOWN_MESSAGE_TYPE",
+      "value": "2147483652"
+    },
+    {
+      "name": "LR_LDP_STATUS_BAD_MESSAGE_LENGTH",
+      "value": "2147483653"
+    },
+    {
+      "name": "LR_LDP_STATUS_UNKNOWN_TLV",
+      "value": "2147483654"
+    },
+    {
+      "name": "LR_LDP_STATUS_BAD_TLV_LENGTH",
+      "value": "2147483655"
+    },
+    {
+      "name": "LR_LDP_STATUS_MALFORMED_TLV_VALUE",
+      "value": "2147483656"
+    },
+    {
+      "name": "LR_LDP_STATUS_HOLD_TIMER_EXPIRED",
+      "value": "2147483657"
+    },
+    {
+      "name": "LR_LDP_STATUS_SHUTDOWN",
+      "value": "2147483658"
+    },
+    {
+      "name": "LR_LDP_STATUS_LOOP_DETECTED",
+      "value": "2147483659"
     },
     {
       "name": "LR_LDP_STATUS_UNKNOWN_FEC",
@@ -42880,6 +43301,18 @@
     {
       "name": "LR_LDP_STATUS_SESSION_REJECTED",
       "value": "2147483664"
+    },
+    {
+      "name": "LR_LDP_STATUS_TRANSPORT_CONNECTION_MISMATCH",
+      "value": "2147483665"
+    },
+    {
+      "name": "LR_LDP_STATUS_KEEPALIVE_TIMER_EXPIRED",
+      "value": "2147483666"
+    },
+    {
+      "name": "LR_LDP_STATUS_DUAL_STACK_NONCOMPLIANCE",
+      "value": "2147483667"
     },
     {
       "name": "LR_LDP_STATUS_LABEL_WITHDRAW",
@@ -43090,6 +43523,34 @@
       "value": "7"
     },
     {
+      "name": "LR_OSPF_VERSION_V2",
+      "value": "2"
+    },
+    {
+      "name": "LR_OSPF_VERSION_V3",
+      "value": "3"
+    },
+    {
+      "name": "LR_OSPF_PACKET_HELLO",
+      "value": "1"
+    },
+    {
+      "name": "LR_OSPF_PACKET_DB_DESC",
+      "value": "2"
+    },
+    {
+      "name": "LR_OSPF_PACKET_LS_REQUEST",
+      "value": "3"
+    },
+    {
+      "name": "LR_OSPF_PACKET_LS_UPDATE",
+      "value": "4"
+    },
+    {
+      "name": "LR_OSPF_PACKET_LS_ACK",
+      "value": "5"
+    },
+    {
       "name": "LR_OSPF_BODY_HELLO",
       "value": "1"
     },
@@ -43114,8 +43575,16 @@
       "value": "6"
     },
     {
-      "name": "LR_OSPF_NSSA_N_P_BIT",
-      "value": "8"
+      "name": "LR_OSPF_AU_TYPE_NULL",
+      "value": "0"
+    },
+    {
+      "name": "LR_OSPF_AU_TYPE_SIMPLE_PASSWORD",
+      "value": "1"
+    },
+    {
+      "name": "LR_OSPF_AU_TYPE_MD5",
+      "value": "2"
     },
     {
       "name": "LR_OSPF_CRYPTO_ALG_HMAC_SHA1",
@@ -43127,7 +43596,7 @@
     },
     {
       "name": "LR_OSPF_V3_AUTH_TYPE_HMAC",
-      "value": "V3_AUTH_TYPE_HMAC"
+      "value": "1"
     },
     {
       "name": "LR_OSPF_LSA_TYPE_V2_ROUTER",
@@ -43328,6 +43797,10 @@
     {
       "name": "LR_OSPF_LS_REFRESH_TIME_SECS",
       "value": "1800"
+    },
+    {
+      "name": "LR_OSPF_NSSA_N_P_BIT",
+      "value": "8"
     },
     {
       "name": "LR_OSPF_OPAQUE_TYPE_GRACE",
@@ -51224,11 +51697,11 @@
         "params": [
           {
             "name": "arr",
-            "type": "struct lr_bgp_ls_tlv_t *",
+            "type": "struct lr_bgp_ls_tlv_entry_t *",
             "is_const": false,
             "is_ptr": true,
             "is_struct": true,
-            "pointee": "lr_bgp_ls_tlv_t"
+            "pointee": "lr_bgp_ls_tlv_entry_t"
           },
           {
             "name": "count",
@@ -51241,7 +51714,7 @@
       },
       {
         "name": "lr_bgp_ls_tlv_new",
-        "return_type": "struct lr_bgp_ls_tlv_t",
+        "return_type": "lr_bgp_ls_tlv_t",
         "params": [
           {
             "name": "tlv_type",
@@ -51273,10 +51746,10 @@
         "params": [
           {
             "name": "t",
-            "type": "struct lr_bgp_ls_tlv_t",
+            "type": "lr_bgp_ls_tlv_t",
             "is_const": false,
             "is_ptr": false,
-            "is_struct": true
+            "is_struct": false
           }
         ]
       },
@@ -51286,10 +51759,10 @@
         "params": [
           {
             "name": "t",
-            "type": "struct lr_bgp_ls_tlv_t",
+            "type": "lr_bgp_ls_tlv_t",
             "is_const": false,
             "is_ptr": false,
-            "is_struct": true
+            "is_struct": false
           }
         ]
       },
@@ -51299,10 +51772,10 @@
         "params": [
           {
             "name": "t",
-            "type": "struct lr_bgp_ls_tlv_t",
+            "type": "lr_bgp_ls_tlv_t",
             "is_const": false,
             "is_ptr": false,
-            "is_struct": true
+            "is_struct": false
           },
           {
             "name": "out",
@@ -51327,10 +51800,10 @@
         "params": [
           {
             "name": "t",
-            "type": "struct lr_bgp_ls_tlv_t",
+            "type": "lr_bgp_ls_tlv_t",
             "is_const": false,
             "is_ptr": false,
-            "is_struct": true
+            "is_struct": false
           }
         ]
       }
@@ -53519,7 +53992,7 @@
       },
       {
         "name": "lr_bgp_ls_tlv_vec_at",
-        "return_type": "struct lr_bgp_ls_tlv_t",
+        "return_type": "lr_bgp_ls_tlv_t",
         "params": [
           {
             "name": "vec",
@@ -65665,6 +66138,34 @@
     ],
     "lr_ldp_engine_config_t": [
       {
+        "name": "lr_ldp_engine_config_new",
+        "return_type": "lr_ldp_engine_config_t",
+        "params": [
+          {
+            "name": "local_id_lsr",
+            "type": "uint32_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "local_id_label_space",
+            "type": "uint16_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "transport_addr_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          }
+        ]
+      },
+      {
         "name": "lr_ldp_engine_config_free",
         "return_type": "void",
         "params": [
@@ -65893,6 +66394,64 @@
         ]
       },
       {
+        "name": "lr_ldp_engine_config_add_targeted_peer",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "c",
+            "type": "lr_ldp_engine_config_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "addr_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "addr_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_ldp_engine_config_add_interface_address",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "c",
+            "type": "lr_ldp_engine_config_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "addr_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "addr_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          }
+        ]
+      },
+      {
         "name": "lr_ldp_engine_config_add_reserved_label",
         "return_type": "int32_t",
         "params": [
@@ -65934,6 +66493,57 @@
           {
             "name": "e",
             "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ldp_engine_feed_udp",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "e",
+            "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "now_ms",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "from_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "from_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "data",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "len",
+            "type": "uintptr_t",
             "is_const": false,
             "is_ptr": false,
             "is_struct": false
@@ -66005,6 +66615,42 @@
             "is_const": false,
             "is_ptr": false,
             "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ldp_engine_on_accepted",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "e",
+            "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "conn",
+            "type": "uint64_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "local_addr_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "local_addr_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
           }
         ]
       },
@@ -66094,6 +66740,114 @@
             "is_const": false,
             "is_ptr": false,
             "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ldp_engine_advertise_mapping",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "e",
+            "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "label_value",
+            "type": "uint32_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ldp_engine_withdraw_mapping",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "e",
+            "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ldp_engine_send_link_hello",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "e",
+            "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "dest_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "dest_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
           }
         ]
       },
@@ -66202,6 +66956,50 @@
         ]
       },
       {
+        "name": "lr_ldp_engine_transit_label_of",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "e",
+            "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out_label",
+            "type": "uint32_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint32_t"
+          }
+        ]
+      },
+      {
         "name": "lr_ldp_engine_transit_label_count",
         "return_type": "uintptr_t",
         "params": [
@@ -66211,6 +67009,66 @@
             "is_const": false,
             "is_ptr": false,
             "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_ldp_engine_transit_next_hop",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "e",
+            "type": "lr_ldp_engine_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "prefix_v4",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_v6",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "prefix_len",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "out_nh_lsr",
+            "type": "uint32_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint32_t"
+          },
+          {
+            "name": "out_nh_label_space",
+            "type": "uint16_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint16_t"
+          },
+          {
+            "name": "out_out_label",
+            "type": "uint32_t *",
+            "is_const": false,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint32_t"
           }
         ]
       },
@@ -78157,11 +79015,11 @@
         },
         {
           "name": "out_array",
-          "type": "struct lr_bgp_ls_tlv_t **",
+          "type": "struct lr_bgp_ls_tlv_entry_t **",
           "is_const": false,
           "is_ptr": true,
           "is_struct": true,
-          "pointee": "lr_bgp_ls_tlv_t"
+          "pointee": "lr_bgp_ls_tlv_entry_t"
         }
       ]
     },
@@ -78171,11 +79029,11 @@
       "params": [
         {
           "name": "tlvs",
-          "type": "const struct lr_bgp_ls_tlv_t *",
+          "type": "const struct lr_bgp_ls_tlv_entry_t *",
           "is_const": true,
           "is_ptr": true,
           "is_struct": true,
-          "pointee": "lr_bgp_ls_tlv_t"
+          "pointee": "lr_bgp_ls_tlv_entry_t"
         },
         {
           "name": "count",
