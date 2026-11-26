@@ -3530,6 +3530,26 @@ fn parse_bgp_role_value(value: &str) -> Result<(String, bool), String> {
     Ok((canonical, strict))
 }
 
+/// Parse a max-prefix enforcement action (BIRD `max prefix`, FRR
+/// `maximum-prefix`) for the `[bgp] max_prefix_action`,
+/// `peer.max_prefix_action` and `--max-prefix-action` surfaces:
+/// `warn` only logs, `teardown` closes the session with the RFC 4486
+/// §3 Cease/1 NOTIFICATION, `restart` is teardown plus a
+/// re-establishment cooldown. The parser is strict — a typo'd action
+/// silently downgraded to `warn` would strip the protection the
+/// operator asked for (FRR rejects an unknown action word the same
+/// way).
+fn parse_max_prefix_action(value: &str) -> Result<lr_bgp::MaxPrefixAction, String> {
+    match value.trim() {
+        "warn" => Ok(lr_bgp::MaxPrefixAction::Warn),
+        "teardown" => Ok(lr_bgp::MaxPrefixAction::Teardown),
+        "restart" => Ok(lr_bgp::MaxPrefixAction::Restart),
+        other => Err(format!(
+            "bad max_prefix_action '{other}' (expected 'warn', 'teardown' or 'restart')"
+        )),
+    }
+}
+
 /// Parse a Software Version capability encoding
 /// (draft-abraitis-bgp-version-capability-18) for the `[bgp]
 /// software_version_encoding` and `peer.software_version_encoding`
@@ -4244,7 +4264,7 @@ pub(crate) fn apply_config_key(
             cfg.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);
         }
         "bgp.max_prefix_action" => {
-            cfg.max_prefix_action = value.to_string();
+            cfg.max_prefix_action = parse_max_prefix_action(value)?.name().to_string();
         }
         "bgp.max_prefix_threshold" => {
             cfg.max_prefix_threshold = value.parse().unwrap_or(75);
@@ -6415,7 +6435,9 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         "max_prefixes" => {
             peer.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);
         }
-        "max_prefix_action" => peer.max_prefix_action = Some(value.to_string()),
+        "max_prefix_action" => {
+            peer.max_prefix_action = Some(parse_max_prefix_action(value)?.name().to_string());
+        }
         "max_prefix_threshold" => {
             peer.max_prefix_threshold = Some(value.parse().map_err(|_| "bad max_prefix_threshold")?)
         }
@@ -6809,7 +6831,13 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 i += 2;
             }
             "--max-prefix-action" if i + 1 < args.len() => {
-                cfg.max_prefix_action = args[i + 1].clone();
+                match parse_max_prefix_action(&args[i + 1]) {
+                    Ok(action) => cfg.max_prefix_action = action.name().to_string(),
+                    Err(e) => {
+                        eprintln!("bad --max-prefix-action: {e}");
+                        return Err(ExitCode::from(2));
+                    }
+                }
                 i += 2;
             }
             "--max-prefix-threshold" if i + 1 < args.len() => {

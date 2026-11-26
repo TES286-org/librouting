@@ -3452,6 +3452,41 @@ fn software_version_encoding_rejects_unknown_spellings() {
     }
 }
 
+/// A typo'd `max_prefix_action` is a hard error, not a silent
+/// downgrade to `warn` — the max-prefix ceiling is a protection the
+/// operator asked for, and FRR rejects an unknown action word the
+/// same way. Regression: the parser used to store the raw string and
+/// `build_session_config` matched only the three legal spellings,
+/// falling through to `warn` for everything else.
+#[test]
+fn max_prefix_action_rejects_unknown_spellings() {
+    for bad in ["shutdown", "teardwon", "warning-only", ""] {
+        let mut cfg = DaemonConfig::with_defaults();
+        let text = format!("[bgp]\nlocal_as = 64512\nmax_prefix_action = \"{bad}\"\n");
+        let err = parse_toml_subset(&text, &mut cfg).unwrap_err();
+        assert!(
+            err.contains("max_prefix_action"),
+            "expected the key name in {err:?}"
+        );
+    }
+    // The three legal spellings parse (and normalise to the enum's
+    // own names).
+    for good in ["warn", "teardown", "restart"] {
+        let mut cfg = DaemonConfig::with_defaults();
+        let text = format!("[bgp]\nlocal_as = 64512\nmax_prefix_action = \"{good}\"\n");
+        parse_toml_subset(&text, &mut cfg).unwrap();
+        assert_eq!(cfg.max_prefix_action, good);
+    }
+    // The per-peer key follows the same rule.
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\n\n[[peer]]\nremote = \"192.0.2.2:179\"\n\
+         peer_as = 64513\nmax_prefix_action = \"explode\"\n",
+        &mut cfg,
+    )
+    .unwrap_err();
+}
+
 /// draft-ietf-idr-addpath-paths-limit-00 §4/§5: the enforcement
 /// action and the still-TBD Cease subcode parse globally and per
 /// peer, with the per-peer key overriding the router-wide one.
