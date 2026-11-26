@@ -65,6 +65,33 @@ fn update_add_path_roundtrip() {
     );
 }
 
+/// RFC 7911 §4.3: an Add-Path entry is `<path-id:4, prefix-len:1,
+/// prefix>`. An NLRI section that ends with the 4-octet path-id (no
+/// prefix-length byte after it) is truncated and must be rejected —
+/// the decoder may never index one byte past the buffer.
+#[test]
+fn legacy_nlri_rejects_trailing_add_path_path_id() {
+    assert!(
+        decode_nlri_set(&[0, 0, 0, 1], true).is_err(),
+        "path-id without a following prefix-length byte must be rejected"
+    );
+    // The same section with the length byte and prefix decodes.
+    let ok = decode_nlri_set(&[0, 0, 0, 1, 24, 203, 0, 113], true).unwrap();
+    assert_eq!(ok.len(), 1);
+    assert_eq!(ok[0].path_id, 1);
+    assert_eq!(ok[0].prefix, Prefix::new_v4([203, 0, 113, 0], 24));
+    // The trailing shape can also appear after a well-formed entry.
+    assert!(
+        decode_nlri_set(&[24, 203, 0, 113, 0, 0, 0, 2], true).is_err(),
+        "a second entry reduced to a bare path-id must be rejected"
+    );
+    // Without Add-Path the guard is inert — a well-formed section
+    // decodes exactly as before the fix.
+    let plain = decode_nlri_set(&[24, 203, 0, 113], false).unwrap();
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0].prefix, Prefix::new_v4([203, 0, 113, 0], 24));
+}
+
 #[test]
 fn keepalive_roundtrip() {
     let m = BgpMessage::Keepalive(Keepalive);

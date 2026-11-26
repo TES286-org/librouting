@@ -457,8 +457,11 @@ fn decode_nlri_set(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        // With Add-Path the entry needs the 4-byte path-id *plus* the
+        // prefix-length byte; a trailing 4-byte path-id with no length
+        // byte is a truncated entry, not an index-one-past-the-end read.
         let path_id = if add_path {
-            if i + 4 > bytes.len() {
+            if i + 5 > bytes.len() {
                 return Err(format!("truncated NLRI at offset {}", i));
             }
             let id = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
