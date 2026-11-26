@@ -1302,11 +1302,22 @@ int main() {
         check(srv6_srh_flags(srh) == 0x20, "SRH flags = 0x20 (OAM)");
         check(srv6_srh_tag(srh) == 0x1234, "SRH tag = 0x1234");
 
-        // first_segment / current_destination.
+        // first_segment / current_destination. The builder takes the
+        // segments in visit order (index 0 = first visited); the wire
+        // order is the reverse (RFC 8754 §2 — Segment List[0] carries
+        // the last segment of the SR Policy). `current_destination` is
+        // the WIRE Segment List[Segments Left] (RFC 8754 §4.3.1 S16);
+        // at the source (SL = Last Entry) that is the first segment
+        // visited — the outer DA at the sender (§4.1) — so it matches
+        // first_segment here, and seg2 is what it becomes at the final
+        // hop (SL = 0 names wire Segment List[0] = the last segment).
         check(srv6_srh_first_segment(srh) == seg1_octets,
-              "SRH first_segment = Segment List[0]");
-        check(srv6_srh_current_destination(srh) == seg2_octets,
-              "SRH current_destination = Segment List[Segments Left]");
+              "SRH first_segment = first visited (wire Segment List[Last Entry])");
+        check(srv6_srh_current_destination(srh) == seg1_octets,
+              "SRH current_destination = wire Segment List[Segments Left]");
+        auto srh_last_hop = make_srv6_srh_with_segments_left(segs, 0);
+        check(srv6_srh_current_destination(srh_last_hop) == seg2_octets,
+              "SRH current_destination at SL=0 = wire Segment List[0] (final segment)");
 
         // Encode produces a 40-byte SRH (8 + 2 * 16).
         auto wire = srv6_srh_encode(srh);

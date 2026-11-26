@@ -91,6 +91,48 @@ fn seg6_route_build_request_shape() {
 }
 
 #[test]
+fn seg6_route_srh_payload_matches_iproute2_wire_order() {
+    // Byte-level iproute2/kernel parity for the SEG6_IPTUNNEL_SRH
+    // payload (issue #101, RFC 8754 §2). `ip -6 route add ...
+    // encap seg6 mode encap segs fcbb:bb00::1,fcbb:bb01::1` has
+    // iproute2's parse_encap_seg6 REVERSE the user-given visit order
+    // into the wire list: Segment List[0] carries the LAST segment of
+    // the SR Policy, Segment List[Last Entry] the first visited. The
+    // kernel's seg6_do_srh then arms the outer DA from
+    // segments[segments_left] of the WIRE list. A payload emitted in
+    // visit order is read by the kernel as "go straight to the final
+    // segment" — every intermediate hop skipped.
+    let first = Sid::from_str("fcbb:bb00:0:0:0:0:0:1").unwrap();
+    let last = Sid::from_str("fcbb:bb01:0:0:0:0:0:1").unwrap();
+    let srh = Srh::new(vec![first, last]).unwrap();
+    let prefix: lr_core::addr::Prefix = "2001:db8:1::/48".parse().unwrap();
+    let route = Seg6Route::new(prefix, srh).with_mode(Seg6EncapMode::Encap);
+    let req = test_netlink()
+        .build_seg6_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+        .unwrap();
+    let encap = find_attr(&req, RTA_ENCAP).unwrap();
+    let srh_attr = find_encap_attr(encap, SEG6_IPTUNNEL_SRH).unwrap();
+    // 4-byte mode + the bare SRH (8 fixed + 2*16 segments = 40).
+    assert_eq!(srh_attr.len(), 4 + 40);
+    let srh_bytes = &srh_attr[4..];
+    // Fixed header: routing type 4, SL = n-1 = 1, Last Entry = 1.
+    assert_eq!(srh_bytes[2], lr_srv6::SRH_ROUTING_TYPE);
+    assert_eq!(srh_bytes[3], 1, "Segments Left = n - 1 (RFC 8754 §4.1)");
+    assert_eq!(srh_bytes[4], 1, "Last Entry = n - 1");
+    // The wire list: [last, first] — RFC 8754 §2.
+    assert_eq!(
+        &srh_bytes[8..24],
+        last.as_bytes(),
+        "wire Segment List[0] = the LAST segment of the SR Policy"
+    );
+    assert_eq!(
+        &srh_bytes[24..40],
+        first.as_bytes(),
+        "wire Segment List[Last Entry] = the first visited (outer DA)"
+    );
+}
+
+#[test]
 fn seg6_route_inline_mode_uses_zero_mode_value() {
     let sid1 = Sid::from_str("fcbb:bb00::1").unwrap();
     let srh = Srh::new(vec![sid1]).unwrap();
