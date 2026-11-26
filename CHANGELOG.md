@@ -17,6 +17,22 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — the `lr bench replay` memory metrics measured the wrong
+counter (issue #101)
+
+`read_rss_kb` parsed only `VmHWM` — the high-water mark — while the
+report presented its samples as `rss_peak_kb` (correct) AND
+`rss_final_kb` (wrong: a peak sample never drops, so "final RSS" was
+a second peak sample) and derived `steady_state_drift_kb` from them
+(wrong: non-negative by construction, so the "static resource
+occupation when routing is maintained" metric could never report a
+release). The reader now returns both `VmHWM` and `VmRSS`; peak
+metrics take the high-water mark, final/drift metrics take the
+current resident set, and a regression test pins `VmRSS <= VmHWM`.
+The real-data harness's per-process sampler
+(`tests/bench/sample_metrics.sh`) already read `VmRSS` directly and
+is unaffected.
+
 ### Fixed — two timing-sensitive CI tests read arrival order instead
 of the settled state (issue #101)
 
