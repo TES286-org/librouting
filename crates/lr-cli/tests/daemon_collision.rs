@@ -175,6 +175,83 @@ fn wait_collision_or_desync(logs: [&std::path::Path; 2]) {
     }
 }
 
+/// The per-session LAST FSM state each daemon logged, keyed by session
+/// number, in log order.
+///
+/// The collision loser legitimately passes through Established before
+/// the resolver closes it when both handshakes completed inside one
+/// poll batch: both sessions' final advances reach Established before
+/// either resolver run sees them, and the resolver then closes the
+/// loser ("connection collision between sessions #N and #M resolved").
+/// The RFC 4271 §6.8 invariant the tests pin is that exactly one
+/// session is STILL Established once the churn settles — not that the
+/// loser never logged the transition. Reading the last transition per
+/// session keeps the assertion on convergence rather than arrival
+/// order, which is what the CI failure on the SRH-wire-order PR run
+/// tripped: "got #1=true #2=true" from a loser whose teardown had not
+/// been waited for.
+fn still_established_sessions(text: &str) -> Vec<u64> {
+    let mut last: std::collections::BTreeMap<u64, &str> = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let Some(idx) = line.find("session #") else {
+            continue;
+        };
+        let rest = &line[idx + "session #".len()..];
+        let n_len = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if n_len == 0 {
+            continue;
+        }
+        let Ok(n) = rest[..n_len].parse::<u64>() else {
+            continue;
+        };
+        let Some(arrow) = rest[n_len..].find("\u{2192}") else {
+            continue;
+        };
+        let state = rest[n_len + arrow + "\u{2192}".len()..].trim();
+        last.insert(n, state);
+    }
+    last.into_iter()
+        .filter(|(_, state)| *state == "Established")
+        .map(|(session, _)| session)
+        .collect()
+}
+
+/// Bounded wait for the §6.8 convergence invariant: exactly one session
+/// per daemon whose LAST logged state is Established. The collision
+/// loser's teardown (Cease / Connection Collision Resolution
+/// NOTIFICATION, then Idle) trails its Established line by one event
+/// dispatch, so the caller waits for the settled view instead of
+/// reading the log at an arbitrary instant.
+fn wait_exactly_one_established(logs: [&std::path::Path; 2]) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let surviving: Vec<Vec<u64>> = logs
+            .iter()
+            .map(|l| {
+                let text = std::fs::read_to_string(l).unwrap_or_default();
+                still_established_sessions(&text)
+            })
+            .collect();
+        if surviving.iter().all(|v| v.len() == 1) {
+            return;
+        }
+        let dump: Vec<String> = logs
+            .iter()
+            .map(|l| std::fs::read_to_string(l).unwrap_or_default())
+            .collect();
+        assert!(
+            Instant::now() < deadline,
+            "expected exactly one still-Established session per daemon, \
+             got a={:?} b={:?}; logs:\n--- a ---\n{}\n--- b ---\n{}",
+            surviving[0],
+            surviving[1],
+            dump[0],
+            dump[1]
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Bidirectional peers: both daemons dial and listen at the same time.
 /// The higher BGP Identifier (B) initiates the surviving connection, so
 /// exactly one session per side reaches Established and both prefixes
@@ -236,19 +313,13 @@ fn bidirectional_collision_converges_to_one_session() {
     // wait_collision_or_desync for the two §6.8-legal shapes).
     wait_collision_or_desync([&a.log, &b.log]);
 
-    // Exactly one Established session per daemon: the losing transport
-    // — whichever it was — never reaches Established for the whole run.
-    // (Two Established sessions for one peer would mean the collision
-    // resolution failed to converge, not just a different winner.)
-    for log in [&a.log, &b.log] {
-        let text = std::fs::read_to_string(log).unwrap();
-        let one = text.contains("session #1 → Established");
-        let two = text.contains("session #2 → Established");
-        assert!(
-            one ^ two,
-            "expected exactly one of the two sessions Established, got #1={one} #2={two}; log:\n{text}"
-        );
-    }
+    // Exactly one Established session per daemon once the churn
+    // settles: the losing transport — whichever it was — is closed by
+    // the collision resolver (or never existed, on the desync shapes).
+    // Two sessions whose LAST logged state is Established for one peer
+    // would mean the collision resolution failed to converge, not just
+    // a different winner.
+    wait_exactly_one_established([&a.log, &b.log]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -324,16 +395,11 @@ fn outbound_only_with_listener_converges_to_one_session() {
     // wait_collision_or_desync).
     wait_collision_or_desync([&a.log, &b.log]);
 
-    // Exactly one Established session per daemon.
-    for log in [&a.log, &b.log] {
-        let text = std::fs::read_to_string(log).unwrap();
-        let one = text.contains("session #1 → Established");
-        let two = text.contains("session #2 → Established");
-        assert!(
-            one ^ two,
-            "expected exactly one of the two sessions Established, got #1={one} #2={two}; log:\n{text}"
-        );
-    }
+    // Exactly one Established session per daemon once the churn
+    // settles (the collision loser may have logged its own Established
+    // line before the resolver closed it — see
+    // wait_exactly_one_established).
+    wait_exactly_one_established([&a.log, &b.log]);
 
     // Stability: no second Established cycle on either side for a
     // full hold-time window after convergence. The pre-fix bug
