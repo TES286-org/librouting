@@ -358,7 +358,21 @@ jobs:
         # tag — the version bump IS the change that clears the
         # debt). See the `Resolve the latest tag` step above for
         # the skip-condition logic.
+        #
+        # The step is `continue-on-error: true` while the workspace is
+        # on the 1.x line but accumulating the 2.0 breaking changes
+        # (issue #101) — the same treatment the PR-level gate in
+        # `.github/workflows/ci.yml` already carries. Without it the
+        # nightly fails every night on the intentional debt, and on
+        # the tooling shape where a crate added after the baseline
+        # (lr-peer-health, post-v1.8.0) is missing from the baseline
+        # checkout, semver-checks exits with "package not found"
+        # before it even reports the debt. The gate becomes blocking
+        # again at the 2.0.0 release cut, together with the ci.yml
+        # copy; the per-crate diff artifact below still uploads for
+        # triage.
         if: steps.latest-tag.outputs.skip != 'true'
+        continue-on-error: true
         run: |
           set -euo pipefail
           TAG="${{ steps.latest-tag.outputs.tag }}"
@@ -401,9 +415,15 @@ jobs:
         with:
           shared-key: "bench-real-data"
       - name: Install BIRD
+        # Ubuntu 26.04 (the current runner image) removed the
+        # unversioned `bird`/`birdc` package names from the archive —
+        # the 2026-11-25 nightly failed with "Package 'bird' has no
+        # installation candidate". `bird2` ships the same `bird` +
+        # `birdc` binaries and is the name ci.yml's interop jobs
+        # install on the same image.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bird birdc
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y bird2
       - name: Build lr + lr-daemon (release)
         run: cargo build --release -p lr-cli --bin lr --bin lr-daemon
       - name: Run the real-data bench harness

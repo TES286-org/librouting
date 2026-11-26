@@ -17,6 +17,26 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — the nightly workflow failed on three CI-infrastructure
+regressions (issue #101)
+
+- **Supply-chain: RUSTSEC-2026-0592 in `url`** — the advisory
+  database flagged the pinned `url` 2.5.8 (stack overflow in
+  `Url::origin()` on nested `blob:` URLs); the lockfile moves to the
+  patched 2.5.9, so the `cargo audit` gate is green again.
+- **Bench real-data: the BIRD install step** — the Ubuntu 26.04
+  runner image dropped the unversioned `bird`/`birdc` package names
+  ("Package 'bird' has no installation candidate"); the step now
+  installs `bird2`, the same package the interop jobs install on the
+  same image (the binaries are the same `bird` + `birdc`).
+- **API surface: the nightly `cargo semver-checks` gate** — the
+  nightly copy of the gate never received the `continue-on-error`
+  treatment the PR-level gate in ci.yml carries while the workspace
+  accumulates the 2.0 breaking changes, so every nightly failed on
+  the intentional debt and on the post-baseline `lr-peer-health`
+  crate the tool cannot find in the v1.8.0 checkout. Aligned with
+  ci.yml; both gates return to blocking at the 2.0.0 cut.
+
 ### Fixed — two timing-sensitive CI tests read arrival order instead
 of the settled state (issue #101)
 
