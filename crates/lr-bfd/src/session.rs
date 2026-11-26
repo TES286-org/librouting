@@ -226,6 +226,12 @@ impl BfdSession {
     pub fn state(&self) -> State {
         self.state
     }
+    /// True between [`start`](Self::start) and
+    /// [`admin_down`](Self::admin_down) — a session that has not been
+    /// started (or was operator-downed) ignores timers and packets.
+    pub fn started_flag(&self) -> bool {
+        self.started
+    }
     pub fn is_up(&self) -> bool {
         self.state == State::Up
     }
@@ -348,11 +354,15 @@ impl BfdSession {
 
     /// Operator-down: force the session to AdminDown (§6.8.16). Timers
     /// stop; received packets are discarded until `start` again.
+    /// `started` resets so a later `start` actually re-arms the
+    /// session — leaving it set made `start` a no-op and the session
+    /// stayed wedged in AdminDown until it was destroyed and rebuilt.
     pub fn admin_down(&mut self) -> Vec<BfdSessionEvent> {
         self.local_diag = Diagnostic::AdminDown;
         self.transition(State::AdminDown);
         self.timers.cancel_all();
         self.tx_armed = false;
+        self.started = false;
         core::mem::take(&mut self.pending_events)
     }
 

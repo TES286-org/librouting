@@ -658,6 +658,42 @@ fn admin_down_discards_packets() {
     assert_eq!(s.remote_discriminator(), 0);
 }
 
+/// `admin_down` must reset `started` so the documented "discarded
+/// until `start` again" actually works: with the flag left set, a
+/// later `start` was a no-op and the session stayed wedged in
+/// AdminDown until it was destroyed and rebuilt (§6.8.16).
+#[test]
+fn admin_down_then_start_re_arms_the_session() {
+    let mut s = make_session(); // started, Down
+    let _ = s.drain_outgoing(); // drop the initial packet start() queued
+    let _ = s.admin_down();
+    assert_eq!(s.state(), State::AdminDown);
+    assert!(!s.started_flag());
+    assert!(s.drain_outgoing().is_empty(), "AdminDown transmits nothing");
+
+    let evs = s.start(Instant(100));
+    // AdminDown -> Down is a transition, and the session arms its
+    // initial transmission again (`start` queues the packet into
+    // `out_buf` without an OutboundQueued event, §6.8.7 initial
+    // transmit).
+    assert!(
+        evs.iter().any(|e| matches!(
+            e,
+            BfdSessionEvent::StateChanged {
+                from: State::AdminDown,
+                to: State::Down,
+                ..
+            }
+        )),
+        "start after admin_down must re-transition to Down"
+    );
+    assert_eq!(s.state(), State::Down);
+    assert!(
+        !s.drain_outgoing().is_empty(),
+        "start after admin_down must queue the initial control packet"
+    );
+}
+
 // ---- Keyed-hash authentication (RFC 5880 §4.3 / §4.4) ----
 //
 // The keyed-hash tests exercise the full session path: the outbound
