@@ -3374,6 +3374,28 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
         &mut over.exchange_plane_policy_role,
         &base.exchange_plane_policy_role,
     );
+    // The capability block (issue #101): every per-peer capability
+    // override inherits from the template the same way the
+    // transport/policy fields above do — a template carrying
+    // capability knobs is the point of naming it.
+    opt(&mut over.extended_message, &base.extended_message);
+    opt(&mut over.bgp_role, &base.bgp_role);
+    opt(&mut over.fqdn, &base.fqdn);
+    opt(&mut over.bfd_strict_mode, &base.bfd_strict_mode);
+    opt(&mut over.software_version, &base.software_version);
+    opt(
+        &mut over.software_version_encoding,
+        &base.software_version_encoding,
+    );
+    opt(&mut over.paths_limit, &base.paths_limit);
+    opt(&mut over.paths_limit_action, &base.paths_limit_action);
+    opt(
+        &mut over.paths_limit_cease_subcode,
+        &base.paths_limit_cease_subcode,
+    );
+    opt(&mut over.link_local_next_hop, &base.link_local_next_hop);
+    opt(&mut over.orf, &base.orf);
+    opt(&mut over.orf_entries, &base.orf_entries);
 }
 
 fn parse_bool(value: &str) -> bool {

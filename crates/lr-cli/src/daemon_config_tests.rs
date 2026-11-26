@@ -3565,3 +3565,31 @@ fn paths_limit_teardown_subcode_resolution_and_inert_case() {
     assert_eq!(cfg.paths_limit_action, PathsLimitAction::Teardown);
 }
 
+/// A peer extending a template inherits the template's capability
+/// knobs — the 2.x capability block (issue #101) must flow through
+/// `extends` like every other peer field, not silently fall to the
+/// router-wide defaults.
+#[test]
+fn peer_template_inherits_capability_block() {
+    let mut cfg = DaemonConfig::with_defaults();
+    parse_toml_subset(
+        "[bgp]\nlocal_as = 64512\n\n\
+         [peer-template.upstream]\nremote = \"192.0.2.2:179\"\npeer_as = 64513\n\
+         add_path = true\npaths_limit = \"1:1:16\"\n\
+         paths_limit_action = \"teardown\"\npaths_limit_cease_subcode = 64\n\
+         software_version = \"lr/2.0\"\nbfd_strict_mode = true\n\n\
+         [[peer]]\nextends = \"upstream\"\n",
+        &mut cfg,
+    )
+    .unwrap();
+    cfg.finalize().unwrap();
+    let peer = &cfg.peers[0];
+    assert_eq!(peer.paths_limit.as_deref(), Some(&[(1u16, 1u8, 16u16)][..]));
+    assert_eq!(
+        peer.paths_limit_action,
+        Some(lr_bgp::PathsLimitAction::Teardown)
+    );
+    assert_eq!(peer.paths_limit_cease_subcode, Some(64));
+    assert_eq!(peer.software_version.as_deref(), Some("lr/2.0"));
+    assert_eq!(peer.bfd_strict_mode, Some(true));
+}
