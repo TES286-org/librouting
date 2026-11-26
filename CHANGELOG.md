@@ -54,9 +54,13 @@ shape the test suite exercised) happened to work.
   and the Python/Go bindings.
 - The `lr-tests` smoke test and the Python/Go binding tests that
   pinned the old (broken) order are updated to the corrected
-  semantics; the C++ header and the FFI doc comments carry the
-  corrected field description.
-  
+  semantics; the C++ harness now asserts the §4.1 source view
+  (`current_destination` = the first visited SID at `SL = Last
+  Entry`, the final one at `SL = 0`) and gains an `SL = 0` hop
+  assertion; the C++ header, the regenerated `lr_ffi.h` and the
+  FFI/Go/Python wrapper doc comments carry the corrected field
+  description.
+
 ### Fixed — the C ABI header actually contains every export, with the
 right shapes and values (issue #101; BREAKING CHANGE for symbols that
 never worked)
