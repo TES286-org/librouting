@@ -1796,8 +1796,14 @@ impl BgpPeer {
         // The NEXT_HOP may live in the well-known attribute (IPv4) or in
         // MP_REACH_NLRI (RFC 4760 / RFC 8277) — checking for the attribute's
         // presence is enough; the per-family decoder validates the body.
+        // The AS_PATH is validated at the session's negotiated width
+        // (RFC 6793 §4.1): a 2-byte-encoded path from an OLD speaker never
+        // decodes at the 4-byte width, so the unconditional check used to
+        // drop every announcement from a 2-byte-only peer.
+        let negotiated_asn4 = self.codec.asn4_active();
         let attrs_ok = u.attributes.origin().is_some()
-            && (u.attributes.as_path().is_some() || u.attributes.as4_path().is_some())
+            && (u.attributes.as_path_wire(negotiated_asn4).is_some()
+                || u.attributes.as4_path().is_some())
             && (u.attributes.next_hop().is_some()
                 || u.attributes.get(AttrType::MpReachNlri).is_some());
 
@@ -1853,8 +1859,17 @@ impl BgpPeer {
             normalized.remove(t);
         }
 
-        let wire_path = normalized.as_path_wire(self.cfg.asn4);
-        let as4 = normalized.as4_path();
+        let wire_path = normalized.as_path_wire(negotiated_asn4);
+        // RFC 6793 §4.1: between NEW speakers (the capability negotiated
+        // both ways) AS4_PATH MUST NOT be carried, and one that arrives
+        // anyway is discarded while processing continues. Only a session
+        // that downgraded to the 2-byte width reconciles per §4.2.3 —
+        // there the AS4_PATH is the authoritative tail of the path.
+        let as4 = if negotiated_asn4 {
+            None
+        } else {
+            normalized.as4_path()
+        };
         let canonical_path = match &wire_path {
             Some(w) => crate::path::as_path::reconcile_as4(w, as4.as_ref()),
             None => as4.unwrap_or_default(),

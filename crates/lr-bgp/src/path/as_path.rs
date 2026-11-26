@@ -3,6 +3,11 @@
 use core::fmt;
 use lr_core::addr::Asn;
 
+/// RFC 6793 §3: the reserved two-octet AS number that stands in for a
+/// non-mappable four-octet AS number inside an AS_PATH encoded with
+/// two-octet AS numbers.
+pub const AS_TRANS: u32 = 23_456;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AsPathType {
@@ -210,14 +215,17 @@ impl AsPath {
         Some(out)
     }
 
-    /// Encode with 2-byte ASNs (legacy AS_PATH).
+    /// Encode with 2-byte ASNs (legacy AS_PATH). Per RFC 6793 §4.2.2
+    /// a non-mappable four-octet AS number is represented by AS_TRANS
+    /// (23456), preserving the path-length property — never truncated
+    /// to its low 16 bits.
     pub fn encode_2(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for seg in &self.segments {
             out.push(seg.kind as u8);
             out.push(seg.ases.len() as u8);
             for a in &seg.ases {
-                let v = a.0.min(0xffff) as u16;
+                let v = if a.0 > 0xffff { AS_TRANS } else { a.0 } as u16;
                 out.extend_from_slice(&v.to_be_bytes());
             }
         }
@@ -235,6 +243,32 @@ impl AsPath {
             }
         }
         out
+    }
+
+    /// Whether every AS number is mappable to the two-octet space
+    /// (RFC 6793 §3). A NEW speaker paired with an OLD peer uses this
+    /// to decide whether the AS4_PATH attribute carries information
+    /// beyond the two-octet AS_PATH (§4.2.2: AS4_PATH is sent except
+    /// when all of the path is mappable).
+    pub fn all_mappable(&self) -> bool {
+        self.segments
+            .iter()
+            .all(|s| s.ases.iter().all(|a| a.0 <= 0xffff))
+    }
+
+    /// The path with every AS_CONFED_SEQUENCE / AS_CONFED_SET segment
+    /// removed (RFC 6793 §4.2.2: those segments are excluded from the
+    /// AS4_PATH attribute a NEW speaker constructs for an OLD peer).
+    /// The non-mutating form of [`Self::strip_confed`].
+    pub fn without_confed_segments(&self) -> AsPath {
+        AsPath {
+            segments: self
+                .segments
+                .iter()
+                .filter(|s| !matches!(s.kind, AsPathType::ConfedSequence | AsPathType::ConfedSet))
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -286,23 +320,42 @@ pub fn reconcile_as4(wire: &AsPath, as4: Option<&AsPath>) -> AsPath {
         taken.push(seg.clone());
         taken_count += seg_count;
     }
-    // If whole segments were not enough (mid-segment split needed), fall
-    // back to prepending the remainder of the path count via a truncated
-    // leading sequence — the RFC allows taking "as many ... as necessary".
+    // A segment straddling the `need` boundary is split: RFC 6793
+    // §4.2.3 takes "as many ... as necessary" from the leading part
+    // of the AS_PATH. The continuation picks up *after* the AS count
+    // the whole segments already consumed — restarting the walk from
+    // the first segment duplicated the ASes already prepended.
     let mut result = AsPath { segments: taken };
     if taken_count < need {
         let deficit = need - taken_count;
-        for seg in &wire.segments {
+        // Advance an iterator past the `taken_count` leading ASes,
+        // then take the head of the next AS_SEQUENCE segment(s).
+        let mut walk = wire.segments.iter();
+        let mut walked = 0usize;
+        while walked < taken_count {
+            let Some(seg) = walk.next() else {
+                break;
+            };
+            walked += match seg.kind {
+                AsPathType::Sequence | AsPathType::ConfedSequence => seg.ases.len(),
+                AsPathType::Set | AsPathType::ConfedSet => 1,
+            };
+        }
+        let mut remaining = deficit;
+        for seg in walk {
+            if remaining == 0 {
+                break;
+            }
             if seg.kind != AsPathType::Sequence {
                 continue;
             }
-            let take = seg.ases.len().min(deficit);
+            let take = seg.ases.len().min(remaining);
             if take > 0 {
                 result.segments.push(AsPathSegment {
                     kind: AsPathType::Sequence,
                     ases: seg.ases[..take].to_vec(),
                 });
-                break;
+                remaining -= take;
             }
         }
     }
