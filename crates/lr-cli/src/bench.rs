@@ -354,16 +354,18 @@ pub(crate) fn run_replay(cfg: &ReplayConfig) -> Result<BenchReport, String> {
     // candidate through `LocRib::install` would replace the previous
     // one (all non-Add-Path entries share `path_id = 0`).
     let rib = LocRib::new();
-    let rss_before = read_rss_kb();
+    let (rss_hwm_before, _) = read_vm_status().unwrap_or((0, 0));
     let install_start = Instant::now();
     let installed = crate::mrt_feed::install(&rib, &feed);
     let install_ms = install_start.elapsed().as_millis() as u64;
-    let rss_after = read_rss_kb();
-    let rss_peak_kb = match (rss_before, rss_after) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
+    let (rss_hwm_after, rss_after) = read_vm_status().unwrap_or((0, 0));
+    // The high-water mark is what "peak" must report; the CURRENT
+    // resident set (rss_after) is what "final" must report. `max` keeps
+    // the peak honest when one of the two reads failed.
+    let rss_peak_kb = if rss_hwm_before == 0 && rss_hwm_after == 0 {
+        None
+    } else {
+        Some(rss_hwm_before.max(rss_hwm_after))
     };
 
     let routes_in = feed.dump_paths;
@@ -396,7 +398,7 @@ pub(crate) fn run_replay(cfg: &ReplayConfig) -> Result<BenchReport, String> {
     let mut soft_reload_peak_rss_kb = None;
     if cfg.soft_reload {
         let sr_start = Instant::now();
-        let sr_rss_before = read_rss_kb();
+        let (sr_hwm_before, _) = read_vm_status().unwrap_or((0, 0));
         let best_path_cfg = BestPathConfig::default();
         for (key, set) in &feed.sets {
             let ranked: Vec<Route> = BestPath::rank(set, &best_path_cfg)
@@ -405,13 +407,12 @@ pub(crate) fn run_replay(cfg: &ReplayConfig) -> Result<BenchReport, String> {
                 .collect();
             rib.install_set(key, ranked);
         }
-        let sr_rss_after = read_rss_kb();
+        let (sr_hwm_after, _) = read_vm_status().unwrap_or((0, 0));
         soft_reload_ms = sr_start.elapsed().as_millis() as u64;
-        soft_reload_peak_rss_kb = match (sr_rss_before, sr_rss_after) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        soft_reload_peak_rss_kb = if sr_hwm_before == 0 && sr_hwm_after == 0 {
+            None
+        } else {
+            Some(sr_hwm_before.max(sr_hwm_after))
         };
     }
 
@@ -437,7 +438,11 @@ pub(crate) fn run_replay(cfg: &ReplayConfig) -> Result<BenchReport, String> {
         loc_rib_prefixes,
         loc_rib_paths,
         rss_peak_kb,
-        rss_final_kb: rss_after,
+        rss_final_kb: if rss_after == 0 {
+            None
+        } else {
+            Some(rss_after)
+        },
         soft_reload_ms,
         soft_reload_peak_rss_kb,
         steady_state_drift_kb,
@@ -566,19 +571,44 @@ fn rss_platform_name() -> &'static str {
 }
 
 fn read_rss_kb() -> Option<u64> {
+    read_vm_status().map(|(_, rss)| rss)
+}
+
+/// `(VmHWM, VmRSS)` from `/proc/self/status`. The high-water mark is
+/// what "peak" metrics need; the CURRENT resident set is what "final"
+/// and "drift" metrics need — a peak sample never drops, so a final
+/// metric read from VmHWM could only rise (the pre-fix behavior made
+/// `rss_final_kb` a second peak sample and `steady_state_drift_kb`
+/// non-negative by construction).
+fn read_vm_status() -> Option<(u64, u64)> {
     if !cfg!(target_os = "linux") {
         return None;
     }
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let mut hwm = None;
+    let mut rss = None;
     for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
-            return rest
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<u64>().ok());
+        if hwm.is_none() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                hwm = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok());
+            }
+        }
+        if rss.is_none() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                rss = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok());
+            }
+        }
+        if hwm.is_some() && rss.is_some() {
+            break;
         }
     }
-    None
+    Some((hwm?, rss?))
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +689,24 @@ mod tests {
         });
         let bytes = dump.encode(1_700_000_000).unwrap();
         std::fs::write(path, bytes)
+    }
+
+    #[test]
+    fn rss_metrics_read_peak_and_current_resident_set() {
+        // The "final" and "drift" metrics need the CURRENT resident set
+        // (VmRSS); the "peak" metrics need the high-water mark (VmHWM).
+        // The pre-fix reader returned VmHWM for both, so
+        // `rss_final_kb` was a second peak sample and
+        // `steady_state_drift_kb` was non-negative by construction.
+        // On Linux, /proc always exposes both fields for this process.
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let (hwm, rss) = read_vm_status().expect("/proc/self/status exposes both fields");
+        assert!(hwm > 0, "VmHWM parsed: {hwm}");
+        assert!(rss > 0, "VmRSS parsed: {rss}");
+        // The current resident set can never exceed the high-water mark.
+        assert!(rss <= hwm, "VmRSS {rss} <= VmHWM {hwm}");
     }
 
     #[test]
