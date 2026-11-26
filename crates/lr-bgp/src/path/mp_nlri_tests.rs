@@ -117,6 +117,48 @@ fn mp_reach_ipv4_with_32_byte_next_hop_is_rejected() {
     assert!(MpReach::decode(&enc).is_none());
 }
 
+/// RFC 8277 §3: labelled NLRI carries a label stack before the prefix.
+/// The plain decoders must refuse the family rather than read label
+/// octets as prefix bits, while the header-only decoder keeps working
+/// so inspection helpers can still report the family and next-hop.
+#[test]
+fn plain_mp_decoders_reject_labelled_families() {
+    for family in [
+        NlriFamily::IPV4_LABELED_UNICAST,
+        NlriFamily::IPV6_LABELED_UNICAST,
+    ] {
+        let (nh, prefix) = if family.afi == 1 {
+            (
+                MpNextHop::V4([192, 0, 2, 1]),
+                Prefix::new_v4([203, 0, 113, 0], 24),
+            )
+        } else {
+            (
+                MpNextHop::V6Global([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    64,
+                ),
+            )
+        };
+        let reach_bytes = MpReach::new(family, nh.clone(), vec![Nlri::plain(prefix)]).encode();
+        assert!(
+            MpReach::decode(&reach_bytes).is_none(),
+            "plain decoder must reject {family:?}"
+        );
+        let header = MpReach::decode_header(&reach_bytes).unwrap();
+        assert_eq!(header.family, family);
+        assert_eq!(header.next_hop, nh);
+        assert!(header.nlri.is_empty());
+
+        let unreach_bytes = MpUnreach::new(family, vec![Nlri::plain(prefix)]).encode();
+        assert!(
+            MpUnreach::decode(&unreach_bytes).is_none(),
+            "plain decoder must reject {family:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // draft-ietf-idr-linklocal-capability-06 next-hop classification.
 // ---------------------------------------------------------------------------

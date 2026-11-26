@@ -1220,7 +1220,9 @@ pub unsafe extern "C" fn lr_bgp_message_update_attr_at(
 // embedder can walk an MP-BGP UPDATE's NLRI list without going through
 // the codec a second time. Family (`AFI`, `SAFI`) and (for MP_REACH)
 // the next-hop are exposed via dedicated readers that mirror the
-// `lr_bgp_path_attrs_mp_*` shape on the path-attributes handle.
+// `lr_bgp_path_attrs_mp_*` shape on the path-attributes handle. Those
+// readers inspect only the attribute's fixed header, so they also work
+// for labelled families whose NLRI the plain decoder rejects.
 
 /// Returns 1 when the UPDATE carries an MP_REACH_NLRI attribute (RFC
 /// 4760 §3), 0 otherwise (including when the handle is null or the
@@ -1244,7 +1246,11 @@ pub unsafe extern "C" fn lr_bgp_message_update_mp_reach_present(
             let BgpMessage::Update(u) = msg else {
                 return 0;
             };
-            u.attributes.mp_reach().is_some() as u8
+            // Presence is about the attribute, not about whether its
+            // NLRI parses as plain (unlabelled) NLRI.
+            u.attributes
+                .get(lr_bgp::path::AttrType::MpReachNlri)
+                .is_some() as u8
         },
         0,
     )
@@ -1278,15 +1284,15 @@ pub unsafe extern "C" fn lr_bgp_message_update_mp_reach_family(
                 set_last_error("message is not UPDATE".into());
                 return LR_ERR_INVALID_HANDLE;
             };
-            let Some(reach) = u.attributes.mp_reach() else {
+            let Some(family) = u.attributes.mp_reach_family() else {
                 set_last_error("UPDATE has no MP_REACH_NLRI attribute".into());
                 return LR_ERR_INVALID_HANDLE;
             };
             if !out_afi.is_null() {
-                unsafe { *out_afi = reach.family.afi };
+                unsafe { *out_afi = family.afi };
             }
             if !out_safi.is_null() {
-                unsafe { *out_safi = reach.family.safi };
+                unsafe { *out_safi = family.safi };
             }
             0
         },
@@ -1328,8 +1334,10 @@ pub unsafe extern "C" fn lr_bgp_message_update_mp_reach_next_hop(
                 set_last_error("message is not UPDATE".into());
                 return LR_ERR_INVALID_HANDLE;
             };
-            let Some(reach) = u.attributes.mp_reach() else {
-                set_last_error("UPDATE has no MP_REACH_NLRI attribute".into());
+            // The next hop lives in the fixed header and is available
+            // even when the NLRI needs a specialised decoder.
+            let Some(reach) = u.attributes.mp_reach_header() else {
+                set_last_error("UPDATE has no decodable MP_REACH_NLRI header".into());
                 return LR_ERR_INVALID_HANDLE;
             };
             let (addr, kind) = match &reach.next_hop {
@@ -1460,7 +1468,9 @@ pub unsafe extern "C" fn lr_bgp_message_update_mp_unreach_present(
             let BgpMessage::Update(u) = msg else {
                 return 0;
             };
-            u.attributes.mp_unreach().is_some() as u8
+            u.attributes
+                .get(lr_bgp::path::AttrType::MpUnreachNlri)
+                .is_some() as u8
         },
         0,
     )
@@ -1491,15 +1501,15 @@ pub unsafe extern "C" fn lr_bgp_message_update_mp_unreach_family(
                 set_last_error("message is not UPDATE".into());
                 return LR_ERR_INVALID_HANDLE;
             };
-            let Some(unreach) = u.attributes.mp_unreach() else {
+            let Some(family) = u.attributes.mp_unreach_family() else {
                 set_last_error("UPDATE has no MP_UNREACH_NLRI attribute".into());
                 return LR_ERR_INVALID_HANDLE;
             };
             if !out_afi.is_null() {
-                unsafe { *out_afi = unreach.family.afi };
+                unsafe { *out_afi = family.afi };
             }
             if !out_safi.is_null() {
-                unsafe { *out_safi = unreach.family.safi };
+                unsafe { *out_safi = family.safi };
             }
             0
         },
@@ -2834,6 +2844,86 @@ mod tests {
         let msg = lr_bgp::BgpMessage::Update(update);
         let codec = BgpC::new();
         codec.encode_vec(&msg).expect("encode UPDATE")
+    }
+
+    /// RFC 8277: presence / family / next-hop readers look at the
+    /// fixed MP_REACH header, so they stay usable for a labelled family
+    /// whose NLRI the plain decoder refuses. NLRI readers still report
+    /// zero entries — embedders use the labelled helpers for those.
+    #[test]
+    fn mp_reach_labelled_family_readers_use_header() {
+        let bytes = build_update_with_mp_reach(
+            lr_core::nlri::NlriFamily::IPV4_LABELED_UNICAST,
+            lr_bgp::path::MpNextHop::V4([192, 0, 2, 1]),
+            vec![lr_bgp::message::update::Nlri::plain(
+                lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+            )],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        assert_eq!(unsafe { lr_bgp_message_update_mp_reach_present(m) }, 1);
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_family(m, &raw mut afi, &raw mut safi) },
+            0
+        );
+        assert_eq!((afi, safi), (1, 4));
+
+        let mut nh = crate::bgp_path::lr_bgp_next_hop_t::default();
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_reach_next_hop(m, &raw mut nh) },
+            0
+        );
+        assert_eq!(nh.present, 1);
+        assert_eq!(nh.kind, 0);
+        assert_eq!(&nh.addr[..4], &[192, 0, 2, 1]);
+
+        // The raw attribute bytes are still the wire form.
+        let mut raw = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let mut typ = 0u8;
+        let mut flags = 0u8;
+        assert_eq!(
+            unsafe {
+                lr_bgp_message_update_attr_at(m, 0, &raw mut typ, &raw mut flags, &raw mut raw)
+            },
+            0
+        );
+        assert_eq!(typ, 14); // MP_REACH_NLRI
+        assert!(!take(&raw).is_empty());
+        drop_bytes(raw);
+        assert_eq!(lr_bgp_message_update_mp_reach_nlri_count(m), 0);
+        unsafe { lr_bgp_message_free(m) };
+    }
+
+    /// MP_UNREACH presence and family are header-only too.
+    #[test]
+    fn mp_unreach_labelled_family_readers_use_header() {
+        let bytes = build_update_with_mp_unreach(
+            lr_core::nlri::NlriFamily::IPV6_LABELED_UNICAST,
+            vec![lr_bgp::message::update::Nlri::plain(
+                lr_core::addr::Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    64,
+                ),
+            )],
+        );
+        let m = lr_bgp_decode_message(bytes.as_ptr(), bytes.len());
+        assert!(!m.is_null());
+        assert_eq!(unsafe { lr_bgp_message_update_mp_unreach_present(m) }, 1);
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        assert_eq!(
+            unsafe { lr_bgp_message_update_mp_unreach_family(m, &raw mut afi, &raw mut safi) },
+            0
+        );
+        assert_eq!((afi, safi), (2, 4));
+        unsafe { lr_bgp_message_free(m) };
     }
 
     #[test]

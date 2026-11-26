@@ -49,6 +49,7 @@ mod roa_trie;
 pub mod role;
 pub mod rtr;
 
+pub use capabilities::CapabilityLengthError;
 pub use codec::BgpCodec;
 pub use error::{
     BgpCeaseSubcode, BgpErrorCode, BgpHeaderErrorSubcode, BgpNotification, BgpOpenErrorSubcode,
