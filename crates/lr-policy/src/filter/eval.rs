@@ -598,7 +598,14 @@ pub const MAX_CALL_DEPTH: u32 = 64;
 struct Evaluator<'a, C: FilterContext + ?Sized> {
     ctx: &'a C,
     scopes: Vec<Scope>,
-    functions: std::collections::BTreeMap<String, FunctionDecl>,
+    /// User functions by name — shared with the tree-walking
+    /// fallbacks the VM runs (`EvalTree`, dynamic `Match` items,
+    /// `Defined` over a dynamic expression), so both engines resolve
+    /// the same declarations. Borrowed, not owned: the table is built
+    /// once per filter (by `evaluate` locally, by `compile` into
+    /// `CompiledFilter::function_table`) instead of deep-cloned per
+    /// route.
+    functions: &'a std::collections::BTreeMap<String, FunctionDecl>,
     call_depth: u32,
     /// Verdict latched by `accept` / `reject` inside a user-function
     /// body (BIRD: terminates the whole filter). Consumed by the
@@ -630,14 +637,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 /// last one, which previously dropped the verdict and fell through
 /// (fail-open).
 pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> EvalResult {
+    let functions: std::collections::BTreeMap<String, FunctionDecl> = filter
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
     let mut ev = Evaluator {
         ctx,
         scopes: vec![Scope::new()],
-        functions: filter
-            .functions
-            .iter()
-            .map(|f| (f.name.clone(), f.clone()))
-            .collect(),
+        functions: &functions,
         call_depth: 0,
         pending_verdict: None,
         line_index: &filter.line_index,
@@ -1895,8 +1903,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         // D3.1: user-defined functions shadow nothing (the parser
         // rejects shadowing a built-in), so look the name up first
         // and fall through to the built-ins otherwise.
-        if let Some(f) = self.functions.get(name).cloned() {
-            return self.call_user_function(&f, args, route, span);
+        if let Some(f) = self.functions.get(name) {
+            return self.call_user_function(f, args, route, span);
         }
         match name {
             "len" => {
@@ -2711,7 +2719,13 @@ pub fn execute(cf: &CompiledFilter, route: &mut Route, ctx: &dyn FilterContext) 
     let mut ev = Evaluator {
         ctx,
         scopes: vec![Scope::new()],
-        functions: std::collections::BTreeMap::new(),
+        // The tree-walking fallbacks (`EvalTree`, dynamic `Match`
+        // items, `Defined` over a dynamic expression) dispatch
+        // through `eval_call`, which resolves user functions from
+        // this table — an empty one made the VM error with
+        // UnknownFunction on programs the interpreter accepts,
+        // flipping the verdict on the same source.
+        functions: &cf.function_table,
         call_depth: 0,
         pending_verdict: None,
         line_index: &cf.line_index,

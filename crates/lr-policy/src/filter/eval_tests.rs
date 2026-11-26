@@ -1724,6 +1724,35 @@ fn p2_callfn_matches_interpreter_on_user_functions() {
     }
 }
 
+/// User functions must resolve from the VM's tree-walking fallbacks.
+/// `execute` used to build the evaluator with an EMPTY function
+/// table, so `defined(f())`, a dynamic `~` set item and any
+/// `EvalTree` subtree that called a user function errored with
+/// UnknownFunction — the VM fell through on programs the interpreter
+/// accepts, flipping the verdict on the same source (the opposite
+/// verdict for `if defined(f()) then accept; reject;`).
+#[test]
+fn vm_resolves_user_functions_from_tree_fallbacks() {
+    // defined() over a dynamic expression containing a user call.
+    let src = "function f() { return true; } if defined(f()) then accept; reject;";
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+
+    // A dynamic set item: the pattern is not liftable at compile
+    // time, so `~` walks the tree and eval_call resolves the
+    // function (as-path membership: any AS in the path is 65000).
+    let src = "function n() { return 65000; } if bgp.as_path ~ [n()] then accept; reject;";
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_AS_PATH),
+        flags: 0x40,
+        value: vec![2u8, 1, 0, 0, 0xFD, 0xE8], // AS_SEQUENCE [65000]
+    });
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
 // ----- #18 Phase 0: evaluation errors carry real positions -----
 
 /// Drive the tree-walking evaluator directly and surface the
@@ -1731,14 +1760,15 @@ fn p2_callfn_matches_interpreter_on_user_functions() {
 fn run_err(filter_src: &str) -> EvalError {
     let mut r = route_with("203.0.113.0/24", 100, 0);
     let f = compile("test", filter_src).unwrap_or_else(|e| panic!("{e}"));
+    let functions: std::collections::BTreeMap<String, _> = f
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
     let mut ev = Evaluator {
         ctx: &StubCtx,
         scopes: vec![Scope::new()],
-        functions: f
-            .functions
-            .iter()
-            .map(|f| (f.name.clone(), f.clone()))
-            .collect(),
+        functions: &functions,
         call_depth: 0,
         pending_verdict: None,
         line_index: &f.line_index,
@@ -1759,7 +1789,7 @@ fn run_vm_err(filter_src: &str) -> EvalError {
     let mut ev = Evaluator {
         ctx: &StubCtx,
         scopes: vec![Scope::new()],
-        functions: std::collections::BTreeMap::new(),
+        functions: &compiled.function_table,
         call_depth: 0,
         pending_verdict: None,
         line_index: &compiled.line_index,
@@ -1789,6 +1819,7 @@ fn vm_stack_underflow_carries_real_instruction_span() {
     // should land at line 1 col 5.
     let src = "abc!xyz";
     let line_index = LineIndex::new(src);
+    let empty_table = std::collections::BTreeMap::new();
     let cf = CompiledFilter {
         name: "synthetic".to_string(),
         code: vec![Instr::Not],
@@ -1796,12 +1827,13 @@ fn vm_stack_underflow_carries_real_instruction_span() {
         line_index: LineIndex::new(src),
         functions: Vec::new(),
         function_index: std::collections::BTreeMap::new(),
+        function_table: empty_table.clone(),
     };
     let mut r = route_with("203.0.113.0/24", 100, 0);
     let mut ev = Evaluator {
         ctx: &StubCtx,
         scopes: vec![Scope::new()],
-        functions: std::collections::BTreeMap::new(),
+        functions: &empty_table,
         call_depth: 0,
         pending_verdict: None,
         line_index: &line_index,
