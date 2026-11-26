@@ -308,7 +308,8 @@ networks = ["203.0.113.0/24"]
 # Available tables and keys:
 #
 #   [[prefix-list]]    name, prefix, ge (default: prefix len),
-#                      le (default: unbounded), permit (default: true)
+#                      le (default: prefix len — exact match; family
+#                      max when ge is set), permit (default: true)
 #   [[as-path-list]]   name, pattern, permit (default: true)
 #                      pattern tokens: ^ start, $ end, _ any separator;
 #                      e.g. "_65000$" = learned from AS65000

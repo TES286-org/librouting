@@ -150,11 +150,12 @@ proptest! {
         let mut expected = false; // implicit deny
         for (prefix, permit) in &entries {
             let mut e = PrefixListEntry::new(*prefix, *permit);
-            // Match the entry's default ge/le behaviour
-            // (ge = prefix_len, le = 255). `PrefixListEntry::new`
-            // already sets those, so this is a no-op, kept for
-            // clarity when the field defaults ever change.
+            // Match the entry's default behaviour: `new` is the FRR
+            // exact-match default (ge = le = prefix_len). The explicit
+            // assignment documents the oracle; it stays correct if
+            // the constructor's defaults ever change again.
             e.ge = e.prefix.prefix_len;
+            e.le = e.prefix.prefix_len;
             if e.matches(&probe) {
                 expected = *permit;
                 break;

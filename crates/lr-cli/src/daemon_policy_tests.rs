@@ -1,6 +1,7 @@
 use super::*;
 use crate::daemon_config::parse_toml_subset;
 use crate::daemon_config::DaemonConfig;
+use lr_policy::ImportHook;
 
 fn parse(text: &str) -> DaemonConfig {
     let mut cfg = DaemonConfig::with_defaults();
@@ -464,4 +465,129 @@ fn shared_filter_function_missing_name_fails() {
     );
     let err = build_filters(&cfg).unwrap_err();
     assert!(err.contains("missing its 'name'"), "{err}");
+}
+
+#[test]
+fn prefix_list_defaults_to_exact_match() {
+    // No ge/le: the entry matches the prefix length exactly (FRR
+    // `ip prefix-list` semantics). It used to admit every longer
+    // prefix under the covering space.
+    let cfg = parse(
+        "[[prefix-list]]\nname = \"doc\"\nprefix = \"198.51.100.0/24\"\n\n\
+             [[route-map]]\nname = \"in\"\nentry = 10\nmatch_prefix = \"doc\"\npermit = true\n\n\
+             [[route-map]]\nname = \"in\"\nentry = 20\npermit = false\n",
+    );
+    let mut set = build_policy_set(&cfg).unwrap();
+    set.bind_import(7, "in");
+    let hooks = set.hooks();
+
+    let key = |len: u8, last: u8| {
+        lr_core::rib::RouteKey::new(
+            lr_core::addr::Prefix::new_v4([198, 51, 100, last], len),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        )
+    };
+    let route = |len: u8, last: u8| lr_core::rib::Route {
+        key: key(len, last),
+        origin: lr_core::rib::RouteOrigin { proto: 0, peer: 7 },
+        protocol: lr_core::rib::Protocol::Bgp,
+        preference: lr_core::rib::Preference::new(20, 100),
+        next_hop: None,
+        attributes: lr_core::attr::Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    };
+
+    // The exact /24 is permitted.
+    let mut r = route(24, 0);
+    assert!(matches!(
+        hooks.on_import(&mut r),
+        lr_policy::hooks::HookVerdict::Keep
+    ));
+    // A /25 under the /24 is NOT (the entry is exact-match).
+    let mut r = route(25, 128);
+    assert!(matches!(
+        hooks.on_import(&mut r),
+        lr_policy::hooks::HookVerdict::Drop
+    ));
+    // A /23 covering the /24 is not either.
+    let mut r = route(23, 0);
+    assert!(matches!(
+        hooks.on_import(&mut r),
+        lr_policy::hooks::HookVerdict::Drop
+    ));
+}
+
+#[test]
+fn prefix_list_ge_alone_widens_to_family_max() {
+    // `ge` without `le`: the window is [ge, 32] — FRR semantics.
+    let cfg = parse(
+        "[[prefix-list]]\nname = \"w\"\nprefix = \"198.51.100.0/24\"\nge = 26\n\n\
+             [[route-map]]\nname = \"in\"\nentry = 10\nmatch_prefix = \"w\"\npermit = true\n\n\
+             [[route-map]]\nname = \"in\"\nentry = 20\npermit = false\n",
+    );
+    let mut set = build_policy_set(&cfg).unwrap();
+    set.bind_import(7, "in");
+    let hooks = set.hooks();
+
+    let route = |len: u8| lr_core::rib::Route {
+        key: lr_core::rib::RouteKey::new(
+            lr_core::addr::Prefix::new_v4([198, 51, 100, 0], len),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        ),
+        origin: lr_core::rib::RouteOrigin { proto: 0, peer: 7 },
+        protocol: lr_core::rib::Protocol::Bgp,
+        preference: lr_core::rib::Preference::new(20, 100),
+        next_hop: None,
+        attributes: lr_core::attr::Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    };
+
+    let mut r = route(24);
+    assert!(matches!(
+        hooks.on_import(&mut r),
+        lr_policy::hooks::HookVerdict::Drop
+    ));
+    let mut r = route(25);
+    assert!(matches!(
+        hooks.on_import(&mut r),
+        lr_policy::hooks::HookVerdict::Drop
+    ));
+    let mut r = route(26);
+    assert!(matches!(
+        hooks.on_import(&mut r),
+        lr_policy::hooks::HookVerdict::Keep
+    ));
+    let mut r = route(32);
+    assert!(matches!(
+        hooks.on_import(&mut r),
+        lr_policy::hooks::HookVerdict::Keep
+    ));
+}
+
+#[test]
+fn prefix_list_impossible_windows_fail_closed() {
+    // le below the prefix length.
+    let cfg = parse("[[prefix-list]]\nname = \"x\"\nprefix = \"10.0.0.0/8\"\nle = 4\n");
+    let err = build_policy_set(&cfg).err().expect("must fail");
+    assert!(err.contains("below the prefix length"), "{err}");
+    // le above the family maximum (the old `le = 255` default).
+    let cfg = parse("[[prefix-list]]\nname = \"x\"\nprefix = \"10.0.0.0/8\"\nle = 255\n");
+    let err = build_policy_set(&cfg).err().expect("must fail");
+    assert!(err.contains("exceeds the 32-bit family maximum"), "{err}");
+    // ge below the prefix length.
+    let cfg = parse("[[prefix-list]]\nname = \"x\"\nprefix = \"10.0.0.0/8\"\nge = 4\n");
+    let err = build_policy_set(&cfg).err().expect("must fail");
+    assert!(err.contains("below the prefix length"), "{err}");
+    // ge greater than le.
+    let cfg = parse("[[prefix-list]]\nname = \"x\"\nprefix = \"10.0.0.0/8\"\nge = 20\nle = 16\n");
+    let err = build_policy_set(&cfg).err().expect("must fail");
+    assert!(err.contains("greater than le"), "{err}");
+    // IPv6: the family maximum is 128, so le = 200 is the error.
+    let cfg = parse("[[prefix-list]]\nname = \"x\"\nprefix = \"2001:db8::/32\"\nle = 200\n");
+    let err = build_policy_set(&cfg).err().expect("must fail");
+    assert!(err.contains("exceeds the 128-bit family maximum"), "{err}");
 }
