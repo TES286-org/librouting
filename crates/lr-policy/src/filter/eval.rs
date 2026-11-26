@@ -623,6 +623,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 }
 
 /// Evaluate a compiled filter against a route.
+///
+/// A verdict latched by `accept` / `reject` inside a user-function
+/// body (BIRD: terminates the whole filter) is consumed after the
+/// statement that caused it — including when that statement is the
+/// last one, which previously dropped the verdict and fell through
+/// (fail-open).
 pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> EvalResult {
     let mut ev = Evaluator {
         ctx,
@@ -637,13 +643,6 @@ pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> 
         line_index: &filter.line_index,
     };
     for stmt in &filter.body.stmts {
-        if let Some(v) = ev.pending_verdict.take() {
-            return match v {
-                ControlFlow::Accept => EvalResult::Accept,
-                ControlFlow::Reject(reason) => EvalResult::Reject(reason),
-                _ => EvalResult::Fallthrough,
-            };
-        }
         match ev.eval_stmt(stmt, route) {
             Ok(ControlFlow::Continue) => {}
             Ok(ControlFlow::Accept) => return EvalResult::Accept,
@@ -659,6 +658,16 @@ pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> 
                 tracing::debug!("filter '{}' eval error: {}", filter.name, e);
                 return EvalResult::Fallthrough;
             }
+        }
+        // A user-function call inside this statement may have
+        // latched a verdict; consume it now so the last statement
+        // cannot drop it. Mirrors the VM's post-`CallFn` check.
+        if let Some(v) = ev.pending_verdict.take() {
+            return match v {
+                ControlFlow::Accept => EvalResult::Accept,
+                ControlFlow::Reject(reason) => EvalResult::Reject(reason),
+                _ => EvalResult::Fallthrough,
+            };
         }
     }
     EvalResult::Fallthrough
@@ -696,6 +705,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     }
 
     fn eval_stmt(&mut self, stmt: &Stmt, route: &mut Route) -> Result<ControlFlow, EvalError> {
+        // A verdict latched earlier (a user-function body hit
+        // `accept` / `reject`) terminates the whole filter — every
+        // later statement is a no-op. Mirrors the VM, whose
+        // `run_code` returns as soon as a `CallFn` latches, so the
+        // instructions after it never execute (in particular, no
+        // route mutation can follow a `reject`).
+        if self.pending_verdict.is_some() {
+            return Ok(ControlFlow::Continue);
+        }
         match stmt {
             Stmt::Return(value, _) => {
                 let v = match value {
@@ -780,11 +798,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
             Stmt::AssignRouteField { field, value, span } => {
                 let v = self.eval_expr(value, route)?;
+                // The RHS may have called a user function that
+                // latched a verdict — the write must not land after
+                // a `reject` (VM parity: the `AssignField`
+                // instruction after a latching `CallFn` never runs).
+                if self.pending_verdict.is_some() {
+                    return Ok(ControlFlow::Continue);
+                }
                 self.assign_route_field(field, v, route, *span)?;
                 Ok(ControlFlow::Continue)
             }
             Stmt::AppendRouteField { field, value, span } => {
                 let v = self.eval_expr(value, route)?;
+                if self.pending_verdict.is_some() {
+                    return Ok(ControlFlow::Continue);
+                }
                 self.append_route_field(field, v, route, *span)?;
                 Ok(ControlFlow::Continue)
             }
@@ -810,6 +838,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     }
 
     fn eval_expr(&mut self, expr: &Expr, route: &mut Route) -> Result<Value, EvalError> {
+        // Sub-expressions after a latched verdict evaluate to a
+        // placeholder without side effects — the VM returns from
+        // `run_code` the moment a `CallFn` latches, so the rest of
+        // the enclosing expression's instructions never run; the
+        // value produced here is unobservable because the verdict
+        // is consumed right after the enclosing statement.
+        if self.pending_verdict.is_some() {
+            return Ok(Value::Bool(false));
+        }
         match expr {
             Expr::Lit(v, _) => Ok(v.clone()),
             Expr::Var(name, span) => self.lookup(name, *span),
@@ -2054,6 +2091,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         route: &mut Route,
         span: Span,
     ) -> Result<Value, EvalError> {
+        // Methods mutate the route; an argument's user-function call
+        // may have latched a verdict, and the mutation must not land
+        // after it (VM parity — see `eval_stmt`).
+        if self.pending_verdict.is_some() {
+            return Ok(Value::Bool(false));
+        }
         match (field.kind, method) {
             (RouteFieldKind::BgpAsPath, "prepend") => {
                 if args.len() != 1 {
@@ -2715,6 +2758,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         let mut stack: Vec<Value> = Vec::new();
         let mut tmp: Option<Value> = None;
         while ip < code.len() {
+            // A tree-walking fallback (`EvalTree`, dynamic `Match`
+            // items, `Defined` over a dynamic expression) can call a
+            // user function whose body latched a verdict. The flat
+            // instructions after it must not run — the same rule the
+            // `Call` / `CallFn` arms enforce inline.
+            if let Some(verdict) = self.pending_verdict.take() {
+                return Ok(match verdict {
+                    ControlFlow::Accept => VmFlow::Accept,
+                    ControlFlow::Reject(reason) => VmFlow::Reject(reason),
+                    _ => VmFlow::Continue,
+                });
+            }
             // GitHub #19 P7: the source span is read lazily inside
             // the fallible arms, not at the dispatch top. The spans
             // table is parallel to `code` (verified by the

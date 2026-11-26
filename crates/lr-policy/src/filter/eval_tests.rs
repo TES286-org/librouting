@@ -1290,6 +1290,72 @@ fn neg_of_i64_min_overflows_not_panics() {
     assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
 }
 
+/// A `reject` latched by the LAST top-level statement must be the
+/// filter's verdict. The interpreter used to consume `pending_verdict`
+/// only at the START of the next loop iteration, so a latch on the
+/// final statement was dropped and the filter fell through — the
+/// daemon maps Fallthrough to Keep, the exact fail-open a `reject`
+/// must never produce.
+#[test]
+fn verdict_from_last_statement_is_consumed() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "function deny() { reject with \"policy\"; } deny();";
+    assert_eq!(
+        run(src, &mut r.clone()),
+        EvalResult::Reject(Some("policy".into()))
+    );
+    assert_eq!(
+        run_vm(src, &mut r),
+        EvalResult::Reject(Some("policy".into()))
+    );
+    // Same shape with accept.
+    let src = "function admit() { accept; } admit();";
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
+/// A verdict latched by a nested user function stops the OUTER
+/// function's remaining statements: the route below must keep its
+/// original LOCAL_PREF and the verdict must be the reject. The
+/// interpreter used to keep executing the outer body (mutating the
+/// route after the reject); the VM already returned.
+#[test]
+fn nested_verdict_stops_outer_function_mutations() {
+    let src = "function inner() { reject; } \
+               function outer() { inner(); bgp.local_pref = 999; } \
+               outer(); accept;";
+    let mut a = route_with("203.0.113.0/24", 100, 0);
+    let mut b = a.clone();
+    assert_eq!(run(src, &mut a), EvalResult::Reject(None));
+    assert_eq!(run_vm(src, &mut b), EvalResult::Reject(None));
+    let keep = |r: &Route| {
+        r.attributes
+            .get_u32_be(AttrTag::raw(TAG_LOCAL_PREF))
+            .unwrap()
+    };
+    assert_eq!(keep(&a), 100, "interpreter must not mutate after the latch");
+    assert_eq!(keep(&b), 100, "VM must not mutate after the latch");
+}
+
+/// The mutation sink itself may call the latching function: the write
+/// must not land on either engine.
+#[test]
+fn assignment_rhs_latch_does_not_mutate() {
+    let src = "function deny() { reject; } bgp.local_pref = 4242; bgp.local_pref = deny(); accept;";
+    let mut a = route_with("203.0.113.0/24", 100, 0);
+    let mut b = a.clone();
+    assert_eq!(run(src, &mut a), EvalResult::Reject(None));
+    assert_eq!(run_vm(src, &mut b), EvalResult::Reject(None));
+    let keep = |r: &Route| {
+        r.attributes
+            .get_u32_be(AttrTag::raw(TAG_LOCAL_PREF))
+            .unwrap()
+    };
+    assert_eq!(keep(&a), 4242, "the pre-latch write lands");
+    assert_eq!(keep(&b), 4242);
+}
+
 /// Every source in the equivalence table must produce identical
 /// verdicts AND identical post-evaluation route state under both
 /// engines.
@@ -1325,6 +1391,19 @@ fn vm_matches_interpreter_on_policy_table() {
             "function double(n) { return n * 2; } if bgp.local_pref == double(50) then accept; reject;",
             "function tag() { bgp.local_pref = 7; return true; } if tag() then accept; reject;",
             "function gated() { if bgp.local_pref > 50 then accept; return false; } gated(); reject;",
+            // A verdict latched inside a user function must survive
+            // even when the call is the LAST top-level statement
+            // (the interpreter used to drop it and fall through).
+            "function deny() { reject with \"policy\"; } deny();",
+            "function admit() { accept; } admit();",
+            // A nested function's verdict stops the outer function's
+            // remaining statements — no route mutation after a latch.
+            "function inner() { reject; } function outer() { inner(); bgp.local_pref = 999; } outer(); accept;",
+            "function inner() { accept; } function outer() { inner(); bgp.local_pref = 999; } outer(); reject;",
+            // The mutation sink itself calls the latching function:
+            // the write must not land.
+            "function deny() { reject; } bgp.local_pref = 4242; bgp.local_pref = deny(); accept;",
+            "function deny() { reject; } bgp.communities += deny(); accept;",
             "function spin() { return spin(); } spin(); accept;",
             "return true;",
             "let n = 65000; if bgp.as_path ~ [n] then accept; reject;",
