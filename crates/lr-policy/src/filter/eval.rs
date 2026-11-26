@@ -2938,8 +2938,11 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // items, `Defined` over a dynamic expression) can call a
             // user function whose body latched a verdict. The flat
             // instructions after it must not run — the same rule the
-            // `Call` / `CallFn` arms enforce inline.
-            if let Some(verdict) = self.pending_verdict.take() {
+            // `Call` / `CallFn` arms enforce inline. The `is_some`
+            // probe keeps the common case (no latch) a load + branch;
+            // `take` would store `None` back on every instruction.
+            if self.pending_verdict.is_some() {
+                let verdict = self.pending_verdict.take().expect("checked above");
                 return Ok(match verdict {
                     ControlFlow::Accept => VmFlow::Accept,
                     ControlFlow::Reject(reason) => VmFlow::Reject(reason),
