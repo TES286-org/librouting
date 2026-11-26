@@ -2038,23 +2038,29 @@ mod damping_reload_toggle_tests {
         )));
         let damping_state: Arc<Mutex<Option<DampingController>>> = Arc::new(Mutex::new(None));
         if initial_enabled {
-            let table = Arc::new(Mutex::new(DampingTable::new(DampingConfig::default())));
+            let table = Arc::new(Mutex::new(
+                DampingTable::new(DampingConfig::default()).unwrap(),
+            ));
             let enabled = Arc::new(AtomicBool::new(true));
             let decay_stop = Arc::new(AtomicBool::new(false));
             let hook = DampingImportHook::with_enabled(Arc::clone(&table), Arc::clone(&enabled));
+            let held = hook.held_routes();
             {
                 let mut r = router.write().unwrap();
                 r.hooks_mut().import.push(Box::new(hook));
             }
             spawn_damping_decay_thread(
                 Arc::clone(&table),
+                Arc::clone(&held),
                 Arc::clone(&decay_stop),
                 DampingConfig::default().decay_interval_s,
+                Arc::clone(&router),
             );
             *damping_state.lock().unwrap() = Some(DampingController {
                 enabled,
                 decay_stop,
                 table,
+                held,
             });
         }
         (router, current_networks, damping_state)
@@ -2155,6 +2161,70 @@ mod damping_reload_toggle_tests {
             decay_stop_flag.load(Ordering::Relaxed),
             "decay_stop flag must be true after on->off reload"
         );
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    /// on → off with held routes: the disable re-imports the
+    /// announcements the hook dropped while their prefixes were
+    /// suppressed — with the hook passing through they are admitted,
+    /// and no peer re-announce is coming to recover them otherwise
+    /// (RFC 2439 §4.8.7).
+    #[test]
+    fn reload_disable_reimports_held_routes() {
+        let cfg_path = temp_config_path("held");
+        write_config(&cfg_path, false);
+        let (router, current_networks, damping_state) = setup(true);
+
+        // Suppress a prefix through the controller's table (three
+        // rapid withdraws cross the 2000 threshold) and stage the
+        // announcement the hook would have held.
+        let prefix: lr_core::addr::Prefix = "198.51.100.0/24".parse().unwrap();
+        let key = lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST);
+        let held_route = lr_core::rib::Route {
+            key: key.clone(),
+            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: Some("192.0.2.254".parse().unwrap()),
+            attributes: Default::default(),
+            age_ms: 1_000,
+            path_id: 0,
+            tag: None,
+        };
+        {
+            let state = damping_state.lock().unwrap();
+            let controller = state.as_ref().expect("setup installed the controller");
+            {
+                let mut table = controller.table.lock().unwrap();
+                table.on_withdraw(&prefix, 0);
+                table.on_withdraw(&prefix, 0);
+                assert!(table.on_withdraw(&prefix, 0), "third flap suppresses");
+            }
+            controller
+                .held
+                .lock()
+                .unwrap()
+                .insert(prefix, vec![held_route]);
+        }
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            None,
+            &[],
+            Some(&damping_state),
+            None,
+            &[],
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("re-imported 1 held route")),
+            "reload should report the held-route re-import: {lines:?}"
+        );
+        assert_eq!(router.read().unwrap().rib_len(), 1);
         let _ = std::fs::remove_file(&cfg_path);
     }
 

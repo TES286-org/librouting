@@ -139,7 +139,13 @@ pub extern "C" fn lr_damping_table_new(cfg: *const lr_damping_config_t) -> lr_da
             } else {
                 unsafe { (*cfg).to_config() }
             };
-            box_table(DampingTable::new(cfg))
+            match DampingTable::new(cfg) {
+                Ok(t) => box_table(t),
+                Err(e) => {
+                    set_last_error(e);
+                    std::ptr::null_mut()
+                }
+            }
         },
         std::ptr::null_mut(),
     )
@@ -594,10 +600,10 @@ mod tests {
         assert_eq!(cfg.additive_incr, 1000);
         assert_eq!(cfg.suppress_threshold, 2000);
         assert_eq!(cfg.reuse_threshold, 750);
-        assert_eq!(cfg.upper_limit, 60000);
+        assert_eq!(cfg.upper_limit, 12000);
         assert_eq!(cfg.decay_interval_s, 30);
-        assert!((cfg.decay_factor_active - 0.97).abs() < 1e-9);
-        assert!((cfg.decay_factor_withdrawn - 0.5).abs() < 1e-9);
+        assert!((cfg.decay_factor_active - 0.977160).abs() < 1e-6);
+        assert!((cfg.decay_factor_withdrawn - 0.977160).abs() < 1e-6);
     }
 
     #[test]

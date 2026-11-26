@@ -2694,6 +2694,26 @@ impl DefaultRouter {
         }
     }
 
+    /// Re-run the full import pipeline for routes an import hook
+    /// previously dropped — the RFC 2439 §4.8.7 reuse step: the
+    /// damping hook held the newest announcement of a suppressed
+    /// prefix, and the decay ticker calls this once the figure of
+    /// merit falls below the reuse threshold. The routes pass through
+    /// the same safety net, RFC 8212 check and hook chain as a live
+    /// announcement (by then the damping hook admits them). Returns
+    /// the number of routes re-imported.
+    pub fn reimport_damped(&mut self, routes: Vec<Route>) -> usize {
+        let mut count = 0;
+        for route in routes {
+            let before = self.adj_rib_in.len();
+            self.import_route(route);
+            if self.adj_rib_in.len() > before {
+                count += 1;
+            }
+        }
+        count
+    }
+
     fn import_route(&mut self, route: Route) {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
         // draft-ietf-idr-addpath-paths-limit-00 §3/§5: cap the number

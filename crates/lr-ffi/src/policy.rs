@@ -379,9 +379,13 @@ pub unsafe extern "C" fn lr_router_set_damping(
                 return std::ptr::null_mut();
             }
             let raw = unsafe { &*cfg };
-            let table = Arc::new(Mutex::new(lr_damping::DampingTable::new(
-                (*raw).to_config(),
-            )));
+            let table = match lr_damping::DampingTable::new((*raw).to_config()) {
+                Ok(t) => Arc::new(Mutex::new(t)),
+                Err(e) => {
+                    set_last_error(e);
+                    return std::ptr::null_mut();
+                }
+            };
             let hook = lr_policy::hooks::DampingImportHook::new(Arc::clone(&table));
             let mut router = match unsafe { lock_router(r) } {
                 Some(g) => g,

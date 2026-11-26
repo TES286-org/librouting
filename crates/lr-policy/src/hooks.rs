@@ -42,6 +42,7 @@
 
 use core::cmp::Ordering;
 
+use lr_core::addr::Prefix;
 use lr_core::rib::{Route, RouteKey, RouteOrigin};
 
 #[cfg(feature = "bgp")]
@@ -365,15 +366,19 @@ impl ImportHook for GracefulShutdownImportHook {
 /// across all sessions on the router. The hook implements both sides
 /// of the damping algorithm:
 ///
-/// * **`on_import`** — first decays the per-prefix figure-of-merit
-///   to "now" via [`DampingTable::on_announce`]; then, if the
-///   prefix is currently suppressed, returns [`HookVerdict::Drop`]
-///   so the route never enters Adj-RIB-In.
-/// * **`on_withdraw`** — calls [`DampingTable::on_withdraw`] to
-///   increment the figure-of-merit. A withdraw that pushes FoM
-///   past the suppress threshold marks the prefix as suppressed;
-///   subsequent imports will be dropped until the FoM decays back
-///   below the reuse threshold.
+/// * **`on_import`** — processes the advertisement via
+///   [`DampingTable::on_announce`] (RFC 2439 §4.8.3: decay, no
+///   penalty — §5 — and the reuse transition); when the prefix is
+///   (still) suppressed it returns [`HookVerdict::Drop`] and keeps
+///   the newest announcement in a held-routes cache, so the decay
+///   ticker can re-inject the route once the FoM decays below the
+///   reuse threshold (§4.8.7): a BGP peer does not re-advertise a
+///   stable route, so without the cache a suppressed prefix whose
+///   FoM later decays would stay out of the Loc-RIB forever.
+/// * **`on_withdraw_with_origin`** — calls
+///   [`DampingTable::on_withdraw`] to apply the flap penalty
+///   (§4.8.2) and drops the same peer's held announcements for the
+///   prefix — a withdrawn route must not come back at reuse time.
 ///
 /// The hook is shared across the import path and the withdraw
 /// notification path — both must see the same table for the
@@ -406,6 +411,14 @@ impl ImportHook for GracefulShutdownImportHook {
 #[derive(Debug, Clone)]
 pub struct DampingImportHook {
     table: Arc<Mutex<DampingTable>>,
+    /// Routes dropped because their prefix was suppressed, kept for
+    /// re-injection when the figure of merit decays below the reuse
+    /// threshold. BGP peers do not re-advertise stable routes, so
+    /// without this cache a suppressed prefix whose FoM later
+    /// decays stays out of the Loc-RIB forever (RFC 2439 §4.8.7's
+    /// reuse step exists precisely for this). Keyed by prefix; each
+    /// entry holds the newest announcement per (peer, key, path id).
+    held: Arc<Mutex<std::collections::BTreeMap<Prefix, Vec<Route>>>>,
     /// Shared on/off flag. The daemon flips this from another
     /// thread (the SIGHUP reload path); the hook reads it on every
     /// `on_import` / `on_withdraw` invocation with a relaxed
@@ -425,6 +438,7 @@ impl DampingImportHook {
     pub fn new(table: Arc<Mutex<DampingTable>>) -> Self {
         Self {
             table,
+            held: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
@@ -438,7 +452,19 @@ impl DampingImportHook {
         table: Arc<Mutex<DampingTable>>,
         enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
-        Self { table, enabled }
+        Self {
+            table,
+            held: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            enabled,
+        }
+    }
+
+    /// Borrow the shared held-routes cache. The daemon's decay
+    /// ticker drains the reactivated prefixes from it and re-imports
+    /// the routes through the router; a SIGHUP that disables damping
+    /// drains it whole so suppressed routes do not stay lost.
+    pub fn held_routes(&self) -> Arc<Mutex<std::collections::BTreeMap<Prefix, Vec<Route>>>> {
+        Arc::clone(&self.held)
     }
 
     /// Borrow the underlying shared table handle. Used by the daemon
@@ -486,33 +512,64 @@ impl ImportHook for DampingImportHook {
             // importing an unsuppressed prefix.
             Err(_) => return HookVerdict::Drop,
         };
-        // RFC 2439 §4.2: on the reachable transition (re-announce),
-        // decay the FoM to now and apply the re-announce increment.
-        // Cisco's variant (which we mirror, see lr_damping docs)
-        // adds `reuse * (1 - decay_factor_withdrawn)` on each
-        // re-announce.
+        // RFC 2439 §4.8.3: process the advertisement — decay the FoM
+        // to now (no penalty lands on advertisement, §5), perform
+        // the reuse transition, and keep the route only when the
+        // prefix is not (or no longer) suppressed.
         let _ = table.on_announce(&route.key.prefix, now_s);
         if table.is_suppressed(&route.key.prefix) {
+            drop(table);
+            // Hold the newest announcement for re-injection at
+            // reuse: a BGP peer does not re-advertise a stable
+            // route, so the router would never see it again on its
+            // own (the §4.8.7 reuse step).
+            if let Ok(mut held) = self.held.lock() {
+                let entry = held.entry(route.key.prefix).or_default();
+                entry.retain(|r| {
+                    !(r.origin.peer == route.origin.peer
+                        && r.key == route.key
+                        && r.path_id == route.path_id)
+                });
+                entry.push(route.clone());
+            }
             HookVerdict::Drop
         } else {
             HookVerdict::Keep
         }
     }
 
-    fn on_withdraw(&self, key: &RouteKey, now_s: u64) {
+    /// Withdraw bookkeeping: record the flap and drop any held
+    /// announcement from the same (peer, key, path id) — the route
+    /// must not come back at reuse time once the peer withdrew it.
+    fn on_withdraw_with_origin(&self, origin: RouteOrigin, key: &RouteKey, now_s: u64) {
         if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
-        let mut table = match self.table.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        // RFC 2439 §4.2: on the unreachable transition (withdraw),
-        // decay the FoM to now and add `additive_incr`. If the new
-        // FoM crosses the suppress threshold, mark the prefix as
-        // suppressed — future imports will be dropped until FoM
-        // decays back below the reuse threshold.
-        let _ = table.on_withdraw(&key.prefix, now_s);
+        {
+            let mut table = match self.table.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            // RFC 2439 §4.8.2: on the unreachable transition, decay
+            // the FoM to now and add `additive_incr`. If the new FoM
+            // crosses the suppress threshold, mark the prefix as
+            // suppressed — future imports will be dropped until FoM
+            // decays back below the reuse threshold.
+            let _ = table.on_withdraw(&key.prefix, now_s);
+        }
+        if let Ok(mut held) = self.held.lock() {
+            if let Some(entry) = held.get_mut(&key.prefix) {
+                // The withdraw notification carries (origin, key) but
+                // not the path id, so every held announcement of this
+                // peer for the prefix goes — for an Add-Path peer the
+                // next announcement of the surviving paths re-populates
+                // the entry.
+                entry.retain(|r| !(r.origin.peer == origin.peer && r.key == *key));
+                if entry.is_empty() {
+                    held.remove(&key.prefix);
+                }
+            }
+        }
     }
 }
 
@@ -1405,7 +1462,9 @@ mod tests {
         DampingImportHook,
         std::sync::Arc<std::sync::Mutex<lr_damping::DampingTable>>,
     ) {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(cfg)));
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_damping::DampingTable::new(cfg).unwrap(),
+        ));
         let hook = DampingImportHook::new(std::sync::Arc::clone(&table));
         (hook, table)
     }
@@ -1512,9 +1571,9 @@ mod tests {
     #[cfg(feature = "damping")]
     #[test]
     fn damping_enabled_flag_passes_through_when_disabled() {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(
-            lr_damping::DampingConfig::default(),
-        )));
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_damping::DampingTable::new(lr_damping::DampingConfig::default()).unwrap(),
+        ));
         let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let hook = DampingImportHook::with_enabled(
             std::sync::Arc::clone(&table),
@@ -1597,9 +1656,9 @@ mod tests {
     #[cfg(feature = "damping")]
     #[test]
     fn damping_default_construction_is_enabled() {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(
-            lr_damping::DampingConfig::default(),
-        )));
+        let table = std::sync::Arc::new(std::sync::Mutex::new(
+            lr_damping::DampingTable::new(lr_damping::DampingConfig::default()).unwrap(),
+        ));
         let hook = DampingImportHook::new(std::sync::Arc::clone(&table));
         assert!(
             hook.enabled_handle()
@@ -1611,6 +1670,118 @@ mod tests {
         // same as before the enabled flag was added.
         let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
         assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
+    }
+
+    // ==== DampingImportHook held-routes (RFC 2439 §4.8.7 reuse) ====
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_holds_dropped_route_and_release_is_visible() {
+        // A suppressed prefix's newest announcement is stashed on
+        // Drop; `held_routes()` exposes the cache the daemon ticker
+        // drains at reuse time.
+        let (hook, table) = damping_hook(lr_damping::DampingConfig::default());
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        let origin = RouteOrigin { proto: 0, peer: 1 };
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        assert!(table.lock().unwrap().is_suppressed(&key.prefix));
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Drop));
+        let held = hook.held_routes();
+        let snapshot = held.lock().unwrap();
+        assert_eq!(
+            snapshot.get(&key.prefix).map(Vec::as_slice),
+            Some(&[r.clone()][..])
+        );
+    }
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_withdraw_clears_the_held_route() {
+        // The peer withdrew the route while it was suppressed: the
+        // held announcement must go, or the reuse step would
+        // resurrect a route the peer no longer offers.
+        let (hook, _table) = damping_hook(lr_damping::DampingConfig::default());
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        let origin = RouteOrigin { proto: 0, peer: 1 };
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Drop));
+        assert_eq!(hook.held_routes().lock().unwrap().len(), 1);
+        // The withdraw that follows the dropped announcement clears
+        // the held copy (and adds another flap to the FoM).
+        hook.on_withdraw_with_origin(origin, &key, 2_000);
+        assert!(
+            hook.held_routes().lock().unwrap().is_empty(),
+            "a withdrawn route must not be resurrected at reuse"
+        );
+    }
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_held_routes_survive_other_peers_withdraw() {
+        // The held cache is per (prefix, peer): peer 2's withdraw
+        // must not evict peer 1's held announcement of the same
+        // prefix.
+        let (hook, _table) = damping_hook(lr_damping::DampingConfig::default());
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        for peer in [1u64, 2] {
+            let origin = RouteOrigin { proto: 0, peer };
+            hook.on_withdraw_with_origin(origin, &key, 0);
+            hook.on_withdraw_with_origin(origin, &key, 0);
+            hook.on_withdraw_with_origin(origin, &key, 0);
+            let mut r = route_at([203, 0, 113, 0], 24, peer, 1_000);
+            assert!(matches!(hook.on_import(&mut r), HookVerdict::Drop));
+        }
+        let held_handle = hook.held_routes();
+        assert_eq!(held_handle.lock().unwrap()[&key.prefix].len(), 2);
+        hook.on_withdraw_with_origin(RouteOrigin { proto: 0, peer: 2 }, &key, 2_000);
+        let held = held_handle.lock().unwrap();
+        assert_eq!(held[&key.prefix].len(), 1, "peer 1's copy survives");
+        assert_eq!(held[&key.prefix][0].origin.peer, 1);
+    }
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_reuse_transition_admits_on_announce() {
+        // RFC 2439 §4.8.3 step 3: after the FoM decays below the
+        // reuse threshold, the next advertisement is admitted — no
+        // new flap, no held-route round trip needed.
+        let (hook, table) = damping_hook(lr_damping::DampingConfig {
+            decay_factor_active: 0.5,
+            decay_factor_withdrawn: 0.5,
+            ..lr_damping::DampingConfig::default()
+        });
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        let origin = RouteOrigin { proto: 0, peer: 1 };
+        for _ in 0..3 {
+            hook.on_withdraw_with_origin(origin, &key, 0);
+        }
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Drop));
+        // Three ticks of 0.5: 3000 -> 375 < reuse 750.
+        let _ = table.lock().unwrap().decay_all(90_000);
+        let mut r2 = route_at([203, 0, 113, 0], 24, 1, 200_000);
+        assert!(
+            matches!(hook.on_import(&mut r2), HookVerdict::Keep),
+            "a decayed-below-reuse prefix must be admitted on announce"
+        );
     }
 
     #[test]

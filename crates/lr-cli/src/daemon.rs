@@ -1104,6 +1104,12 @@ pub(crate) struct DampingController {
     /// clone of this `Arc`; keeping it here lets a re-enable reuse
     /// the existing FoM state instead of starting from zero.
     pub(crate) table: Arc<Mutex<lr_damping::DampingTable>>,
+    /// Routes the hook dropped while their prefix was suppressed —
+    /// the RFC 2439 §4.8.7 reuse step re-imports them once the FoM
+    /// decays below the reuse threshold. Shared with the hook and
+    /// the decay thread.
+    pub(crate) held:
+        Arc<Mutex<std::collections::BTreeMap<lr_core::addr::Prefix, Vec<lr_core::rib::Route>>>>,
 }
 
 /// Spawn the RFC 2439 §4.2 decay ticker thread. The thread holds
@@ -1118,8 +1124,10 @@ pub(crate) struct DampingController {
 /// or the table mutex poisons.
 fn spawn_damping_decay_thread(
     table: Arc<Mutex<lr_damping::DampingTable>>,
+    held: Arc<Mutex<std::collections::BTreeMap<lr_core::addr::Prefix, Vec<lr_core::rib::Route>>>>,
     decay_stop: Arc<AtomicBool>,
     decay_interval_s: u64,
+    router: Arc<RwLock<lr_router::DefaultRouter>>,
 ) {
     std::thread::Builder::new()
         .name("lr-damping-decay".into())
@@ -1170,20 +1178,39 @@ fn spawn_damping_decay_thread(
                 };
                 let now_s = base.elapsed().as_secs();
                 let reactivated = table.decay_all(now_s);
+                // RFC 2439 §4.8.7: a suppressed route whose FoM fell
+                // below the reuse threshold is used again. BGP peers
+                // do not re-advertise stable routes, so the router
+                // would never relearn the prefix on its own — the
+                // hook held the newest announcement, and this is the
+                // step that puts it back. The table lock is already
+                // released (the `let reactivated` binding dropped the
+                // guard), so re-importing cannot deadlock against the
+                // hook taking the same lock inside `run_import`.
                 for prefix in &reactivated {
-                    // The router's import hook chain has no
-                    // "please re-import this prefix" API — the
-                    // next re-announce from the peer will
-                    // naturally flow through the import hook
-                    // (and pass, since `is_suppressed(prefix)`
-                    // is now false). Until then, the prefix
-                    // stays out of Adj-RIB-In. Log the
-                    // reactivation so the operator can correlate.
-                    log_info!(
-                        Component::Policy,
-                        "damping: prefix {} reactivated (FoM decayed below reuse threshold)",
-                        prefix
-                    );
+                    let routes = held
+                        .lock()
+                        .map(|mut h| h.remove(prefix).unwrap_or_default())
+                        .unwrap_or_default();
+                    if !routes.is_empty() {
+                        let n = router
+                            .write()
+                            .map(|mut r| r.reimport_damped(routes))
+                            .unwrap_or(0);
+                        log_info!(
+                            Component::Policy,
+                            "damping: prefix {} reactivated (FoM decayed below reuse \
+                             threshold) — re-imported {} route(s)",
+                            prefix,
+                            n
+                        );
+                    } else {
+                        log_info!(
+                            Component::Policy,
+                            "damping: prefix {} reactivated (FoM decayed below reuse threshold)",
+                            prefix
+                        );
+                    }
                 }
             }
         })
@@ -1821,28 +1848,36 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // off) without the daemon's I/O paths ever taking the lock.
     let damping_state: Arc<Mutex<Option<DampingController>>> = Arc::new(Mutex::new(None));
     if cfg.damping.enabled {
-        let table = Arc::new(Mutex::new(lr_damping::DampingTable::new(
-            cfg.damping.config.clone(),
-        )));
+        let table = match lr_damping::DampingTable::new(cfg.damping.config.clone()) {
+            Ok(t) => Arc::new(Mutex::new(t)),
+            Err(e) => {
+                log_error!(Component::Policy, "rfc2439: refusing [damping] config: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         let enabled = Arc::new(AtomicBool::new(true));
         let decay_stop = Arc::new(AtomicBool::new(false));
         let hook = lr_policy::hooks::DampingImportHook::with_enabled(
             Arc::clone(&table),
             Arc::clone(&enabled),
         );
+        let held = hook.held_routes();
         {
             let mut r = router.write().unwrap();
             r.hooks_mut().import.push(Box::new(hook));
         }
         spawn_damping_decay_thread(
             Arc::clone(&table),
+            Arc::clone(&held),
             Arc::clone(&decay_stop),
             cfg.damping.config.decay_interval_s,
+            Arc::clone(&router),
         );
         *damping_state.lock().unwrap() = Some(DampingController {
             enabled,
             decay_stop,
             table,
+            held,
         });
         log_info!(
             Component::Policy,
@@ -10520,24 +10555,34 @@ fn reload_config(
         let is_enabled = fresh.damping.enabled;
         match (was_enabled, is_enabled) {
             (false, true) => {
-                // Off → on: install hook + spawn decay thread.
-                let table = Arc::new(Mutex::new(lr_damping::DampingTable::new(
-                    fresh.damping.config.clone(),
-                )));
+                // Off → on: install hook + spawn decay thread. An
+                // invalid fresh config aborts the arm and keeps
+                // damping off rather than starting a table that
+                // would misbehave.
+                let table = match lr_damping::DampingTable::new(fresh.damping.config.clone()) {
+                    Ok(t) => Arc::new(Mutex::new(t)),
+                    Err(e) => {
+                        lines.push(format!("reload: damping config invalid, staying off: {e}"));
+                        return lines;
+                    }
+                };
                 let enabled = Arc::new(AtomicBool::new(true));
                 let decay_stop = Arc::new(AtomicBool::new(false));
                 let hook = lr_policy::hooks::DampingImportHook::with_enabled(
                     Arc::clone(&table),
                     Arc::clone(&enabled),
                 );
+                let held = hook.held_routes();
                 {
                     let mut r = router.write().unwrap();
                     r.hooks_mut().import.push(Box::new(hook));
                 }
                 spawn_damping_decay_thread(
                     Arc::clone(&table),
+                    Arc::clone(&held),
                     Arc::clone(&decay_stop),
                     fresh.damping.config.decay_interval_s,
+                    Arc::clone(router),
                 );
                 lines.push(format!(
                     "reload: damping enabled (suppress={}, reuse={}, decay={}s)",
@@ -10549,6 +10594,7 @@ fn reload_config(
                     enabled,
                     decay_stop,
                     table,
+                    held,
                 });
             }
             (true, false) => {
@@ -10558,9 +10604,30 @@ fn reload_config(
                 // (the off→on arm above handles the case where it was
                 // never installed; this arm handles the more common
                 // disable→enable cycle that keeps the hook in
-                // place).
+                // place). Routes held while their prefixes were
+                // suppressed are re-imported first — with the hook
+                // passing through they are admitted, and without
+                // this they would stay lost (no peer re-announce is
+                // coming).
                 if let Some(controller) = state.take() {
+                    // Flip the hook to pass-through FIRST: re-importing
+                    // while it still gates would drop the routes right
+                    // back into the held cache.
                     controller.enabled.store(false, Ordering::Relaxed);
+                    let held_routes: Vec<lr_core::rib::Route> = controller
+                        .held
+                        .lock()
+                        .map(|mut h| h.values_mut().flat_map(std::mem::take).collect())
+                        .unwrap_or_default();
+                    if !held_routes.is_empty() {
+                        let n = router
+                            .write()
+                            .map(|mut r| r.reimport_damped(held_routes))
+                            .unwrap_or(0);
+                        lines.push(format!(
+                            "reload: damping disabled — re-imported {n} held route(s)"
+                        ));
+                    }
                     controller.decay_stop.store(true, Ordering::Relaxed);
                 }
                 lines.push(
@@ -10578,11 +10645,20 @@ fn reload_config(
                     let params_changed =
                         controller.table.lock().unwrap().config() != &fresh.damping.config;
                     if params_changed {
-                        controller
+                        match controller
                             .table
                             .lock()
                             .unwrap()
-                            .update_config(fresh.damping.config.clone());
+                            .update_config(fresh.damping.config.clone())
+                        {
+                            Ok(()) => {}
+                            Err(e) => {
+                                lines.push(format!(
+                                    "reload: damping re-tune invalid, keeping the old \
+                                     parameters: {e}"
+                                ));
+                            }
+                        }
                         lines.push(format!(
                             "reload: damping re-tuned (suppress={}, reuse={}, \
                              additive={}, limit={}, decay-act={}, decay-wdr={}, \
@@ -10598,18 +10674,22 @@ fn reload_config(
                     }
                     // Signal the old ticker to exit at its next
                     // iteration. A fresh ticker spawns with a new
-                    // stop flag; the FoM table persists.
+                    // stop flag; the FoM table and the held-route
+                    // cache persist.
                     controller.decay_stop.store(true, Ordering::Relaxed);
                     let new_stop = Arc::new(AtomicBool::new(false));
                     spawn_damping_decay_thread(
                         Arc::clone(&controller.table),
+                        Arc::clone(&controller.held),
                         Arc::clone(&new_stop),
                         fresh.damping.config.decay_interval_s,
+                        Arc::clone(router),
                     );
                     *state = Some(DampingController {
                         enabled: controller.enabled,
                         decay_stop: new_stop,
                         table: controller.table,
+                        held: controller.held,
                     });
                     if !params_changed {
                         lines.push(format!(
