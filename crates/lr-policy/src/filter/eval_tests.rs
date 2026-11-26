@@ -1828,6 +1828,111 @@ fn asn_values_compare_against_int_literals() {
     }
 }
 
+/// The read-only accessor methods on route fields — the BIRD
+/// `bgp.path.first` spelling. The grammar doc's flagship example
+/// (§7.6) uses `bgp.as_path.first`, which used to be a runtime
+/// UnknownMethod error. Both engines must agree on every accessor.
+#[test]
+fn readonly_accessor_methods_read_the_field() {
+    fn with_path() -> Route {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_AS_PATH),
+            flags: 0x40,
+            // AS_SEQUENCE [64500]
+            value: vec![2u8, 1, 0, 0, 0xFB, 0xF4],
+        });
+        r
+    }
+
+    let cases: &[(&str, EvalResult)] = &[
+        // The doc §7.6 flagship shape.
+        (
+            "if bgp.as_path.first == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.as_path.first == 65000 then accept; reject;",
+            EvalResult::Reject(None),
+        ),
+        (
+            "if bgp.as_path.last == 64500 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.as_path.len == 1 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.as_path.count == 1 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if !bgp.as_path.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.communities.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.communities.len == 0 then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.large_communities.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if bgp.ext_communities.empty then accept; reject;",
+            EvalResult::Accept,
+        ),
+        // The function form still works and agrees with the method
+        // form on the same route.
+        (
+            "if first(bgp.as_path) == bgp.as_path.first then accept; reject;",
+            EvalResult::Accept,
+        ),
+        (
+            "if len(bgp.as_path) == bgp.as_path.len then accept; reject;",
+            EvalResult::Accept,
+        ),
+    ];
+    for (src, want) in cases {
+        let mut a = with_path();
+        let mut b = with_path();
+        assert_eq!(run(src, &mut a), *want, "interpreter: {src}");
+        assert_eq!(run_vm(src, &mut b), *want, "VM: {src}");
+    }
+}
+
+/// The doc §7.6 example, verbatim shape: a user function taking the
+/// first AS as its parameter.
+#[test]
+fn doc_76_flagship_example_runs() {
+    let src = "function is_internal(asn) => bool {\n    return asn == 64500;\n}\n\
+               if is_internal(bgp.as_path.first) then {\n    bgp.local_pref = 200;\n    accept;\n}\n\
+               reject;";
+    let mut a = route_with("203.0.113.0/24", 100, 0);
+    a.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_AS_PATH),
+        flags: 0x40,
+        // AS_SEQUENCE [64500]
+        value: vec![2u8, 1, 0, 0, 0xFB, 0xF4],
+    });
+    let mut b = a.clone();
+    assert_eq!(run(src, &mut a), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut b), EvalResult::Accept);
+    assert_eq!(
+        a.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF)),
+        Some(200)
+    );
+    assert_eq!(
+        b.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF)),
+        Some(200)
+    );
+}
+
 // ----- #18 Phase 0: evaluation errors carry real positions -----
 
 /// Drive the tree-walking evaluator directly and surface the

@@ -2106,6 +2106,146 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             return Ok(Value::Bool(false));
         }
         match (field.kind, method) {
+            // Read-only accessors — the BIRD `bgp.path.first` spelling.
+            // They mirror the §3.2 built-ins (first/last/len/empty/count)
+            // but read the receiver field directly, so the method form
+            // works without binding the attribute to a variable first.
+            // Pure: no route mutation, so the §3.3 mutation rule does not
+            // apply to these arms.
+            (RouteFieldKind::BgpAsPath, "first") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.first",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(self
+                    .ctx
+                    .bgp_as_path(route)
+                    .first()
+                    .map(|a| Value::Asn(*a))
+                    .unwrap_or(Value::Bool(false)))
+            }
+            (RouteFieldKind::BgpAsPath, "last") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.last",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(self
+                    .ctx
+                    .bgp_as_path(route)
+                    .last()
+                    .map(|a| Value::Asn(*a))
+                    .unwrap_or(Value::Bool(false)))
+            }
+            (RouteFieldKind::BgpAsPath, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(self.ctx.bgp_as_path(route).len() as i64))
+            }
+            (RouteFieldKind::BgpAsPath, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.as_path.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(self.ctx.bgp_as_path(route).is_empty()))
+            }
+            (RouteFieldKind::BgpCommunities, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.communities.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(self.ctx.bgp_communities(route).len() as i64))
+            }
+            (RouteFieldKind::BgpCommunities, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.communities.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(self.ctx.bgp_communities(route).is_empty()))
+            }
+            (RouteFieldKind::BgpLargeCommunities, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.large_communities.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(
+                    self.ctx.bgp_large_communities(route).len() as i64
+                ))
+            }
+            (RouteFieldKind::BgpLargeCommunities, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.large_communities.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(
+                    self.ctx.bgp_large_communities(route).is_empty(),
+                ))
+            }
+            (RouteFieldKind::BgpExtCommunities, "len" | "count") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.ext_communities.len",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Int(self.ctx.bgp_ext_communities(route).len() as i64))
+            }
+            (RouteFieldKind::BgpExtCommunities, "empty") => {
+                if !args.is_empty() {
+                    return Err(bad_arg_count(
+                        "bgp.ext_communities.empty",
+                        0,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
+                }
+                Ok(Value::Bool(self.ctx.bgp_ext_communities(route).is_empty()))
+            }
             (RouteFieldKind::BgpAsPath, "prepend") => {
                 if args.len() != 1 {
                     return Err(bad_arg_count(
