@@ -110,6 +110,48 @@ fn error_display() {
     assert!(!TcpAuthError::ConnectTimeout.is_kernel_unsupported());
 }
 
+/// The partial-TCP-AO-backport error (`TCP_AO_ADD_KEY` works,
+/// `TCP_AO_INFO` returns EINVAL) classifies as kernel-unsupported so
+/// the live handshake tests skip gracefully on such kernels, while
+/// the daemon's arm path fails closed with it — the listener never
+/// silently runs without `ao_required`.
+#[test]
+fn ao_required_unavailable_is_kernel_unsupported() {
+    let e = TcpAuthError::AoRequiredUnavailable { errno: 22 };
+    assert!(e.is_kernel_unsupported());
+    let msg = e.to_string();
+    assert!(msg.contains("ao_required"));
+    assert!(msg.contains("tcp_ao_without_ao_required"));
+    // A plain EINVAL from another socket call stays a generic OS
+    // error — only the ao_required path gets the dedicated variant.
+    let os = TcpAuthError::Os {
+        context: "setsockopt(TCP_AO_ADD_KEY)",
+        errno: 22,
+    };
+    assert!(!os.is_kernel_unsupported());
+}
+
+/// The explicit opt-out constructor clears the flag after running the
+/// same key/mac validation as `tcp_ao`.
+#[test]
+fn tcp_ao_without_ao_required_clears_the_flag() {
+    let auth = TcpAuth::tcp_ao_without_ao_required(
+        vec![TcpAoKey::symmetric(1, b"ao-secret".as_slice()).unwrap()],
+        TcpAoAlgorithm::HmacSha1,
+        0,
+    )
+    .unwrap();
+    match auth {
+        TcpAuth::Ao { ao_required, .. } => assert!(!ao_required),
+        _ => panic!("expected TcpAuth::Ao"),
+    }
+    // Validation still applies.
+    assert_eq!(
+        TcpAuth::tcp_ao_without_ao_required(Vec::new(), TcpAoAlgorithm::HmacSha1, 0).unwrap_err(),
+        TcpAuthError::NoAoKeys
+    );
+}
+
 // -- Linux wire-structure layout pins: see `imp::layout_tests`. --------
 
 // -- Live loopback handshakes (graceful skip on kernels lacking the

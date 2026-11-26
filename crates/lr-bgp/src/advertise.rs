@@ -164,15 +164,37 @@ impl BgpPeer {
         }
         attrs.remove(AttrType::AsPath);
         attrs.remove(AttrType::As4Path);
+        // RFC 6793 §4.1/§4.2.2: the wire width follows the session's
+        // negotiated four-octet-AS state (computed at the OPEN
+        // exchange), not the configured knob. A four-octet-capable
+        // speaker paired with a two-octet-only peer downgrades to the
+        // 2-byte encoding — the OLD speaker cannot parse a 4-byte
+        // AS_PATH, and the previous knob-driven choice sent it anyway.
+        let negotiated_asn4 = self.codec.asn4_active();
         attrs.insert(PathAttribute::new(
             PathAttrFlags::new().set_transitive(true),
             AttrType::AsPath,
-            if self.cfg.asn4 {
+            if negotiated_asn4 {
                 as_path.encode_4()
             } else {
                 as_path.encode_2()
             },
         ));
+        if !negotiated_asn4 && !as_path.all_mappable() {
+            // RFC 6793 §4.2.2: toward an OLD speaker the AS4_PATH
+            // carries the four-octet AS numbers the 2-byte AS_PATH
+            // represents as AS_TRANS. It is sent exactly when the
+            // path is not fully mappable, with the AS_CONFED_*
+            // segments excluded.
+            let as4 = as_path.without_confed_segments();
+            if !as4.segments.is_empty() {
+                attrs.insert(PathAttribute::new(
+                    PathAttrFlags::new().set_optional(true).set_transitive(true),
+                    AttrType::As4Path,
+                    as4.encode_4(),
+                ));
+            }
+        }
 
         // --- LOCAL_PREF: iBGP only (RFC 4271 §5.1.4 / §9.1.2.2) ---
         // LOCAL_PREF is well-known discretionary → optional bit MUST be 0.
@@ -429,10 +451,22 @@ impl BgpPeer {
         } else {
             match family {
                 NlriFamily::IPV4_UNICAST => {
-                    if let Some(nh) = next_hop {
-                        if attrs.get(AttrType::NextHop).is_none() {
-                            attrs.insert(Self::next_hop_attr(nh));
+                    // RFC 4271 §5.1.3: NEXT_HOP is four octets for IPv4
+                    // NLRI. A 16-octet IPv6 next-hop is legal only with
+                    // RFC 5549 / RFC 8950 Extended Next-Hop (1,1,2)
+                    // negotiated — that case took the MP_REACH branch
+                    // above. Without it we must not emit a 16-octet
+                    // well-known NEXT_HOP (BIRD and FRR reject it), nor
+                    // an UPDATE with no NEXT_HOP at all (RFC 4271 §6.3).
+                    // Withhold the route; the caller then skips the
+                    // Adj-RIB-Out entry.
+                    match next_hop {
+                        Some(lr_core::addr::IpAddr::V4(b)) => {
+                            if attrs.get(AttrType::NextHop).is_none() {
+                                attrs.insert(Self::next_hop_attr(lr_core::addr::IpAddr::V4(b)));
+                            }
                         }
+                        Some(lr_core::addr::IpAddr::V6(_)) | None => return false,
                     }
                     update.nlri.push(Nlri::new(route.path_id, route.key.prefix));
                 }

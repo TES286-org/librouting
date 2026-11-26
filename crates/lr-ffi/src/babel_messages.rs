@@ -365,7 +365,8 @@ pub unsafe extern "C" fn lr_babel_router_id_new(bytes: *const u8) -> lr_babel_ro
 }
 
 /// Read the 8-octet Router-ID into `*out` (must point to 8 writable
-/// bytes).
+/// bytes). The two reserved octets of the RFC 8966 §4.6.7 wire form
+/// are not part of the id and are not written.
 ///
 /// # Safety
 /// `r` must be a valid handle; `out` must point to 8 writable bytes.
@@ -377,9 +378,13 @@ pub unsafe extern "C" fn lr_babel_router_id_bytes(r: lr_babel_router_id_t, out: 
                 return LR_ERR_NULL;
             }
             let rid: &RouterId = unsafe { &*(r as *const RouterId) };
+            // `encode()` is `Reserved(2) | Router-Id(8)`; the contract
+            // (and the frozen header) promise 8 bytes — the id proper.
+            // Writing the full 10-octet wire form used to overflow the
+            // caller's 8-byte buffer by two bytes.
             let bytes = rid.encode();
             unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, 10);
+                std::ptr::copy_nonoverlapping(&bytes[2], out, 8);
             }
             0
         },
@@ -1332,14 +1337,14 @@ mod tests {
         let bytes_in = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let r = unsafe { lr_babel_router_id_new(bytes_in.as_ptr()) };
         assert!(!r.is_null());
-        let mut bytes_out = [0u8; 10];
+        // The header contract is 8 writable bytes holding the id —
+        // exactly what RFC 8966 §4.6.7 puts in the Router-ID TLV body
+        // after the two reserved octets. A caller following the
+        // contract must not be overflowed.
+        let mut bytes_out = [0u8; 8];
         let rc = unsafe { lr_babel_router_id_bytes(r, bytes_out.as_mut_ptr()) };
         assert_eq!(rc, 0);
-        // RouterId::encode is `Reserved(2) | Router-Id(8)` (RFC 8966
-        // §4.6.7) — the first two bytes are reserved (zero), then
-        // the 8-byte Router-ID follows.
-        assert_eq!(&bytes_out[..2], &[0, 0]);
-        assert_eq!(&bytes_out[2..], &bytes_in);
+        assert_eq!(bytes_out, bytes_in);
         unsafe { lr_babel_router_id_free(r) };
     }
 

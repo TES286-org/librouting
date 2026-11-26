@@ -4183,13 +4183,26 @@ impl DefaultRouter {
                     // re-advertises. Skipped when the session has no
                     // configured peer address (the comparator's step 8
                     // then ties through to the remaining tiebreakers).
-                    if let Some(SessionState::Bgp {
-                        peer_address: Some(addr),
-                        ..
-                    }) = self.sessions.get(&r.origin.peer)
-                    {
+                    //
+                    // The same block stamps the peer's BGP Identifier
+                    // (`LrPeerBgpId`): the comparator's step 10 uses
+                    // it when the route carries no ORIGINATOR_ID (the
+                    // FRR/BIRD substitution — without it such a route
+                    // compared as identifier 0 and beat every real
+                    // router id). Skipped when the session's peer id
+                    // is not known yet.
+                    if let Some(SessionState::Bgp { .. }) = self.sessions.get(&r.origin.peer) {
                         let mut attrs: lr_bgp::path::PathAttributes = r.attributes.clone().into();
-                        attrs.set_peer_source_address(*addr);
+                        if let Some(SessionState::Bgp {
+                            peer_address: Some(addr),
+                            ..
+                        }) = self.sessions.get(&r.origin.peer)
+                        {
+                            attrs.set_peer_source_address(*addr);
+                        }
+                        if let Some(rid) = self.session_peer_bgp_id(r.origin.peer) {
+                            attrs.set_peer_bgp_id(rid.as_u32());
+                        }
                         r.attributes = attrs.into();
                     }
                     self.import_route(r);

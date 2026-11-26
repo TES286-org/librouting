@@ -214,6 +214,26 @@ impl TcpAuth {
         })
     }
 
+    /// RFC 5925 configuration with the `ao_required` listener hardening
+    /// explicitly disabled: the keys still authenticate the handshake
+    /// (`TCP_AO_ADD_KEY`), but the listener does not reject inbound
+    /// connections that carry no TCP-AO option. This is the explicit
+    /// opt-out for kernels whose `TCP_AO_INFO` rejects the flag
+    /// ([`TcpAuthError::AoRequiredUnavailable`]) — arming an
+    /// `ao_required` listener there fails closed by design, so an
+    /// operator who genuinely accepts the weaker posture says so here.
+    pub fn tcp_ao_without_ao_required(
+        keys: Vec<TcpAoKey>,
+        algorithm: TcpAoAlgorithm,
+        mac_len: u8,
+    ) -> Result<Self, TcpAuthError> {
+        let mut auth = Self::tcp_ao(keys, algorithm, mac_len)?;
+        if let TcpAuth::Ao { ao_required, .. } = &mut auth {
+            *ao_required = false;
+        }
+        Ok(auth)
+    }
+
     /// True when no authentication is configured.
     pub fn is_none(&self) -> bool {
         matches!(self, TcpAuth::None)
@@ -257,14 +277,31 @@ pub enum TcpAuthError {
     ConnectTimeout,
     /// A socket operation failed; `errno` is the OS error code.
     Os { context: &'static str, errno: i32 },
+    /// The kernel accepted the AO keys but rejected the per-socket
+    /// `TCP_AO_INFO` `ao_required` hardening (EINVAL) — observed on
+    /// kernels with a partial TCP-AO backport, where
+    /// `setsockopt(TCP_AO_ADD_KEY)` succeeds but `TCP_AO_INFO` fails.
+    /// Surfaced instead of silently dropping the flag: an
+    /// `ao_required` listener that accepts unauthenticated inbound
+    /// connections is exactly what the configuration promised to
+    /// prevent (RFC 5925 §7.1). Callers that accept the weaker
+    /// posture may re-arm explicitly with
+    /// [`TcpAuth::tcp_ao_without_ao_required`].
+    AoRequiredUnavailable { errno: i32 },
 }
 
 impl TcpAuthError {
     /// True when the running kernel lacks the requested socket option —
-    /// e.g. TCP-AO on kernels older than Linux 6.7 (`ENOPROTOOPT`).
+    /// e.g. TCP-AO on kernels older than Linux 6.7 (`ENOPROTOOPT`), or
+    /// a partial TCP-AO backport whose `TCP_AO_INFO` rejects the
+    /// `ao_required` flag (EINVAL while `TCP_AO_ADD_KEY` works).
     /// Callers may degrade gracefully (skip) instead of failing hard.
     pub fn is_kernel_unsupported(&self) -> bool {
-        matches!(self, TcpAuthError::Os { errno, .. } if *errno == ENOPROTOOPT)
+        match self {
+            TcpAuthError::Os { errno, .. } => *errno == ENOPROTOOPT,
+            TcpAuthError::AoRequiredUnavailable { .. } => true,
+            _ => false,
+        }
     }
 
     /// True when the failure is `bind(2)` rejecting the requested local
@@ -295,6 +332,16 @@ impl fmt::Display for TcpAuthError {
             TcpAuthError::Os { context, errno } => {
                 let e = std::io::Error::from_raw_os_error(*errno);
                 write!(f, "{context}: {e}")
+            }
+            TcpAuthError::AoRequiredUnavailable { errno } => {
+                let e = std::io::Error::from_raw_os_error(*errno);
+                write!(
+                    f,
+                    "setsockopt(TCP_AO_INFO, ao_required) failed: {e} — \
+                     the kernel cannot enforce authenticated-only inbound \
+                     connections (re-arm with tcp_ao_without_ao_required \
+                     to accept the weaker posture explicitly)"
+                )
             }
         }
     }
@@ -776,46 +823,28 @@ mod imp {
                     )?;
                 }
                 if *ao_required {
-                    // setsockopt(TCP_AO_INFO) sets the per-socket
-                    // `ao_required` flag (reject unauthenticated
-                    // inbound connections). Some kernels that support
-                    // TCP_AO_ADD_KEY (key installation) return EINVAL
-                    // for TCP_AO_INFO — observed on the s390x
-                    // self-hosted CI runner, likely a partial TCP-AO
-                    // backport or a struct layout nuance on
-                    // big-endian. The `ao_required` flag is a
-                    // hardening feature (fail-closed for
-                    // unauthenticated connections); the authenticated
-                    // handshake itself works without it because the
-                    // keys are already installed. Degrade gracefully:
-                    // log and continue rather than failing the entire
-                    // arm_listener call, so the TCP-AO handshake test
-                    // can proceed on kernels with partial TCP-AO
-                    // support.
+                    // `TCP_AO_INFO`'s `ao_required` flag is the only
+                    // switch that rejects unauthenticated inbound
+                    // connections (RFC 5925 §7.1). Some kernels with a
+                    // partial TCP-AO backport accept `TCP_AO_ADD_KEY`
+                    // (the keys were installed above) but return EINVAL
+                    // for `TCP_AO_INFO` — observed on the s390x
+                    // self-hosted CI runner. Degrading silently would
+                    // run the listener fail-open: an operator who
+                    // configured TCP-AO would get a listener that
+                    // completes unauthenticated connections, the exact
+                    // opposite of the configured intent. The error is
+                    // surfaced instead; a caller that accepts the
+                    // weaker posture re-arms explicitly with
+                    // [`TcpAuth::tcp_ao_without_ao_required`], and
+                    // `is_kernel_unsupported` classifies the error so
+                    // tests on partial-support kernels skip gracefully.
                     if let Err(e) = set_ao_required(fd) {
-                        if matches!(e, TcpAuthError::Os { errno, .. } if errno == EINVAL) {
-                            // setsockopt(TCP_AO_INFO) returned EINVAL:
-                            // the kernel supports TCP_AO_ADD_KEY (the
-                            // keys were installed above) but rejects
-                            // the per-socket INFO option. Observed on
-                            // the s390x self-hosted CI runner — likely
-                            // a partial TCP-AO backport or a struct
-                            // layout nuance on big-endian. The
-                            // `ao_required` flag is a hardening
-                            // feature (reject unauthenticated inbound
-                            // connections); the authenticated
-                            // handshake itself works without it because
-                            // the keys are already installed. Degrade
-                            // gracefully: log to stderr and continue
-                            // rather than failing the entire
-                            // arm_listener call.
-                            eprintln!(
-                                "lr-osroute: setsockopt(TCP_AO_INFO) \
-                                 returned EINVAL — continuing without \
-                                 ao_required (partial TCP-AO kernel support)"
-                            );
-                        } else {
-                            return Err(e);
+                        match e {
+                            TcpAuthError::Os { errno, .. } if errno == EINVAL => {
+                                return Err(TcpAuthError::AoRequiredUnavailable { errno });
+                            }
+                            other => return Err(other),
                         }
                     }
                 }

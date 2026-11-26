@@ -8,14 +8,15 @@ use lr_core::codec::Decoder;
 use lr_core::rib::{Preference, Protocol, RouteKey, RouteOrigin};
 
 fn established_peer(cfg: PeerConfig) -> BgpPeer {
+    let dummy = PeerConfig::new(cfg.peer_as, cfg.local_as, RouterId::from_v4([10, 9, 9, 9]));
+    established_peer_with_dummy(cfg, dummy)
+}
+
+fn established_peer_with_dummy(cfg: PeerConfig, dummy_cfg: PeerConfig) -> BgpPeer {
     // Full OPEN/KEEPALIVE handshake against a dummy partner so the
     // peer under test actually reaches Established.
-    let mut p = BgpPeer::new(cfg.clone());
-    let mut dummy = BgpPeer::new(PeerConfig::new(
-        cfg.peer_as,
-        cfg.local_as,
-        RouterId::from_v4([10, 9, 9, 9]),
-    ));
+    let mut p = BgpPeer::new(cfg);
+    let mut dummy = BgpPeer::new(dummy_cfg);
     p.step(BgpEvent::ManualStart);
     p.step(BgpEvent::TransportOpen);
     dummy.step(BgpEvent::ManualStart);
@@ -915,5 +916,91 @@ fn advertise_bgpls_with_attr_empty_attr_is_noop() {
     let nlri = sample_bgpls_node_nlri();
     let attr = BgpLsAttr::default();
     assert!(!peer.advertise_bgpls_with_attr(&[nlri], &attr));
+    assert!(peer.drain_outgoing().is_empty());
+}
+
+fn ipv4_route_with_next_hop(next_hop: Option<IpAddr>) -> Route {
+    let mut attrs = PathAttributes::new();
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    attrs.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        AsPath::from_sequence([64500].iter().copied().map(Asn)).encode_4(),
+    ));
+    Route {
+        key: RouteKey::new(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        ),
+        origin: RouteOrigin { proto: 0, peer: 7 },
+        protocol: Protocol::Bgp,
+        preference: Preference::new(20, 1),
+        next_hop,
+        attributes: attrs.into(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+/// RFC 5549 §4 / RFC 8950 §4: an IPv6 next-hop for IPv4 NLRI is legal
+/// only when (1,1,2) was negotiated. Without it the egress must not
+/// emit a 16-octet well-known NEXT_HOP (RFC 4271 §5.1.3 fixes it at
+/// four octets) — withhold the route instead.
+#[test]
+fn ipv4_unicast_ipv6_next_hop_without_enh_is_withheld() {
+    let cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    let mut peer = established_peer(cfg);
+    let v6 = IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    assert!(!peer.advertise(&ipv4_route_with_next_hop(Some(v6))));
+    assert!(peer.drain_outgoing().is_empty());
+}
+
+/// The same route becomes advertisable once both speakers advertised
+/// (1,1,2): the next-hop then travels in MP_REACH_NLRI.
+#[test]
+fn ipv4_unicast_ipv6_next_hop_with_enh_uses_mp_reach() {
+    let cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    let mut peer_cfg = cfg.clone();
+    peer_cfg.extended_next_hop = vec![(1, 1, 2)];
+    let mut dummy_cfg =
+        PeerConfig::new(cfg.peer_as, cfg.local_as, RouterId::from_v4([10, 9, 9, 9]));
+    dummy_cfg.extended_next_hop = vec![(1, 1, 2)];
+    let mut peer = established_peer_with_dummy(peer_cfg, dummy_cfg);
+    assert!(peer.extended_next_hop_for(1, 1, 2));
+
+    let v6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let route = ipv4_route_with_next_hop(Some(IpAddr::V6(v6)));
+    assert!(peer.advertise(&route));
+
+    let bytes = peer.drain_outgoing();
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    match dec.decode(&mut r) {
+        Ok(Some(BgpMessage::Update(u))) => {
+            assert!(u.attributes.next_hop().is_none(), "no 16-octet NEXT_HOP");
+            let reach = crate::path::MpReach::decode(
+                &u.attributes.get(AttrType::MpReachNlri).unwrap().value,
+            )
+            .unwrap();
+            assert_eq!(reach.family, NlriFamily::IPV4_UNICAST);
+            assert_eq!(reach.next_hop, crate::path::MpNextHop::V4OverV6(v6));
+            assert_eq!(reach.nlri.len(), 1);
+        }
+        _ => panic!("UPDATE did not decode"),
+    }
+}
+
+/// RFC 4271 §6.3 requires NEXT_HOP on an UPDATE carrying IPv4 NLRI.
+/// A route with no next-hop at all cannot be sent safely either.
+#[test]
+fn ipv4_unicast_without_next_hop_is_withheld() {
+    let cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    let mut peer = established_peer(cfg);
+    assert!(!peer.advertise(&ipv4_route_with_next_hop(None)));
     assert!(peer.drain_outgoing().is_empty());
 }

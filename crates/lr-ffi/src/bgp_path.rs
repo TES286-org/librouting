@@ -1319,7 +1319,12 @@ pub unsafe extern "C" fn lr_bgp_path_attrs_mp_reach(
             if out_next_hop.is_null() || out_nlri_bytes.is_null() {
                 return 0;
             }
-            match attrs.mp_reach() {
+            // Read the fixed header rather than decoding the NLRI: the
+            // family / next-hop / raw-byte readers must also work for
+            // families whose NLRI need a specialised decoder (RFC 8277
+            // labelled unicast), which the plain `MpReach` decoder
+            // deliberately rejects.
+            match attrs.mp_reach_header() {
                 Some(reach) => {
                     if !out_family_afi.is_null() {
                         unsafe { *out_family_afi = reach.family.afi };
@@ -1406,13 +1411,15 @@ pub unsafe extern "C" fn lr_bgp_path_attrs_mp_unreach(
             if out_nlri_bytes.is_null() {
                 return 0;
             }
-            match attrs.mp_unreach() {
-                Some(unreach) => {
+            // Header-only, like the mp_reach reader above: presence,
+            // family and raw bytes are available for every SAFI.
+            match attrs.mp_unreach_family() {
+                Some(family) => {
                     if !out_family_afi.is_null() {
-                        unsafe { *out_family_afi = unreach.family.afi };
+                        unsafe { *out_family_afi = family.afi };
                     }
                     if !out_family_safi.is_null() {
-                        unsafe { *out_family_safi = unreach.family.safi };
+                        unsafe { *out_family_safi = family.safi };
                     }
                     // Surface the raw attribute value bytes — the
                     // caller decodes the AFI/SAFI + NLRI list with
@@ -2411,6 +2418,61 @@ mod tests {
             0
         );
         unsafe { lr_bgp_path_attrs_free(a) };
+    }
+
+    /// Header-only readers keep working for RFC 8277 labelled families,
+    /// whose NLRI the plain `MpReach` decoder deliberately rejects.
+    #[test]
+    fn ffi_path_attrs_mp_reach_labelled_family() {
+        let a = lr_bgp_path_attrs_new();
+        {
+            let attrs = unsafe { borrow_attrs_mut(a).unwrap() };
+            let gua = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            let reach = lr_bgp::path::MpReach::new(
+                lr_core::nlri::NlriFamily::IPV6_LABELED_UNICAST,
+                lr_bgp::path::MpNextHop::V6Global(gua),
+                vec![],
+            );
+            attrs.insert(lr_bgp::path::PathAttribute::new(
+                lr_bgp::path::PathAttrFlags::new().set_optional(true),
+                AttrType::MpReachNlri,
+                reach.encode(),
+            ));
+        }
+
+        let mut afi = 0u16;
+        let mut safi = 0u8;
+        let mut nh = lr_bgp_next_hop_t::default();
+        let mut nlri = lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(
+            unsafe {
+                lr_bgp_path_attrs_mp_reach(
+                    a,
+                    &raw mut afi,
+                    &raw mut safi,
+                    &raw mut nh,
+                    &raw mut nlri,
+                )
+            },
+            1
+        );
+        assert_eq!((afi, safi), (2, 4));
+        assert_eq!(nh.present, 1);
+        assert_eq!(nh.kind, 1);
+        assert_eq!(
+            nh.addr,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+        let raw = unsafe { std::slice::from_raw_parts(nlri.ptr, nlri.len) }.to_vec();
+        assert_eq!(raw[0..3], [0x00, 0x02, 0x04]);
+        unsafe {
+            crate::bytes::lr_bytes_free(&raw mut nlri);
+            lr_bgp_path_attrs_free(a);
+        }
     }
 
     #[test]

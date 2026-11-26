@@ -614,6 +614,12 @@ impl BestPath {
         first_a == first_b
     }
 
+    /// The route's identifier for the step-10 tiebreak (RFC 5004
+    /// deterministic mode, RFC 4456 §9): the ORIGINATOR_ID when the
+    /// route carries one, otherwise the advertising peer's BGP
+    /// Identifier (the FRR/BIRD substitution — without it every
+    /// route lacking ORIGINATOR_ID compared as 0 and beat every
+    /// real router id), otherwise 0.
     fn originator_id(attrs: &PathAttributes) -> u32 {
         attrs
             .get(AttrType::OriginatorId)
@@ -626,6 +632,7 @@ impl BestPath {
                     None
                 }
             })
+            .or_else(|| attrs.peer_bgp_id())
             .unwrap_or(0)
     }
 
@@ -715,6 +722,61 @@ mod tests {
         let routes = [a, b];
         let best = BestPath::select(&routes, &cfg).unwrap();
         assert_eq!(best.origin.peer, 1);
+    }
+
+    /// RFC 4456 §9 / RFC 5004 step 10: a route without ORIGINATOR_ID
+    /// compares on the advertising peer's BGP Identifier (the
+    /// FRR/BIRD substitution, carried as the `LrPeerBgpId` private
+    /// tag). Without the substitution every such route compared as
+    /// identifier 0 and beat every real router id.
+    #[test]
+    fn deterministic_step10_substitutes_peer_bgp_id_without_originator() {
+        // Two eBGP-shaped routes (no ORIGINATOR_ID), different peer
+        // BGP ids: the lower id wins regardless of insertion order.
+        let a = route_with_attrs_many(
+            &[
+                (2, vec![2, 1, 0, 0, 100]),
+                (247, 0x0b00_0002u32.to_be_bytes().to_vec()),
+            ],
+            1,
+        );
+        let b = route_with_attrs_many(
+            &[
+                (2, vec![2, 1, 0, 0, 100]),
+                (247, 0x0a00_0001u32.to_be_bytes().to_vec()),
+            ],
+            2,
+        );
+        let cfg = BestPathConfig::default();
+        let routes = [a.clone(), b.clone()];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(best.origin.peer, 2, "the lower peer BGP Identifier wins");
+        let routes = [b, a];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(best.origin.peer, 2, "insertion order does not matter");
+
+        // ORIGINATOR_ID still takes precedence over the substitute.
+        let reflected = route_with_attrs_many(
+            &[
+                (2, vec![2, 1, 0, 0, 100]),
+                (9, vec![0, 0, 0, 9]),
+                (247, 0x0c00_0000u32.to_be_bytes().to_vec()),
+            ],
+            3,
+        );
+        let plain = route_with_attrs_many(
+            &[
+                (2, vec![2, 1, 0, 0, 100]),
+                (247, 0x0a00_0001u32.to_be_bytes().to_vec()),
+            ],
+            4,
+        );
+        let routes = [reflected, plain];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 3,
+            "ORIGINATOR_ID 9 beats the lower substitute id"
+        );
     }
 
     #[test]

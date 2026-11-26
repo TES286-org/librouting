@@ -2294,8 +2294,12 @@ impl OspfDaemon {
                             // debugging a "session stuck in Init" with
                             // no signal that the auth failed).
                             if !verify_ospf_auth(&mut auth, ospf) {
-                                let peer_rid =
-                                    u32::from_be_bytes([ospf[4], ospf[5], ospf[6], ospf[7]]);
+                                // A truncated OSPF payload (the IP header
+                                // only guarantees 20 bytes of datagram, so
+                                // the payload can be shorter than the OSPF
+                                // header) must not index past the buffer
+                                // on the drop path.
+                                let peer_rid = ospf_router_id(ospf);
                                 log_warn!(
                                     Component::Ospf,
                                     "ospf auth: dropping packet from {:08x} on {} \
@@ -2305,13 +2309,15 @@ impl OspfDaemon {
                                 );
                                 continue;
                             }
-                            if ospf_debug_enabled() {
+                            if ospf.len() >= lr_ospf::packet::OspfHeader::LEN
+                                && ospf_debug_enabled()
+                            {
                                 log_debug!(
                                     Component::Ospf,
                                     "dbg-recv kind={} len={} rid={:08x}",
                                     ospf.get(1).copied().unwrap_or(0),
                                     u16::from_be_bytes([ospf[2], ospf[3]]),
-                                    u32::from_be_bytes([ospf[4], ospf[5], ospf[6], ospf[7]])
+                                    ospf_router_id(ospf)
                                 );
                             }
                             // §10.5: parse Hellos for the interface's
@@ -4304,6 +4310,18 @@ fn strip_ipv4_header(bytes: &[u8]) -> Option<&[u8]> {
         return None; // not OSPF
     }
     Some(&bytes[ihl..])
+}
+
+/// The sending router's id at offset 4..8 of an OSPFv2 packet, or 0
+/// when the payload is too short to carry one. The receive paths use
+/// this for their log lines: a truncated datagram (the IP header only
+/// guarantees 20 bytes) must never index past the buffer while
+/// reporting the drop.
+fn ospf_router_id(bytes: &[u8]) -> u32 {
+    if bytes.len() < 8 {
+        return 0;
+    }
+    u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
 }
 
 /// Extract `(router-id, area, length)` from a raw OSPFv2 datagram

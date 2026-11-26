@@ -1265,6 +1265,31 @@ fn run_vm(filter_src: &str, route: &mut Route) -> EvalResult {
     crate::filter::bytecode::execute(&compiled, route, &StubCtx)
 }
 
+/// Negating i64::MIN overflows. The module contract says the
+/// evaluator never panics; both engines must surface the same
+/// Overflow error (mapped to Fallthrough) instead — the previous
+/// `-n` panicked in debug builds and wrapped in release.
+#[test]
+fn neg_of_i64_min_overflows_not_panics() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "let x = -(-9223372036854775807 - 1); let y = -x; accept;";
+    let va = run(src, &mut r.clone());
+    let vb = run_vm(src, &mut r);
+    assert_eq!(
+        va, vb,
+        "the interpreter and the VM agree on the overflow verdict"
+    );
+    assert_eq!(
+        va,
+        EvalResult::Fallthrough,
+        "overflow is fatal for the route, not the process"
+    );
+    // The non-overflowing negation still works on both engines.
+    let src = "let x = -(0 - 5); if x == 5 then accept; reject;";
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
 /// Every source in the equivalence table must produce identical
 /// verdicts AND identical post-evaluation route state under both
 /// engines.
@@ -1278,6 +1303,13 @@ fn vm_matches_interpreter_on_policy_table() {
             "if bgp.local_pref > 200 then accept; else reject;",
             "case proto { \"bgp\" => accept; default => reject; }",
             "case bgp.local_pref { 100 => accept; 200 => reject; default => accept; }",
+            // Multi-pattern arms: any pattern may match (OR). The VM
+            // used to compile these as AND — a two-pattern arm of
+            // literals never fired.
+            "case bgp.local_pref { 42, 100 => accept; default => reject; }",
+            "case bgp.local_pref { 7, 42, 200 => accept; default => reject; }",
+            "case bgp.med { 1 => reject; 5, 100 => accept; default => reject; }",
+            "case proto { \"bgp\", \"ospf\" => accept; default => reject; }",
             "if bgp.local_pref > 50 && bgp.med < 10 then accept; reject;",
             "if bgp.local_pref > 500 || bgp.med < 10 then accept; reject;",
             "let x = bgp.local_pref * 2 + 1; if x == 201 then accept; reject;",

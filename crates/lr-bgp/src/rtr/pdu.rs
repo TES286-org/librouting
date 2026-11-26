@@ -668,11 +668,18 @@ pub fn decode(buf: &[u8]) -> Result<Option<(u8, RtrPdu, usize)>, RtrDecodeError>
         }
         RtrPduType::EndOfData => {
             // §5.8: v0 = 12 bytes (session + serial only); v1+ = 24
-            // bytes with the three timing intervals.
+            // bytes with the three timing intervals. Validate the
+            // length before reading any field — every other PDU branch
+            // checks first; an 8..11-byte End-of-Data used to read the
+            // serial past the buffer before the check rejected it.
+            if version >= RTR_VERSION_1 {
+                expect_len(pdu_type, len, 24)?;
+            } else {
+                expect_len(pdu_type, len, 12)?;
+            }
             let session_id = u16::from_be_bytes([body[2], body[3]]);
             let serial = u32::from_be_bytes([body[8], body[9], body[10], body[11]]);
             if version >= RTR_VERSION_1 {
-                expect_len(pdu_type, len, 24)?;
                 let refresh_interval =
                     Some(u32::from_be_bytes([body[12], body[13], body[14], body[15]]));
                 let retry_interval =
@@ -687,7 +694,6 @@ pub fn decode(buf: &[u8]) -> Result<Option<(u8, RtrPdu, usize)>, RtrDecodeError>
                     expire_interval,
                 }
             } else {
-                expect_len(pdu_type, len, 12)?;
                 RtrPdu::EndOfData {
                     session_id,
                     serial,

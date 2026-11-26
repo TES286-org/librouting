@@ -2590,10 +2590,10 @@ int main(void) {
 
         lr_babel_router_id_t rid_t = lr_babel_router_id_new(rid);
         check(rid_t != NULL, "lr_babel_router_id_new");
-        uint8_t rid_out[10] = {};
+        uint8_t rid_out[8] = {};
         rc = lr_babel_router_id_bytes(rid_t, rid_out);
         check(rc == 0, "lr_babel_router_id_bytes");
-        check(rid_out[2] == 1 && rid_out[9] == 1, "RouterId bytes round-trip");
+        check(rid_out[0] == 1 && rid_out[7] == 1, "RouterId bytes round-trip");
         lr_babel_router_id_free(rid_t);
 
         lr_babel_route_request_t rr = lr_babel_route_request_new_wildcard();

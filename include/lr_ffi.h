@@ -5753,7 +5753,8 @@ lr_babel_router_id_t lr_babel_router_id_new(const uint8_t *bytes);
 
 /**
  * Read the 8-octet Router-ID into `*out` (must point to 8 writable
- * bytes).
+ * bytes). The two reserved octets of the RFC 8966 §4.6.7 wire form
+ * are not part of the id and are not written.
  *
  * # Safety
  * `r` must be a valid handle; `out` must point to 8 writable bytes.
@@ -13809,6 +13810,18 @@ int32_t lr_mrt_reader_decode_slice(lr_mrt_reader_t r,
                                    uintptr_t len,
                                    lr_mrt_record_t *out);
 
+/**
+ * Buffer raw chunk bytes without decoding anything. The records
+ * stay buffered; `lr_mrt_reader_decode_slice` and
+ * `lr_mrt_reader_next_record` pop them one at a time. Feeding a
+ * chunk that holds exactly one complete record keeps that record
+ * buffered — nothing is decoded or discarded here. Returns 0, or
+ * `LR_ERR_NULL` on a NULL handle / null data pointer.
+ *
+ * # Safety
+ * `r` must be a valid reader handle; `data` must point to `len`
+ * readable bytes.
+ */
 int32_t lr_mrt_reader_feed(lr_mrt_reader_t r, const uint8_t *data, uintptr_t len);
 
 int32_t lr_mrt_reader_next_record(lr_mrt_reader_t r, lr_mrt_record_t *out);

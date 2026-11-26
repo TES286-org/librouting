@@ -83,6 +83,31 @@ fn mp_unreach_add_path_roundtrip() {
     assert_eq!(dec, mp);
 }
 
+/// RFC 7911 §4.3: an Add-Path NLRI entry whose 4-octet path-id ends
+/// the attribute is truncated (no prefix-length byte follows) and the
+/// decoder must reject it — never index one byte past the buffer.
+#[test]
+fn mp_add_path_rejects_trailing_path_id() {
+    // MP_REACH: AFI/SAFI(3) | nh-len(1) | nh(16) | reserved(1) |
+    // path-id(4) with no length byte after it.
+    let mut b = vec![0, 2, 1, 16];
+    b.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    b.push(0);
+    b.extend_from_slice(&[0, 0, 0, 5]);
+    assert!(MpReach::decode_ex(&b, true).is_none());
+    // MP_UNREACH: AFI/SAFI(3) | path-id(4) and nothing else.
+    let u = vec![0, 1, 1, 0, 0, 0, 7];
+    assert!(MpUnreach::decode_ex(&u, true).is_none());
+    // The well-formed shape still decodes: path-id(4) + /32 with its
+    // 4 address octets.
+    let mut b2 = b.clone();
+    b2.extend_from_slice(&[32, 0x20, 0x01, 0x0d, 0xb8]);
+    let dec = MpReach::decode_ex(&b2, true).unwrap();
+    assert_eq!(dec.nlri.len(), 1);
+    assert_eq!(dec.nlri[0].path_id, 5);
+    assert_eq!(dec.nlri[0].prefix.prefix_len, 32);
+}
+
 /// RFC 5549: MP_REACH_NLRI for IPv4 unicast (AFI=1, SAFI=1) with a
 /// 16-byte IPv6 next-hop. The peer must have advertised the Extended
 /// Next-Hop capability for `(1, 1, 2)` — that is enforced by the FSM,
@@ -115,6 +140,48 @@ fn mp_reach_ipv4_with_32_byte_next_hop_is_rejected() {
     enc.push(24); // prefix length
     enc.extend_from_slice(&[203, 0, 113]);
     assert!(MpReach::decode(&enc).is_none());
+}
+
+/// RFC 8277 §3: labelled NLRI carries a label stack before the prefix.
+/// The plain decoders must refuse the family rather than read label
+/// octets as prefix bits, while the header-only decoder keeps working
+/// so inspection helpers can still report the family and next-hop.
+#[test]
+fn plain_mp_decoders_reject_labelled_families() {
+    for family in [
+        NlriFamily::IPV4_LABELED_UNICAST,
+        NlriFamily::IPV6_LABELED_UNICAST,
+    ] {
+        let (nh, prefix) = if family.afi == 1 {
+            (
+                MpNextHop::V4([192, 0, 2, 1]),
+                Prefix::new_v4([203, 0, 113, 0], 24),
+            )
+        } else {
+            (
+                MpNextHop::V6Global([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    64,
+                ),
+            )
+        };
+        let reach_bytes = MpReach::new(family, nh.clone(), vec![Nlri::plain(prefix)]).encode();
+        assert!(
+            MpReach::decode(&reach_bytes).is_none(),
+            "plain decoder must reject {family:?}"
+        );
+        let header = MpReach::decode_header(&reach_bytes).unwrap();
+        assert_eq!(header.family, family);
+        assert_eq!(header.next_hop, nh);
+        assert!(header.nlri.is_empty());
+
+        let unreach_bytes = MpUnreach::new(family, vec![Nlri::plain(prefix)]).encode();
+        assert!(
+            MpUnreach::decode(&unreach_bytes).is_none(),
+            "plain decoder must reject {family:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

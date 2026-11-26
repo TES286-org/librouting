@@ -212,6 +212,13 @@ impl LdpSession {
         self.peer
     }
 
+    /// This speaker's LDP identifier — the value every PDU header this
+    /// session emits carries as its sender (RFC 5036 §3.1: the PDU
+    /// header's LDP identifier is the sender's own, never the peer's).
+    pub fn local_id(&self) -> LdpId {
+        self.cfg.local_id
+    }
+
     /// The negotiated parameters, valid once the session is up.
     pub fn negotiated(&self) -> Option<&NegotiatedParams> {
         self.negotiated.as_ref()

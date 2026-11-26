@@ -63,6 +63,32 @@ impl MpReach {
         Self::decode_ex(b, false)
     }
 
+    /// Decode only the fixed MP_REACH_NLRI header — family and next-hop —
+    /// without touching the NLRI. Unlike [`Self::decode`], this works for
+    /// every family with a defined next-hop wire form, including RFC 8277
+    /// labelled-unicast families whose NLRI the plain decoder cannot
+    /// parse. Helpers that only need the family or next-hop (UPDATE
+    /// inspection, FFI readers) use this.
+    pub fn decode_header(b: &[u8]) -> Option<Self> {
+        if b.len() < 4 {
+            return None;
+        }
+        let family = NlriFamily {
+            afi: u16::from_be_bytes([b[0], b[1]]),
+            safi: b[2],
+        };
+        let nh_len = b[3] as usize;
+        if b.len() < 4 + nh_len {
+            return None;
+        }
+        let next_hop = decode_next_hop(&b[4..4 + nh_len], family)?;
+        Some(Self {
+            family,
+            next_hop,
+            nlri: Vec::new(),
+        })
+    }
+
     /// Decode with RFC 7911 Add-Path: when `add_path` is true every NLRI
     /// entry is prefixed by a 4-octet path identifier.
     pub fn decode_ex(b: &[u8], add_path: bool) -> Option<Self> {
@@ -72,6 +98,13 @@ impl MpReach {
         let afi = u16::from_be_bytes([b[0], b[1]]);
         let safi = b[2];
         let family = NlriFamily { afi, safi };
+        // RFC 8277 §3: labelled NLRI carries its label stack inside the
+        // prefix-length octets. The plain decoder would read those label
+        // bits as prefix bits and install a bogus prefix; reject the
+        // family so callers dispatch to `labeled_nlri` instead.
+        if family.is_labeled_unicast() {
+            return None;
+        }
         let nh_len = b[3] as usize;
         if b.len() < 4 + nh_len {
             return None;
@@ -91,9 +124,11 @@ impl MpReach {
         let mut nlri = Vec::new();
         while i < b.len() {
             // Prefix-length (1) + ceil(pl / 8) bytes, optionally after a
-            // 4-octet Add-Path identifier (RFC 7911 §4.3).
+            // 4-octet Add-Path identifier (RFC 7911 §4.3). The entry
+            // needs the path-id *plus* the length byte; a path-id that
+            // ends the buffer is a truncated entry, not a length byte.
             let path_id = if add_path {
-                if i + 4 > b.len() {
+                if i + 5 > b.len() {
                     return None;
                 }
                 let id = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
@@ -208,11 +243,18 @@ impl MpUnreach {
         let afi = u16::from_be_bytes([b[0], b[1]]);
         let safi = b[2];
         let family = NlriFamily { afi, safi };
+        // RFC 8277 §3: see `MpReach::decode_ex` — labelled NLRI is not
+        // `<plen><prefix>` and must go through `labeled_nlri`.
+        if family.is_labeled_unicast() {
+            return None;
+        }
         let mut i = 3;
         let mut nlri = Vec::new();
         while i < b.len() {
+            // See `MpReach::decode_ex`: the Add-Path entry needs the
+            // 4-byte path-id plus the prefix-length byte after it.
             let path_id = if add_path {
-                if i + 4 > b.len() {
+                if i + 5 > b.len() {
                     return None;
                 }
                 let id = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);

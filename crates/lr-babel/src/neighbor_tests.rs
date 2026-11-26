@@ -61,6 +61,20 @@ fn rtt_ewma_converges_toward_samples() {
 }
 
 #[test]
+fn rtt_ewma_survives_large_samples() {
+    // A sample past u32::MAX / RTT_DECAY (~102 s in microseconds) used
+    // to overflow the u32 fixed-point mix and panic. Samples that big
+    // are inside the RTT_SANITY_US window, so the fold must survive
+    // them: 150 s sample, first fold doubles to 300 s, the second
+    // folds (42*150e6 + 214*300e6)/256 = 275_390_625.
+    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 9]), 0);
+    exchange(&mut n, 75_000_000, 1_000, 75_000_000);
+    assert_eq!(n.rtt_us(10), Some(300_000_000));
+    exchange(&mut n, 75_000_000, 1_000, 75_000_000);
+    assert_eq!(n.rtt_us(10), Some(275_390_625));
+}
+
+#[test]
 fn rtt_expires_after_validity_window() {
     let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 9]), 0);
     exchange(&mut n, 2_000, 1_000, 1_500);

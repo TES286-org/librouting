@@ -39,6 +39,43 @@ restarts (issue #101)
   own supervisor path (which never calls `BfdSession::admin_down`) is
   unaffected.
 
+### Fixed — Babel default route, GTSM multihop send TTL, TCP-AO
+`ao_required` fail-open (issue #101)
+
+Three wire- and safety-correctness defects, each confirmed against the
+primary references before fixing:
+
+- **Babel default route** (`lr-router`): a Plen=0 Update carries zero
+  in-band prefix octets (RFC 8966 §4.6.9 — "(Plen/8 - Omitted) rounded
+  upwards" octets in-band, "the remaining octets … set to 0"), which
+  the production path read as a malformed Update and dropped. A peer's
+  default-route announcement AND its retraction were both silently
+  discarded, so a stale default could linger until the neighbour
+  expired. Both directions install and retract now; the family-width
+  caps stay as a defensive bound.
+- **GTSM multihop send TTL** (`lr-osroute::gtsm`): `Gtsm::multihop`
+  armed the socket with a send TTL equal to the configured hop count.
+  A GTSM transmitter never lowers its send TTL — RFC 5082 Appendix A
+  has the recipient check that packets arrive "within a configured
+  number of hops from 255", and FRR's `bgp_set_socket_ttl` arms the
+  send side at `MAXTTL` with `sockopt_minttl(MAXTTL + 1 - hops)`. A
+  send TTL of `hops` dies in the network before reaching a peer
+  `hops` away. The multihop sender now transmits at TTL 255; only the
+  receive threshold (`255 - hops + 1`, unchanged) carries the hop
+  budget.
+- **TCP-AO `ao_required` fail-open** (`lr-osroute::tcp_auth`): when a
+  kernel with a partial TCP-AO backport accepted `TCP_AO_ADD_KEY` but
+  returned EINVAL for `TCP_AO_INFO`, the listener silently continued
+  without `ao_required` — an operator who configured TCP-AO got a
+  listener that completes unauthenticated inbound connections, the
+  opposite of the configured intent (RFC 5925 §7.1). Arming now fails
+  closed with `TcpAuthError::AoRequiredUnavailable`; callers that
+  genuinely accept the weaker posture re-arm explicitly with the new
+  `TcpAuth::tcp_ao_without_ao_required`, and
+  `is_kernel_unsupported` classifies the error so tests on
+  partial-support kernels skip gracefully. The FFI error mapping
+  carries the variant in the kernel-unsupported range.
+
 ### Added — PATHS-LIMIT "Maximum Number of Paths Reached" Cease subcode
 (draft-ietf-idr-addpath-paths-limit-00 §4, issue #101)
 
@@ -149,6 +186,108 @@ real BGP sessions, measures each during the feed, and compares them:
 - New docs page
   [`docs/examples/real_data_benchmark.md`](docs/examples/real_data_benchmark.md)
   is the operator walkthrough.
+
+### Fixed — five remotely triggerable decoder panics/aborts (issue #101)
+
+Audit-by-reading-the-code surfaced five input-reachable crash points;
+each fix ships with a regression test verified to fail on the previous
+code:
+
+- **BGP Add-Path NLRI trailing path-id** (`lr-bgp::codec` +
+  `lr-bgp::path::mp_nlri`): the entry bound checked only the 4-octet
+  path-id, so an NLRI section ending exactly at the path-id indexed
+  one byte past the buffer on the prefix-length read — a 27-byte
+  UPDATE crashed any session with receive Add-Path negotiated. The
+  guard now requires the path-id plus the length byte.
+- **RTR End-of-Data length check order** (`lr-bgp::rtr::pdu`): the
+  session id and serial were read before the declared length was
+  validated; an 8..11-byte End-of-Data PDU read past the buffer. The
+  daemon feeds raw cache bytes straight into the decoder on its RTR
+  thread, so a hostile cache could crash the process. Length first,
+  fields after — the order every other PDU branch already used.
+- **OSPF LS-Update capacity** (`lr-ospf::codec`): the declared LSA
+  count went straight into `Vec::with_capacity`; a forged 24-byte
+  LSU declaring `u32::MAX` LSAs asked the allocator for ~200 GB and
+  aborted the process. The capacity is clamped to the buffer bound
+  (every LSA needs at least one 20-byte header).
+- **Babel RTT EWMA overflow** (`lr-babel::neighbor`): the fixed-point
+  mix ran in `u32` microseconds; a peer-supplied sample past ~102 s
+  (inside the sanity window) overflowed — debug builds panicked on a
+  crafted Hello/IHU timestamp pair, release builds wrapped to a
+  garbage RTT. The mix runs in `u64` now.
+- **OSPFv2 auth-drop warn path** (`lr-cli::daemon_ospf`): the
+  auth-failure warning read the sender's router id at offset 4..8
+  without a length check; a 4..7-byte OSPF payload (the IP header
+  only guarantees 20 bytes) reached the read and panicked. The id
+  comes from a length-safe helper and the debug trace is gated on a
+  full header, mirroring the v3 daemon.
+
+### Fixed — RFC 6793 four-octet-AS negotiation now drives the UPDATE
+data path (issue #101)
+
+The per-session `asn4::negotiated` state (computed from the OPEN
+exchange) was stored on the codec but never consumed: the inbound
+announcement gate and the wire-path decode used the configured knob,
+and egress encoded at the configured width. A four-octet-capable
+speaker paired with a two-octet-only peer dropped every announcement
+(the 2-byte wire AS_PATH fails the unconditional 4-byte read) and
+sent 4-byte AS_PATHs the OLD speaker cannot parse. Both directions
+now follow the negotiated width (RFC 6793 §4.1), egress to a
+downgraded session substitutes AS_TRANS (23456) for non-mappable AS
+numbers and attaches AS4_PATH exactly when the path is not fully
+mappable with the AS_CONFED_* segments excluded (§4.2.2), an AS4_PATH
+received between NEW speakers is discarded instead of merged (§4.1),
+and `reconcile_as4`'s mid-segment split no longer duplicates the
+leading wire ASes (§4.2.3). Wire-byte tests pin both session shapes;
+the previous test only asserted the codec flag.
+
+### Fixed — filter DSL bytecode VM multi-pattern case arms (issue #101)
+
+The bytecode compiler chained every pattern's `JumpIfFalse` to the
+same post-body target, so a comma-separated case arm ran its body
+only when the scrutinee equalled *all* of its patterns — for literal
+patterns, never. The tree-walking interpreter matches on any pattern
+(the module's "the two engines can never disagree" contract); such an
+arm silently never fired under the VM. Multi-pattern arms now compile
+to a `JumpIfTrue` chain into the body (any match enters, no match
+falls to the next arm); the single-pattern shape is unchanged and the
+comma-multi-pattern shapes joined the VM/interpreter equivalence
+corpus.
+
+### Fixed — three FFI contract violations (issue #101)
+
+- **`lr_babel_router_id_bytes`** wrote all 10 octets of the RFC 8966
+  §4.6.7 wire form (2 reserved + 8 id) into the 8-byte buffer the
+  frozen header promises — a two-byte overflow for every C caller
+  following the header; the Go/Python bindings and C/C++ harnesses
+  had grown 10-byte workarounds that masked it. The function writes
+  exactly the 8-byte id and every consumer follows the header.
+- **`lr_ldp_session_drain_outgoing`** stamped the *peer's* LDP
+  identifier as the PDU sender (RFC 5036 §3.1: the PDU header carries
+  the sending speaker's own), making every PDU produced through the
+  entry point invalid on the wire. `LdpSession::local_id` is exposed
+  and used.
+- **`lr_mrt_reader_feed`** ran the reader's feed+decode pair and
+  discarded the decoded record, silently losing every chunk's first
+  record; `MrtReader::feed`/`next_record` are public now and the FFI
+  entry buffers only.
+
+### Fixed — two more wire-and-policy defects (issue #101)
+
+- **`-i64::MIN` in the filter DSL** (`lr-policy::eval`): unary
+  negation ran unchecked in both engines; the value is constructible
+  as `-(-9223372036854775807 - 1)` and negating it panicked in debug
+  builds (the module contract says the evaluator never panics).
+  Both engines now use `checked_neg` and surface the same Overflow
+  error the binary operators already use.
+- **Step-10 tiebreak for routes without ORIGINATOR_ID**
+  (`lr-bgp::best_path`): every such route compared as identifier 0
+  and beat every real router id in the RFC 5004 deterministic-mode
+  tiebreak. The advertising peer's BGP Identifier (the FRR/BIRD
+  substitution) now rides the route bag under the private
+  `LrPeerBgpId` tag, stamped at InstallRoute time next to
+  `LrPeerSourceAddress`, and the comparator reads
+  ORIGINATOR_ID → `LrPeerBgpId` → 0.
 
 ### Fixed — the real-data benchmark now measures a real dump's selection
 
@@ -677,6 +816,31 @@ module surfaces: `RouteRefresh` carries an optional
 and `RouterInstance` gains a default `set_bfd_state` no-op plus
 `DefaultRouter::send_orf` / `set_orf_tx`. Pre-2.0 semver debt the
 `api-surface` CI job already tracks. C ABI untouched.
+
+### Fixed — BGP capability wire-format correctness (issue #101)
+
+- `Capability::encode_set` cast each value length to one octet,
+  wrapping a value over 255 bytes into a corrupt OPEN. It now omits
+  capabilities the wire form cannot carry, and the additive
+  `Capability::try_encode_set` returns `CapabilityLengthError`
+  (also re-exported at the crate root) so embedders can detect the
+  case. The FQDN constructor shares a 253-octet budget between its
+  two length-prefixed UTF-8 strings instead of allowing a 512-octet
+  value; cuts stay on character boundaries and the hostname wins.
+  The Add-Path and Graceful Restart tuple decoders now refuse a
+  partial trailing tuple instead of silently dropping it.
+- Egress no longer emits a 16-octet IPv6 well-known NEXT_HOP for
+  IPv4 unicast when RFC 5549 / RFC 8950 Extended Next-Hop (1,1,2)
+  was not negotiated; it withholds the route. With the capability,
+  the next-hop stays in MP_REACH_NLRI. A route with no next-hop is
+  withheld rather than sent without the mandatory NEXT_HOP.
+- The plain MP_REACH / MP_UNREACH decoders explicitly refuse
+  RFC 8277 labelled SAFI instead of reading label octets as prefix
+  bits. `PathAttributes::mp_reach_family` / `mp_unreach_family` /
+  `mp_reach_header` and `MpReach::decode_header` read only the
+  fixed header, so `Update::family()` and the C MP presence,
+  family, next-hop and raw-byte readers keep working for labelled
+  families. The C ABI surface (symbols and header) is unchanged.
 
 ### Added — RFC 9072 Extended Optional Parameters Length
 

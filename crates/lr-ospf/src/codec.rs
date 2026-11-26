@@ -590,7 +590,13 @@ fn decode_lsupdate(b: &[u8], version: OspfVersion) -> Result<LsUpdateBody, Parse
     // the actual count (always equal to the wire count on success) keeps
     // a re-encode of the decoded value byte-faithful to the input.
     let declared_count = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
-    let mut lsas = Vec::with_capacity(declared_count);
+    // The declared count is attacker-controlled and up to 2^32-1;
+    // every LSA is at least one header, so the buffer can never hold
+    // more than b.len() / LEN entries. Clamp the capacity to that
+    // bound (the v3 sibling decoders use the same min() pattern) — a
+    // forged 24-byte LSU declaring 0xFFFFFFFF LSAs used to ask the
+    // allocator for ~200 GB and abort the process.
+    let mut lsas = Vec::with_capacity(declared_count.min(b.len() / LsaHeader::LEN));
     let mut i = 4;
     while i + LsaHeader::LEN <= b.len() {
         let h = decode_lsa_header(&b[i..i + LsaHeader::LEN], version)?;
@@ -879,6 +885,36 @@ mod tests {
             assert!(
                 decode_lsupdate(&bogus, version).is_err(),
                 "non-zero declared count with no LSAs must be rejected on {:?}",
+                version
+            );
+        }
+    }
+
+    /// RFC 2328 §A.3.5: the declared LSA count is untrusted input. A
+    /// tiny LSU declaring u32::MAX LSAs must surface as the count
+    /// mismatch it is, never as a ~200 GB `Vec::with_capacity` request
+    /// that aborts the process on allocation failure.
+    #[test]
+    fn lsupdate_huge_declared_count_is_rejected_not_aborted() {
+        for version in [OspfVersion::V2, OspfVersion::V3] {
+            // 24 bytes: the count word plus 20 bytes of one LSA header
+            // (not decoded further — the count check fires first when
+            // the header is malformed or the count disagrees).
+            let mut forged = Vec::new();
+            forged.extend_from_slice(&u32::MAX.to_be_bytes());
+            forged.extend_from_slice(&[0u8; 20]);
+            assert!(
+                decode_lsupdate(&forged, version).is_err(),
+                "u32::MAX declared count must be rejected on {:?}",
+                version
+            );
+            // A mid-range forged count is equally harmless.
+            let mut mid = Vec::new();
+            mid.extend_from_slice(&1_000_000u32.to_be_bytes());
+            mid.extend_from_slice(&[0u8; 20]);
+            assert!(
+                decode_lsupdate(&mid, version).is_err(),
+                "1e6 declared count with one header must be rejected on {:?}",
                 version
             );
         }

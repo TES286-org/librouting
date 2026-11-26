@@ -207,9 +207,15 @@ impl Capability {
     /// `2 + hostname.len() + domain.len()`; the receiver rejects
     /// values whose trailing length byte does not match the
     /// remaining bytes.
+    ///
+    /// The capability length is a single octet (RFC 5492 §3), so the
+    /// two strings share 253 octets. Long strings are truncated on a
+    /// UTF-8 character boundary; the hostname is kept in full before
+    /// the domain is shortened.
     pub fn fqdn(hostname: &str, domain: &str) -> Self {
-        let h = truncate_u8(hostname.as_bytes());
-        let d = truncate_u8(domain.as_bytes());
+        const MAX_STRINGS: usize = u8::MAX as usize - 2;
+        let h = truncate_utf8(hostname.as_bytes(), MAX_STRINGS);
+        let d = truncate_utf8(domain.as_bytes(), MAX_STRINGS - h.len());
         let mut v = Vec::with_capacity(2 + h.len() + d.len());
         v.push(h.len() as u8);
         v.extend_from_slice(h);
@@ -368,16 +374,10 @@ impl Capability {
     }
 }
 
-/// Truncate a byte slice to the maximum length a 1-octet capability
-/// field can carry. Used by the FQDN encoder so a long
-/// operator-supplied string cannot overflow the value field.
-fn truncate_u8(bytes: &[u8]) -> &[u8] {
-    &bytes[..bytes.len().min(u8::MAX as usize)]
-}
-
 /// Truncate a UTF-8 byte slice to at most `max` bytes without
 /// splitting a character. The Software Version capability is capped
-/// at 64 bytes by a SHOULD, and a mid-character cut would turn a
+/// at 64 bytes by a SHOULD, and the FQDN value is capped by the
+/// one-octet capability length; a mid-character cut would turn a
 /// valid string into an invalid one.
 fn truncate_utf8(bytes: &[u8], max: usize) -> &[u8] {
     if bytes.len() <= max {
@@ -518,6 +518,48 @@ mod tests {
             dec[0].as_fqdn(),
             Some(("rr-hk01".to_string(), String::new()))
         );
+    }
+
+    /// The capability value is `2 + hostname + domain` and the RFC 5492
+    /// §3 length is one octet: 253 octets total for the two strings.
+    /// The hostname takes priority and a character boundary is kept.
+    #[test]
+    fn fqdn_total_value_never_exceeds_255_octets() {
+        let hostname = "h".repeat(300);
+        let domain = "example.net".repeat(40);
+        let cap = Capability::fqdn(&hostname, &domain);
+        assert_eq!(cap.value.len(), 255);
+        let wire = Capability::try_encode_set(std::slice::from_ref(&cap)).unwrap();
+        assert_eq!(wire[1], 255);
+        let decoded = Capability::decode_set(&wire);
+        assert_eq!(decoded.len(), 1);
+        let (h, d) = decoded[0].as_fqdn().unwrap();
+        assert_eq!(h, "h".repeat(253));
+        // 253 octets went to the hostname, leaving none for the domain.
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn fqdn_truncates_domain_when_hostname_is_short() {
+        let domain = "d".repeat(300);
+        let cap = Capability::fqdn("r1", &domain);
+        assert_eq!(cap.value.len(), 255);
+        let (h, d) = cap.as_fqdn().unwrap();
+        assert_eq!(h, "r1");
+        assert_eq!(d, "d".repeat(251));
+    }
+
+    #[test]
+    fn fqdn_truncates_at_utf8_character_boundary() {
+        // 252 one-byte characters + a two-byte character cannot fit in
+        // the 253-octet budget; the two-byte character is dropped whole.
+        let mut hostname = "a".repeat(252);
+        hostname.push('é');
+        let cap = Capability::fqdn(&hostname, "");
+        assert_eq!(cap.value.len(), 254); // 2 + 252
+        let (h, d) = cap.as_fqdn().unwrap();
+        assert_eq!(h, "a".repeat(252));
+        assert!(d.is_empty());
     }
 
     #[test]

@@ -1053,3 +1053,69 @@ fn same_origin_claim_via_two_neighbours_is_an_alternate() {
     assert_eq!(selected.next_hop, Some(peer_b));
     assert_eq!(selected.preference.metric, 96);
 }
+
+/// RFC 8966 §4.6.9: a prefix of Plen=0 carries zero in-band octets —
+/// the default route (::/0 for AE 2, 0.0.0.0/0 for AE 1). The
+/// production path used to read the empty octet vector as a malformed
+/// Update and return, so a peer's default-route announcement AND its
+/// retraction were both silently dropped (a stale default route then
+/// lingered until the neighbour expired). Both directions install and
+/// retract now.
+#[test]
+fn plen_zero_default_route_installs_and_retracts() {
+    let (mut r, h) = babel_session();
+    let v6_nh = Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: 2,
+            address: IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        }
+        .encode(),
+    );
+    let v4_nh = Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: 1,
+            address: IpAddr::V4([192, 0, 2, 2]),
+        }
+        .encode(),
+    );
+    let default_v6 = Prefix::new_v6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0);
+    let default_v4 = Prefix::new_v4([0, 0, 0, 0], 0);
+
+    let announce = frame(vec![
+        v6_nh.clone(),
+        v4_nh,
+        router_id_tlv(PEER_ID),
+        // ::/0, AE 2, zero in-band octets.
+        update_tlv(2, 0, 0, 0, &[], 3, 100),
+        // 0.0.0.0/0, AE 1, zero in-band octets.
+        update_tlv(1, 0, 0, 0, &[], 3, 100),
+    ]);
+    r.feed_input(h, &announce).unwrap();
+    assert!(
+        snapshot_has(r.as_ref(), default_v6, Protocol::Babel),
+        "the v6 default route (Plen=0, zero octets) must install"
+    );
+    assert!(
+        snapshot_has(r.as_ref(), default_v4, Protocol::Babel),
+        "the v4 default route (Plen=0, zero octets) must install"
+    );
+
+    // A per-prefix retraction of ::/0 — metric infinity on the same
+    // (AE, Plen, prefix) shape — must withdraw it.
+    let retract = frame(vec![
+        v6_nh,
+        router_id_tlv(PEER_ID),
+        update_tlv(2, 0, 0, 0, &[], 3, 0xFFFF),
+    ]);
+    r.feed_input(h, &retract).unwrap();
+    assert!(
+        !snapshot_has(r.as_ref(), default_v6, Protocol::Babel),
+        "retracting the v6 default route must withdraw it (pre-fix the retraction was dropped and the stale default lingered)"
+    );
+    assert!(
+        snapshot_has(r.as_ref(), default_v4, Protocol::Babel),
+        "the v4 default route is a distinct prefix and must survive the v6 retraction"
+    );
+}

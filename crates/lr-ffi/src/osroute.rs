@@ -1369,7 +1369,9 @@ mod tests {
     #[test]
     fn ffi_gtsm_multihop() {
         let g = lr_gtsm_multihop(5);
-        assert_eq!(g.outbound_ttl, 5);
+        // The sender always transmits at TTL 255 (RFC 5082 Appendix A);
+        // only the receive threshold is relaxed.
+        assert_eq!(g.outbound_ttl, 255);
         // min_ttl = 255 - 5 + 1 = 251.
         assert_eq!(g.min_ttl, 251);
         assert_eq!(lr_gtsm_is_disabled(g), 0);
@@ -1402,7 +1404,7 @@ mod tests {
     #[test]
     fn ffi_gtsm_outbound_and_min_ttl_readers() {
         let g = lr_gtsm_multihop(10);
-        assert_eq!(lr_gtsm_outbound_ttl(g), 10);
+        assert_eq!(lr_gtsm_outbound_ttl(g), 255);
         // min_ttl = 255 - 10 + 1 = 246.
         assert_eq!(lr_gtsm_min_ttl(g), 246);
     }
