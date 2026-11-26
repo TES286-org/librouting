@@ -365,11 +365,13 @@ fn gtsm_single_hop_config() {
     assert!(!g.is_disabled());
 }
 
-/// `Gtsm::multihop(N)` produces outbound_ttl=N, min_ttl=255-N+1.
+/// `Gtsm::multihop(N)` sends with TTL 255 (RFC 5082 Appendix A: the
+/// sender never lowers its transmit TTL) and relaxes the receive
+/// threshold to `255 - N + 1` (the FRR `MAXTTL + 1 - hops` formula).
 #[test]
 fn gtsm_multihop_config() {
     let g = lr_osroute::gtsm::Gtsm::multihop(2);
-    assert_eq!(g.outbound_ttl, 2);
+    assert_eq!(g.outbound_ttl, 255);
     assert_eq!(g.min_ttl, 254);
 }
 

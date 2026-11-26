@@ -10,9 +10,13 @@
 //! - **Single-hop eBGP** (the common case): set TTL=255 on send and
 //!   require TTL>=255 on receive. A remote attacker's packets arrive
 //!   with a decremented TTL and are silently dropped by the kernel.
-//! - **Multihop eBGP / iBGP**: set TTL to the configured hop count
-//!   (e.g. 2 for a 2-hop path) and require TTL >= `255 - hops + 1` on
-//!   receive. The peer must set its own TTL symmetrically.
+//! - **Multihop eBGP / iBGP**: the sender still transmits with
+//!   TTL=255 — the protocol never sends a low TTL (RFC 5082 Appendix
+//!   A: the recipient checks that packets arrive "within a
+//!   configured number of hops from 255") — and requires
+//!   TTL >= `255 - hops + 1` on receive (the FRR `ttl-security hops`
+//!   formula, `MAXTTL + 1 - hops`). The peer must configure the same
+//!   hop count symmetrically.
 //!
 //! ## Sockets and roles
 //!
@@ -55,8 +59,9 @@
 /// (Linux `IP_MINTTL` / `IPV6_MINHOPCOUNT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Gtsm {
-    /// TTL set on every outbound segment. 255 for single-hop; the
-    /// configured hop count for multihop.
+    /// TTL set on every outbound segment. Always 255 — GTSM never
+    /// transmits a low TTL (RFC 5082 Appendix A); multihop only
+    /// relaxes the receive-side threshold.
     pub outbound_ttl: u8,
     /// Minimum TTL required on inbound segments. The kernel drops
     /// anything below this. 255 for single-hop; `255 - hops + 1` for
@@ -74,9 +79,15 @@ impl Gtsm {
         }
     }
 
-    /// Multihop GTSM (RFC 5082 §4.2): outbound TTL = `hops`, minimum
-    /// inbound TTL = `255 - hops + 1`. The peer must configure the same
-    /// hop count symmetrically.
+    /// Multihop GTSM (RFC 5082 Appendix A): outbound TTL is always
+    /// 255 — a GTSM transmitter never lowers its send TTL; only the
+    /// receive threshold is relaxed — and the minimum inbound TTL is
+    /// `255 - hops + 1` (the FRR `bgp_set_socket_ttl` formula,
+    /// `MAXTTL + 1 - hops`, where the send side is likewise armed at
+    /// `MAXTTL`). A send TTL of `hops` would die in the network
+    /// before reaching a peer `hops` away and could never satisfy any
+    /// compliant receiver's threshold. The peer must configure the
+    /// same hop count symmetrically.
     ///
     /// # Panics
     /// `hops` must be in `1..=254` (255 is single-hop; 0 is meaningless).
@@ -86,7 +97,7 @@ impl Gtsm {
             "multihop TTL must be 1..=254 (got {hops})"
         );
         Self {
-            outbound_ttl: hops,
+            outbound_ttl: 255,
             min_ttl: 255 - hops + 1,
         }
     }
@@ -106,11 +117,10 @@ impl std::fmt::Display for Gtsm {
         if self.outbound_ttl == 255 && self.min_ttl == 255 {
             return f.write_str("gtsm(single-hop, ttl=255)");
         }
-        write!(
-            f,
-            "gtsm(multihop, ttl={}, min={})",
-            self.outbound_ttl, self.min_ttl
-        )
+        // The multihop sender always transmits at TTL 255; only the
+        // receive threshold carries the hop budget, so that is what
+        // the operator-facing text shows.
+        write!(f, "gtsm(multihop, send-ttl=255, min={})", self.min_ttl)
     }
 }
 
@@ -701,16 +711,24 @@ mod tests {
 
     #[test]
     fn multihop_computes_min_ttl() {
-        // 1 hop → ttl=1, min=255 (same as single-hop on the wire, but
-        // expressed through the multihop formula).
+        // 1 hop → send 255, min=255 (same as single-hop on the wire,
+        // but expressed through the multihop formula).
         let g = Gtsm::multihop(1);
-        assert_eq!(g.outbound_ttl, 1);
+        assert_eq!(g.outbound_ttl, 255);
         assert_eq!(g.min_ttl, 255);
 
-        // 2 hops → ttl=2, min=254
+        // 2 hops → send 255, min=254 (FRR `MAXTTL + 1 - hops`)
         let g = Gtsm::multihop(2);
-        assert_eq!(g.outbound_ttl, 2);
+        assert_eq!(g.outbound_ttl, 255);
         assert_eq!(g.min_ttl, 254);
+
+        // 10 hops → send 255, min=246. A send TTL equal to the hop
+        // count would arrive at 0 after the transit and could never
+        // pass any threshold — regression test for the RFC 5082
+        // Appendix A sender rule.
+        let g = Gtsm::multihop(10);
+        assert_eq!(g.outbound_ttl, 255);
+        assert_eq!(g.min_ttl, 246);
     }
 
     #[test]
@@ -751,7 +769,7 @@ mod tests {
     #[test]
     fn display_multihop() {
         let g = Gtsm::multihop(3);
-        assert_eq!(format!("{g}"), "gtsm(multihop, ttl=3, min=253)");
+        assert_eq!(format!("{g}"), "gtsm(multihop, send-ttl=255, min=253)");
     }
 
     /// Live socket test: arm a listener with single-hop GTSM and connect

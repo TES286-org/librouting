@@ -17,6 +17,43 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — Babel default route, GTSM multihop send TTL, TCP-AO
+`ao_required` fail-open (issue #101)
+
+Three wire- and safety-correctness defects, each confirmed against the
+primary references before fixing:
+
+- **Babel default route** (`lr-router`): a Plen=0 Update carries zero
+  in-band prefix octets (RFC 8966 §4.6.9 — "(Plen/8 - Omitted) rounded
+  upwards" octets in-band, "the remaining octets … set to 0"), which
+  the production path read as a malformed Update and dropped. A peer's
+  default-route announcement AND its retraction were both silently
+  discarded, so a stale default could linger until the neighbour
+  expired. Both directions install and retract now; the family-width
+  caps stay as a defensive bound.
+- **GTSM multihop send TTL** (`lr-osroute::gtsm`): `Gtsm::multihop`
+  armed the socket with a send TTL equal to the configured hop count.
+  A GTSM transmitter never lowers its send TTL — RFC 5082 Appendix A
+  has the recipient check that packets arrive "within a configured
+  number of hops from 255", and FRR's `bgp_set_socket_ttl` arms the
+  send side at `MAXTTL` with `sockopt_minttl(MAXTTL + 1 - hops)`. A
+  send TTL of `hops` dies in the network before reaching a peer
+  `hops` away. The multihop sender now transmits at TTL 255; only the
+  receive threshold (`255 - hops + 1`, unchanged) carries the hop
+  budget.
+- **TCP-AO `ao_required` fail-open** (`lr-osroute::tcp_auth`): when a
+  kernel with a partial TCP-AO backport accepted `TCP_AO_ADD_KEY` but
+  returned EINVAL for `TCP_AO_INFO`, the listener silently continued
+  without `ao_required` — an operator who configured TCP-AO got a
+  listener that completes unauthenticated inbound connections, the
+  opposite of the configured intent (RFC 5925 §7.1). Arming now fails
+  closed with `TcpAuthError::AoRequiredUnavailable`; callers that
+  genuinely accept the weaker posture re-arm explicitly with the new
+  `TcpAuth::tcp_ao_without_ao_required`, and
+  `is_kernel_unsupported` classifies the error so tests on
+  partial-support kernels skip gracefully. The FFI error mapping
+  carries the variant in the kernel-unsupported range.
+
 ### Added — PATHS-LIMIT "Maximum Number of Paths Reached" Cease subcode
 (draft-ietf-idr-addpath-paths-limit-00 §4, issue #101)
 

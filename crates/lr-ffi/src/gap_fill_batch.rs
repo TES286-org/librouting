@@ -830,6 +830,10 @@ fn tcp_auth_error_to_i32(e: &TcpAuthError) -> i32 {
         TcpAuthError::BadMacLen { .. } => -1,
         TcpAuthError::Os { .. } => -2,
         TcpAuthError::ConnectTimeout => -3,
+        // The partial-TCP-AO-backport case: the keys installed but the
+        // ao_required hardening is unavailable — same kernel-unsupported
+        // range (-10..-19) as `Unsupported` above.
+        TcpAuthError::AoRequiredUnavailable { .. } => -10,
     }
 }
 
