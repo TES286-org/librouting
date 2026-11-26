@@ -17,6 +17,43 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — LDP engine: connection/PDU binding, dual-stack address
+advertisement, the §2.5.3 establishment window (issue #101)
+
+- **PDUs were routed by the sender LDP-ID the header claims, not by
+  the connection they arrived on**: with two sessions up, a peer on
+  connection 1 could send PDUs stamped with peer 2's LDP-ID and have
+  them fed into peer 2's session — label mappings and withdraws
+  injected into the wrong LIB, with the responses flushed to peer 2's
+  real connection (RFC 5036 §2.5.3: a TCP connection carries exactly
+  one session). The engine now routes by the connection: a PDU whose
+  sender does not match the bound session is a fatal protocol error
+  answered with the Bad LDP Identifier notification (§3.9, E=1), and
+  a PDU on a connection with no session context closes the
+  connection.
+- **The dual-stack Address advertisement mixed families in one TLV**:
+  with the RFC 7552 Dual-Stack capability negotiated, the SessionUp
+  path queued one Address message carrying IPv4 and IPv6 addresses —
+  encoded as AF=2 followed by raw 4-octet IPv4 bodies when the first
+  address was IPv6 (illegal on the wire), or dropped wholesale by the
+  encoder when IPv4-first (its mixed-family guard only fired for
+  IPv4-headed lists). RFC 5036 §3.4.3 keeps an Address List TLV
+  single-family: the engine now sends one Address message per family,
+  transport family first, and the IPv6 branch of the encoder gained
+  the same mixed-family guard the IPv4 branch already had.
+- **A session that never completed its handshake held the transport
+  forever**: `LdpSession::tick` services only Operational sessions,
+  so an Init sent to a silent peer (OpenSent), a lost KeepAlive on
+  the passive side (OpenRec) and an accepted connection whose peer
+  never spoke waited indefinitely. The engine now tears both down
+  after a 15 s establishment window (FRR's ldpd default; RFC 5036
+  leaves the establishment timing to the implementation) — the peer
+  gets an explicit Shutdown instead of silence, and the next Hello
+  re-runs the §2.5.2 role decision for a natural reconnect.
+
+Each fix ships with a regression test verified to fail on the
+previous code.
+
 ### Fixed — the C ABI header actually contains every export, with the
 right shapes and values (issue #101; BREAKING CHANGE for symbols that
 never worked)

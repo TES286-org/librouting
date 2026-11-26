@@ -13,14 +13,18 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::time::{Duration, Instant as StdInstant};
 
 use lr_core::addr::Prefix;
+use lr_core::buf::ReadBuf;
 use lr_core::buf::WriteBuf;
-use lr_core::codec::Encoder;
+use lr_core::codec::{Decoder, Encoder};
 use lr_core::time::Instant;
 use lr_ldp::engine::{EngineEvent, LdpEngine, LdpEngineConfig};
 use lr_ldp::mapping::FecKey;
-use lr_ldp::message::{HelloMsg, LdpCodec, LdpMessage, LdpPdu};
+use lr_ldp::message::{HelloMsg, InitMsg, KeepAliveMsg, LdpCodec, LdpMessage, LdpPdu};
+use lr_ldp::pdu::{AdvertisementMode, DEFAULT_MAX_PDU_LEN, LDP_VERSION};
 use lr_ldp::session::{SessionDownReason, SessionState};
-use lr_ldp::tlv::{DualStackCapability, HelloParams, TransportAddress, TransportPreference};
+use lr_ldp::tlv::{
+    DualStackCapability, HelloParams, SessionParams, TransportAddress, TransportPreference,
+};
 use lr_ldp::{GenericLabel, IpAddr, LdpId, StatusCode};
 
 struct Speaker {
@@ -62,7 +66,7 @@ impl Speaker {
         cfg.accept_targeted = true;
         cfg.keepalive_time = 2; // short for test pacing (§3.5.3: non-zero)
         cfg.targeted_hello_hold = 9; // hello every hold/3 = 3s
-        cfg.interface_addresses = interface_addrs;
+        cfg.interface_addresses = interface_addrs.clone();
         tweak(&mut cfg);
         let engine = LdpEngine::new(cfg);
         let (udp, listener) = match addr {
@@ -97,22 +101,28 @@ impl Speaker {
 
     /// A dual-stack speaker: IPv4 transport plus an explicit IPv6
     /// transport address (RFC 7552 §6.1.1 dual-stack LSR).
+    ///
+    /// `interface_addrs` are the addresses the speaker advertises on
+    /// SessionUp (previously the parameter was silently overridden
+    /// with a fixed IPv4 list); `prefer_ipv6` selects the §6.1.1
+    /// transport preference.
     fn new_dual_stack(
         lsr_id: [u8; 4],
         addr: IpAddr,
         addr_v6: Option<IpAddr>,
         peer_addr: IpAddr,
         interface_addrs: Vec<IpAddr>,
+        prefer_ipv6: bool,
     ) -> Self {
-        let mut speaker = Self::new(lsr_id, addr, peer_addr, interface_addrs);
+        let mut speaker = Self::new(lsr_id, addr, peer_addr, interface_addrs.clone());
         let mut cfg = LdpEngineConfig::new(LdpId::new(lsr_id, 0), addr);
         cfg.transport_addr_v6 = addr_v6;
-        cfg.prefer_ipv6 = true;
+        cfg.prefer_ipv6 = prefer_ipv6;
         cfg.targeted_peers = Vec::from([peer_addr]);
         cfg.accept_targeted = true;
         cfg.keepalive_time = 2;
         cfg.targeted_hello_hold = 9;
-        cfg.interface_addresses = Vec::from([IpAddr::V4([10, 99, 1, 1])]);
+        cfg.interface_addresses = interface_addrs;
         speaker.engine = LdpEngine::new(cfg);
         speaker
     }
@@ -728,6 +738,7 @@ fn dual_stack_preference_mismatch_resets_session() {
         Some(A_TRANSPORT_V6),
         B_TRANSPORT,
         Vec::from([IpAddr::V4([10, 99, 1, 1])]),
+        true,
     );
     let mut b = Speaker::new(
         B_ID,
@@ -1100,4 +1111,299 @@ fn loop_detection_rejects_request_with_own_path_vector() {
         a.engine.session_state(peer_b),
         Some(SessionState::Operational)
     );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 5036 §2.5.3 — connection/PDU binding + the establishment window
+// ---------------------------------------------------------------------------
+
+/// A PDU whose sender LDP-ID does not match the session bound to the
+/// connection it arrived on is a fatal protocol error (§2.5.3: a TCP
+/// connection carries exactly one session). Before the binding check,
+/// such a PDU was routed by its CLAIMED sender: a peer on connection 1
+/// could feed PDUs stamped with peer 2's LDP-ID into peer 2's session
+/// and poison the wrong LIB.
+#[test]
+fn foreign_sender_pdu_kills_only_the_bound_session() {
+    // A carries the higher transport address, so the §2.5.2 role
+    // decision makes A active (the foreign-PDU injection needs a
+    // session A established itself).
+    const A_HI: IpAddr = IpAddr::V4([127, 0, 0, 9]);
+    let mut cfg = LdpEngineConfig::new(LdpId::new(A_ID, 0), A_HI);
+    cfg.accept_targeted = true;
+    let mut a = LdpEngine::new(cfg);
+    let peer_b = LdpId::new(B_ID, 0);
+    let rogue = LdpId::new([9, 9, 9, 9], 0);
+
+    // B announces itself with a targeted Hello; A dials the (fake)
+    // transport and establishes.
+    let now = Instant::from_millis(1_000);
+    let hello = hello_pdu_from(B_ID, Some(B_TRANSPORT), None, None);
+    a.feed_udp(now, B_TRANSPORT, &hello);
+    let events = a.take_events();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, EngineEvent::EstablishTransport { peer_id, .. } if *peer_id == peer_b)
+        ),
+        "discovery must schedule the session"
+    );
+    a.on_connected(now, 7, peer_b);
+    assert_eq!(
+        a.session_state(peer_b),
+        Some(SessionState::OpenSent),
+        "the active side transmits Init and waits in OPENSENT"
+    );
+
+    // B's Initialization + KeepAlive complete A's side of the handshake.
+    let init = LdpMessage::Initialization(InitMsg {
+        message_id: 1,
+        params: SessionParams {
+            protocol_version: LDP_VERSION,
+            keepalive_time: 15,
+            advertisement: AdvertisementMode::DownstreamUnsolicited,
+            loop_detection: false,
+            path_vector_limit: 32,
+            max_pdu_len: DEFAULT_MAX_PDU_LEN,
+            receiver: LdpId::new(A_ID, 0),
+        },
+        ft_session: None,
+        unknown_tlvs: Vec::new(),
+    });
+    let mut handshake = craft_pdu(B_ID, init);
+    handshake.extend_from_slice(&craft_pdu(
+        B_ID,
+        LdpMessage::KeepAlive(KeepAliveMsg { message_id: 2 }),
+    ));
+    a.feed_tcp(now, 7, &handshake);
+    let events = a.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::SessionUp { peer_id, .. } if *peer_id == peer_b)),
+        "the session must establish before the injection"
+    );
+
+    // A PDU stamped with an unrelated sender arrives on B's connection.
+    let foreign = craft_pdu(
+        [9, 9, 9, 9],
+        LdpMessage::KeepAlive(KeepAliveMsg { message_id: 3 }),
+    );
+    a.feed_tcp(now, 7, &foreign);
+
+    let events = a.take_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EngineEvent::SessionDown { peer_id, reason: SessionDownReason::ProtocolError, .. }
+                if *peer_id == peer_b
+        )),
+        "the bound session must go down on the foreign PDU; events: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::CloseConnection(7))),
+        "the poisoned connection must be closed"
+    );
+    // The rogue identity never became a session.
+    assert_eq!(a.session_state(rogue), None);
+    // The fatal Bad LDP Identifier notification went onto the wire.
+    // The connection's byte stream also carries the Init the engine
+    // queued at connect time, so decode PDU after PDU until the
+    // Notification surfaces.
+    let out = a.drain_tcp_all();
+    let bytes = out
+        .iter()
+        .find(|(conn, _)| *conn == 7)
+        .map(|(_, bytes)| bytes)
+        .expect("a notification is queued for the closed connection");
+    let mut read = ReadBuf::new(bytes);
+    let mut notification = None;
+    while let Ok(Some(pdu)) = LdpCodec.decode(&mut read) {
+        if let Some(n) = pdu.messages.iter().find_map(|m| match m {
+            LdpMessage::Notification(n) => Some(n.clone()),
+            _ => None,
+        }) {
+            notification = Some(n);
+            break;
+        }
+    }
+    let notification = notification.expect("a Notification message on the wire");
+    assert_eq!(
+        notification.status.code,
+        StatusCode::BAD_LDP_IDENTIFIER,
+        "the fatal status code is Bad LDP Identifier (§3.9)"
+    );
+}
+
+/// The §2.5.3 establishment window: a session registered but never
+/// reaching Operational — an Init sent to a silent peer — is torn down
+/// after the window expires instead of holding the transport forever.
+#[test]
+fn establishment_window_tears_down_a_stuck_handshake() {
+    const A_HI: IpAddr = IpAddr::V4([127, 0, 0, 9]);
+    let mut cfg = LdpEngineConfig::new(LdpId::new(A_ID, 0), A_HI);
+    cfg.accept_targeted = true;
+    let mut a = LdpEngine::new(cfg);
+    let peer_b = LdpId::new(B_ID, 0);
+
+    let now = Instant::from_millis(1_000);
+    let hello = hello_pdu_from(B_ID, Some(B_TRANSPORT), None, None);
+    a.feed_udp(now, B_TRANSPORT, &hello);
+    a.take_events();
+    a.on_connected(now, 7, peer_b);
+    assert_eq!(
+        a.session_state(peer_b),
+        Some(SessionState::OpenSent),
+        "the active side transmits Init and waits in OPENSENT"
+    );
+    a.take_events();
+
+    // B never answers. Keep the Hello adjacency alive across the
+    // window (a refreshed Hello at 15 s) so the teardown at 16 s can
+    // only come from the establishment window — not from the
+    // adjacency expiring and taking the session with it.
+    a.feed_udp(
+        Instant::from_millis(1_000 + 15_000),
+        B_TRANSPORT,
+        &hello_pdu_from(B_ID, Some(B_TRANSPORT), None, None),
+    );
+    a.tick(Instant::from_millis(1_000 + 1_000));
+    assert_eq!(
+        a.session_state(peer_b),
+        Some(SessionState::OpenSent),
+        "inside the window the handshake is still pending"
+    );
+    a.tick(Instant::from_millis(1_000 + 16_000));
+    let events = a.take_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EngineEvent::SessionDown {
+                peer_id,
+                reason: SessionDownReason::LocalShutdown,
+                ..
+            } if *peer_id == peer_b
+        )),
+        "the establishment window (not adjacency expiry) tears the          handshake down with an explicit Shutdown; events: {events:?}"
+    );
+    assert_eq!(a.session_state(peer_b), None);
+    // The Shutdown notification was flushed for the embedder to send.
+    assert!(a.drain_tcp_all().iter().any(|(conn, _)| *conn == 7));
+}
+
+/// An accepted connection whose peer never sends an Initialization is
+/// closed after the establishment window (the passive side holds the
+/// session struct and buffer entries for as long as the embedder keeps
+/// the socket).
+#[test]
+fn silent_accepted_connection_is_closed_after_the_window() {
+    let mut cfg = LdpEngineConfig::new(LdpId::new(A_ID, 0), A_TRANSPORT);
+    cfg.accept_targeted = true;
+    let mut a = LdpEngine::new(cfg);
+
+    let now = Instant::from_millis(2_000);
+    a.on_accepted(10, A_TRANSPORT);
+    a.tick(now);
+    a.take_events();
+
+    a.tick(Instant::from_millis(2_000 + 1_000));
+    // The stamp came from the first tick; the window is still open.
+    a.on_accepted(11, A_TRANSPORT);
+    a.tick(Instant::from_millis(2_000 + 2_000));
+    a.take_events();
+
+    a.tick(Instant::from_millis(2_000 + 17_000));
+    let events = a.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::CloseConnection(10))),
+        "the silent connection is closed past the window"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::CloseConnection(11))),
+        "the late-accepted silent connection is closed too"
+    );
+}
+
+/// RFC 5036 §3.4.3 + RFC 7552 §7.1: an Address List TLV is
+/// single-family, so a dual-stack session with both families of
+/// interface addresses sends one Address message per family — the
+/// transport family first. A single mixed-family message was either
+/// encoded with AF=2 followed by raw IPv4 bodies (illegal) or dropped
+/// wholesale by the encoder.
+#[test]
+fn dual_stack_addresses_send_one_message_per_family() {
+    // Both speakers are RFC 7552 §6.1.1 dual-stack LSRs; the transport
+    // runs over IPv4 (both listeners bind loopback v4) while both
+    // families of Hellos flow, so each side sees a compliant
+    // dual-stack peer.
+    let mut a = Speaker::new_dual_stack(
+        A_ID,
+        A_TRANSPORT,
+        Some(A_TRANSPORT_V6),
+        B_TRANSPORT,
+        Vec::from([IpAddr::V4([10, 99, 1, 1]), A_TRANSPORT_V6]),
+        false,
+    );
+    let mut b = Speaker::new_dual_stack(
+        B_ID,
+        B_TRANSPORT,
+        Some(B_TRANSPORT_V6),
+        A_TRANSPORT,
+        Vec::from([IpAddr::V4([10, 99, 2, 1])]),
+        false,
+    );
+    a.peer_udp_port = b.udp_port();
+    a.peer_tcp_port = b.tcp_port;
+    b.peer_udp_port = a.udp_port();
+    b.peer_tcp_port = a.tcp_port;
+    let peer_a = LdpId::new(A_ID, 0);
+    let peer_b = LdpId::new(B_ID, 0);
+
+    let events = wait_for(&mut a, &mut b, Duration::from_secs(10), |events| {
+        has_session_up(events, peer_a)
+            && has_session_up(events, peer_b)
+            && events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        EngineEvent::AddressReceived { peer_id, .. } if *peer_id == peer_a
+                    )
+                })
+                .count()
+                >= 2
+    });
+    assert!(has_session_up(&events, peer_a) && has_session_up(&events, peer_b));
+
+    // B received TWO Address messages for A: the transport family
+    // (IPv4) first, then IPv6 — each single-family.
+    let address_lists: Vec<&Vec<IpAddr>> = events
+        .iter()
+        .filter_map(|e| match e {
+            EngineEvent::AddressReceived { peer_id, addresses } if *peer_id == peer_a => {
+                Some(&addresses.addresses)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        address_lists.len(),
+        2,
+        "one Address message per family, never one mixed message"
+    );
+    assert!(
+        address_lists[0].iter().all(|addr| addr.is_ipv4()),
+        "the first message carries only IPv4 (the transport family)"
+    );
+    assert!(address_lists[0].iter().any(|addr| addr.is_ipv4()));
+    let v6_list = address_lists
+        .iter()
+        .find(|l| l.iter().any(|addr| addr.is_ipv6()))
+        .expect("the second message carries the IPv6 addresses");
+    assert!(v6_list.iter().all(|addr| addr.is_ipv6()));
 }
