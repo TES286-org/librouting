@@ -1492,6 +1492,64 @@ class BgpLsAttr:
         return rc
 
 
+class BgpLsTlv:
+    """Low-level RAII wrapper around ``lr_bgp_ls_tlv_t``.
+
+    Generated; prefer the hand-written wrappers in the other modules when they exist.
+    """
+
+    __slots__ = ("_ptr",)
+
+    def __init__(self, ptr):
+        self._ptr = ptr
+
+    @classmethod
+    def __wrap__(cls, ptr):
+        """Wrap an existing C handle without taking ownership of construction.
+        The handle is still freed by ``__del__``."""
+        return cls(ptr)
+
+    def free(self) -> None:
+        """Release the underlying ``lr_bgp_ls_tlv_t`` handle."""
+        if getattr(self, "_ptr", None) is not None and self._ptr != ffi.NULL:
+            _lib.lr_bgp_ls_tlv_free(self._ptr)
+            self._ptr = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
+    @property
+    def ptr(self):
+        """Return the raw CFFI pointer for direct C ABI access."""
+        return self._ptr
+
+    @classmethod
+    def new(cls, tlv_type, value, value_len):
+        """Construct a new ``lr_bgp_ls_tlv_t``. Throws ``LrError`` on failure."""
+        p = _lib.lr_bgp_ls_tlv_new(tlv_type, value, value_len)
+        if not p:
+            raise LrError(last_error())
+        return cls(p)
+
+    def type(self):
+        """Low-level wrapper for ``lr_bgp_ls_tlv_type``. See ``include/lr_ffi.h``."""
+        return _lib.lr_bgp_ls_tlv_type(self._ptr)
+
+    def value_len(self):
+        """Low-level wrapper for ``lr_bgp_ls_tlv_value_len``. See ``include/lr_ffi.h``."""
+        return _lib.lr_bgp_ls_tlv_value_len(self._ptr)
+
+    def value(self, out, cap):
+        """Low-level wrapper for ``lr_bgp_ls_tlv_value``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_bgp_ls_tlv_value(self._ptr, out, cap)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
+
 class BgpLsTlvVec:
     """Low-level RAII wrapper around ``lr_bgp_ls_tlv_vec_t``.
 
@@ -1532,7 +1590,10 @@ class BgpLsTlvVec:
 
     def at(self, index):
         """Low-level wrapper for ``lr_bgp_ls_tlv_vec_at``. See ``include/lr_ffi.h``."""
-        return _lib.lr_bgp_ls_tlv_vec_at(self._ptr, index)
+        p = _lib.lr_bgp_ls_tlv_vec_at(self._ptr, index)
+        if not p:
+            raise LrError(last_error())
+        return BgpLsTlv.__wrap__(p)
 
 
 class BgpOtc:
@@ -2723,6 +2784,14 @@ class LdpEngineConfig:
         """Return the raw CFFI pointer for direct C ABI access."""
         return self._ptr
 
+    @classmethod
+    def new(cls, local_id_lsr, local_id_label_space, transport_addr_v4):
+        """Construct a new ``lr_ldp_engine_config_t``. Throws ``LrError`` on failure."""
+        p = _lib.lr_ldp_engine_config_new(local_id_lsr, local_id_label_space, transport_addr_v4)
+        if not p:
+            raise LrError(last_error())
+        return cls(p)
+
     def set_transport_addr_v6(self, transport_addr_v6):
         """Low-level wrapper for ``lr_ldp_engine_config_set_transport_addr_v6``. See ``include/lr_ffi.h``."""
         rc = _lib.lr_ldp_engine_config_set_transport_addr_v6(self._ptr, transport_addr_v6)
@@ -2793,6 +2862,20 @@ class LdpEngineConfig:
             raise LrError(last_error())
         return rc
 
+    def add_targeted_peer(self, addr_v4, addr_v6):
+        """Low-level wrapper for ``lr_ldp_engine_config_add_targeted_peer``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_config_add_targeted_peer(self._ptr, addr_v4, addr_v6)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
+    def add_interface_address(self, addr_v4, addr_v6):
+        """Low-level wrapper for ``lr_ldp_engine_config_add_interface_address``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_config_add_interface_address(self._ptr, addr_v4, addr_v6)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
     def add_reserved_label(self, label):
         """Low-level wrapper for ``lr_ldp_engine_config_add_reserved_label``. See ``include/lr_ffi.h``."""
         rc = _lib.lr_ldp_engine_config_add_reserved_label(self._ptr, label)
@@ -2835,6 +2918,13 @@ class LdpEngine:
         """Return the raw CFFI pointer for direct C ABI access."""
         return self._ptr
 
+    def feed_udp(self, now_ms, from_v4, from_v6, data, len):
+        """Low-level wrapper for ``lr_ldp_engine_feed_udp``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_feed_udp(self._ptr, now_ms, from_v4, from_v6, data, len)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
     def on_connected(self, now_ms, conn, peer_lsr, peer_label_space):
         """Low-level wrapper for ``lr_ldp_engine_on_connected``. See ``include/lr_ffi.h``."""
         rc = _lib.lr_ldp_engine_on_connected(self._ptr, now_ms, conn, peer_lsr, peer_label_space)
@@ -2845,6 +2935,13 @@ class LdpEngine:
     def on_connect_failed(self, peer_lsr, peer_label_space):
         """Low-level wrapper for ``lr_ldp_engine_on_connect_failed``. See ``include/lr_ffi.h``."""
         rc = _lib.lr_ldp_engine_on_connect_failed(self._ptr, peer_lsr, peer_label_space)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
+    def on_accepted(self, conn, local_addr_v4, local_addr_v6):
+        """Low-level wrapper for ``lr_ldp_engine_on_accepted``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_on_accepted(self._ptr, conn, local_addr_v4, local_addr_v6)
         if rc < 0:
             raise LrError(last_error())
         return rc
@@ -2866,6 +2963,27 @@ class LdpEngine:
     def tick(self, now_ms):
         """Low-level wrapper for ``lr_ldp_engine_tick``. See ``include/lr_ffi.h``."""
         rc = _lib.lr_ldp_engine_tick(self._ptr, now_ms)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
+    def advertise_mapping(self, prefix_v4, prefix_v6, prefix_len, label_value):
+        """Low-level wrapper for ``lr_ldp_engine_advertise_mapping``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_advertise_mapping(self._ptr, prefix_v4, prefix_v6, prefix_len, label_value)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
+    def withdraw_mapping(self, prefix_v4, prefix_v6, prefix_len):
+        """Low-level wrapper for ``lr_ldp_engine_withdraw_mapping``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_withdraw_mapping(self._ptr, prefix_v4, prefix_v6, prefix_len)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
+    def send_link_hello(self, dest_v4, dest_v6):
+        """Low-level wrapper for ``lr_ldp_engine_send_link_hello``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_send_link_hello(self._ptr, dest_v4, dest_v6)
         if rc < 0:
             raise LrError(last_error())
         return rc
@@ -2898,9 +3016,23 @@ class LdpEngine:
             raise LrError(last_error())
         return rc
 
+    def transit_label_of(self, prefix_v4, prefix_v6, prefix_len, out_label):
+        """Low-level wrapper for ``lr_ldp_engine_transit_label_of``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_transit_label_of(self._ptr, prefix_v4, prefix_v6, prefix_len, out_label)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
+
     def transit_label_count(self):
         """Low-level wrapper for ``lr_ldp_engine_transit_label_count``. See ``include/lr_ffi.h``."""
         return _lib.lr_ldp_engine_transit_label_count(self._ptr)
+
+    def transit_next_hop(self, prefix_v4, prefix_v6, prefix_len, out_nh_lsr, out_nh_label_space, out_out_label):
+        """Low-level wrapper for ``lr_ldp_engine_transit_next_hop``. See ``include/lr_ffi.h``."""
+        rc = _lib.lr_ldp_engine_transit_next_hop(self._ptr, prefix_v4, prefix_v6, prefix_len, out_nh_lsr, out_nh_label_space, out_out_label)
+        if rc < 0:
+            raise LrError(last_error())
+        return rc
 
     def adjacency_count(self):
         """Low-level wrapper for ``lr_ldp_engine_adjacency_count``. See ``include/lr_ffi.h``."""

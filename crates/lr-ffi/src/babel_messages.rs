@@ -620,24 +620,19 @@ pub unsafe extern "C" fn lr_babel_seqno_request_free(r: lr_babel_seqno_request_t
 }
 
 // ---- TLV type constants (RFC 8966 §4.6) ----
+//
+// Single definition in [`crate::babel`]; re-used here. A duplicate
+// definition (even with identical values) makes cbindgen's header
+// emission order-dependent and previously dropped the whole set from
+// `lr_ffi.h`.
+pub use crate::babel::{
+    LR_BABEL_TLV_ACK, LR_BABEL_TLV_ACK_REQ, LR_BABEL_TLV_CHALLENGE_REPLY,
+    LR_BABEL_TLV_CHALLENGE_REQUEST, LR_BABEL_TLV_HELLO, LR_BABEL_TLV_HMAC, LR_BABEL_TLV_IHU,
+    LR_BABEL_TLV_MAC, LR_BABEL_TLV_NEXT_HOP, LR_BABEL_TLV_PAD1, LR_BABEL_TLV_PADN, LR_BABEL_TLV_PC,
+    LR_BABEL_TLV_ROUTER_ID, LR_BABEL_TLV_ROUTE_REQUEST, LR_BABEL_TLV_SEQNO_REQUEST,
+    LR_BABEL_TLV_TS_PC, LR_BABEL_TLV_UPDATE,
+};
 
-pub const LR_BABEL_TLV_PAD1: u8 = 0;
-pub const LR_BABEL_TLV_PADN: u8 = 1;
-pub const LR_BABEL_TLV_ACK_REQ: u8 = 2;
-pub const LR_BABEL_TLV_ACK: u8 = 3;
-pub const LR_BABEL_TLV_HELLO: u8 = 4;
-pub const LR_BABEL_TLV_IHU: u8 = 5;
-pub const LR_BABEL_TLV_ROUTER_ID: u8 = 6;
-pub const LR_BABEL_TLV_NEXT_HOP: u8 = 7;
-pub const LR_BABEL_TLV_UPDATE: u8 = 8;
-pub const LR_BABEL_TLV_ROUTE_REQUEST: u8 = 9;
-pub const LR_BABEL_TLV_SEQNO_REQUEST: u8 = 10;
-pub const LR_BABEL_TLV_TS_PC: u8 = 11;
-pub const LR_BABEL_TLV_HMAC: u8 = 12;
-pub const LR_BABEL_TLV_MAC: u8 = 16;
-pub const LR_BABEL_TLV_PC: u8 = 17;
-pub const LR_BABEL_TLV_CHALLENGE_REQUEST: u8 = 18;
-pub const LR_BABEL_TLV_CHALLENGE_REPLY: u8 = 19;
 pub const LR_BABEL_TLV_SOURCE_PREFIX_SUBTLV: u8 = 128;
 
 pub const LR_BABEL_HELLO_UNICAST: u16 = 0x8000;

@@ -53,12 +53,13 @@
 //! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
 //! thread-local last-error string.
 
-// The `[u8; 4]` / `[u8; 16]` extern parameters (transport_addr_v4,
-// prefix_v4, etc.) are not FFI-safe per the improper_ctypes_definitions
-// lint, but cbindgen emits them as fixed-size arrays on the C side
-// (`uint8_t addr_v4[4]` / `uint8_t addr_v6[16]`) which IS the standard
-// C ABI shape. The Rust-side lint is overly conservative here.
-#![allow(improper_ctypes_definitions)]
+// IPv4 address arguments are `*const u8` (4 readable bytes), not
+// by-value `[u8; 4]`: cbindgen silently DROPS every function whose
+// signature carries a by-value array from the generated header, and
+// the ten LDP engine entry points below were entirely absent from
+// `lr_ffi.h` — the LDP engine was unusable from C, C++, Go and
+// Python. The pointer form is the shape every other address-taking
+// entry point in this crate already uses.
 #![allow(unused_unsafe)]
 
 use lr_core::addr::{IpAddr, Prefix};
@@ -82,14 +83,35 @@ const LR_ERR_OTHER: i32 = LrError::Other as i32;
 pub const LR_LDP_ADVERTISEMENT_DOWNSTREAM_UNSOLICITED: i32 = 1;
 pub const LR_LDP_ADVERTISEMENT_DOWNSTREAM_ON_DEMAND: i32 = 2;
 
-pub const LR_LDP_DISCOVERY_KIND_LINK: i32 = 1;
-pub const LR_LDP_DISCOVERY_KIND_TARGETED: i32 = 2;
+// `LR_LDP_DISCOVERY_KIND_*` — single crate-level definition in
+// [`crate::ldp_discovery`] (LINK = 0, TARGETED = 1, the values the
+// header has always advertised). This module previously re-declared
+// the names with DIFFERENT values (LINK = 1, TARGETED = 2) and wrote
+// those into `lr_ldp_engine_event_t::discovery_kind` and
+// `lr_ldp_engine_adjacency_at`'s output, so a consumer matching the
+// field against the header constants misread every Link adjacency as
+// Targeted. The events and adjacency readers now carry the canonical
+// numbering.
+pub use crate::ldp_discovery::{LR_LDP_DISCOVERY_KIND_LINK, LR_LDP_DISCOVERY_KIND_TARGETED};
 
-pub const LR_LDP_SESSION_STATE_NON_EXISTENT: i32 = 1;
-pub const LR_LDP_SESSION_STATE_INITIALIZED: i32 = 2;
-pub const LR_LDP_SESSION_STATE_OPEN_REC: i32 = 3;
-pub const LR_LDP_SESSION_STATE_OPEN_SENT: i32 = 4;
-pub const LR_LDP_SESSION_STATE_OPERATIONAL: i32 = 5;
+// `LR_LDP_SESSION_STATE_*` — single crate-level definition in
+// [`crate::ldp_session`]; a second identical definition here made
+// cbindgen's header emission order-dependent.
+pub use crate::ldp_session::{
+    LR_LDP_SESSION_STATE_INITIALIZED, LR_LDP_SESSION_STATE_NON_EXISTENT,
+    LR_LDP_SESSION_STATE_OPEN_REC, LR_LDP_SESSION_STATE_OPEN_SENT,
+    LR_LDP_SESSION_STATE_OPERATIONAL,
+};
+
+/// Read 4 bytes as an IPv4 octet array.
+///
+/// # Safety
+/// `p` must be non-NULL and point to 4 readable bytes.
+unsafe fn read_v4(p: *const u8) -> [u8; 4] {
+    let mut a = [0u8; 4];
+    a.copy_from_slice(unsafe { std::slice::from_raw_parts(p, 4) });
+    a
+}
 
 // ---- Opaque handle types ----
 
@@ -149,21 +171,28 @@ unsafe fn borrow_engine(e: lr_ldp_engine_t) -> Option<&'static LdpEngine> {
 /// `local_id_lsr` is the 4-byte LSR Id as a `u32` in host byte
 /// order (e.g. `0x01020304` for 1.2.3.4). `local_id_label_space`
 /// is the 16-bit label space (0 for platform-wide).
-/// `transport_addr_v4` is the 4-byte IPv4 transport address (must
-/// not be 0.0.0.0 in production; the FFI accepts it for tests).
+/// `transport_addr_v4` points to the 4-byte IPv4 transport address
+/// (must not be 0.0.0.0 in production; the FFI accepts it for tests).
 ///
-/// Returns NULL only on a panic.
+/// Returns NULL on a NULL `transport_addr_v4` or a panic.
+///
+/// # Safety
+/// `transport_addr_v4` must point to 4 readable bytes.
 #[no_mangle]
-pub extern "C" fn lr_ldp_engine_config_new(
+pub unsafe extern "C" fn lr_ldp_engine_config_new(
     local_id_lsr: u32,
     local_id_label_space: u16,
-    transport_addr_v4: [u8; 4],
+    transport_addr_v4: *const u8,
 ) -> lr_ldp_engine_config_t {
     guarded(
-        || {
+        || unsafe {
+            if transport_addr_v4.is_null() {
+                set_last_error("transport_addr_v4 is NULL".into());
+                return std::ptr::null_mut();
+            }
             let lsr_bytes = local_id_lsr.to_be_bytes();
             let local_id = LdpId::new(lsr_bytes, local_id_label_space);
-            let cfg = LdpEngineConfig::new(local_id, IpAddr::V4(transport_addr_v4));
+            let cfg = LdpEngineConfig::new(local_id, IpAddr::V4(read_v4(transport_addr_v4)));
             box_config(cfg)
         },
         std::ptr::null_mut(),
@@ -404,11 +433,13 @@ pub extern "C" fn lr_ldp_engine_config_set_label_range(
 /// `addr_v6` wins.
 ///
 /// # Safety
+/// At least one of `addr_v4` / `addr_v6` must be non-NULL.
+/// `addr_v4` must point to 4 readable bytes when non-NULL;
 /// `addr_v6` must point to 16 readable bytes when non-NULL.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_config_add_targeted_peer(
     c: lr_ldp_engine_config_t,
-    addr_v4: [u8; 4],
+    addr_v4: *const u8,
     addr_v6: *const u8,
 ) -> i32 {
     guarded(
@@ -416,12 +447,15 @@ pub unsafe extern "C" fn lr_ldp_engine_config_add_targeted_peer(
             let Some(cfg) = borrow_config(c) else {
                 return LR_ERR_NULL;
             };
+            if addr_v4.is_null() && addr_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let addr = if !addr_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(addr_v6, 16) });
                 IpAddr::V6(a)
             } else {
-                IpAddr::V4(addr_v4)
+                IpAddr::V4(read_v4(addr_v4))
             };
             cfg.targeted_peers.push(addr);
             0
@@ -434,11 +468,13 @@ pub unsafe extern "C" fn lr_ldp_engine_config_add_targeted_peer(
 /// message (RFC 5036 §3.5.6).
 ///
 /// # Safety
+/// At least one of `addr_v4` / `addr_v6` must be non-NULL.
+/// `addr_v4` must point to 4 readable bytes when non-NULL;
 /// `addr_v6` must point to 16 readable bytes when non-NULL.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_config_add_interface_address(
     c: lr_ldp_engine_config_t,
-    addr_v4: [u8; 4],
+    addr_v4: *const u8,
     addr_v6: *const u8,
 ) -> i32 {
     guarded(
@@ -446,12 +482,15 @@ pub unsafe extern "C" fn lr_ldp_engine_config_add_interface_address(
             let Some(cfg) = borrow_config(c) else {
                 return LR_ERR_NULL;
             };
+            if addr_v4.is_null() && addr_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let addr = if !addr_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(addr_v6, 16) });
                 IpAddr::V6(a)
             } else {
-                IpAddr::V4(addr_v4)
+                IpAddr::V4(read_v4(addr_v4))
             };
             cfg.interface_addresses.push(addr);
             0
@@ -528,12 +567,12 @@ pub unsafe extern "C" fn lr_ldp_engine_free(e: lr_ldp_engine_t) {
 /// # Safety
 /// `data` must point to `len` readable bytes. `from_v6` must point to
 /// 16 readable bytes when non-NULL (IPv6 source); otherwise `from_v4`
-/// carries the IPv4 source.
+/// must point to 4 readable bytes (the IPv4 source).
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_feed_udp(
     e: lr_ldp_engine_t,
     now_ms: u64,
-    from_v4: [u8; 4],
+    from_v4: *const u8,
     from_v6: *const u8,
     data: *const u8,
     len: usize,
@@ -546,12 +585,15 @@ pub unsafe extern "C" fn lr_ldp_engine_feed_udp(
             if data.is_null() && len != 0 {
                 return LR_ERR_NULL;
             }
+            if from_v4.is_null() && from_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let from = if !from_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(from_v6, 16) });
                 IpAddr::V6(a)
             } else {
-                IpAddr::V4(from_v4)
+                IpAddr::V4(read_v4(from_v4))
             };
             let slice = if len == 0 {
                 &[]
@@ -620,12 +662,14 @@ pub unsafe extern "C" fn lr_ldp_engine_on_connect_failed(
 /// §7.1 rules.
 ///
 /// # Safety
+/// At least one of `local_addr_v4` / `local_addr_v6` must be non-NULL.
+/// `local_addr_v4` must point to 4 readable bytes when non-NULL;
 /// `local_addr_v6` must point to 16 readable bytes when non-NULL.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_on_accepted(
     e: lr_ldp_engine_t,
     conn: u64,
-    local_addr_v4: [u8; 4],
+    local_addr_v4: *const u8,
     local_addr_v6: *const u8,
 ) -> i32 {
     guarded(
@@ -633,12 +677,15 @@ pub unsafe extern "C" fn lr_ldp_engine_on_accepted(
             let Some(engine) = borrow_engine_mut(e) else {
                 return LR_ERR_NULL;
             };
+            if local_addr_v4.is_null() && local_addr_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let local_addr = if !local_addr_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(local_addr_v6, 16) });
                 IpAddr::V6(a)
             } else {
-                IpAddr::V4(local_addr_v4)
+                IpAddr::V4(read_v4(local_addr_v4))
             };
             engine.on_accepted(conn, local_addr);
             0
@@ -717,15 +764,18 @@ pub unsafe extern "C" fn lr_ldp_engine_tick(e: lr_ldp_engine_t, now_ms: u64) -> 
 // ---- Origination ----
 
 /// Locally originate a label binding (egress side): advertise the
-/// FEC-to-label mapping to every operational peer. `prefix_v4` is
-/// the IPv4 prefix bytes; pass `prefix_v6` non-NULL for IPv6.
+/// FEC-to-label mapping to every operational peer. `prefix_v4`
+/// points to the 4 IPv4 prefix bytes; pass `prefix_v6` non-NULL for
+/// IPv6.
 ///
 /// # Safety
+/// At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+/// `prefix_v4` must point to 4 readable bytes when non-NULL;
 /// `prefix_v6` must point to 16 readable bytes when non-NULL.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_advertise_mapping(
     e: lr_ldp_engine_t,
-    prefix_v4: [u8; 4],
+    prefix_v4: *const u8,
     prefix_v6: *const u8,
     prefix_len: u8,
     label_value: u32,
@@ -735,12 +785,15 @@ pub unsafe extern "C" fn lr_ldp_engine_advertise_mapping(
             let Some(engine) = borrow_engine_mut(e) else {
                 return LR_ERR_NULL;
             };
+            if prefix_v4.is_null() && prefix_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let prefix = if !prefix_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(prefix_v6, 16) });
                 Prefix::new_v6(a, prefix_len)
             } else {
-                Prefix::new_v4(prefix_v4, prefix_len)
+                Prefix::new_v4(read_v4(prefix_v4), prefix_len)
             };
             engine.advertise_mapping(prefix, GenericLabel(label_value));
             0
@@ -752,11 +805,13 @@ pub unsafe extern "C" fn lr_ldp_engine_advertise_mapping(
 /// Withdraw a previously advertised label binding.
 ///
 /// # Safety
+/// At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+/// `prefix_v4` must point to 4 readable bytes when non-NULL;
 /// `prefix_v6` must point to 16 readable bytes when non-NULL.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_withdraw_mapping(
     e: lr_ldp_engine_t,
-    prefix_v4: [u8; 4],
+    prefix_v4: *const u8,
     prefix_v6: *const u8,
     prefix_len: u8,
 ) -> i32 {
@@ -765,12 +820,15 @@ pub unsafe extern "C" fn lr_ldp_engine_withdraw_mapping(
             let Some(engine) = borrow_engine_mut(e) else {
                 return LR_ERR_NULL;
             };
+            if prefix_v4.is_null() && prefix_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let prefix = if !prefix_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(prefix_v6, 16) });
                 Prefix::new_v6(a, prefix_len)
             } else {
-                Prefix::new_v4(prefix_v4, prefix_len)
+                Prefix::new_v4(read_v4(prefix_v4), prefix_len)
             };
             engine.withdraw_mapping(prefix);
             0
@@ -782,11 +840,13 @@ pub unsafe extern "C" fn lr_ldp_engine_withdraw_mapping(
 /// Emit one Link Hello to the given destination.
 ///
 /// # Safety
+/// At least one of `dest_v4` / `dest_v6` must be non-NULL.
+/// `dest_v4` must point to 4 readable bytes when non-NULL;
 /// `dest_v6` must point to 16 readable bytes when non-NULL.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_send_link_hello(
     e: lr_ldp_engine_t,
-    dest_v4: [u8; 4],
+    dest_v4: *const u8,
     dest_v6: *const u8,
 ) -> i32 {
     guarded(
@@ -794,12 +854,15 @@ pub unsafe extern "C" fn lr_ldp_engine_send_link_hello(
             let Some(engine) = borrow_engine_mut(e) else {
                 return LR_ERR_NULL;
             };
+            if dest_v4.is_null() && dest_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let dest = if !dest_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(dest_v6, 16) });
                 IpAddr::V6(a)
             } else {
-                IpAddr::V4(dest_v4)
+                IpAddr::V4(read_v4(dest_v4))
             };
             engine.send_link_hello(dest);
             0
@@ -933,12 +996,14 @@ pub unsafe extern "C" fn lr_ldp_engine_drain_tcp_all(
 /// on error.
 ///
 /// # Safety
+/// At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+/// `prefix_v4` must point to 4 readable bytes when non-NULL;
 /// `prefix_v6` must point to 16 readable bytes when non-NULL.
 /// `out_label` must point to writable u32 memory.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_transit_label_of(
     e: lr_ldp_engine_t,
-    prefix_v4: [u8; 4],
+    prefix_v4: *const u8,
     prefix_v6: *const u8,
     prefix_len: u8,
     out_label: *mut u32,
@@ -951,12 +1016,15 @@ pub unsafe extern "C" fn lr_ldp_engine_transit_label_of(
             if out_label.is_null() {
                 return LR_ERR_NULL;
             }
+            if prefix_v4.is_null() && prefix_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let prefix = if !prefix_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(prefix_v6, 16) });
                 Prefix::new_v6(a, prefix_len)
             } else {
-                Prefix::new_v4(prefix_v4, prefix_len)
+                Prefix::new_v4(read_v4(prefix_v4), prefix_len)
             };
             match engine.transit_label_of(&prefix) {
                 Some(label) => {
@@ -989,12 +1057,14 @@ pub unsafe extern "C" fn lr_ldp_engine_transit_label_count(e: lr_ldp_engine_t) -
 /// negative on error.
 ///
 /// # Safety
+/// At least one of `prefix_v4` / `prefix_v6` must be non-NULL.
+/// `prefix_v4` must point to 4 readable bytes when non-NULL;
 /// `prefix_v6` must point to 16 readable bytes when non-NULL.
 /// All out-pointers must point to writable memory.
 #[no_mangle]
 pub unsafe extern "C" fn lr_ldp_engine_transit_next_hop(
     e: lr_ldp_engine_t,
-    prefix_v4: [u8; 4],
+    prefix_v4: *const u8,
     prefix_v6: *const u8,
     prefix_len: u8,
     out_nh_lsr: *mut u32,
@@ -1009,12 +1079,15 @@ pub unsafe extern "C" fn lr_ldp_engine_transit_next_hop(
             if out_nh_lsr.is_null() || out_nh_label_space.is_null() || out_out_label.is_null() {
                 return LR_ERR_NULL;
             }
+            if prefix_v4.is_null() && prefix_v6.is_null() {
+                return LR_ERR_NULL;
+            }
             let prefix = if !prefix_v6.is_null() {
                 let mut a = [0u8; 16];
                 a.copy_from_slice(unsafe { std::slice::from_raw_parts(prefix_v6, 16) });
                 Prefix::new_v6(a, prefix_len)
             } else {
-                Prefix::new_v4(prefix_v4, prefix_len)
+                Prefix::new_v4(read_v4(prefix_v4), prefix_len)
             };
             match engine.transit_next_hop(&prefix) {
                 Some((nh, label)) => {
@@ -1136,8 +1209,8 @@ fn adjacency_to_c(
         *out_peer_lsr = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         *out_peer_label_space = u16::from_be_bytes([bytes[4], bytes[5]]);
         *out_kind = match adj.kind {
-            DiscoveryKind::Link => LR_LDP_DISCOVERY_KIND_LINK,
-            DiscoveryKind::Targeted => LR_LDP_DISCOVERY_KIND_TARGETED,
+            DiscoveryKind::Link => LR_LDP_DISCOVERY_KIND_LINK as i32,
+            DiscoveryKind::Targeted => LR_LDP_DISCOVERY_KIND_TARGETED as i32,
         };
         match adj.source {
             IpAddr::V4(b) => {
@@ -1524,8 +1597,8 @@ fn engine_event_to_c(ev: EngineEvent) -> lr_ldp_engine_event_t {
             out.kind = lr_ldp_engine_event_kind_t::AdjacencyUp as i32;
             write_peer(&mut out, adj.peer_id);
             out.discovery_kind = match adj.kind {
-                DK::Link => LR_LDP_DISCOVERY_KIND_LINK,
-                DK::Targeted => LR_LDP_DISCOVERY_KIND_TARGETED,
+                DK::Link => LR_LDP_DISCOVERY_KIND_LINK as i32,
+                DK::Targeted => LR_LDP_DISCOVERY_KIND_TARGETED as i32,
             };
             write_addr(&mut out.source_is_ipv6, &mut out.source_addr, adj.source);
             write_addr(
@@ -1542,8 +1615,8 @@ fn engine_event_to_c(ev: EngineEvent) -> lr_ldp_engine_event_t {
             out.kind = lr_ldp_engine_event_kind_t::AdjacencyDown as i32;
             write_peer(&mut out, peer_id);
             out.discovery_kind = match kind {
-                DK::Link => LR_LDP_DISCOVERY_KIND_LINK,
-                DK::Targeted => LR_LDP_DISCOVERY_KIND_TARGETED,
+                DK::Link => LR_LDP_DISCOVERY_KIND_LINK as i32,
+                DK::Targeted => LR_LDP_DISCOVERY_KIND_TARGETED as i32,
             };
             write_addr(&mut out.source_is_ipv6, &mut out.source_addr, source);
         }
@@ -1778,14 +1851,14 @@ mod tests {
 
     #[test]
     fn engine_config_new_returns_non_null() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         assert!(!c.is_null());
         unsafe { lr_ldp_engine_config_free(c) };
     }
 
     #[test]
     fn engine_config_setters_round_trip() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         assert_eq!(lr_ldp_engine_config_set_keepalive_time(c, 60), 0);
         assert_eq!(lr_ldp_engine_config_set_max_pdu_len(c, 8192), 0);
         assert_eq!(
@@ -1801,13 +1874,23 @@ mod tests {
         assert_eq!(lr_ldp_engine_config_set_label_range(c, 1000, 2000), 0);
         // SAFETY: passing NULL addr_v6 selects the IPv4 variant.
         assert_eq!(
-            unsafe { lr_ldp_engine_config_add_targeted_peer(c, [192, 0, 2, 1], std::ptr::null()) },
+            unsafe {
+                lr_ldp_engine_config_add_targeted_peer(
+                    c,
+                    [192u8, 0, 2, 1].as_ptr(),
+                    std::ptr::null(),
+                )
+            },
             0
         );
         // SAFETY: same — IPv4 path.
         assert_eq!(
             unsafe {
-                lr_ldp_engine_config_add_interface_address(c, [10, 0, 0, 1], std::ptr::null())
+                lr_ldp_engine_config_add_interface_address(
+                    c,
+                    [10u8, 0, 0, 1].as_ptr(),
+                    std::ptr::null(),
+                )
             },
             0
         );
@@ -1825,7 +1908,7 @@ mod tests {
 
     #[test]
     fn engine_new_consumes_config() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         let e = unsafe { lr_ldp_engine_new(c) };
         assert!(!e.is_null());
         unsafe { lr_ldp_engine_free(e) };
@@ -1842,7 +1925,7 @@ mod tests {
             lr_ldp_engine_feed_udp(
                 std::ptr::null_mut(),
                 0,
-                [10, 0, 0, 1],
+                [10u8, 0, 0, 1].as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
                 0,
@@ -1859,10 +1942,18 @@ mod tests {
 
     #[test]
     fn engine_advertise_mapping_round_trip() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         let e = unsafe { lr_ldp_engine_new(c) };
         assert_eq!(
-            unsafe { lr_ldp_engine_advertise_mapping(e, [10, 0, 0, 0], std::ptr::null(), 24, 100) },
+            unsafe {
+                lr_ldp_engine_advertise_mapping(
+                    e,
+                    [10u8, 0, 0, 0].as_ptr(),
+                    std::ptr::null(),
+                    24,
+                    100,
+                )
+            },
             0
         );
         // advertise_mapping (egress side) does NOT allocate a transit
@@ -1876,13 +1967,21 @@ mod tests {
         // allocation).
         let mut label = 0u32;
         let rc = unsafe {
-            lr_ldp_engine_transit_label_of(e, [10, 0, 0, 0], std::ptr::null(), 24, &raw mut label)
+            lr_ldp_engine_transit_label_of(
+                e,
+                [10u8, 0, 0, 0].as_ptr(),
+                std::ptr::null(),
+                24,
+                &raw mut label,
+            )
         };
         assert_eq!(rc, 0);
         assert_eq!(unsafe { lr_ldp_engine_transit_label_count(e) }, 0);
         // Withdraw.
         assert_eq!(
-            unsafe { lr_ldp_engine_withdraw_mapping(e, [10, 0, 0, 0], std::ptr::null(), 24) },
+            unsafe {
+                lr_ldp_engine_withdraw_mapping(e, [10u8, 0, 0, 0].as_ptr(), std::ptr::null(), 24)
+            },
             0
         );
         unsafe { lr_ldp_engine_free(e) };
@@ -1890,7 +1989,7 @@ mod tests {
 
     #[test]
     fn engine_session_state_returns_non_existent_for_unknown_peer() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         let e = unsafe { lr_ldp_engine_new(c) };
         assert_eq!(
             unsafe { lr_ldp_engine_session_state(e, 0x0a000002, 0) },
@@ -1901,7 +2000,7 @@ mod tests {
 
     #[test]
     fn engine_take_events_returns_zero_on_empty() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         let e = unsafe { lr_ldp_engine_new(c) };
         let mut buf: [lr_ldp_engine_event_t; 4] = [
             lr_ldp_engine_event_t::default(),
@@ -1916,7 +2015,7 @@ mod tests {
 
     #[test]
     fn engine_adjacency_count_returns_zero_on_fresh_engine() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         let e = unsafe { lr_ldp_engine_new(c) };
         assert_eq!(unsafe { lr_ldp_engine_adjacency_count(e) }, 0);
         unsafe { lr_ldp_engine_free(e) };
@@ -1924,7 +2023,7 @@ mod tests {
 
     #[test]
     fn engine_adjacency_at_returns_invalid_handle_on_oob() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         let e = unsafe { lr_ldp_engine_new(c) };
         let mut lsr = 0u32;
         let mut ls = 0u16;
@@ -1964,7 +2063,7 @@ mod tests {
 
     #[test]
     fn engine_drain_udp_returns_empty_on_fresh_engine() {
-        let c = lr_ldp_engine_config_new(0x01020304, 0, [10, 0, 0, 1]);
+        let c = unsafe { lr_ldp_engine_config_new(0x01020304, 0, [10u8, 0, 0, 1].as_ptr()) };
         let e = unsafe { lr_ldp_engine_new(c) };
         let mut b = lr_bytes_t {
             ptr: std::ptr::null_mut(),

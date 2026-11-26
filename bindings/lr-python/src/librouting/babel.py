@@ -415,40 +415,46 @@ class BabelCodec:
         get_lib().lr_babel_frame_array_free(array[0])
         return out
 
-    def decode_authenticated_slice(self, data: bytes, pseudo_header: "PseudoHeader") -> bytes:
+    def decode_authenticated_slice(self, data: bytes, pseudo_header: "PseudoHeader",
+                                   keys: Sequence["MacKey"],
+                                   replay: "ReplayProtection") -> BabelFrame:
         """Decode an authenticated Babel frame slice (RFC 8967 §3).
-        Returns the inner (de-encapsulated) frame bytes."""
-        b = ffi.new("lr_bytes_t*")
-        rc = get_lib().lr_babel_codec_decode_authenticated_slice(
-            self._c, bytes(data), len(data), pseudo_header._p, b
-        )
-        _check_rc(rc, "BabelCodec.decode_authenticated_slice")
-        n = int(get_lib().lr_bytes_len(b))
-        if n == 0:
-            get_lib().lr_bytes_free(b)
-            return b""
-        ptr = get_lib().lr_bytes_ptr(b)
-        out = ffi.buffer(ptr, n)[:]
-        get_lib().lr_bytes_free(b)
-        return out
 
-    def encode_authenticated(self, frame: BabelFrame, pseudo_header: "PseudoHeader",
-                             keys: Sequence["MacKey"]) -> bytes:
-        """Encode an authenticated Babel frame (RFC 8967 §3). The
-        resulting bytes carry the original TLVs plus one HMAC TLV per
-        key, in the order the keys were supplied."""
-        if not keys:
-            arr = ffi.NULL
-            n = 0
-        else:
+        Verifies the HMAC TLVs against `keys` and the packet counter
+        through `replay`; on success returns a newly-allocated
+        ``BabelFrame`` holding the inner (de-encapsulated) TLVs. The
+        caller owns the returned frame (``close`` / garbage
+        collection frees it)."""
+        if keys:
             arr_t = ffi.typeof(f"lr_babel_mac_key_t[{len(keys)}]")
             arr = ffi.new(arr_t)
             for i, k in enumerate(keys):
                 arr[i] = k._k
+            keys_ptr = ffi.cast("const lr_babel_mac_key_t*", arr)
             n = len(keys)
+        else:
+            keys_ptr = ffi.NULL
+            n = 0
+        out = ffi.new("lr_babel_frame_t*")
+        rc = get_lib().lr_babel_codec_decode_authenticated_slice(
+            self._c, bytes(data), len(data), pseudo_header._p, keys_ptr, n,
+            replay._r, out,
+        )
+        _check_rc(rc, "BabelCodec.decode_authenticated_slice")
+        return BabelFrame(out[0])
+
+    def encode_authenticated(self, frame: BabelFrame, pseudo_header: "PseudoHeader",
+                             key: "MacKey", counter: "PacketCounter") -> bytes:
+        """Encode an authenticated Babel frame (RFC 8967 §3).
+
+        Appends one HMAC TLV computed with `key` and advances
+        `counter` (the nonce source); returns the wire bytes. The
+        C ABI takes a single key handle and a packet-counter handle —
+        the earlier signature (a key array) never matched the Rust
+        entry point and passed garbage in the register slots."""
         b = ffi.new("lr_bytes_t*")
         rc = get_lib().lr_babel_codec_encode_authenticated(
-            self._c, frame._f, pseudo_header._p, arr, n, b
+            self._c, frame._f, pseudo_header._p, key._k, counter._c, b
         )
         _check_rc(rc, "BabelCodec.encode_authenticated")
         n = int(get_lib().lr_bytes_len(b))
@@ -1119,11 +1125,12 @@ class Hello:
 
     @property
     def timestamp(self) -> Optional[int]:
-        out = ffi.new("uint32_t*")
-        rc = get_lib().lr_babel_hello_timestamp(self._h, out)
-        if rc < 0:
+        present = ffi.new("uint8_t*")
+        ts = ffi.new("uint32_t*")
+        rc = get_lib().lr_babel_hello_timestamp(self._h, present, ts)
+        if rc < 0 or present[0] == 0:
             return None
-        return int(out[0])
+        return int(ts[0])
 
     def encode(self) -> bytes:
         b = ffi.new("lr_bytes_t*")

@@ -108,7 +108,7 @@ pub unsafe extern "C" fn lr_bgp_reconcile_as4(
 // ---- BGP-LS TLV stream codec (RFC 7752 §3.2) ----
 
 /// Decode a BGP-LS TLV stream (RFC 7752 §3.2 — the body of a BGP-LS
-/// NLRI or attribute). Writes one `lr_bgp_ls_tlv_t` per decoded TLV
+/// NLRI or attribute). Writes one `lr_bgp_ls_tlv_entry_t` per decoded TLV
 /// to `*out_array`; the caller frees the array with
 /// [`lr_bgp_ls_tlv_array_free`]. Returns the count through
 /// `*out_count`.
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn lr_bgp_decode_tlv_stream(
     data: *const u8,
     len: usize,
     out_count: *mut usize,
-    out_array: *mut *mut lr_bgp_ls_tlv_t,
+    out_array: *mut *mut lr_bgp_ls_tlv_entry_t,
 ) -> i32 {
     guarded(
         || unsafe {
@@ -144,12 +144,12 @@ pub unsafe extern "C" fn lr_bgp_decode_tlv_stream(
                     // reclaims the value allocations by calling
                     // lr_bgp_ls_tlv_array_free, which walks each entry
                     // and frees the value_ptr via Box::from_raw.
-                    let mut c_arr: Vec<lr_bgp_ls_tlv_t> = Vec::with_capacity(n);
+                    let mut c_arr: Vec<lr_bgp_ls_tlv_entry_t> = Vec::with_capacity(n);
                     for t in tlvs {
                         let len_u16 = t.value.len() as u16;
                         let value_box: Box<[u8]> = t.value.into_boxed_slice();
                         let value_ptr = Box::into_raw(value_box) as *mut u8;
-                        c_arr.push(lr_bgp_ls_tlv_t {
+                        c_arr.push(lr_bgp_ls_tlv_entry_t {
                             tlv_type: t.ty,
                             value_offset: 0,
                             value_len: len_u16,
@@ -178,9 +178,19 @@ pub unsafe extern "C" fn lr_bgp_decode_tlv_stream(
 /// One BGP-LS TLV (RFC 7752 §3.2). The value bytes are owned by the
 /// array — the caller must not free `value_ptr` directly; free the
 /// whole array with [`lr_bgp_ls_tlv_array_free`].
+///
+/// Named `lr_bgp_ls_tlv_entry_t`, NOT `lr_bgp_ls_tlv_t`: the latter is
+/// the opaque single-TLV handle type in [`crate::bgp_ls`]. Two Rust
+/// items sharing one C name made cbindgen emit the handle-based
+/// functions (`lr_bgp_ls_tlv_new` / `_type` / `_value_len` / `_value`
+/// / `_free` / `_vec_at`) with a 40-byte struct passed by value where
+/// the implementation takes/returns an 8-byte pointer — corrupted
+/// register/stack arguments for every C, Go and Python caller. The
+/// flat-array entry keeps the `_entry_t` name; the handle keeps
+/// `lr_bgp_ls_tlv_entry_t`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct lr_bgp_ls_tlv_t {
+pub struct lr_bgp_ls_tlv_entry_t {
     pub tlv_type: u16,
     pub value_offset: usize,
     pub value_len: u16,
@@ -190,18 +200,18 @@ pub struct lr_bgp_ls_tlv_t {
 }
 
 /// Encode a slice of BGP-LS TLVs (RFC 7752 §3.2). `tlvs` is a flat
-/// array of `lr_bgp_ls_tlv_t` (the same shape
+/// array of `lr_bgp_ls_tlv_entry_t` (the same shape
 /// [`lr_bgp_decode_tlv_stream`] produces); the encode walk reads
 /// `value_len` bytes from each `value_ptr`. Writes the wire bytes to
 /// `*out`.
 ///
 /// # Safety
-/// `tlvs` must point to `count` readable `lr_bgp_ls_tlv_t` entries;
+/// `tlvs` must point to `count` readable `lr_bgp_ls_tlv_entry_t` entries;
 /// each `value_ptr` must point to `value_len` readable bytes; `out`
 /// must point to a writable `lr_bytes_t`.
 #[no_mangle]
 pub unsafe extern "C" fn lr_bgp_encode_tlv_stream(
-    tlvs: *const lr_bgp_ls_tlv_t,
+    tlvs: *const lr_bgp_ls_tlv_entry_t,
     count: usize,
     out: *mut lr_bytes_t,
 ) -> i32 {
@@ -213,7 +223,7 @@ pub unsafe extern "C" fn lr_bgp_encode_tlv_stream(
             if out.is_null() {
                 return LR_ERR_NULL;
             }
-            let slice: &[lr_bgp_ls_tlv_t] = if count == 0 {
+            let slice: &[lr_bgp_ls_tlv_entry_t] = if count == 0 {
                 &[]
             } else {
                 unsafe { core::slice::from_raw_parts(tlvs, count) }
@@ -251,7 +261,7 @@ pub unsafe extern "C" fn lr_bgp_encode_tlv_stream(
 /// already freed; `count` must match the count returned by the decode
 /// call.
 #[no_mangle]
-pub unsafe extern "C" fn lr_bgp_ls_tlv_array_free(arr: *mut lr_bgp_ls_tlv_t, count: usize) {
+pub unsafe extern "C" fn lr_bgp_ls_tlv_array_free(arr: *mut lr_bgp_ls_tlv_entry_t, count: usize) {
     guarded(
         || unsafe {
             if arr.is_null() || count == 0 {
@@ -440,7 +450,7 @@ mod tests {
 
         // Decode through the FFI.
         let mut count = 0usize;
-        let mut arr: *mut lr_bgp_ls_tlv_t = std::ptr::null_mut();
+        let mut arr: *mut lr_bgp_ls_tlv_entry_t = std::ptr::null_mut();
         let rc = unsafe {
             lr_bgp_decode_tlv_stream(wire.as_ptr(), wire.len(), &raw mut count, &raw mut arr)
         };

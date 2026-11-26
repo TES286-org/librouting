@@ -58,10 +58,18 @@ pub(crate) unsafe fn borrow_frame(f: lr_babel_frame_t) -> Option<&'static BabelF
     Some(unsafe { &*(f as *const BabelFrame) })
 }
 
-// ---- Constants (mirrors lr_babel pub consts) ----
-
-pub const LR_BABEL_MAGIC: u8 = lr_babel::MAGIC;
-pub const LR_BABEL_VERSION: u8 = lr_babel::VERSION;
+// ---- Constants ----
+//
+// The TLV type set is defined HERE and nowhere else in the crate:
+// `babel_messages.rs` re-uses it via `pub use`. A second identical
+// definition makes cbindgen's header emission order-dependent and
+// previously dropped the whole set from `lr_ffi.h`.
+//
+// MAGIC/VERSION live in [`crate::constants_batch`] as literals — a
+// cross-crate value (`lr_babel::MAGIC`) is a path cbindgen cannot
+// evaluate, which previously emitted `#define LR_BABEL_MAGIC
+// lr_babel::MAGIC`-style broken defines or dropped the constant.
+pub use crate::constants_batch::{LR_BABEL_MAGIC, LR_BABEL_VERSION};
 
 pub const LR_BABEL_TLV_PAD1: u8 = 0;
 pub const LR_BABEL_TLV_PADN: u8 = 1;

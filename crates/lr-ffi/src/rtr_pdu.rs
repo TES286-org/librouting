@@ -45,8 +45,6 @@
 
 use lr_bgp::rtr::pdu::{
     decode as decode_pdu, encode as encode_pdu, RtrErrorCode, RtrPdu, RtrPduType,
-    RTR_FLAG_ANNOUNCE, RTR_HEADER_LEN, RTR_PDU_MAX_LEN, RTR_VERSION_0, RTR_VERSION_1,
-    RTR_VERSION_2, RTR_VERSION_MAX,
 };
 
 use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
@@ -57,14 +55,15 @@ const LR_ERR_NULL: i32 = LrError::Null as i32;
 const LR_ERR_INVALID_HANDLE: i32 = LrError::InvalidHandle as i32;
 const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
-// Re-export as pub consts so cbindgen picks them up.
-pub const LR_RTR_VERSION_0: u8 = RTR_VERSION_0;
-pub const LR_RTR_VERSION_1: u8 = RTR_VERSION_1;
-pub const LR_RTR_VERSION_2: u8 = RTR_VERSION_2;
-pub const LR_RTR_VERSION_MAX: u8 = RTR_VERSION_MAX;
-pub const LR_RTR_HEADER_LEN: usize = RTR_HEADER_LEN;
-pub const LR_RTR_PDU_MAX_LEN: usize = RTR_PDU_MAX_LEN;
-pub const LR_RTR_FLAG_ANNOUNCE: u8 = RTR_FLAG_ANNOUNCE;
+// Re-export the constants module's literal definitions so this
+// module's code and tests can use them unqualified. The literals are
+// the single crate-level definition: a second set here whose values
+// are cross-crate paths is a value cbindgen cannot evaluate, and the
+// duplicate name made the header emission order-dependent.
+pub use crate::constants_batch::{
+    LR_RTR_FLAG_ANNOUNCE, LR_RTR_HEADER_LEN, LR_RTR_PDU_MAX_LEN, LR_RTR_VERSION_0,
+    LR_RTR_VERSION_1, LR_RTR_VERSION_2, LR_RTR_VERSION_MAX,
+};
 
 /// Opaque `RtrPdu` handle. C side never touches internals.
 #[repr(C)]

@@ -1109,7 +1109,8 @@ const char *lr_srv6_locator_parse_error_name(int32_t v);
 lr_srv6_srh_t lr_srv6_srh_new(const uint8_t *data, uintptr_t count);
 lr_srv6_srh_t lr_srv6_srh_new_with_segments_left(const uint8_t *data,
                                                   uintptr_t count,
-                                                  uint8_t segments_left);
+                                                  uint8_t segments_left,
+                                                  uint8_t segments_left_present);
 int32_t lr_srv6_srh_set_next_header(lr_srv6_srh_t srh, uint8_t next_header);
 int32_t lr_srv6_srh_set_flags(lr_srv6_srh_t srh, uint8_t flags);
 int32_t lr_srv6_srh_set_tag(lr_srv6_srh_t srh, uint16_t tag);
@@ -1725,12 +1726,15 @@ int32_t lr_babel_codec_decode_authenticated_slice(lr_babel_codec_t c,
                                                    const uint8_t *data,
                                                    uintptr_t len,
                                                    lr_babel_pseudo_header_t ph,
-                                                   lr_bytes_t *out);
+                                                   const lr_babel_mac_key_t *keys,
+                                                   uintptr_t keys_count,
+                                                   lr_babel_replay_protection_t replay,
+                                                   lr_babel_frame_t *out);
 int32_t lr_babel_codec_encode_authenticated(lr_babel_codec_t c,
                                             lr_babel_frame_t frame,
                                             lr_babel_pseudo_header_t ph,
-                                            const lr_babel_mac_key_t *keys,
-                                            uintptr_t keys_len,
+                                            lr_babel_mac_key_t key,
+                                            lr_babel_packet_counter_t counter,
                                             lr_bytes_t *out);
 
 int32_t lr_babel_decode_frame(const uint8_t *data, uintptr_t len, lr_babel_frame_t *out);
@@ -1879,7 +1883,9 @@ int32_t lr_babel_hello_set_unicast(lr_babel_hello_t h, uint8_t on);
 uint16_t lr_babel_hello_seqno(lr_babel_hello_t h);
 uint16_t lr_babel_hello_interval_cs(lr_babel_hello_t h);
 uint16_t lr_babel_hello_flags(lr_babel_hello_t h);
-int32_t lr_babel_hello_timestamp(lr_babel_hello_t h, uint32_t *out);
+int32_t lr_babel_hello_timestamp(lr_babel_hello_t h,
+                                 uint8_t *present,
+                                 uint32_t *ts_us);
 int32_t lr_babel_hello_encode(lr_babel_hello_t h, lr_bytes_t *out);
 void lr_babel_hello_free(lr_babel_hello_t h);
 
@@ -2123,6 +2129,8 @@ typedef struct OpaqueBgpExtCommunity OpaqueBgpExtCommunity;
 typedef struct OpaqueBgpExtCommunity *lr_bgp_ext_community_t;
 typedef struct OpaqueBgpLsAttr OpaqueBgpLsAttr;
 typedef struct OpaqueBgpLsAttr *lr_bgp_ls_attr_t;
+typedef struct OpaqueBgpLsTlv OpaqueBgpLsTlv;
+typedef struct OpaqueBgpLsTlv *lr_bgp_ls_tlv_t;
 typedef struct OpaqueBgpLsTlvVec OpaqueBgpLsTlvVec;
 typedef struct OpaqueBgpLsTlvVec *lr_bgp_ls_tlv_vec_t;
 typedef struct OpaqueOtc OpaqueOtc;
@@ -2268,13 +2276,13 @@ typedef struct lr_bgp_ext_next_hop_tuple_t {
     uint8_t nlri_safi;
     uint16_t nh_afi;
 } lr_bgp_ext_next_hop_tuple_t;
-typedef struct lr_bgp_ls_tlv_t {
+typedef struct lr_bgp_ls_tlv_entry_t {
     uint16_t tlv_type;
     uintptr_t value_offset;
     uint16_t value_len;
     uint8_t * value_ptr;
     void * _owned;
-} lr_bgp_ls_tlv_t;
+} lr_bgp_ls_tlv_entry_t;
 typedef struct lr_bgp_peer_message_stats_t {
     uint64_t open_sent;
     uint64_t open_received;
@@ -2654,14 +2662,14 @@ int32_t lr_bgp_decode_tlv_stream(
     const uint8_t * data,
     uintptr_t len,
     uintptr_t * out_count,
-    struct lr_bgp_ls_tlv_t ** out_array
+    struct lr_bgp_ls_tlv_entry_t ** out_array
 );
 int32_t lr_bgp_encode_tlv_stream(
-    const struct lr_bgp_ls_tlv_t * tlvs,
+    const struct lr_bgp_ls_tlv_entry_t * tlvs,
     uintptr_t count,
     struct lr_bytes_t * out
 );
-void lr_bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_t * arr, uintptr_t count);
+void lr_bgp_ls_tlv_array_free(struct lr_bgp_ls_tlv_entry_t * arr, uintptr_t count);
 int32_t lr_bgp_labeled_nlri_encode_list(
     const uint8_t * data,
     uintptr_t len,
@@ -2756,19 +2764,19 @@ const char * lr_bgp_community_kind_name(uint8_t v);
 uint8_t lr_bgp_route_refresh_subtype_from_u8(uint8_t v);
 uint8_t lr_bgp_route_refresh_subtype_to_u8(uint8_t v);
 const char * lr_bgp_route_refresh_subtype_name(uint8_t v);
-struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(
+lr_bgp_ls_tlv_t lr_bgp_ls_tlv_new(
     uint16_t tlv_type,
     const uint8_t * value,
     uintptr_t value_len
 );
-uint16_t lr_bgp_ls_tlv_type(struct lr_bgp_ls_tlv_t t);
-uintptr_t lr_bgp_ls_tlv_value_len(struct lr_bgp_ls_tlv_t t);
+uint16_t lr_bgp_ls_tlv_type(lr_bgp_ls_tlv_t t);
+uintptr_t lr_bgp_ls_tlv_value_len(lr_bgp_ls_tlv_t t);
 int32_t lr_bgp_ls_tlv_value(
-    struct lr_bgp_ls_tlv_t t,
+    lr_bgp_ls_tlv_t t,
     uint8_t * out,
     uintptr_t cap
 );
-void lr_bgp_ls_tlv_free(struct lr_bgp_ls_tlv_t t);
+void lr_bgp_ls_tlv_free(lr_bgp_ls_tlv_t t);
 int32_t lr_bgp_ls_decode_tlv_stream(
     const uint8_t * data,
     uintptr_t len,
@@ -2776,7 +2784,7 @@ int32_t lr_bgp_ls_decode_tlv_stream(
 );
 int32_t lr_bgp_ls_encode_tlv_stream(lr_bgp_ls_tlv_vec_t vec, struct lr_bytes_t * out);
 uintptr_t lr_bgp_ls_tlv_vec_len(lr_bgp_ls_tlv_vec_t vec);
-struct lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
+lr_bgp_ls_tlv_t lr_bgp_ls_tlv_vec_at(lr_bgp_ls_tlv_vec_t vec, uintptr_t index);
 void lr_bgp_ls_tlv_vec_free(lr_bgp_ls_tlv_vec_t vec);
 lr_bgp_ls_attr_t lr_bgp_ls_attr_new(void);
 void lr_bgp_ls_attr_free(lr_bgp_ls_attr_t a);
@@ -4977,6 +4985,69 @@ typedef struct lr_afi_safi_t lr_nlri_family_t;
    Source: scripts/gen_python.py + scripts/abi.json
    Re-run: python3 scripts/gen_python.py */
 
+lr_ldp_engine_config_t lr_ldp_engine_config_new(
+    uint32_t local_id_lsr,
+    uint16_t local_id_label_space,
+    const uint8_t * transport_addr_v4
+);
+int32_t lr_ldp_engine_config_add_targeted_peer(
+    lr_ldp_engine_config_t c,
+    const uint8_t * addr_v4,
+    const uint8_t * addr_v6
+);
+int32_t lr_ldp_engine_config_add_interface_address(
+    lr_ldp_engine_config_t c,
+    const uint8_t * addr_v4,
+    const uint8_t * addr_v6
+);
+int32_t lr_ldp_engine_feed_udp(
+    lr_ldp_engine_t e,
+    uint64_t now_ms,
+    const uint8_t * from_v4,
+    const uint8_t * from_v6,
+    const uint8_t * data,
+    uintptr_t len
+);
+int32_t lr_ldp_engine_on_accepted(
+    lr_ldp_engine_t e,
+    uint64_t conn,
+    const uint8_t * local_addr_v4,
+    const uint8_t * local_addr_v6
+);
+int32_t lr_ldp_engine_advertise_mapping(
+    lr_ldp_engine_t e,
+    const uint8_t * prefix_v4,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len,
+    uint32_t label_value
+);
+int32_t lr_ldp_engine_withdraw_mapping(
+    lr_ldp_engine_t e,
+    const uint8_t * prefix_v4,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len
+);
+int32_t lr_ldp_engine_send_link_hello(
+    lr_ldp_engine_t e,
+    const uint8_t * dest_v4,
+    const uint8_t * dest_v6
+);
+int32_t lr_ldp_engine_transit_label_of(
+    lr_ldp_engine_t e,
+    const uint8_t * prefix_v4,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len,
+    uint32_t * out_label
+);
+int32_t lr_ldp_engine_transit_next_hop(
+    lr_ldp_engine_t e,
+    const uint8_t * prefix_v4,
+    const uint8_t * prefix_v6,
+    uint8_t prefix_len,
+    uint32_t * out_nh_lsr,
+    uint16_t * out_nh_label_space,
+    uint32_t * out_out_label
+);
 int32_t lr_router_reset_session(lr_router_t r, uint64_t session);
 int32_t lr_router_deconfigure_session(lr_router_t r, uint64_t session);
 """

@@ -277,13 +277,12 @@ pub extern "C" fn lr_ospf_grace_reason_from_u8(v: u8) -> i32 {
 // additional surface here.
 
 // ---- RouterLsaFlags (RFC 2328 §A.4.2 — V/E/B bits) ----
-
-/// `RouterLsaFlags::V_BIT` (RFC 2328 §A.4.2 — virtual-link bit).
-pub const LR_OSPF_ROUTER_LSA_FLAG_V_BIT: u8 = lr_ospf::origination::RouterLsaFlags::V_BIT;
-/// `RouterLsaFlags::E_BIT` (RFC 2328 §A.4.2 — AS-border-router bit).
-pub const LR_OSPF_ROUTER_LSA_FLAG_E_BIT: u8 = lr_ospf::origination::RouterLsaFlags::E_BIT;
-/// `RouterLsaFlags::B_BIT` (RFC 2328 §A.4.2 — area-border-router bit).
-pub const LR_OSPF_ROUTER_LSA_FLAG_B_BIT: u8 = lr_ospf::origination::RouterLsaFlags::B_BIT;
+//
+// No `_BIT` constants here: they re-exported cross-crate values
+// (`lr_ospf::origination::RouterLsaFlags::V_BIT`) cbindgen cannot
+// evaluate, so the set never reached `lr_ffi.h`, and they duplicated
+// the value-identical `LR_OSPF_ROUTER_LSA_FLAG_{V,E,B}` literals in
+// `ospf_constants.rs` / `ospf_origination.rs`. Use those.
 
 /// `RouterLsaFlags::to_word` — pack the V/E/B bits into the 2-byte
 /// flags word that opens the Router-LSA body (the bits live in the
@@ -400,9 +399,12 @@ mod tests {
 
     #[test]
     fn ffi_router_lsa_flag_bits_match_rfc() {
-        assert_eq!(LR_OSPF_ROUTER_LSA_FLAG_V_BIT, 0x04);
-        assert_eq!(LR_OSPF_ROUTER_LSA_FLAG_E_BIT, 0x02);
-        assert_eq!(LR_OSPF_ROUTER_LSA_FLAG_B_BIT, 0x01);
+        use crate::ospf_constants::{
+            LR_OSPF_ROUTER_LSA_FLAG_B, LR_OSPF_ROUTER_LSA_FLAG_E, LR_OSPF_ROUTER_LSA_FLAG_V,
+        };
+        assert_eq!(LR_OSPF_ROUTER_LSA_FLAG_V, 0x04);
+        assert_eq!(LR_OSPF_ROUTER_LSA_FLAG_E, 0x02);
+        assert_eq!(LR_OSPF_ROUTER_LSA_FLAG_B, 0x01);
     }
 
     #[test]

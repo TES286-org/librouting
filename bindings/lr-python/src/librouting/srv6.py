@@ -562,7 +562,7 @@ class Srh:
             ptr = get_lib().lr_srv6_srh_new(bytes(flat), len(segments))
         else:
             ptr = get_lib().lr_srv6_srh_new_with_segments_left(
-                bytes(flat), len(segments), segments_left
+                bytes(flat), len(segments), segments_left, 1
             )
         if ptr == ffi.NULL:
             raise LrError("lr_srv6_srh_new returned null")

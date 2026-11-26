@@ -219,6 +219,7 @@ func (p *BfdPacket) Encode() ([]byte, error) {
 	if rc != 0 {
 		return nil, fmt.Errorf("lr_bfd_encode: %s (rc=%d)", LastError(), int(rc))
 	}
+	defer C.lr_bytes_free(&out)
 	return copyBytes(&out), nil
 }
 
