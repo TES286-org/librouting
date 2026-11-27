@@ -1059,11 +1059,16 @@ pub unsafe extern "C" fn lr_route_selector_select_bgp(
 /// keeps more than one path per prefix; the first element is the
 /// best path the non-Add-Path consumers see). The `routes` array
 /// carries `count` route handles; ownership is **transferred** —
-/// each handle is consumed and freed by this call (the LocRib
-/// clones the underlying `Route` value).
+/// each handle is consumed and freed by this call, exactly like
+/// [`lr_loc_rib_install`] consumes its single handle.
+///
+/// A NULL entry anywhere in the array aborts with `LR_ERR_NULL`
+/// **before anything is consumed** — on error every handle stays
+/// owned by the caller, on success none does.
 ///
 /// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL LocRib / NULL
-/// routes / NULL key, `LR_ERR_OTHER` (-6) on a malformed key.
+/// routes / NULL key / a zero count / a NULL array entry,
+/// `LR_ERR_OTHER` (-6) on a malformed key.
 ///
 /// # Safety
 /// `r` must be a valid LocRib handle. `routes` (when `count > 0`)
@@ -1090,16 +1095,23 @@ pub unsafe extern "C" fn lr_loc_rib_install_set(
             if routes.is_null() {
                 return LR_ERR_NULL;
             }
+            // Validate the whole array before consuming any handle so
+            // the error contract above holds: NULL entry => nothing is
+            // consumed.
+            for i in 0..count {
+                if unsafe { *routes.add(i) }.is_null() {
+                    return LR_ERR_NULL;
+                }
+            }
             let key_c: lr_route_key_t = unsafe { *key };
             let key = crate::core::route_key_from_c(&key_c);
             let mut ranked: Vec<Route> = Vec::with_capacity(count);
             for i in 0..count {
                 let h = unsafe { *routes.add(i) };
-                if h.is_null() {
-                    return LR_ERR_NULL;
-                }
-                let route: &'static Route = unsafe { &*(h as *const Route) };
-                ranked.push(route.clone());
+                // The validation pass guarantees `h` is non-NULL; the
+                // move into `ranked` is the consumption itself.
+                let boxed: Box<Route> = unsafe { Box::from_raw(h as *mut Route) };
+                ranked.push(*boxed);
             }
             rib.install_set(&key, ranked);
             0
@@ -1794,16 +1806,33 @@ mod tests {
         let routes = [r1, r2];
         let rc = unsafe { lr_loc_rib_install_set(rib, &key, routes.as_ptr(), routes.len()) };
         assert_eq!(rc, 0);
-        // The LocRib holds 2 paths for this key.
+        // The handles were consumed by the call — the documented
+        // ownership-transfer contract; freeing them here would be a
+        // double-free. The LocRib holds 2 paths for this key.
         assert_eq!(unsafe { lr_loc_rib_paths(rib, &key) }, 2);
         // An unknown key returns 0 paths.
         let key2 = build_key_v4([198, 51, 100, 0], 24);
         assert_eq!(unsafe { lr_loc_rib_paths(rib, &key2) }, 0);
-        unsafe {
-            crate::policy_objects::lr_route_free(r1);
-            crate::policy_objects::lr_route_free(r2);
-            lr_loc_rib_free(rib);
-        }
+        unsafe { lr_loc_rib_free(rib) };
+    }
+
+    #[test]
+    fn ffi_loc_rib_install_set_null_entry_consumes_nothing() {
+        let rib = lr_loc_rib_new();
+        let key = build_key_v4([203, 0, 113, 0], 24);
+        // A NULL entry mid-array must abort without consuming any
+        // handle: r1 stays owned by the caller (freeing it below is
+        // the regression — the old clone-and-keep shape leaked it
+        // while the documented contract said consumed).
+        let r1 = build_route_with_metric([203, 0, 113, 0], 24, 100);
+        let routes = [r1, std::ptr::null_mut()];
+        let rc = unsafe { lr_loc_rib_install_set(rib, &key, routes.as_ptr(), routes.len()) };
+        assert_eq!(rc, LR_ERR_NULL);
+        assert_eq!(unsafe { lr_loc_rib_paths(rib, &key) }, 0);
+        // Nothing was consumed — the caller still owns r1 and frees
+        // it without a double-free.
+        unsafe { crate::policy_objects::lr_route_free(r1) };
+        unsafe { lr_loc_rib_free(rib) };
     }
 
     #[test]
@@ -1824,10 +1853,12 @@ mod tests {
         // Zero count → LR_ERR_NULL.
         let rc = unsafe { lr_loc_rib_install_set(rib, &key, routes.as_ptr(), 0) };
         assert_eq!(rc, LR_ERR_NULL);
-        unsafe {
-            crate::policy_objects::lr_route_free(r1);
-            lr_loc_rib_free(rib);
-        }
+        // Every error path above consumed nothing: r1 is still a
+        // live handle the caller owns, so installing it works and
+        // the caller frees nothing (install consumed it).
+        let rc = unsafe { lr_loc_rib_install(rib, r1) };
+        assert_eq!(rc, 1);
+        unsafe { lr_loc_rib_free(rib) };
     }
 
     #[test]

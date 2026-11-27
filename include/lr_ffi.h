@@ -18221,11 +18221,16 @@ int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
  * keeps more than one path per prefix; the first element is the
  * best path the non-Add-Path consumers see). The `routes` array
  * carries `count` route handles; ownership is **transferred** —
- * each handle is consumed and freed by this call (the LocRib
- * clones the underlying `Route` value).
+ * each handle is consumed and freed by this call, exactly like
+ * [`lr_loc_rib_install`] consumes its single handle.
+ *
+ * A NULL entry anywhere in the array aborts with `LR_ERR_NULL`
+ * **before anything is consumed** — on error every handle stays
+ * owned by the caller, on success none does.
  *
  * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL LocRib / NULL
- * routes / NULL key, `LR_ERR_OTHER` (-6) on a malformed key.
+ * routes / NULL key / a zero count / a NULL array entry,
+ * `LR_ERR_OTHER` (-6) on a malformed key.
  *
  * # Safety
  * `r` must be a valid LocRib handle. `routes` (when `count > 0`)
