@@ -28208,6 +28208,19 @@
       ]
     },
     {
+      "name": "lr_route_clone",
+      "return_type": "lr_route_t",
+      "params": [
+        {
+          "name": "route",
+          "type": "lr_route_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_route_set_next_hop",
       "return_type": "int32_t",
       "params": [
@@ -47924,6 +47937,19 @@
       {
         "name": "lr_route_free",
         "return_type": "void",
+        "params": [
+          {
+            "name": "route",
+            "type": "lr_route_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          }
+        ]
+      },
+      {
+        "name": "lr_route_clone",
+        "return_type": "lr_route_t",
         "params": [
           {
             "name": "route",

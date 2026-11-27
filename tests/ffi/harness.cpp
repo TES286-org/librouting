@@ -1934,7 +1934,7 @@ int main() {
         std::vector<Route> paths;
         paths.push_back(std::move(p1));
         paths.push_back(std::move(p2));
-        rib.install_set(k, paths);
+        rib.install_set(k, std::move(paths));
         check(rib.paths_size() == 2, "LocRib paths_size == 2 after install_set");
         check(rib.size() == 1, "LocRib size == 1 after install_set");
         check(rib.paths(k) == 2, "LocRib paths(k) == 2");
@@ -1943,6 +1943,32 @@ int main() {
         check(n_best == 1, "LocRib iter_best count == 1");
         std::size_t n_paths = rib.iter_paths([&](lr_route_t) {});
         check(n_paths == 2, "LocRib iter_paths count == 2");
+
+        // A throwing callback: the exception must never unwind across
+        // the C boundary and must not free the borrowed handle on the
+        // way out (the RAII-guard shape this harness ran before the
+        // trampolines grew the guard aborted right here with a
+        // double-free). The callback is not invoked again and the
+        // exception rethrows from iter_paths once the FFI call
+        // returns.
+        struct Thrown {};
+        std::size_t visits = 0;
+        bool caught = false;
+        try {
+            rib.iter_paths([&](lr_route_t) {
+                ++visits;
+                throw Thrown{};
+            });
+        } catch (const Thrown&) {
+            caught = true;
+        }
+        check(caught, "LocRib iter_paths rethrows the callback's exception");
+        check(visits == 1, "LocRib iter_paths stops at the throwing callback");
+        // The Loc-RIB is untouched and keeps answering after the
+        // aborted walk.
+        check(rib.paths(k) == 2, "LocRib paths == 2 after the aborted walk");
+        std::size_t n_again = rib.iter_paths([&](lr_route_t) {});
+        check(n_again == 2, "LocRib iter_paths works after the aborted walk");
         std::size_t n_sets = rib.iter_sets([&](std::array<std::uint8_t, 16> addr,
                                                 std::uint8_t plen, bool is_v6,
                                                 std::size_t cnt) {

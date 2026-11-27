@@ -88,6 +88,11 @@ pub const LR_OSPF_PACKET_LS_ACK: u8 = 5;
 /// Decode one OSPFv2 packet from `data`. On success, writes a freshly-
 /// allocated `lr_ospf_packet_t` to `*out`.
 ///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+/// (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
+///
 /// # Safety
 /// `data` must point to `len` readable bytes. `out` must point to a
 /// writable `lr_ospf_packet_t`.
@@ -161,6 +166,10 @@ pub unsafe extern "C" fn lr_ospf_decode_v3_packet(
 
 /// Encode an OSPF packet to its wire form. The version field on the
 /// header selects v2 vs v3.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 ///
 /// # Safety
 /// `packet` must be a valid handle. `out` must point to a writable

@@ -44,6 +44,13 @@ pub extern "C" fn lr_babel_codec_new() -> lr_babel_codec_t {
     guarded(|| box_codec(BabelCodec::new()), std::ptr::null_mut())
 }
 
+/// Decode one Babel frame from `data`. On success, writes a
+/// freshly-allocated `lr_babel_frame_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete frame (the
+/// last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a decode
+/// failure (the last-error string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_codec_decode_slice(
     c: lr_babel_codec_t,
@@ -79,6 +86,12 @@ pub unsafe extern "C" fn lr_babel_codec_decode_slice(
     )
 }
 
+/// Encode one Babel frame to wire bytes. On success, writes a
+/// freshly-allocated `lr_bytes_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_codec_encode_vec(
     c: lr_babel_codec_t,

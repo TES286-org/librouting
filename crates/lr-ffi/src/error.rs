@@ -4,13 +4,18 @@ use std::cell::RefCell;
 
 /// Error code returned by FFI functions. 0 = success, negative = error.
 ///
-/// `Codec` (`-5`) is the value the SRv6 codec entry points return for
-/// their own encode/decode failures — it is intentionally **not** a
-/// general-purpose error code, and no entry point outside the SRv6 codec
-/// returns it. Consumers that want a single ABI-compatibility check use
-/// [`lr_abi_version`](crate::error::lr_abi_version) instead: the library
-/// performs no runtime ABI mismatch detection, so `AbiMismatch` is not a
-/// distinct code.
+/// `Codec` (`-5`) is the codec-class code: the SRv6 SRH entry points
+/// (`lr_srv6_encode_srh` / `lr_srv6_decode_srh`) and the wire-codec
+/// entry points (`lr_bgp_decode`, `lr_bfd_decode`, `lr_ospf_decode_*`,
+/// `lr_babel_decode`, `lr_ldp_decode`, `lr_bmp_decode`, the
+/// `lr_*_codec_*` / `lr_mrt_reader_*` families and the peer/packet
+/// feeders) return it for their own encode/decode failures. It is
+/// intentionally **not** a general-purpose error code — a non-codec
+/// entry point never returns it. Consumers that want a single
+/// ABI-compatibility check use
+/// [`lr_abi_version`](crate::error::lr_abi_version) instead: the
+/// library performs no runtime ABI mismatch detection, so
+/// `AbiMismatch` is not a distinct code.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LrError {
@@ -19,8 +24,10 @@ pub enum LrError {
     InvalidHandle = -2,
     BadUtf8 = -3,
     Panic = -4,
-    /// SRv6 codec (SRH) encode/decode failure. Returned only by
-    /// `lr_srv6_encode_srh` / `lr_srv6_decode_srh`.
+    /// Codec encode/decode failure: the SRv6 SRH entry points and the
+    /// wire-codec entry points (`lr_*_decode` / `lr_*_encode` /
+    /// `lr_*_feed_*`). Never returned for anything that is not a
+    /// wire parse or serialization failure.
     Codec = -5,
     Other = -6,
 }

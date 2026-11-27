@@ -14,9 +14,13 @@
  * a C consumer. Pointer-returning entry points signal failure with NULL
  * and set the thread-local message from lr_last_error() instead.
  *
- * LR_ERR_CODEC (-5) is NOT a general error code: only the SRv6 codec
- * entry points (lr_srv6_encode_srh / lr_srv6_decode_srh) return it for
- * their own encode/decode failures, as documented on those functions. */
+ * LR_ERR_CODEC (-5) is the codec-class code: the SRv6 SRH entry points
+ * (lr_srv6_encode_srh / lr_srv6_decode_srh) and the wire-codec entry
+ * points (lr_bgp_decode, lr_bfd_decode, lr_ospf_decode_*, lr_babel_*,
+ * lr_ldp_decode, lr_bmp_decode, the lr_*_codec_* / lr_mrt_reader_*
+ * families and the packet feeders) return it for their own
+ * encode/decode failures, as documented on those functions. It is NOT a
+ * general error code — a non-codec entry point never returns it. */
 #define LR_ERR_OK 0
 #define LR_ERR_NULL (-1)
 #define LR_ERR_INVALID_HANDLE (-2)
@@ -5170,6 +5174,11 @@ void lr_attributes_free(lr_attributes_t a);
  * Decode one Babel frame from `data`. On success, writes a freshly-
  * allocated `lr_babel_frame_t` to `*out`.
  *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+ * (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
+ *
  * # Safety
  * `data` must point to `len` readable bytes. `out` must point to a
  * writable `lr_babel_frame_t`.
@@ -5178,6 +5187,10 @@ int32_t lr_babel_decode_frame(const uint8_t *data, uintptr_t len, lr_babel_frame
 
 /**
  * Encode a Babel frame to its wire form.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
  *
  * # Safety
  * `frame` must be a valid handle. `out` must point to a writable
@@ -5297,6 +5310,17 @@ int32_t lr_babel_codec_encode_authenticated(lr_babel_codec_t codec,
                                             lr_babel_packet_counter_t counter,
                                             struct lr_bytes_t *out);
 
+/**
+ * Decode and authenticate one Babel frame from `data` (RFC 8967
+ * §4.3 / RFC 9467 §3). On success, writes a freshly-allocated
+ * `lr_babel_frame_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_INVALID_HANDLE` (-2) on a bad key handle,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete frame or
+ * the authentication fails (the last-error string carries the
+ * error).
+ */
 int32_t lr_babel_codec_decode_authenticated_slice(lr_babel_codec_t codec,
                                                   const uint8_t *packet,
                                                   uintptr_t len,
@@ -5696,11 +5720,28 @@ lr_babel_route_key_t lr_babel_route_borrow_key(lr_babel_route_t r);
 
 lr_babel_codec_t lr_babel_codec_new(void);
 
+/**
+ * Decode one Babel frame from `data`. On success, writes a
+ * freshly-allocated `lr_babel_frame_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete frame (the
+ * last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a decode
+ * failure (the last-error string carries the error).
+ */
 int32_t lr_babel_codec_decode_slice(lr_babel_codec_t c,
                                     const uint8_t *data,
                                     uintptr_t len,
                                     lr_babel_frame_t *out);
 
+/**
+ * Encode one Babel frame to wire bytes. On success, writes a
+ * freshly-allocated `lr_bytes_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
+ */
 int32_t lr_babel_codec_encode_vec(lr_babel_codec_t c,
                                   lr_babel_frame_t frame,
                                   struct lr_bytes_t *out);
@@ -6381,8 +6422,12 @@ int32_t lr_best_path_compare_multipath(lr_route_t a,
 
 /**
  * Decode one BFD Control packet from `data`. On success, writes a
- * freshly-allocated `lr_bfd_packet_t` to `*out`. Returns 0 on success,
- * negative on error.
+ * freshly-allocated `lr_bfd_packet_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+ * (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
  *
  * # Safety
  * `data` must point to `len` readable bytes. `out` must point to a
@@ -6393,6 +6438,10 @@ int32_t lr_bfd_decode(const uint8_t *data, uintptr_t len, lr_bfd_packet_t *out);
 /**
  * Encode a `lr_bfd_packet_t` to its wire form. On success, writes a
  * freshly-allocated `lr_bytes_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
  *
  * # Safety
  * `packet` must be a valid handle. `out` must point to a writable
@@ -9414,6 +9463,11 @@ int32_t lr_bgp_labeled_nlri_ipv4_implicit_null(const uint8_t *prefix_addr,
  * Decode one BMP message from `data`. On success, writes a freshly-
  * allocated `lr_bmp_message_t` to `*out`.
  *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+ * (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
+ *
  * # Safety
  * `data` must point to `len` readable bytes. `out` must point to a
  * writable `lr_bmp_message_t`.
@@ -9422,6 +9476,10 @@ int32_t lr_bmp_decode(const uint8_t *data, uintptr_t len, lr_bmp_message_t *out)
 
 /**
  * Encode a `lr_bmp_message_t` to its wire form.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
  *
  * # Safety
  * `message` must be a valid handle. `out` must point to a writable
@@ -9564,6 +9622,14 @@ void lr_bmp_message_free(lr_bmp_message_t message);
 
 lr_bmp_codec_t lr_bmp_codec_new(void);
 
+/**
+ * Decode one BMP message from `data`. On success, writes a
+ * freshly-allocated `lr_bmp_message_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_CODEC` (-5) on a decode failure (the last-error string
+ * carries the error).
+ */
 int32_t lr_bmp_codec_decode_slice(lr_bmp_codec_t c,
                                   const uint8_t *data,
                                   uintptr_t len,
@@ -9571,8 +9637,22 @@ int32_t lr_bmp_codec_decode_slice(lr_bmp_codec_t c,
 
 int32_t lr_bmp_codec_feed(lr_bmp_codec_t c, const uint8_t *data, uintptr_t len);
 
+/**
+ * Pop the next complete message off the codec's carryover buffer.
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument, 1
+ * when no complete message is buffered, `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
+ */
 int32_t lr_bmp_codec_next_message(lr_bmp_codec_t c, lr_bmp_message_t *out);
 
+/**
+ * Encode one BMP message to wire bytes. On success, writes a
+ * freshly-allocated `lr_bytes_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
+ */
 int32_t lr_bmp_codec_encode_vec(lr_bmp_codec_t c, lr_bmp_message_t m, struct lr_bytes_t *out);
 
 void lr_bmp_codec_free(lr_bmp_codec_t c);
@@ -9921,7 +10001,8 @@ void lr_bgp_cap_array_free(lr_bgp_capability_array_t arr, uintptr_t count);
 /**
  * Decode one BGP message from `data`. Returns 0 on success (and writes a
  * `lr_bytes_t` containing the message type byte at offset 0 + body to
- * `out`). Negative on error.
+ * `out`). Negative on error — see the module doc for the shared
+ * code table (`LR_ERR_NULL` / `LR_ERR_OTHER` / `LR_ERR_CODEC`).
  */
 int32_t lr_bgp_decode(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
 
@@ -12290,6 +12371,10 @@ struct lr_ldp_id_t lr_ldp_id_from_bytes(const uint8_t *bytes);
  * one `HelloMsg` with the supplied parameters. The encoded bytes
  * are written to `*out`.
  *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
+ *
  * # Safety
  * `out` must point to a writable `lr_bytes_t`.
  */
@@ -12301,8 +12386,12 @@ int32_t lr_ldp_encode_hello_pdu(struct lr_ldp_id_t sender,
 
 /**
  * Decode one LDP PDU from `data`. On success, writes a freshly-
- * allocated `lr_ldp_pdu_t` to `*out`. Returns 0 on success, negative
- * on error.
+ * allocated `lr_ldp_pdu_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+ * (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
  *
  * # Safety
  * `data` must point to `len` readable bytes. `out` must point to a
@@ -13870,7 +13959,8 @@ int32_t lr_mpls_stack_last_err_code(void);
  * (carryover survives across calls when bytes are partial); this FFI
  * entry creates a fresh `MrtReader` per call, so partial records
  * return `LR_ERR_OTHER` — embedders should feed one complete record
- * at a time.
+ * at a time. A NULL argument returns `LR_ERR_NULL` (-1); a decode
+ * failure returns `LR_ERR_CODEC` (-5).
  *
  * # Safety
  * `data` must point to `len` readable bytes. `out` must point to a
@@ -13882,6 +13972,10 @@ int32_t lr_mrt_decode(const uint8_t *data, uintptr_t len, lr_mrt_record_t *out);
  * Encode a Peer Index Table record to wire bytes (RFC 6396 §4.3 +
  * RFC 8050). The peer list is a flat array of `lr_mrt_peer_entry_t`
  * passed through `peers` / `peer_count`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
  *
  * # Safety
  * `view_name` must be a NUL-terminated C string (NULL = empty view).
@@ -13897,6 +13991,10 @@ int32_t lr_mrt_encode_peer_index_table(uint32_t timestamp,
 /**
  * Encode a RIB table record (RFC 6396 §4.3 + RFC 8050 subtype 2).
  * The entries are a flat array of `lr_mrt_rib_entry_t`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
  *
  * # Safety
  * `entries` must point to `entry_count` readable `lr_mrt_rib_entry_t`.
@@ -13995,6 +14093,10 @@ int32_t lr_mrt_rib_dump_add_table(lr_mrt_rib_dump_t dump,
 /**
  * Encode the entire dump as a sequence of MRT records, returning
  * the concatenated wire bytes in `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
  *
  * # Safety
  * `dump` must be a valid handle. `out` must point to a writable
@@ -14141,6 +14243,14 @@ int32_t lr_mrt_encode_attributes(lr_attributes_t attrs, struct lr_bytes_t *out);
 
 lr_mrt_reader_t lr_mrt_reader_new(void);
 
+/**
+ * Decode one MRT record from `data`. On success, writes a
+ * freshly-allocated `lr_mrt_record_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument, 1
+ * when `data` holds no complete record yet, `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
+ */
 int32_t lr_mrt_reader_decode_slice(lr_mrt_reader_t r,
                                    const uint8_t *data,
                                    uintptr_t len,
@@ -14160,6 +14270,13 @@ int32_t lr_mrt_reader_decode_slice(lr_mrt_reader_t r,
  */
 int32_t lr_mrt_reader_feed(lr_mrt_reader_t r, const uint8_t *data, uintptr_t len);
 
+/**
+ * Pop the next complete buffered record.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument, 1
+ * when no complete record is buffered, `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
+ */
 int32_t lr_mrt_reader_next_record(lr_mrt_reader_t r, lr_mrt_record_t *out);
 
 void lr_mrt_reader_free(lr_mrt_reader_t r);
@@ -14167,6 +14284,11 @@ void lr_mrt_reader_free(lr_mrt_reader_t r);
 /**
  * Decode one OSPFv2 packet from `data`. On success, writes a freshly-
  * allocated `lr_ospf_packet_t` to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+ * (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
  *
  * # Safety
  * `data` must point to `len` readable bytes. `out` must point to a
@@ -14185,6 +14307,10 @@ int32_t lr_ospf_decode_v3_packet(const uint8_t *data, uintptr_t len, lr_ospf_pac
 /**
  * Encode an OSPF packet to its wire form. The version field on the
  * header selects v2 vs v3.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+ * handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+ * string carries the error).
  *
  * # Safety
  * `packet` must be a valid handle. `out` must point to a writable
@@ -14985,6 +15111,17 @@ lr_ospf_packet_t lr_ospf_db_exchange_take_ls_request(lr_ospf_db_exchange_t e, ui
  */
 uintptr_t lr_ospf_db_exchange_pending_requests(lr_ospf_db_exchange_t e);
 
+/**
+ * Feed one OSPFv2 Database Description packet to the exchange
+ * driver. On success, writes the packed `lr_ospf_exchange_step_t`
+ * (possibly NULL when the step has no output) to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete packet, the
+ * wrong packet type, or an incoherent step,
+ * `LR_ERR_CODEC` (-5) on a decode failure (the last-error string
+ * carries the error).
+ */
 int32_t lr_ospf_db_exchange_on_db_desc_packet(lr_ospf_db_exchange_t e,
                                               lr_ospf_neighbor_t neighbor,
                                               lr_ospf_lsdb_t lsdb,
@@ -14993,6 +15130,16 @@ int32_t lr_ospf_db_exchange_on_db_desc_packet(lr_ospf_db_exchange_t e,
                                               uint64_t now_ms,
                                               struct lr_ospf_exchange_step_t *out);
 
+/**
+ * Feed one OSPFv2 Link State Request packet to the exchange
+ * driver. On success, writes the packed
+ * `lr_ospf_exchange_step_t` (possibly NULL) to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete packet, the
+ * wrong packet type, or an incoherent step, `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
+ */
 int32_t lr_ospf_db_exchange_on_ls_request_packet(lr_ospf_db_exchange_t e,
                                                  lr_ospf_neighbor_t neighbor,
                                                  lr_ospf_lsdb_t lsdb,
@@ -15001,6 +15148,16 @@ int32_t lr_ospf_db_exchange_on_ls_request_packet(lr_ospf_db_exchange_t e,
                                                  uint64_t now_ms,
                                                  struct lr_ospf_exchange_step_t *out);
 
+/**
+ * Feed one OSPFv2 Link State Update packet to the exchange
+ * driver. On success, writes the packed `lr_ospf_exchange_step_t`
+ * (possibly NULL) to `*out`.
+ *
+ * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+ * `LR_ERR_OTHER` (-6) when the bytes hold an incomplete packet, the
+ * wrong packet type, or an incoherent step, `LR_ERR_CODEC` (-5) on a
+ * decode failure (the last-error string carries the error).
+ */
 int32_t lr_ospf_db_exchange_on_ls_update_packet(lr_ospf_db_exchange_t e,
                                                 lr_ospf_neighbor_t neighbor,
                                                 const uint8_t *data,
@@ -17322,6 +17479,22 @@ lr_route_t lr_route_new_v6(const uint8_t *octets, uint8_t prefix_len, int32_t pr
 void lr_route_free(lr_route_t route);
 
 /**
+ * Clone a route handle — returns a NEW `lr_route_t` the caller owns
+ * (free it with [`lr_route_free`]), or NULL on a NULL input.
+ *
+ * The route iterators (`lr_loc_rib_iter_best` and friends) hand the
+ * callback a *borrowed* handle whose lifetime ends when the
+ * iteration moves on; a caller that wants to keep the route past
+ * the callback body clones it here.
+ *
+ * # Safety
+ * `route` must be null or a live `lr_route_t`. The returned handle
+ * is independent of the input (freeing one never invalidates the
+ * other).
+ */
+lr_route_t lr_route_clone(lr_route_t route);
+
+/**
  * Set the route's next hop (RFC 4271 §5.1.3). `addr` carries the
  * IPv4 octets in the first four bytes when `is_ipv6` is 0. Returns
  * 0, -1 on a null argument.
@@ -17547,10 +17720,29 @@ lr_prefix_list_t lr_prefix_list_new(void);
 void lr_prefix_list_free(lr_prefix_list_t list);
 
 /**
- * Append one entry: `prefix` with the ge/le length window (FRR
- * `ge`/`le`; `le = 255` means no upper bound) and `permit` (non-zero
- * = permit). First matching entry decides; no match denies.
- * 0 ok, -1 null, -3 malformed prefix.
+ * Append one entry: `prefix` with the ge/le length window and
+ * `permit` (non-zero = permit). First matching entry decides; no
+ * match denies. The window follows FRR `ip prefix-list` semantics
+ * (the FRR `ge`/`le` rules; the daemon's `build_policy_set` applies
+ * the same defaults to `.lr` configuration):
+ *
+ * - `ge = 0` — unset; the lower bound is the prefix length (exact
+ *   by default).
+ * - `ge > 0` — an explicit lower bound; `ge` below the prefix
+ *   length is rejected (FRR vty rejects it too).
+ * - `le = 0` — unset; the upper bound is the prefix length, or the
+ *   family maximum (32 / 128) when `ge` was given (`ge` alone
+ *   widens, the FRR default).
+ * - `le = 255` — no upper bound (the family maximum).
+ * - `le > 0`, `le != 255` — an explicit upper bound; `le` below the
+ *   prefix length or above the family maximum is rejected.
+ *
+ * A zero-initialized C call (`ge = 0, le = 0`) therefore gets the
+ * FRR/Cisco exact-match default — the same entry FRR builds for
+ * `ip prefix-list NAME permit 10.0.0.0/8` with no `ge`/`le`.
+ *
+ * Returns 0 ok, -1 null, -3 malformed prefix or an impossible
+ * ge/le window (details in `lr_last_error`).
  *
  * # Safety
  * `list` must be a live handle; `prefix` a readable `lr_prefix_t`.
@@ -18221,11 +18413,16 @@ int64_t lr_route_selector_select_bgp(const lr_route_t *routes, uintptr_t count);
  * keeps more than one path per prefix; the first element is the
  * best path the non-Add-Path consumers see). The `routes` array
  * carries `count` route handles; ownership is **transferred** —
- * each handle is consumed and freed by this call (the LocRib
- * clones the underlying `Route` value).
+ * each handle is consumed and freed by this call, exactly like
+ * [`lr_loc_rib_install`] consumes its single handle.
+ *
+ * A NULL entry anywhere in the array aborts with `LR_ERR_NULL`
+ * **before anything is consumed** — on error every handle stays
+ * owned by the caller, on success none does.
  *
  * Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL LocRib / NULL
- * routes / NULL key, `LR_ERR_OTHER` (-6) on a malformed key.
+ * routes / NULL key / a zero count / a NULL array entry,
+ * `LR_ERR_OTHER` (-6) on a malformed key.
  *
  * # Safety
  * `r` must be a valid LocRib handle. `routes` (when `count > 0`)

@@ -604,6 +604,30 @@ def test_policy_objects():
     assert pl.match(([10, 1, 1, 0], 24))
     assert not pl.match(([10, 0, 0, 0], 8))
 
+    # FRR defaults: a bare entry matches the prefix length exactly;
+    # le=255 means no upper bound; an impossible window raises.
+    exact = librouting.PrefixList()
+    exact.add(([10, 0, 0, 0], 8))
+    assert exact.match(([10, 0, 0, 0], 8))
+    assert not exact.match(([10, 1, 0, 0], 16))
+    widened = librouting.PrefixList()
+    widened.add(([10, 0, 0, 0], 8), le=255, permit=True)
+    assert widened.match(([10, 1, 0, 0], 16))
+    ge_alone = librouting.PrefixList()
+    ge_alone.add(([10, 0, 0, 0], 8), ge=16, permit=True)
+    assert not ge_alone.match(([10, 0, 0, 0], 8))
+    assert ge_alone.match(([10, 1, 0, 0], 16))
+    for bad_ge, bad_le in ((4, 0), (0, 4), (24, 16), (0, 33)):
+        broken = librouting.PrefixList()
+        try:
+            broken.add(([10, 0, 0, 0], 8), ge=bad_ge, le=bad_le, permit=True)
+        except librouting.LrError:
+            pass
+        else:
+            raise AssertionError(
+                f"prefix-list ge={bad_ge} le={bad_le} must be rejected"
+            )
+
     # Resolver + route-map: the FRR flow.
     res = librouting.Resolver()
     any4 = librouting.PrefixList()

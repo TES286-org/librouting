@@ -103,6 +103,11 @@ def test_loc_rib_install_set_paths_iter():
         k = _v4_key([10, 0, 0, 1], 24)
         rib.install_set(k, [r1, r2])
 
+        # install_set consumed the handles — the wrappers hold
+        # nothing and their finalizers free nothing.
+        assert r1._ptr is None
+        assert r2._ptr is None
+
         # paths_len counts both; len counts 1 (one key).
         assert rib.paths_len() == 2
         assert len(rib) == 1
@@ -127,6 +132,39 @@ def test_loc_rib_install_set_paths_iter():
         # the 16-byte buffer (the C ABI uses the start, not the
         # IPv4-mapped IPv6 layout used by lr_core_prefix_t).
         assert addr[:4] == bytes([10, 0, 0, 1])
+    finally:
+        rib.close()
+
+
+def test_loc_rib_iter_yields_owned_snapshots():
+    """The RIB iterators yield owned snapshots, not dangling borrows.
+
+    The iteration callbacks receive handles whose lifetime ends when
+    the walk moves on; storing them past the call (the old shape)
+    left every yielded wrapper reading freed memory as soon as the
+    RIB dropped the stored route. Uninstall frees the stored route
+    and the fresh route's allocation takes its place, so a wrapper
+    aliasing the freed storage reads the fresh route's fields.
+    """
+    rib = LocRib()
+    try:
+        k = _v4_key([10, 0, 0, 1], 24)
+        r1 = _v4_route([10, 0, 0, 1], 24)
+        r1.set_metric(100)
+        rib.install_set(k, [r1])
+
+        snapshot = list(rib.iter_best())[0]
+        assert isinstance(snapshot, Route)
+        assert snapshot.metric() == 100
+
+        # Drop the stored route; the fresh route's allocation reuses
+        # the freed slot. The snapshot must keep its own values.
+        rib.uninstall(k)
+        r2 = _v4_route([10, 0, 0, 1], 24)
+        r2.set_metric(200)
+        rib.install(r2)
+        assert snapshot.metric() == 100
+        assert rib.best(k).metric() == 200
     finally:
         rib.close()
 

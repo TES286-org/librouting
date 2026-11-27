@@ -17,6 +17,77 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — the FFI and bindings contract batch: install_set
+ownership, prefix-list FRR defaults, RIB iterator snapshots,
+C++ trampoline safety, codec error codes (issue #101)
+
+Six contract violations across the C ABI and its Go / Python / C++
+wrappers, each confirmed against the documented contract (and FRR,
+for the prefix-list window) before fixing:
+
+- **`lr_loc_rib_install_set` documented "ownership is transferred —
+  each handle is consumed and freed by this call" but cloned every
+  route and left the handles live** — an embedder programming by the
+  C header leaked `count` routes on every call. The body now
+  validates the whole array first (a NULL entry aborts with
+  `LR_ERR_NULL` before anything is consumed) and then moves every
+  handle into the ranked set. The Python, Go and C++ wrappers follow:
+  they release their wrapper handles after the call (the C++ wrapper
+  takes the vector by value), so no wrapper teaches the old
+  clone-and-keep contract.
+- **`lr_prefix_list_add` copied the `ge`/`le` arguments verbatim**, so
+  the natural zero-initialized C spelling produced the `[0, 0]`
+  window — a silent deny-all — and `ge = 0, le = 255` matched every
+  length. The window now resolves the way FRR's `ip prefix-list` (and
+  the daemon's `.lr` loader) resolve it: `ge = 0` / `le = 0` mean
+  unset (exact match by default, `ge` alone widens to the family
+  maximum), `le = 255` means no upper bound, and an impossible window
+  (`ge` below the prefix length, `le` below the prefix length or
+  above the family maximum, `ge > le`) is rejected with `-3`
+  (FRR vty rejects the same input).
+- **The Python RIB iterators returned wrappers around borrowed
+  handles that die when the iteration moves on** — a use-after-free
+  every time the Loc-RIB / Adj-RIB / RibMux dropped the stored route
+  after the walk. Every iterator now clones the handle inside the
+  callback (through the new additive `lr_route_clone`) and yields
+  owned `Route` snapshots; `_BorrowedRoute` is gone.
+- **A throwing C++ callback unwound across the `extern "C"` frames**
+  (the library is compiled with `panic = abort` — undefined
+  behaviour), and on the five RAII trampolines it also destroyed the
+  borrowed-handle guard on the way out: a double free that corrupts
+  the RIB heap. All eleven trampoline sites route the invocation
+  through a latch-and-rethrow guard (`detail::guarded_callback`): the
+  first exception never crosses the boundary, later invocations are
+  skipped, and it rethrows from the wrapper method once the FFI call
+  returns.
+- **Three Python cdef signatures disagreed with the C ABI**
+  (`lr_babel_replay_protection_accept` reads a `u8` return;
+  `lr_babel_mac_key_secret_copy` and
+  `lr_babel_packet_counter_peek_index_copy` return `uintptr_t`) —
+  cffi's ABI mode reads the return register as the declared type, so
+  the drift read undefined upper bits or truncated. The cdef now
+  mirrors `include/lr_ffi.h` exactly.
+- **The codec-class error codes were fragmented**: the three
+  round-trip decoders (`lr_bgp_decode` / `lr_ospf_decode_v2` /
+  `lr_babel_decode`) returned `LR_ERR_PANIC` (-4) when the canonical
+  re-encode failed — the code the `catch_unwind` barrier owns — and
+  `LR_ERR_BAD_UTF8` (-3) for truncated input, while every sibling
+  codec entry point used `LR_ERR_OTHER` (-6) for the incomplete
+  frame. Aligned: -4 stays panic-only, the incomplete frame is -6
+  with the same `"truncated"` last-error string, and the decode /
+  re-encode failure is `LR_ERR_CODEC` (-5). The header preamble, the
+  `LrError` enum doc and every codec entry point's doc now state the
+  real rule (-5 is the codec-class code; a non-codec entry point
+  never returns it) instead of the SRv6-only claim the wire-codec
+  family contradicted. The `ospf_db_exchange` feeders and
+  `lr_babel_codec_decode_authenticated_slice` also stop returning -5
+  for an incomplete packet.
+
+Each fix ships with a regression test verified to fail on the
+previous code (the C++ harness case aborts with the double-free
+before the trampoline guard, the Python snapshot test reads the
+freed slot's replacement before the clone).
+
 ### Fixed — link-local IPv6 inbound peer matching (`lr-cli`)
 
 A peer configured with `address = "fe80::1"` or

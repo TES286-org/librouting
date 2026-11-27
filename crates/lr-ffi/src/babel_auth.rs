@@ -479,6 +479,15 @@ pub unsafe extern "C" fn lr_babel_codec_encode_authenticated(
     )
 }
 
+/// Decode and authenticate one Babel frame from `data` (RFC 8967
+/// §4.3 / RFC 9467 §3). On success, writes a freshly-allocated
+/// `lr_babel_frame_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_INVALID_HANDLE` (-2) on a bad key handle,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete frame or
+/// the authentication fails (the last-error string carries the
+/// error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_babel_codec_decode_authenticated_slice(
     codec: crate::babel_codec::lr_babel_codec_t,
@@ -531,7 +540,7 @@ pub unsafe extern "C" fn lr_babel_codec_decode_authenticated_slice(
                 }
                 Ok(None) => {
                     set_last_error("decode_authenticated_slice: truncated".into());
-                    LrError::Codec as i32
+                    LrError::Other as i32
                 }
                 Err(e) => {
                     set_last_error(e.to_string());

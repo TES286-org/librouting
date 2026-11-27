@@ -88,7 +88,8 @@ pub const LR_MRT_RECORD_UNKNOWN: u8 = 5;
 /// (carryover survives across calls when bytes are partial); this FFI
 /// entry creates a fresh `MrtReader` per call, so partial records
 /// return `LR_ERR_OTHER` — embedders should feed one complete record
-/// at a time.
+/// at a time. A NULL argument returns `LR_ERR_NULL` (-1); a decode
+/// failure returns `LR_ERR_CODEC` (-5).
 ///
 /// # Safety
 /// `data` must point to `len` readable bytes. `out` must point to a
@@ -128,6 +129,10 @@ pub unsafe extern "C" fn lr_mrt_decode(
 /// Encode a Peer Index Table record to wire bytes (RFC 6396 §4.3 +
 /// RFC 8050). The peer list is a flat array of `lr_mrt_peer_entry_t`
 /// passed through `peers` / `peer_count`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 ///
 /// # Safety
 /// `view_name` must be a NUL-terminated C string (NULL = empty view).
@@ -188,6 +193,10 @@ pub unsafe extern "C" fn lr_mrt_encode_peer_index_table(
 
 /// Encode a RIB table record (RFC 6396 §4.3 + RFC 8050 subtype 2).
 /// The entries are a flat array of `lr_mrt_rib_entry_t`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 ///
 /// # Safety
 /// `entries` must point to `entry_count` readable `lr_mrt_rib_entry_t`.
@@ -643,6 +652,10 @@ pub unsafe extern "C" fn lr_mrt_rib_dump_add_table(
 
 /// Encode the entire dump as a sequence of MRT records, returning
 /// the concatenated wire bytes in `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 ///
 /// # Safety
 /// `dump` must be a valid handle. `out` must point to a writable

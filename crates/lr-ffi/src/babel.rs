@@ -94,6 +94,11 @@ pub const LR_BABEL_TLV_CHALLENGE_REPLY: u8 = 19;
 /// Decode one Babel frame from `data`. On success, writes a freshly-
 /// allocated `lr_babel_frame_t` to `*out`.
 ///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+/// (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
+///
 /// # Safety
 /// `data` must point to `len` readable bytes. `out` must point to a
 /// writable `lr_babel_frame_t`.
@@ -130,6 +135,10 @@ pub unsafe extern "C" fn lr_babel_decode_frame(
 }
 
 /// Encode a Babel frame to its wire form.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 ///
 /// # Safety
 /// `frame` must be a valid handle. `out` must point to a writable

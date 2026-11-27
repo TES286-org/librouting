@@ -14,6 +14,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -5327,6 +5328,33 @@ struct AdjRibOutDeleter {
 struct RibMuxDeleter {
     void operator()(lr_rib_mux_t p) const noexcept { if (p) lr_rib_mux_free(p); }
 };
+
+/// Invoke a user callback from an FFI trampoline, catching every
+/// exception so none ever unwinds across the C boundary (the library
+/// is compiled with panic=abort; an exception through an
+/// `extern "C"` frame is undefined behaviour, and a lambda that
+/// throws through one of the RAII trampolines below would also free
+/// a *borrowed* handle on its way out).
+///
+/// The first exception is latched into `pending` and every later
+/// invocation is a no-op; the trampoline's caller rethrows it after
+/// the FFI call returns — `rethrow_pending(pending)` is the one-line
+/// tail every wrapper needs.
+template <typename Invoke>
+inline void guarded_callback(std::exception_ptr& pending, Invoke&& f) {
+    if (pending) return;
+    try {
+        f();
+    } catch (...) {
+        pending = std::current_exception();
+    }
+}
+
+/// Rethrow the exception `guarded_callback` latched, if any. Called
+/// after the FFI call returns.
+inline void rethrow_pending(const std::exception_ptr& pending) {
+    if (pending) std::rethrow_exception(pending);
+}
 } // namespace detail
 
 /// AFI / SAFI constants (mirror lr_core::nlri::NlriFamily).
@@ -5486,17 +5514,22 @@ public:
         return rc == 1;
     }
     /// Install a ranked set of paths for a key (RFC 7911 Add-Path).
-    /// The handles are *not* consumed — the Loc-RIB clones the
-    /// underlying Route value.
-    void install_set(const RouteKey& k, const std::vector<Route>& routes) {
+    /// The handles are *consumed* — the Loc-RIB takes ownership and
+    /// frees them; pass the vector by value (`std::move(paths)`).
+    void install_set(const RouteKey& k, std::vector<Route> routes) {
         if (routes.empty()) throw Error("install_set: at least one route required");
         lr_route_key_t ck = detail::to_lr_route_key(k);
         std::vector<lr_route_t> handles(routes.size());
         for (std::size_t i = 0; i < routes.size(); ++i) {
-            handles[i] = const_cast<Route&>(routes[i]).get();
+            handles[i] = routes[i].get();
         }
         int rc = lr_loc_rib_install_set(ptr_.get(), &ck, handles.data(), routes.size());
-        if (rc < 0) throw Error(std::string("lr_loc_rib_install_set: ") + lr_last_error());
+        if (rc < 0) {
+            // Nothing was consumed — the wrappers keep ownership.
+            throw Error(std::string("lr_loc_rib_install_set: ") + lr_last_error());
+        }
+        // The call consumed every handle: relinquish without freeing.
+        for (auto& r : routes) r.release();
     }
     /// Number of paths stored for a key (RFC 7911 Add-Path).
     std::size_t paths(const RouteKey& k) const {
@@ -5530,33 +5563,40 @@ public:
         return Route(out);
     }
     /// Walk every best route in the Loc-RIB. The callback receives a
-    /// *borrowed* route handle — the caller must NOT free it.
+    /// *borrowed* route handle — the caller must NOT free it. An
+    /// exception thrown by the callback is caught at the trampoline
+    /// (it never unwinds across the C boundary), the callback is not
+    /// invoked again, and the exception rethrows from this method
+    /// once the FFI call returns.
     template <typename F>
     std::size_t iter_best(F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_route_t route, void* user) {
             auto* c = static_cast<Ctx*>(user);
-            Route borrowed(route);
-            (*c->f)(borrowed.get());
-            borrowed.release();
+            // The handle is borrowed (the Loc-RIB owns it for the
+            // walk) — no RAII wrapper, an escaping exception must not
+            // free it on the way out.
+            detail::guarded_callback(c->pending, [&] { (*c->f)(route); });
         };
         std::int64_t n = lr_loc_rib_iter_best(ptr_.get(), trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_loc_rib_iter_best: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
     /// Walk every path (every multipath entry, not just the best).
+    /// See `iter_best` for the borrowing contract.
     template <typename F>
     std::size_t iter_paths(F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_route_t route, void* user) {
             auto* c = static_cast<Ctx*>(user);
-            Route borrowed(route);
-            (*c->f)(borrowed.get());
-            borrowed.release();
+            // Borrowed handle: no RAII wrapper (see iter_best).
+            detail::guarded_callback(c->pending, [&] { (*c->f)(route); });
         };
         std::int64_t n = lr_loc_rib_iter_paths(ptr_.get(), trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_loc_rib_iter_paths: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
@@ -5565,17 +5605,21 @@ public:
     /// bytes), the prefix length, an IPv6 flag, and the path count.
     template <typename F>
     std::size_t iter_sets(F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](std::uint8_t* prefix_out, std::uint8_t prefix_len,
                               std::uint8_t is_ipv6, std::uintptr_t path_count,
                               void* user) {
             auto* c = static_cast<Ctx*>(user);
-            std::array<std::uint8_t, 16> addr{};
-            for (std::size_t i = 0; i < 16; ++i) addr[i] = prefix_out[i];
-            (*c->f)(addr, prefix_len, is_ipv6 != 0, static_cast<std::size_t>(path_count));
+            detail::guarded_callback(c->pending, [&] {
+                std::array<std::uint8_t, 16> addr{};
+                for (std::size_t i = 0; i < 16; ++i) addr[i] = prefix_out[i];
+                (*c->f)(addr, prefix_len, is_ipv6 != 0,
+                        static_cast<std::size_t>(path_count));
+            });
         };
         std::int64_t n = lr_loc_rib_iter_sets(ptr_.get(), trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_loc_rib_iter_sets: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
@@ -5668,34 +5712,35 @@ public:
         if (rc < 0) throw Error(std::string("lr_adj_rib_in_clear_for: ") + lr_last_error());
     }
     /// Walk every route in the Adj-RIB-In, regardless of origin.
+    /// See `LocRib::iter_best` for the borrowing contract.
     template <typename F>
     std::size_t iter_all(F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_route_t route, void* user) {
             auto* c = static_cast<Ctx*>(user);
-            Route borrowed(route);
-            (*c->f)(borrowed.get());
-            borrowed.release();
+            // Borrowed handle: no RAII wrapper (see LocRib::iter_best).
+            detail::guarded_callback(c->pending, [&] { (*c->f)(route); });
         };
         std::int64_t n = lr_adj_rib_in_iter_all(ptr_.get(), trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_adj_rib_in_iter_all: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
     /// Walk every route from one origin.
     template <typename F>
     std::size_t iter_origin(const RouteOrigin& origin, F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_route_t route, void* user) {
             auto* c = static_cast<Ctx*>(user);
-            Route borrowed(route);
-            (*c->f)(borrowed.get());
-            borrowed.release();
+            // Borrowed handle: no RAII wrapper (see LocRib::iter_best).
+            detail::guarded_callback(c->pending, [&] { (*c->f)(route); });
         };
         std::int64_t n = lr_adj_rib_in_iter_origin(ptr_.get(), origin.peer,
                                                      static_cast<std::int32_t>(origin.protocol),
                                                      trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_adj_rib_in_iter_origin: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
@@ -5768,19 +5813,20 @@ public:
         if (rc < 0) throw Error(std::string("lr_adj_rib_out_clear_for: ") + lr_last_error());
     }
     /// Walk every route advertised to a given destination.
+    /// See `LocRib::iter_best` for the borrowing contract.
     template <typename F>
     std::size_t iter_for(const RouteOrigin& dest, F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_route_t route, void* user) {
             auto* c = static_cast<Ctx*>(user);
-            Route borrowed(route);
-            (*c->f)(borrowed.get());
-            borrowed.release();
+            // Borrowed handle: no RAII wrapper (see LocRib::iter_best).
+            detail::guarded_callback(c->pending, [&] { (*c->f)(route); });
         };
         std::int64_t n = lr_adj_rib_out_iter_for(ptr_.get(), dest.peer,
                                                    static_cast<std::int32_t>(dest.protocol),
                                                    trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_adj_rib_out_iter_for: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
@@ -5789,16 +5835,17 @@ public:
     /// it; the Adj-RIB-Out owns it for the duration of the walk).
     template <typename F>
     std::size_t paths_for(const RouteOrigin& dest, const RouteKey& k, F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](std::uint32_t path_id, lr_route_t route, void* user) {
             auto* c = static_cast<Ctx*>(user);
-            (*c->f)(path_id, route);
+            detail::guarded_callback(c->pending, [&] { (*c->f)(path_id, route); });
         };
         lr_route_key_t ck = detail::to_lr_route_key(k);
         lr_route_origin_t oc = detail::to_lr_route_origin(dest);
         std::int64_t n = lr_adj_rib_out_paths_for(ptr_.get(), oc, &ck,
                                                     trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_adj_rib_out_paths_for: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
@@ -5809,23 +5856,26 @@ public:
     std::vector<std::pair<RouteKey, std::vector<std::uint32_t>>>
     advertised_keys(const RouteOrigin& dest, std::uint16_t afi, std::uint8_t safi) const {
         std::vector<std::pair<RouteKey, std::vector<std::uint32_t>>> out;
-        struct Ctx { decltype(out)* v; };
-        Ctx ctx{&out};
+        struct Ctx { decltype(out)* v; std::exception_ptr pending; };
+        Ctx ctx{&out, nullptr};
         auto trampoline = +[](const lr_route_key_t* key,
                               const std::uint32_t* path_ids,
                               std::uintptr_t count,
                               void* user) {
             auto* c = static_cast<Ctx*>(user);
-            RouteKey k = detail::from_lr_route_key(*key);
-            std::vector<std::uint32_t> ids;
-            if (path_ids != nullptr && count > 0) {
-                ids.assign(path_ids, path_ids + count);
-            }
-            c->v->emplace_back(std::move(k), std::move(ids));
+            detail::guarded_callback(c->pending, [&] {
+                RouteKey k = detail::from_lr_route_key(*key);
+                std::vector<std::uint32_t> ids;
+                if (path_ids != nullptr && count > 0) {
+                    ids.assign(path_ids, path_ids + count);
+                }
+                c->v->emplace_back(std::move(k), std::move(ids));
+            });
         };
         lr_route_origin_t oc = detail::to_lr_route_origin(dest);
         std::int64_t n = lr_adj_rib_out_advertised_keys(ptr_.get(), oc, afi, safi,
                                                          trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_adj_rib_out_advertised_keys: ") + lr_last_error());
         return out;
     }
@@ -5884,13 +5934,14 @@ public:
     /// duration of the walk).
     template <typename F>
     std::size_t iter(F&& cb) const {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_route_t route, void* user) {
             auto* c = static_cast<Ctx*>(user);
-            (*c->f)(route);
+            detail::guarded_callback(c->pending, [&] { (*c->f)(route); });
         };
         std::int64_t n = lr_rib_mux_iter(ptr_.get(), trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (n < 0) throw Error(std::string("lr_rib_mux_iter: ") + lr_last_error());
         return static_cast<std::size_t>(n);
     }
@@ -6488,27 +6539,41 @@ public:
     /// borrowed BabelRoute snapshot copied out of the table.
     template <typename F>
     void iter_all(F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_babel_route_t route, void* user) -> std::int32_t {
             auto* c = static_cast<Ctx*>(user);
-            (*c->f)(detail_route_from_c(route));
+            if (c->pending) return -1;
+            try {
+                (*c->f)(detail_route_from_c(route));
+            } catch (...) {
+                c->pending = std::current_exception();
+                return -1;
+            }
             return 0;
         };
         std::int32_t rc = lr_babel_route_table_iter(ptr_.get(), trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (rc != 0) throw Error(std::string("lr_babel_route_table_iter: ") + lr_last_error());
     }
     /// Iterate the best (lowest-metric feasible) route per destination.
     template <typename F>
     void iter_best(F&& cb) {
-        struct Ctx { F* f; };
-        Ctx ctx{&cb};
+        struct Ctx { F* f; std::exception_ptr pending; };
+        Ctx ctx{&cb, nullptr};
         auto trampoline = +[](lr_babel_route_t route, void* user) -> std::int32_t {
             auto* c = static_cast<Ctx*>(user);
-            (*c->f)(detail_route_from_c(route));
+            if (c->pending) return -1;
+            try {
+                (*c->f)(detail_route_from_c(route));
+            } catch (...) {
+                c->pending = std::current_exception();
+                return -1;
+            }
             return 0;
         };
         std::int32_t rc = lr_babel_route_table_best_routes_iter(ptr_.get(), trampoline, &ctx);
+        detail::rethrow_pending(ctx.pending);
         if (rc != 0) throw Error(std::string("lr_babel_route_table_best_routes_iter: ") + lr_last_error());
     }
 
@@ -14111,6 +14176,10 @@ inline std::int32_t best_path_compare_multipath(RouteHandle const& h, lr_route_t
     std::int32_t rc = lr_best_path_compare_multipath(h.get(), b, cfg);
     if (rc < 0) throw Error(std::string("lr_best_path_compare_multipath failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
     return rc;
+}
+
+inline lr_route_t clone(RouteHandle const& h) {
+    return lr_route_clone(h.get());
 }
 
 inline std::int32_t lrxp_store_kind(RouteHandle const& h, std::uint8_t* out, std::uint8_t* out_present) {

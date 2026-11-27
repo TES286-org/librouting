@@ -141,6 +141,10 @@ pub unsafe extern "C" fn lr_ldp_id_from_bytes(bytes: *const u8) -> lr_ldp_id_t {
 /// one `HelloMsg` with the supplied parameters. The encoded bytes
 /// are written to `*out`.
 ///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
+///
 /// # Safety
 /// `out` must point to a writable `lr_bytes_t`.
 #[no_mangle]
@@ -194,8 +198,12 @@ pub unsafe extern "C" fn lr_ldp_encode_hello_pdu(
 }
 
 /// Decode one LDP PDU from `data`. On success, writes a freshly-
-/// allocated `lr_ldp_pdu_t` to `*out`. Returns 0 on success, negative
-/// on error.
+/// allocated `lr_ldp_pdu_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+/// (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
 ///
 /// # Safety
 /// `data` must point to `len` readable bytes. `out` must point to a

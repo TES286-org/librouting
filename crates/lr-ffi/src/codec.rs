@@ -11,10 +11,18 @@
 //!   raw bytes.
 //! - `lr_ospf_decode_v2` and `lr_babel_decode` round-trip the parsed
 //!   message through `OspfCodec::encode_vec` / `BabelCodec::encode_vec`
-//!   the same way the BGP path does. The parse is checked (decode
-//!   errors return `LR_ERR_CODEC` = `-5`); a successful re-encode
-//!   returns the canonical byte form so FFI consumers see a stable
-//!   shape regardless of which optional fields the peer set.
+//!   the same way the BGP path does. The parse is checked; a
+//!   successful re-encode returns the canonical byte form so FFI
+//!   consumers see a stable shape regardless of which optional
+//!   fields the peer set.
+//!
+//! The three decode entry points share one error contract (the same
+//! one every codec-class entry point in this crate returns): 0 on
+//! success; `LR_ERR_NULL` (-1) on a NULL argument; `LR_ERR_OTHER`
+//! (-6) when the bytes hold only an incomplete message (the
+//! last-error string is "truncated"); `LR_ERR_CODEC` (-5) when the
+//! bytes fail to decode or the canonical re-encode fails (the
+//! last-error string carries the codec error).
 //!
 //! Every entry point runs inside the crate's `catch_unwind` barrier
 //! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
@@ -39,12 +47,15 @@ use crate::policy::lr_prefix_t;
 const LR_ERR_NULL: i32 = LrError::Null as i32;
 /// `LR_ERR_INVALID_HANDLE` (-2) — wrong message variant for this reader.
 const LR_ERR_INVALID_HANDLE: i32 = LrError::InvalidHandle as i32;
+/// `LR_ERR_CODEC` (-5) — the decode or canonical re-encode failed.
+const LR_ERR_CODEC: i32 = LrError::Codec as i32;
 /// `LR_ERR_OTHER` (-6) — index out of range or other documented failure.
 const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
 /// Decode one BGP message from `data`. Returns 0 on success (and writes a
 /// `lr_bytes_t` containing the message type byte at offset 0 + body to
-/// `out`). Negative on error.
+/// `out`). Negative on error — see the module doc for the shared
+/// code table (`LR_ERR_NULL` / `LR_ERR_OTHER` / `LR_ERR_CODEC`).
 #[no_mangle]
 pub extern "C" fn lr_bgp_decode(data: *const u8, len: usize, out: *mut lr_bytes_t) -> i32 {
     guarded(
@@ -62,7 +73,7 @@ pub extern "C" fn lr_bgp_decode(data: *const u8, len: usize, out: *mut lr_bytes_
                         Ok(b) => b,
                         Err(e) => {
                             set_last_error(e.to_string());
-                            return -4;
+                            return LR_ERR_CODEC;
                         }
                     };
                     unsafe { *out = lr_bytes_t::from_vec(bytes) }
@@ -70,11 +81,11 @@ pub extern "C" fn lr_bgp_decode(data: *const u8, len: usize, out: *mut lr_bytes_
                 }
                 Ok(None) => {
                     set_last_error("truncated".into());
-                    -3
+                    LR_ERR_OTHER
                 }
                 Err(e) => {
                     set_last_error(format!("{:?}", e));
-                    -5
+                    LR_ERR_CODEC
                 }
             }
         },
@@ -423,7 +434,7 @@ pub extern "C" fn lr_ospf_decode_v2(data: *const u8, len: usize, out: *mut lr_by
                         Ok(b) => b,
                         Err(e) => {
                             set_last_error(e.to_string());
-                            return -4;
+                            return LR_ERR_CODEC;
                         }
                     };
                     unsafe { *out = lr_bytes_t::from_vec(bytes) }
@@ -431,11 +442,11 @@ pub extern "C" fn lr_ospf_decode_v2(data: *const u8, len: usize, out: *mut lr_by
                 }
                 Ok(None) => {
                     set_last_error("truncated".into());
-                    -3
+                    LR_ERR_OTHER
                 }
                 Err(e) => {
                     set_last_error(e.to_string());
-                    -5
+                    LR_ERR_CODEC
                 }
             }
         },
@@ -462,7 +473,7 @@ pub extern "C" fn lr_babel_decode(data: *const u8, len: usize, out: *mut lr_byte
                         Ok(b) => b,
                         Err(e) => {
                             set_last_error(e.to_string());
-                            return -4;
+                            return LR_ERR_CODEC;
                         }
                     };
                     unsafe { *out = lr_bytes_t::from_vec(bytes) }
@@ -470,11 +481,11 @@ pub extern "C" fn lr_babel_decode(data: *const u8, len: usize, out: *mut lr_byte
                 }
                 Ok(None) => {
                     set_last_error("truncated".into());
-                    -3
+                    LR_ERR_OTHER
                 }
                 Err(e) => {
                     set_last_error(e.to_string());
-                    -5
+                    LR_ERR_CODEC
                 }
             }
         },
@@ -2179,9 +2190,9 @@ mod tests {
         let bytes = [0u8, 2, 1];
         let mut out = new_out();
         let rc = lr_ospf_decode_v2(bytes.as_ptr(), bytes.len(), &raw mut out);
-        assert!(
-            rc == -3 || rc == -5,
-            "truncated/malformed input returns -3/-5, got {rc}"
+        assert_eq!(
+            rc, LR_ERR_OTHER,
+            "an incomplete packet is -6 (the old shape returned -3)"
         );
     }
 
@@ -2239,9 +2250,9 @@ mod tests {
         let bytes = [0x2a, 0x00];
         let mut out = new_out();
         let rc = lr_babel_decode(bytes.as_ptr(), bytes.len(), &raw mut out);
-        assert!(
-            rc == -3 || rc == -5,
-            "truncated/malformed input returns -3/-5, got {rc}"
+        assert_eq!(
+            rc, LR_ERR_OTHER,
+            "an incomplete frame is -6 (the old shape returned -3)"
         );
     }
 
@@ -3686,5 +3697,66 @@ mod tests {
     fn ffi_decode_ipv4_nlri_handles_null_safely() {
         let rc = unsafe { lr_bgp_decode_ipv4_nlri(std::ptr::null(), 0, std::ptr::null_mut()) };
         assert_eq!(rc, LR_ERR_NULL);
+    }
+
+    // ---- the three round-trip decoders' error contract ----
+    //
+    // The shared table (module doc): -1 NULL, -6 incomplete ("truncated"),
+    // -5 decode failure. The old shape returned -3 for truncated and -4
+    // for the canonical re-encode failure — -4 is the LR_ERR_PANIC the
+    // catch_unwind barrier owns, so a caller dispatching by the header
+    // read a library bug as a caught panic.
+
+    #[test]
+    fn ffi_bgp_decode_error_codes() {
+        let mut out = new_out();
+        // NULL argument → -1.
+        assert_eq!(
+            unsafe { lr_bgp_decode(std::ptr::null(), 4, &raw mut out) },
+            LR_ERR_NULL
+        );
+        // An incomplete header → -6 with "truncated" in last_error.
+        let short = [0xffu8; 8];
+        assert_eq!(
+            unsafe { lr_bgp_decode(short.as_ptr(), short.len(), &raw mut out) },
+            LR_ERR_OTHER
+        );
+        // A well-formed header with an unknown message type → -5.
+        let mut bad = [0xffu8; 19];
+        bad[18] = 99;
+        assert_eq!(
+            unsafe { lr_bgp_decode(bad.as_ptr(), bad.len(), &raw mut out) },
+            LR_ERR_CODEC
+        );
+    }
+
+    #[test]
+    fn ffi_ospf_decode_v2_error_codes() {
+        let mut out = new_out();
+        assert_eq!(
+            unsafe { lr_ospf_decode_v2(std::ptr::null(), 4, &raw mut out) },
+            LR_ERR_NULL
+        );
+        let short = [0u8; 8];
+        assert_eq!(
+            unsafe { lr_ospf_decode_v2(short.as_ptr(), short.len(), &raw mut out) },
+            LR_ERR_OTHER
+        );
+    }
+
+    #[test]
+    fn ffi_babel_decode_error_codes() {
+        let mut out = new_out();
+        assert_eq!(
+            unsafe { lr_babel_decode(std::ptr::null(), 4, &raw mut out) },
+            LR_ERR_NULL
+        );
+        // A Babel packet header is 4 bytes (magic + version + body
+        // length); anything shorter is an incomplete frame → -6.
+        let short = [0x2au8, 2, 0];
+        assert_eq!(
+            unsafe { lr_babel_decode(short.as_ptr(), short.len(), &raw mut out) },
+            LR_ERR_OTHER
+        );
     }
 }
