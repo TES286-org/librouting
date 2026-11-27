@@ -270,16 +270,16 @@ impl BestPath {
 
         let internal_a = a.protocol == lr_core::rib::Protocol::Bgp && a.origin.proto == 1;
         let internal_b = b.protocol == lr_core::rib::Protocol::Bgp && b.origin.proto == 1;
-        let p_a = if internal_a {
-            attrs_a.local_pref().map(|p| p.0).unwrap_or(100)
-        } else {
-            100
-        };
-        let p_b = if internal_b {
-            attrs_b.local_pref().map(|p| p.0).unwrap_or(100)
-        } else {
-            100
-        };
+        // 2. LOCAL_PREF (higher wins) — compared for EVERY route, with
+        //    100 as the value only when the attribute is absent.
+        //    RFC 4271 §9.1.2.2 step (c)(1) does not gate the step on
+        //    where the route was learned: an eBGP route defaults to
+        //    100 (FRR's bgp_default_local_pref, BIRD's equivalent)
+        //    and an inbound `set local-pref` policy overrides it, so
+        //    pinning eBGP routes at 100 ignored the attribute and
+        //    made `set local-pref 50` on an eBGP neighbor a no-op.
+        let p_a = attrs_a.local_pref().map(|p| p.0).unwrap_or(100);
+        let p_b = attrs_b.local_pref().map(|p| p.0).unwrap_or(100);
         let cmp = p_b.cmp(&p_a);
         if cmp != Ordering::Equal {
             return cmp;
@@ -407,13 +407,12 @@ impl BestPath {
         // 0b. RFC 8326 §4: a route carrying the GRACEFUL_SHUTDOWN
         //     community is likewise the least preferred — the sender
         //     attached it precisely so receivers move traffic onto
-        //     alternatives before the session goes away. The step sits
-        //     ahead of LOCAL_PREF because the comparator pins eBGP
-        //     LOCAL_PREF at 100, so the RFC §4.1 low-LOCAL_PREF inbound
-        //     policy alone could not de-preference an eBGP path against
-        //     another eBGP path (FRR closes the same gap by forcing
-        //     LOCAL_PREF to 0 on GS-tagged eBGP routes and comparing
-        //     LOCAL_PREF unconditionally).
+        //     alternatives before the session goes away. Step 2 below
+        //     compares LOCAL_PREF unconditionally (absent = 100), so an
+        //     RFC §4.1 low-LOCAL_PREF inbound policy on the tagged eBGP
+        //     path also de-preferences it; the explicit step ahead of
+        //     LOCAL_PREF keeps an untagged-policy deployment working
+        //     (FRR keeps the same belt-and-braces shape).
         if cfg.graceful_shutdown_least_preferred {
             let gshut_a = Self::is_graceful_shutdown(&attrs_a);
             let gshut_b = Self::is_graceful_shutdown(&attrs_b);
@@ -427,20 +426,17 @@ impl BestPath {
         }
 
         // 1. Weight (vendor-specific; treated as 0; embedder injects via policy).
-        // 2. LOCAL_PREF — only meaningful for iBGP. For eBGP routes we
-        //    approximate as 100 unless the route is internal.
+        // 2. LOCAL_PREF (higher wins) — compared for every route, with
+        //    100 only as the absent-attribute default. RFC 4271
+        //    §9.1.2.2 step (c)(1) does not gate the step on where the
+        //    route was learned; FRR and BIRD compare LOCAL_PREF for
+        //    eBGP routes too (default 100, overridable by an inbound
+        //    `set local-pref` policy), so pinning eBGP routes at 100
+        //    silently ignored the policy.
         let internal_a = a.protocol == lr_core::rib::Protocol::Bgp && a.origin.proto == 1;
         let internal_b = b.protocol == lr_core::rib::Protocol::Bgp && b.origin.proto == 1;
-        let p_a = if internal_a {
-            attrs_a.local_pref().map(|p| p.0).unwrap_or(100)
-        } else {
-            100
-        };
-        let p_b = if internal_b {
-            attrs_b.local_pref().map(|p| p.0).unwrap_or(100)
-        } else {
-            100
-        };
+        let p_a = attrs_a.local_pref().map(|p| p.0).unwrap_or(100);
+        let p_b = attrs_b.local_pref().map(|p| p.0).unwrap_or(100);
         let cmp = p_b.cmp(&p_a); // higher LOCAL_PREF is better
         if cmp != Ordering::Equal {
             return cmp;
@@ -702,6 +698,43 @@ mod tests {
         let routes = [short, long];
         let best = BestPath::select(&routes, &cfg).unwrap();
         assert_eq!(best.origin.peer, 1);
+    }
+
+    /// RFC 4271 §9.1.2.2 step (c)(1): LOCAL_PREF is compared for every
+    /// route, not only iBGP-learned ones. An eBGP route that carries the
+    /// attribute (an inbound `set local-pref` policy attaches it) wins
+    /// over the absent-attribute default of 100 — the comparator used
+    /// to pin eBGP routes at 100 and silently ignore the policy.
+    #[test]
+    fn local_pref_compares_for_ebgp_routes() {
+        // Two eBGP routes (origin.proto 0), identical AS_PATH; peer 2's
+        // carries LOCAL_PREF 200 (attribute 5, 4-byte value).
+        let plain = route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 100])], 1);
+        let boosted = route_with_attrs_many(
+            &[(2, vec![2, 1, 0, 0, 100]), (5, vec![0, 0, 0, 200])],
+            2,
+        );
+        let cfg = BestPathConfig::default();
+        let routes = [plain, boosted];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 2,
+            "LOCAL_PREF 200 on an eBGP route must beat the 100 default"
+        );
+
+        // Symmetrically, an inbound policy that LOWERS LOCAL_PREF below
+        // the default loses against an untouched eBGP route.
+        let demoted = route_with_attrs_many(
+            &[(2, vec![2, 1, 0, 0, 100]), (5, vec![0, 0, 0, 50])],
+            1,
+        );
+        let untouched = route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 100])], 2);
+        let routes = [demoted, untouched];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 2,
+            "LOCAL_PREF 50 on an eBGP route must lose to the 100 default"
+        );
     }
 
     #[test]
