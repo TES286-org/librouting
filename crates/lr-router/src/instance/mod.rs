@@ -1360,22 +1360,34 @@ impl DefaultRouter {
         }
     }
 
-    /// Emit a BMP Peer Down message (RFC 7854 §4.5) to the sink, when
+    /// Emit a BMP Peer Down message (RFC 7854 §4.9) to the sink, when
     /// configured. Called when a BGP session leaves Established.
-    fn bmp_peer_down(&self, session: u64) {
+    ///
+    /// The reason follows the teardown's own outbound actions: when the
+    /// batch that drove the session down queued a NOTIFICATION, reason 1
+    /// (local close) carries it as the §4.9 data; otherwise reason 2
+    /// (local close without a notification) carries the FSM event code
+    /// 0, 0 — "no relevant Event code is defined". A teardown caused by
+    /// the remote end is outside this call site's knowledge; collectors
+    /// treat reason 2/4 with the zero event code as the generic form.
+    fn bmp_peer_down(&self, session: u64, queued_notification: Option<&[u8]>) {
         let Some(sink) = &self.bmp_sink else {
             return;
         };
         let Some(peer) = self.bmp_peer_header(session) else {
             return;
         };
-        let msg = lr_bmp::BmpMessage::peer_down(peer, lr_bmp::PeerDownReason::LocalClose, &[]);
+        let (reason, data): (lr_bmp::PeerDownReason, Vec<u8>) = match queued_notification {
+            Some(pdu) => (lr_bmp::PeerDownReason::LocalCloseNotification, pdu.to_vec()),
+            None => (lr_bmp::PeerDownReason::LocalCloseNoNotification, vec![0, 0]),
+        };
+        let msg = lr_bmp::BmpMessage::peer_down(peer, reason, &data);
         if let Ok(bytes) = lr_bmp::BmpCodec::new().encode_vec(&msg) {
             sink(&bytes);
         }
     }
 
-    /// Emit a BMP Route Monitoring message (RFC 7854 §4.3) for a route
+    /// Emit a BMP Route Monitoring message (RFC 7854 §4.6) for a route
     /// that just entered the Loc-RIB. The payload is a minimal BGP
     /// UPDATE carrying the route's prefix — a full BGP UPDATE encode
     /// would require the path-attribute bag, which we delegate to the
@@ -1386,7 +1398,7 @@ impl DefaultRouter {
         let Some(sink) = &self.bmp_sink else {
             return;
         };
-        // A real BGP UPDATE (RFC 7854 §4.3 mirrors what the session
+        // A real BGP UPDATE (RFC 7854 §4.6 mirrors what the session
         // sent): the route's own path attributes, IPv4 NLRI in the
         // legacy section, IPv6 via MP_REACH_NLRI.
         use lr_bgp::message::update::{Nlri, Update};
@@ -2696,6 +2708,26 @@ impl DefaultRouter {
             }
             _ => (false, false),
         }
+    }
+
+    /// Re-run the full import pipeline for routes an import hook
+    /// previously dropped — the RFC 2439 §4.8.7 reuse step: the
+    /// damping hook held the newest announcement of a suppressed
+    /// prefix, and the decay ticker calls this once the figure of
+    /// merit falls below the reuse threshold. The routes pass through
+    /// the same safety net, RFC 8212 check and hook chain as a live
+    /// announcement (by then the damping hook admits them). Returns
+    /// the number of routes re-imported.
+    pub fn reimport_damped(&mut self, routes: Vec<Route>) -> usize {
+        let mut count = 0;
+        for route in routes {
+            let before = self.adj_rib_in.len();
+            self.import_route(route);
+            if self.adj_rib_in.len() > before {
+                count += 1;
+            }
+        }
+        count
     }
 
     fn import_route(&mut self, route: Route) {
@@ -4210,7 +4242,15 @@ impl DefaultRouter {
             self.bmp_peer_up(session);
         }
         if transition_down {
-            self.bmp_peer_down(session);
+            // A NOTIFICATION queued in this batch means the local end
+            // closed the session: RFC 7854 §4.9 reason 1 carries it as
+            // the Peer Down data. A BGP message is `marker(16) +
+            // length(2) + type(1)` — type 3 is NOTIFICATION.
+            let queued_notification = actions.iter().find_map(|a| match a {
+                BgpAction::Send(b) if b.len() >= 19 && b[18] == 3 => Some(b.clone()),
+                _ => None,
+            });
+            self.bmp_peer_down(session, queued_notification.as_deref());
         }
         for a in actions {
             match a {
@@ -5692,7 +5732,7 @@ impl RouterInstance for DefaultRouter {
                     return Ok(());
                 }
                 if newly_established {
-                    // BMP (RFC 7854 §4.6): the Peer Up event mirrors
+                    // BMP (RFC 7854 §4.10): the Peer Up event mirrors
                     // *before* any Route Monitoring from the same batch
                     // — with TCP coalescing the KEEPALIVE that completes
                     // the handshake and the first UPDATE arrive in one

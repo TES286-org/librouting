@@ -2,8 +2,8 @@
 //! Routing instruction in the IPv6 data plane.
 //!
 //! A SID is, on the wire, simply an IPv6 address (RFC 8754 §3): the
-//! 128-bit value is parsed as **LOC:FUNCT:ARGS** (RFC 8402 §3.2.1,
-//! RFC 8754 §3.1):
+//! 128-bit value is parsed as **LOC:FUNCT:ARGS** (RFC 8986 §3.1:
+//! "This document defines an SRv6 SID as consisting of LOC:FUNCT:ARG"):
 //!
 //! ```text
 //!  0                   1                   2                   3
@@ -16,9 +16,9 @@
 //! ```
 //!
 //! - **Locator** (LOC) routes the packet to the node that owns the SID.
-//!   Each node advertises a Locator block — an IPv6 prefix (RFC 8754
-//!   §3.1) — and every SID under that Locator is delivered to that node
-//!   by plain IPv6 forwarding.
+//!   Each node advertises a Locator — an IPv6 prefix (RFC 8986 §3.1)
+//!   — and every SID under that Locator is delivered to that node by
+//!   plain IPv6 forwarding.
 //! - **Function** (FUNCT) identifies the behavior the receiving node
 //!   executes when the SID becomes *active* (the destination address
 //!   equals this SID). The behaviors are codified by RFC 8986 — see
@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 /// Stored as a plain `[u8; 16]` so the type is `Copy`, comparable by
 /// value and usable in `no_std`. The LOC/FUNCT/ARGS split is *not*
 /// encoded into the type — it is context-dependent on the originating
-/// node's advertised locator length (RFC 8754 §3.1, `BLEN`). Helpers
+/// node's advertised locator length (RFC 8986 §3.1, L). Helpers
 /// on [`Sid`] take the configured lengths when slicing into the parts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Sid {
@@ -60,7 +60,7 @@ impl Sid {
         Self { octets }
     }
 
-    /// All-zeros SID — the RFC 8754 §3.1 example for "no SID" is the
+    /// All-zeros SID — the IPv6 unspecified address doubles as the
     /// IPv6 unspecified address. Most SRv6 control planes use it as a
     /// placeholder in TLVs that carry the SID list length only.
     pub const UNSPECIFIED: Self = Self::from_octets([0; 16]);
@@ -80,9 +80,8 @@ impl Sid {
         &self.octets
     }
 
-    /// True when the SID equals [`Self::UNSPECIFIED`] (all-zero). RFC 8754
-    /// §3.1 leaves the meaning of `::` to the control plane — callers
-    /// typically treat it as "no SID".
+    /// True when the SID equals [`Self::UNSPECIFIED`] (all-zero) —
+    /// callers typically treat `::` as "no SID".
     pub const fn is_unspecified(&self) -> bool {
         let mut i = 0;
         while i < 16 {
@@ -94,7 +93,7 @@ impl Sid {
         true
     }
 
-    /// Slice the locator prefix out of the SID (RFC 8754 §3.1). Returns
+    /// Slice the locator prefix out of the SID (RFC 8986 §3.1). Returns
     /// `(offset_bytes, byte_count)` so the caller can borrow the slice:
     /// `&sid.octets()[offset..offset+len]`. Returns `None` if
     /// `locator_block_bits` exceeds 128 or is not a multiple of 8 — the
@@ -129,8 +128,8 @@ impl Sid {
         Some(Self::from_octets(octets))
     }
 
-    /// True when the SID falls inside the given locator block (RFC 8754
-    /// §3.1, the leading `locator_block_bits` are equal). Returns
+    /// True when the SID falls inside the given locator block (the
+    /// leading `locator_block_bits` are equal; RFC 8986 §3.1). Returns
     /// `false` (rather than erroring) on an invalid bit length — the
     /// contract is a plain membership check.
     pub fn is_inside_locator(&self, locator: &[u8], locator_block_bits: u8) -> bool {

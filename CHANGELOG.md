@@ -17,6 +17,147 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — the MRT wire format: Add-Path subtype numbers, the
+RIB_GENERIC_ADDPATH layout, the reduced MP_REACH form (issue #101)
+
+- **Every Add-Path RIB record was written with GEO_PEER_TABLE's
+  subtype** — the five TABLE_DUMP_V2 Add-Path constants ran one below
+  the RFC 8050 §5.2 registry values (8-12), so subtype 7 (RFC 6397's
+  geo peer table) was stamped instead, and on read, wire subtypes
+  9/11/12 misparsed (IPv4 records decoded as IPv6, generic-addpath
+  dropped). Renumbered, `GEO_PEER_TABLE` added (decodes as Unknown;
+  the geo layout is not modelled) and the values mirrored through
+  the FFI constants, `include/lr_ffi.h` and `scripts/abi.json`.
+- **RIB_GENERIC_ADDPATH entries were read with a per-entry path
+  identifier the subtype does not carry** — RFC 8050 §4.2 keeps the
+  RFC 6396 §4.3.3 entry layout and puts the Path Identifier in the
+  record's Add-Path NLRI; the phantom 4-byte field misframed every
+  real record.
+- **MP_REACH_NLRI inside RIB entries ignored the RFC 6396 §4.3.4
+  reduced form** — the attribute drops the AFI/SAFI/Reserved fields
+  in RIB entries, so conformant dumps replayed with no next hop. The
+  encoder now writes the reduced form and the interpreter accepts
+  both it and the full RFC 4760 form some writers keep.
+- Also in MRT: BGP4MP `_LOCAL` subtypes 6/7 decode per RFC 6396
+  §4.4.5/§4.4.6 (current, not deprecated), the common-header
+  timestamp (plus the `_ET` microseconds) surfaces on BGP4MP records
+  instead of being dropped, the invented 64 KiB record cap that
+  rejected valid >64 KiB tables is now a 16 MiB sanity fence, the
+  encoder bounds-checks per-entry attribute lengths and entry/peer
+  counts instead of the aggregate sum, Loc-RIB-private attribute
+  tags from 243 no longer leak into dumps, prefix decoding masks
+  the RFC-declared-irrelevant trailing bits, and `parse_file`
+  reports trailing truncation as an error as its doc always claimed.
+
+### Fixed — the BMP wire format: Peer Up framing, Peer Down reasons,
+error-path resynchronization (issue #101)
+
+- **Peer Up carried two spurious u16 length prefixes before the
+  OPEN messages** — RFC 7854 §4.10 has none (the OPENs are
+  self-delimiting BGP PDUs), so every Peer Up this crate emitted was
+  misparsed by a conformant collector. The router's Peer Down
+  station now picks the §4.9 reason from the teardown: reason 1 with
+  the queued NOTIFICATION when the local end sent one, else reason 2
+  with the FSM event code 0,0 (the enum previously mislabeled
+  reason 2 as "remote close" and reason 4 as "depleted resource").
+- **A decode failure wedged the stream** — the offending frame
+  stayed buffered and re-failed on every subsequent read while the
+  carryover grew without bound; a bad frame is now dropped alone and
+  the next call resynchronizes. Unknown message TYPE bytes are
+  skipped whole per §4.1 ("MUST ignore unrecognized message types")
+  instead of erroring, and the `Decoder` trait impl carries the same
+  declared-length sanity bound `next_message` always had.
+- Peer Type 3 (Loc-RIB Instance Peer, RFC 9069 §4.1) decodes instead
+  of being rejected as reserved; the message-size bound admits a
+  Route Monitoring message wrapping an RFC 8654 extended UPDATE;
+  Initiation/Termination TLV values over 65 535 octets fail at
+  encode instead of wrapping the 2-octet Information Length; the
+  encoder refuses type/per-peer-header combinations its own decoder
+  would reject; and the module doc's section citations point at the
+  real RFC 7854 TOC.
+
+### Fixed — route flap damping: RFC 2439 §4.8 semantics and the
+missing reuse step (issue #101)
+
+- The decay factor was keyed on the suppression flag; RFC 2439 §4.2
+  keys it on reachability ("whether suppressed or not") — a
+  suppressed-but-announced route decayed at a 30-second half-life
+  under the shipped defaults, collapsing every suppression window to
+  about a minute. Entries now track reachability.
+- Re-announcements were penalized and a route's first announcement
+  created an entry at FoM 375; §5 penalizes only removal ("not when
+  a route is added") and §4.8.3 explicitly creates no structure for
+  an unknown route. One flap now costs exactly one `additive_incr`.
+- A suppressed route whose FoM decayed below reuse was never
+  re-used: the hook dropped re-announcements from Adj-RIB-In and the
+  ticker only logged the reactivation — BGP peers do not
+  re-advertise stable routes, so the prefix was gone until a session
+  reset. The hook now holds the newest dropped announcement, the
+  daemon's decay ticker re-imports the held routes through the new
+  `DefaultRouter::reimport_damped` (the full import pipeline), a
+  SIGHUP that disables damping re-imports what is still held, and a
+  withdraw clears that peer's held copies.
+- Defaults aligned with the FRR `bgp dampening` scale they claimed
+  to follow: decay factors 0.977160 per 30 s (the 15-minute
+  half-life of §4.7's sample) instead of 0.97/0.5, ceiling 12 000
+  (reuse × 2^(max-suppress/half-life)) instead of 60 000;
+  `flap_count` counts flaps (withdraws), not events; and
+  `DampingTable::new`/`update_config` validate the §4.2 parameter
+  constraints (previously only the opt-in FFI helper did).
+
+### Fixed — per-peer flap suppression: the soft-budget recovery
+wedge and three more state-machine defects (issue #101)
+
+- The soft global budget froze recovery outright at `soft_degraded`
+  degraded sessions — but recovery is the only operation that lowers
+  the count, so the freeze could never lift: every session stayed
+  degraded until restart (the defaults tripped at 10 sessions, and
+  the hard gate pushing healthy sessions to L1 grew the count
+  further). At/above the budget recovery is now rate-limited to one
+  transition per tick — the anti-storm intent without the wedge.
+- The hard budget's forced L0→L1 went through the escalating path
+  and marked every healthy peer's prefixes stale — a global-
+  protection posture applied as evidence against the peer. The
+  forced floor no longer marks stale.
+- The EWMA baseline's first-sample seed keyed on a
+  `last_baseline_ms == 0` sentinel that cannot fire (the router
+  clock is ms-since-daemon-start), so every session blended its
+  first sample against an implicit zero baseline and mis-budgeted
+  legitimately chatty peers; the baseline is also frozen while any
+  detection window is over budget so a burst cannot raise its own
+  budget.
+- The recovery backoff reset at every L0 return, giving the classic
+  repeat flapper the base dwell every cycle; it now survives the L0
+  return and clears after one full stable baseline window. The
+  budget gates read the state machine's own tier count (not the
+  rollout-masked public view) so shadow-mode runs simulate the same
+  global-budget behavior Full mode would produce, and window-second
+  conversions saturate instead of overflowing on u64::MAX configs.
+
+### Fixed — the SRv6 SRH: PadN type, the reduced-SRH Segments Left,
+bit-granular locators (issue #101)
+
+- The SRH encoder emitted PadN TLVs with type 1; RFC 8754 §2.1.1.2
+  assigns PadN type 4 (values 1-3 are Reserved from draft versions),
+  and the Linux uapi's `SR6_TLV_PADDING` is 4.
+- `Segments Left == Last Entry + 1` was rejected everywhere; RFC
+  8754 §4.3.1.1 S11 discards only when SL is greater than
+  `Last Entry + 1` — the reduced-SRH source state of §4.1.1 (the
+  DA carries the active segment; the RFC's own §6.3.2 examples carry
+  SL=1 over a one-entry list), which the crate could neither build
+  nor decode. `current_destination()` returns `None` for it.
+- `Locator::contains_sid` returned false for every SID whenever the
+  locator length was not a multiple of 8, despite the module
+  supporting such lengths (RFC 8986 §3.1 makes the length free); the
+  comparison is now bit-granular.
+- `Srh::hdr_ext_len` ignored the auto-padding `encode_vec` appends
+  and reported a header eight octets shorter than the bytes it
+  encodes. The flag/TLV/behavior documentation now matches the RFC
+  text (no SRH flags are defined — the IANA O-flag is bit 0x20 per
+  RFC 9259; End.B6.Insert's 13/26 come from the insertion draft's
+  registry entries that RFC 8986 Table 6 leaves Unassigned; End.DX2V
+  is the VLAN L2 table lookup of §4.10, not a cross-connect).
+
 ### Fixed — the protocol-semantics batch: private attribute injection,
 OSPF LSDB flush and anti-replay, hold-time-0 sessions, Babel AE 3,
 eBGP LOCAL_PREF, RFC 4456 reflection (issue #101)

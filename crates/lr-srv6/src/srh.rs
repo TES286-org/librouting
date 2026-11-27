@@ -55,10 +55,14 @@
 //! - **Last Entry** (1 octet): contains the index (zero based), in
 //!   the Segment List, of the last element of the list — `n - 1`
 //!   for `n` segments (RFC 8754 §2).
-//! - **Flags** (1 octet): RFC 8754 §2.1 — only the low two bits are
-//!   defined: `O` (octet 5, bit 0x80 — "OAM packet") and `H` (octet
-//!   5, bit 0x40 — "HMAC present"). All other bits MUST be 0 on
-//!   send and ignored on receive (RFC 8754 §2.3).
+//! - **Flags** (1 octet): RFC 8754 §2 defines NO flags for the SRH
+//!   — the figure shows eight unused bits that "MUST be 0 on
+//!   transmission and ignored on receipt". The only value IANA has
+//!   since registered is the O-flag at bit 2 (mask 0x20, RFC 9259);
+//!   this crate's `FLAG_OAM` carries it. The other mask constants
+//!   (`FLAG_HMAC`, `FLAG_ALERT`, `FLAG_PROTECTED`) mirror the Linux
+//!   uapi's deployed bit positions and are accepted on receive, but
+//!   no RFC assigns them.
 //! - **Tag** (2 octets): a tag the sender sets to group packets for
 //!   management / OAM (RFC 8754 §2.4). Not used in forwarding.
 //! - **Segment List**: array of 16-octet SIDs, **encoded starting
@@ -79,11 +83,12 @@
 //! (`net/ipv6/seg6_iptunnel.c`), so a multi-segment SRH encoded
 //! without the reversal is forwarded straight to its final segment,
 //! skipping every intermediate hop.
-//! - **TLVs**: optional variable-length attributes (RFC 8754 §2.6).
-//!   The HMAC TLV (type 5) is the only one currently assigned (RFC
-//!   8754 §2.6.1). The crate parses the TLV bytes back to the caller
-//!   as a raw slice — it does not interpret individual TLVs in this
-//!   slice (future work).
+//! - **TLVs**: optional variable-length attributes (RFC 8754 §2.1).
+//!   The registry (§8.2) assigns Pad1 (type 0, §2.1.1.1), PadN
+//!   (type 4, §2.1.1.2) and HMAC (type 5, §2.1.3); values 1-3 are
+//!   Reserved from earlier draft versions. The crate parses the TLV
+//!   bytes back to the caller as a raw slice — it does not interpret
+//!   individual TLVs in this slice (future work).
 //!
 //! ## Routing Type constant
 //!
@@ -143,12 +148,14 @@ pub const SRH_SEGMENT_LEN: usize = 16;
 /// short of an 8-octet boundary.
 pub const TLV_PAD1: u8 = 0;
 
-/// TLV option type `PadN` (RFC 8200 §4.4.2 — the multi-octet padding
-/// option, two header octets plus `length` zero-octet value bytes).
-/// Used by the SRH encoder for alignment deltas of two through seven
-/// octets. A `PadN` with `length = 0` pads two octets; `length = 5`
-/// pads the full seven.
-pub const TLV_PADN: u8 = 1;
+/// TLV type `PadN` (RFC 8754 §2.1.1.2 — Type 4 in the SRH TLV
+/// registry; values 1-3 are Reserved from earlier drafts, and the
+/// RFC 8200 §4.4.2 numbering the drafts borrowed applies to the
+/// Hop-by-Hop/Destination options, not the SRH). Two header octets
+/// plus `length` zero-octet value bytes. Used by the SRH encoder for
+/// alignment deltas of two through seven octets. A `PadN` with
+/// `length = 0` pads two octets; `length = 5` pads the full seven.
+pub const TLV_PADN: u8 = 4;
 
 /// Maximum number of segments in an SRH (RFC 8754 §2 — `Hdr Ext
 /// Len` is a single octet, so the segment list is bounded by
@@ -171,9 +178,9 @@ pub struct Srh {
     /// the caller (a packet builder) sets this to whatever follows.
     pub next_header: u8,
     /// Segments Left (RFC 8754 §2). The index of the current
-    /// destination in the segment list. RFC 8754 §4.2 requires
-    /// `segments_left <= last_entry + 1`; this crate's [`Srh::new`]
-    /// enforces that.
+    /// destination in the segment list. RFC 8754 §4.3.1.1 S11
+    /// requires `segments_left <= last_entry + 1`; this crate's
+    /// [`Srh::new`] enforces that.
     pub segments_left: u8,
     /// Last Entry (RFC 8754 §2). The index of the last entry in the
     /// segment list (i.e. `n - 1` for `n` segments).
@@ -190,7 +197,7 @@ pub struct Srh {
     /// which is not valid on the wire but is useful as a builder
     /// start). The wire order is the reverse (RFC 8754 §2).
     pub segments: Vec<Sid>,
-    /// Optional TLV bytes following the segment list (RFC 8754 §2.6).
+    /// Optional TLV bytes following the segment list (RFC 8754 §2.1).
     /// The crate passes them through verbatim — TLV interpretation is
     /// out of scope for this slice. The encoder auto-appends Pad1 /
     /// PadN TLVs (RFC 8200 §4.4) so the SRH total length is always a
@@ -227,17 +234,20 @@ pub enum SrhError {
     /// be `segments.len() - 1`).
     LastEntryOutOfRange,
     /// `Segments Left` is greater than `Last Entry + 1` (RFC 8754
-    /// §4.2 — the pointer must point at a valid segment).
+    /// §4.3.1.1 S11 — the pointer must name a segment of the list
+    /// or, at `Last Entry + 1`, the reduced-SRH state whose active
+    /// segment the DA carries).
     SegmentsLeftOutOfRange,
     /// The Routing Type is not 4 (RFC 8754 §2 — the SRH is
     /// identified by Routing Type 4 in the IPv6 Routing header; 4 is
     /// not to be confused with 43, the Next Header value of the
     /// Routing extension header itself).
     WrongRoutingType(u8),
-    /// Reserved flag bits are set (RFC 8754 §2.1 — the final RFC
-    /// text leaves all flag bits unassigned, so a sender must keep
-    /// them zero; the Linux uapi's four deployed positions
-    /// (Protected/OAM/Alert/HMAC) are the accepted set here).
+    /// Reserved flag bits are set (RFC 8754 §2 — the RFC text
+    /// leaves all flag bits unassigned, so a sender must keep them
+    /// zero; the IANA O-flag (RFC 9259, bit 0x20) and the Linux
+    /// uapi's deployed positions (Protected/OAM/Alert/HMAC) are the
+    /// accepted set here).
     ReservedFlagBits(u8),
 }
 
@@ -305,7 +315,13 @@ impl Srh {
         }
         let last_entry = (segments.len() - 1) as u8;
         let segments_left = segments_left.unwrap_or(last_entry);
-        if segments_left > last_entry {
+        // RFC 8754 §4.3.1.1 S11 (identically RFC 8986 §4.1 S10):
+        // discard only when Segments Left is GREATER than
+        // Last Entry + 1 — SL == LE + 1 is the reduced-SRH source
+        // state (§4.1.1: the DA already carries the active segment,
+        // the list starts one further down the path; the RFC's own
+        // §6.3.2 examples carry `SL=1` over one list entry).
+        if segments_left > last_entry.saturating_add(1) {
             return Err(SrhError::SegmentsLeftOutOfRange);
         }
         Ok(Self {
@@ -342,7 +358,7 @@ impl Srh {
         self
     }
 
-    /// Set the TLV bytes (RFC 8754 §2.6). Builder-style. The caller
+    /// Set the TLV bytes (RFC 8754 §2.1). Builder-style. The caller
     /// is responsible for ensuring the TLVs are well-formed — the
     /// crate passes them through verbatim.
     #[must_use]
@@ -386,11 +402,15 @@ impl Srh {
         if len == 0 {
             return None;
         }
-        // `segments_left <= last_entry = len - 1` is enforced by the
-        // constructors and `decode`, so `len - 1 - segments_left`
-        // cannot underflow for a well-formed value; the saturating
-        // form only guards a struct built by direct field mutation.
-        let idx = (len - 1).saturating_sub(self.segments_left as usize);
+        // `segments_left <= last_entry + 1 = len` is enforced by the
+        // constructors and `decode`. At `segments_left == len` (the
+        // reduced-SRH source state, RFC 8754 §4.1.1) the active
+        // segment is the one the IPv6 DA already carries — it is not
+        // in this list, so there is nothing to return.
+        if self.segments_left as usize >= len {
+            return None;
+        }
+        let idx = (len - 1) - self.segments_left as usize;
         self.segments.get(idx).copied()
     }
 
@@ -402,10 +422,11 @@ impl Srh {
         if self.segments.len() > MAX_SEGMENTS {
             return Err(SrhError::TooManySegments);
         }
-        // RFC 8754 §2.1: the final text leaves all flag bits
-        // unassigned, so a sender must keep undefined bits zero. The
-        // Linux uapi's four deployed positions (Protected/OAM/Alert/
-        // HMAC) are the accepted set — anything else is reserved.
+        // RFC 8754 §2: the RFC text leaves all flag bits unassigned,
+        // so a sender must keep undefined bits zero. The IANA O-flag
+        // (RFC 9259, bit 0x20) and the Linux uapi's four deployed
+        // positions (Protected/OAM/Alert/HMAC) are the accepted set
+        // — anything else is reserved.
         if self.flags & !(FLAG_OAM | FLAG_HMAC | FLAG_ALERT | FLAG_PROTECTED) != 0 {
             return Err(SrhError::ReservedFlagBits(self.flags));
         }
@@ -413,7 +434,9 @@ impl Srh {
         if self.last_entry != n - 1 {
             return Err(SrhError::LastEntryOutOfRange);
         }
-        if self.segments_left > self.last_entry {
+        // RFC 8754 §4.3.1.1 S11: only SL > Last Entry + 1 is invalid
+        // (SL == LE + 1 is the reduced-SRH source state, §4.1.1).
+        if self.segments_left > self.last_entry.saturating_add(1) {
             return Err(SrhError::SegmentsLeftOutOfRange);
         }
         // RFC 8200 §4.8: Hdr Ext Len = (header_total_octets / 8) - 1.
@@ -530,17 +553,17 @@ impl Srh {
         } else {
             Vec::new()
         };
-        // RFC 8754 §4.2: segments_left MUST be <= last_entry + 1
-        // (actually <= last_entry, since the index points at a valid
-        // segment — but the spec text says "<= last_entry" without
-        // the +1; we follow the spec text).
-        if segments_left > last_entry {
+        // RFC 8754 §4.3.1.1 S11 (identically RFC 8986 §4.1 S10):
+        // discard only when Segments Left is greater than
+        // (Last Entry + 1). SL == LE + 1 is the reduced-SRH source
+        // state (§4.1.1: the DA carries the active segment and the
+        // list starts one further down the path).
+        if segments_left > last_entry.saturating_add(1) {
             return Err(SrhError::SegmentsLeftOutOfRange);
         }
-        // RFC 8754 §2.3: the reserved flag bits (other than O and H)
-        // MUST be zero on send. We accept them on receive (the spec
-        // says "MUST be ignored on receive") but the encoder rejects
-        // them. So we don't return an error here.
+        // RFC 8754 §2: the flag bits are unused and "MUST be ignored
+        // on receipt" — accept them here; the encoder rejects the
+        // unassigned ones on send.
         let _ = flags;
         Ok(Self {
             next_header,
@@ -554,10 +577,14 @@ impl Srh {
     }
 
     /// The expected `Hdr Ext Len` field value for this SRH (RFC 8200
-    /// §4.8: `(total_octets / 8) - 1`).
+    /// §4.8: `(total_octets / 8) - 1`). The total includes the
+    /// auto-padding [`Srh::encode_vec`] appends to reach the 8-octet
+    /// alignment RFC 8754 §2.2 requires, so the value matches the
+    /// bytes the encoder actually writes.
     pub fn hdr_ext_len(&self) -> u8 {
-        let total = SRH_FIXED_LEN + self.segments.len() * SRH_SEGMENT_LEN + self.tlvs.len();
-        ((total / 8) - 1) as u8
+        let unpadded = SRH_FIXED_LEN + self.segments.len() * SRH_SEGMENT_LEN + self.tlvs.len();
+        let pad = (8 - (unpadded % 8)) % 8;
+        ((unpadded + pad) / 8 - 1) as u8
     }
 }
 
@@ -842,7 +869,7 @@ mod tests {
 
     #[test]
     fn srh_decode_accepts_reserved_flag_bits_on_receive() {
-        // RFC 8754 §2.3: reserved flag bits MUST be ignored on receive.
+        // RFC 8754 §2: the flag bits are unused and MUST be ignored on receive.
         let mut bytes = vec![0u8; 24];
         bytes[1] = 2; // (2+1)*8 = 24
         bytes[2] = ROUTING_TYPE_SRH;
@@ -933,8 +960,11 @@ mod tests {
     fn srh_encode_pads_unaligned_tlv_tail() {
         let segs = vec![sid("fcbb:bb00::1")];
         // TLV tail of 3 octets: total = 8 + 16 + 3 = 27 — needs 5
-        // octets of padding to reach 32. RFC 8200 §4.4.2 PadN with
-        // length=3 (type 1, length 3, 3 zero-octet value).
+        // octets of padding to reach 32. RFC 8754 §2.1.1.2 PadN
+        // (type 4) with length=3: two header octets plus 3 zero-octet
+        // value bytes. The pre-correction encoder wrote type 1 — a
+        // Reserved value in the SRH TLV registry that draft versions
+        // used.
         let srh = Srh::new(segs).unwrap().with_tlvs(vec![0xaa, 0xbb, 0xcc]);
         let enc = srh.encode_vec().unwrap();
         assert_eq!(
@@ -946,7 +976,7 @@ mod tests {
         // Fixed header (8) + one segment (16) = 24, then TLVs start at 24.
         // Caller's TLV (3 octets): 0xaa 0xbb 0xcc at indices 24..27.
         assert_eq!(&enc[24..27], &[0xaa, 0xbb, 0xcc]);
-        // PadN TLV at indices 27..32: type 1, length 3, 3 zero octets.
+        // PadN TLV at indices 27..32: type 4, length 3, 3 zero octets.
         assert_eq!(enc[27], TLV_PADN);
         assert_eq!(enc[28], 3);
         assert_eq!(&enc[29..32], &[0, 0, 0]);
@@ -1000,5 +1030,67 @@ mod tests {
             // hdr_ext_len = (8 + 16 + 8) / 8 - 1 = 3.
             assert_eq!(enc[1], 3);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit H65 batch: the PadN TLV type, the reduced-SRH Segments Left
+// bound and the padding-aware Hdr Ext Len.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    fn sid(s: &str) -> Sid {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn padn_tlv_type_is_4() {
+        // RFC 8754 §2.1.1.2: "Type: 4". Value 1 is Reserved in the
+        // SRH TLV registry (a draft-version number); the Linux
+        // uapi's SR6_TLV_PADDING is likewise 4, so kernel-validated
+        // SRHs never carried the pre-correction type 1.
+        assert_eq!(TLV_PADN, 4);
+    }
+
+    #[test]
+    fn reduced_srh_segments_left_eq_last_entry_plus_one_round_trips() {
+        // RFC 8754 §4.1.1 + §6.3.2 (e.g. P6: "(A3,S7)(S4; SL=1)" —
+        // one list entry, SL=1): the reduced SRH omits the first
+        // segment (it is the DA), sets Last Entry = n-2 and leaves
+        // Segments Left one past the list. §4.3.1.1 S11 discards
+        // only when SL is GREATER than Last Entry + 1.
+        let srh = Srh::with_segments_left(vec![sid("2001:db8:a::4")], Some(1)).unwrap();
+        assert_eq!(srh.segments_left, 1);
+        assert_eq!(srh.last_entry, 0);
+        let enc = srh.encode_vec().unwrap();
+        let dec = Srh::decode(&enc).unwrap();
+        assert_eq!(dec, srh);
+        // The active segment is the one the DA carries, not a list
+        // entry.
+        assert_eq!(dec.current_destination(), None);
+        // SL past LE+1 is still rejected.
+        assert!(matches!(
+            Srh::with_segments_left(vec![sid("2001:db8:a::4")], Some(2)),
+            Err(SrhError::SegmentsLeftOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn hdr_ext_len_accounts_for_auto_padding() {
+        // RFC 8200 §4.8: Hdr Ext Len = total_octets/8 - 1 over the
+        // bytes the encoder writes — including the auto-padding that
+        // reaches the 8-octet alignment RFC 8754 §2.2 requires. With
+        // one segment and a 3-octet TLV tail the padded total is 32,
+        // so Hdr Ext Len is 3 (the pre-fix method reported 2).
+        let srh = Srh::new(vec![sid("fcbb:bb00::1")])
+            .unwrap()
+            .with_tlvs(vec![0xaa, 0xbb, 0xcc]);
+        assert_eq!(srh.hdr_ext_len(), 3);
+        let enc = srh.encode_vec().unwrap();
+        assert_eq!(enc[1], 3);
+        assert_eq!(enc[1], srh.hdr_ext_len());
     }
 }

@@ -1,6 +1,6 @@
 //! SRv6 Locator — an IPv6 prefix owned by a node and advertised so
 //! that packets destined for any SID under the locator are routed to
-//! that node (RFC 8754 §3.1).
+//! that node (RFC 8986 §3.1).
 //!
 //! A Locator is conceptually a structured prefix: the high-order bits
 //! are the **block** (BLOC, the operator-assigned aggregation), the
@@ -9,7 +9,7 @@
 //! wire, a Locator is just an IPv6 prefix that the node owns.
 //!
 //! The crate models the Locator as a 16-byte address plus a prefix
-//! length (RFC 8754 §3.1 "Locator" = the IPv6 prefix the IGP
+//! length (RFC 8986 §3.1: the Locator is the IPv6 prefix the IGP
 //! advertises). The structured `block_len` / `node_len` split is
 //! stored alongside so behaviors and the daemon can render the
 //! human-readable `LOC:FUNCT:ARGS` form without recomputation.
@@ -19,13 +19,13 @@ use core::str::FromStr;
 
 use crate::sid::{parse_v6, Sid, SidParseError};
 
-/// Maximum locator block length in bits (RFC 8754 §3.1).
+/// Maximum locator block length in bits (RFC 8986 §3.1).
 pub const MAX_BLOCK_BITS: u8 = 128;
 
 /// A locator block: an IPv6 prefix plus its bit length (RFC 8754
-/// §3.1). The address carries 16 bytes of network-byte-order data;
+/// — RFC 8986 §3.1). The address carries 16 bytes of network-byte-order data;
 /// host bits beyond `block_bits` are zero on construction and on
-/// `from_str` parsing (RFC 8754 §3.1 — a Locator is a *prefix*, not
+/// `from_str` parsing (RFC 8986 §3.1 — a Locator is a *prefix*, not
 /// an address).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Locator {
@@ -39,7 +39,7 @@ pub struct Locator {
 
 impl Locator {
     /// Construct a Locator from a 16-byte address and a bit length.
-    /// The address is masked so host bits are zero (RFC 8754 §3.1).
+    /// The address is masked so host bits are zero (RFC 8986 §3.1).
     /// Returns `None` if `block_bits > 128`.
     pub fn new(addr: [u8; 16], block_bits: u8) -> Option<Self> {
         if block_bits > MAX_BLOCK_BITS {
@@ -95,9 +95,24 @@ impl Locator {
         Sid::from_octets(octets)
     }
 
-    /// True when `sid` falls inside this locator.
+    /// True when `sid` falls inside this locator — a bit-granular
+    /// comparison of the leading `block_bits` (RFC 8986 §3.1: "L, the
+    /// locator length, is flexible, and an operator is free to use
+    /// the locator length of their choice"). The byte-granular
+    /// `Sid::is_inside_locator` helper returned `false` for every SID
+    /// whenever `block_bits` was not a multiple of 8.
     pub fn contains_sid(&self, sid: Sid) -> bool {
-        sid.is_inside_locator(&self.addr[..self.block_bytes()], self.block_bits)
+        let n = self.block_bytes();
+        if sid.as_bytes()[..n] != self.addr[..n] {
+            return false;
+        }
+        // Compare the remaining bits of the partial byte, if any.
+        let rem = self.block_bits % 8;
+        if rem == 0 {
+            return true;
+        }
+        let mask = !((1u16 << (8 - rem)) - 1) as u8;
+        (sid.as_bytes()[n - 1] & mask) == (self.addr[n - 1] & mask)
     }
 
     /// Allocate a SID at a given function index inside this locator.
@@ -317,5 +332,38 @@ mod tests {
         assert_eq!(loc.block_bytes(), 16);
         let loc = Locator::from_str("::/0").unwrap();
         assert_eq!(loc.block_bytes(), 0);
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn contains_sid_bit_granular_for_non_octet_locators() {
+        // RFC 8986 §3.1: the locator length is flexible. A /33
+        // locator must recognize the SIDs it builds — the
+        // byte-granular helper returned false for every SID whenever
+        // block_bits was not a multiple of 8.
+        let loc = Locator::from_str("2001:db8:8000::/33").unwrap();
+        let sid = loc.sid_with_tail({
+            let mut t = [0u8; 16];
+            t[8..12].copy_from_slice(&[0, 0, 0, 1]);
+            t
+        });
+        assert!(loc.contains_sid(sid), "a locator-built SID is inside");
+        // Outside the /33: flip a bit the locator pins (bit 33).
+        let mut outside = [0u8; 16];
+        outside.copy_from_slice(sid.as_bytes());
+        outside[4] ^= 0x80;
+        assert!(
+            !loc.contains_sid(Sid::from_octets(outside)),
+            "a SID differing inside the locator prefix is outside"
+        );
+        // The locator's own host bits (past /33) do not matter.
+        let mut tail_match = [0u8; 16];
+        tail_match.copy_from_slice(sid.as_bytes());
+        tail_match[5] ^= 0x01;
+        assert!(loc.contains_sid(Sid::from_octets(tail_match)));
     }
 }

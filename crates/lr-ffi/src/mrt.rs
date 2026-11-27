@@ -732,6 +732,10 @@ pub unsafe extern "C" fn lr_mrt_record_bgp4mp_message(
             box_record(MrtRecord::Bgp4MpMessage(Bgp4MpMessage {
                 common,
                 message: msg,
+                // Constructed by the embedder, not decoded: no header
+                // timestamp exists to carry over.
+                timestamp_s: 0,
+                timestamp_us: None,
             }))
         },
         std::ptr::null_mut(),
@@ -769,6 +773,10 @@ pub unsafe extern "C" fn lr_mrt_record_bgp4mp_state_change(
                 common,
                 old_state,
                 new_state,
+                // Constructed by the embedder, not decoded: no header
+                // timestamp exists to carry over.
+                timestamp_s: 0,
+                timestamp_us: None,
             }))
         },
         std::ptr::null_mut(),

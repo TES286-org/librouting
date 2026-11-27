@@ -35,10 +35,28 @@ pub use config::{
 pub use stale::{StaleEntry, StaleSet, StaleSweepReport};
 pub use tier::{PeerHealthTier, MAX_TIER};
 
+/// Per-tick budget state for the global recovery rate limit: at or
+/// above the `soft_degraded` budget, at most one session recovers per
+/// tick (issue #99 §Global protection's "freeze automatic recovery",
+/// without the permanent wedge a full freeze produced — recovery is
+/// the only thing that lowers the degraded count).
+#[derive(Debug, Clone, Copy, Default)]
+struct TickBudget {
+    recoveries: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionState {
     pub baseline_rate: f64,
     pub last_baseline_ms: u64,
+    /// Whether the EWMA baseline has taken its first sample. An
+    /// explicit flag rather than a `last_baseline_ms == 0` sentinel:
+    /// the router clock is milliseconds-since-daemon-start, so a
+    /// session created at any `now_ms > 0` would never match the
+    /// sentinel and would blend its first sample against an implicit
+    /// zero baseline — badly under-estimating a legitimately chatty
+    /// peer's budget.
+    pub baseline_seeded: bool,
     pub events: Vec<u64>,
     pub tier: PeerHealthTier,
     pub last_transition_ms: u64,
@@ -84,6 +102,7 @@ impl Default for SessionState {
         Self {
             baseline_rate: 0.0,
             last_baseline_ms: 0,
+            baseline_seeded: false,
             events: Vec::new(),
             tier: PeerHealthTier::L0,
             last_transition_ms: 0,
@@ -121,7 +140,7 @@ impl SessionState {
     }
 
     fn count_in_window(&self, window_s: u64, now_ms: u64) -> u64 {
-        let cutoff = now_ms.saturating_sub(window_s * 1000);
+        let cutoff = now_ms.saturating_sub(window_s.saturating_mul(1000));
         // Linear scan: correct regardless of insertion order. The
         // events vec is bounded by `longest_window_s * peak_rate`
         // and pruned on every `account_event`, so the scan is
@@ -143,10 +162,13 @@ impl SessionState {
     }
 
     fn compute_baseline(&mut self, now_ms: u64, cfg: &PeerHealthConfig) -> f64 {
-        // §Detection: "Maintain an EWMA baseline per
-        // session; freeze or restrict baseline updates while
-        // degraded." The EWMA is updated only while at L0 (frozen
-        // on escalation so a flap cannot inflate its own baseline).
+        // §Detection: "Maintain an EWMA baseline per session; freeze
+        // or restrict baseline updates while degraded." The EWMA is
+        // updated only while the session is at L0 AND no detection
+        // window is currently over budget — a burst's own events sit
+        // in the sample window, so blending during the burst would
+        // let an escalating flapper raise its own budget (weaker
+        // suppression each cycle) before the tier catches up.
         //
         // The sample is the per-second event rate observed over the
         // baseline window (`count_in_window / baseline_window_s`);
@@ -157,13 +179,18 @@ impl SessionState {
         // windowed-average sample keeps the EWMA grounded in a
         // representative observation rather than the instantaneous
         // rate (which would be noisy on a quiet session).
-        if self.tier == PeerHealthTier::L0 {
+        let frozen = self.tier != PeerHealthTier::L0 || self.any_window_tripped(cfg, now_ms);
+        if !frozen {
             let count = self.count_in_window(cfg.baseline_window_s, now_ms);
             let window_s = cfg.baseline_window_s.max(1) as f64;
             let sample = (count as f64) / window_s;
             let alpha = cfg.ewma_alpha.clamp(0.0, 1.0);
-            self.baseline_rate = if self.last_baseline_ms == 0 {
-                // First sample seeds the EWMA.
+            self.baseline_rate = if !self.baseline_seeded {
+                // First sample seeds the EWMA (an explicit flag: the
+                // router clock is ms-since-daemon-start, so a
+                // `last_baseline_ms == 0` sentinel can never fire for
+                // a session created later than the daemon itself).
+                self.baseline_seeded = true;
                 sample
             } else {
                 alpha * sample + (1.0 - alpha) * self.baseline_rate
@@ -171,6 +198,19 @@ impl SessionState {
             self.last_baseline_ms = now_ms;
         }
         self.baseline_rate
+    }
+
+    /// Whether any detection window is currently over budget — the
+    /// condition under which the baseline update is frozen (a burst
+    /// must not raise its own budget).
+    fn any_window_tripped(&self, cfg: &PeerHealthConfig, now_ms: u64) -> bool {
+        let baseline_eps = self.baseline_rate.max(cfg.min_baseline_rate_eps);
+        let short = self.count_in_window(cfg.short_window.window_s, now_ms);
+        let mid = self.count_in_window(cfg.mid_window.window_s, now_ms);
+        let long = self.count_in_window(cfg.long_window.window_s, now_ms);
+        short > cfg.short_window.budget_for(baseline_eps)
+            || mid > cfg.mid_window.budget_for(baseline_eps)
+            || long > cfg.long_window.budget_for(baseline_eps)
     }
 }
 
@@ -202,6 +242,12 @@ pub struct PeerHealthTable {
     cfg: PeerHealthConfig,
     sessions: BTreeMap<(u64, NlriFamily), SessionState>,
     degraded_session_count: u32,
+    /// Degraded-session count by the state machine's OWN tiers,
+    /// independent of the rollout mask. The budget gates read this so
+    /// shadow-mode runs simulate the same global-budget behavior Full
+    /// mode would produce (the public `degraded_session_count` stays
+    /// masked to L0 in shadow modes for operator-facing output).
+    internal_degraded_count: u32,
     peak_tier: PeerHealthTier,
 }
 
@@ -211,6 +257,7 @@ impl PeerHealthTable {
             cfg,
             sessions: BTreeMap::new(),
             degraded_session_count: 0,
+            internal_degraded_count: 0,
             peak_tier: PeerHealthTier::L0,
         }
     }
@@ -299,8 +346,18 @@ impl PeerHealthTable {
         entry.record_event(now_ms);
         entry.exclusions.retain(|w| now_ms < w.end_ms);
         let longest_s = self.cfg.longest_window_s();
-        entry.prune_events(now_ms.saturating_sub(longest_s * 1000));
-        self.run_state_machine((peer_id, family), now_ms);
+        entry.prune_events(now_ms.saturating_sub(longest_s.saturating_mul(1000)));
+        // An event-driven run has no tick budget of its own to spend;
+        // a fresh one means the soft-budget rate limit applies per
+        // event rather than per tick — acceptable because event-driven
+        // recoveries also require the session's full dwell+cooldown.
+        let mut budget = TickBudget::default();
+        self.internal_degraded_count = self
+            .sessions
+            .values()
+            .filter(|s| s.tier > PeerHealthTier::L0)
+            .count() as u32;
+        self.run_state_machine((peer_id, family), now_ms, &mut budget);
         self.recompute_aggregates();
         let session = self
             .sessions
@@ -487,8 +544,9 @@ impl PeerHealthTable {
             return report;
         }
         let longest_s = self.cfg.longest_window_s();
-        let cutoff = now_ms.saturating_sub(longest_s * 1000);
+        let cutoff = now_ms.saturating_sub(longest_s.saturating_mul(1000));
         let keys: Vec<(u64, NlriFamily)> = self.sessions.keys().copied().collect();
+        let mut budget = TickBudget::default();
         for key in keys {
             let before = self
                 .sessions
@@ -499,7 +557,15 @@ impl PeerHealthTable {
                 s.prune_events(cutoff);
                 s.exclusions.retain(|w| now_ms < w.end_ms);
             }
-            self.run_state_machine(key, now_ms);
+            // Refresh the internal count from the completed
+            // transitions of the sessions already processed this
+            // tick, so the budget gates see a monotone view.
+            self.internal_degraded_count = self
+                .sessions
+                .values()
+                .filter(|s| s.tier > PeerHealthTier::L0)
+                .count() as u32;
+            self.run_state_machine(key, now_ms, &mut budget);
             let after = self
                 .sessions
                 .get(&key)
@@ -519,7 +585,7 @@ impl PeerHealthTable {
         report
     }
 
-    fn run_state_machine(&mut self, key: (u64, NlriFamily), now_ms: u64) {
+    fn run_state_machine(&mut self, key: (u64, NlriFamily), now_ms: u64, budget: &mut TickBudget) {
         let Some(session) = self.sessions.get_mut(&key) else {
             return;
         };
@@ -530,7 +596,12 @@ impl PeerHealthTable {
         let cfg = self.cfg.clone();
 
         for _ in 0..=(MAX_TIER as u8 as usize) {
-            let degraded_count = self.degraded_session_count;
+            // The state machine gates read the INTERNAL degraded
+            // count — the state machine's own tiers, not the
+            // rollout-masked public view — so a shadow-mode run
+            // computes the same tiers Full mode would (the shadow
+            // phases exist to predict Full-mode behavior).
+            let degraded_count = self.internal_degraded_count;
 
             let short = s.count_in_window(cfg.short_window.window_s, now_ms);
             let mid = s.count_in_window(cfg.mid_window.window_s, now_ms);
@@ -558,7 +629,7 @@ impl PeerHealthTable {
                 let emergency =
                     long_tripped && long > cfg.long_window.emergency_budget(baseline_eps);
                 let interval_ok = now_ms.saturating_sub(s.last_escalation_ms)
-                    >= cfg.min_transition_interval_s * 1000;
+                    >= cfg.min_transition_interval_s.saturating_mul(1000);
                 if emergency || interval_ok {
                     let new_tier = s.tier.next().unwrap_or(MAX_TIER);
                     apply_transition(&mut s, new_tier, now_ms, true, &cfg);
@@ -579,13 +650,26 @@ impl PeerHealthTable {
 
             if all_recovered && s.tier > PeerHealthTier::L0 {
                 let dwell_ok = now_ms.saturating_sub(s.tier_entered_ms)
-                    >= cfg.dwell_s(s.tier) * 1000 * (s.backoff as u64);
-                let cooldown_ok =
-                    now_ms.saturating_sub(s.last_recovery_ms) >= cfg.min_recovery_interval_s * 1000;
-                let global_room = degraded_count < cfg.global_budgets.soft_degraded;
+                    >= cfg
+                        .dwell_s(s.tier)
+                        .saturating_mul(1000)
+                        .saturating_mul(s.backoff as u64);
+                let cooldown_ok = now_ms.saturating_sub(s.last_recovery_ms)
+                    >= cfg.min_recovery_interval_s.saturating_mul(1000);
+                // Global soft budget (issue #99 §Global protection:
+                // "freeze automatic recovery"): below it, recovery
+                // proceeds freely; at or above it, recovery is
+                // RATE-LIMITED to one session per tick — the
+                // anti-storm intent, without the wedge a hard freeze
+                // produced (recovery is the only thing that lowers
+                // the count, so a full freeze at `count >= soft`
+                // could never lift once tripped).
+                let global_room =
+                    degraded_count < cfg.global_budgets.soft_degraded || budget.recoveries == 0;
                 if dwell_ok && cooldown_ok && global_room {
                     let new_tier = s.tier.prev().unwrap_or(PeerHealthTier::L0);
                     apply_transition(&mut s, new_tier, now_ms, false, &cfg);
+                    budget.recoveries += 1;
                     continue;
                 } else {
                     s.counters.recovery_suppressed =
@@ -597,11 +681,31 @@ impl PeerHealthTable {
                 && degraded_count >= cfg.global_budgets.hard_degraded
                 && s.tier == PeerHealthTier::L0
             {
-                apply_transition(&mut s, PeerHealthTier::L1, now_ms, true, &cfg);
+                // The hard budget forces a minimum tier (issue #99
+                // §Global protection). This is a global-protection
+                // posture, NOT evidence against the peer: no stale
+                // marking rides with it (marking every healthy
+                // peer's prefixes stale during a network-wide event
+                // would strip ECMP alternates on top of the event).
+                apply_transition_min(&mut s, PeerHealthTier::L1, now_ms, &cfg);
                 continue;
             }
 
             break;
+        }
+
+        // One full stable baseline window at L0 clears the recovery
+        // backoff — a repeat flapper's dwell stretches within a flap
+        // cycle, while a peer that stayed quiet for a whole window
+        // starts fresh. (Resetting the backoff at the L0 transition
+        // itself defeated the mechanism: the classic L0↔L1 repeat
+        // flapper always saw the base dwell.)
+        if s.tier == PeerHealthTier::L0
+            && s.backoff > 1
+            && now_ms.saturating_sub(s.tier_entered_ms)
+                >= cfg.baseline_window_s.saturating_mul(1000)
+        {
+            s.backoff = 1;
         }
 
         *session = s;
@@ -618,8 +722,12 @@ impl PeerHealthTable {
         // and the global-budget logic.
         let publicly_active = matches!(self.cfg.rollout, RolloutMode::Limited | RolloutMode::Full);
         let mut count = 0u32;
+        let mut internal = 0u32;
         let mut peak = PeerHealthTier::L0;
         for s in self.sessions.values() {
+            if s.tier > PeerHealthTier::L0 {
+                internal = internal.saturating_add(1);
+            }
             let t = if publicly_active {
                 self.cfg.effective_tier(s.tier)
             } else {
@@ -633,6 +741,7 @@ impl PeerHealthTable {
             }
         }
         self.degraded_session_count = count;
+        self.internal_degraded_count = internal;
         self.peak_tier = peak;
     }
 
@@ -648,6 +757,7 @@ impl PeerHealthTable {
     pub fn reset(&mut self) {
         self.sessions.clear();
         self.degraded_session_count = 0;
+        self.internal_degraded_count = 0;
         self.peak_tier = PeerHealthTier::L0;
     }
 }
@@ -688,11 +798,39 @@ fn apply_transition(
     } else {
         s.last_recovery_ms = now_ms;
         s.counters.recoveries = s.counters.recoveries.saturating_add(1);
+        // The backoff doubles per recovery step and deliberately
+        // survives the L0 return — the classic L0<->L1 repeat flapper
+        // must see a stretching dwell, not the base one every cycle.
+        // It clears after one full stable baseline window at L0 (see
+        // run_state_machine).
         s.backoff = s.backoff.saturating_mul(2).min(cfg.max_backoff);
-        if new_tier == PeerHealthTier::L0 {
-            s.backoff = 1;
-        }
     }
+}
+
+/// A minimum-tier transition forced by the global hard budget: the
+/// tier and bookkeeping of [`apply_transition`] without the stale
+/// marking — a global-protection posture is not evidence against the
+/// peer, and marking every healthy session's prefixes stale during a
+/// network-wide event would strip ECMP alternates on top of it.
+fn apply_transition_min(
+    s: &mut SessionState,
+    new_tier: PeerHealthTier,
+    now_ms: u64,
+    cfg: &PeerHealthConfig,
+) {
+    let old_tier = s.tier;
+    if new_tier == old_tier {
+        return;
+    }
+    s.tier = new_tier;
+    s.last_transition_ms = now_ms;
+    s.tier_entered_ms = now_ms;
+    s.last_escalation_ms = now_ms;
+    s.counters.escalations = s.counters.escalations.saturating_add(1);
+    if new_tier > s.counters.peak_tier {
+        s.counters.peak_tier = new_tier;
+    }
+    let _ = cfg;
 }
 
 impl PartialOrd for PeerHealthTier {
@@ -953,5 +1091,163 @@ mod tests {
         // Flip to Limited: tier capped at L1.
         t.set_rollout_mode(RolloutMode::Limited);
         assert_eq!(t.tier(1, NlriFamily::IPV4_UNICAST), PeerHealthTier::L1);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Audit H65 batch: the soft-budget recovery wedge, stale marking on the
+    // hard-budget gate, the EWMA first-sample seed, backoff across L0 and
+    // window-second overflow.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn soft_budget_rate_limits_recovery_without_wedging() {
+        // With the soft budget at 2, three degraded sessions must still
+        // ALL recover — one per tick — instead of being frozen forever
+        // (the pre-fix `degraded_count < soft` gate could never lift
+        // once tripped, because recovery is the only thing that
+        // lowers the count).
+        let mut cfg = cfg_test();
+        cfg.global_budgets.soft_degraded = 2;
+        cfg.global_budgets.hard_degraded = 0;
+        let mut t = PeerHealthTable::new(cfg);
+        let fam = NlriFamily::IPV4_UNICAST;
+        let mut final_ms = 0u64;
+        for peer in 1..=3u64 {
+            final_ms = train_then_burst(&mut t, peer, fam, 10_000, 200, 10);
+        }
+        assert_eq!(t.degraded_session_count(), 3);
+        // Ticks past every window: at or above the soft budget at most
+        // ONE recovery transition fires per tick (the anti-storm
+        // rate limit), and the count always reaches 0 — the wedge a
+        // full freeze produced (no recovery ever) is gone.
+        let mut now = final_ms + 200_000;
+        let mut ticks = 0;
+        while t.degraded_session_count() > 0 {
+            let report = t.tick(now);
+            if t.degraded_session_count() >= 2 {
+                let recoveries = report
+                    .tier_changes
+                    .iter()
+                    .filter(|(_, _, before, after)| after < before)
+                    .count();
+                assert!(
+                    recoveries <= 1,
+                    "at/above the soft budget at most one recovery per tick, got {recoveries}"
+                );
+            }
+            ticks += 1;
+            assert!(ticks < 40, "the soft budget must not wedge recovery");
+            now += 200_000;
+        }
+    }
+
+    #[test]
+    fn hard_budget_gate_does_not_mark_stale() {
+        // The hard budget forces healthy sessions to L1 — a global
+        // posture, not evidence against the peer. Their prefixes must
+        // NOT be marked stale (that would strip ECMP alternates during
+        // a network-wide event). Peers 1-3 degrade for real; peer 4 is
+        // healthy and gets the forced floor.
+        let mut cfg = cfg_test();
+        cfg.global_budgets.soft_degraded = 1;
+        cfg.global_budgets.hard_degraded = 2;
+        let mut t = PeerHealthTable::new(cfg);
+        let fam = NlriFamily::IPV4_UNICAST;
+        // The session must exist before the prefix lands in its set.
+        let _ = t.account_update(1, fam, 0);
+        t.observe_prefix(1, fam, &"198.51.100.0/24".parse().unwrap());
+        for peer in 1..=3u64 {
+            train_then_burst(&mut t, peer, fam, 10_000, 200, 10);
+            assert!(t.tier(peer, fam) > PeerHealthTier::L0);
+        }
+        assert!(t.is_stale(1, fam, &"198.51.100.0/24".parse().unwrap()));
+        // Peer 4 is healthy; the hard gate forces it to L1 but marks
+        // nothing stale.
+        t.observe_prefix(4, fam, &"203.0.113.0/24".parse().unwrap());
+        let _ = t.account_update(4, fam, 20_000);
+        let _ = t.tick(20_000);
+        assert_eq!(t.tier(4, fam), PeerHealthTier::L1, "hard gate forces L1");
+        assert!(
+            !t.is_stale(4, fam, &"203.0.113.0/24".parse().unwrap()),
+            "hard-budget L1 must not mark the healthy peer's prefixes stale"
+        );
+    }
+
+    #[test]
+    fn ewma_first_sample_seeds_not_blends_with_zero() {
+        // A session created at now_ms > 0 (the common case — the router
+        // clock is ms-since-daemon-start) must seed the EWMA with its
+        // first sample. The pre-fix `last_baseline_ms == 0` sentinel
+        // never fired for such a session, so the first sample blended
+        // against an implicit zero baseline. The rate stays below every
+        // window's floor budget so nothing escalates and the baseline
+        // keeps training.
+        let cfg = cfg_test();
+        let mut t = PeerHealthTable::new(cfg);
+        let fam = NlriFamily::IPV4_UNICAST;
+        // One update every 30 s for 8 minutes: 16 events, 1 per mid
+        // window, well under the mid budget floor of 4.
+        let start_ms = 500_000u64;
+        for i in 0..16u64 {
+            let _ = t.account_update(7, fam, start_ms + i * 30_000);
+        }
+        let s = t.sessions_iter().find(|(k, _)| k.0 == 7).unwrap().1.clone();
+        assert_eq!(t.tier(7, fam), PeerHealthTier::L0);
+        assert!(s.baseline_seeded, "the first sample must seed the EWMA");
+        assert!(
+            s.baseline_rate > 0.01,
+            "the seeded EWMA tracks the observed rate, got {} \
+             (the zero-blend bug leaves it near 1/480)",
+            s.baseline_rate
+        );
+    }
+
+    #[test]
+    fn backoff_survives_l0_within_a_flap_cycle() {
+        // The classic L0<->L1 repeat flapper must see a stretching
+        // dwell: the backoff doubles per recovery and no longer resets
+        // at the L0 transition itself. It clears only after one full
+        // stable baseline window at L0.
+        let mut cfg = cfg_test();
+        cfg.baseline_window_s = 480;
+        let mut t = PeerHealthTable::new(cfg);
+        let fam = NlriFamily::IPV4_UNICAST;
+        let final_ms = train_then_burst(&mut t, 9, fam, 10_000, 200, 10);
+        assert!(t.tier(9, fam) > PeerHealthTier::L0);
+        // Windows drain; the session recovers to L0 with backoff > 1.
+        let mut now = final_ms + 200_000;
+        let mut backoff_at_l0 = 0;
+        for _ in 0..6 {
+            let _ = t.tick(now);
+            now += 200_000;
+            if t.tier(9, fam) == PeerHealthTier::L0 {
+                backoff_at_l0 = t.sessions_iter().find(|(k, _)| k.0 == 9).unwrap().1.backoff;
+                break;
+            }
+        }
+        assert_eq!(t.tier(9, fam), PeerHealthTier::L0, "session recovers");
+        assert!(
+            backoff_at_l0 > 1,
+            "the recovery backoff survives the L0 return, got {backoff_at_l0}"
+        );
+        // One full stable baseline window later, the backoff clears.
+        let _ = t.tick(now + 480_000);
+        let backoff = t.sessions_iter().find(|(k, _)| k.0 == 9).unwrap().1.backoff;
+        assert_eq!(backoff, 1, "a stable baseline window clears the backoff");
+    }
+
+    #[test]
+    fn window_seconds_overflow_does_not_panic() {
+        // A config with u64::MAX window seconds must not overflow the
+        // ms conversion (debug builds panic on `window_s * 1000`).
+        let mut cfg = cfg_test();
+        cfg.short_window.window_s = u64::MAX;
+        cfg.mid_window.window_s = u64::MAX;
+        cfg.long_window.window_s = u64::MAX;
+        cfg.baseline_window_s = u64::MAX;
+        let mut t = PeerHealthTable::new(cfg);
+        let fam = NlriFamily::IPV4_UNICAST;
+        let _ = t.account_update(11, fam, 1_000);
+        let _ = t.tick(2_000);
     }
 }

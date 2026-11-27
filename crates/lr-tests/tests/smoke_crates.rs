@@ -141,7 +141,7 @@ mod damping {
     // the reuse threshold before the route re-emerges).
     #[test]
     fn repeated_flaps_suppress_the_route() {
-        let mut table = DampingTable::new(DampingConfig::default());
+        let mut table = DampingTable::new(DampingConfig::default()).unwrap();
         let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
 
         // First withdraw: FoM = DEFAULT_ADDITIVE_INCR = 1000. Below
@@ -169,29 +169,32 @@ mod damping {
     }
 
     // A suppressed route re-emerges once the figure of merit decays
-    // below the reuse threshold (RFC 2439 §4.3). `decay_all` advances
-    // the clock; the decay factor is 0.97 per 30 s, so after enough
-    // ticks the FoM drifts below `DEFAULT_REUSE_THRESHOLD`.
+    // below the reuse threshold (RFC 2439 §4.8.7). The decay runs at
+    // the REACHABLE rate while the peer keeps the route announced —
+    // §4.2: "reduced by half if the route is considered reachable
+    // (whether suppressed or not)".
     #[test]
     fn suppressed_route_reuses_after_decay() {
-        let mut table = DampingTable::new(DampingConfig::default());
+        let mut table = DampingTable::new(DampingConfig::default()).unwrap();
         let prefix = Prefix::new_v4([198, 51, 100, 0], 24);
 
-        // Drive FoM up to ~6× the suppress threshold so the decay has
-        // real work to do.
+        // Drive FoM up to 6000, then re-announce: the entry is
+        // reachable (and suppressed) from here on.
         for i in 0..6 {
             table.on_withdraw(&prefix, i);
         }
         assert!(table.is_suppressed(&prefix));
+        assert!(table.on_announce(&prefix, 6));
 
         // Decay until reuse. The default `decay_factor_active` is
-        // 0.97; each 30 s tick multiplies FoM by 0.97. To drop from
-        // 6000 (capped) below 750 needs roughly log(750/6000) /
-        // log(0.97) ≈ 73 ticks. Cap the loop so a regression in the
-        // decay arithmetic surfaces rather than hanging the test.
+        // 2^(-30/900) ≈ 0.977160 per 30 s tick (a 15-minute
+        // half-life); to drop from 6000 below 750 needs
+        // log(750/6000) / log(0.977160) ≈ 106 ticks. Cap the loop so
+        // a regression in the decay arithmetic surfaces rather than
+        // hanging the test.
         let mut now_s = 6u64;
         for _ in 0..200 {
-            now_s += DEFAULT_REUSE_THRESHOLD as u64; // arbitrary, advances clock
+            now_s += 30; // one decay interval per tick
             let _reused = table.decay_all(now_s);
             if !table.is_suppressed(&prefix) {
                 return;
@@ -205,7 +208,7 @@ mod damping {
     // defaulting to suppressed.
     #[test]
     fn unknown_prefix_is_not_suppressed() {
-        let table = DampingTable::new(DampingConfig::default());
+        let table = DampingTable::new(DampingConfig::default()).unwrap();
         let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
         assert!(!table.is_suppressed(&prefix));
     }
@@ -216,7 +219,7 @@ mod damping {
     // re-installed.
     #[test]
     fn forget_clears_suppression() {
-        let mut table = DampingTable::new(DampingConfig::default());
+        let mut table = DampingTable::new(DampingConfig::default()).unwrap();
         let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
         for i in 0..3 {
             table.on_withdraw(&prefix, i);
@@ -226,9 +229,9 @@ mod damping {
         assert!(!table.is_suppressed(&prefix));
     }
 
-    // The default thresholds are the RFC 2439 §4.7 sample parameters;
-    // pinning them here catches accidental drift in the constants
-    // table.
+    // The default thresholds are the FRR `bgp dampening` scale
+    // (penalty/reuse/suppress 1000/750/2000); pinning them here
+    // catches accidental drift in the constants table.
     #[test]
     fn default_thresholds_match_rfc_2439_sample_parameters() {
         assert_eq!(DEFAULT_ADDITIVE_INCR, 1000);
