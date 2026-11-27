@@ -6540,6 +6540,16 @@ func (x *Route) BestPathCompareMultipath(b *Route, cfg C.lr_best_path_config_t) 
 	return int32(rc), nil
 }
 
+func (x *Route) Clone() (*Route, error) {
+	p := C.lr_route_clone(x.ptr)
+	if p == nil {
+		return nil, fmt.Errorf("lr_route_clone: %s", LastError())
+	}
+	wrapped := &Route{ptr: p}
+	runtime.SetFinalizer(wrapped, (*Route).destroy)
+	return wrapped, nil
+}
+
 func (x *Router) OspfNetworkTypeName(v int32) (string, error) {
 	cp := C.lr_router_ospf_network_type_name(C.int32_t(v))
 	if cp == nil {

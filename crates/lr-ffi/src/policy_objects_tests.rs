@@ -143,6 +143,31 @@ fn as_path_and_communities_round_trip() {
 }
 
 #[test]
+fn route_clone_is_independent() {
+    // Clone: an independent handle — mutating the original never
+    // changes the clone, and each side frees its own handle.
+    let r = v4_route([198, 51, 100, 0], 24);
+    assert_eq!(unsafe { lr_route_set_metric(r, 42) }, 0);
+    let c = unsafe { lr_route_clone(r) };
+    assert!(!c.is_null());
+    let mut v: u32 = 0;
+    assert_eq!(unsafe { lr_route_metric(c, &mut v) }, 0);
+    assert_eq!(v, 42);
+    assert_eq!(unsafe { lr_route_set_metric(r, 4242) }, 0);
+    assert_eq!(unsafe { lr_route_metric(r, &mut v) }, 0);
+    assert_eq!(v, 4242);
+    assert_eq!(unsafe { lr_route_metric(c, &mut v) }, 0);
+    assert_eq!(v, 42); // unchanged by the original's mutation
+                       // NULL input clones to NULL.
+    assert!(unsafe { lr_route_clone(std::ptr::null_mut()) }.is_null());
+    unsafe { lr_route_free(c) };
+    // The clone's free never touched the original.
+    assert_eq!(unsafe { lr_route_metric(r, &mut v) }, 0);
+    assert_eq!(v, 4242);
+    unsafe { lr_route_free(r) };
+}
+
+#[test]
 fn route_construction_rejections() {
     let mut addr = [0u8; 16];
     addr[0] = 203;

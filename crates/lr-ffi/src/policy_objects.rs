@@ -328,6 +328,32 @@ pub unsafe extern "C" fn lr_route_free(route: lr_route_t) {
     )
 }
 
+/// Clone a route handle — returns a NEW `lr_route_t` the caller owns
+/// (free it with [`lr_route_free`]), or NULL on a NULL input.
+///
+/// The route iterators (`lr_loc_rib_iter_best` and friends) hand the
+/// callback a *borrowed* handle whose lifetime ends when the
+/// iteration moves on; a caller that wants to keep the route past
+/// the callback body clones it here.
+///
+/// # Safety
+/// `route` must be null or a live `lr_route_t`. The returned handle
+/// is independent of the input (freeing one never invalidates the
+/// other).
+#[no_mangle]
+pub unsafe extern "C" fn lr_route_clone(route: lr_route_t) -> lr_route_t {
+    guarded(
+        || {
+            if route.is_null() {
+                return std::ptr::null_mut();
+            }
+            let route: &Route = unsafe { &*(route as *const Route) };
+            Box::into_raw(Box::new(route.clone())) as lr_route_t
+        },
+        std::ptr::null_mut(),
+    )
+}
+
 /// Set the route's next hop (RFC 4271 §5.1.3). `addr` carries the
 /// IPv4 octets in the first four bytes when `is_ipv6` is 0. Returns
 /// 0, -1 on a null argument.

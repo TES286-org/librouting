@@ -14113,6 +14113,10 @@ inline std::int32_t best_path_compare_multipath(RouteHandle const& h, lr_route_t
     return rc;
 }
 
+inline lr_route_t clone(RouteHandle const& h) {
+    return lr_route_clone(h.get());
+}
+
 inline std::int32_t lrxp_store_kind(RouteHandle const& h, std::uint8_t* out, std::uint8_t* out_present) {
     std::int32_t rc = lr_route_lrxp_store_kind(h.get(), out, out_present);
     if (rc < 0) throw Error(std::string("lr_route_lrxp_store_kind failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));

@@ -5055,6 +5055,7 @@ int32_t lr_ldp_engine_transit_next_hop(
     uint16_t * out_nh_label_space,
     uint32_t * out_out_label
 );
+lr_route_t lr_route_clone(lr_route_t route);
 int32_t lr_router_reset_session(lr_router_t r, uint64_t session);
 int32_t lr_router_deconfigure_session(lr_router_t r, uint64_t session);
 """
