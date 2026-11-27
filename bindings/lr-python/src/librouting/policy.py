@@ -956,7 +956,15 @@ class PrefixList:
     def __exit__(self, *_):
         self.__del__()
 
-    def add(self, prefix, ge: int = 0, le: int = 255, permit: bool = True) -> None:
+    def add(self, prefix, ge: int = 0, le: int = 0, permit: bool = True) -> None:
+        """Append one entry (FRR `ip prefix-list` semantics).
+
+        ``ge``/``le`` default to unset: a bare entry matches the
+        prefix length exactly. ``ge`` alone widens ``le`` to the
+        family maximum (32 / 128); ``le = 255`` means no upper bound;
+        ``le`` below the prefix length, above the family maximum, or
+        below ``ge`` raises :class:`LrError`.
+        """
         p = _prefix_spec(prefix)
         rc = get_lib().lr_prefix_list_add(self._ptr, p, int(ge), int(le), 1 if permit else 0)
         if rc != 0:

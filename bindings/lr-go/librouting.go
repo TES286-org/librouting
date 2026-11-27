@@ -3709,7 +3709,12 @@ func (l *PrefixList) Free() {
         l.destroy()
 }
 
-// Add appends one entry (le = 255 means no upper bound).
+// Add appends one entry with FRR `ip prefix-list` ge/le semantics:
+// ge = 0 (or le = 0) means unset — the entry matches the prefix
+// length exactly; ge alone widens le to the family maximum (32 /
+// 128); le = 255 means no upper bound; an impossible window (ge
+// below the prefix length, le below the prefix length or above the
+// family maximum, ge greater than le) is an error.
 func (l *PrefixList) Add(spec PrefixSpec, ge, le uint8, permit bool) error {
         if len(spec.Addr) != 4 && len(spec.Addr) != 16 {
                 return fmt.Errorf("PrefixList.Add: bad address length (want 4 or 16)")
