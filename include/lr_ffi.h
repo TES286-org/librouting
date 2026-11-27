@@ -8880,6 +8880,13 @@ int32_t lr_bgp_peer_advertise(lr_bgp_peer_t r, lr_route_t route);
  * 4456 §8: "A BGP speaker SHOULD NOT create an ORIGINATOR_ID
  * attribute if one already exists").
  *
+ * This entry always reports `origin_is_rr_client = false` (the route
+ * was not learned from an RR client of this speaker); a caller that
+ * tracks the source peer's client flag should use
+ * [`lr_bgp_peer_advertise_reflected`] so the RFC 4456 §6 rule 2
+ * reflection (client origins reach the non-client iBGP peers too)
+ * applies.
+ *
  * `originator_bgp_id_addr` points to 4 bytes (the BGP Identifier
  * in network byte order — i.e. the dotted-quad bytes 10.0.0.1
  * would be passed as `{ 10, 0, 0, 1 }`). NULL is rejected with
@@ -8902,6 +8909,37 @@ int32_t lr_bgp_peer_advertise_with_originator(lr_bgp_peer_t r,
                                               lr_route_t route,
                                               uint8_t originator_bgp_id_present,
                                               const uint8_t *originator_bgp_id_addr);
+
+/**
+ * Advertise a route with the full RFC 4456 reflection metadata: the
+ * ORIGINATOR_ID source (§8, like
+ * [`lr_bgp_peer_advertise_with_originator`]) plus the RR-client
+ * origin flag. `origin_is_rr_client != 0` says the route was learned
+ * from a peer this speaker configured as a route-reflector client,
+ * so RFC 4456 §6 rule 2 applies: the speaker reflects the route to
+ * its non-client iBGP peers as well as its clients (with the §8
+ * ORIGINATOR_ID / CLUSTER_LIST loop-detection attributes on every
+ * reflected UPDATE).
+ *
+ * Returns 1 when the route was queued for transmission, 0 when the
+ * peer refused the route (same gates as
+ * [`lr_bgp_peer_advertise`]), `LR_ERR_NULL` (-1) on a NULL peer
+ * handle, NULL route handle, or a NULL originator handle with
+ * `present != 0`.
+ *
+ * The route handle is **borrowed** — the caller retains ownership
+ * and must still free it via `lr_route_free`.
+ *
+ * # Safety
+ * `r` must be a valid BgpPeer handle. `route` must be a valid
+ * Route handle. `originator_bgp_id_addr` (when
+ * `originator_bgp_id_present != 0`) must point to 4 readable bytes.
+ */
+int32_t lr_bgp_peer_advertise_reflected(lr_bgp_peer_t r,
+                                        lr_route_t route,
+                                        uint8_t originator_bgp_id_present,
+                                        const uint8_t *originator_bgp_id_addr,
+                                        uint8_t origin_is_rr_client);
 
 /**
  * Withdraw a list of IPv4/IPv6 prefixes (RFC 4271 §9.3). The peer

@@ -375,11 +375,12 @@ fn ae3_next_hop_roundtrips_with_implied_fe80_prefix() {
     };
     let enc = nh.encode();
     assert_eq!(enc.len(), 2 + 8);
-    assert_eq!(&enc[2..10], &[0x20, 0x00, 0x0c, 0x9f, 0xfe, 0x00, 0x00, 0x01]);
+    assert_eq!(
+        &enc[2..10],
+        &[0x20, 0x00, 0x0c, 0x9f, 0xfe, 0x00, 0x00, 0x01]
+    );
     assert_eq!(NextHop::decode(&enc).unwrap(), nh);
     // babeld's wire form (from network_prefix) decodes identically.
-    let babeld_form = [
-        3, 0, 0x20, 0x00, 0x0c, 0x9f, 0xfe, 0x00, 0x00, 0x01,
-    ];
+    let babeld_form = [3, 0, 0x20, 0x00, 0x0c, 0x9f, 0xfe, 0x00, 0x00, 0x01];
     assert_eq!(NextHop::decode(&babeld_form).unwrap(), nh);
 }

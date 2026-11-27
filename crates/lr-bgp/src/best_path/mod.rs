@@ -710,10 +710,8 @@ mod tests {
         // Two eBGP routes (origin.proto 0), identical AS_PATH; peer 2's
         // carries LOCAL_PREF 200 (attribute 5, 4-byte value).
         let plain = route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 100])], 1);
-        let boosted = route_with_attrs_many(
-            &[(2, vec![2, 1, 0, 0, 100]), (5, vec![0, 0, 0, 200])],
-            2,
-        );
+        let boosted =
+            route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 100]), (5, vec![0, 0, 0, 200])], 2);
         let cfg = BestPathConfig::default();
         let routes = [plain, boosted];
         let best = BestPath::select(&routes, &cfg).unwrap();
@@ -724,10 +722,8 @@ mod tests {
 
         // Symmetrically, an inbound policy that LOWERS LOCAL_PREF below
         // the default loses against an untouched eBGP route.
-        let demoted = route_with_attrs_many(
-            &[(2, vec![2, 1, 0, 0, 100]), (5, vec![0, 0, 0, 50])],
-            1,
-        );
+        let demoted =
+            route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 100]), (5, vec![0, 0, 0, 50])], 1);
         let untouched = route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 100])], 2);
         let routes = [demoted, untouched];
         let best = BestPath::select(&routes, &cfg).unwrap();

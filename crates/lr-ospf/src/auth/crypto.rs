@@ -463,7 +463,10 @@ mod tests {
         let next_trailer = next.sign_trailer(&next_header, &body);
         let mut next_packet = next_header.clone();
         next_packet.extend_from_slice(&body);
-        assert!(verifier.verify(&next_packet, &next_trailer), "seq 101 accepted");
+        assert!(
+            verifier.verify(&next_packet, &next_trailer),
+            "seq 101 accepted"
+        );
         // The byte-identical retransmission of seq 101 also verifies.
         assert!(
             verifier.verify(&next_packet, &next_trailer),

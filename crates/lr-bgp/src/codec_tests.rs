@@ -835,10 +835,7 @@ fn private_codepoints_decode_as_unknown_attributes() {
     frame.push(2);
     frame.extend_from_slice(&body);
 
-    let msg = BgpCodec::new()
-        .decode_slice(&frame)
-        .unwrap()
-        .unwrap();
+    let msg = BgpCodec::new().decode_slice(&frame).unwrap().unwrap();
     let BgpMessage::Update(u) = msg else {
         panic!("expected UPDATE, got {msg:?}");
     };
