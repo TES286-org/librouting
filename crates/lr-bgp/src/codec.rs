@@ -487,6 +487,19 @@ fn decode_nlri_set(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, String> {
     Ok(out)
 }
 
+/// Whether `code` is one of the librouting-private internal code points
+/// that must never be decoded into the matching `AttrType::Lr*` variant
+/// (see [`crate::path::AttrType`]). The list is the mirror of the
+/// encode-side skip list in `encode_update`: 243-255 minus 248 (never
+/// assigned) and minus 251 (the exchange-plane wire attribute, which is
+/// legitimately carried as `Other(251)` and preserved end-to-end).
+fn is_private_codepoint(code: u8) -> bool {
+    matches!(
+        code,
+        243..=247 | 249 | 250 | 252..=255
+    )
+}
+
 fn decode_path_attributes(bytes: &[u8]) -> Result<PathAttributes, BgpError> {
     let mut out = PathAttributes::new();
     let mut i = 0;
@@ -524,7 +537,26 @@ fn decode_path_attributes(bytes: &[u8]) -> Result<PathAttributes, BgpError> {
         let value = bytes[value_start..value_start + attr_len].to_vec();
         let attr = PathAttribute {
             flags,
-            attr_type: AttrType::from_u8(ty_byte),
+            // Ingress private-codepoint filter. The private
+            // `AttrType::Lr*` variants (243-255, minus the type-251
+            // exchange-plane wire attribute) carry router-internal
+            // state — IGP metric, peer source, OSPF/Babel ingress
+            // fields, health tiering, the MPLS label stack — and the
+            // encoder strips them for exactly that reason (see
+            // `encode_update`). Mapping them here to `Other` instead
+            // keeps a remote peer from injecting them with a forged
+            // UPDATE: a received 246 decodes as `Other(246)`, the
+            // typed accessors (`igp_metric()`, `peer_source_address()`,
+            // `label_stack()`, ...) no longer match it, and the value
+            // rides the normal unrecognized-optional-transitive path
+            // (forwarded, never interpreted). Without this the forged
+            // tag would steer the RFC 4271 §9.1.2.2 step (g)/(h)
+            // tiebreaks and the policy DSL's private fields.
+            attr_type: if is_private_codepoint(ty_byte) {
+                AttrType::Other(ty_byte)
+            } else {
+                AttrType::from_u8(ty_byte)
+            },
             value,
         };
         // RFC 4271 §6.3: an attribute appearing more than once is a

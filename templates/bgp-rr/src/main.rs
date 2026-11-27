@@ -458,11 +458,17 @@ mod tests {
         assert_eq!(cluster_list, vec![u32::from_be_bytes(args.cluster_id)]);
     }
 
-    /// `route_reflector.enabled = false` (default) suppresses the
-    /// reflection attributes per RFC 4456 §3 — a non-reflector must
-    /// not stamp ORIGINATOR_ID / CLUSTER_LIST.
+    /// `route_reflector.enabled = false` (default) makes the speaker a
+    /// non-reflector: the iBGP split-horizon rule (RFC 4271 §10)
+    /// applies in full, so an iBGP-learned route is not re-advertised
+    /// to another iBGP peer at all — even one labelled
+    /// `route_reflector_client = true`. A peer's client flag alone
+    /// must not turn a plain speaker into a reflector (RFC 4456 §3:
+    /// reflection is a per-speaker behaviour), and a speaker that
+    /// did reflect without being a reflector would do so without the
+    /// §8 ORIGINATOR_ID / CLUSTER_LIST loop-detection attributes.
     #[test]
-    fn rr_attributes_suppressed_when_not_reflector() {
+    fn rr_suppresses_reflection_when_not_reflector() {
         let args = Args::default();
         let mut cfg = rr_client_cfg(&args, args.clients[1]);
         cfg.route_reflector.enabled = false;
@@ -473,24 +479,38 @@ mod tests {
 
         let route = sample_route();
         assert!(
-            rr_b.advertise(&route),
-            "RR queues UPDATE for client B (no RR)"
+            !rr_b.advertise(&route),
+            "a non-reflector must honour iBGP split-horizon even toward a peer flagged rr_client"
+        );
+        assert!(
+            rr_b.drain_outgoing().is_empty(),
+            "nothing may be queued for a non-reflector's iBGP peer"
+        );
+
+        // An eBGP-learned route still goes out to the same peer: the
+        // split-horizon carve-out only covers iBGP-learned routes,
+        // and an eBGP-to-iBGP advertisement is a plain UPDATE with
+        // no ORIGINATOR_ID / CLUSTER_LIST stamps.
+        let mut plain_route = sample_route();
+        plain_route.origin.proto = 0; // eBGP-learned
+        assert!(
+            rr_b.advertise(&plain_route),
+            "an eBGP-learned route still reaches the iBGP peer"
         );
         let bytes = rr_b.drain_outgoing();
         assert!(!bytes.is_empty());
 
-        // Decode the UPDATE; we expect *no* ORIGINATOR_ID.
         let mut codec = BgpCodec::new();
         let mut r = lr_core::buf::ReadBuf::new(&bytes);
         while let Ok(Some(msg)) = codec.decode(&mut r) {
             if let BgpMessage::Update(u) = msg {
                 assert!(
                     u.attributes.get(AttrType::OriginatorId).is_none(),
-                    "ORIGINATOR_ID must not be stamped when route_reflector.enabled = false"
+                    "a non-reflector stamps no ORIGINATOR_ID"
                 );
                 assert!(
                     u.attributes.get(AttrType::ClusterList).is_none(),
-                    "CLUSTER_LIST must not be stamped when route_reflector.enabled = false"
+                    "a non-reflector stamps no CLUSTER_LIST"
                 );
                 return;
             }

@@ -158,6 +158,71 @@ bit-granular locators (issue #101)
   registry entries that RFC 8986 Table 6 leaves Unassigned; End.DX2V
   is the VLAN L2 table lookup of §4.10, not a cross-connect).
 
+### Fixed — the protocol-semantics batch: private attribute injection,
+OSPF LSDB flush and anti-replay, hold-time-0 sessions, Babel AE 3,
+eBGP LOCAL_PREF, RFC 4456 reflection (issue #101)
+
+Seven wire- and decision-process defects, each confirmed against the
+primary RFC text (and babeld's `network_prefix` for AE 3) before
+fixing:
+
+- **A forged UPDATE could inject the private 243-255 attribute code
+  points** — the encoder strips the eleven librouting-internal tags,
+  but the decoder mapped a received code point straight back into the
+  private `AttrType::Lr*` variant, so any peer could steer the
+  RFC 4271 §9.1.2.2 step (g)/(h) tiebreaks with a fake `LrIgpMetric`
+  (246) / `LrPeerSourceAddress` (245) or attach a bogus MPLS label
+  stack (255). The decoder now maps the private code points to
+  `Other(code)` — the mirror of the encode-side skip list — so the
+  typed accessors can never match them; type 251 stays the
+  exchange-plane wire attribute.
+- **An OSPF MaxAge instance flushed the LSDB before the sequence
+  comparison** — `install` removed the stored entry on `ls_age >=
+  MaxAge` before the §12.1.6 signed comparison, so a replayed
+  early-sequence flush (RFC 2328 §13 step 8's "database copy is more
+  recent" case) washed a newer live LSA out of the database with one
+  forged LSU. The §13.1 comparison now runs first; an equal-sequence
+  MaxAge instance still wins the MaxAge tiebreaker and flushes.
+- **The v2 crypto anti-replay rejected legal retransmissions** —
+  RFC 2328 §D.5.3(2) discards only a **lower** sequence ("is less
+  than"), but the check rejected equality too, while §D.4.3(5) only
+  obliges the sender to use a non-decreasing value, so every BIRD/
+  FRR/Cisco retransmission was dropped and one lost packet wedged the
+  adjacency. The v3 trailer keeps its strictly-greater rule (RFC 7166
+  §4.6 mandates it there) and the cross-referencing daemon comments
+  now quote both rules accurately.
+- **A hold-time-0 session never established and never survived** —
+  the OpenConfirm KEEPALIVE was gated on a non-zero hold time
+  (RFC 4271 §8 sends it unconditionally), and the Established
+  KEEPALIVE/UPDATE arms re-armed the HOLD timer on a zero interval
+  (arm treats 0 as "fire immediately"), tearing the session down
+  after the first message. Verified against a live BIRD 2.17.3
+  session negotiating hold time 0.
+- **A Babel AE-3 address round-tripped as `XXXX::`** — RFC 8966
+  §4.1.4 carries 8 interface-id octets with `fe80::/64` implied; the
+  Hello/IHU and Next Hop codecs wrote the first half of the address
+  instead, so an IHU from a compliant peer never matched and v6
+  next-hops resolved wrongly. Both directions now reconstruct/strip
+  the implied prefix the way babeld and BIRD do.
+- **eBGP LOCAL_PREF was pinned at 100 in the decision process** —
+  RFC 4271 §9.1.2.2 step (c)(1) does not gate the comparison on where
+  the route was learned; FRR/BIRD compare LOCAL_PREF for eBGP routes
+  too (100 only as the absent-attribute default), so an inbound
+  `set local-pref 50` policy was a silent no-op. Both `compare` and
+  `compare_multipath` now read the attribute on every route.
+- **Route reflection implemented only half of RFC 4456 §6** — a route
+  learned from an RR client never reached the non-client iBGP peers
+  (§6 rule 2: "Reflect to all the Non-Client peers and also to the
+  Client peers"), and a non-reflector with a peer merely labelled
+  `route_reflector_client` forwarded iBGP routes without the §8
+  ORIGINATOR_ID/CLUSTER_LIST loop-detection attributes. The §8 stamps
+  now ride every reflected UPDATE, including client routes
+  reflected to non-clients. `advertise_with_originator` gains an
+  `origin_is_rr_client` flag (BREAKING CHANGE for Rust embedders
+  calling it directly; `advertise` is unchanged) and the FFI grows
+  the additive `lr_bgp_peer_advertise_reflected` carrying the full
+  reflection metadata.
+
 ### Fixed — the policy-engine batch: filter verdicts, VM/interpreter
 agreement, AS comparisons, safety knobs, prefix-list semantics
 (issue #101)
