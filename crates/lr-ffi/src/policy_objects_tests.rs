@@ -1,5 +1,10 @@
 use super::*;
+use crate::error::last_error_string;
 use crate::handle::lr_route_t;
+
+fn last_error_message() -> String {
+    last_error_string()
+}
 
 fn v4_route(octets: [u8; 4], len: u8) -> lr_route_t {
     let mut addr = [0u8; 16];
@@ -213,6 +218,104 @@ fn prefix_list_match_semantics() {
     );
     unsafe { lr_prefix_list_free(l) };
     unsafe { lr_prefix_list_free(std::ptr::null_mut()) };
+}
+
+#[test]
+fn prefix_list_frr_ge_le_defaults() {
+    // FRR `ip prefix-list` defaults at the C boundary: a bare entry
+    // (the natural zero-initialized ge/le) matches the prefix length
+    // exactly; `ge` alone widens to the family maximum; `le = 255`
+    // means no upper bound. The old shape copied ge/le verbatim, so
+    // the zero-initialized spelling produced [0, 0] — a window that
+    // never matches — and `ge = 0, le = 255` matched every length.
+    let p8 = {
+        let mut p = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 0,
+            prefix_len: 8,
+        };
+        p.addr[0] = 10;
+        p
+    };
+    let exact = {
+        let mut p = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 0,
+            prefix_len: 8,
+        };
+        p.addr[0] = 10;
+        p
+    };
+    let longer = {
+        let mut p = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 0,
+            prefix_len: 24,
+        };
+        p.addr[0] = 10;
+        p.addr[1] = 1;
+        p
+    };
+
+    // Bare entry: exact match (FRR `permit 10.0.0.0/8`).
+    let l = lr_prefix_list_new();
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p8, 0, 0, 1) }, 0);
+    assert_eq!(unsafe { lr_prefix_list_match(l, &exact) }, 1);
+    assert_eq!(unsafe { lr_prefix_list_match(l, &longer) }, 0);
+    unsafe { lr_prefix_list_free(l) };
+
+    // le = 255 alone: no upper bound ([plen, family max]).
+    let l = lr_prefix_list_new();
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p8, 0, 255, 1) }, 0);
+    assert_eq!(unsafe { lr_prefix_list_match(l, &exact) }, 1);
+    assert_eq!(unsafe { lr_prefix_list_match(l, &longer) }, 1);
+    unsafe { lr_prefix_list_free(l) };
+
+    // ge alone widens to the family maximum ([ge, 32]).
+    let l = lr_prefix_list_new();
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p8, 16, 0, 1) }, 0);
+    assert_eq!(unsafe { lr_prefix_list_match(l, &exact) }, 0); // /8 < ge
+    assert_eq!(unsafe { lr_prefix_list_match(l, &longer) }, 1);
+    unsafe { lr_prefix_list_free(l) };
+
+    // An impossible window is rejected, never silently stored as a
+    // never-matching entry (FRR vty rejects the same input).
+    let l = lr_prefix_list_new();
+    // ge below the prefix length.
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p8, 4, 0, 1) }, -3);
+    // le below the prefix length.
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p8, 0, 4, 1) }, -3);
+    // ge greater than le.
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p8, 24, 16, 1) }, -3);
+    // le above the family maximum.
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p8, 0, 33, 1) }, -3);
+    // Nothing was stored: the list still denies everything.
+    assert_eq!(unsafe { lr_prefix_list_match(l, &exact) }, 0);
+    let msg = last_error_message();
+    assert!(
+        msg.starts_with("prefix-list:"),
+        "the rejection set lr_last_error, got {msg:?}"
+    );
+    unsafe { lr_prefix_list_free(l) };
+
+    // IPv6: the family maximum is 128.
+    let p64 = {
+        let mut p = lr_prefix_t {
+            addr: [0u8; 16],
+            is_ipv6: 1,
+            prefix_len: 64,
+        };
+        p.addr[0] = 0xfd;
+        p
+    };
+    let l = lr_prefix_list_new();
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p64, 0, 129, 1) }, -3);
+    // le = 255 keeps meaning "no upper bound" on v6 too.
+    assert_eq!(unsafe { lr_prefix_list_add(l, &p64, 0, 255, 1) }, 0);
+    let mut p120 = p64;
+    p120.prefix_len = 120;
+    assert_eq!(unsafe { lr_prefix_list_match(l, &p120) }, 1);
+    unsafe { lr_prefix_list_free(l) };
 }
 
 #[test]

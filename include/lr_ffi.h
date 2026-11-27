@@ -17547,10 +17547,29 @@ lr_prefix_list_t lr_prefix_list_new(void);
 void lr_prefix_list_free(lr_prefix_list_t list);
 
 /**
- * Append one entry: `prefix` with the ge/le length window (FRR
- * `ge`/`le`; `le = 255` means no upper bound) and `permit` (non-zero
- * = permit). First matching entry decides; no match denies.
- * 0 ok, -1 null, -3 malformed prefix.
+ * Append one entry: `prefix` with the ge/le length window and
+ * `permit` (non-zero = permit). First matching entry decides; no
+ * match denies. The window follows FRR `ip prefix-list` semantics
+ * (the FRR `ge`/`le` rules; the daemon's `build_policy_set` applies
+ * the same defaults to `.lr` configuration):
+ *
+ * - `ge = 0` — unset; the lower bound is the prefix length (exact
+ *   by default).
+ * - `ge > 0` — an explicit lower bound; `ge` below the prefix
+ *   length is rejected (FRR vty rejects it too).
+ * - `le = 0` — unset; the upper bound is the prefix length, or the
+ *   family maximum (32 / 128) when `ge` was given (`ge` alone
+ *   widens, the FRR default).
+ * - `le = 255` — no upper bound (the family maximum).
+ * - `le > 0`, `le != 255` — an explicit upper bound; `le` below the
+ *   prefix length or above the family maximum is rejected.
+ *
+ * A zero-initialized C call (`ge = 0, le = 0`) therefore gets the
+ * FRR/Cisco exact-match default — the same entry FRR builds for
+ * `ip prefix-list NAME permit 10.0.0.0/8` with no `ge`/`le`.
+ *
+ * Returns 0 ok, -1 null, -3 malformed prefix or an impossible
+ * ge/le window (details in `lr_last_error`).
  *
  * # Safety
  * `list` must be a live handle; `prefix` a readable `lr_prefix_t`.
