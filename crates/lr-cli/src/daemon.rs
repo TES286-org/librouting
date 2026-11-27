@@ -1178,15 +1178,27 @@ fn spawn_damping_decay_thread(
                 };
                 let now_s = base.elapsed().as_secs();
                 let reactivated = table.decay_all(now_s);
+                // Release the table lock BEFORE re-importing. The
+                // guard from the `table.lock()` above is still live
+                // here — `let reactivated = ...` borrows the guard
+                // for the `decay_all` call but does not end its
+                // lifetime — and `reimport_damped` re-enters the
+                // import chain, whose `DampingImportHook::on_import`
+                // takes the same `table` lock. Holding the guard
+                // across that call self-deadlocks the decay thread
+                // (a `Mutex` is not reentrant): the thread froze
+                // holding the router write lock too, which stalled
+                // the ticker thread and froze the whole daemon —
+                // the prefix never re-activated and the route never
+                // came back (caught live by tests/interop/
+                // damping_frr.sh).
+                drop(table);
                 // RFC 2439 §4.8.7: a suppressed route whose FoM fell
                 // below the reuse threshold is used again. BGP peers
                 // do not re-advertise stable routes, so the router
                 // would never relearn the prefix on its own — the
                 // hook held the newest announcement, and this is the
-                // step that puts it back. The table lock is already
-                // released (the `let reactivated` binding dropped the
-                // guard), so re-importing cannot deadlock against the
-                // hook taking the same lock inside `run_import`.
+                // step that puts it back.
                 for prefix in &reactivated {
                     let routes = held
                         .lock()
