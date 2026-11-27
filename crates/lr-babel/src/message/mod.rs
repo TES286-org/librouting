@@ -236,9 +236,20 @@ impl Ihu {
             match ae {
                 1 => Some(IpAddr::from_bytes(b)?),
                 2 => Some(IpAddr::from_bytes(b)?),
+                // RFC 8966 §4.1.4: "AE 3: Link-local IPv6 address.
+                // Compression is not allowed. The value is 8 octets
+                // long, a prefix of fe80::/64 is implied" — the 8 wire
+                // octets are the interface identifier (bytes 8..16 of
+                // the reconstructed address), not its first 8 bytes.
+                // babeld (network_prefix) and BIRD reconstruct the
+                // same way; writing the octets into a[..8] yielded
+                // `XXXX::` — an IHU from a compliant peer never
+                // matched and v6 next-hops resolved wrongly.
                 _ => {
                     let mut a = [0u8; 16];
-                    a[..8].copy_from_slice(b);
+                    a[0] = 0xfe;
+                    a[1] = 0x80;
+                    a[8..].copy_from_slice(b);
                     Some(IpAddr::V6(a))
                 }
             }
@@ -270,7 +281,11 @@ impl Ihu {
             match (self.ae, addr) {
                 (1, IpAddr::V4(b)) => a.extend_from_slice(b),
                 (2, IpAddr::V6(b)) => a.extend_from_slice(b),
-                (3, IpAddr::V6(b)) => a.extend_from_slice(&b[..8]),
+                // RFC 8966 §4.1.4: AE 3 carries the 8 interface-id
+                // octets — the fe80::/64 prefix is implied, never
+                // sent. Encoding b[..8] shipped the prefix and
+                // dropped the interface identifier.
+                (3, IpAddr::V6(b)) => a.extend_from_slice(&b[8..]),
                 _ => {} // cannot encode; caller should not construct this
             }
         }
@@ -323,10 +338,16 @@ impl NextHop {
         let address = match ae {
             1 => IpAddr::from_bytes(v.get(2..6)?)?,
             2 => IpAddr::from_bytes(v.get(2..18)?)?,
+            // RFC 8966 §4.1.4: AE 3 is 8 octets with fe80::/64
+            // implied — the octets are the interface identifier
+            // (bytes 8..16), the same reconstruction babeld's
+            // network_prefix and BIRD's babel_read_next_hop apply.
             3 => {
                 let b = v.get(2..10)?;
                 let mut a = [0u8; 16];
-                a[..8].copy_from_slice(b);
+                a[0] = 0xfe;
+                a[1] = 0x80;
+                a[8..].copy_from_slice(b);
                 IpAddr::V6(a)
             }
             _ => return None, // AE 0 is forbidden; unknown AEs ignored
@@ -341,7 +362,9 @@ impl NextHop {
         match (&self.address, self.ae) {
             (IpAddr::V4(b), 1) => a.extend_from_slice(b),
             (IpAddr::V6(b), 2) => a.extend_from_slice(b),
-            (IpAddr::V6(b), 3) => a.extend_from_slice(&b[..8]),
+            // RFC 8966 §4.1.4: AE 3 carries the 8 interface-id octets;
+            // the fe80::/64 prefix is implied and never sent.
+            (IpAddr::V6(b), 3) => a.extend_from_slice(&b[8..]),
             _ => {}
         }
         a
