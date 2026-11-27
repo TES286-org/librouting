@@ -42,6 +42,12 @@
 
 use core::cmp::Ordering;
 
+// `Prefix` is only referenced by the `DampingImportHook` surface
+// (the held-routes cache), so a default-feature build (no
+// `damping`) would flag the import as unused — the templates job
+// builds the workspace crates with default features and `-D
+// warnings`, so the gate is part of the fix, not a style choice.
+#[cfg(feature = "damping")]
 use lr_core::addr::Prefix;
 use lr_core::rib::{Route, RouteKey, RouteOrigin};
 
