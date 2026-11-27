@@ -1845,7 +1845,7 @@ lr_babel_mac_key_t lr_babel_mac_key_blake2s128(const uint8_t *secret, uintptr_t 
 int32_t lr_babel_mac_key_algorithm(lr_babel_mac_key_t k);
 uintptr_t lr_babel_mac_key_digest_len(lr_babel_mac_key_t k);
 uintptr_t lr_babel_mac_key_secret_len(lr_babel_mac_key_t k);
-int32_t lr_babel_mac_key_secret_copy(lr_babel_mac_key_t k, uint8_t *out, uintptr_t cap);
+uintptr_t lr_babel_mac_key_secret_copy(lr_babel_mac_key_t k, uint8_t *out, uintptr_t cap);
 void lr_babel_mac_key_free(lr_babel_mac_key_t k);
 
 lr_babel_pseudo_header_t lr_babel_pseudo_header_new_v4(const uint8_t *src_v4,
@@ -1864,13 +1864,13 @@ lr_babel_packet_counter_t lr_babel_packet_counter_new(const uint8_t *index,
                                                       uint32_t initial);
 uint32_t lr_babel_packet_counter_peek_counter(lr_babel_packet_counter_t c);
 uintptr_t lr_babel_packet_counter_peek_index_len(lr_babel_packet_counter_t c);
-int32_t lr_babel_packet_counter_peek_index_copy(lr_babel_packet_counter_t c,
+uintptr_t lr_babel_packet_counter_peek_index_copy(lr_babel_packet_counter_t c,
                                                 uint8_t *out,
                                                 uintptr_t cap);
 void lr_babel_packet_counter_free(lr_babel_packet_counter_t c);
 
 lr_babel_replay_protection_t lr_babel_replay_protection_new(void);
-int32_t lr_babel_replay_protection_accept(lr_babel_replay_protection_t r,
+uint8_t lr_babel_replay_protection_accept(lr_babel_replay_protection_t r,
                                           const uint8_t *index,
                                           uintptr_t index_len,
                                           uint32_t counter);
