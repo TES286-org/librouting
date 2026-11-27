@@ -151,29 +151,22 @@ class RibDiff:
     removed: int = 0
 
 
-class _BorrowedRoute:
-    """A *borrowed* ``lr_route_t`` wrapper — the C side owns the
-    underlying ``Route`` and the wrapper's lifetime ends when the
-    iteration completes. The destructor is a no-op (does NOT call
-    ``lr_route_free``); the borrow is only valid for the body of the
-    iteration that produced it.
+def _route_from_borrowed(ptr):
+    """Snapshot a borrowed ``lr_route_t`` into an owned :class:`Route`.
 
-    Use this only inside the iterators returned by :meth:`LocRib.iter_best`
-    / :meth:`LocRib.iter_paths` / :meth:`AdjRibIn.iter_all` /
-    :meth:`AdjRibIn.iter_origin` / :meth:`AdjRibOut.iter_for`.
+    The RIB iteration callbacks receive handles whose lifetime ends
+    when the iteration moves on (the Loc-RIB / Adj-RIB drops the
+    route as soon as the walk advances), so every collector clones
+    the handle here and hands the caller an owned wrapper.
     """
+    from .policy import Route
 
-    __slots__ = ("_ptr",)
-
-    def __init__(self, ptr) -> None:
-        self._ptr = ptr
-
-    def __del__(self) -> None:  # No-op: the C side owns the route.
-        pass
-
-    @property
-    def ptr(self):
-        return self._ptr
+    cloned = get_lib().lr_route_clone(ptr)
+    if cloned == ffi.NULL:
+        raise LrError("lr_route_clone returned NULL")
+    r = Route.__new__(Route)
+    r._ptr = cloned
+    return r
 
 
 class LocRib:
@@ -313,16 +306,15 @@ class LocRib:
     def iter_best(self) -> Iterator:
         """Walk every best route in the Loc-RIB.
 
-        The callback receives a *borrowed* :class:`Route` handle — the
-        caller must NOT free it. The iterator materializes each route
-        into a temporary wrapper that's only valid for one iteration.
+        Yields owned :class:`Route` snapshots — each route is cloned
+        out of the Loc-RIB during the walk, so the yielded routes stay
+        valid after the iteration ends and after the Loc-RIB mutates.
         """
         results: List = []
 
         @ffi.callback("void(lr_route_t, void *)")
         def cb(route, _user):
-            r = _BorrowedRoute(route)
-            results.append(r)
+            results.append(_route_from_borrowed(route))
 
         count = get_lib().lr_loc_rib_iter_best(self._ptr, cb, ffi.NULL)
         if count < 0:
@@ -331,14 +323,13 @@ class LocRib:
 
     def iter_paths(self) -> Iterator:
         """Walk every path (every multipath entry, not just the best)
-        in the Loc-RIB. See :meth:`iter_best` for the borrowing
-        contract."""
+        in the Loc-RIB. See :meth:`iter_best` for the snapshot
+        semantics."""
         results: List = []
 
         @ffi.callback("void(lr_route_t, void *)")
         def cb(route, _user):
-            r = _BorrowedRoute(route)
-            results.append(r)
+            results.append(_route_from_borrowed(route))
 
         count = get_lib().lr_loc_rib_iter_paths(self._ptr, cb, ffi.NULL)
         if count < 0:
@@ -507,17 +498,16 @@ class AdjRibIn:
     def iter_all(self) -> Iterator:
         """Walk every route in the Adj-RIB-In, regardless of origin.
 
-        The callback receives a *borrowed* route handle — the caller
-        must NOT free it. Returns a list of :class:`_BorrowedRoute`
-        wrappers; the borrow is only valid until the next mutating
-        call on this Adj-RIB-In.
+        Yields owned :class:`Route` snapshots — each route is cloned
+        out of the Adj-RIB-In during the walk, so the yielded routes
+        stay valid after the iteration ends and after the Adj-RIB-In
+        mutates.
         """
         results: List = []
 
         @ffi.callback("void(lr_route_t, void *)")
         def cb(route, _user):
-            r = _BorrowedRoute(route)
-            results.append(r)
+            results.append(_route_from_borrowed(route))
 
         count = get_lib().lr_adj_rib_in_iter_all(self._ptr, cb, ffi.NULL)
         if count < 0:
@@ -526,13 +516,12 @@ class AdjRibIn:
 
     def iter_origin(self, origin: RouteOrigin) -> Iterator:
         """Walk every route from one origin. See :meth:`iter_all` for
-        the borrowing contract."""
+        the snapshot semantics."""
         results: List = []
 
         @ffi.callback("void(lr_route_t, void *)")
         def cb(route, _user):
-            r = _BorrowedRoute(route)
-            results.append(r)
+            results.append(_route_from_borrowed(route))
 
         count = get_lib().lr_adj_rib_in_iter_origin(
             self._ptr, int(origin.peer), int(origin.protocol), cb, ffi.NULL
@@ -622,19 +611,20 @@ class AdjRibOut:
 
     def paths_for(
         self, dest: RouteOrigin, key: RouteKey
-    ) -> List[Tuple[int, "_BorrowedRoute"]]:
+    ) -> List[Tuple[int, "Route"]]:
         """Walk every advertised ``(tx_path_id, route)`` pair for
-        ``(dest, key)``. Each route is *borrowed* — the Adj-RIB-Out
-        owns it for the duration of the call; the borrow is only
-        valid until the next mutating call on this Adj-RIB-Out.
+        ``(dest, key)``. Each route is an owned :class:`Route`
+        snapshot cloned out of the Adj-RIB-Out during the walk, so
+        the pairs stay valid after the call returns and after the
+        Adj-RIB-Out mutates.
         """
         key_c = key._to_c()
         dest_c = dest._to_c()
-        results: List[Tuple[int, _BorrowedRoute]] = []
+        results: List[Tuple[int, "Route"]] = []
 
         @ffi.callback("void(uint32_t, lr_route_t, void *)")
         def cb(path_id, route, _user):
-            results.append((int(path_id), _BorrowedRoute(route)))
+            results.append((int(path_id), _route_from_borrowed(route)))
 
         count = get_lib().lr_adj_rib_out_paths_for(
             self._ptr, dest_c[0], key_c, cb, ffi.NULL
@@ -707,13 +697,12 @@ class AdjRibOut:
 
     def iter_for(self, dest: RouteOrigin) -> Iterator:
         """Walk every route advertised to a given destination. See
-        :meth:`AdjRibIn.iter_all` for the borrowing contract."""
+        :meth:`AdjRibIn.iter_all` for the snapshot semantics."""
         results: List = []
 
         @ffi.callback("void(lr_route_t, void *)")
         def cb(route, _user):
-            r = _BorrowedRoute(route)
-            results.append(r)
+            results.append(_route_from_borrowed(route))
 
         count = get_lib().lr_adj_rib_out_iter_for(
             self._ptr, int(dest.peer), int(dest.protocol), cb, ffi.NULL
@@ -799,16 +788,16 @@ class RibMux:
         return bool(get_lib().lr_rib_mux_is_empty(self._ptr))
 
     def iter(self) -> Iterator:
-        """Walk every merged route in the mux. The callback receives a
-        *borrowed* route handle — the caller must NOT free it. The
-        borrow is only valid until the next mutating call on this mux.
+        """Walk every merged route in the mux. Yields owned
+        :class:`Route` snapshots — each route is cloned out of the mux
+        during the walk, so the yielded routes stay valid after the
+        iteration ends and after the mux mutates.
         """
         results: List = []
 
         @ffi.callback("void(lr_route_t, void *)")
         def cb(route, _user):
-            r = _BorrowedRoute(route)
-            results.append(r)
+            results.append(_route_from_borrowed(route))
 
         count = get_lib().lr_rib_mux_iter(self._ptr, cb, ffi.NULL)
         if count < 0:
