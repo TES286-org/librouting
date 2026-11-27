@@ -329,3 +329,58 @@ fn ihu_truncated_subtlv_drops_the_echo_only() {
     assert_eq!(ihu.timestamp_echo, None);
     assert_eq!(ihu.rxcost, 96);
 }
+
+/// RFC 8966 §4.1.4: "AE 3: Link-local IPv6 address. Compression is not
+/// allowed. The value is 8 octets long, a prefix of fe80::/64 is
+/// implied." The 8 wire octets are the interface identifier — bytes
+/// 8..16 of the reconstructed address. The old codec wrote/expected
+/// the first 8 bytes instead, so an AE-3 address round-tripped as
+/// `XXXX::` (the fe80 prefix dropped, the interface id lost) and never
+/// matched a compliant peer's IHU or next-hop.
+#[test]
+fn ae3_ihu_roundtrips_with_implied_fe80_prefix() {
+    let ihu = Ihu {
+        ae: 3,
+        rxcost: 96,
+        interval_cs: 300,
+        // fe80::1 — the wire form is the interface id `...0001`.
+        address: Some(IpAddr::V6([
+            0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ])),
+        timestamp_echo: None,
+    };
+    let enc = ihu.encode();
+    // Exactly 8 address octets on the wire, all zero except the last.
+    assert_eq!(enc.len(), 6 + 8);
+    assert_eq!(&enc[6..14], &[0, 0, 0, 0, 0, 0, 0, 1]);
+    // A compliant peer's form decodes back to fe80::1.
+    assert_eq!(Ihu::decode(&enc).unwrap(), ihu);
+    assert_eq!(
+        Ihu::decode(&enc).unwrap().address,
+        Some(IpAddr::V6([
+            0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+        ]))
+    );
+}
+
+/// RFC 8966 §4.6.8 + §4.1.4: the Next Hop TLV's AE-3 form carries the
+/// same 8 interface-id octets.
+#[test]
+fn ae3_next_hop_roundtrips_with_implied_fe80_prefix() {
+    let nh = NextHop {
+        ae: 3,
+        address: IpAddr::V6([
+            0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x20, 0x0, 0xc, 0x9f, 0xfe, 0, 0, 0x1,
+        ]),
+    };
+    let enc = nh.encode();
+    assert_eq!(enc.len(), 2 + 8);
+    assert_eq!(
+        &enc[2..10],
+        &[0x20, 0x00, 0x0c, 0x9f, 0xfe, 0x00, 0x00, 0x01]
+    );
+    assert_eq!(NextHop::decode(&enc).unwrap(), nh);
+    // babeld's wire form (from network_prefix) decodes identically.
+    let babeld_form = [3, 0, 0x20, 0x00, 0x0c, 0x9f, 0xfe, 0x00, 0x00, 0x01];
+    assert_eq!(NextHop::decode(&babeld_form).unwrap(), nh);
+}

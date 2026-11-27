@@ -273,7 +273,7 @@ fn rr_reflection_stamps_supplied_originator_bgp_id() {
     // observable in the wire bytes.
     let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
     let originator = RouterId::from_v4([10, 0, 0, 1]);
-    assert!(peer.advertise_with_originator(&route, Some(originator)));
+    assert!(peer.advertise_with_originator(&route, Some(originator), false));
     let bytes = peer.drain_outgoing();
     let mut dec = crate::codec::BgpCodec::new();
     let mut r = lr_core::buf::ReadBuf::new(&bytes);
@@ -351,7 +351,7 @@ fn rr_reflection_preserves_existing_originator_id() {
     // Supply a different BGP Identifier as the candidate — the
     // existing ORIGINATOR_ID must win.
     let candidate = RouterId::from_v4([10, 0, 0, 1]);
-    assert!(peer.advertise_with_originator(&route, Some(candidate)));
+    assert!(peer.advertise_with_originator(&route, Some(candidate), false));
     let bytes = peer.drain_outgoing();
     let mut dec = crate::codec::BgpCodec::new();
     let mut r = lr_core::buf::ReadBuf::new(&bytes);
@@ -392,12 +392,14 @@ fn withdraw_encodes() {
 
 /// RR reflection is gated on `route_reflector.enabled` as well as the
 /// per-peer `route_reflector_client` flag. RFC 4456 §3 makes reflection
-/// a per-speaker behavior — a peer marked as an RR-client of a speaker
-/// that is itself not a reflector must NOT receive ORIGINATOR_ID /
-/// CLUSTER_LIST, because no cluster id is defined for the local
-/// speaker. This test pins the gating: with `route_reflector_client =
-/// true` and `route_reflector.enabled = false` (the default), the
-/// reflected UPDATE carries neither attribute.
+/// a per-speaker behavior — a speaker that is itself not a reflector
+/// never reflects, even toward a peer merely marked
+/// `route_reflector_client = true`: the old gate keyed only on the
+/// target's flag, so a non-RR speaker forwarded iBGP routes to the
+/// mislabelled peer AND (because the stamp gate required `enabled`)
+/// without the ORIGINATOR_ID / CLUSTER_LIST loop-detection attributes.
+/// With `enabled = false` the iBGP split-horizon rule (RFC 4271 §10)
+/// applies in full and nothing is sent at all.
 #[test]
 fn rr_reflection_suppressed_when_route_reflector_disabled() {
     let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
@@ -406,7 +408,83 @@ fn rr_reflection_suppressed_when_route_reflector_disabled() {
     // value of `false` — the speaker is not configured as a reflector.
     let mut peer = established_peer(cfg);
     let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
-    assert!(peer.advertise(&route));
+    assert!(
+        !peer.advertise(&route),
+        "a non-reflector must honour iBGP split-horizon even toward a peer flagged rr_client"
+    );
+}
+
+/// RFC 4456 §6 rule 2: "A route from a Client peer: Reflect to all the
+/// Non-Client peers and also to the Client peers." A route learned
+/// from an RR client must reach the non-client iBGP peers too — the
+/// old split-horizon gate keyed only on the TARGET's client flag, so
+/// client routes never left the cluster and a typical RR deployment's
+/// non-client mesh went dark for them.
+#[test]
+fn rr_reflects_client_route_to_non_client_peers() {
+    // The egress peer is a NON-client iBGP peer (route_reflector_client
+    // stays false); the speaker is a reflector.
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.route_reflector.enabled = true;
+    let mut peer = established_peer(cfg);
+    // origin.proto = 1 (iBGP-learned) from a client.
+    let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
+    assert!(peer.advertise_with_originator(&route, Some(RouterId::from_v4([10, 0, 0, 42])), true,));
+    let bytes = peer.drain_outgoing();
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    match dec.decode(&mut r) {
+        Ok(Some(BgpMessage::Update(u))) => {
+            // §8: the reflected UPDATE carries the loop-detection
+            // attributes even to a non-client (CLUSTER_LIST is the
+            // downstream clusters' loop-detection input).
+            let oi = u
+                .attributes
+                .get(AttrType::OriginatorId)
+                .expect("ORIGINATOR_ID on a client route reflected to a non-client");
+            assert_eq!(
+                oi.value.as_slice(),
+                [10, 0, 0, 42],
+                "the supplied originator rides ORIGINATOR_ID"
+            );
+            let cl = u
+                .attributes
+                .get(AttrType::ClusterList)
+                .expect("CLUSTER_LIST on a client route reflected to a non-client");
+            assert_eq!(cl.value.len(), 4, "one prepended cluster id");
+        }
+        _ => panic!("UPDATE did not decode"),
+    }
+}
+
+/// RFC 4456 §6 rule 1: a route from a NON-client iBGP peer reflects to
+/// the clients only. The same iBGP-learned route toward a non-client
+/// peer is still blocked by the split-horizon rule.
+#[test]
+fn rr_does_not_reflect_non_client_route_to_non_client_peers() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.route_reflector.enabled = true;
+    let mut peer = established_peer(cfg);
+    // origin.proto = 1 (iBGP-learned) from a NON-client (flag false).
+    let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
+    assert!(
+        !peer.advertise_with_originator(&route, None, false),
+        "a non-client origin must not reach a non-client peer (RFC 4456 §6 rule 1)"
+    );
+}
+
+/// An eBGP-learned or locally-originated route to a NON-client iBGP
+/// peer is a plain advertisement, not a reflection: no
+/// ORIGINATOR_ID / CLUSTER_LIST stamps (RFC 4456 §8 stamps ride only
+/// reflected UPDATEs).
+#[test]
+fn rr_plain_advertisement_to_non_client_is_unstamped() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.route_reflector.enabled = true;
+    let mut peer = established_peer(cfg);
+    // origin.proto = 2 (locally originated) toward the non-client peer.
+    let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 2);
+    assert!(peer.advertise_with_originator(&route, None, false));
     let bytes = peer.drain_outgoing();
     let mut dec = crate::codec::BgpCodec::new();
     let mut r = lr_core::buf::ReadBuf::new(&bytes);
@@ -414,11 +492,11 @@ fn rr_reflection_suppressed_when_route_reflector_disabled() {
         Ok(Some(BgpMessage::Update(u))) => {
             assert!(
                 u.attributes.get(AttrType::OriginatorId).is_none(),
-                "ORIGINATOR_ID must not be stamped when route_reflector.enabled = false"
+                "a plain advertisement to a non-client carries no ORIGINATOR_ID"
             );
             assert!(
                 u.attributes.get(AttrType::ClusterList).is_none(),
-                "CLUSTER_LIST must not be stamped when route_reflector.enabled = false"
+                "a plain advertisement to a non-client carries no CLUSTER_LIST"
             );
         }
         _ => panic!("UPDATE did not decode"),

@@ -254,10 +254,11 @@ struct Neighbor {
 /// the [`lr_ospf::auth::CryptoAuth`] shape). Anti-replay across
 /// multiple peers with a single key is therefore approximate — the
 /// strongest seen sequence number sticks and any peer whose seq
-/// regresses below it is rejected. RFC 2328 §D.3.3 specifies the
-/// check as "less than or equal to the value last received from the
-/// same router", so a strict per-peer table is the long-term shape; a
-/// single-peer deployment (the common p2p lab) is exact today.
+/// regresses below it is rejected. RFC 2328 §D.5.3 specifies the
+/// check per sending neighbor ("less than the cryptographic sequence
+/// number recorded in the sending neighbor's data structure"), so a
+/// strict per-peer table is the long-term shape; a single-peer
+/// deployment (the common p2p lab) is exact today.
 #[derive(Debug, Clone, Default)]
 enum OspfAuthState {
     /// AuType 0 (NullAuth, the default).
@@ -822,8 +823,8 @@ struct OspfDaemon {
     ///   trailer (Key ID + Auth Data Len + Crypto Seq + HMAC-SHA
     ///   digest) is appended after the OSPF body. Received packets
     ///   are verified: key_id, auth_data_len, MAC and the
-    ///   anti-replay crypto_seq (RFC 2328 §D.3.3 — strictly greater
-    ///   than the last-seen value).
+    ///   anti-replay crypto_seq (RFC 2328 §D.5.3(2) — not less than
+    ///   the last-seen value; equality is a legal retransmission).
     ///
     /// The crypto state is wrapped in `Arc<Mutex<_>>` because the
     /// send path advances the crypto_seq (the daemon is logically
@@ -4130,10 +4131,11 @@ fn apply_ospf_auth(auth: &mut OspfAuthState, bytes: &mut Vec<u8>) -> bool {
                 return false;
             }
             let mut ca = arc.lock().unwrap();
-            // RFC 2328 §D.3.2: the crypto_seq is "non-decreasing" —
-            // advance it on every packet so a receiver's anti-replay
-            // window always sees a strictly larger value (RFC 2328
-            // §D.3.3).
+            // RFC 2328 §D.4.3(5): the crypto_seq is set to a
+            // "non-decreasing" value — advance it on every packet so
+            // a replay of an earlier transmission stays behind the
+            // newest one the receiver accepted (RFC 2328 §D.5.3(2)
+            // discards strictly-lower sequences).
             ca.advance_seq();
             // Rebuild the header with au_type = 2 and the RFC 2328
             // §D.3.1 auth_data field `(key_id | auth_data_len |
@@ -4192,7 +4194,7 @@ fn apply_ospf_auth(auth: &mut OspfAuthState, bytes: &mut Vec<u8>) -> bool {
 /// strategy (or the strategy is NullAuth, which accepts everything);
 /// `false` when the au_type, password, key id, digest length or
 /// digest do not match, or when the anti-replay `crypto_seq` is
-/// less than or equal to the last-seen value (RFC 2328 §D.3.3).
+/// less than the last-seen value (RFC 2328 §D.5.3(2)).
 fn verify_ospf_auth(auth: &mut OspfAuthState, bytes: &[u8]) -> bool {
     match auth {
         OspfAuthState::None => true, // NullAuth: accept all

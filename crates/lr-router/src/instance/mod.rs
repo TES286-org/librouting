@@ -1322,6 +1322,22 @@ impl DefaultRouter {
         peer.peer_bgp_id()
     }
 
+    /// Whether the peer on the far end of `session` is configured as a
+    /// route-reflector client of this speaker (RFC 4456 §5). Used at
+    /// every `BgpPeer::advertise_with_originator` call site so the
+    /// egress path can apply §6 rule 2: a route learned FROM a client
+    /// is reflected to the non-client iBGP peers as well, not only to
+    /// the other clients. False for non-BGP sessions.
+    fn session_is_rr_client(&self, session: u64) -> bool {
+        let Some(state) = self.sessions.get(&session) else {
+            return false;
+        };
+        let SessionState::Bgp { peer, .. } = state else {
+            return false;
+        };
+        peer.config().route_reflector_client
+    }
+
     /// Emit a BMP Peer Up message (RFC 7854 §4.6) to the sink, when
     /// configured. Called when a BGP session transitions to Established.
     fn bmp_peer_up(&self, session: u64) {
@@ -3348,23 +3364,37 @@ impl DefaultRouter {
             return;
         };
         let key = first.key.clone();
-        // Pre-compute the source peer's BGP Identifier for each
-        // distinct originator session in `routes` before the egress
-        // session's mutable borrow — `BgpPeer::advertise_with_originator`
-        // stamps this into ORIGINATOR_ID per RFC 4456 §8 (the
-        // originator of the route in the local AS, not the route
-        // reflector's own BGP Identifier). The lookup is O(distinct
-        // source sessions) — typically 1 in steady-state.
-        let originators: BTreeMap<u64, Option<RouterId>> = routes
+        // Pre-compute the source peer's BGP Identifier and RR-client
+        // flag for each distinct originator session in `routes` before
+        // the egress session's mutable borrow —
+        // `BgpPeer::advertise_with_originator` stamps the identifier
+        // into ORIGINATOR_ID per RFC 4456 §8 (the originator of the
+        // route in the local AS, not the route reflector's own BGP
+        // Identifier) and applies §6 rule 2 with the client flag (a
+        // client's route reflects to the non-client iBGP peers too).
+        // The lookup is O(distinct source sessions) — typically 1 in
+        // steady-state.
+        let originators: BTreeMap<u64, (Option<RouterId>, bool)> = routes
             .iter()
-            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .map(|r| {
+                (
+                    r.origin.peer,
+                    (
+                        self.session_peer_bgp_id(r.origin.peer),
+                        self.session_is_rr_client(r.origin.peer),
+                    ),
+                )
+            })
             .collect();
         let sent =
             if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
                 let mut sent = false;
                 for route in routes {
-                    let originator = originators.get(&route.origin.peer).copied().flatten();
-                    sent |= peer.advertise_with_originator(route, originator);
+                    let (originator, origin_is_rr_client) = originators
+                        .get(&route.origin.peer)
+                        .copied()
+                        .unwrap_or((None, false));
+                    sent |= peer.advertise_with_originator(route, originator, origin_is_rr_client);
                 }
                 let bytes = peer.drain_outgoing();
                 if !bytes.is_empty() {
@@ -3773,17 +3803,27 @@ impl DefaultRouter {
         // Adj-RIB-Out empty as the RFC requires.
         let (_, rfc8212_deny_export) = self.rfc8212_denies(session);
 
-        // Pre-compute the source peer's BGP Identifier for each
-        // route in `snapshot` before the egress session's mutable
-        // borrow — `BgpPeer::advertise_with_originator` stamps this
-        // into ORIGINATOR_ID per RFC 4456 §8. The snapshot may
-        // contain routes from many distinct source sessions (Add-Path
-        // refresh of the full Loc-RIB view), so the lookup is keyed
-        // by `route.origin.peer` and de-duplicated by the BTreeMap.
-        let originators: BTreeMap<u64, Option<RouterId>> = snapshot
+        // Pre-compute the source peer's BGP Identifier and RR-client
+        // flag for each route in `snapshot` before the egress session's
+        // mutable borrow — `BgpPeer::advertise_with_originator` stamps
+        // the identifier into ORIGINATOR_ID per RFC 4456 §8 and applies
+        // the §6 rule 2 reflection with the client flag. The snapshot
+        // may contain routes from many distinct source sessions
+        // (Add-Path refresh of the full Loc-RIB view), so the lookup is
+        // keyed by `route.origin.peer` and de-duplicated by the
+        // BTreeMap.
+        let originators: BTreeMap<u64, (Option<RouterId>, bool)> = snapshot
             .iter()
             .flatten()
-            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .map(|r| {
+                (
+                    r.origin.peer,
+                    (
+                        self.session_peer_bgp_id(r.origin.peer),
+                        self.session_is_rr_client(r.origin.peer),
+                    ),
+                )
+            })
             .collect();
 
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
@@ -3813,8 +3853,11 @@ impl DefaultRouter {
                     if matches!(hooks.run_export_to(&mut route, session), HookVerdict::Drop) {
                         continue;
                     }
-                    let originator = originators.get(&route.origin.peer).copied().flatten();
-                    if peer.advertise_with_originator(&route, originator) {
+                    let (originator, origin_is_rr_client) = originators
+                        .get(&route.origin.peer)
+                        .copied()
+                        .unwrap_or((None, false));
+                    if peer.advertise_with_originator(&route, originator, origin_is_rr_client) {
                         advertised.push(route);
                     }
                 }
@@ -4049,17 +4092,26 @@ impl DefaultRouter {
             }
         }
 
-        // Pre-compute the source peer's BGP Identifier for each
-        // route in `snapshot` before the egress session's mutable
-        // borrow — `BgpPeer::advertise_with_originator` stamps this
-        // into ORIGINATOR_ID per RFC 4456 §8. The initial dump covers
-        // the whole Loc-RIB, so the snapshot typically contains
-        // routes from many distinct source sessions; the lookup is
-        // keyed by `route.origin.peer` and de-duplicated by the
-        // BTreeMap.
-        let originators: BTreeMap<u64, Option<RouterId>> = snapshot
+        // Pre-compute the source peer's BGP Identifier and RR-client
+        // flag for each route in `snapshot` before the egress session's
+        // mutable borrow — `BgpPeer::advertise_with_originator` stamps
+        // the identifier into ORIGINATOR_ID per RFC 4456 §8 and applies
+        // the §6 rule 2 reflection with the client flag. The initial
+        // dump covers the whole Loc-RIB, so the snapshot typically
+        // contains routes from many distinct source sessions; the
+        // lookup is keyed by `route.origin.peer` and de-duplicated by
+        // the BTreeMap.
+        let originators: BTreeMap<u64, (Option<RouterId>, bool)> = snapshot
             .iter()
-            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .map(|r| {
+                (
+                    r.origin.peer,
+                    (
+                        self.session_peer_bgp_id(r.origin.peer),
+                        self.session_is_rr_client(r.origin.peer),
+                    ),
+                )
+            })
             .collect();
 
         // RFC 5291 §6: send the configured ORF entries once the session
@@ -4088,8 +4140,11 @@ impl DefaultRouter {
                 if matches!(hooks.run_export_to(&mut r, h), HookVerdict::Drop) {
                     continue;
                 }
-                let originator = originators.get(&r.origin.peer).copied().flatten();
-                if peer.advertise_with_originator(&r, originator) {
+                let (originator, origin_is_rr_client) = originators
+                    .get(&r.origin.peer)
+                    .copied()
+                    .unwrap_or((None, false));
+                if peer.advertise_with_originator(&r, originator, origin_is_rr_client) {
                     advertised.push(r);
                 }
             }

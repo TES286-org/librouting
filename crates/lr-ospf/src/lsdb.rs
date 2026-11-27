@@ -115,27 +115,54 @@ impl Lsdb {
     /// keyed on it — untouched.
     pub fn install(&mut self, lsa: Lsa, now_ms: u64) -> InstallOutcome {
         let key = lsa.key();
-        if lsa.header.ls_age >= MAX_AGE_SECS {
-            // §13: a MaxAge instance flushes the LSA (and its watermark so
-            // re-origination may restart at the initial sequence number).
-            return if self.entries.remove(&key).is_some() {
-                self.seq_watermark.remove(&key);
-                self.version = self.version.wrapping_add(1);
-                InstallOutcome::Purged
-            } else {
-                InstallOutcome::Ignored
-            };
-        }
-        // Accept if newer than what we have (signed sequence space,
-        // §12.1.2). Out-of-range sequence numbers (the reserved
-        // 0x80000000 and the unreachable wrap region) are rejected
-        // outright — never compared, so a malformed instance cannot be
-        // treated as newer than a valid one or poison the watermark.
+        // Reject out-of-range sequence numbers (the reserved 0x80000000
+        // and the unreachable wrap region) outright — never compared,
+        // so a malformed instance cannot be treated as newer than a
+        // valid one or poison the watermark (§12.1.2).
         if !sequence_in_range(lsa.header.ls_sequence_number) {
             return InstallOutcome::Ignored;
         }
-        let prev_seq = self.seq_watermark.get(&key).copied().unwrap_or(0);
-        if (lsa.header.ls_sequence_number as i32) <= (prev_seq as i32) && prev_seq != 0 {
+        // RFC 2328 §13 steps (5)/(7)/(8) with §13.1's comparison in
+        // between: only an instance MORE RECENT than the stored copy
+        // may replace it, and the MaxAge flush rides the same
+        // comparison. A MaxAge instance whose sequence number is not
+        // newer than the stored copy is §13 step (8)'s "database copy
+        // is more recent" case — the router discards it (and sends
+        // the database copy back, the caller's exchange layer) — so a
+        // stale or forged MaxAge flush (e.g. a replayed early
+        // 0x80000001 instance) can no longer wash a newer live LSA
+        // out of the LSDB. With no stored copy, step (5)'s "no
+        // database copy" arm installs any in-range instance; a MaxAge
+        // instance with no stored copy is step (4)'s ack-and-discard
+        // case, observable here as `Ignored`.
+        let new_seq = lsa.header.ls_sequence_number;
+        let more_recent = match self.entries.get(&key) {
+            None => true,
+            Some(entry) => {
+                let stored = entry.lsa.header.ls_sequence_number;
+                // §13.1: the newer sequence number is more recent;
+                // with equal sequence numbers the MaxAge instance is
+                // the more recent one (a stored entry never carries
+                // MaxAge — MaxAge instances purge at install).
+                (new_seq as i32) > (stored as i32)
+                    || (new_seq == stored && lsa.header.ls_age >= MAX_AGE_SECS)
+            }
+        };
+        if !more_recent {
+            return InstallOutcome::Ignored;
+        }
+        if lsa.header.ls_age >= MAX_AGE_SECS {
+            // §13 step (5)(d) with a more-recent MaxAge instance: the
+            // aged-out LSA is flushed (and its watermark removed so
+            // re-origination may restart at the initial sequence
+            // number).
+            if self.entries.remove(&key).is_some() {
+                self.seq_watermark.remove(&key);
+                self.version = self.version.wrapping_add(1);
+                return InstallOutcome::Purged;
+            }
+            // §13 step (4): MaxAge with no stored instance and no
+            // Exchange/Loading neighbours — nothing to flush.
             return InstallOutcome::Ignored;
         }
         self.seq_watermark
@@ -342,6 +369,50 @@ mod tests {
         let mut again = make_lsa(1, 2, 0x80000003);
         again.header.ls_age = MAX_AGE_SECS;
         assert_eq!(db.install(again, 11), InstallOutcome::Ignored);
+    }
+
+    /// Regression: RFC 2328 §13 step (8) — a MaxAge instance that is
+    /// NOT more recent than the stored copy is discarded; it must not
+    /// flush the newer live LSA out of the LSDB. A replayed or forged
+    /// flush carrying an old sequence number (e.g. a 0x80000001
+    /// instance against a stored 0x80000005) used to wash the live
+    /// entry away before any sequence comparison ran.
+    #[test]
+    fn stale_max_age_instance_does_not_purge() {
+        let mut db = Lsdb::new();
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000005), 0),
+            InstallOutcome::New
+        );
+        // An older MaxAge instance: not more recent → §13 step (8).
+        let mut stale_flush = make_lsa(1, 2, 0x80000001);
+        stale_flush.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(stale_flush, 5), InstallOutcome::Ignored);
+        assert_eq!(db.len(), 1, "the live instance must survive");
+        let e = db.get(&make_lsa(1, 2, 0).key()).unwrap();
+        assert_eq!(e.lsa.header.ls_sequence_number, 0x80000005);
+        // §13.1: an equal-sequence MaxAge instance IS the more recent
+        // one — the MaxAge tiebreaker makes it a genuine flush.
+        let mut tiebreak_flush = make_lsa(1, 2, 0x80000005);
+        tiebreak_flush.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(tiebreak_flush, 6), InstallOutcome::Purged);
+        assert!(db.is_empty());
+    }
+
+    /// Regression: an out-of-range sequence number must not reach the
+    /// MaxAge flush either — the malformed-instance rejection (§12.1.2
+    /// hardening) runs before every comparison.
+    #[test]
+    fn max_age_with_out_of_range_sequence_is_ignored() {
+        let mut db = Lsdb::new();
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000002), 0),
+            InstallOutcome::New
+        );
+        let mut forged = make_lsa(1, 2, 0x00000001);
+        forged.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(forged, 5), InstallOutcome::Ignored);
+        assert_eq!(db.len(), 1, "out-of-range flush must not purge");
     }
 
     #[test]

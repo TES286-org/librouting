@@ -1237,9 +1237,10 @@ impl BgpPeer {
         }
 
         // RFC 4271 §4.2: the Hold Timer is the smaller of our configured
-        // hold time and the peer's. A zero received hold time disables the
-        // hold timer entirely (and with it KEEPALIVEs, per §4.4) — we must
-        // not substitute our own value.
+        // hold time and the peer's. A zero received hold time disables
+        // the hold timer entirely (§8: "the HoldTimer and
+        // KeepaliveTimer are not started") — we must not substitute our
+        // own value.
         self.negotiated_hold_time = open.hold_time.min(self.cfg.hold_time);
         self.hold_remaining = (self.negotiated_hold_time as u64) * 1000;
         let keepalive = self.cfg.keepalive_interval();
@@ -1273,8 +1274,17 @@ impl BgpPeer {
             }
             return (BgpState::OpenSent, actions);
         }
+        // RFC 4271 §8 (OpenSent, "the local system: ... sends a KEEPALIVE
+        // message ... changes its state to OpenConfirm"): the
+        // OpenConfirm KEEPALIVE is sent unconditionally — only the
+        // HoldTimer and KeepaliveTimer are conditional ("If the
+        // negotiated hold time value is zero, then the HoldTimer and
+        // KeepaliveTimer are not started"). Gating the KEEPALIVE
+        // itself on a non-zero hold time left every hold-time-0
+        // session stuck in OpenConfirm: the peer never received the
+        // KEEPALIVE that completes the Established transition.
+        self.enqueue_keepalive();
         if self.negotiated_hold_time > 0 {
-            self.enqueue_keepalive();
             actions.push(BgpAction::SetTimer(
                 timer_ids::HOLD,
                 TimerSpec::once(self.hold_remaining),
@@ -1358,12 +1368,20 @@ impl BgpPeer {
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::Message(BgpMessage::Keepalive(_))) => {
-                self.hold_remaining = (self.negotiated_hold_time as u64) * 1000;
-                my_actions.push(BgpAction::CancelTimer(timer_ids::HOLD));
-                my_actions.push(BgpAction::SetTimer(
-                    timer_ids::HOLD,
-                    TimerSpec::once(self.hold_remaining),
-                ));
+                // RFC 4271 §4.4: when the negotiated Hold Time is zero,
+                // neither the Hold Timer nor the KeepaliveTimer is ever
+                // armed — the session lives on transport alone. Re-arming
+                // HOLD with a zero interval fires it on the next tick
+                // (the timer treats 0 as "immediately"), tearing down
+                // every hold-time-0 session after the first message.
+                if self.negotiated_hold_time > 0 {
+                    self.hold_remaining = (self.negotiated_hold_time as u64) * 1000;
+                    my_actions.push(BgpAction::CancelTimer(timer_ids::HOLD));
+                    my_actions.push(BgpAction::SetTimer(
+                        timer_ids::HOLD,
+                        TimerSpec::once(self.hold_remaining),
+                    ));
+                }
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::Message(BgpMessage::RouteRefresh(refresh))) => {
@@ -1460,12 +1478,18 @@ impl BgpPeer {
                 };
                 my_actions.extend(self.handle_update_in_established(&update));
                 // Feasibility: re-arm the hold timer — any valid message
-                // refreshes it (RFC 4271 §4.4).
-                my_actions.push(BgpAction::CancelTimer(timer_ids::HOLD));
-                my_actions.push(BgpAction::SetTimer(
-                    timer_ids::HOLD,
-                    TimerSpec::once((self.negotiated_hold_time as u64) * 1000),
-                ));
+                // refreshes it (RFC 4271 §4.4), except when the negotiated
+                // Hold Time is zero: §4.4 leaves those sessions with no
+                // hold timer at all, so arming a zero-interval timer
+                // would fire it on the next tick and tear the session
+                // down after the first UPDATE.
+                if self.negotiated_hold_time > 0 {
+                    my_actions.push(BgpAction::CancelTimer(timer_ids::HOLD));
+                    my_actions.push(BgpAction::SetTimer(
+                        timer_ids::HOLD,
+                        TimerSpec::once((self.negotiated_hold_time as u64) * 1000),
+                    ));
+                }
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::TimerKeepalive) => {
