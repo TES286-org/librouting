@@ -236,8 +236,8 @@ class LocRib:
     def install_set(self, key: RouteKey, routes: Sequence) -> None:
         """Install a ranked set of paths for a key (RFC 7911 — Add-Path
         keeps more than one path per prefix; the first element is the
-        best path non-Add-Path consumers see). The handles are *not*
-        consumed — the Loc-RIB clones the underlying ``Route`` value.
+        best path non-Add-Path consumers see). The handles are
+        *consumed* — the caller must not free them afterwards.
         """
         if not routes:
             raise LrError("install_set requires at least one route")
@@ -247,6 +247,9 @@ class LocRib:
             arr[i] = r._ptr
         rc = get_lib().lr_loc_rib_install_set(self._ptr, key_c, arr, len(routes))
         _check_rc(rc, "lr_loc_rib_install_set")
+        # The LocRib consumed the handles; the wrappers must not free.
+        for r in routes:
+            r._ptr = None
 
     def paths_len(self) -> int:
         """Total number of stored paths (>= ``len()`` under RFC 7911

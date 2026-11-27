@@ -1934,7 +1934,7 @@ int main() {
         std::vector<Route> paths;
         paths.push_back(std::move(p1));
         paths.push_back(std::move(p2));
-        rib.install_set(k, paths);
+        rib.install_set(k, std::move(paths));
         check(rib.paths_size() == 2, "LocRib paths_size == 2 after install_set");
         check(rib.size() == 1, "LocRib size == 1 after install_set");
         check(rib.paths(k) == 2, "LocRib paths(k) == 2");

@@ -138,6 +138,15 @@ func TestLocRibInstallSetAndIter(t *testing.T) {
 		t.Fatalf("InstallSet: %v", err)
 	}
 
+	// InstallSet consumed the handles: the wrappers hold nothing
+	// (Free is a no-op, the finalizer is gone) and the LocRib owns
+	// the memory from here on.
+	if r1.ptr != nil || r2.ptr != nil {
+		t.Fatalf("InstallSet must consume the route handles")
+	}
+	r1.Free()
+	r2.Free()
+
 	if r.PathsLen() != 2 {
 		t.Fatalf("PathsLen: got %d want 2", r.PathsLen())
 	}
@@ -191,10 +200,6 @@ func TestLocRibInstallSetAndIter(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("IterSets count: got %d want 1", n)
 	}
-
-	// Free the route handles (InstallSet didn't consume them).
-	r1.Free()
-	r2.Free()
 }
 
 func TestLocRibDiffSince(t *testing.T) {

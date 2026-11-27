@@ -103,6 +103,11 @@ def test_loc_rib_install_set_paths_iter():
         k = _v4_key([10, 0, 0, 1], 24)
         rib.install_set(k, [r1, r2])
 
+        # install_set consumed the handles — the wrappers hold
+        # nothing and their finalizers free nothing.
+        assert r1._ptr is None
+        assert r2._ptr is None
+
         # paths_len counts both; len counts 1 (one key).
         assert rib.paths_len() == 2
         assert len(rib) == 1

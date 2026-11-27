@@ -321,8 +321,9 @@ func (r *LocRib) Uninstall(key RouteKey) (bool, error) {
 
 // InstallSet installs a ranked set of paths for a key (RFC 7911 —
 // Add-Path keeps more than one path per prefix; the first element is
-// the best path non-Add-Path consumers see). The handles are *not*
-// consumed — the Loc-RIB clones the underlying Route value.
+// the best path non-Add-Path consumers see). The handles are
+// *consumed* — the Loc-RIB takes ownership and frees them; the
+// caller must not free or reuse them afterwards.
 func (r *LocRib) InstallSet(key RouteKey, routes []*Route) error {
 	if len(routes) == 0 {
 		return fmt.Errorf("InstallSet: at least one route required")
@@ -335,6 +336,11 @@ func (r *LocRib) InstallSet(key RouteKey, routes []*Route) error {
 	rc := C.lr_loc_rib_install_set(r.ptr, &keyC, (*C.lr_route_t)(unsafe.Pointer(&arr[0])), C.uintptr_t(len(routes)))
 	if rc < 0 {
 		return fmt.Errorf("lr_loc_rib_install_set: %s (rc=%d)", LastError(), int(rc))
+	}
+	// The LocRib consumed the handles; the wrappers must not free.
+	for _, rt := range routes {
+		rt.ptr = nil
+		runtime.SetFinalizer(rt, nil)
 	}
 	return nil
 }

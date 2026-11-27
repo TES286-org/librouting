@@ -2293,6 +2293,8 @@ int main(void) {
         lr_route_t routes[2] = {rr1, rr2};
         rc = lr_loc_rib_install_set(rib, &k, routes, 2);
         check(rc == 0, "lr_loc_rib_install_set");
+        /* install_set consumed both handles (the documented
+         * ownership-transfer contract) — no lr_route_free here. */
         check(lr_loc_rib_paths_len(rib) == 2, "LocRib paths_len == 2 after install_set");
         check(lr_loc_rib_len(rib) == 1, "LocRib len == 1 after install_set");
         check(lr_loc_rib_paths(rib, &k) == 2, "lr_loc_rib_paths == 2");
@@ -2306,9 +2308,6 @@ int main(void) {
         rc = lr_loc_rib_diff_since(rib, 0, &added, &modified, &removed);
         check(rc == 0 && added >= 1, "lr_loc_rib_diff_since added >= 1");
 
-        /* Free the route handles (InstallSet did not consume them). */
-        lr_route_free(rr1);
-        lr_route_free(rr2);
         lr_loc_rib_free(rib);
 
         /* AdjRibIn lifecycle + feed / withdraw / get / origins_for. */

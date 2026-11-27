@@ -5486,17 +5486,22 @@ public:
         return rc == 1;
     }
     /// Install a ranked set of paths for a key (RFC 7911 Add-Path).
-    /// The handles are *not* consumed — the Loc-RIB clones the
-    /// underlying Route value.
-    void install_set(const RouteKey& k, const std::vector<Route>& routes) {
+    /// The handles are *consumed* — the Loc-RIB takes ownership and
+    /// frees them; pass the vector by value (`std::move(paths)`).
+    void install_set(const RouteKey& k, std::vector<Route> routes) {
         if (routes.empty()) throw Error("install_set: at least one route required");
         lr_route_key_t ck = detail::to_lr_route_key(k);
         std::vector<lr_route_t> handles(routes.size());
         for (std::size_t i = 0; i < routes.size(); ++i) {
-            handles[i] = const_cast<Route&>(routes[i]).get();
+            handles[i] = routes[i].get();
         }
         int rc = lr_loc_rib_install_set(ptr_.get(), &ck, handles.data(), routes.size());
-        if (rc < 0) throw Error(std::string("lr_loc_rib_install_set: ") + lr_last_error());
+        if (rc < 0) {
+            // Nothing was consumed — the wrappers keep ownership.
+            throw Error(std::string("lr_loc_rib_install_set: ") + lr_last_error());
+        }
+        // The call consumed every handle: relinquish without freeing.
+        for (auto& r : routes) r.release();
     }
     /// Number of paths stored for a key (RFC 7911 Add-Path).
     std::size_t paths(const RouteKey& k) const {
