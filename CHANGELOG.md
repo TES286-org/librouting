@@ -29,6 +29,19 @@ IPv6 literals are now parsed whole before the `host:port` split, and
 the optional `%zone` is stripped (the accepted `SocketAddrV6` carries
 the zone separately).
 
+### Fixed — redistribution copies exported when their source wins best path (`lr-router`)
+
+A route re-originated into BGP by a `[[redistribute]]` pipe was
+advertised only while it held the Loc-RIB best-path slot. A static
+blackhole aggregate (admin distance 1) outranks its BGP copy (admin
+distance 20), so the copy sat in `redistributed_bgp` outside the
+ranked set: the aggregate was missing from Adj-RIB-Out and was
+withdrawn on the next reselect, even though the kernel mirror
+correctly kept the Static best path. The steady-state export path and
+the session-up initial dump now include redistribution copies that
+the ranked set does not already carry; split horizon, ORF, RFC 8212
+and `summary-only` gates still apply.
+
 ### Fixed — the policy-engine batch: filter verdicts, VM/interpreter
 agreement, AS comparisons, safety knobs, prefix-list semantics
 (issue #101)
