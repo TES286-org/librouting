@@ -3483,6 +3483,20 @@ impl DefaultRouter {
         }
     }
 
+    /// Whether two entries are the same BGP path for export purposes.
+    /// Egress assigns a per-session path identifier to a clone, so the
+    /// identifier itself is not part of the identity.
+    fn same_export_path(a: &Route, b: &Route) -> bool {
+        a.key == b.key
+            && a.origin == b.origin
+            && a.protocol == b.protocol
+            && a.preference == b.preference
+            && a.next_hop == b.next_hop
+            && a.attributes == b.attributes
+            && a.tag == b.tag
+            && a.age_ms == b.age_ms
+    }
+
     /// Per-session slice of [`Self::export_selection`]: the (advertise,
     /// withdraw) delta for `key` toward one established session under
     /// `hooks`, computed against Adj-RIB-Out. Pure with respect to the
@@ -3524,6 +3538,21 @@ impl DefaultRouter {
         // specific than itself, so the aggregate is not suppressed.
         let summary_only_suppressed = self.summary_only_suppresses(key);
         let add_path_tx = peer.add_path_tx_for(key.family);
+        // BIRD `pipe` / FRR `redistribute` semantics: a route
+        // re-originated into BGP by a pipe belongs to BGP's table even
+        // when its source outranks the copy in the shared Loc-RIB. A
+        // static blackhole aggregate is the common case — admin
+        // distance 1 keeps the Static route as the best path (so the
+        // kernel mirror never installs the blackhole) while the BGP
+        // copy, admin distance 20, sits only in `redistributed_bgp`.
+        // The ranked set then carries no BGP path at all; without the
+        // copy as an extra export candidate the aggregate is never
+        // advertised and is withdrawn from peers on the next reselect.
+        let redistributed = self.redistributed_bgp.get(key).cloned().filter(|copy| {
+            copy.origin.peer != session && self.orf_permits(session, key.family, &copy.key.prefix)
+        });
+        let redistributed =
+            redistributed.filter(|copy| !ranked.iter().any(|r| Self::same_export_path(r, copy)));
         let mut desired: Vec<Route> = Vec::new();
         if !summary_only_suppressed && add_path_tx && !rfc8212_deny_export {
             for (slot, route) in ranked.iter().enumerate() {
@@ -3553,6 +3582,16 @@ impl DefaultRouter {
                 }
                 desired.push(candidate);
             }
+            if let Some(copy) = redistributed {
+                let mut candidate = copy;
+                candidate.path_id = desired.len() as u32 + 1;
+                if !matches!(
+                    hooks.run_export_to(&mut candidate, session),
+                    HookVerdict::Drop
+                ) {
+                    desired.push(candidate);
+                }
+            }
         } else if !summary_only_suppressed {
             if let Some(best) = ranked.first() {
                 if best.protocol == Protocol::Bgp
@@ -3561,6 +3600,21 @@ impl DefaultRouter {
                     && self.orf_permits(session, key.family, &best.key.prefix)
                 {
                     let mut candidate = best.clone();
+                    candidate.path_id = 0;
+                    if !matches!(
+                        hooks.run_export_to(&mut candidate, session),
+                        HookVerdict::Drop
+                    ) {
+                        desired.push(candidate);
+                    }
+                }
+            }
+            // Single-path peers advertise one route per prefix: only
+            // fall back to the redistributed copy when the ranked set
+            // contributed no BGP path (the static-aggregate case).
+            if desired.is_empty() && !rfc8212_deny_export {
+                if let Some(copy) = redistributed {
+                    let mut candidate = copy;
                     candidate.path_id = 0;
                     if !matches!(
                         hooks.run_export_to(&mut candidate, session),
@@ -4049,16 +4103,16 @@ impl DefaultRouter {
         };
         let mut ipv4_unicast_suppressed = false;
         let mut snapshot: Vec<Route> = Vec::new();
-        for (family, add_path_tx, suppressed) in families {
-            if suppressed {
-                if family == NlriFamily::IPV4_UNICAST {
+        for (family, add_path_tx, suppressed) in &families {
+            if *suppressed {
+                if *family == NlriFamily::IPV4_UNICAST {
                     ipv4_unicast_suppressed = true;
                 }
                 continue;
             }
-            if add_path_tx {
+            if *add_path_tx {
                 for (key, set) in self.loc_rib.iter_sets() {
-                    if key.family != family {
+                    if key.family != *family {
                         continue;
                     }
                     for (slot, route) in set.iter().enumerate() {
@@ -4083,7 +4137,7 @@ impl DefaultRouter {
                         if route.protocol != Protocol::Bgp {
                             continue;
                         }
-                        if !self.orf_permits(h, family, &route.key.prefix) {
+                        if !self.orf_permits(h, *family, &route.key.prefix) {
                             continue;
                         }
                         let mut r = route.clone();
@@ -4096,15 +4150,52 @@ impl DefaultRouter {
                     // Same gates as the Add-Path branch: family + split
                     // horizon, the protocol-direct exclusion, and the
                     // peer's ORF.
-                    if route.key.family != family
+                    if route.key.family != *family
                         || route.origin.peer == h
                         || route.protocol != Protocol::Bgp
-                        || !self.orf_permits(h, family, &route.key.prefix)
+                        || !self.orf_permits(h, *family, &route.key.prefix)
                     {
                         continue;
                     }
                     snapshot.push(route);
                 }
+            }
+        }
+        // Redistribution copies kept outside Loc-RIB (see
+        // `export_work_for`) must be part of the initial dump too —
+        // otherwise a static aggregate that loses the Loc-RIB slot to
+        // its own source is missing from every session established
+        // after the pipe installed it.
+        for (family, add_path_tx, suppressed) in families.clone() {
+            if suppressed {
+                continue;
+            }
+            for copy in self.redistributed_bgp.values() {
+                if copy.key.family != family
+                    || copy.origin.peer == h
+                    || !self.orf_permits(h, family, &copy.key.prefix)
+                    || snapshot.iter().any(|r| Self::same_export_path(r, copy))
+                {
+                    continue;
+                }
+                let mut r = copy.clone();
+                if add_path_tx {
+                    r.path_id = snapshot
+                        .iter()
+                        .filter(|existing| existing.key == copy.key)
+                        .map(|existing| existing.path_id)
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                } else {
+                    // A single-path peer receives one route per prefix;
+                    // the Loc-RIB entry (if any) already covers it.
+                    if snapshot.iter().any(|existing| existing.key == copy.key) {
+                        continue;
+                    }
+                    r.path_id = 0;
+                }
+                snapshot.push(r);
             }
         }
         let hooks = std::mem::take(&mut self.hooks);

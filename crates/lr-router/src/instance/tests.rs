@@ -3182,6 +3182,79 @@ fn redistribution_bgp_to_bgp_respects_split_horizon() {
     );
 }
 
+/// A static aggregate redistributed into BGP must still be advertised
+/// when the Static source outranks the copy in Loc-RIB. The copy then
+/// lives only in `redistributed_bgp`: the best path is Static (admin
+/// distance 1 vs BGP 20), so the kernel mirror keeps the blackhole out
+/// of the FIB, but BGP owns the copy and must export it (FRR
+/// `redistribute static` / BIRD `pipe`).
+#[test]
+fn static_redistributed_into_bgp_is_exported_when_static_wins_best() {
+    let (mut a, a_session, mut b, b_session) = ebgp_pair();
+    // Install before the session comes up so the initial dump is the
+    // only path the aggregate can reach the peer through.
+    a.add_redistribution_pipe(RedistributionPipe::new(Protocol::Static, Protocol::Bgp));
+    let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
+    let key = a.install_static(
+        prefix,
+        NlriFamily::IPV4_UNICAST,
+        Some(IpAddr::V4([192, 0, 2, 1])),
+        0,
+        None,
+    );
+    a.reselect(&key);
+    let best = a
+        .rib_snapshot()
+        .into_iter()
+        .find(|r| r.key.prefix == prefix)
+        .expect("aggregate stays in Loc-RIB");
+    assert_eq!(
+        best.protocol,
+        Protocol::Static,
+        "the blackhole stays the best path for the kernel mirror"
+    );
+    assert!(a.redistributed_bgp.contains_key(&key));
+
+    establish(&mut a, a_session, &mut b, b_session);
+    let out = a.drain_output(a_session);
+    assert!(
+        !out.is_empty(),
+        "the initial dump must include the redistributed aggregate"
+    );
+    b.feed_input(b_session, &out).unwrap();
+    assert!(
+        b.rib_snapshot().iter().any(|r| r.key.prefix == prefix),
+        "the peer learns the aggregate"
+    );
+
+    // Steady-state export: clear Adj-RIB-Out and run the export path
+    // with the Static best route. The ranked set carries no BGP path,
+    // so only the redistributed copy can produce an advertisement.
+    let dest = RouteOrigin {
+        proto: 0,
+        peer: a_session.0,
+    };
+    a.adj_rib_out.suppress(dest, &key, 0);
+    let static_route = a.static_routes().get(&key).cloned().unwrap();
+    a.export_selection(&key, &[static_route]);
+    let out = a.drain_output(a_session);
+    assert!(
+        !out.is_empty(),
+        "steady-state export must re-advertise the copy"
+    );
+
+    // Withdrawing the static withdrawals the BGP copy with it.
+    assert!(a.uninstall_static(&key));
+    let out = a.drain_output(a_session);
+    if !out.is_empty() {
+        b.feed_input(b_session, &out).unwrap();
+    }
+    assert!(
+        !b.rib_snapshot().iter().any(|r| r.key.prefix == prefix),
+        "the aggregate is withdrawn with its source"
+    );
+}
+
 /// remove_session must drop every piece of per-session bookkeeping:
 /// Adj-RIB-Out entries, pre-policy slices, LLGR caps, max-prefix
 /// state (audit m1) — and withdraw iBGP-origin (proto 1) paths too.

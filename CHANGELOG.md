@@ -17,6 +17,31 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — link-local IPv6 inbound peer matching (`lr-cli`)
+
+A peer configured with `address = "fe80::1"` or
+`remote = "[fe80::1%eth0]:179"` never matched an inbound
+connection. `transport_ip` split the string at its last colon before
+trying the whole literal, so `fe80::1` became `fe80:` and parsed as
+`None`; a `%zone` suffix failed the same way. `match_inbound_peer`
+then skipped the peer and logged "no configured peer matches". Bare
+IPv6 literals are now parsed whole before the `host:port` split, and
+the optional `%zone` is stripped (the accepted `SocketAddrV6` carries
+the zone separately).
+
+### Fixed — redistribution copies exported when their source wins best path (`lr-router`)
+
+A route re-originated into BGP by a `[[redistribute]]` pipe was
+advertised only while it held the Loc-RIB best-path slot. A static
+blackhole aggregate (admin distance 1) outranks its BGP copy (admin
+distance 20), so the copy sat in `redistributed_bgp` outside the
+ranked set: the aggregate was missing from Adj-RIB-Out and was
+withdrawn on the next reselect, even though the kernel mirror
+correctly kept the Static best path. The steady-state export path and
+the session-up initial dump now include redistribution copies that
+the ranked set does not already carry; split horizon, ORF, RFC 8212
+and `summary-only` gates still apply.
+
 ### Fixed — the MRT wire format: Add-Path subtype numbers, the
 RIB_GENERIC_ADDPATH layout, the reduced MP_REACH form (issue #101)
 

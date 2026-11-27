@@ -3623,6 +3623,13 @@ fn dial_local_address(g: &DaemonConfig, p: &PeerSpec, peer_is_v6: bool) -> Optio
 
 /// Match an inbound connection's source address to a configured peer
 /// (explicit mode). Exactly one peer must claim the address.
+///
+/// Matching is address-only: the caller passes `peer_sockaddr.ip()`, so
+/// an IPv6 zone (for example `%eth0`) is not part of `src`. A zone in
+/// the configured `address`/`remote` is stripped by
+/// [`transport_ip`]. Two peers that share one link-local address on
+/// different interfaces therefore cannot be told apart and fail the
+/// exactly-one rule.
 fn match_inbound_peer(entries: &[PeerEntry], src: std::net::IpAddr) -> Result<&PeerEntry, String> {
     let src = match src {
         std::net::IpAddr::V4(v4) => IpAddr::V4(v4.octets()),
@@ -9522,21 +9529,37 @@ fn resolve(addr: &str) -> Option<std::net::SocketAddr> {
 /// Extract the IP component of a `host:port` or `[v6]:port` string.
 /// Returns `None` when the address cannot be parsed — the caller treats
 /// this as "no derivable local address" and falls back to other sources.
+///
+/// A bare IPv6 literal must be parsed whole *before* the `host:port`
+/// split: every hextet separator is a colon, so splitting on the last
+/// one would leave `fe80:` for `fe80::1` and silently return `None`.
+/// That made a peer with `address = "fe80::1"` invisible to
+/// [`match_inbound_peer`]. An optional `%zone` suffix is stripped
+/// because `IpAddr` has no scope-id field: the kernel reports the zone
+/// in the `SocketAddrV6` scope id on `accept()`, not in the address.
 fn transport_ip(addr: &str) -> Option<IpAddr> {
-    // Bracketed IPv6 form: `[v6]:port` or `[v6]`.
+    // Bracketed IPv6 form: `[v6]:port`, `[v6]`, optionally `%zone`.
     if addr.starts_with('[') {
         let end = addr.find(']')?;
-        let host = &addr[1..end];
-        return IpAddr::from_str(host).ok();
+        return parse_ip_literal(&addr[1..end]);
+    }
+    // A bare literal (IPv4, or IPv6 with an optional `%zone`) has no
+    // port. This must come before the `host:port` split because an
+    // IPv6 literal's last colon belongs to the address.
+    if let Some(ip) = parse_ip_literal(addr) {
+        return Some(ip);
     }
     // Plain `host:port` — last colon separates port (IPv4 or hostname).
-    // For a bare IPv6 without brackets this is ambiguous; the resolve()
-    // helper handles that path separately.
-    if let Some(idx) = addr.rfind(':') {
-        let host = &addr[..idx];
-        return IpAddr::from_str(host).ok();
+    if let Some((host, _port)) = addr.rsplit_once(':') {
+        return parse_ip_literal(host);
     }
-    IpAddr::from_str(addr).ok()
+    None
+}
+
+/// Parse an IP literal, ignoring an optional `%zone` suffix.
+fn parse_ip_literal(s: &str) -> Option<IpAddr> {
+    let host = s.split_once('%').map_or(s, |(host, _zone)| host);
+    IpAddr::from_str(host).ok()
 }
 
 /// Parse a labelled-network entry of the form `"<prefix> <labels>"` where
