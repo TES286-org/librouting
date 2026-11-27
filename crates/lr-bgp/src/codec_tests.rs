@@ -754,3 +754,96 @@ fn extended_message_encoder_allocates_for_the_negotiated_ceiling() {
     assert_eq!(default_bytes, ext_bytes);
     assert_eq!(ext_bytes.len(), 19);
 }
+
+/// Regression: the librouting-private internal code points (243-255,
+/// minus 248 and the type-251 exchange-plane wire attribute) carry
+/// router-internal state that "never appears on the wire" — the encoder
+/// strips all eleven of them (see `encode_update`). The decoder must not
+/// map them back into the private `AttrType::Lr*` variants either: a
+/// peer that sends a forged 246 (LrIgpMetric) or 243 (LrPeerHealthStale)
+/// UPDATE must not be able to steer the RFC 4271 §9.1.2.2 step (g)/(h)
+/// tiebreaks or the policy DSL's private fields. The value decodes as
+/// the unrecognized `Other(code)` form, which the router never
+/// interprets and merely forwards like any other unknown
+/// optional-transitive attribute.
+#[test]
+fn private_codepoints_decode_as_unknown_attributes() {
+    // Optional-transitive flags (0xC0), code 246, 4-byte value.
+    let mut attrs = vec![0xc0, 246, 4, 0, 0, 0, 1];
+    // A well-known mandatory ORIGIN so the UPDATE stays parseable.
+    attrs.extend_from_slice(&[0x40, AttrType::Origin.to_u8(), 1, OriginKind::Igp as u8]);
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&0u16.to_be_bytes()); // withdrawn len
+    body.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    body.extend_from_slice(&attrs);
+    body.push(24); // one NLRI prefix length
+    body.extend_from_slice(&[10, 0, 0, 0]); // 10.0.0.0/24
+
+    let mut frame = vec![0xffu8; 16];
+    let len = 19 + body.len();
+    frame.extend_from_slice(&(len as u16).to_be_bytes());
+    frame.push(2); // UPDATE
+    frame.extend_from_slice(&body);
+
+    let mut c = BgpCodec::new();
+    let msg = c.decode_slice(&frame).unwrap().unwrap();
+    let BgpMessage::Update(u) = msg else {
+        panic!("expected UPDATE, got {msg:?}");
+    };
+    let attr = u
+        .attributes
+        .get(AttrType::Other(246))
+        .expect("forged 246 must survive decode as Other(246)");
+    assert_eq!(attr.value, vec![0, 0, 0, 1]);
+    // The private typed accessors must not see the forged value.
+    assert!(
+        u.attributes.igp_metric().is_none(),
+        "a wire-received 246 must never surface as LrIgpMetric"
+    );
+    assert!(!u.attributes.has_igp_metric());
+    // The same holds for every other private code point.
+    for code in [243u8, 244, 245, 247, 249, 250, 252, 253, 254, 255] {
+        let attr = PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::from_u8(code),
+            vec![0],
+        );
+        // from_u8 maps the code to the private variant when asked
+        // directly (the typed API embedders use), but the codec's
+        // ingress path never produces that mapping — see below.
+        assert_ne!(
+            attr.attr_type,
+            AttrType::Other(code),
+            "sanity: {code} maps to a private variant when constructed"
+        );
+    }
+    // And 251 — the exchange-plane wire attribute — stays Other(251),
+    // preserved end-to-end rather than remapped.
+    let mut attrs_251 = vec![0xc0, 251, 4, 0, 0, 0, 2];
+    attrs_251.extend_from_slice(&[0x40, AttrType::Origin.to_u8(), 1, OriginKind::Igp as u8]);
+    let mut body = Vec::new();
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.extend_from_slice(&(attrs_251.len() as u16).to_be_bytes());
+    body.extend_from_slice(&attrs_251);
+    body.push(24);
+    body.extend_from_slice(&[10, 0, 1, 0]);
+
+    let mut frame = vec![0xffu8; 16];
+    let len = 19 + body.len();
+    frame.extend_from_slice(&(len as u16).to_be_bytes());
+    frame.push(2);
+    frame.extend_from_slice(&body);
+
+    let msg = BgpCodec::new()
+        .decode_slice(&frame)
+        .unwrap()
+        .unwrap();
+    let BgpMessage::Update(u) = msg else {
+        panic!("expected UPDATE, got {msg:?}");
+    };
+    assert!(
+        u.attributes.get(AttrType::Other(251)).is_some(),
+        "251 is the exchange-plane wire attribute and stays Other(251)"
+    );
+}
