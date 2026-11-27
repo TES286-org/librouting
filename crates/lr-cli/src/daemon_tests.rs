@@ -2972,3 +2972,80 @@ fn build_session_config_inherits_and_overrides_software_version_encoding() {
         "the per-peer key overrides the router-wide encoding"
     );
 }
+
+#[cfg(test)]
+mod inbound_peer_match_tests {
+    use super::*;
+
+    fn entry(remote: Option<&str>, address: Option<&str>) -> PeerEntry {
+        PeerEntry {
+            spec: PeerSpec {
+                remote: remote.map(str::to_string),
+                address: address.map(str::to_string),
+                ..PeerSpec::default()
+            },
+            handle: SessionHandle(1),
+            handle_in: None,
+            auth: TcpAuth::None,
+            gtsm: Gtsm::default(),
+            bfd: None,
+            busy: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            connector_gen: Arc::new(AtomicU64::new(0)),
+            connector_exited: Arc::new(AtomicU64::new(0)),
+            outbound_lost_collision: Arc::new(AtomicBool::new(false)),
+            admin_down: false,
+            bfd_strict_mode: false,
+        }
+    }
+
+    fn v6(s: &str) -> std::net::IpAddr {
+        std::net::IpAddr::V6(s.parse().unwrap())
+    }
+
+    /// `transport_ip` must accept a bare IPv6 literal (the last colon is
+    /// part of the address, not a port separator) and ignore a `%zone`
+    /// suffix. Pre-fix both forms returned `None`, so `expected_peer_ip`
+    /// skipped the peer and every inbound link-local was rejected with
+    /// "no configured peer matches".
+    #[test]
+    fn transport_ip_parses_bare_and_scoped_ipv6() {
+        let expected = "fe80::1".parse::<IpAddr>().unwrap();
+        assert_eq!(transport_ip("fe80::1"), Some(expected));
+        assert_eq!(transport_ip("fe80::1%eth0"), Some(expected));
+        assert_eq!(transport_ip("[fe80::1]:179"), Some(expected));
+        assert_eq!(transport_ip("[fe80::1%eth0]:179"), Some(expected));
+    }
+
+    /// The IPv4 and hostname paths are unchanged: `host:port` still
+    /// splits at the last colon, and a non-literal host stays `None`.
+    #[test]
+    fn transport_ip_keeps_the_ipv4_and_hostname_paths() {
+        let expected = "192.0.2.1".parse::<IpAddr>().unwrap();
+        assert_eq!(transport_ip("192.0.2.1"), Some(expected));
+        assert_eq!(transport_ip("192.0.2.1:179"), Some(expected));
+        assert_eq!(transport_ip("peer.example:179"), None);
+    }
+
+    /// An `address` holding the bare link-local and a `remote` carrying
+    /// the zone must both claim the inbound source. The gate binds the
+    /// accepted connection to exactly that peer.
+    #[test]
+    fn link_local_inbound_matches_bare_address_and_scoped_remote() {
+        let entries = vec![entry(Some("[fe80::1%eth0]:179"), Some("fe80::1"))];
+        let matched = match_inbound_peer(&entries, v6("fe80::1"))
+            .expect("the configured peer must claim fe80::1");
+        assert_eq!(matched.label(), "[fe80::1%eth0]:179");
+    }
+
+    /// A bidirectional peer that configures only `remote` must also
+    /// match inbound connections: `expected_peer_ip` falls back to the
+    /// host part of `remote`, zone suffix included.
+    #[test]
+    fn scoped_remote_alone_matches_inbound_source() {
+        let entries = vec![entry(Some("[fe80::1%eth0]:179"), None)];
+        let matched = match_inbound_peer(&entries, v6("fe80::1"))
+            .expect("the remote host must claim fe80::1");
+        assert_eq!(matched.label(), "[fe80::1%eth0]:179");
+    }
+}

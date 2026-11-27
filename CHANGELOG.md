@@ -17,6 +17,18 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — link-local IPv6 inbound peer matching (`lr-cli`)
+
+A peer configured with `address = "fe80::1"` or
+`remote = "[fe80::1%eth0]:179"` never matched an inbound
+connection. `transport_ip` split the string at its last colon before
+trying the whole literal, so `fe80::1` became `fe80:` and parsed as
+`None`; a `%zone` suffix failed the same way. `match_inbound_peer`
+then skipped the peer and logged "no configured peer matches". Bare
+IPv6 literals are now parsed whole before the `host:port` split, and
+the optional `%zone` is stripped (the accepted `SocketAddrV6` carries
+the zone separately).
+
 ### Fixed — the policy-engine batch: filter verdicts, VM/interpreter
 agreement, AS comparisons, safety knobs, prefix-list semantics
 (issue #101)
