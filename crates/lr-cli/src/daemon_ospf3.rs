@@ -487,10 +487,11 @@ struct Neighbor {
 /// shape: anti-replay across multiple peers with a single key is
 /// approximate (the strongest seen sequence number sticks and any
 /// peer whose seq regresses below it is rejected). RFC 7166 §4.6
-/// specifies the check as "less than or equal to the value last
-/// received from the same router", so a strict per-peer table is the
-/// long-term shape; a single-peer deployment (the common p2p lab) is
-/// exact today.
+/// specifies the check per sending neighbor — the sequence number
+/// "MUST be greater than the sequence number in the last accepted
+/// OSPFv3 packet of the same OSPFv3 packet type", so a strict
+/// per-peer (and per-packet-type) table is the long-term shape; a
+/// single-peer deployment (the common p2p lab) is exact today.
 ///
 /// The `source_v6` field on the inner [`V3Auth`] is left at the
 /// `[0;16]` default — the daemon sends from a per-interface

@@ -4,11 +4,11 @@
 //! protocol in librouting needs:
 //!
 //! - [`Sid`] — a 128-bit SRv6 Segment Identifier (RFC 8754 §3, RFC
-//!   8402 §3.2.1). A SID is an IPv6 address split into LOC:FUNCT:ARGS;
+//!   8986 §3.1). A SID is an IPv6 address split into LOC:FUNCT:ARGS;
 //!   the [`locator`] module models the prefix part.
 //! - [`Locator`] — an IPv6 prefix owned by a node, advertised by the
 //!   IGP so packets destined for any SID under the locator route to
-//!   that node (RFC 8754 §3.1).
+//!   that node (RFC 8986 §3.1).
 //! - [`Srh`] — the IPv6 Segment Routing Header codec (RFC 8754 §2).
 //!   Encodes/decodes the full wire format: Next Header, Hdr Ext Len,
 //!   Routing Type 4, Segments Left, Last Entry, Flags, Tag, the

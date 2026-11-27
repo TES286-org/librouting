@@ -12407,6 +12407,12 @@ inline std::int32_t advertise_with_originator(BgpPeerHandle const& h, lr_route_t
     return rc;
 }
 
+inline std::int32_t advertise_reflected(BgpPeerHandle const& h, lr_route_t route, std::uint8_t originator_bgp_id_present, const std::uint8_t* originator_bgp_id_addr, std::uint8_t origin_is_rr_client) {
+    std::int32_t rc = lr_bgp_peer_advertise_reflected(h.get(), route, originator_bgp_id_present, originator_bgp_id_addr, origin_is_rr_client);
+    if (rc < 0) throw Error(std::string("lr_bgp_peer_advertise_reflected failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));
+    return rc;
+}
+
 inline std::int32_t withdraw(BgpPeerHandle const& h, const struct lr_prefix_t* prefixes, std::uintptr_t count, std::uint16_t family_afi, std::uint8_t family_safi) {
     std::int32_t rc = lr_bgp_peer_withdraw(h.get(), prefixes, count, family_afi, family_safi);
     if (rc < 0) throw Error(std::string("lr_bgp_peer_withdraw failed: ") + (lr_last_error() ? lr_last_error() : "unknown"));

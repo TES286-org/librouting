@@ -4985,6 +4985,13 @@ typedef struct lr_afi_safi_t lr_nlri_family_t;
    Source: scripts/gen_python.py + scripts/abi.json
    Re-run: python3 scripts/gen_python.py */
 
+int32_t lr_bgp_peer_advertise_reflected(
+    lr_bgp_peer_t r,
+    lr_route_t route,
+    uint8_t originator_bgp_id_present,
+    const uint8_t * originator_bgp_id_addr,
+    uint8_t origin_is_rr_client
+);
 lr_ldp_engine_config_t lr_ldp_engine_config_new(
     uint32_t local_id_lsr,
     uint16_t local_id_label_space,

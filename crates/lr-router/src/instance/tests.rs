@@ -6869,3 +6869,34 @@ fn no_lookup_means_no_stale_filtering() {
     let out = collect_ranked_with_stale_filter(candidates, 4, None);
     assert_eq!(out.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// RFC 2439 §4.8.7 reuse: `reimport_damped` re-runs the import
+// pipeline for routes a hook dropped while the prefix was suppressed.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reimport_damped_runs_the_import_pipeline() {
+    let (mut a, _a_session, _b, _b_session) = ebgp_pair();
+    // A route learned from a peer (proto 0 = eBGP) — the shape the
+    // damping hook holds while the prefix is suppressed.
+    let key = RouteKey::new("198.51.100.0/24".parse().unwrap(), NlriFamily::IPV4_UNICAST);
+    let route = Route {
+        key: key.clone(),
+        origin: RouteOrigin { proto: 0, peer: 1 },
+        protocol: Protocol::Bgp,
+        preference: Preference::new(20, 100),
+        next_hop: Some(IpAddr::V4([192, 0, 2, 254])),
+        attributes: Default::default(),
+        age_ms: 1_000,
+        path_id: 0,
+        tag: None,
+    };
+    let n = a.reimport_damped(vec![route]);
+    assert_eq!(n, 1, "the held route re-imports");
+    assert_eq!(a.adj_rib_in.len(), 1);
+    assert!(
+        a.loc_rib.best(&key).is_some(),
+        "the re-imported route reaches the Loc-RIB"
+    );
+}

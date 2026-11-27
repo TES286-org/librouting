@@ -810,7 +810,13 @@ A targeted peer's address must not be link-local (RFC 7552 §5.2), and
 
 Route flap damping (RFC 2439) is off by default. The thresholds and the
 factor are dimensionless figure-of-merit values, not seconds; only
-`decay_interval_s` is a time.
+`decay_interval_s` is a time. The defaults follow the FRR `bgp dampening`
+scale; the decay factor is keyed on reachability (RFC 2439 §4.2) — a
+route that stays announced decays at `decay_factor_active` whether or
+not it is suppressed. Suppressed routes whose figure of merit decays
+below `reuse_threshold` are re-imported automatically (RFC 2439
+§4.8.7): the daemon holds the newest announcement while the prefix is
+suppressed and re-runs the import pipeline at reuse.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -818,10 +824,10 @@ factor are dimensionless figure-of-merit values, not seconds; only
 | `additive_incr` | int | 1000 | Penalty per flap |
 | `suppress_threshold` | int | 2000 | FoM that suppresses |
 | `reuse_threshold` | int | 750 | FoM that reactivates |
-| `upper_limit` | int | 60000 | FoM ceiling |
+| `upper_limit` | int | 12000 | FoM ceiling (reuse × 2^(max-suppress/half-life)) |
 | `decay_interval_s` | int | 30 | Seconds between decays |
-| `decay_factor_active` | float | 0.97 | Per interval, active route |
-| `decay_factor_withdrawn` | float | 0.5 | Per interval, withdrawn |
+| `decay_factor_active` | float | 0.977160 | Per interval, reachable route (15-minute half-life) |
+| `decay_factor_withdrawn` | float | 0.977160 | Per interval, withdrawn route |
 
 ### `[logging]`
 
@@ -875,8 +881,8 @@ radius is one peer. Off by default.
 | `min_recovery_interval_s` | int | 60 | Recovery cooldown (separate from above) |
 | `max_stale_age_s` | int | 300 | Max age before a stale prefix is swept |
 | `tick_interval_s` | int | 5 | Peer-health ticker period |
-| `soft_degraded` | int | 10 | Freeze recovery at this many degraded sessions |
-| `hard_degraded` | int | 20 | Force every session to ≥ L1 at this many |
+| `soft_degraded` | int | 10 | Rate-limit recovery to one transition per tick at/above this many degraded sessions |
+| `hard_degraded` | int | 20 | Force every healthy session to ≥ L1 at this many (no stale marking) |
 
 Rollout modes gate how far the mechanism reaches:
 

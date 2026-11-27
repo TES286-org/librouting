@@ -586,6 +586,13 @@ pub unsafe extern "C" fn lr_bgp_peer_advertise(
 /// 4456 §8: "A BGP speaker SHOULD NOT create an ORIGINATOR_ID
 /// attribute if one already exists").
 ///
+/// This entry always reports `origin_is_rr_client = false` (the route
+/// was not learned from an RR client of this speaker); a caller that
+/// tracks the source peer's client flag should use
+/// [`lr_bgp_peer_advertise_reflected`] so the RFC 4456 §6 rule 2
+/// reflection (client origins reach the non-client iBGP peers too)
+/// applies.
+///
 /// `originator_bgp_id_addr` points to 4 bytes (the BGP Identifier
 /// in network byte order — i.e. the dotted-quad bytes 10.0.0.1
 /// would be passed as `{ 10, 0, 0, 1 }`). NULL is rejected with
@@ -635,7 +642,73 @@ pub unsafe extern "C" fn lr_bgp_peer_advertise_with_originator(
             // and asserts it has not been freed yet.
             let route_ref: &'static lr_core::rib::Route =
                 unsafe { &*(route as *const lr_core::rib::Route) };
-            if p.advertise_with_originator(route_ref, originator) {
+            if p.advertise_with_originator(route_ref, originator, false) {
+                1
+            } else {
+                0
+            }
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Advertise a route with the full RFC 4456 reflection metadata: the
+/// ORIGINATOR_ID source (§8, like
+/// [`lr_bgp_peer_advertise_with_originator`]) plus the RR-client
+/// origin flag. `origin_is_rr_client != 0` says the route was learned
+/// from a peer this speaker configured as a route-reflector client,
+/// so RFC 4456 §6 rule 2 applies: the speaker reflects the route to
+/// its non-client iBGP peers as well as its clients (with the §8
+/// ORIGINATOR_ID / CLUSTER_LIST loop-detection attributes on every
+/// reflected UPDATE).
+///
+/// Returns 1 when the route was queued for transmission, 0 when the
+/// peer refused the route (same gates as
+/// [`lr_bgp_peer_advertise`]), `LR_ERR_NULL` (-1) on a NULL peer
+/// handle, NULL route handle, or a NULL originator handle with
+/// `present != 0`.
+///
+/// The route handle is **borrowed** — the caller retains ownership
+/// and must still free it via `lr_route_free`.
+///
+/// # Safety
+/// `r` must be a valid BgpPeer handle. `route` must be a valid
+/// Route handle. `originator_bgp_id_addr` (when
+/// `originator_bgp_id_present != 0`) must point to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_bgp_peer_advertise_reflected(
+    r: lr_bgp_peer_t,
+    route: crate::handle::lr_route_t,
+    originator_bgp_id_present: u8,
+    originator_bgp_id_addr: *const u8,
+    origin_is_rr_client: u8,
+) -> i32 {
+    guarded(
+        || unsafe {
+            let Some(p) = borrow_peer_mut(r) else {
+                return LR_ERR_NULL;
+            };
+            if route.is_null() {
+                return LR_ERR_NULL;
+            }
+            let originator = if originator_bgp_id_present != 0 {
+                if originator_bgp_id_addr.is_null() {
+                    return LR_ERR_NULL;
+                }
+                // SAFETY: the caller asserts the pointer is readable
+                // for 4 bytes when `present != 0`.
+                let bytes = unsafe { core::slice::from_raw_parts(originator_bgp_id_addr, 4) };
+                Some(lr_core::addr::RouterId::from_v4([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ]))
+            } else {
+                None
+            };
+            // SAFETY: the caller passed a handle from `lr_route_new_*`
+            // and asserts it has not been freed yet.
+            let route_ref: &'static lr_core::rib::Route =
+                unsafe { &*(route as *const lr_core::rib::Route) };
+            if p.advertise_with_originator(route_ref, originator, origin_is_rr_client != 0) {
                 1
             } else {
                 0

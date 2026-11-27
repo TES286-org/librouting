@@ -2038,23 +2038,29 @@ mod damping_reload_toggle_tests {
         )));
         let damping_state: Arc<Mutex<Option<DampingController>>> = Arc::new(Mutex::new(None));
         if initial_enabled {
-            let table = Arc::new(Mutex::new(DampingTable::new(DampingConfig::default())));
+            let table = Arc::new(Mutex::new(
+                DampingTable::new(DampingConfig::default()).unwrap(),
+            ));
             let enabled = Arc::new(AtomicBool::new(true));
             let decay_stop = Arc::new(AtomicBool::new(false));
             let hook = DampingImportHook::with_enabled(Arc::clone(&table), Arc::clone(&enabled));
+            let held = hook.held_routes();
             {
                 let mut r = router.write().unwrap();
                 r.hooks_mut().import.push(Box::new(hook));
             }
             spawn_damping_decay_thread(
                 Arc::clone(&table),
+                Arc::clone(&held),
                 Arc::clone(&decay_stop),
                 DampingConfig::default().decay_interval_s,
+                Arc::clone(&router),
             );
             *damping_state.lock().unwrap() = Some(DampingController {
                 enabled,
                 decay_stop,
                 table,
+                held,
             });
         }
         (router, current_networks, damping_state)
@@ -2155,6 +2161,70 @@ mod damping_reload_toggle_tests {
             decay_stop_flag.load(Ordering::Relaxed),
             "decay_stop flag must be true after on->off reload"
         );
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    /// on → off with held routes: the disable re-imports the
+    /// announcements the hook dropped while their prefixes were
+    /// suppressed — with the hook passing through they are admitted,
+    /// and no peer re-announce is coming to recover them otherwise
+    /// (RFC 2439 §4.8.7).
+    #[test]
+    fn reload_disable_reimports_held_routes() {
+        let cfg_path = temp_config_path("held");
+        write_config(&cfg_path, false);
+        let (router, current_networks, damping_state) = setup(true);
+
+        // Suppress a prefix through the controller's table (three
+        // rapid withdraws cross the 2000 threshold) and stage the
+        // announcement the hook would have held.
+        let prefix: lr_core::addr::Prefix = "198.51.100.0/24".parse().unwrap();
+        let key = lr_core::rib::RouteKey::new(prefix, lr_core::nlri::NlriFamily::IPV4_UNICAST);
+        let held_route = lr_core::rib::Route {
+            key: key.clone(),
+            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: Some("192.0.2.254".parse().unwrap()),
+            attributes: Default::default(),
+            age_ms: 1_000,
+            path_id: 0,
+            tag: None,
+        };
+        {
+            let state = damping_state.lock().unwrap();
+            let controller = state.as_ref().expect("setup installed the controller");
+            {
+                let mut table = controller.table.lock().unwrap();
+                table.on_withdraw(&prefix, 0);
+                table.on_withdraw(&prefix, 0);
+                assert!(table.on_withdraw(&prefix, 0), "third flap suppresses");
+            }
+            controller
+                .held
+                .lock()
+                .unwrap()
+                .insert(prefix, vec![held_route]);
+        }
+
+        let lines = reload_config(
+            Some(cfg_path.to_str().unwrap()),
+            None,
+            &router,
+            &current_networks,
+            None,
+            None,
+            None,
+            &[],
+            Some(&damping_state),
+            None,
+            &[],
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("re-imported 1 held route")),
+            "reload should report the held-route re-import: {lines:?}"
+        );
+        assert_eq!(router.read().unwrap().rib_len(), 1);
         let _ = std::fs::remove_file(&cfg_path);
     }
 
@@ -2929,6 +2999,144 @@ mod babel_reload_tests {
         assert!(
             registered[4..8].iter().all(|r| r.is_none()),
             "the dead slots' clones dropped"
+        );
+    }
+}
+
+/// The decay ticker's RFC 2439 §4.8.7 reuse step: a reactivated
+/// prefix's held announcement must actually come back through the
+/// import chain. `spawn_damping_decay_thread` used to hold the
+/// damping table's `MutexGuard` across `reimport_damped` — the
+/// re-import re-enters `DampingImportHook::on_import`, which takes
+/// the same non-reentrant lock, so the ticker self-deadlocked while
+/// it also held the router write lock (freezing the whole daemon
+/// with it — caught live by tests/interop/damping_frr.sh as "the
+/// decay ticker never reactivated the prefix"). These tests pin the
+/// wiring without FRR: suppress a prefix, hold the announcement,
+/// spawn the daemon's real decay ticker, and require the route back
+/// in the Loc-RIB within a bounded window — a deadlock fails the
+/// test instead of hanging it.
+#[cfg(test)]
+mod damping_reuse_reimport_tests {
+    use super::*;
+    use lr_core::addr::Prefix;
+    use lr_core::nlri::NlriFamily;
+    use lr_core::rib::{Route, RouteKey, RouteOrigin};
+    use lr_damping::{DampingConfig, DampingTable};
+    use lr_policy::hooks::{DampingImportHook, HookVerdict, ImportHook};
+    use lr_router::DefaultRouter;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
+    use std::time::{Duration, Instant};
+
+    /// Suppress after two flaps, decay far below the reuse threshold
+    /// on the first 1-second tick — the whole reuse cycle lands
+    /// inside a bounded window without any sleeping beyond the
+    /// ticker's own interval.
+    fn fast_config() -> DampingConfig {
+        DampingConfig {
+            additive_incr: 1000,
+            suppress_threshold: 2000,
+            reuse_threshold: 750,
+            upper_limit: 12000,
+            decay_interval_s: 1,
+            decay_factor_active: 0.001,
+            decay_factor_withdrawn: 0.001,
+        }
+    }
+
+    fn held_route(peer: u64) -> Route {
+        Route {
+            key: RouteKey::new(
+                Prefix::new_v4([203, 0, 113, 0], 24),
+                NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn decay_ticker_reimports_held_route_without_deadlock() {
+        let table = Arc::new(Mutex::new(DampingTable::new(fast_config()).unwrap()));
+        let hook = DampingImportHook::new(Arc::clone(&table));
+        let held = hook.held_routes();
+        let decay_stop = Arc::new(AtomicBool::new(false));
+        let router = Arc::new(RwLock::new(DefaultRouter::new()));
+        // The Loc-RIB handle takes per-family shard locks only, so
+        // the polling below never blocks on the router's writer —
+        // exactly why the daemon hands this same handle to its API
+        // readers. Grab it before the ticker exists so a deadlocked
+        // writer cannot stall the test's own read path either.
+        let rib = { router.read().unwrap().rib_handle() };
+        {
+            let mut r = router.write().unwrap();
+            r.hooks_mut().import.push(Box::new(hook.clone()));
+        }
+        let route = held_route(1);
+        let key = route.key.clone();
+        let origin = RouteOrigin { proto: 0, peer: 1 };
+        // Two withdraw flaps cross the suppress threshold
+        // (2 x 1000 >= 2000) with no decay interval elapsing in
+        // between.
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        hook.on_withdraw_with_origin(origin, &key, 0);
+        assert!(
+            table.lock().unwrap().is_suppressed(&key.prefix),
+            "two rapid flaps must suppress the prefix"
+        );
+        // The re-announcement is dropped and held for the reuse step.
+        let mut r = route;
+        assert!(
+            matches!(hook.on_import(&mut r), HookVerdict::Drop),
+            "a suppressed prefix's announcement must be dropped"
+        );
+        assert!(
+            held.lock().unwrap().len() == 1,
+            "the drop stashed the route"
+        );
+        assert!(rib.best(&key).is_none(), "nothing in Loc-RIB yet");
+
+        spawn_damping_decay_thread(
+            Arc::clone(&table),
+            Arc::clone(&held),
+            Arc::clone(&decay_stop),
+            1,
+            Arc::clone(&router),
+        );
+
+        // The first tick (1 s) decays the FoM (3000 x 0.001) far
+        // below the reuse threshold, the prefix reactivates and the
+        // held route must come back through the import chain. The
+        // 15 s ceiling turns a deadlock (which would otherwise hang
+        // forever holding the router write lock) into a clean test
+        // failure.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if rib.best(&key).is_some() {
+                decay_stop.store(true, Ordering::Relaxed);
+                assert!(
+                    held.lock().unwrap().is_empty(),
+                    "the reuse step must drain the held cache"
+                );
+                assert!(
+                    !table.lock().unwrap().is_suppressed(&key.prefix),
+                    "the prefix is no longer suppressed after reuse"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "the decay ticker never re-imported the held route within 15 s — \
+             the damping table lock is probably held across reimport_damped \
+             again (self-deadlock; see tests/interop/damping_frr.sh)"
         );
     }
 }

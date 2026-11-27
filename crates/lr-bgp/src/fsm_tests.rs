@@ -2597,3 +2597,65 @@ fn software_version_empty_string_is_not_advertised() {
 
     assert!(b.peer_software_version().is_none());
 }
+
+/// RFC 4271 §4.4 + §8 (OpenSent): "If the negotiated hold time value is
+/// zero, then the HoldTimer and KeepaliveTimer are not started." A
+/// hold-time-0 session must never see its HOLD timer re-armed either —
+/// `arm` treats a zero interval as "fire immediately", so the old
+/// unconditional re-arm tore down every hold-time-0 session (BFD-
+/// protected sessions commonly negotiate 0) after the first KEEPALIVE
+/// or UPDATE.
+#[test]
+fn zero_hold_time_session_survives_keepalive_and_update() {
+    let (mut cfg_a, mut cfg_b) = (
+        crate::peer::PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1])),
+        crate::peer::PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2])),
+    );
+    cfg_a.hold_time = 0;
+    cfg_b.hold_time = 0;
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+    assert_eq!(a.negotiated_hold_time(), 0);
+    assert_eq!(b.negotiated_hold_time(), 0);
+
+    // A KEEPALIVE in Established must not arm a zero-interval HOLD
+    // timer (the old code emitted SetTimer(HOLD, once(0)) here).
+    a.step(BgpEvent::Message(BgpMessage::Keepalive(
+        crate::message::keepalive::Keepalive,
+    )));
+    assert!(a.is_established(), "session stays Established");
+
+    // The same for an UPDATE: no HOLD timer is armed, and the route
+    // installation proceeds normally.
+    let mut u = crate::message::update::Update::new();
+    u.nlri
+        .push(Nlri::new(0, Prefix::new_v4([203, 0, 113, 7], 32)));
+    let actions = a.step(BgpEvent::Message(BgpMessage::Update(u)));
+    assert!(
+        actions
+            .iter()
+            .all(|act| !matches!(act, BgpAction::SetTimer(timer_ids::HOLD, _))),
+        "no HOLD timer may be armed on a hold-time-0 session: {actions:?}"
+    );
+    assert!(a.is_established(), "session stays Established");
+
+    // Sanity — the same flow with a non-zero hold time still re-arms.
+    let (mut cfg_a, mut cfg_b) = (
+        crate::peer::PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1])),
+        crate::peer::PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2])),
+    );
+    cfg_a.hold_time = 30;
+    cfg_b.hold_time = 30;
+    let (mut a, mut b) = (BgpPeer::new(cfg_a), BgpPeer::new(cfg_b));
+    establish(&mut a, &mut b);
+    assert_eq!(a.negotiated_hold_time(), 30);
+    let actions = a.step(BgpEvent::Message(BgpMessage::Keepalive(
+        crate::message::keepalive::Keepalive,
+    )));
+    assert!(
+        actions
+            .iter()
+            .any(|act| matches!(act, BgpAction::SetTimer(timer_ids::HOLD, _))),
+        "a non-zero hold time still re-arms the HOLD timer"
+    );
+}

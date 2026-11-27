@@ -63,7 +63,9 @@ pub const LR_BFD_MAX_PASSWORD_LEN: usize = 16;
 /// BMP header length (RFC 7854 §4.1 — 6 bytes).
 pub const LR_BMP_HEADER_LEN: usize = 6;
 /// Maximum BMP message size (RFC 7854 §4.1 — 65535 bytes).
-pub const LR_BMP_MAX_MESSAGE: usize = 65535;
+/// Largest BMP message: an RFC 8654 extended UPDATE (65 535 octets)
+/// plus the common and per-peer headers.
+pub const LR_BMP_MAX_MESSAGE: usize = 65535 + 6 + 42;
 
 // =========================================================================
 // lr-bgp — BGP-LS TLV type ids (RFC 7752 §3.3 / §3.4 + RFC 9552 §4)

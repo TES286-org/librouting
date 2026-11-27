@@ -3,20 +3,25 @@
 //! BMP is a one-way monitoring protocol: a BGP router sends a mirror
 //! copy of every BGP UPDATE (pre- and post-policy) plus session state
 //! changes to an external BMP collector. The collector never sends data
-//! back. This crate implements the BMP message codec and a collector
-//! sink; the router wires it into its event pipeline.
+//! back. This crate implements the BMP message codec; the router wires
+//! the sending station into its event pipeline and the daemon the
+//! collector sink.
 //!
-//! # Message types (RFC 7854 §4)
+//! # Message types (RFC 7854 §4.1)
 //!
 //! | Type | Name              | Purpose |
 //! |------|-------------------|---------|
-//! | 0    | Route Monitoring  | Mirror of a BGP UPDATE |
-//! | 1    | Statistics Report| Per-peer counters |
-//! | 2    | Peer Down        | Session went down |
-//! | 3    | Peer Up          | Session came up |
-//! | 4    | Initiation       | Collector handshake (sent on connect) |
-//! | 5    | Termination      | Collector goodbye (sent on disconnect) |
-//! | 6    | Route Mirroring  | Exact copy of a received BGP message |
+//! | 0    | Route Monitoring  | Mirror of a BGP UPDATE (§4.6) |
+//! | 1    | Statistics Report | Per-peer counters (§4.8) |
+//! | 2    | Peer Down         | Session went down (§4.9) |
+//! | 3    | Peer Up           | Session came up (§4.10) |
+//! | 4    | Initiation        | Sender handshake (§4.3) |
+//! | 5    | Termination       | Sender goodbye (§4.5) |
+//! | 6    | Route Mirroring   | TLV-framed copy of a received BGP message (§4.7) |
+//!
+//! Unrecognized type bytes are skipped whole per RFC 7854 §4.1
+//! ("A BMP implementation MUST ignore unrecognized message types
+//! upon receipt").
 //!
 //! # Wire format
 //!
@@ -29,14 +34,17 @@
 //!    +1  Message Length (u32, big-endian, includes header)
 //!    +5  Message Type   (u8)
 //!
-//!  Per-Peer Header (RFC 7854 §4.2, for types 0-2, 6):
-//!    +0  Peer Type      (u8, 0=global, 1=RD, 2=L3VPN)
+//!  Per-Peer Header (RFC 7854 §4.2, for every type except
+//!  Initiation and Termination):
+//!    +0  Peer Type      (u8, 0=global, 1=RD, 2=local instance,
+//!                        3=Loc-RIB per RFC 9069 §4.1)
 //!    +1  Peer Flags     (u8, V=0x80 bit 7, L=0x40 bit 6, A=0x20 bit 5)
 //!    +2  Peer Distinguisher (u64, big-endian, RD or 0)
 //!   +10  Peer Address   (16 bytes, IPv4 in last 4 or full IPv6)
 //!   +26  Peer AS        (u32, big-endian)
 //!   +30  Peer BGP ID    (u32, big-endian)
-//!   +34  Timestamp      (u32 seconds + u32 fraction, big-endian)
+//!   +34  Timestamp      (u32 seconds + u32 microseconds since the
+//!                        Unix epoch, big-endian)
 //! ```
 
 #![forbid(unsafe_code)]
@@ -50,23 +58,23 @@ use lr_core::error::{EncodeError, ParseError};
 /// BMP version (RFC 7854 §4.1: always 3).
 pub const VERSION: u8 = 3;
 
-/// BMP message types (RFC 7854 §4).
+/// BMP message types (RFC 7854 §4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum BmpMsgType {
-    /// Route Monitoring (§4.3): a BGP UPDATE mirror.
+    /// Route Monitoring (§4.6): a BGP UPDATE mirror.
     RouteMonitoring = 0,
-    /// Statistics Report (§4.4): per-peer counters.
+    /// Statistics Report (§4.8): per-peer counters.
     StatisticsReport = 1,
-    /// Peer Down (§4.5): session went down.
+    /// Peer Down (§4.9): session went down.
     PeerDown = 2,
-    /// Peer Up (§4.6): session came up.
+    /// Peer Up (§4.10): session came up.
     PeerUp = 3,
-    /// Initiation (§4.7): sent on connect.
+    /// Initiation (§4.3): sent on connect.
     Initiation = 4,
-    /// Termination (§4.8): sent on disconnect.
+    /// Termination (§4.5): sent on disconnect.
     Termination = 5,
-    /// Route Mirroring (§4.9): exact copy of a received BGP message.
+    /// Route Mirroring (§4.7): a received BGP message in TLV form.
     RouteMirroring = 6,
 }
 
@@ -99,7 +107,7 @@ impl fmt::Display for BmpMsgType {
     }
 }
 
-/// Peer type (RFC 7854 §4.2).
+/// Peer type (RFC 7854 §4.2; Loc-RIB per RFC 9069 §4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum PeerType {
@@ -110,6 +118,11 @@ pub enum PeerType {
     Rd = 1,
     /// Local instance peer (VRF).
     Local = 2,
+    /// Loc-RIB instance peer (RFC 9069 §4.1): the message mirrors
+    /// the local router's own Loc-RIB, not a peer's Adj-RIB-In.
+    /// Locally sourced routes MUST be conveyed with this peer type
+    /// (RFC 9069 §4.2).
+    LocRib = 3,
 }
 
 /// Peer flags (RFC 7854 §4.2): `V` (bit 7, 0x80) = the peer address is
@@ -170,12 +183,18 @@ pub struct BmpHeader {
 impl BmpHeader {
     pub const LEN: usize = 6;
 
-    /// Upper bound on a single BMP message: a Route Monitoring message
-    /// carries one BGP UPDATE (≤ 4096 bytes), so 64 KiB is generous.
-    pub const MAX_MESSAGE: usize = 65535;
+    /// Upper bound on a single BMP message: a Route Monitoring
+    /// message wraps one BGP UPDATE, which RFC 8654 lets grow to
+    /// 65 535 octets once the Extended Message capability is
+    /// negotiated — the common header and the per-peer header ride
+    /// on top (RFC 7854 §4.1: the length includes headers, data and
+    /// encapsulated messages). A declared length beyond this bound
+    /// is treated as malformed.
+    pub const MAX_MESSAGE: usize = 65_535 + Self::LEN + PeerHeader::LEN;
 }
 
-/// Per-peer header (RFC 7854 §4.2). Present on messages of type 0-2, 6.
+/// Per-peer header (RFC 7854 §4.2). Present on every message type
+/// except Initiation and Termination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerHeader {
     pub peer_type: PeerType,
@@ -186,7 +205,8 @@ pub struct PeerHeader {
     pub peer_address: [u8; 16],
     pub peer_as: u32,
     pub peer_bgp_id: u32,
-    /// Timestamp: seconds + fraction (NTP-style, RFC 7854 §4.2).
+    /// Timestamp: seconds + microseconds since the Unix epoch
+    /// (RFC 7854 §4.2).
     pub timestamp_secs: u32,
     pub timestamp_fraction: u32,
 }
@@ -219,7 +239,11 @@ impl BmpMessage {
         }
     }
 
-    /// Build a Peer Up message (type 3).
+    /// Build a Peer Up message (type 3). The body is RFC 7854 §4.10:
+    /// local address (16), local port, remote port, then the full
+    /// Sent and Received OPEN messages — self-delimiting BGP PDUs
+    /// with no length prefixes ("The full OPEN message transmitted
+    /// by the monitored router to its peer").
     pub fn peer_up(
         peer: PeerHeader,
         local_addr: [u8; 16],
@@ -228,12 +252,10 @@ impl BmpMessage {
         sent_open: &[u8],
         received_open: &[u8],
     ) -> Self {
-        let mut payload = Vec::with_capacity(36 + sent_open.len() + received_open.len());
+        let mut payload = Vec::with_capacity(20 + sent_open.len() + received_open.len());
         payload.extend_from_slice(&local_addr);
         payload.extend_from_slice(&local_port.to_be_bytes());
         payload.extend_from_slice(&remote_port.to_be_bytes());
-        payload.extend_from_slice(&(sent_open.len() as u16).to_be_bytes());
-        payload.extend_from_slice(&(received_open.len() as u16).to_be_bytes());
         payload.extend_from_slice(sent_open);
         payload.extend_from_slice(received_open);
         Self {
@@ -263,15 +285,19 @@ impl BmpMessage {
         }
     }
 
-    /// Build an Initiation message (type 4).
-    pub fn initiation(info: &[(u16, &[u8])]) -> Self {
+    /// Build an Initiation message (type 4). Each
+    /// `(&[(info_type, info_value)])` pair becomes one §4.4
+    /// Information TLV; values longer than 65 535 octets cannot be
+    /// expressed in the 2-octet Information Length and fail at
+    /// encode time.
+    pub fn initiation(info: &[(u16, &[u8])]) -> Result<Self, EncodeError> {
         let mut payload = Vec::new();
         for (tlv_type, tlv_value) in info {
             payload.extend_from_slice(&tlv_type.to_be_bytes());
-            payload.extend_from_slice(&(tlv_value.len() as u16).to_be_bytes());
+            payload.extend_from_slice(&checked_tlv_len(tlv_value.len())?.to_be_bytes());
             payload.extend_from_slice(tlv_value);
         }
-        Self {
+        Ok(Self {
             header: BmpHeader {
                 version: VERSION,
                 msg_len: 0,
@@ -279,18 +305,19 @@ impl BmpMessage {
             },
             peer: None,
             payload,
-        }
+        })
     }
 
-    /// Build a Termination message (type 5).
-    pub fn termination(info: &[(u16, &[u8])]) -> Self {
+    /// Build a Termination message (type 5), same TLV framing as
+    /// [`Self::initiation`].
+    pub fn termination(info: &[(u16, &[u8])]) -> Result<Self, EncodeError> {
         let mut payload = Vec::new();
         for (tlv_type, tlv_value) in info {
             payload.extend_from_slice(&tlv_type.to_be_bytes());
-            payload.extend_from_slice(&(tlv_value.len() as u16).to_be_bytes());
+            payload.extend_from_slice(&checked_tlv_len(tlv_value.len())?.to_be_bytes());
             payload.extend_from_slice(tlv_value);
         }
-        Self {
+        Ok(Self {
             header: BmpHeader {
                 version: VERSION,
                 msg_len: 0,
@@ -298,24 +325,42 @@ impl BmpMessage {
             },
             peer: None,
             payload,
-        }
+        })
     }
 }
 
-/// Peer Down reason (RFC 7854 §4.5).
+/// The §4.4 Information Length is two octets — a longer value is an
+/// encode error, not a silent wrap.
+fn checked_tlv_len(len: usize) -> Result<u16, EncodeError> {
+    u16::try_from(len)
+        .map_err(|_| EncodeError::InvalidValue("bmp info TLV value exceeds 65535 bytes"))
+}
+
+/// Peer Down reason (RFC 7854 §4.9). The data that must follow the
+/// reason byte differs per reason — the variants below name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PeerDownReason {
-    /// The local system closed the session.
-    LocalClose = 1,
-    /// The remote peer closed the session.
-    RemoteClose = 2,
-    /// The remote peer sent a NOTIFICATION.
-    RemoteNotification = 3,
-    /// The local system depleted a resource.
-    DepletedResource = 4,
-    /// The peer was administratively removed.
-    AdminReset = 5,
+    /// Reason 1: the local system closed the session. The data is a
+    /// BGP PDU carrying the NOTIFICATION that would have been sent
+    /// to the peer.
+    LocalCloseNotification = 1,
+    /// Reason 2: the local system closed the session without a
+    /// notification. The data is the 2-byte FSM event code that
+    /// caused the close (RFC 4271 §8.1); `0, 0` means no relevant
+    /// event code is defined.
+    LocalCloseNoNotification = 2,
+    /// Reason 3: the remote system closed the session with a
+    /// notification. The data is the received BGP PDU carrying the
+    /// NOTIFICATION.
+    RemoteCloseNotification = 3,
+    /// Reason 4: the remote system closed the session without a
+    /// notification — including any unexpected termination of the
+    /// transport session. No data follows.
+    RemoteClose = 4,
+    /// Reason 5: the peer will no longer be reported for
+    /// configuration reasons. No data follows.
+    PeerConfigRemoved = 5,
 }
 
 /// BMP codec: encodes/decodes BMP messages to/from the wire format.
@@ -330,7 +375,7 @@ impl BmpCodec {
     }
 
     pub fn encode_vec(&self, msg: &BmpMessage) -> Result<Vec<u8>, EncodeError> {
-        let mut out = vec![0u8; 65535];
+        let mut out = vec![0u8; BmpHeader::MAX_MESSAGE];
         let mut w = WriteBuf::new(&mut out);
         let n = self.encode(msg, &mut w)?;
         out.truncate(n);
@@ -345,30 +390,61 @@ impl BmpCodec {
 
     /// Decode the next complete buffered message, if any.
     /// `Ok(None)` = need more bytes.
+    ///
+    /// A frame whose declared length is below the header size or
+    /// beyond [`BmpHeader::MAX_MESSAGE`] is malformed and the whole
+    /// buffer is dropped (the declared length cannot be trusted to
+    /// skip). A frame of sane length that fails to decode — unknown
+    /// version, unknown peer type, truncated peer header — is
+    /// dropped alone and the error is returned; the next call
+    /// resynchronizes on the following frame instead of re-failing
+    /// on the same bytes forever. Unknown MESSAGE TYPE bytes are
+    /// skipped silently per RFC 7854 §4.1 ("A BMP implementation
+    /// MUST ignore unrecognized message types upon receipt").
     pub fn next_message(&mut self) -> Result<Option<BmpMessage>, ParseError> {
-        if self.carryover.len() < BmpHeader::LEN {
-            return Ok(None);
+        loop {
+            if self.carryover.len() < BmpHeader::LEN {
+                return Ok(None);
+            }
+            let msg_len = u32::from_be_bytes([
+                self.carryover[1],
+                self.carryover[2],
+                self.carryover[3],
+                self.carryover[4],
+            ]) as usize;
+            // A declared length below the header size or beyond any
+            // sane BMP message is malformed — do not buffer
+            // unboundedly waiting for a huge length an attacker
+            // keeps feeding.
+            if !(BmpHeader::LEN..=BmpHeader::MAX_MESSAGE).contains(&msg_len) {
+                self.carryover.clear();
+                return Err(ParseError::bad_length(1, "bmp.msg_len"));
+            }
+            if self.carryover.len() < msg_len {
+                return Ok(None);
+            }
+            let buf = &self.carryover[..msg_len];
+            match decode_message(buf) {
+                Ok(Some(msg)) => {
+                    self.carryover.drain(0..msg_len);
+                    return Ok(Some(msg));
+                }
+                // RFC 7854 §4.1: ignore unrecognized message types.
+                // The frame is length-framed, so skipping it is
+                // exact; continue with whatever follows in the
+                // buffer.
+                Ok(None) => {
+                    self.carryover.drain(0..msg_len);
+                    continue;
+                }
+                Err(e) => {
+                    // Drop the offending frame only — the stream can
+                    // resynchronize on the next one.
+                    self.carryover.drain(0..msg_len);
+                    return Err(e);
+                }
+            }
         }
-        let msg_len = u32::from_be_bytes([
-            self.carryover[1],
-            self.carryover[2],
-            self.carryover[3],
-            self.carryover[4],
-        ]) as usize;
-        // A declared length below the header size or beyond any sane BMP
-        // message is malformed — do not buffer unboundedly waiting for a
-        // huge length an attacker keeps feeding.
-        if !(BmpHeader::LEN..=BmpHeader::MAX_MESSAGE).contains(&msg_len) {
-            self.carryover.clear();
-            return Err(ParseError::bad_length(1, "bmp.msg_len"));
-        }
-        if self.carryover.len() < msg_len {
-            return Ok(None);
-        }
-        let buf = &self.carryover[..msg_len];
-        let msg = decode_message(buf)?;
-        self.carryover.drain(0..msg_len);
-        Ok(Some(msg))
     }
 
     pub fn decode_slice(&mut self, b: &[u8]) -> Result<Option<BmpMessage>, ParseError> {
@@ -380,6 +456,19 @@ impl BmpCodec {
 impl Encoder<BmpMessage> for BmpCodec {
     fn encode(&self, msg: &BmpMessage, out: &mut WriteBuf<'_>) -> Result<usize, EncodeError> {
         let start = out.position();
+        // A per-peer header is required on every type except
+        // Initiation and Termination (RFC 7854 §4.2); refuse the
+        // combinations the decoder would reject, so the encoder can
+        // never emit a frame this crate cannot read back.
+        let needs_peer = !matches!(
+            msg.header.msg_type,
+            BmpMsgType::Initiation | BmpMsgType::Termination
+        );
+        if needs_peer != msg.peer.is_some() {
+            return Err(EncodeError::InvalidValue(
+                "bmp message type and per-peer header presence disagree",
+            ));
+        }
         // Common header.
         out.put_u8(VERSION).ok_or(EncodeError::BufferFull)?;
         // Length placeholder — patched after we know the total size.
@@ -414,13 +503,34 @@ impl Decoder<BmpMessage> for BmpCodec {
             self.carryover[3],
             self.carryover[4],
         ]) as usize;
+        // Same sanity bound as `next_message`: a declared length
+        // outside it can never be completed, so `Ok(None)` ("need
+        // more bytes") would buffer unboundedly, and a length below
+        // the header size can never decode. Surface it as a length
+        // error instead.
+        if !(BmpHeader::LEN..=BmpHeader::MAX_MESSAGE).contains(&msg_len) {
+            self.carryover.clear();
+            return Err(ParseError::bad_length(1, "bmp.msg_len"));
+        }
         if self.carryover.len() < msg_len {
             return Ok(None);
         }
         let buf = &self.carryover[..msg_len];
-        let msg = decode_message(buf)?;
-        self.carryover.drain(0..msg_len);
-        Ok(Some(msg))
+        match decode_message(buf) {
+            // RFC 7854 §4.1: ignore unrecognized message types.
+            Ok(None) => {
+                self.carryover.drain(0..msg_len);
+                self.decode(src)
+            }
+            Ok(Some(msg)) => {
+                self.carryover.drain(0..msg_len);
+                Ok(Some(msg))
+            }
+            Err(e) => {
+                self.carryover.drain(0..msg_len);
+                Err(e)
+            }
+        }
     }
 }
 
@@ -444,7 +554,10 @@ fn encode_peer_header(peer: &PeerHeader, out: &mut WriteBuf<'_>) -> Result<(), E
     Ok(())
 }
 
-fn decode_message(buf: &[u8]) -> Result<BmpMessage, ParseError> {
+/// Decode one complete frame. `Ok(None)` = the message type byte
+/// is not one of the seven assigned values — the caller skips the
+/// frame per RFC 7854 §4.1.
+fn decode_message(buf: &[u8]) -> Result<Option<BmpMessage>, ParseError> {
     if buf.len() < BmpHeader::LEN {
         return Err(ParseError::truncated("bmp.header"));
     }
@@ -456,10 +569,12 @@ fn decode_message(buf: &[u8]) -> Result<BmpMessage, ParseError> {
     if msg_len as usize != buf.len() {
         return Err(ParseError::bad_length(1, "bmp.header.length"));
     }
-    let msg_type = BmpMsgType::from_u8(buf[5])
-        .ok_or_else(|| ParseError::unknown_type(5, "bmp.header.type"))?;
+    let Some(msg_type) = BmpMsgType::from_u8(buf[5]) else {
+        return Ok(None);
+    };
     let mut offset = BmpHeader::LEN;
-    // Messages of type 0-2, 6 carry a per-peer header.
+    // Every type except Initiation and Termination carries a
+    // per-peer header (RFC 7854 §4.2).
     let peer = match msg_type {
         BmpMsgType::RouteMonitoring
         | BmpMsgType::StatisticsReport
@@ -476,7 +591,7 @@ fn decode_message(buf: &[u8]) -> Result<BmpMessage, ParseError> {
         BmpMsgType::Initiation | BmpMsgType::Termination => None,
     };
     let payload = buf[offset..].to_vec();
-    Ok(BmpMessage {
+    Ok(Some(BmpMessage {
         header: BmpHeader {
             version,
             msg_len,
@@ -484,28 +599,31 @@ fn decode_message(buf: &[u8]) -> Result<BmpMessage, ParseError> {
         },
         peer,
         payload,
-    })
+    }))
 }
 
 fn decode_peer_header(buf: &[u8]) -> Result<PeerHeader, ParseError> {
     if buf.len() < PeerHeader::LEN {
         return Err(ParseError::truncated("bmp.peer_header"));
     }
-    // RFC 7854 §4.2: Peer Type is one of {0=Global, 1=RD, 2=Local};
-    // values 3..=255 are reserved for future use and MUST NOT be
-    // emitted by a conformant implementation. The previous lenient
-    // decoder mapped reserved values to `Global`, masking malformed
-    // input as a real global peer — surface the wire byte as an
-    // `UnknownType` parse error so the collector can drop the frame
-    // and log the peer byte instead of installing routes attributed
-    // to a peer that did not really send them.
+    // Peer Type is one of the IANA-registered values: 0=Global,
+    // 1=RD, 2=Local Instance (RFC 7854 §4.2) and 3=Loc-RIB
+    // Instance Peer (RFC 9069 §4.1). Values 4..=255 are unassigned
+    // — surface the wire byte as an `UnknownType` parse error so
+    // the collector can drop the frame and log the peer byte
+    // instead of installing routes attributed to a peer that did
+    // not really send them.
     let peer_type = match buf[0] {
         0 => PeerType::Global,
         1 => PeerType::Rd,
         2 => PeerType::Local,
+        3 => PeerType::LocRib,
         other => {
-            return Err(ParseError::unknown_type(0, "bmp.peer_header.peer_type")
-                .with_detail(format!("peer_type {other} is reserved (RFC 7854 §4.2)")));
+            return Err(
+                ParseError::unknown_type(0, "bmp.peer_header.peer_type").with_detail(format!(
+                    "peer_type {other} is unassigned (RFC 7854 §4.2 / RFC 9069 §4.1)"
+                )),
+            );
         }
     };
     let peer_flags = PeerFlags(buf[1]);
@@ -567,7 +685,7 @@ mod tests {
     #[test]
     fn initiation_roundtrip() {
         let info: &[(u16, &[u8])] = &[(0, b"test-string")];
-        let msg = BmpMessage::initiation(info);
+        let msg = BmpMessage::initiation(info).unwrap();
         let enc = BmpCodec::new().encode_vec(&msg).unwrap();
         let mut codec = BmpCodec::new();
         let dec = codec.decode_slice(&enc).unwrap().unwrap();
@@ -580,7 +698,7 @@ mod tests {
     #[test]
     fn termination_roundtrip() {
         let info: &[(u16, &[u8])] = &[(1, b"bye")];
-        let msg = BmpMessage::termination(info);
+        let msg = BmpMessage::termination(info).unwrap();
         let enc = BmpCodec::new().encode_vec(&msg).unwrap();
         let mut codec = BmpCodec::new();
         let dec = codec.decode_slice(&enc).unwrap().unwrap();
@@ -606,10 +724,12 @@ mod tests {
         let dec = codec.decode_slice(&enc).unwrap().unwrap();
         assert_eq!(dec.header.msg_type, BmpMsgType::PeerUp);
         assert!(dec.peer.is_some());
-        // Payload: local_addr(16) + local_port(2) + remote_port(2) +
-        // sent_open_len(2) + recv_open_len(2) + sent_open(29) +
-        // recv_open(29) = 82
-        assert_eq!(dec.payload.len(), 82);
+        // Payload per RFC 7854 §4.10: local_addr(16) + local_port(2)
+        // + remote_port(2) + sent_open(29) + recv_open(29) = 78. The
+        // OPENs are self-delimiting BGP PDUs — no length prefixes.
+        assert_eq!(dec.payload.len(), 78);
+        assert_eq!(&dec.payload[20..20 + 29], &sent_open[..]);
+        assert_eq!(&dec.payload[20 + 29..], &received_open[..]);
     }
 
     #[test]
@@ -617,14 +737,17 @@ mod tests {
         let peer = sample_peer_header();
         let msg = BmpMessage::peer_down(
             peer.clone(),
-            PeerDownReason::RemoteNotification,
+            PeerDownReason::RemoteCloseNotification,
             &[0x06, 0x08], // CEASE code+subcode
         );
         let enc = BmpCodec::new().encode_vec(&msg).unwrap();
         let mut codec = BmpCodec::new();
         let dec = codec.decode_slice(&enc).unwrap().unwrap();
         assert_eq!(dec.header.msg_type, BmpMsgType::PeerDown);
-        assert_eq!(dec.payload[0], PeerDownReason::RemoteNotification as u8);
+        assert_eq!(
+            dec.payload[0],
+            PeerDownReason::RemoteCloseNotification as u8
+        );
         assert_eq!(&dec.payload[1..], &[0x06, 0x08]);
     }
 
@@ -748,21 +871,20 @@ mod tests {
     }
 
     // Regression for the silent peer_type → Global fallback. Before
-    // the fix, `decode_peer_header` mapped reserved peer_type values
-    // (3..=255) to `Global`, masking malformed input as a real global
-    // peer (RFC 7854 §4.2 reserves those values). The strict decoder
-    // surfaces an `UnknownType` error so the collector can drop the
-    // frame and log the wire byte instead.
+    // the fix, `decode_peer_header` mapped unassigned peer_type values
+    // to `Global`, masking malformed input as a real global peer. The
+    // strict decoder surfaces an `UnknownType` error so the collector
+    // can drop the frame and log the wire byte instead. Byte 3 is the
+    // assigned Loc-RIB type (RFC 9069 §4.1) and must decode; byte 4 is
+    // unassigned and must not.
     #[test]
-    fn decode_rejects_reserved_peer_type() {
+    fn decode_rejects_unassigned_peer_type() {
         let peer = sample_peer_header();
         let msg = BmpMessage::route_monitoring(peer, &[]);
         let mut enc = BmpCodec::new().encode_vec(&msg).unwrap();
         // Common header (6) puts the peer header at byte 6. The first
         // peer-header octet is the peer_type byte (RFC 7854 §4.2).
-        // Set it to a reserved value (3) and verify the decoder rejects
-        // the frame rather than mapping the peer to Global.
-        enc[6] = 3;
+        enc[6] = 4;
         let mut codec = BmpCodec::new();
         let err = codec.decode_slice(&enc).unwrap_err();
         // The error kind matches `ParseError::unknown_type(...).kind`
@@ -775,19 +897,21 @@ mod tests {
             err.detail
                 .as_deref()
                 .unwrap_or_default()
-                .contains("reserved"),
-            "error should mention the reserved status, got: {:?}",
+                .contains("unassigned"),
+            "error should mention the unassigned status, got: {:?}",
             err.detail
         );
     }
 
     #[test]
     fn decode_accepts_each_assigned_peer_type() {
-        // RFC 7854 §4.2: only 0, 1, 2 are assigned; each must round-trip.
+        // RFC 7854 §4.2 assigns 0-2; RFC 9069 §4.1 assigns 3
+        // (Loc-RIB). Each must round-trip.
         for (byte, expected) in [
             (0u8, PeerType::Global),
             (1, PeerType::Rd),
             (2, PeerType::Local),
+            (3, PeerType::LocRib),
         ] {
             let peer = sample_peer_header();
             let msg = BmpMessage::route_monitoring(peer, &[]);
@@ -801,5 +925,122 @@ mod tests {
                 "peer_type byte {byte} should decode to {expected:?}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Audit H65 batch: error-path resynchronization, unknown-type skip,
+    // the peer-header presence check and the extended-UPDATE size bound.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn decode_error_drops_only_the_bad_frame() {
+        // A frame with an unassigned peer type is followed by a good
+        // Route Monitoring frame in the same buffer. The first
+        // next_message call reports the error but consumes only the bad
+        // frame; the second call decodes the good one — the stream
+        // resynchronizes instead of re-failing on the same bytes.
+        let peer = sample_peer_header();
+        let good = BmpMessage::route_monitoring(peer, &[0xAB]);
+        let mut bad = BmpCodec::new().encode_vec(&good).unwrap();
+        bad[6] = 9; // unassigned peer type
+        let good_wire = BmpCodec::new().encode_vec(&good).unwrap();
+        let mut codec = BmpCodec::new();
+        codec.feed(&bad);
+        codec.feed(&good_wire);
+        assert!(codec.next_message().is_err(), "the bad frame errors");
+        let dec = codec.next_message().unwrap().unwrap();
+        assert_eq!(dec.payload, vec![0xAB], "the following frame decodes");
+    }
+
+    #[test]
+    fn unknown_message_type_is_skipped_not_fatal() {
+        // RFC 7854 §4.1: "A BMP implementation MUST ignore unrecognized
+        // message types upon receipt." An experimental type-251 frame
+        // between two Route Monitoring frames must not kill the stream.
+        let peer = sample_peer_header();
+        let m1 = BmpMessage::route_monitoring(peer.clone(), &[0x01]);
+        let m2 = BmpMessage::route_monitoring(peer, &[0x02]);
+        let w1 = BmpCodec::new().encode_vec(&m1).unwrap();
+        let w2 = BmpCodec::new().encode_vec(&m2).unwrap();
+        // Hand-build a type-251 frame: valid header, unknown type byte.
+        let mut unknown = vec![0u8; 6 + 4];
+        unknown[0] = VERSION;
+        unknown[1..5].copy_from_slice(&(6u32 + 4).to_be_bytes());
+        unknown[5] = 251;
+        unknown[6] = 0xde;
+        unknown[7] = 0xad;
+        unknown[8] = 0xbe;
+        unknown[9] = 0xef;
+        let mut codec = BmpCodec::new();
+        codec.feed(&w1);
+        codec.feed(&unknown);
+        codec.feed(&w2);
+        let d1 = codec.next_message().unwrap().unwrap();
+        assert_eq!(d1.payload, vec![0x01]);
+        // The unknown frame is skipped silently and the next good frame
+        // comes back out of the same drain.
+        let d2 = codec.next_message().unwrap().unwrap();
+        assert_eq!(d2.payload, vec![0x02]);
+        assert!(codec.next_message().unwrap().is_none());
+    }
+
+    #[test]
+    fn extended_update_sized_route_monitoring_decodes() {
+        // An RFC 8654 extended UPDATE (65 535 octets) wrapped in a Route
+        // Monitoring message is 65 535 + 6 + 42 bytes — above the old
+        // 65 535 cap, which rejected it as bad_length and cleared the
+        // buffer.
+        let peer = sample_peer_header();
+        let update = vec![0xAA; 65_535];
+        let msg = BmpMessage::route_monitoring(peer, &update);
+        let enc = BmpCodec::new().encode_vec(&msg).unwrap();
+        assert_eq!(enc.len(), 65_535 + BmpHeader::LEN + PeerHeader::LEN);
+        let mut codec = BmpCodec::new();
+        let dec = codec.decode_slice(&enc).unwrap().unwrap();
+        assert_eq!(dec.payload.len(), 65_535);
+    }
+
+    #[test]
+    fn encode_rejects_peer_header_presence_mismatch() {
+        // Initiation carries no per-peer header; Route Monitoring
+        // requires one. The encoder must refuse the wrong combinations so
+        // it can never emit a frame its own decoder rejects.
+        let err = BmpCodec::new()
+            .encode_vec(&BmpMessage {
+                header: BmpHeader {
+                    version: VERSION,
+                    msg_len: 0,
+                    msg_type: BmpMsgType::RouteMonitoring,
+                },
+                peer: None,
+                payload: vec![],
+            })
+            .unwrap_err();
+        assert!(matches!(err, EncodeError::InvalidValue(_)));
+        let info: &[(u16, &[u8])] = &[];
+        let with_peer = BmpMessage::initiation(info).unwrap();
+        let with_peer = BmpMessage {
+            peer: Some(sample_peer_header()),
+            ..with_peer
+        };
+        assert!(BmpCodec::new().encode_vec(&with_peer).is_err());
+    }
+
+    #[test]
+    fn initiation_tlv_over_u16_fails_to_encode() {
+        // The §4.4 Information Length is two octets; a longer value is an
+        // error, not a silent wrap.
+        let big = vec![0u8; 65_536];
+        let info: &[(u16, &[u8])] = &[(0, &big)];
+        assert!(BmpMessage::initiation(info).is_err());
+    }
+
+    #[test]
+    fn peer_down_reason_values_match_rfc_7854_4_9() {
+        assert_eq!(PeerDownReason::LocalCloseNotification as u8, 1);
+        assert_eq!(PeerDownReason::LocalCloseNoNotification as u8, 2);
+        assert_eq!(PeerDownReason::RemoteCloseNotification as u8, 3);
+        assert_eq!(PeerDownReason::RemoteClose as u8, 4);
+        assert_eq!(PeerDownReason::PeerConfigRemoved as u8, 5);
     }
 }

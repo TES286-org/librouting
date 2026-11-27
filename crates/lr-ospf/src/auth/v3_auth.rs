@@ -271,9 +271,16 @@ impl V3Auth {
             trailer[14],
             trailer[15],
         ]);
-        // Anti-replay: strictly greater than any sequence seen so far;
-        // the first packet (including a seq-0 one) bootstraps the
-        // session, after which seq-0 replays are rejected.
+        // Anti-replay per RFC 7166 §4.6: the 64-bit sequence number
+        // "MUST be greater than the sequence number in the last
+        // accepted OSPFv3 packet of the same OSPFv3 packet type from
+        // the sending OSPFv3 neighbor" — OSPFv3 is deliberately
+        // STRICTER than the OSPFv2 rule (RFC 2328 §D.5.3(2) discards
+        // only strictly-lower values, so a byte-identical v2
+        // retransmission verifies). The v3 sender increments the
+        // sequence for every packet it sends, so equality is a replay
+        // here. The first packet (including a seq-0 one) bootstraps
+        // the recorded value.
         if let Some(last) = self.last_peer_seq {
             if peer_seq <= last {
                 return false;
@@ -339,6 +346,8 @@ impl V3Auth {
             trailer[14],
             trailer[15],
         ]);
+        // Anti-replay per RFC 7166 §4.6 — see `verify`: strictly
+        // greater than the last accepted value; equality is a replay.
         if let Some(last) = self.last_peer_seq {
             if peer_seq <= last {
                 return false;
@@ -475,6 +484,11 @@ mod tests {
 
     #[test]
     fn replay_attack_rejected() {
+        // RFC 7166 §4.6: the sequence number "MUST be greater than the
+        // sequence number in the last accepted OSPFv3 packet of the
+        // same OSPFv3 packet type" — so both a lower AND an equal
+        // sequence are replays (the v3 sender increments on every
+        // packet it sends, unlike the v2 sender's non-decreasing rule).
         let mut auth = V3Auth::new(1, b"key".to_vec()).with_source(src());
         auth.crypto_seq = 1000;
         let packet = make_v3_packet();
@@ -485,13 +499,24 @@ mod tests {
             verifier.verify(&packet, &[], &trailer),
             "first packet accepted"
         );
-        assert!(!verifier.verify(&packet, &[], &trailer), "replay must fail");
+        assert!(
+            !verifier.verify(&packet, &[], &trailer),
+            "equal-sequence replay must be discarded (RFC 7166 §4.6)"
+        );
+
+        let mut old = V3Auth::new(1, b"key".to_vec()).with_source(src());
+        old.crypto_seq = 500;
+        let old_trailer = old.sign_trailer(&packet, &[]);
+        assert!(
+            !verifier.verify(&packet, &[], &old_trailer),
+            "replayed older packet must be discarded"
+        );
     }
 
     #[test]
     fn seq_zero_replay_hole_closed() {
         // A first packet with seq 0 bootstraps; a replayed seq-0 packet
-        // must be rejected (audit A3).
+        // is rejected — RFC 7166 §4.6 requires strictly greater.
         let auth = V3Auth::new(1, b"key".to_vec()).with_source(src());
         let packet = make_v3_packet();
         let trailer = auth.sign_trailer(&packet, &[]);

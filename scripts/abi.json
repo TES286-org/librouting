@@ -8869,6 +8869,48 @@
       ]
     },
     {
+      "name": "lr_bgp_peer_advertise_reflected",
+      "return_type": "int32_t",
+      "params": [
+        {
+          "name": "r",
+          "type": "lr_bgp_peer_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "route",
+          "type": "lr_route_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "originator_bgp_id_present",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        },
+        {
+          "name": "originator_bgp_id_addr",
+          "type": "const uint8_t *",
+          "is_const": true,
+          "is_ptr": true,
+          "is_struct": false,
+          "pointee": "uint8_t"
+        },
+        {
+          "name": "origin_is_rr_client",
+          "type": "uint8_t",
+          "is_const": false,
+          "is_ptr": false,
+          "is_struct": false
+        }
+      ]
+    },
+    {
       "name": "lr_bgp_peer_withdraw",
       "return_type": "int32_t",
       "params": [
@@ -41939,35 +41981,35 @@
       "value": "5"
     },
     {
-      "name": "LR_COMMUNITY_KIND_CUSTOM",
+      "name": "LR_COMMUNITY_KIND_NO_EXPORT",
       "value": "0"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_EXPORT",
+      "name": "LR_COMMUNITY_KIND_NO_ADVERTISE",
       "value": "1"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_ADVERTISE",
+      "name": "LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED",
       "value": "2"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_EXPORT_SUBCONFED",
+      "name": "LR_COMMUNITY_KIND_NO_PEER",
       "value": "3"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_PEER",
+      "name": "LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN",
       "value": "4"
     },
     {
-      "name": "LR_COMMUNITY_KIND_GRACEFUL_SHUTDOWN",
+      "name": "LR_COMMUNITY_KIND_LLGR_STALE",
       "value": "5"
     },
     {
-      "name": "LR_COMMUNITY_KIND_LLGR_STALE",
+      "name": "LR_COMMUNITY_KIND_NO_LLGR",
       "value": "6"
     },
     {
-      "name": "LR_COMMUNITY_KIND_NO_LLGR",
+      "name": "LR_COMMUNITY_KIND_CUSTOM",
       "value": "7"
     },
     {
@@ -42311,11 +42353,15 @@
       "value": "2"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_LOCAL_CLOSE",
+      "name": "LR_BMP_PEER_TYPE_LOC_RIB",
+      "value": "3"
+    },
+    {
+      "name": "LR_BMP_PEER_DOWN_LOCAL_CLOSE_NOTIFICATION",
       "value": "1"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_REMOTE_CLOSE",
+      "name": "LR_BMP_PEER_DOWN_LOCAL_CLOSE",
       "value": "2"
     },
     {
@@ -42323,11 +42369,11 @@
       "value": "3"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_DEPLETED_RESOURCE",
+      "name": "LR_BMP_PEER_DOWN_REMOTE_CLOSE",
       "value": "4"
     },
     {
-      "name": "LR_BMP_PEER_DOWN_ADMIN_RESET",
+      "name": "LR_BMP_PEER_DOWN_PEER_CONFIG_REMOVED",
       "value": "5"
     },
     {
@@ -42496,7 +42542,7 @@
     },
     {
       "name": "LR_BMP_MAX_MESSAGE",
-      "value": "65535"
+      "value": "((65535"
     },
     {
       "name": "LR_BGP_LS_TLV_LOCAL_NODE_DESCRIPTOR",
@@ -43471,24 +43517,28 @@
       "value": "6"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV4_UNICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_GEO_PEER_TABLE",
       "value": "7"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV4_MULTICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV4_UNICAST_ADDPATH",
       "value": "8"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV6_UNICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV4_MULTICAST_ADDPATH",
       "value": "9"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_IPV6_MULTICAST_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV6_UNICAST_ADDPATH",
       "value": "10"
     },
     {
-      "name": "LR_MRT_TDV2_RIB_GENERIC_ADDPATH",
+      "name": "LR_MRT_TDV2_RIB_IPV6_MULTICAST_ADDPATH",
       "value": "11"
+    },
+    {
+      "name": "LR_MRT_TDV2_RIB_GENERIC_ADDPATH",
+      "value": "12"
     },
     {
       "name": "LR_MRT_BGP4MP_STATE_CHANGE",
@@ -55637,6 +55687,48 @@
             "is_ptr": true,
             "is_struct": false,
             "pointee": "uint8_t"
+          }
+        ]
+      },
+      {
+        "name": "lr_bgp_peer_advertise_reflected",
+        "return_type": "int32_t",
+        "params": [
+          {
+            "name": "r",
+            "type": "lr_bgp_peer_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "route",
+            "type": "lr_route_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "originator_bgp_id_present",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
+          },
+          {
+            "name": "originator_bgp_id_addr",
+            "type": "const uint8_t *",
+            "is_const": true,
+            "is_ptr": true,
+            "is_struct": false,
+            "pointee": "uint8_t"
+          },
+          {
+            "name": "origin_is_rr_client",
+            "type": "uint8_t",
+            "is_const": false,
+            "is_ptr": false,
+            "is_struct": false
           }
         ]
       },

@@ -941,10 +941,11 @@ fn verify_ospf_auth_crypto_anti_replay_rejects_stale_seq() {
         verify_ospf_auth(&mut receiver, &p2),
         "second packet (seq 2 > 1) is accepted"
     );
-    // Replay p1 (seq = 1, <= last_peer_seq = 2) — rejected.
+    // Replay p1 (seq = 1, < last_peer_seq = 2) — rejected: RFC 2328
+    // §D.5.3(2) discards strictly lower sequences.
     assert!(
         !verify_ospf_auth(&mut receiver, &p1),
-        "replayed packet (seq 1 <= 2) is rejected by anti-replay"
+        "replayed packet (seq 1 < 2) is rejected by anti-replay"
     );
 }
 

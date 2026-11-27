@@ -12,11 +12,13 @@
 #
 # Test-friendly tunings (still RFC 2439 mechanics, compressed time):
 #   additive_incr = 1000, suppress_threshold = 3000, reuse = 750,
-#   decay_interval_s = 30 with decay_factor_withdrawn = 0.125 — three
+#   decay_interval_s = 30 with decay_factor_active = 0.125 — three
 #   withdraw flaps cross the suppress threshold with no decay interval
 #   elapsing between them (the whole flap phase takes ~10 s); the
-#   first decay tick then divides the suppressed FoM by 8, dropping it
-#   below reuse in one tick (4125 / 8 = 515 < 750).
+#   suppressed prefix is REACHABLE (FRR re-announces it), so its FoM
+#   decays at the reachable rate (RFC 2439 §4.2: "whether suppressed
+#   or not") and the first decay tick divides it by 8, dropping below
+#   reuse in one tick (3000 / 8 = 375 < 750).
 #
 # Success criteria (all judged from lr-daemon's observable state):
 #   1. The route installs on the initial announcement.
@@ -26,9 +28,10 @@
 #      following re-announcement is DROPPED: no `route installed`
 #      line for the prefix for several seconds (the suppression
 #      window) even though FRR announced it.
-#   4. The decay ticker reactivates the prefix
-#      (`damping: prefix ... reactivated`), and a further flap
-#      re-installs the route — the full suppress/decay/reuse cycle.
+#   4. The decay ticker reactivates the prefix and re-imports the
+#      held announcement (`damping: prefix ... reactivated ...
+#      re-imported`), and a further flap re-installs the route — the
+#      full suppress/decay/reuse cycle.
 #
 # bgpd runs standalone (no zebra, no kernel) on unprivileged ports.
 # Environments without bgpd SKIP gracefully.
@@ -113,8 +116,8 @@ suppress_threshold = 3000
 reuse_threshold = 750
 upper_limit = 20000
 decay_interval_s = 30
-decay_factor_active = 0.5
-decay_factor_withdrawn = 0.125
+decay_factor_active = 0.125
+decay_factor_withdrawn = 0.5
 EOF
 
 echo "== starting lr-daemon (AS64512, [damping] RFC 2439) =="
@@ -240,8 +243,8 @@ echo "   flap 2: round-tripped (FoM ~2000 < suppress 3000)"
 echo "== flap 3 (FoM 3000+ -> suppressed) =="
 flap
 # The re-announcement must now be DROPPED by the damping hook: the
-# route stays out until two 3 s decay ticks have halved the FoM below
-# the reuse threshold (suppressed entries decay 0.5 per tick).
+# route stays out until the first decay tick divides the FoM by 8
+# (reachable suppressed entries decay at decay_factor_active).
 sleep 6
 after=$(count_log "route installed 198.51.100.0/24")
 if [ "$after" -gt "$before" ]; then
@@ -266,4 +269,5 @@ echo "damping interop: PASS"
 echo "  - FRR-generated withdraw flaps drove the RFC 2439 figure-of-merit"
 echo "  - the third flap suppressed the prefix; the import hook dropped the re-announcement"
 echo "  - the decay ticker reactivated it below the reuse threshold"
+echo "  - the held announcement was re-imported at reuse"
 echo "  - a post-reuse flap installed the route again"

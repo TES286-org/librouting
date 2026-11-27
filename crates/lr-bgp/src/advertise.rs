@@ -41,21 +41,25 @@ impl BgpPeer {
     /// e.g. an iBGP-learned route to a non-client iBGP peer.
     ///
     /// Equivalent to [`BgpPeer::advertise_with_originator`] with
-    /// `originator_bgp_id = None`: when reflecting to an RR-client the
-    /// ORIGINATOR_ID attribute falls back to the local speaker's BGP
-    /// Identifier. The router instance — which knows the source peer's
-    /// BGP Identifier — should call
+    /// `originator_bgp_id = None` and `origin_is_rr_client = false`: when
+    /// reflecting to an RR-client the ORIGINATOR_ID attribute falls back
+    /// to the local speaker's BGP Identifier, and the route is assumed
+    /// not to come from an RR client of this speaker. The router
+    /// instance — which knows the source peer's BGP Identifier and
+    /// client flag — should call
     /// [`BgpPeer::advertise_with_originator`] instead so the
-    /// ORIGINATOR_ID carries the actual originator per RFC 4456 §8.
+    /// ORIGINATOR_ID carries the actual originator per RFC 4456 §8 and
+    /// the §6 reflection rules see the client flag.
     pub fn advertise(&mut self, route: &Route) -> bool {
-        self.advertise_with_originator(route, None)
+        self.advertise_with_originator(route, None, false)
     }
 
     /// Advertise a route to this peer with an explicit ORIGINATOR_ID
-    /// source (RFC 4456 §8). Like [`BgpPeer::advertise`] but, when
-    /// reflecting a route to an RR-client and the route does not already
-    /// carry an ORIGINATOR_ID, stamps `originator_bgp_id` instead of the
-    /// local speaker's BGP Identifier.
+    /// source (RFC 4456 §8) and RR-client origin flag (RFC 4456 §6).
+    /// Like [`BgpPeer::advertise`] but, when reflecting a route to an
+    /// RR-client and the route does not already carry an
+    /// ORIGINATOR_ID, stamps `originator_bgp_id` instead of the local
+    /// speaker's BGP Identifier.
     ///
     /// Per RFC 4456 §8 the ORIGINATOR_ID carries "the BGP Identifier of
     /// the originator of the route in the local AS" — i.e. the source
@@ -65,6 +69,11 @@ impl BgpPeer {
     /// Identifier for an iBGP-learned route, or `None` for a locally
     /// originated route (in which case the local speaker is itself the
     /// originator and the local BGP Identifier is the correct value).
+    ///
+    /// `origin_is_rr_client` says the route was learned from a peer
+    /// this speaker configured as an RR client, so RFC 4456 §6 rule 2
+    /// applies: the speaker reflects the route to its non-client iBGP
+    /// peers as well as its clients.
     ///
     /// When `originator_bgp_id` is `None` the ORIGINATOR_ID falls back to
     /// the local speaker's BGP Identifier — preserving the historical
@@ -77,6 +86,7 @@ impl BgpPeer {
         &mut self,
         route: &Route,
         originator_bgp_id: Option<RouterId>,
+        origin_is_rr_client: bool,
     ) -> bool {
         if !self.is_established() {
             return false;
@@ -92,12 +102,26 @@ impl BgpPeer {
         }
         let topo = self.cfg.compute_topology();
 
-        // iBGP split-horizon (RFC 4271 §10): a route learned from an iBGP
-        // peer is not re-advertised to another iBGP peer unless that peer
-        // is an RR client of this speaker (reflection).
+        // iBGP split-horizon (RFC 4271 §10) with the RFC 4456 §6
+        // reflection carve-outs. A route learned from an iBGP peer is
+        // re-advertised to another iBGP peer only when THIS speaker is
+        // configured as a route reflector AND either the target is an
+        // RR client (§6 rule 1: non-client origins reflect to all
+        // clients) or the route was learned FROM a client (§6 rule 2:
+        // client origins reflect to every iBGP peer, clients and
+        // non-clients alike). A non-reflector never reflects — the old
+        // gate keyed only on the target's `rr_client` flag, so a
+        // non-RR speaker forwarded iBGP routes to a peer merely
+        // labelled `route_reflector_client` and, because the stamp
+        // gate below also required `enabled`, did so WITHOUT the
+        // ORIGINATOR_ID/CLUSTER_LIST loop-detection attributes.
         let learned_internal =
             route.origin.proto == 1 && route.protocol == lr_core::rib::Protocol::Bgp;
-        if learned_internal && topo.role.is_internal() && !topo.rr_client {
+        let reflector = self.cfg.route_reflector.enabled;
+        if learned_internal
+            && topo.role.is_internal()
+            && !(reflector && (topo.rr_client || origin_is_rr_client))
+        {
             return false;
         }
 
@@ -309,20 +333,26 @@ impl BgpPeer {
             }
         }
 
-        // --- Route-Reflector reflection attributes (RFC 4456 §3) ---
+        // --- Route-Reflector reflection attributes (RFC 4456 §8) ---
         // ORIGINATOR_ID and CLUSTER_LIST are optional non-transitive
         // (RFC 4456 §5): optional=1, transitive=0 → 0x80.
         //
-        // Gating: `topo.rr_client` says this peer is configured as a
-        // client; `route_reflector.enabled` says *this speaker* is
-        // itself a route reflector. RFC 4456 §3 makes reflection a
-        // per-speaker behavior — a non-reflector with an accidentally
-        // set `rr_client` flag must NOT stamp ORIGINATOR_ID /
-        // CLUSTER_LIST, because no cluster is defined for the local
-        // speaker. The `enabled` field is therefore read here so the
-        // per-peer flag is honoured only when the local speaker is
-        // actually configured as a reflector.
-        if topo.rr_client && self.cfg.route_reflector.enabled {
+        // Gating: `route_reflector.enabled` says *this speaker* is
+        // itself a route reflector — a non-reflector never stamps
+        // (RFC 4456 §3 makes reflection a per-speaker behaviour; no
+        // cluster is defined for a non-reflector). Within a reflector,
+        // the attributes ride every REFLECTED UPDATE: to a client
+        // (§6 rules 1 and 2), and — the case the old gate missed — to
+        // a NON-client iBGP peer receiving a client's route (§6 rule
+        // 2), where §8's "When an RR reflects a route, it MUST
+        // prepend the local CLUSTER_ID to the CLUSTER_LIST" is the
+        // downstream clusters' loop-detection input. An eBGP-learned
+        // or locally-originated route to a non-client is a plain
+        // advertisement, not a reflection, and stays unstamped.
+        if self.cfg.route_reflector.enabled
+            && topo.role.is_internal()
+            && (topo.rr_client || learned_internal)
+        {
             let cluster = self
                 .cfg
                 .route_reflector

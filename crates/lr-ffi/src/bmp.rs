@@ -261,7 +261,13 @@ pub unsafe extern "C" fn lr_bmp_message_termination(
             };
             let info_refs: Vec<(u16, &[u8])> =
                 info_vec.iter().map(|(t, v)| (*t, v.as_slice())).collect();
-            box_message(BmpMessage::termination(&info_refs))
+            match BmpMessage::termination(&info_refs) {
+                Ok(m) => box_message(m),
+                Err(e) => {
+                    set_last_error(e.to_string());
+                    std::ptr::null_mut()
+                }
+            }
         },
         std::ptr::null_mut(),
     )
@@ -296,7 +302,13 @@ pub unsafe extern "C" fn lr_bmp_message_initiation(
             };
             let info_refs: Vec<(u16, &[u8])> =
                 info_vec.iter().map(|(t, v)| (*t, v.as_slice())).collect();
-            box_message(BmpMessage::initiation(&info_refs))
+            match BmpMessage::initiation(&info_refs) {
+                Ok(m) => box_message(m),
+                Err(e) => {
+                    set_last_error(e.to_string());
+                    std::ptr::null_mut()
+                }
+            }
         },
         std::ptr::null_mut(),
     )
@@ -315,11 +327,15 @@ pub struct lr_bmp_tlv_t {
 }
 
 /// Build a Peer Down message (type 2). `reason` is one of the
-/// `LR_BMP_PEER_DOWN_*` constants (1=LocalClose, 2=RemoteClose,
-/// 3=RemoteNotification, 4=DepletedResource, 5=AdminReset); values
-/// outside that range are clamped to LocalClose. `peer` MUST be
-/// non-NULL. `data` is the optional reason-specific payload (NULL when
-/// `data_len == 0`).
+/// `LR_BMP_PEER_DOWN_*` constants — the wire values of RFC 7854
+/// §4.9: 1 = local close with the NOTIFICATION PDU in `data`,
+/// 2 = local close without notification (`data` = the 2-byte FSM
+/// event code), 3 = remote close with the received NOTIFICATION in
+/// `data`, 4 = remote close without notification (no data),
+/// 5 = peer removed for configuration reasons (no data); values
+/// outside that range are clamped to 2 (local close, no notification).
+/// `peer` MUST be non-NULL. `data` is the optional reason-specific
+/// payload (NULL when `data_len == 0`).
 ///
 /// # Safety
 /// `peer` must point to a `lr_bmp_peer_header_t`. `data` must point to
@@ -343,12 +359,12 @@ pub unsafe extern "C" fn lr_bmp_message_peer_down(
                 unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
             };
             let r = match reason {
-                1 => PeerDownReason::LocalClose,
-                2 => PeerDownReason::RemoteClose,
-                3 => PeerDownReason::RemoteNotification,
-                4 => PeerDownReason::DepletedResource,
-                5 => PeerDownReason::AdminReset,
-                _ => PeerDownReason::LocalClose,
+                1 => PeerDownReason::LocalCloseNotification,
+                2 => PeerDownReason::LocalCloseNoNotification,
+                3 => PeerDownReason::RemoteCloseNotification,
+                4 => PeerDownReason::RemoteClose,
+                5 => PeerDownReason::PeerConfigRemoved,
+                _ => PeerDownReason::LocalCloseNoNotification,
             };
             box_message(BmpMessage::peer_down(peer, r, data_vec.as_slice()))
         },

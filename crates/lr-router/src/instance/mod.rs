@@ -1322,6 +1322,22 @@ impl DefaultRouter {
         peer.peer_bgp_id()
     }
 
+    /// Whether the peer on the far end of `session` is configured as a
+    /// route-reflector client of this speaker (RFC 4456 §5). Used at
+    /// every `BgpPeer::advertise_with_originator` call site so the
+    /// egress path can apply §6 rule 2: a route learned FROM a client
+    /// is reflected to the non-client iBGP peers as well, not only to
+    /// the other clients. False for non-BGP sessions.
+    fn session_is_rr_client(&self, session: u64) -> bool {
+        let Some(state) = self.sessions.get(&session) else {
+            return false;
+        };
+        let SessionState::Bgp { peer, .. } = state else {
+            return false;
+        };
+        peer.config().route_reflector_client
+    }
+
     /// Emit a BMP Peer Up message (RFC 7854 §4.6) to the sink, when
     /// configured. Called when a BGP session transitions to Established.
     fn bmp_peer_up(&self, session: u64) {
@@ -1344,22 +1360,34 @@ impl DefaultRouter {
         }
     }
 
-    /// Emit a BMP Peer Down message (RFC 7854 §4.5) to the sink, when
+    /// Emit a BMP Peer Down message (RFC 7854 §4.9) to the sink, when
     /// configured. Called when a BGP session leaves Established.
-    fn bmp_peer_down(&self, session: u64) {
+    ///
+    /// The reason follows the teardown's own outbound actions: when the
+    /// batch that drove the session down queued a NOTIFICATION, reason 1
+    /// (local close) carries it as the §4.9 data; otherwise reason 2
+    /// (local close without a notification) carries the FSM event code
+    /// 0, 0 — "no relevant Event code is defined". A teardown caused by
+    /// the remote end is outside this call site's knowledge; collectors
+    /// treat reason 2/4 with the zero event code as the generic form.
+    fn bmp_peer_down(&self, session: u64, queued_notification: Option<&[u8]>) {
         let Some(sink) = &self.bmp_sink else {
             return;
         };
         let Some(peer) = self.bmp_peer_header(session) else {
             return;
         };
-        let msg = lr_bmp::BmpMessage::peer_down(peer, lr_bmp::PeerDownReason::LocalClose, &[]);
+        let (reason, data): (lr_bmp::PeerDownReason, Vec<u8>) = match queued_notification {
+            Some(pdu) => (lr_bmp::PeerDownReason::LocalCloseNotification, pdu.to_vec()),
+            None => (lr_bmp::PeerDownReason::LocalCloseNoNotification, vec![0, 0]),
+        };
+        let msg = lr_bmp::BmpMessage::peer_down(peer, reason, &data);
         if let Ok(bytes) = lr_bmp::BmpCodec::new().encode_vec(&msg) {
             sink(&bytes);
         }
     }
 
-    /// Emit a BMP Route Monitoring message (RFC 7854 §4.3) for a route
+    /// Emit a BMP Route Monitoring message (RFC 7854 §4.6) for a route
     /// that just entered the Loc-RIB. The payload is a minimal BGP
     /// UPDATE carrying the route's prefix — a full BGP UPDATE encode
     /// would require the path-attribute bag, which we delegate to the
@@ -1370,7 +1398,7 @@ impl DefaultRouter {
         let Some(sink) = &self.bmp_sink else {
             return;
         };
-        // A real BGP UPDATE (RFC 7854 §4.3 mirrors what the session
+        // A real BGP UPDATE (RFC 7854 §4.6 mirrors what the session
         // sent): the route's own path attributes, IPv4 NLRI in the
         // legacy section, IPv6 via MP_REACH_NLRI.
         use lr_bgp::message::update::{Nlri, Update};
@@ -2682,6 +2710,26 @@ impl DefaultRouter {
         }
     }
 
+    /// Re-run the full import pipeline for routes an import hook
+    /// previously dropped — the RFC 2439 §4.8.7 reuse step: the
+    /// damping hook held the newest announcement of a suppressed
+    /// prefix, and the decay ticker calls this once the figure of
+    /// merit falls below the reuse threshold. The routes pass through
+    /// the same safety net, RFC 8212 check and hook chain as a live
+    /// announcement (by then the damping hook admits them). Returns
+    /// the number of routes re-imported.
+    pub fn reimport_damped(&mut self, routes: Vec<Route>) -> usize {
+        let mut count = 0;
+        for route in routes {
+            let before = self.adj_rib_in.len();
+            self.import_route(route);
+            if self.adj_rib_in.len() > before {
+                count += 1;
+            }
+        }
+        count
+    }
+
     fn import_route(&mut self, route: Route) {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
         // draft-ietf-idr-addpath-paths-limit-00 §3/§5: cap the number
@@ -3348,23 +3396,37 @@ impl DefaultRouter {
             return;
         };
         let key = first.key.clone();
-        // Pre-compute the source peer's BGP Identifier for each
-        // distinct originator session in `routes` before the egress
-        // session's mutable borrow — `BgpPeer::advertise_with_originator`
-        // stamps this into ORIGINATOR_ID per RFC 4456 §8 (the
-        // originator of the route in the local AS, not the route
-        // reflector's own BGP Identifier). The lookup is O(distinct
-        // source sessions) — typically 1 in steady-state.
-        let originators: BTreeMap<u64, Option<RouterId>> = routes
+        // Pre-compute the source peer's BGP Identifier and RR-client
+        // flag for each distinct originator session in `routes` before
+        // the egress session's mutable borrow —
+        // `BgpPeer::advertise_with_originator` stamps the identifier
+        // into ORIGINATOR_ID per RFC 4456 §8 (the originator of the
+        // route in the local AS, not the route reflector's own BGP
+        // Identifier) and applies §6 rule 2 with the client flag (a
+        // client's route reflects to the non-client iBGP peers too).
+        // The lookup is O(distinct source sessions) — typically 1 in
+        // steady-state.
+        let originators: BTreeMap<u64, (Option<RouterId>, bool)> = routes
             .iter()
-            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .map(|r| {
+                (
+                    r.origin.peer,
+                    (
+                        self.session_peer_bgp_id(r.origin.peer),
+                        self.session_is_rr_client(r.origin.peer),
+                    ),
+                )
+            })
             .collect();
         let sent =
             if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
                 let mut sent = false;
                 for route in routes {
-                    let originator = originators.get(&route.origin.peer).copied().flatten();
-                    sent |= peer.advertise_with_originator(route, originator);
+                    let (originator, origin_is_rr_client) = originators
+                        .get(&route.origin.peer)
+                        .copied()
+                        .unwrap_or((None, false));
+                    sent |= peer.advertise_with_originator(route, originator, origin_is_rr_client);
                 }
                 let bytes = peer.drain_outgoing();
                 if !bytes.is_empty() {
@@ -3827,17 +3889,27 @@ impl DefaultRouter {
         // Adj-RIB-Out empty as the RFC requires.
         let (_, rfc8212_deny_export) = self.rfc8212_denies(session);
 
-        // Pre-compute the source peer's BGP Identifier for each
-        // route in `snapshot` before the egress session's mutable
-        // borrow — `BgpPeer::advertise_with_originator` stamps this
-        // into ORIGINATOR_ID per RFC 4456 §8. The snapshot may
-        // contain routes from many distinct source sessions (Add-Path
-        // refresh of the full Loc-RIB view), so the lookup is keyed
-        // by `route.origin.peer` and de-duplicated by the BTreeMap.
-        let originators: BTreeMap<u64, Option<RouterId>> = snapshot
+        // Pre-compute the source peer's BGP Identifier and RR-client
+        // flag for each route in `snapshot` before the egress session's
+        // mutable borrow — `BgpPeer::advertise_with_originator` stamps
+        // the identifier into ORIGINATOR_ID per RFC 4456 §8 and applies
+        // the §6 rule 2 reflection with the client flag. The snapshot
+        // may contain routes from many distinct source sessions
+        // (Add-Path refresh of the full Loc-RIB view), so the lookup is
+        // keyed by `route.origin.peer` and de-duplicated by the
+        // BTreeMap.
+        let originators: BTreeMap<u64, (Option<RouterId>, bool)> = snapshot
             .iter()
             .flatten()
-            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .map(|r| {
+                (
+                    r.origin.peer,
+                    (
+                        self.session_peer_bgp_id(r.origin.peer),
+                        self.session_is_rr_client(r.origin.peer),
+                    ),
+                )
+            })
             .collect();
 
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
@@ -3867,8 +3939,11 @@ impl DefaultRouter {
                     if matches!(hooks.run_export_to(&mut route, session), HookVerdict::Drop) {
                         continue;
                     }
-                    let originator = originators.get(&route.origin.peer).copied().flatten();
-                    if peer.advertise_with_originator(&route, originator) {
+                    let (originator, origin_is_rr_client) = originators
+                        .get(&route.origin.peer)
+                        .copied()
+                        .unwrap_or((None, false));
+                    if peer.advertise_with_originator(&route, originator, origin_is_rr_client) {
                         advertised.push(route);
                     }
                 }
@@ -4140,17 +4215,26 @@ impl DefaultRouter {
             }
         }
 
-        // Pre-compute the source peer's BGP Identifier for each
-        // route in `snapshot` before the egress session's mutable
-        // borrow — `BgpPeer::advertise_with_originator` stamps this
-        // into ORIGINATOR_ID per RFC 4456 §8. The initial dump covers
-        // the whole Loc-RIB, so the snapshot typically contains
-        // routes from many distinct source sessions; the lookup is
-        // keyed by `route.origin.peer` and de-duplicated by the
-        // BTreeMap.
-        let originators: BTreeMap<u64, Option<RouterId>> = snapshot
+        // Pre-compute the source peer's BGP Identifier and RR-client
+        // flag for each route in `snapshot` before the egress session's
+        // mutable borrow — `BgpPeer::advertise_with_originator` stamps
+        // the identifier into ORIGINATOR_ID per RFC 4456 §8 and applies
+        // the §6 rule 2 reflection with the client flag. The initial
+        // dump covers the whole Loc-RIB, so the snapshot typically
+        // contains routes from many distinct source sessions; the
+        // lookup is keyed by `route.origin.peer` and de-duplicated by
+        // the BTreeMap.
+        let originators: BTreeMap<u64, (Option<RouterId>, bool)> = snapshot
             .iter()
-            .map(|r| (r.origin.peer, self.session_peer_bgp_id(r.origin.peer)))
+            .map(|r| {
+                (
+                    r.origin.peer,
+                    (
+                        self.session_peer_bgp_id(r.origin.peer),
+                        self.session_is_rr_client(r.origin.peer),
+                    ),
+                )
+            })
             .collect();
 
         // RFC 5291 §6: send the configured ORF entries once the session
@@ -4179,8 +4263,11 @@ impl DefaultRouter {
                 if matches!(hooks.run_export_to(&mut r, h), HookVerdict::Drop) {
                     continue;
                 }
-                let originator = originators.get(&r.origin.peer).copied().flatten();
-                if peer.advertise_with_originator(&r, originator) {
+                let (originator, origin_is_rr_client) = originators
+                    .get(&r.origin.peer)
+                    .copied()
+                    .unwrap_or((None, false));
+                if peer.advertise_with_originator(&r, originator, origin_is_rr_client) {
                     advertised.push(r);
                 }
             }
@@ -4246,7 +4333,15 @@ impl DefaultRouter {
             self.bmp_peer_up(session);
         }
         if transition_down {
-            self.bmp_peer_down(session);
+            // A NOTIFICATION queued in this batch means the local end
+            // closed the session: RFC 7854 §4.9 reason 1 carries it as
+            // the Peer Down data. A BGP message is `marker(16) +
+            // length(2) + type(1)` — type 3 is NOTIFICATION.
+            let queued_notification = actions.iter().find_map(|a| match a {
+                BgpAction::Send(b) if b.len() >= 19 && b[18] == 3 => Some(b.clone()),
+                _ => None,
+            });
+            self.bmp_peer_down(session, queued_notification.as_deref());
         }
         for a in actions {
             match a {
@@ -5728,7 +5823,7 @@ impl RouterInstance for DefaultRouter {
                     return Ok(());
                 }
                 if newly_established {
-                    // BMP (RFC 7854 §4.6): the Peer Up event mirrors
+                    // BMP (RFC 7854 §4.10): the Peer Up event mirrors
                     // *before* any Route Monitoring from the same batch
                     // — with TCP coalescing the KEEPALIVE that completes
                     // the handshake and the first UPDATE arrive in one
