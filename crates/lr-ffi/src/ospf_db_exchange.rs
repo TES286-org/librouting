@@ -11,6 +11,9 @@ use crate::ospf_lsdb::{borrow_lsdb, lr_ospf_lsa_box_t, lr_ospf_lsdb_t};
 use crate::ospf_neighbor::{borrow_neighbor_mut, lr_ospf_neighbor_t};
 
 const LR_ERR_NULL: i32 = LrError::Null as i32;
+/// `LR_ERR_OTHER` (-6) — the bytes hold an incomplete packet
+/// ("truncated" in the last-error string).
+const LR_ERR_OTHER: i32 = LrError::Other as i32;
 
 /// Opaque `DbExchange` handle.
 #[repr(C)]
@@ -482,6 +485,15 @@ unsafe fn decode_packet_v2(data: *const u8, len: usize) -> Result<Option<OspfPac
     }
 }
 
+/// Feed one OSPFv2 Database Description packet to the exchange
+/// driver. On success, writes the packed `lr_ospf_exchange_step_t`
+/// (possibly NULL when the step has no output) to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete packet, the
+/// wrong packet type, or an incoherent step,
+/// `LR_ERR_CODEC` (-5) on a decode failure (the last-error string
+/// carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_ospf_db_exchange_on_db_desc_packet(
     e: lr_ospf_db_exchange_t,
@@ -509,7 +521,7 @@ pub unsafe extern "C" fn lr_ospf_db_exchange_on_db_desc_packet(
                 Ok(Some(p)) => p,
                 Ok(None) => {
                     set_last_error("on_db_desc: truncated".into());
-                    return LrError::Codec as i32;
+                    return LR_ERR_OTHER;
                 }
                 Err(()) => return LrError::Codec as i32,
             };
@@ -539,6 +551,14 @@ pub unsafe extern "C" fn lr_ospf_db_exchange_on_db_desc_packet(
     )
 }
 
+/// Feed one OSPFv2 Link State Request packet to the exchange
+/// driver. On success, writes the packed
+/// `lr_ospf_exchange_step_t` (possibly NULL) to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete packet, the
+/// wrong packet type, or an incoherent step, `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_ospf_db_exchange_on_ls_request_packet(
     e: lr_ospf_db_exchange_t,
@@ -566,7 +586,7 @@ pub unsafe extern "C" fn lr_ospf_db_exchange_on_ls_request_packet(
                 Ok(Some(p)) => p,
                 Ok(None) => {
                     set_last_error("on_ls_request: truncated".into());
-                    return LrError::Codec as i32;
+                    return LR_ERR_OTHER;
                 }
                 Err(()) => return LrError::Codec as i32,
             };
@@ -596,6 +616,14 @@ pub unsafe extern "C" fn lr_ospf_db_exchange_on_ls_request_packet(
     )
 }
 
+/// Feed one OSPFv2 Link State Update packet to the exchange
+/// driver. On success, writes the packed `lr_ospf_exchange_step_t`
+/// (possibly NULL) to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete packet, the
+/// wrong packet type, or an incoherent step, `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_ospf_db_exchange_on_ls_update_packet(
     e: lr_ospf_db_exchange_t,
@@ -619,7 +647,7 @@ pub unsafe extern "C" fn lr_ospf_db_exchange_on_ls_update_packet(
                 Ok(Some(p)) => p,
                 Ok(None) => {
                     set_last_error("on_ls_update: truncated".into());
-                    return LrError::Codec as i32;
+                    return LR_ERR_OTHER;
                 }
                 Err(()) => return LrError::Codec as i32,
             };

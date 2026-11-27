@@ -44,6 +44,12 @@ pub extern "C" fn lr_bmp_codec_new() -> lr_bmp_codec_t {
     guarded(|| box_codec(BmpCodec::new()), std::ptr::null_mut())
 }
 
+/// Decode one BMP message from `data`. On success, writes a
+/// freshly-allocated `lr_bmp_message_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_CODEC` (-5) on a decode failure (the last-error string
+/// carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_bmp_codec_decode_slice(
     c: lr_bmp_codec_t,
@@ -97,6 +103,10 @@ pub unsafe extern "C" fn lr_bmp_codec_feed(c: lr_bmp_codec_t, data: *const u8, l
     )
 }
 
+/// Pop the next complete message off the codec's carryover buffer.
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument, 1
+/// when no complete message is buffered, `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_bmp_codec_next_message(
     c: lr_bmp_codec_t,
@@ -126,6 +136,12 @@ pub unsafe extern "C" fn lr_bmp_codec_next_message(
     )
 }
 
+/// Encode one BMP message to wire bytes. On success, writes a
+/// freshly-allocated `lr_bytes_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_bmp_codec_encode_vec(
     c: lr_bmp_codec_t,

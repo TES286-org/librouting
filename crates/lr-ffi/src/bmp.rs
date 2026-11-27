@@ -126,6 +126,11 @@ impl From<&PeerHeader> for lr_bmp_peer_header_t {
 /// Decode one BMP message from `data`. On success, writes a freshly-
 /// allocated `lr_bmp_message_t` to `*out`.
 ///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+/// (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
+///
 /// # Safety
 /// `data` must point to `len` readable bytes. `out` must point to a
 /// writable `lr_bmp_message_t`.
@@ -162,6 +167,10 @@ pub unsafe extern "C" fn lr_bmp_decode(
 }
 
 /// Encode a `lr_bmp_message_t` to its wire form.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 ///
 /// # Safety
 /// `message` must be a valid handle. `out` must point to a writable

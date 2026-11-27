@@ -36,6 +36,12 @@ pub extern "C" fn lr_mrt_reader_new() -> lr_mrt_reader_t {
     guarded(|| box_reader(MrtReader::new()), std::ptr::null_mut())
 }
 
+/// Decode one MRT record from `data`. On success, writes a
+/// freshly-allocated `lr_mrt_record_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument, 1
+/// when `data` holds no complete record yet, `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_mrt_reader_decode_slice(
     r: lr_mrt_reader_t,
@@ -100,6 +106,11 @@ pub unsafe extern "C" fn lr_mrt_reader_feed(
     )
 }
 
+/// Pop the next complete buffered record.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument, 1
+/// when no complete record is buffered, `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
 #[no_mangle]
 pub unsafe extern "C" fn lr_mrt_reader_next_record(
     r: lr_mrt_reader_t,

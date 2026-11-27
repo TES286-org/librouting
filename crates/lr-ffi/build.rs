@@ -37,9 +37,13 @@ fn main() {
  * a C consumer. Pointer-returning entry points signal failure with NULL
  * and set the thread-local message from lr_last_error() instead.
  *
- * LR_ERR_CODEC (-5) is NOT a general error code: only the SRv6 codec
- * entry points (lr_srv6_encode_srh / lr_srv6_decode_srh) return it for
- * their own encode/decode failures, as documented on those functions. */
+ * LR_ERR_CODEC (-5) is the codec-class code: the SRv6 SRH entry points
+ * (lr_srv6_encode_srh / lr_srv6_decode_srh) and the wire-codec entry
+ * points (lr_bgp_decode, lr_bfd_decode, lr_ospf_decode_*, lr_babel_*,
+ * lr_ldp_decode, lr_bmp_decode, the lr_*_codec_* / lr_mrt_reader_*
+ * families and the packet feeders) return it for their own
+ * encode/decode failures, as documented on those functions. It is NOT a
+ * general error code — a non-codec entry point never returns it. */
 #define LR_ERR_OK 0
 #define LR_ERR_NULL (-1)
 #define LR_ERR_INVALID_HANDLE (-2)

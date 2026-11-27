@@ -119,8 +119,12 @@ pub const LR_BFD_DIAG_MISCONN_DEFECT: u8 = 9;
 // ---- Packet surface ----
 
 /// Decode one BFD Control packet from `data`. On success, writes a
-/// freshly-allocated `lr_bfd_packet_t` to `*out`. Returns 0 on success,
-/// negative on error.
+/// freshly-allocated `lr_bfd_packet_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument,
+/// `LR_ERR_OTHER` (-6) when the bytes hold an incomplete message
+/// (the last-error string is "truncated"), `LR_ERR_CODEC` (-5) on a
+/// decode failure (the last-error string carries the error).
 ///
 /// # Safety
 /// `data` must point to `len` readable bytes. `out` must point to a
@@ -160,6 +164,10 @@ pub unsafe extern "C" fn lr_bfd_decode(
 
 /// Encode a `lr_bfd_packet_t` to its wire form. On success, writes a
 /// freshly-allocated `lr_bytes_t` to `*out`.
+///
+/// Returns 0 on success, `LR_ERR_NULL` (-1) on a NULL argument or
+/// handle, `LR_ERR_CODEC` (-5) on an encode failure (the last-error
+/// string carries the error).
 ///
 /// # Safety
 /// `packet` must be a valid handle. `out` must point to a writable
