@@ -236,8 +236,8 @@ impl CryptoAuth {
     }
 
     /// Verify a received packet's authentication trailer. Returns `true`
-    /// when the MAC matches and the sequence number is strictly greater
-    /// than the last-seen value (anti-replay, RFC 2328 §D.3.3).
+    /// when the MAC matches and the sequence number is not less than the
+    /// last-seen value (anti-replay, RFC 2328 §D.5.3(2)).
     ///
     /// `packet` is the full OSPF packet (header + body, without the
     /// trailer); `trailer` is the appended authentication trailer.
@@ -259,13 +259,16 @@ impl CryptoAuth {
             return false;
         }
         let peer_seq = u32::from_be_bytes([trailer[2], trailer[3], trailer[4], trailer[5]]);
-        // Anti-replay: the sequence number must be strictly greater than
-        // any sequence seen so far. The very first packet (nothing seen)
-        // is always accepted to bootstrap the session — including a
-        // first packet with seq 0, after which further seq-0 packets are
-        // rejected (the "has seen any packet" rule, not "last != 0").
+        // Anti-replay per RFC 2328 §D.5.3(2): the packet is discarded
+        // only when the sequence number is LESS than the one recorded
+        // for the sending neighbor. An equal sequence number is
+        // accepted — a retransmitted DD/LSR/LSU is byte-identical
+        // (same crypto_seq, same MAC), so rejecting equality turns one
+        // lost packet into a permanent adjacency wedge against any
+        // compliant peer (BIRD/FRR/Cisco retransmit verbatim). The very
+        // first packet (nothing seen yet) bootstraps the recorded value.
         if let Some(last) = self.last_peer_seq {
-            if peer_seq <= last {
+            if peer_seq < last {
                 return false;
             }
         }
@@ -407,7 +410,11 @@ mod tests {
     }
 
     #[test]
-    fn replay_attack_rejected() {
+    fn older_sequence_replay_rejected() {
+        // RFC 2328 §D.5.3(2): only a packet whose crypto sequence is
+        // LESS than the recorded one is discarded — a replayed older
+        // packet fails the MAC-independent replay check. A same-sequence
+        // packet is a legal retransmission (see below).
         let mut auth = CryptoAuth::new(1, b"key".to_vec());
         auth.crypto_seq = 100;
         let header = make_header(2, auth_field(1, auth.algorithm.digest_len() as u8, 100));
@@ -418,14 +425,57 @@ mod tests {
 
         let mut verifier = CryptoAuth::new(1, b"key".to_vec());
         assert!(verifier.verify(&packet, &trailer), "first packet accepted");
-        // Replay the same packet — same sequence number, must be rejected.
-        assert!(!verifier.verify(&packet, &trailer), "replay must fail");
+
+        // A genuinely older packet — sign one with seq 50.
+        let mut old = CryptoAuth::new(1, b"key".to_vec());
+        old.crypto_seq = 50;
+        let old_header = make_header(2, auth_field(1, old.algorithm.digest_len() as u8, 50));
+        let old_trailer = old.sign_trailer(&old_header, &body);
+        let mut old_packet = old_header.clone();
+        old_packet.extend_from_slice(&body);
+        assert!(
+            !verifier.verify(&old_packet, &old_trailer),
+            "replayed older packet must be discarded (§D.5.3(2))"
+        );
     }
 
     #[test]
-    fn seq_zero_replay_hole_closed() {
-        // A first packet with seq 0 is accepted to bootstrap; a second
-        // seq-0 packet must be rejected (audit A3).
+    fn equal_sequence_retransmission_accepted() {
+        // RFC 2328 §D.5.3(2): the discard rule is strictly "less
+        // than". A retransmitted DD/LSR/LSU is byte-identical (same
+        // crypto_seq, same MAC), so equality must verify — rejecting it
+        // wedged every RxmtInterval retransmission against a compliant
+        // peer (BIRD/FRR/Cisco) after a single lost packet.
+        let mut auth = CryptoAuth::new(1, b"key".to_vec());
+        auth.crypto_seq = 100;
+        let header = make_header(2, auth_field(1, auth.algorithm.digest_len() as u8, 100));
+        let body: Vec<u8> = vec![0];
+        let trailer = auth.sign_trailer(&header, &body);
+        let mut packet = header.clone();
+        packet.extend_from_slice(&body);
+
+        let mut verifier = CryptoAuth::new(1, b"key".to_vec());
+        assert!(verifier.verify(&packet, &trailer), "first packet accepted");
+        // A higher sequence still advances.
+        let mut next = CryptoAuth::new(1, b"key".to_vec());
+        next.crypto_seq = 101;
+        let next_header = make_header(2, auth_field(1, next.algorithm.digest_len() as u8, 101));
+        let next_trailer = next.sign_trailer(&next_header, &body);
+        let mut next_packet = next_header.clone();
+        next_packet.extend_from_slice(&body);
+        assert!(verifier.verify(&next_packet, &next_trailer), "seq 101 accepted");
+        // The byte-identical retransmission of seq 101 also verifies.
+        assert!(
+            verifier.verify(&next_packet, &next_trailer),
+            "retransmission with equal sequence must verify"
+        );
+    }
+
+    #[test]
+    fn seq_zero_bootstrap_and_retransmission() {
+        // A first packet with seq 0 bootstraps the recorded value
+        // (nothing seen yet), and a byte-identical seq-0 retransmission
+        // verifies — §D.5.3(2) discards only strictly-lower sequences.
         let auth = CryptoAuth::new(1, b"key".to_vec());
         let header = make_header(2, auth_field(1, auth.algorithm.digest_len() as u8, 0));
         let body: Vec<u8> = vec![0];
@@ -439,8 +489,8 @@ mod tests {
             "first seq-0 packet accepted"
         );
         assert!(
-            !verifier.verify(&packet, &trailer),
-            "replayed seq-0 packet must be rejected"
+            verifier.verify(&packet, &trailer),
+            "retransmitted seq-0 packet accepted as a legal retransmission"
         );
     }
 
