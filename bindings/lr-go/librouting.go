@@ -4020,7 +4020,9 @@ func (f *CompiledFilter) Name() (string, error) {
 // the RFC 6811 ROA override — lives in the C ABI's
 // lr_filter_context_t callback table. Returns one of the Filter*
 // verdict constants; for FilterReject, reason carries the
-// `reject with` payload when present.
+// `reject with` payload when present. A runtime error (undefined
+// variable, type error, overflow) also evaluates to FilterReject
+// with the error text as reason — a broken filter fails closed.
 func (f *CompiledFilter) Evaluate(route *Route) (int32, string, error) {
         var verdict C.int32_t
         var reason C.struct_lr_bytes_t

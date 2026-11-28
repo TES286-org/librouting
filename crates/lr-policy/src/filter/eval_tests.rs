@@ -482,11 +482,13 @@ fn function_len_on_as_path() {
 }
 
 #[test]
-fn undefined_variable_is_an_error_fallthrough() {
+fn undefined_variable_is_an_error_reject() {
     let mut r = route_with("203.0.113.0/24", 100, 0);
     assert_eq!(
         run("if undefined_var > 0 then accept; reject;", &mut r),
-        EvalResult::Fallthrough
+        EvalResult::Reject(Some(
+            "filter eval error at line 1 col 4: undefined variable 'undefined_var'".into()
+        ))
     );
 }
 
@@ -504,10 +506,15 @@ fn arithmetic_precedence() {
 }
 
 #[test]
-fn division_by_zero_is_fallthrough() {
+fn division_by_zero_rejects() {
     let mut r = route_with("203.0.113.0/24", 100, 0);
     let src = "let x = 1 / 0; accept;";
-    assert_eq!(run(src, &mut r), EvalResult::Fallthrough);
+    assert_eq!(
+        run(src, &mut r),
+        EvalResult::Reject(Some(
+            "filter eval error at line 1 col 9: division by zero".into()
+        ))
+    );
 }
 
 #[test]
@@ -559,6 +566,26 @@ fn nested_case_scrutinees_do_not_alias() {
     let src = "case bgp.local_pref { 100 => { case proto { \"bgp\" => { let x = 5; } default => {} } } default => {} } if bgp.local_pref == 100 then accept; reject;";
     assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
     assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
+/// A runtime error must reject the route on BOTH engines — the
+/// verdict an explicit `reject` produces, with the error text as
+/// the reason. Before the fix both entries mapped the error to
+/// Fallthrough, and the daemon maps Fallthrough to Keep: a filter
+/// with a typo on a taken branch was a permit-all (fail-open).
+#[test]
+fn runtime_error_rejects_on_both_engines() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "if undefined_var > 0 then accept; reject;";
+    let va = run(src, &mut r.clone());
+    let vb = run_vm(src, &mut r);
+    assert_eq!(va, vb, "the two engines agree on the error verdict");
+    assert_eq!(
+        va,
+        EvalResult::Reject(Some(
+            "filter eval error at line 1 col 4: undefined variable 'undefined_var'".into()
+        ))
+    );
 }
 
 #[test]
@@ -944,7 +971,12 @@ fn append_rejects_wildcard_pattern() {
     let mut r = route_with("203.0.113.0/24", 100, 0);
     assert_eq!(
         run("bgp.communities += [64512:*]; accept;", &mut r),
-        EvalResult::Fallthrough,
+        // A wildcard inside `+=` is a runtime error, and a runtime
+        // error rejects the route — the same verdict shape an
+        // explicit `reject` produces (fail-closed, BIRD parity).
+        EvalResult::Reject(Some(
+            "filter eval error at line 1 col 1: += expects compatible types, got community-set and community-pattern wildcard".into()
+        )),
     );
 }
 
@@ -1252,10 +1284,13 @@ fn bare_return_and_fallthrough_yield_false() {
 fn runaway_recursion_is_bounded() {
     let mut r = route_with("203.0.113.0/24", 100, 0);
     // spin() calls itself forever; the depth limiter must abort
-    // evaluation (Fallthrough), not smash the stack.
+    // evaluation with a Reject verdict, not smash the stack and not
+    // fall through to Keep.
     assert_eq!(
         run("function spin() { return spin(); } spin(); accept;", &mut r),
-        EvalResult::Fallthrough,
+        EvalResult::Reject(Some(
+            "filter eval error at line 1 col 26: user-function call depth exceeded 64".into()
+        )),
     );
 }
 
@@ -1311,8 +1346,9 @@ fn run_vm(filter_src: &str, route: &mut Route) -> EvalResult {
 
 /// Negating i64::MIN overflows. The module contract says the
 /// evaluator never panics; both engines must surface the same
-/// Overflow error (mapped to Fallthrough) instead — the previous
-/// `-n` panicked in debug builds and wrapped in release.
+/// Overflow error (mapped to Reject with the error text as the
+/// reason) instead — the previous `-n` panicked in debug builds and
+/// wrapped in release.
 #[test]
 fn neg_of_i64_min_overflows_not_panics() {
     let mut r = route_with("203.0.113.0/24", 100, 0);
@@ -1325,7 +1361,9 @@ fn neg_of_i64_min_overflows_not_panics() {
     );
     assert_eq!(
         va,
-        EvalResult::Fallthrough,
+        EvalResult::Reject(Some(
+            "filter eval error at line 1 col 9: arithmetic overflow".into()
+        )),
         "overflow is fatal for the route, not the process"
     );
     // The non-overflowing negation still works on both engines.

@@ -31,9 +31,11 @@ pub enum EvalResult {
     Fallthrough,
 }
 
-/// Evaluation error — always fatal for this route (the daemon logs
-/// and falls back to the configured `roa_invalid_action` / the
-/// route-map's verdict). Never panics.
+/// Evaluation error — always fatal for this route. Both engine
+/// entries map it to [`EvalResult::Reject`] with the error text as
+/// the reason (BIRD: "If there is a runtime error in filter, the
+/// route is rejected"), so a broken filter fails closed instead of
+/// keeping every route it touches. Never panics.
 ///
 /// Errors carry the byte [`Span`] of the offending AST node plus its
 /// 1-indexed start line/column (derived from the filter's
@@ -664,7 +666,11 @@ pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> 
             }
             Err(e) => {
                 tracing::debug!("filter '{}' eval error: {}", filter.name, e);
-                return EvalResult::Fallthrough;
+                // Fail closed: a runtime error rejects the route, it
+                // does not fall through to Keep (BIRD rejects the
+                // route on a filter runtime error; the error text
+                // rides along as the reject reason).
+                return EvalResult::Reject(Some(e.to_string()));
             }
         }
         // A user-function call inside this statement may have
@@ -2899,7 +2905,12 @@ pub fn execute(cf: &CompiledFilter, route: &mut Route, ctx: &dyn FilterContext) 
         Ok(VmFlow::Return(_)) => EvalResult::Fallthrough,
         Err(e) => {
             tracing::debug!("filter '{}' bytecode error: {}", cf.name, e);
-            EvalResult::Fallthrough
+            // Fail closed, matching the interpreter's `evaluate`:
+            // a runtime error (undefined variable, type error,
+            // overflow, depth bound) rejects the route instead of
+            // falling through to Keep — a filter with a typo on a
+            // taken branch must not become a permit-all.
+            EvalResult::Reject(Some(e.to_string()))
         }
     }
 }
