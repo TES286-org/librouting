@@ -1461,8 +1461,16 @@ impl LdpDaemon {
     /// IPv6 and IPv4 LDP Link Hellos ... using the same LDP
     /// Identifier").
     fn pump_link_hellos(&mut self, now_ms: u64) {
-        let hold_ms = u64::from(self.engine.config().link_hello_hold) * 1000;
-        let interval = (hold_ms / 3).max(1);
+        // §3.5.2: a 0 hold-time proposal selects the 15 s link
+        // default; the cadence follows the effective hold time, not
+        // the raw 0 (which would schedule a Hello every millisecond).
+        // The daemon config validation rejects 0 hold times, so this
+        // is defense-in-depth for embedder-built engine configs.
+        let hold_secs = match self.engine.config().link_hello_hold {
+            0 => lr_ldp::DEFAULT_LINK_HELLO_HOLD,
+            h => h,
+        };
+        let interval = (u64::from(hold_secs) * 1000 / 3).max(1);
         let due: Vec<usize> = self
             .interfaces
             .iter()
