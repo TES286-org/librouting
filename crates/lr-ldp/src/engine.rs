@@ -584,7 +584,8 @@ impl LdpEngine {
                             let outgoing = session.drain_outgoing();
                             self.absorb_session_events(now, peer_id, conn, down_events);
                             self.encode_outgoing(conn, outgoing, max_pdu_len);
-                            self.lib.unlearn_peer(peer_id);
+                            // The absorb above already ran the full
+                            // purge (bindings + transit FECs).
                         }
                         self.pending_connect.retain(|p| *p != peer_id);
                     }
@@ -616,7 +617,8 @@ impl LdpEngine {
                             let outgoing = session.drain_outgoing();
                             self.absorb_session_events(now, peer_id, conn, down_events);
                             self.encode_outgoing(conn, outgoing, max_pdu_len);
-                            self.lib.unlearn_peer(peer_id);
+                            // The absorb above already ran the full
+                            // purge (bindings + transit FECs).
                             self.events.push_back(EngineEvent::CloseConnection(conn));
                         }
                     }
@@ -959,9 +961,7 @@ impl LdpEngine {
                     reason: SessionDownReason::ProtocolError,
                     graceful: false,
                 });
-                self.gr_stale.remove(&bound_peer);
-                self.gr_recovering.remove(&bound_peer);
-                self.lib.unlearn_peer(bound_peer);
+                self.purge_peer_state(bound_peer);
                 return;
             }
             Some(_) => {}
@@ -1002,9 +1002,7 @@ impl LdpEngine {
                     reason: SessionDownReason::ProtocolError,
                     graceful: false,
                 });
-                self.gr_stale.remove(&peer);
-                self.gr_recovering.remove(&peer);
-                self.lib.unlearn_peer(peer);
+                self.purge_peer_state(peer);
                 return;
             }
         }
@@ -1202,16 +1200,7 @@ impl LdpEngine {
                             reason,
                             graceful: false,
                         });
-                        self.gr_stale.remove(&peer);
-                        self.gr_recovering.remove(&peer);
-                        self.lib.unlearn_peer(peer);
-                        // Transit bookkeeping: every FEC the peer had a
-                        // binding for may need a new next hop (or lose
-                        // its LSP entirely, §3.5.7.1.1).
-                        let prefixes: Vec<Prefix> = self.transit.keys().copied().collect();
-                        for prefix in prefixes {
-                            self.transit_on_unlearn(peer, prefix);
-                        }
+                        self.purge_peer_state(peer);
                     }
                 }
                 SessionEvent::NotificationReceived(status) => {
@@ -2050,6 +2039,23 @@ impl LdpEngine {
         prefixes
     }
 
+    /// Purge every trace of `peer` after a non-retaining teardown: the
+    /// LIB bindings, the graceful-restart bookkeeping and the FEC
+    /// bookkeeping for every transit prefix. Every deliberate
+    /// teardown path funnels here so a session can never die with a
+    /// binding, a data-plane swap or a local label left behind
+    /// (§3.5.7.1.1: a lost downstream binding needs the next-hop
+    /// re-selection and, on the last one, the upstream withdrawal).
+    fn purge_peer_state(&mut self, peer: LdpId) {
+        self.gr_stale.remove(&peer);
+        self.gr_recovering.remove(&peer);
+        self.lib.unlearn_peer(peer);
+        let prefixes: Vec<Prefix> = self.transit.keys().copied().collect();
+        for prefix in prefixes {
+            self.transit_on_unlearn(peer, prefix);
+        }
+    }
+
     /// The FT Session TLV timers to advertise (RFC 3478 §2), when
     /// graceful restart is configured.
     fn gr_advise(&self) -> Option<crate::session::GrAdvise> {
@@ -2123,7 +2129,8 @@ impl LdpEngine {
             self.absorb_session_events(now, peer, conn, down_events);
             self.encode_outgoing(conn, outgoing, max_pdu_len);
             self.events.push_back(EngineEvent::CloseConnection(conn));
-            self.lib.unlearn_peer(peer);
+            // The absorb above already ran the full purge (bindings
+            // + transit FECs).
         }
     }
 

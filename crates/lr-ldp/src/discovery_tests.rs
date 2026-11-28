@@ -74,7 +74,7 @@ fn adjacency_created_and_refreshed() {
 fn hold_time_negotiated_to_minimum() {
     let now = Instant::from_secs(0);
     let mut d = LdpDiscovery::new(cfg());
-    // Peer proposes 0 → default 45 (targeted); we propose 45 → 45.
+    // Peer proposes 0 → the targeted default 45; we propose 45 → 45.
     let (pdu, msg) = hello_pdu(id(2), true, 0, None);
     let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 2]));
     assert_eq!(d.adjacencies()[0].hold_time.as_secs(), 45);
@@ -82,10 +82,61 @@ fn hold_time_negotiated_to_minimum() {
     let (pdu, msg) = hello_pdu(id(3), true, 10, None);
     let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 3]));
     assert_eq!(d.adjacencies()[1].hold_time.as_secs(), 10);
-    // Link hello default: peer 0 → we propose 15 → 15.
+    // Link Hello: peer 0 → the link default 15; we propose 15 → 15.
     let (pdu, msg) = hello_pdu(id(4), false, 0, None);
     let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 4]));
     assert_eq!(d.adjacencies()[2].hold_time.as_secs(), 15);
+}
+
+#[test]
+fn zero_and_infinite_hold_proposals_resolve_per_hello_type() {
+    // §3.5.2: "A value of 0 means use the default, which is 15
+    // seconds for Link Hellos and 45 seconds for Targeted Hellos. A
+    // value of 0xffff means infinite." Both sides of the negotiation
+    // resolve through the Hello type's default — the kind picks 15
+    // or 45, never the other proposal's value and never a raw 0.
+    let now = Instant::from_secs(0);
+    let mut d = LdpDiscovery::new(cfg());
+    // Targeted, both sides propose 0 → the 45 s targeted default.
+    let (pdu, msg) = hello_pdu(id(2), true, 0, None);
+    let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 2]));
+    assert_eq!(d.adjacencies()[0].hold_time.as_secs(), 45);
+    // Link, both sides propose 0 → the 15 s link default.
+    let (pdu, msg) = hello_pdu(id(3), false, 0, None);
+    let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 3]));
+    assert_eq!(d.adjacencies()[1].hold_time.as_secs(), 15);
+
+    // A 0 proposal on the LOCAL side of a targeted adjacency selects
+    // the 45 s targeted default (not the 15 s link default): the peer
+    // proposing 20 then governs with min(20, 45) = 20.
+    let mut local_zero = cfg();
+    local_zero.targeted_hello_hold = 0;
+    let mut d = LdpDiscovery::new(local_zero);
+    let (pdu, msg) = hello_pdu(id(4), true, 20, None);
+    let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 4]));
+    assert_eq!(d.adjacencies()[0].hold_time.as_secs(), 20);
+
+    // The peer's 0 selects the default even when the local proposal
+    // is higher: min(45, 60) would overshoot without the mapping.
+    let mut local_high = cfg();
+    local_high.targeted_hello_hold = 60;
+    let mut d = LdpDiscovery::new(local_high);
+    let (pdu, msg) = hello_pdu(id(5), true, 0, None);
+    let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 5]));
+    assert_eq!(d.adjacencies()[0].hold_time.as_secs(), 45);
+
+    // 0xffff = effectively infinite: the finite side governs, and a
+    // 0xffff/0xffff pair keeps the infinite proposal.
+    let mut d = LdpDiscovery::new(cfg());
+    let (pdu, msg) = hello_pdu(id(6), true, 0xffff, None);
+    let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 6]));
+    assert_eq!(d.adjacencies()[0].hold_time.as_secs(), 45);
+    let mut also_infinite = cfg();
+    also_infinite.targeted_hello_hold = 0xffff;
+    let mut d = LdpDiscovery::new(also_infinite);
+    let (pdu, msg) = hello_pdu(id(7), true, 0xffff, None);
+    let _ = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 7]));
+    assert_eq!(d.adjacencies()[0].hold_time.as_secs(), 65535);
 }
 
 #[test]

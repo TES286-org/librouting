@@ -238,7 +238,12 @@ impl LdpDiscovery {
             .transport_addr_for(&source)
             .map(|t| t.0)
             .unwrap_or(source);
+        // Negotiate the hold time per §3.5.2: the minimum of the two
+        // proposals, where a 0 proposal selects the default for the
+        // Hello type (15 s link / 45 s targeted) and 0xffff proposes
+        // effectively infinite.
         let hold = Self::effective_hold(
+            kind,
             hello.params.hold_time,
             match kind {
                 DiscoveryKind::Link => self.cfg.link_hello_hold,
@@ -310,8 +315,12 @@ impl LdpDiscovery {
             }
         }
         // Outbound targeted Hellos: every hold/3 (§3.5.2.1 recommends
-        // at most one third of the hold time between Hellos).
-        let interval = (self.cfg.targeted_hello_hold as u64).max(1) * 1000 / 3;
+        // at most one third of the hold time between Hellos). The
+        // cadence follows the effective hold time a 0 proposal
+        // stands for, not the raw 0.
+        let interval = Self::resolved_hold(DiscoveryKind::Targeted, self.cfg.targeted_hello_hold)
+            .as_millis()
+            / 3;
         let due: Vec<IpAddr> = self
             .targeted_targets
             .iter()
@@ -433,21 +442,40 @@ impl LdpDiscovery {
         id
     }
 
-    /// Map a peer's proposed hold time through the §3.5.2 rules
-    /// (0 → default; 0xffff = effectively infinite) and take the
-    /// minimum against our proposal.
-    fn effective_hold(peer_proposed: u16, local_proposed: u16) -> Duration {
-        let peer = if peer_proposed == 0 {
-            local_proposed
+    /// The §3.5.2 default hold time for a Hello type: 15 seconds for
+    /// Link Hellos, 45 seconds for Targeted Hellos (the value a
+    /// proposal of 0 selects).
+    fn default_hold(kind: DiscoveryKind) -> u16 {
+        match kind {
+            DiscoveryKind::Link => DEFAULT_LINK_HELLO_HOLD,
+            DiscoveryKind::Targeted => DEFAULT_TARGETED_HELLO_HOLD,
+        }
+    }
+
+    /// Resolve one §3.5.2 hold-time proposal: a value of 0 selects
+    /// the default for the Hello type, any other value stands for
+    /// itself (0xffff = effectively infinite).
+    fn resolved_hold(kind: DiscoveryKind, proposal: u16) -> Duration {
+        let secs = if proposal == 0 {
+            Self::default_hold(kind)
         } else {
-            peer_proposed
+            proposal
         };
-        let local = if local_proposed == 0 {
-            DEFAULT_LINK_HELLO_HOLD
-        } else {
-            local_proposed
-        };
-        Duration::from_secs(peer.min(local).max(1) as u64)
+        Duration::from_secs(secs as u64)
+    }
+
+    /// Negotiate the adjacency hold time per §3.5.2: "The hold time
+    /// used is the minimum of the hold times proposed in their Hellos.
+    /// A value of 0 means use the default, which is 15 seconds for
+    /// Link Hellos and 45 seconds for Targeted Hellos. A value of
+    /// 0xffff means infinite." Each side's proposal resolves through
+    /// the Hello type's default, so a 0/0 pair yields the default
+    /// and never collapses to the one-second floor the raw minimum
+    /// would give.
+    fn effective_hold(kind: DiscoveryKind, peer_proposed: u16, local_proposed: u16) -> Duration {
+        let peer = Self::resolved_hold(kind, peer_proposed);
+        let local = Self::resolved_hold(kind, local_proposed);
+        peer.min(local)
     }
 }
 

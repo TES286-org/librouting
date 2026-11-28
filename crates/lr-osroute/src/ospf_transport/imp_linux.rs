@@ -431,37 +431,25 @@ impl OspfV2Transport {
             interface: interface.to_string(),
             ifindex,
         };
-        // Scope the socket to the interface (receive + egress).
-        if let Err(e) =
-            transport.set_sockopt_bytes(SOL_SOCKET, SO_BINDTODEVICE, cname.as_bytes_with_nul())
-        {
-            unsafe { close(fd) };
-            return Err(e);
-        }
+        // Scope the socket to the interface (receive + egress). The
+        // transport owns the fd from here on — `Drop` closes it
+        // exactly once on every path below, so an error return must
+        // not close it again (a second close races another thread
+        // acquiring the same descriptor number in the multi-threaded
+        // daemon).
+        transport.set_sockopt_bytes(SOL_SOCKET, SO_BINDTODEVICE, cname.as_bytes_with_nul())?;
         // Deep receive queue: flooding bursts on loaded machines must
         // not overflow the default buffer (see RCVBUF_TARGET).
         let _ = transport.set_sockopt_i32(SOL_SOCKET, SO_RCVBUF, RCVBUF_TARGET);
         // Multicast egress: choose the interface by index (works on
         // unnumbered links), TTL 1 (link-local groups, RFC 2328 A.1),
         // loopback per caller.
-        if let Err(e) = transport.set_multicast_if() {
-            unsafe { close(fd) };
-            return Err(e);
-        }
-        if let Err(e) = transport.set_sockopt_u8(IPPROTO_IP, IP_MULTICAST_TTL, 1) {
-            unsafe { close(fd) };
-            return Err(e);
-        }
+        transport.set_multicast_if()?;
+        transport.set_sockopt_u8(IPPROTO_IP, IP_MULTICAST_TTL, 1)?;
         let loop_on = if multicast_loop { 1u8 } else { 0u8 };
-        if let Err(e) = transport.set_sockopt_u8(IPPROTO_IP, IP_MULTICAST_LOOP, loop_on) {
-            unsafe { close(fd) };
-            return Err(e);
-        }
+        transport.set_sockopt_u8(IPPROTO_IP, IP_MULTICAST_LOOP, loop_on)?;
         for group in [ALL_SPF_ROUTERS, ALL_D_ROUTERS] {
-            if let Err(e) = transport.join_group(group) {
-                unsafe { close(fd) };
-                return Err(e);
-            }
+            transport.join_group(group)?;
         }
         Ok(transport)
     }
@@ -812,32 +800,23 @@ impl OspfV6Transport {
             interface: interface.to_string(),
             ifindex,
         };
-        // Scope the socket to the interface (receive + egress).
-        if let Err(e) =
-            transport.set_sockopt_bytes(SOL_SOCKET, SO_BINDTODEVICE, cname.as_bytes_with_nul())
-        {
-            unsafe { close(fd) };
-            return Err(e);
-        }
+        // Scope the socket to the interface (receive + egress). The
+        // transport owns the fd from here on — `Drop` closes it
+        // exactly once on every path below, so an error return must
+        // not close it again (a second close races another thread
+        // acquiring the same descriptor number in the multi-threaded
+        // daemon).
+        transport.set_sockopt_bytes(SOL_SOCKET, SO_BINDTODEVICE, cname.as_bytes_with_nul())?;
         let _ = transport.set_sockopt_i32(SOL_SOCKET, SO_RCVBUF, RCVBUF_TARGET);
         // Multicast egress: interface by index, hop limit 1 (the OSPFv3
         // counterpart of the v2 TTL 1), loopback per caller.
-        if let Err(e) = transport.set_sockopt_i32(IPPROTO_IPV6, IPV6_MULTICAST_IF, ifindex as i32) {
-            unsafe { close(fd) };
-            return Err(e);
-        }
-        if let Err(e) = transport.set_sockopt_i32(IPPROTO_IPV6, IPV6_MULTICAST_HOPS, 1) {
-            unsafe { close(fd) };
-            return Err(e);
-        }
-        if let Err(e) = transport.set_sockopt_i32(
+        transport.set_sockopt_i32(IPPROTO_IPV6, IPV6_MULTICAST_IF, ifindex as i32)?;
+        transport.set_sockopt_i32(IPPROTO_IPV6, IPV6_MULTICAST_HOPS, 1)?;
+        transport.set_sockopt_i32(
             IPPROTO_IPV6,
             IPV6_MULTICAST_LOOP,
             if multicast_loop { 1 } else { 0 },
-        ) {
-            unsafe { close(fd) };
-            return Err(e);
-        }
+        )?;
         for group in [ALL_SPF_ROUTERS_V6, ALL_D_ROUTERS_V6] {
             let mreq = Ipv6Mreq {
                 ipv6mr_multiaddr: group,
@@ -854,7 +833,6 @@ impl OspfV6Transport {
                 )
             };
             if rc != 0 {
-                unsafe { close(fd) };
                 return Err(os_error("IPV6_ADD_MEMBERSHIP"));
             }
         }
@@ -1078,5 +1056,83 @@ mod tests {
     fn interface_lookup_unknown() {
         let e = interface_v4_addrs("no-such-if-xyz").unwrap_err();
         assert!(matches!(e, OspfTransportError::UnknownInterface(_)));
+    }
+
+    #[test]
+    fn bind_owns_exactly_one_fd() {
+        // The transport owns its raw socket: constructing one holds
+        // exactly one descriptor and dropping it closes exactly that
+        // one. The construction error paths used to close the fd by
+        // hand before returning into `Drop` — a second close that
+        // races another thread acquiring the same descriptor number
+        // in the multi-threaded daemon.
+        fn open_fd_count() -> usize {
+            // The `read_dir` handle itself is a descriptor, present in
+            // every call alike — the comparison stays consistent.
+            std::fs::read_dir("/proc/self/fd")
+                .map(|d| d.count())
+                .unwrap_or(usize::MAX)
+        }
+        let before = open_fd_count();
+        let Ok(sock) = OspfV2Transport::bind("lo", false) else {
+            // No CAP_NET_RAW: the privilege-gated path is exercised by
+            // tests/interop/ospf.sh under `unshare -Urn` instead.
+            eprintln!("skipped (no CAP_NET_RAW)");
+            return;
+        };
+        assert_eq!(
+            open_fd_count(),
+            before + 1,
+            "the transport holds exactly one descriptor"
+        );
+        drop(sock);
+        assert_eq!(
+            open_fd_count(),
+            before,
+            "drop closes the raw socket and nothing else"
+        );
+    }
+
+    #[test]
+    fn bind_unknown_interface_leaves_no_fd_behind() {
+        fn open_fd_count() -> usize {
+            std::fs::read_dir("/proc/self/fd")
+                .map(|d| d.count())
+                .unwrap_or(usize::MAX)
+        }
+        let before = open_fd_count();
+        let e = match OspfV2Transport::bind("no-such-if-xyz", false) {
+            Err(e) => e,
+            Ok(_) => panic!("an unknown interface must not bind"),
+        };
+        assert!(matches!(e, OspfTransportError::UnknownInterface(_)));
+        assert_eq!(open_fd_count(), before);
+    }
+
+    #[test]
+    fn bind_v6_owns_exactly_one_fd() {
+        // The v6 transport holds the same single-descriptor ownership
+        // contract as its v2 counterpart (see bind_owns_exactly_one_fd).
+        fn open_fd_count() -> usize {
+            std::fs::read_dir("/proc/self/fd")
+                .map(|d| d.count())
+                .unwrap_or(usize::MAX)
+        }
+        let before = open_fd_count();
+        let Ok(sock) = OspfV6Transport::bind("lo", false) else {
+            eprintln!("skipped (no CAP_NET_RAW)");
+            return;
+        };
+        assert_eq!(
+            open_fd_count(),
+            before + 1,
+            "the v6 transport holds exactly one descriptor"
+        );
+        drop(sock);
+        assert_eq!(
+            open_fd_count(),
+            before,
+            "drop closes the v6 raw socket and nothing else"
+        );
     }
 }
