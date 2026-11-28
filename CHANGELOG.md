@@ -17,6 +17,41 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — the LDP discovery and teardown semantics, plus the OSPF
+raw-socket fd ownership (issue #101)
+
+Three protocol/platform findings from the 2.x audit round, each
+confirmed against the RFC text (and FRR ldpd, for the Hello
+negotiation) before fixing:
+
+- **The LDP Hello hold-time negotiation mishandled a 0 proposal**
+  (RFC 5036 §3.5.2: "The hold time used is the minimum of the hold
+  times proposed in their Hellos. A value of 0 means use the default,
+  which is 15 seconds for Link Hellos and 45 seconds for Targeted
+  Hellos."). The negotiation mapped the peer's 0 to the local proposal
+  and the local 0 to the link default regardless of the Hello type, so
+  a targeted adjacency with both sides proposing 0 collapsed to a
+  one-second hold — an adjacency flapping every second. Each side's
+  proposal now resolves through the Hello type's default before the
+  minimum, and the outbound Hello cadence follows the effective hold
+  time (a 0 configured targeted Hellos every 333 ms instead of 15 s).
+- **The Bad LDP Identifier and Bad PDU Length session teardowns skipped
+  the transit bookkeeping** (RFC 5036 §3.5.7.1.1): they unlearned only
+  the LIB bindings, so a session ended by either error left the
+  router's transit FECs pointing at the dead peer — the data-plane
+  swap kept forwarding into the torn-down session and the local label
+  leaked. Every deliberate teardown now funnels through one
+  `purge_peer_state` (graceful-restart bookkeeping, LIB bindings and
+  the per-prefix transit re-selection/withdrawal), the same sequence
+  the transport-close path runs.
+- **The OSPFv2/v3 raw-socket constructors closed their fd twice on
+  every sockopt error path** — once by hand and once through `Drop`,
+  which owns the descriptor. The second close could hit an unrelated
+  descriptor number another daemon thread had already re-acquired.
+  `Drop` is now the single owner on every path; tests pin the
+  one-descriptor-held / none-leaked ownership contract through
+  `/proc/self/fd`.
+
 ### Fixed — the FFI and bindings contract batch: install_set
 ownership, prefix-list FRR defaults, RIB iterator snapshots,
 C++ trampoline safety, codec error codes (issue #101)
