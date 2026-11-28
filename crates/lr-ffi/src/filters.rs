@@ -326,7 +326,10 @@ pub unsafe extern "C" fn lr_filter_name(filter: lr_filter_t, out: *mut u8, cap: 
 /// (built-in route-backed context). On [`LR_FILTER_REJECT`] the
 /// optional `reject with "reason"` payload is written to `out_reason`
 /// as a NUL-terminated byte buffer the caller frees with
-/// `lr_bytes_free`; pass NULL to ignore it.
+/// `lr_bytes_free`; pass NULL to ignore it. A runtime error (undefined
+/// variable, type error, overflow, call-depth bound) evaluates to
+/// `LR_FILTER_REJECT` with the error text as the reason payload —
+/// a broken filter fails closed, it never reports accept.
 ///
 /// Returns 0 on a completed evaluation, -1 on null arguments, -2 on
 /// invalid handles.

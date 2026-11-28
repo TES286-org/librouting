@@ -633,9 +633,11 @@ fn compile_named_filter(
 }
 
 /// True when `compiled` accepts the route (`accept` or `fallthrough`).
-/// Only an explicit `reject` drops it — the BIRD default for a filter
-/// with no matching statement is accept, and both Babel and the kernel
-/// mirror follow that.
+/// A `reject` — explicit or produced by a runtime error (undefined
+/// variable, type error, overflow; the engines map every error to
+/// `Reject`) — drops it. The BIRD default for a filter with no
+/// matching statement is accept, and both Babel and the kernel mirror
+/// follow that.
 fn filter_accepts(
     compiled: &lr_policy::filter::bytecode::CompiledFilter,
     ctx: &DaemonFilterContext,

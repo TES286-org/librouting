@@ -17,6 +17,41 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 event bus, 2.x capability block, per-unit configuration reload,
 real-data RIB replay benchmark
 
+### Fixed — filter runtime errors reject the route, and case-arm
+scopes agree between the two engines (issue #101)
+
+Two policy-engine findings from the 2.x audit round, each confirmed
+against the primary references (the BIRD user guide, §5 Filters:
+"If there is a runtime error in filter, the route is rejected")
+before fixing:
+
+- **A filter runtime error rejected nothing — it kept the route.**
+  Both engine entries (`eval::evaluate` and
+  `bytecode::execute`, the daemon's production path) mapped every
+  `EvalError` to `Fallthrough`, and `map_verdict` maps `Fallthrough`
+  to `Keep`: an import filter with a typo on a taken branch
+  (undefined variable, type mismatch, division by zero, arithmetic
+  overflow, the `MAX_CALL_DEPTH` bound) silently became a
+  permit-all — fail-open. Both entries now map the error to
+  `Reject` with the error text (kind, line, column) as the reason
+  string, so a broken filter drops the route in both directions,
+  the FFI reports `LR_FILTER_REJECT` with the error text in
+  `out_reason`, and the reason is distinguishable from an ordinary
+  `reject` with no payload. The daemon's `filter_accepts` and the
+  Babel/kernel export paths follow automatically (every
+  `Reject` drops).
+- **The two engines disagreed on `case`-arm scopes.** The
+  tree-walking interpreter pushes and pops a scope around every
+  case-arm body; the bytecode compiler inlined the body without the
+  `PushScope`/`PopScope` pair, so a `let` inside an arm compiled to
+  a store into the *enclosing* scope — the binding leaked past the
+  arm and later statements read the wrong value on the VM (the
+  daemon's production path) while the interpreter answered
+  differently on the same source, breaking the engines' documented
+  bit-identical verdict contract. The compiler now emits the scope
+  pair around every arm shape (single pattern, multi-pattern,
+  default), matching the interpreter.
+
 ### Fixed — the LDP discovery and teardown semantics, plus the OSPF
 raw-socket fd ownership (issue #101)
 

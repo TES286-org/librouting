@@ -1286,7 +1286,10 @@ class CompiledFilter:
 
         Returns ``(verdict, reason)`` where ``verdict`` is
         ``FILTER_ACCEPT`` / ``FILTER_REJECT`` / ``FILTER_FALLTHROUGH``
-        and ``reason`` is the optional ``reject with`` payload."""
+        and ``reason`` is the optional ``reject with`` payload. A
+        runtime error (undefined variable, type error, overflow)
+        evaluates to ``FILTER_REJECT`` with the error text as the
+        reason — a broken filter fails closed, it never accepts."""
         verdict = ffi.new("int32_t*")
         reason = ffi.new("lr_bytes_t*")
         ctx = context._as_cptr if context is not None else ffi.NULL

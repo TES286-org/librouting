@@ -340,6 +340,52 @@ fn babel_import_hook_skips_non_babel_routes() {
     );
 }
 
+/// A filter that hits a runtime error must drop the route through the
+/// daemon hook — the fail-closed verdict (BIRD: "If there is a runtime
+/// error in filter, the route is rejected"). Before the fix the error
+/// mapped to Fallthrough and `map_verdict` turned that into Keep: a
+/// filter with a typo on a taken branch was a permit-all.
+#[test]
+fn babel_import_hook_runtime_error_drops_route() {
+    use lr_core::rib::Route;
+    use lr_policy::hooks::{HookVerdict, ImportHook};
+
+    let cfg = parse(
+        "[[filter]]\nname = \"broken\"\nbody = \"if undefined_var > 0 then accept; accept;\"\n",
+    );
+    let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+    let f = build_babel_filter(&cfg, &Some("broken".into()), &roa)
+        .unwrap()
+        .unwrap();
+    let hook = BabelFilterImportHook {
+        inner: BabelFilter {
+            name: f.name.clone(),
+            compiled: f.compiled.clone(),
+            ctx: f.ctx.clone(),
+        },
+        stats: None,
+    };
+
+    let mut babel_route = Route {
+        key: lr_core::rib::RouteKey::new(
+            lr_core::addr::Prefix::new_v4([192, 0, 2, 0], 24),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        ),
+        origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
+        protocol: lr_core::rib::Protocol::Babel,
+        preference: lr_core::rib::Preference::new(20, 100),
+        next_hop: None,
+        attributes: lr_core::attr::Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    };
+    assert!(
+        matches!(hook.on_import(&mut babel_route), HookVerdict::Drop),
+        "a runtime error must drop the route, not keep it"
+    );
+}
+
 /// The export-side `BabelFilter::accepts` mirrors the import-side
 /// verdict: accept / fallthrough → true, reject → false.
 #[test]

@@ -206,7 +206,9 @@ Notes:
 - `case` arms accept a comma-separated list of patterns sharing one body. A bare
   `default` arm carries no pattern. The body of an arm is a single statement and
   is required: a brace-delimited block is the usual form, parsed as
-  `Stmt::Block`. An optional trailing `;` is allowed after the arm body.
+  `Stmt::Block`. An optional trailing `;` is allowed after the arm body. Every
+  arm body runs in its own scope: a `let` inside an arm binds only inside the
+  arm and never shadows an outer binding past it.
 - `accept` and `reject` terminate the filter immediately. A bare `reject;`
   carries no reason; `reject "bad";` and `reject with EXPR;` are equivalent and
   produce a reason string at evaluation time.
@@ -362,6 +364,13 @@ returns `Fallthrough`. The daemon maps every `EvalResult` through
 `daemon_policy::map_verdict`, which turns both `Accept` and `Fallthrough` into
 `HookVerdict::Keep` and `Reject` into `HookVerdict::Drop`; a `Fallthrough` in
 either direction therefore keeps the route rather than dropping it.
+
+A runtime error — undefined variable, type mismatch, division by zero,
+arithmetic overflow, a user-function call depth past `MAX_CALL_DEPTH` (§6) —
+evaluates to `Reject` with the error text as the reason string (BIRD: "If there
+is a runtime error in filter, the route is rejected"). A filter that fails on a
+taken branch is therefore fail-closed in both directions: the route is
+dropped, never silently kept.
 
 ### 3.2 Built-in functions
 

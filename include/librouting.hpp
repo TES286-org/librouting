@@ -2293,7 +2293,9 @@ inline std::string filter_name(const Filter& f) {
 
 /// Run the filter against the route. `ctx` may be nullptr (built-in
 /// route-backed context). `reason` (optional) receives the
-/// `reject with` payload.
+/// `reject with` payload; a runtime error (undefined variable, type
+/// error, overflow) also evaluates to Reject with the error text as
+/// the reason — a broken filter fails closed.
 inline FilterVerdict filter_evaluate(const Filter& f, Route& r,
                                      const lr_filter_context_t* ctx = nullptr,
                                      std::string* reason = nullptr) {
