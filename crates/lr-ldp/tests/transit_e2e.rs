@@ -608,6 +608,159 @@ fn transit_teardown_on_transport_close() {
     panic!("transport close did not tear the transit LSP down (removed={b_removed}, withdrawn={a_withdrawn})");
 }
 
+/// Drive the lab until C's session with B is down, the transit LSP for
+/// `target` is removed on B and A received the upstream withdrawal —
+/// the observable triple of a teardown that flushed the transit state.
+/// Panics after 300 pump rounds without progress.
+fn wait_for_teardown_flush(lab: &mut Lab, now_ms: &mut u64, target: Prefix) {
+    let c_id = LdpId::new([3, 0, 0, 1], 0);
+    let mut b_down = false;
+    let mut b_removed = false;
+    let mut a_withdrew = false;
+    for _ in 0..300 {
+        let events = lab.pump_n(1, now_ms);
+        for (i, ev) in &events {
+            match (i, ev) {
+                (1, EngineEvent::SessionDown { peer_id, .. }) if *peer_id == c_id => {
+                    b_down = true;
+                }
+                (1, EngineEvent::TransitSwapRemoved { prefix, .. }) if *prefix == target => {
+                    b_removed = true;
+                }
+                (0, EngineEvent::MappingWithdrawn { prefixes, .. }) => {
+                    a_withdrew |= prefixes.contains(&target);
+                }
+                _ => {}
+            }
+        }
+        if b_down && b_removed && a_withdrew {
+            assert_eq!(
+                lab.speakers[1].engine.transit_label_of(&target),
+                None,
+                "the transit label was released"
+            );
+            assert_eq!(
+                lab.speakers[1].engine.transit_next_hop(&target),
+                None,
+                "the next-hop binding is gone"
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "teardown did not flush the transit state (down={b_down}, removed={b_removed}, \
+         withdrew={a_withdrew})"
+    );
+}
+
+/// Write raw bytes into C's single TCP connection to B — the wire the
+/// attacker (or a buggy peer) controls.
+fn write_to_b_from_c(lab: &mut Lab, bytes: &[u8]) {
+    assert_eq!(
+        lab.speakers[2].conns.len(),
+        1,
+        "C holds exactly one connection (to B) at this point"
+    );
+    let stream = lab.speakers[2]
+        .conns
+        .values_mut()
+        .next()
+        .expect("C's connection to B");
+    stream.write_all(bytes).expect("injecting into C→B works");
+}
+
+#[test]
+fn spoofed_ldp_identifier_teardown_flushes_transit_state() {
+    // RFC 5036 §2.5.3: a connection carries exactly one session and a
+    // PDU whose sender LDP-ID mismatches the session bound to the
+    // connection is a fatal Bad LDP Identifier error. The innocent
+    // session's teardown must run the full transit bookkeeping — label
+    // released, upstream withdrawal, next-hop binding dropped. The
+    // hand-rolled teardown once removed only the session and left
+    // B's transit state pointing at the dead peer (regression).
+    let mut lab = Lab::new(|_| {});
+    let mut now_ms = 0u64;
+    wait_for_session_up(&mut lab, &mut now_ms);
+    lab.speakers[2]
+        .engine
+        .advertise_mapping(fec(7), GenericLabel(24007));
+    for _ in 0..100 {
+        let events = lab.pump_n(1, &mut now_ms);
+        if events.iter().any(|(i, ev)| {
+            *i == 0 && matches!(ev, EngineEvent::MappingLearned { prefix, .. } if *prefix == fec(7))
+        }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        lab.speakers[1].engine.transit_next_hop(&fec(7)),
+        Some((LdpId::new([3, 0, 0, 1], 0), GenericLabel(24007)))
+    );
+
+    // A PDU stamped with a third party's LDP-ID ([9.9.9.9], space 0)
+    // rides on C's connection: version 1, body length 14 (6-octet
+    // LDP Identifier + one 8-octet KeepAlive), forged sender, one
+    // KeepAlive (type 0x0201, length 4, Message ID 1).
+    let spoofed: [u8; 18] = [
+        0x00, 0x01, // version
+        0x00, 0x0e, // PDU length (14)
+        0x09, 0x09, 0x09, 0x09, // forged LSR Id
+        0x00, 0x00, // label space
+        0x02, 0x01, // KeepAlive
+        0x00, 0x04, // message length
+        0x00, 0x00, 0x00, 0x01, // Message ID
+    ];
+    write_to_b_from_c(&mut lab, &spoofed);
+    wait_for_teardown_flush(&mut lab, &mut now_ms, fec(7));
+}
+
+#[test]
+fn oversized_pdu_teardown_flushes_transit_state() {
+    // RFC 5036 §3.5.3: a PDU longer than the negotiated Max PDU
+    // Length is a fatal Bad PDU Length error. The session teardown
+    // must run the full transit bookkeeping, exactly like the
+    // transport-close path (regression: this hand-rolled teardown
+    // once skipped it).
+    let mut lab = Lab::new(|_| {});
+    let mut now_ms = 0u64;
+    wait_for_session_up(&mut lab, &mut now_ms);
+    lab.speakers[2]
+        .engine
+        .advertise_mapping(fec(8), GenericLabel(24008));
+    for _ in 0..100 {
+        let events = lab.pump_n(1, &mut now_ms);
+        if events.iter().any(|(i, ev)| {
+            *i == 0 && matches!(ev, EngineEvent::MappingLearned { prefix, .. } if *prefix == fec(8))
+        }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        lab.speakers[1].engine.transit_next_hop(&fec(8)),
+        Some((LdpId::new([3, 0, 0, 1], 0), GenericLabel(24008)))
+    );
+
+    // 513 KeepAlive messages: 6 + 513*8 = 4110 octets of PDU body —
+    // one message past the 4096 default maximum. The sender is C's
+    // honest LDP-ID (this is a size violation, not a spoof).
+    let keepalives = 513usize;
+    let mut oversized = Vec::with_capacity(4 + 6 + keepalives * 8);
+    oversized.extend_from_slice(&1u16.to_be_bytes());
+    oversized.extend_from_slice(&(6 + keepalives as u16 * 8).to_be_bytes());
+    oversized.extend_from_slice(&[3, 0, 0, 1]);
+    oversized.extend_from_slice(&0u16.to_be_bytes());
+    for i in 0..keepalives {
+        oversized.extend_from_slice(&0x0201u16.to_be_bytes());
+        oversized.extend_from_slice(&4u16.to_be_bytes());
+        oversized.extend_from_slice(&(i as u32).to_be_bytes());
+    }
+    write_to_b_from_c(&mut lab, &oversized);
+    wait_for_teardown_flush(&mut lab, &mut now_ms, fec(8));
+}
+
 // ---------------------------------------------------------------------------
 // RFC 3478 graceful restart (§3.3): the surviving speaker retains the
 // failed peer's bindings and the dataplane keeps forwarding while the
