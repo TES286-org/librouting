@@ -626,9 +626,19 @@ impl<'a> Compiler<'a> {
                 emit!(Instr::StoreTmp, *span);
                 let mut arm_jumps = Vec::new();
                 for arm in arms {
+                    // Each arm body runs in its own scope — the same
+                    // rule the tree-walking interpreter applies
+                    // (eval.rs `Stmt::Case` pushes a scope before the
+                    // body, pops after). Without the pair a `let`
+                    // inside an arm body compiled to a bare `StoreVar`
+                    // into the enclosing scope, so the binding leaked
+                    // past the arm and the two engines disagreed on
+                    // every later read of the shadowed name.
                     if arm.patterns.is_empty() {
                         // default arm
+                        emit!(Instr::PushScope, *span);
                         self.compile_stmts(&arm.body, out, spans);
+                        emit!(Instr::PopScope, *span);
                         arm_jumps.push(out.len());
                         emit!(Instr::Jump(usize::MAX), *span);
                         continue;
@@ -641,7 +651,9 @@ impl<'a> Compiler<'a> {
                         emit!(Instr::Bin(BinaryOp::Eq), *span);
                         let jf = out.len();
                         emit!(Instr::JumpIfFalse(usize::MAX), *span);
+                        emit!(Instr::PushScope, *span);
                         self.compile_stmts(&arm.body, out, spans);
+                        emit!(Instr::PopScope, *span);
                         arm_jumps.push(out.len());
                         emit!(Instr::Jump(usize::MAX), *span);
                         out[jf] = Instr::JumpIfFalse(out.len());
@@ -668,7 +680,9 @@ impl<'a> Compiler<'a> {
                     for j in pattern_jumps {
                         out[j] = Instr::JumpIfTrue(out.len());
                     }
+                    emit!(Instr::PushScope, *span);
                     self.compile_stmts(&arm.body, out, spans);
+                    emit!(Instr::PopScope, *span);
                     arm_jumps.push(out.len());
                     emit!(Instr::Jump(usize::MAX), *span);
                     out[skip] = Instr::Jump(out.len());

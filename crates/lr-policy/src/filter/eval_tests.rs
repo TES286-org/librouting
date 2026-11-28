@@ -517,6 +517,50 @@ fn nested_blocks_have_separate_scope() {
     assert_eq!(run(src, &mut r), EvalResult::Accept);
 }
 
+/// A `let` inside a case arm must not leak past the arm. The
+/// interpreter always scoped arm bodies (a scope per arm, pushed
+/// before the body); the bytecode compiler inlined them without the
+/// `PushScope`/`PopScope` pair, so the same source left `x == 1` on
+/// the interpreter and `x == 2` on the VM — the daemon's production
+/// path — breaking the two-engines-agree contract.
+#[test]
+fn case_arm_body_is_its_own_scope() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "let x = 1; case bgp.local_pref { 100 => { let x = 2; } default => {} } if x == 2 then reject; accept;";
+    assert_eq!(
+        run(src, &mut r.clone()),
+        EvalResult::Accept,
+        "interpreter: the arm binding must not leak"
+    );
+    assert_eq!(
+        run_vm(src, &mut r),
+        EvalResult::Accept,
+        "VM: the arm binding must not leak"
+    );
+}
+
+/// The multi-pattern and default arm shapes take the same scope
+/// rule: every arm body is its own scope, whichever way the compiler
+/// laid out the jumps into it.
+#[test]
+fn case_multi_pattern_and_default_arms_scope_their_bodies() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "let x = 1; case bgp.local_pref { 99, 100 => { let x = 2; } default => { let x = 3; } } if x == 1 then accept; reject;";
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
+/// Nested `case` statements must keep each scrutinee to itself (the
+/// VM keeps the current scrutinee in one temp slot; an inner case
+/// overwrites it) and the engines must still agree on the verdict.
+#[test]
+fn nested_case_scrutinees_do_not_alias() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let src = "case bgp.local_pref { 100 => { case proto { \"bgp\" => { let x = 5; } default => {} } } default => {} } if bgp.local_pref == 100 then accept; reject;";
+    assert_eq!(run(src, &mut r.clone()), EvalResult::Accept);
+    assert_eq!(run_vm(src, &mut r), EvalResult::Accept);
+}
+
 #[test]
 fn roa_state_string_equality() {
     // Verify `roa.state == "invalid"` form works — the StubCtx
